@@ -58,6 +58,7 @@ class WorkflowOrchestrator:
         self.semantic_validator = semantic_validator or SemanticInputValidator()
         self.workflow_version = workflow_version
         self.adapter_version = adapter_version
+        self.step_dispatch = None
 
     def for_request(self, event_bus: AgentEventBus) -> WorkflowOrchestrator:
         """Create an isolated orchestrator for one request's event stream."""
@@ -134,12 +135,14 @@ class WorkflowOrchestrator:
                 break
         return session.finish()
 
-    @staticmethod
     def _execute_step(
+        self,
         tool: Any,
         input_data: Any,
         step: WorkflowStep,
     ) -> ToolResult:
+        if self.step_dispatch is not None:
+            return self.step_dispatch(tool, input_data, step)
         if not step.timeout_seconds:
             return execute_tool_compat(tool, input_data)
 

@@ -144,7 +144,8 @@ class CanaryHarness:
             workflow_name=policy.name,
             trace_id=context.trace_id,
             idempotency_key=kwargs.get("idempotency_key"),
-            executor_supported=isinstance(self.executor, WorkflowExecutor),
+            executor_supported=(isinstance(self.executor, WorkflowExecutor)
+                                and getattr(self.executor, "canary_execution_enabled", True)),
         )
         if decision.backend == "langgraph":
             run = self.langgraph.execute(**kwargs)

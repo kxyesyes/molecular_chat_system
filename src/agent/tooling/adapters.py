@@ -276,6 +276,20 @@ class LegacyPythonToolAdapter(ToolAdapter):
         raw = self.tool.execute(payload)
         if raw_validator is not None:
             raw_validator(raw)
+        if isinstance(raw, dict) and (
+            ("success" in raw and type(raw["success"]) is not bool)
+            or (raw.get("success") is True and (
+                raw.get("error") is not None
+                or raw.get("status") in {
+                    "failed", "rejected", "cancelled", "unavailable", "invalid_input"
+                }
+            ))
+            or (raw.get("success") is False and raw.get("status") == "succeeded")
+        ):
+            return ToolResult.error_result(
+                self.spec.name, AgentErrorCode.INVALID_OUTPUT,
+                "Conflicting raw tool result status",
+            )
         if isinstance(raw, ToolResult):
             return raw
 

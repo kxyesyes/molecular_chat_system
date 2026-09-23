@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
@@ -40,6 +41,25 @@ class SessionLifecycleError(RuntimeError):
     """Raised when a workflow session lifecycle operation is invalid."""
 
 
+class RunClaimConflict(SessionLifecycleError):
+    """A delegated trace is terminal or another worker has claimed it."""
+
+    def __init__(self, status: str | None):
+        super().__init__("Existing run cannot be safely restarted")
+        self.status = status
+
+    def to_result(self, context: AgentContext) -> AgentResult:
+        outcome = RunOutcome(self.status) if self.status in {"cancelled", "rejected"} else RunOutcome.FAILED
+        return AgentResult(
+            trace_id=context.trace_id, skill_name=context.active_skill,
+            success=False, outcome=outcome,
+            message="Existing run cannot be safely restarted; use an explicit new request",
+            error=AgentExecutionError(code=AgentErrorCode.INVALID_INPUT,
+                                      message="Existing run is terminal or execution is uncertain"),
+            metadata={"run_claim_conflict": True},
+        )
+
+
 _UNSET = object()
 
 
@@ -49,6 +69,7 @@ class _StepJournal:
     input_data: Any = _UNSET
     input_hash: str = ""
     tool_version: str = ""
+    adapter_version: str = ""
     model_version: str = ""
     semantic_checked: bool = False
     semantic_evidence_entry: dict[str, str] | None = None
@@ -191,6 +212,9 @@ class WorkflowRunSession:
         state = self._start_state
         ledger = self._start_ledger
 
+        claim_run = getattr(self.orchestrator, "run_claim", None)
+        if self.orchestrator.state_store and not self._start_run_persisted and callable(claim_run):
+            self._start_run_persisted = claim_run(context, self.idempotency_key) is True
         if self.orchestrator.state_store and not self._start_run_persisted:
             self.orchestrator.state_store.start_run(
                 {
@@ -677,7 +701,7 @@ class WorkflowRunSession:
             journal.tool_version = str(
                 step.metadata.get(
                     "tool_version",
-                    getattr(tool, "version", "1")
+                    getattr(getattr(tool, "spec", tool), "version", "1")
                     if tool is not None
                     else "missing",
                 )
@@ -692,19 +716,37 @@ class WorkflowRunSession:
                     ),
                 )
             )
-            if self.dynamic:
+            if self.dynamic or self.orchestrator.step_dispatch is not None:
+                # Delegated checkpoint identity comes from the registered tool,
+                # not a plan metadata pin; persistence uses this same journal.
                 journal.tool_version = str(
                     getattr(getattr(tool, "spec", tool), "version", "1")
                     if tool is not None else "missing"
                 )
+        journal.adapter_version = str(getattr(tool, "adapter_version", self.orchestrator.adapter_version))
         if not journal.checkpoint_checked:
-            checkpoint = self.orchestrator._compatible_checkpoint(
-                self.context.trace_id,
-                step,
-                journal.input_hash,
-                journal.tool_version,
-                journal.model_version,
-            )
+            dispatch = self.orchestrator.step_dispatch
+            if dispatch is not None:
+                denial = dispatch.authorize(tool, step)
+                if denial is not None:
+                    journal.result = denial
+                    journal.checkpoint_checked = True
+                    return
+            try:
+                checkpoint = self.orchestrator._compatible_checkpoint(
+                    self.context.trace_id,
+                    step,
+                    journal.input_hash,
+                    journal.tool_version,
+                    journal.model_version,
+                    adapter_version=journal.adapter_version,
+                )
+            except json.JSONDecodeError:
+                checkpoint = None
+                journal.checkpoint_warning = f"Ignored incompatible checkpoint for {step.name}"
+                journal.checkpoint_warning_entry = {
+                    "step": step.name, "reason": "checkpoint_deserialization_failed",
+                }
             if checkpoint:
                 try:
                     journal.result = self.orchestrator._result_from_checkpoint(
@@ -721,6 +763,29 @@ class WorkflowRunSession:
                     }
                 else:
                     journal.checkpoint_reused = True
+            if (checkpoint is None and journal.checkpoint_warning_entry is None
+                    and getattr(getattr(tool, "spec", None), "idempotent", True) is not True
+                    and self.orchestrator.state_store):
+                try:
+                    prior = self.orchestrator.state_store.latest_checkpoint(
+                        self.context.trace_id, step.name)
+                except json.JSONDecodeError:
+                    prior = {"status": "corrupt"}
+                if prior is not None:
+                    journal.checkpoint_warning = (
+                        f"Prior execution of non-idempotent step {step.name} is uncertain"
+                    )
+                    journal.checkpoint_warning_entry = {
+                        "step": step.name, "reason": "uncertain_prior_execution",
+                    }
+            if (journal.checkpoint_warning_entry is not None
+                    and getattr(getattr(tool, "spec", None), "idempotent", True) is not True):
+                journal.result = ToolResult.error_result(
+                    step.tool_name,
+                    AgentErrorCode.INVALID_OUTPUT,
+                    "Prior non-idempotent execution requires manual review",
+                    details={"step": step.name, "reason": "uncertain_prior_execution"},
+                )
             journal.checkpoint_checked = True
         if journal.result is not None:
             return
@@ -822,7 +887,7 @@ class WorkflowRunSession:
                 "input_hash": journal.input_hash,
                 "tool_name": step.tool_name,
                 "tool_version": journal.tool_version,
-                "adapter_version": self.orchestrator.adapter_version,
+                "adapter_version": journal.adapter_version or self.orchestrator.adapter_version,
                 "model_version": journal.model_version,
                 "output": output,
                 "error": error,
@@ -937,6 +1002,9 @@ class WorkflowRunSession:
                 ],
             },
         )
+        dispatch = self.orchestrator.step_dispatch
+        if dispatch is not None:
+            dispatch.decorate_result(agent_result, self.context, self.reused_steps)
         if self.skipped_steps:
             has_success = any(item.success for item in self.results)
             agent_result.success = False
@@ -955,6 +1023,15 @@ class WorkflowRunSession:
                 message="Scientific workflow precondition failed",
                 details={"skipped_steps": self.skipped_steps},
             )
+        if any(
+            item.error is not None
+            and (item.error.details or {}).get("reason") == "uncertain_prior_execution"
+            for item in self.results
+        ):
+            agent_result.success = False
+            agent_result.partial = any(item.success for item in self.results)
+            agent_result.outcome = RunOutcome.REJECTED
+            agent_result.message = "Workflow requires manual review of an uncertain prior execution"
         if self._runtime_error is not None:
             message = "Workflow failed because the runtime stopped unexpectedly"
             agent_result.success = False

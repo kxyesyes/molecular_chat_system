@@ -17,7 +17,7 @@ from src.agent.contracts import (
     RunOutcome,
 )
 from src.agent.planning import WorkflowPlan
-from src.agent.runtime.run_session import SessionLifecycleError
+from src.agent.runtime.run_session import RunClaimConflict, SessionLifecycleError
 from src.agent.runtime.workflow_executor import (
     PreparedWorkflow,
     WorkflowExecution,
@@ -173,18 +173,34 @@ class LangGraphExecutionHarness:
                 ),
             )
 
-        if self.graph_runner is not None:
-            with self._graph_runner_lock:
-                return self._execute_prepared(
+        try:
+            if self.graph_runner is not None:
+                with self._graph_runner_lock:
+                    return self._execute_prepared(
+                        prepared,
+                        fingerprint=fingerprint,
+                        started=started,
+                    )
+            return self._execute_prepared(
+                prepared,
+                fingerprint=fingerprint,
+                started=started,
+            )
+        except RunClaimConflict as exc:
+            return HarnessRun(
+                authoritative=prepared.to_execution(exc.to_result(prepared.context)),
+                execution=self._metadata(
                     prepared,
-                    fingerprint=fingerprint,
+                    plan_fingerprint_value=fingerprint,
+                    backend="langgraph",
+                    backend_version=self.backend_version,
+                    selection_reason="direct_langgraph_execution",
+                    tool_attempt_count=0,
+                    fallback_before_execution=False,
+                    error_code="run_claim_conflict",
                     started=started,
-                )
-        return self._execute_prepared(
-            prepared,
-            fingerprint=fingerprint,
-            started=started,
-        )
+                ),
+            )
 
     def _execute_prepared(
         self,

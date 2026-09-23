@@ -271,6 +271,50 @@ class SQLiteAgentStateStore:
                 ),
             )
 
+    def claim_workflow_run(self, run: dict[str, Any], *, expected_status: str | None) -> bool:
+        """Atomically claim a trace by the status observed before Session start.
+
+        A changed state never permits a second execution. Completed traces may
+        be explicitly retried to reuse compatible checkpoints.
+        """
+        data = redact_sensitive(run)
+        now = time.time()
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status FROM agent_runs WHERE trace_id = ?",
+                (data["trace_id"],),
+            ).fetchone()
+            actual = row["status"] if row is not None else None
+            if actual != expected_status or actual not in {
+                None, "pending", "succeeded", "completed", "partial", "failed",
+            }:
+                return False
+            if row is None:
+                try:
+                    connection.execute(
+                        """INSERT INTO agent_runs
+                        (trace_id, status, skill_name, query, workflow_version,
+                         idempotency_key, user_id, session_id, metadata_json,
+                         created_at, updated_at)
+                        VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (data["trace_id"], data.get("skill_name"), data.get("query"),
+                         data.get("workflow_version"), data.get("idempotency_key"),
+                         data.get("user_id"), data.get("session_id"),
+                         _json_dump(data.get("metadata", {})), now, now),
+                    )
+                except sqlite3.IntegrityError:
+                    return False
+            else:
+                connection.execute(
+                    """UPDATE agent_runs SET status = 'running',
+                    workflow_version = ?, metadata_json = ?, updated_at = ?
+                    WHERE trace_id = ?""",
+                    (data.get("workflow_version"),
+                     _json_dump(data.get("metadata", {})), now, data["trace_id"]),
+                )
+        return True
+
     def update_run_status(self, trace_id: str, status: str) -> None:
         with self._lock, self._connect() as connection:
             connection.execute(
