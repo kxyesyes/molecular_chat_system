@@ -186,11 +186,10 @@ class ChatHandler:
         agent_response = ""
         agent_result = None
         
-        # 优化1: 并行执行Agent和RAG检索（如果都启用）
+        # 初始化 Agent 执行状态
         agent_task = None
         agent_event_queue = None
         live_agent_events = 0
-        rag_task = None
 
         try:
             validated_mol_count = preflight_generation_request(
@@ -204,7 +203,7 @@ class ChatHandler:
             await websocket.send_text(
                 json.dumps({"type": "complete", "content": content})
             )
-            history.append(
+            self._append_history(history,
                 {
                     "user": message,
                     "agent_used": False,
@@ -215,8 +214,6 @@ class ChatHandler:
                     "error": {"code": "invalid_input", "message": str(exc)},
                 }
             )
-            if len(history) > 20:
-                del history[:-20]
             return
         if validated_mol_count is not None:
             mol_count = validated_mol_count
@@ -244,7 +241,7 @@ class ChatHandler:
                 "type": "complete",
                 "content": clarification,
             }, ensure_ascii=False))
-            history.append({
+            self._append_history(history, {
                 "user": message,
                 "agent_used": False,
                 "agent_response": None,
@@ -252,8 +249,6 @@ class ChatHandler:
                 "molecules_retrieved": 0,
                 "assistant": clarification,
             })
-            if len(history) > 20:
-                del history[:-20]
             return
 
         should_use_agent = bool(
@@ -330,10 +325,9 @@ class ChatHandler:
                 )
             )
         
-        # 等待并行任务完成
+        # 接收 Agent 事件并等待执行结果
         retrieved_molecules = []
         rag_context = ""
-        rag_task = None # 保持变量兼容性，虽然不再硬编码启动任务
         
         if agent_task:
             try:
@@ -378,14 +372,10 @@ class ChatHandler:
                             rag_context = self._format_rag_context(retrieved_molecules)
                             
                             # 发送 RAG 卡片到前端
-                            await websocket.send_text(json.dumps({
-                                "type": "rag_info",
-                                "molecules": [
-                                    rag_info_molecule(mol)
-                                    for mol in retrieved_molecules[:rag_count]
-                                ],
-                                "message": f"✅ 技能自动触发：从库中找到 {len(retrieved_molecules)} 个相关分子"
-                            }))
+                            await websocket.send_text(json.dumps(self._rag_info_payload(
+                                retrieved_molecules[:rag_count],
+                                f"✅ 技能自动触发：从库中找到 {len(retrieved_molecules)} 个相关分子",
+                            )))
 
                     skill_info = f" (当前技能: {active_skill})" if active_skill else ""
 
@@ -438,14 +428,10 @@ class ChatHandler:
                 retrieved_molecules = await self.rag_service.search_similar_molecules(message, rag_count)
                 if retrieved_molecules:
                     rag_context = self._format_rag_context(retrieved_molecules)
-                    await websocket.send_text(json.dumps({
-                        "type": "rag_info",
-                        "molecules": [
-                            rag_info_molecule(mol)
-                            for mol in retrieved_molecules
-                        ],
-                        "message": f"✅ 找到 {len(retrieved_molecules)} 个相关分子"
-                    }))
+                    await websocket.send_text(json.dumps(self._rag_info_payload(
+                        retrieved_molecules,
+                        f"✅ 找到 {len(retrieved_molecules)} 个相关分子",
+                    )))
                     await self._send_status(websocket, f"📊 基于 {len(retrieved_molecules)} 个分子数据生成回答...")
             except Exception as e:
                 logger.error(f"Legacy RAG search failed: {e}")
@@ -469,7 +455,7 @@ class ChatHandler:
                 "type": "complete",
                 "content": full_response,
             }, ensure_ascii=False))
-            history.append({
+            self._append_history(history, {
                 "user": message,
                 "agent_used": True,
                 "agent_response": agent_response,
@@ -477,8 +463,6 @@ class ChatHandler:
                 "molecules_retrieved": len(retrieved_molecules),
                 "assistant": full_response,
             })
-            if len(history) > 20:
-                del history[:-20]
             return
 
         if agent_used and agent_response:
@@ -494,8 +478,7 @@ class ChatHandler:
                     "type": "complete", "content": content,
                     "error": {"code": "interpretation_budget_exceeded"},
                 }, ensure_ascii=False))
-                history.append({"user": message, "assistant": content, "agent_used": True})
-                del history[:-20]
+                self._append_history(history, {"user": message, "assistant": content, "agent_used": True})
                 return
         else:
             prompt = self._build_prompt(
@@ -527,7 +510,7 @@ class ChatHandler:
                                 "type": "stream",
                                 "content": chunk
                             }))
-                            # 优化4: 减少sleep时间，提高响应速度
+                            # 让出事件循环，允许处理其他连接。
                             if chunk_count % 5 == 0:  # 每5个chunk才sleep一次
                                 await asyncio.sleep(0.001)
                 finally:
@@ -592,8 +575,8 @@ class ChatHandler:
                 **completion_meta,
             }, ensure_ascii=False))
         
-        # 优化5: 限制对话历史长度，避免内存泄漏
-        history.append({
+        # 保存本轮结果并限制历史长度
+        self._append_history(history, {
             "user": message,
             "agent_used": agent_used,
             "agent_response": agent_response if agent_used else None,
@@ -601,11 +584,23 @@ class ChatHandler:
             "molecules_retrieved": len(retrieved_molecules),
             "assistant": full_response
         })
-        
-        # 只保留最近20条对话
+
+    @staticmethod
+    def _append_history(history, entry):
+        """原位保留最近 20 条记录，不改变记录对象及其字段。"""
+        history.append(entry)
         if len(history) > 20:
             del history[:-20]
-    
+
+    @staticmethod
+    def _rag_info_payload(molecules, message):
+        """复用共享 RAG 投影；展示条数和文案由调用方决定。"""
+        return {
+            "type": "rag_info",
+            "molecules": [rag_info_molecule(mol) for mol in molecules],
+            "message": message,
+        }
+
     async def _execute_agent(
         self,
         message: str,
@@ -617,7 +612,7 @@ class ChatHandler:
         enable_tools: bool = True,
         session_id: str | None = None,
     ):
-        """异步执行Agent（用于并行处理）"""
+        """在线程池中执行 Agent，并转发执行事件。"""
         try:
             import inspect
 
@@ -779,7 +774,7 @@ class ChatHandler:
             websocket,
             agent_result,
         )
-        history.append({
+        self._append_history(history, {
             "user": message,
             "agent_used": True,
             "agent_response": agent_response,
@@ -787,8 +782,6 @@ class ChatHandler:
             "molecules_retrieved": 0,
             "assistant": agent_response,
         })
-        if len(history) > 20:
-            del history[:-20]
 
     async def _send_terminal_agent_failure(
         self,
