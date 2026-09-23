@@ -24,6 +24,9 @@ from src.agent.contracts.generation_request import (
 )
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.agent.utils.validators import InputValidator
+from src.web.prompt_budget import (
+    InputBudgetExceeded, STATUS_RESERVE, assemble, bounded_record, character_limit, validate_question,
+)
 from src.web.models import generate_for_chat
 from src.web.rag_presentation import format_rag_context, rag_info_molecule
 
@@ -163,6 +166,16 @@ class ChatHandler:
             if conversation_history is not None
             else self.conversation_history
         )
+        try:
+            validate_question(message, self._input_limit())
+            for section in ("history", "rag", "tool"):
+                character_limit(self.config, section=section)
+        except InputBudgetExceeded as exc:
+            await websocket.send_text(json.dumps({
+                "type": "complete", "content": str(exc),
+                "error": {"code": "input_budget_exceeded"},
+            }, ensure_ascii=False))
+            return
         start_time = time.time()
         full_response = ""
         agent_used = False
@@ -460,7 +473,21 @@ class ChatHandler:
             return
 
         if agent_used and agent_response:
-            prompt = self._build_prompt_with_agent(message, agent_response, rag_context, retrieved_molecules)
+            try:
+                prompt = self._build_prompt_with_agent(message, agent_response, rag_context, retrieved_molecules, agent_result=agent_result)
+            except InputBudgetExceeded:
+                # Do not let the model reinterpret evidence without its limitations.
+                content = agent_response + (
+                    "\n\n工具来源或错误信息超过解读预算，未进行模型总结。"
+                    "以上为原始工具答复，不表示全部步骤成功；请查看结构化工具结果。"
+                )
+                await websocket.send_text(json.dumps({
+                    "type": "complete", "content": content,
+                    "error": {"code": "interpretation_budget_exceeded"},
+                }, ensure_ascii=False))
+                history.append({"user": message, "assistant": content, "agent_used": True})
+                del history[:-20]
+                return
         else:
             prompt = self._build_prompt(
                 message,
@@ -468,11 +495,6 @@ class ChatHandler:
                 retrieved_molecules,
                 conversation_history=history,
             )
-        
-        # 优化3: 缩短提示词长度（为4GB显存优化）
-        if len(prompt) > 3000:  # 降低阈值从4000到3000
-            logger.warning(f"提示词过长({len(prompt)}字符)，进行截断")
-            prompt = prompt[:3000] + "\n\n[内容已截断，请基于以上信息回答]"
         
         # 生成响应
         await self._send_status(websocket, "🤖 AI正在生成回答...")
@@ -1083,85 +1105,54 @@ class ChatHandler:
         )
     
     def _format_rag_context(self, molecules: List[Dict[str, Any]]) -> str:
-        return format_rag_context(molecules)
+        """Budget complete records before applying the shared RAG presentation."""
+        if not molecules:
+            return ""
+        limit = character_limit(self.config, section="rag")
+        notice = "\n[RAG 记录因预算整条省略，不能推断其内容。]"
+        available = max(0, limit - len(notice))
+        included = []
+        result = ""
+        omitted = False
+        for mol in molecules:
+            record = bounded_record(mol, available - len(result))
+            if record is None:
+                omitted = True
+                continue
+            # Only bounded JSON-compatible values reach the display formatter;
+            # keep original retrieval records untouched for rag_info/provenance.
+            candidate = included + [json.loads(record)]
+            rendered = format_rag_context(candidate)
+            if len(rendered) > available:
+                omitted = True
+                continue
+            included = candidate
+            result = rendered
+        if omitted and len(notice) <= limit:
+            result += notice
+        return result
+
+    def _input_limit(self) -> int:
+        return character_limit(self.config, bool(getattr(self.model, "provider_name", None)))
     
     def _build_prompt(self, user_message: str, rag_context: str,
                      retrieved_molecules: List[Dict[str, Any]],
                      conversation_history: List[Dict[str, Any]] | None = None) -> str:
-        """构建提示词 - 中文优化版，针对API-key模型"""
-        history = (
-            conversation_history
-            if conversation_history is not None
-            else self.conversation_history
-        )
-        
-        # 导入系统提示词
-        from src.agent.prompts import DRUG_DESIGN_SYSTEM_PROMPT
-        
-        # 构建对话上下文
-        conversation_context = ""
-        if history:
-            recent_history = history[-2:]  # 仅2轮对话，降低显存占用
-            conversation_context = "\n## 📝 最近对话历史\n"
-            for i, entry in enumerate(recent_history, 1):
-                conversation_context += f"\n**对话 {i}:**\n"
-                conversation_context += f"用户: {entry['user']}\n"
-                # 如果使用了工具，显示工具信息
-                if entry.get('agent_used'):
-                    conversation_context += f"（使用了智能工具）\n"
-                conversation_context += f"助手: {entry['assistant'][:500]}...\n"  # 缩短到500字符
-
-        # 分析用户意图
-        user_message_lower = user_message.lower()
-        intent_analysis = self._analyze_user_intent(user_message_lower)
-        
-        # 构建提示词
-        prompt_parts = [DRUG_DESIGN_SYSTEM_PROMPT]
-        
-        # 添加对话历史
-        if conversation_context:
-            prompt_parts.append(conversation_context)
-        
-        # 添加意图分析
-        prompt_parts.append(f"\n## 🎯 当前任务分析\n")
-        prompt_parts.append(f"**用户意图**: {intent_analysis['intent_type']}")
-        prompt_parts.append(f"**任务类型**: {intent_analysis['task_description']}")
-        
-        # 添加RAG检索结果
-        if rag_context:
-            prompt_parts.append(f"\n## 📊 相关分子数据（RAG检索）\n")
-            prompt_parts.append(f"系统从分子数据库中检索到 {len(retrieved_molecules)} 个相关分子：\n")
-            prompt_parts.append(rag_context)
-            prompt_parts.append(f"\n**使用建议**: {intent_analysis['rag_usage']}")
-            prompt_parts.append("\n⚠️ **重要提示**: 你在回答时无需重复列出这些数值属性。请专注于提供分析、建议和解释。")
-        
-        # 添加工具使用提示
-        if intent_analysis['suggested_tools']:
-            prompt_parts.append(f"\n## 🔧 建议使用的工具\n")
-            for tool in intent_analysis['suggested_tools']:
-                prompt_parts.append(f"- {tool}")
-        
-        # 添加用户问题
-        prompt_parts.append(f"\n## 💬 用户问题\n{user_message}")
-        
-        # 添加回答指导
-        prompt_parts.append(f"\n## 📋 回答要求\n")
-        prompt_parts.append("1. 如果需要使用工具，系统会自动调用（智能工具已启用）")
-        prompt_parts.append("2. 基于工具结果和检索数据提供专业分析")
-        prompt_parts.append("3. 使用清晰的中文，包含具体数值和评估")
-        prompt_parts.append("4. 提供可操作的药物化学建议")
-        prompt_parts.append("5. 保持专业但易懂的表达风格")
-        prompt_parts.append(
-            "6. 对问候或概念问答直接回答当前问题，默认保持精炼；除非用户明确询问，"
-            "不要展开完整平台功能清单"
-        )
-        prompt_parts.append(
-            "7. 科学数值只能引用真实工具结果；未调用对应工具时必须明确说明不可用"
-        )
-        
-        prompt_parts.append("\n请开始回答：")
-
-        return "\n".join(prompt_parts)
+        history = conversation_history if conversation_history is not None else self.conversation_history
+        history_cap = character_limit(self.config, section="history")
+        blocks = [("RAG 检索证据", rag_context, character_limit(self.config, section="rag"))]
+        # Most recent complete turns take priority. Never cut a SMILES/JSON value.
+        for entry in reversed(history[-2:]):
+            user, assistant = entry.get("user", ""), entry.get("assistant", "")
+            if len(user) + len(assistant) + 20 > history_cap:
+                notice = "历史记录因预算整轮省略"
+                blocks.append(("历史", notice, history_cap))
+                history_cap = max(0, history_cap - len(notice) - 6)
+                continue
+            text = "用户: " + user + "\n助手: " + assistant
+            blocks.append(("历史", text, history_cap))
+            history_cap -= len(text) + len("历史") + 4
+        return assemble(user_message, self._input_limit(), blocks, chronological_history=True)
 
     def _model_max_tokens(self) -> int:
         """Select an output budget without leaking local GPU limits to remote APIs."""
@@ -1242,51 +1233,22 @@ class ChatHandler:
         
         return intent
     
-    def _build_prompt_with_agent(self, user_message: str, agent_response: str, 
-                                rag_context: str, retrieved_molecules: List[Dict[str, Any]]) -> str:
-        """构建带 Agent 结果的提示词 - 中文优化版"""
-        
-        system_prompt = """# 🧬 药物设计AI助手 - 结果解读模式
-
-## 你的任务
-智能工具已经完成了专业计算和分析，你需要：
-1. 📊 **解读工具结果** - 将技术数据转化为易懂的专业见解
-2. 💡 **提供深度分析** - 基于结果给出药物化学建议
-3. 🎯 **关联用户需求** - 确保回答直接解决用户问题
-4. 📈 **给出优化方向** - 提供可操作的改进建议
-
-## 回答风格
-- 使用专业但易懂的中文
-- 突出关键发现和重要数值
-- 提供具体的药物化学见解
-- 给出实用的优化建议
-"""
-
-        prompt_parts = [system_prompt]
-        
-        # 添加工具分析结果
-        prompt_parts.append(f"\n## 🔧 智能工具分析结果\n")
-        prompt_parts.append("系统已使用专业工具完成分析，结果如下：\n")
-        prompt_parts.append(agent_response)
-        
-        # 添加RAG检索数据
-        if rag_context:
-            prompt_parts.append(f"\n## 📊 相关分子数据（供对比参考）\n")
-            prompt_parts.append(rag_context)
-            prompt_parts.append("\n**使用建议**: 将工具分析结果与这些相似分子对比，提供更全面的评估")
-            prompt_parts.append("\n⚠️ **重要提示**: 你在回答时无需重复分子属性，只需提供专业的分析和建议。")
-        
-        # 添加用户原始问题
-        prompt_parts.append(f"\n## 💬 用户原始问题\n{user_message}")
-        
-        # 添加回答指导
-        prompt_parts.append(f"\n## 📋 回答要求\n")
-        prompt_parts.append("1. **总结关键发现** - 提炼工具结果中的核心信息")
-        prompt_parts.append("2. **专业解读** - 解释数值的药物化学意义")
-        prompt_parts.append("3. **优缺点分析** - 客观评价分子的优势和不足")
-        prompt_parts.append("4. **优化建议** - 给出具体的改进方向")
-        prompt_parts.append("5. **结论** - 简明扼要地回答用户问题")
-        
-        prompt_parts.append("\n请基于工具结果提供专业的解读和建议：")
-
-        return "\n".join(prompt_parts)
+    def _build_prompt_with_agent(self, user_message: str, agent_response: str,
+                                rag_context: str, retrieved_molecules: List[Dict[str, Any]],
+                                agent_result: Mapping | None = None) -> str:
+        result = agent_result or {}
+        # Preserve actual limitations separately from the optional narrative.
+        keys = ("success", "partial", "status", "warnings", "error", "errors",
+                "provenance", "tool_provenance", "evidence", "quality", "artifacts",
+                "tool_results", "tool_result_sequence", "tool_results_by_step",
+                "tools_used", "trace_id")
+        metadata = bounded_record({key: result[key] for key in keys if key in result},
+                                  STATUS_RESERVE - 80)
+        if metadata is None:
+            raise InputBudgetExceeded("工具来源或错误信息超过解读预算")
+        state = "\n工具状态与来源（逐项核对，不可推断全部成功）：\n" + metadata + "\n"
+        blocks = [
+            ("工具证据（保留来源和错误）", agent_response, character_limit(self.config, section="tool")),
+            ("RAG 检索证据", rag_context, character_limit(self.config, section="rag")),
+        ]
+        return assemble(user_message, self._input_limit(), blocks, status=state)
