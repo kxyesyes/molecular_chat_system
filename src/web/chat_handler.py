@@ -4,7 +4,6 @@
 import json
 import asyncio
 import logging
-import pandas as pd
 import time
 from collections.abc import Mapping
 from typing import List, Dict, Any
@@ -26,6 +25,7 @@ from src.agent.contracts.generation_request import (
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.agent.utils.validators import InputValidator
 from src.web.models import generate_for_chat
+from src.web.rag_presentation import format_rag_context, rag_info_molecule
 
 logger = logging.getLogger(__name__)
 
@@ -364,15 +364,7 @@ class ChatHandler:
                             await websocket.send_text(json.dumps({
                                 "type": "rag_info",
                                 "molecules": [
-                                    {
-                                        "smiles": mol.get("SMILES", ""),
-                                        "similarity": round(float(mol.get("similarity_score", 0)), 3),
-                                        "properties": {
-                                            k: (round(float(v), 2) if isinstance(v, (int, float)) else str(v))
-                                            for k, v in mol.items()
-                                            if k not in ["SMILES", "similarity_score"] and v is not None
-                                        }
-                                    }
+                                    rag_info_molecule(mol)
                                     for mol in retrieved_molecules[:rag_count]
                                 ],
                                 "message": f"✅ 技能自动触发：从库中找到 {len(retrieved_molecules)} 个相关分子"
@@ -427,15 +419,7 @@ class ChatHandler:
                     await websocket.send_text(json.dumps({
                         "type": "rag_info",
                         "molecules": [
-                            {
-                                "smiles": mol.get("SMILES", ""),
-                                "similarity": round(float(mol.get("similarity_score", 0)), 3),
-                                "properties": {
-                                    k: (round(float(v), 2) if isinstance(v, (int, float)) else str(v))
-                                    for k, v in mol.items()
-                                    if k not in ["SMILES", "similarity_score"] and v is not None
-                                }
-                            }
+                            rag_info_molecule(mol)
                             for mol in retrieved_molecules
                         ],
                         "message": f"✅ 找到 {len(retrieved_molecules)} 个相关分子"
@@ -1099,23 +1083,7 @@ class ChatHandler:
         )
     
     def _format_rag_context(self, molecules: List[Dict[str, Any]]) -> str:
-        """格式化 RAG 上下文"""
-        if not molecules:
-            return ""
-        
-        context_parts = ["Relevant molecular data found:"]
-        
-        for i, mol in enumerate(molecules, 1):
-            smiles = mol.get("SMILES", "Unknown")
-            score = mol.get("similarity_score", 0)
-            
-            context_parts.append(f"{i}. SMILES: {smiles} (similarity: {score:.3f})")
-            
-            for key, value in mol.items():
-                if key not in ["SMILES", "similarity_score"] and pd.notna(value):
-                    context_parts.append(f"   {key}: {value}")
-        
-        return "\n".join(context_parts)
+        return format_rag_context(molecules)
     
     def _build_prompt(self, user_message: str, rag_context: str,
                      retrieved_molecules: List[Dict[str, Any]],

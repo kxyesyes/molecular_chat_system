@@ -2,6 +2,10 @@ import asyncio
 import dataclasses
 import json
 import os
+import builtins
+import subprocess
+import sys
+from types import SimpleNamespace
 from dataclasses import replace
 from pathlib import Path
 
@@ -23,6 +27,7 @@ from src.web.rag_index import (  # noqa: E402
     validate_manifest,
 )
 from src.web.app import RAGSystem  # noqa: E402
+from src.agent.tools.rag_search_tool import RAGSearchTool  # noqa: E402
 
 
 def _write_source(path: Path) -> pd.DataFrame:
@@ -81,7 +86,7 @@ def test_manifest_json_round_trip_is_frozen_and_has_builder_version(tmp_path):
         restored.vector_count = 99
 
 
-def test_index_records_source_row_mapping_and_search_resolves_faiss_label(tmp_path):
+def test_index_records_source_row_mapping_and_search_resolves_faiss_label(tmp_path, monkeypatch):
     source_path = tmp_path / "molecules.csv"
     dataframe = _write_source(source_path)
     vector_store_path = tmp_path / "molecular_faiss"
@@ -131,6 +136,18 @@ def test_index_records_source_row_mapping_and_search_resolves_faiss_label(tmp_pa
     assert results[0]["source_index"] == 2
     assert results[0]["provenance"]["vector_label"] == 1
     assert results[0]["provenance"]["source_sha256"] == file_sha256(source_path)
+
+    # Exercise the real Agent tool, not a copied iloc/mapping expression.
+    from types import SimpleNamespace
+    from src.agent.tools.rag_search_tool import RAGSearchTool
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SimpleNamespace(
+        status_code=200, json=lambda: {"embedding": [0.0, 1.0]},
+    ))
+    monkeypatch.setattr(rag, "get_embedding_sync", lambda text: np.asarray([0.0, 1.0]), raising=False)
+    tool_result = RAGSearchTool(rag_system=rag).execute("third molecule", k=2)
+    assert tool_result["success"] is True
+    assert tool_result["data"][0]["SMILES"] == "CCC"
+    assert tool_result["data"] == results
 
 
 @pytest.mark.parametrize(
@@ -481,3 +498,295 @@ def test_atomic_pair_fsyncs_both_temps_before_replacing_index_then_manifest(
     assert replace_events[1][1] != final_manifest_path
     assert persisted_manifest.index_sha256 == file_sha256(index_path)
     assert load_manifest(final_manifest_path) == persisted_manifest
+
+
+@pytest.fixture
+def retrieval_service(tmp_path, monkeypatch):
+    source = tmp_path / "molecules.csv"
+    frame = _write_source(source)
+    store = tmp_path / "vectors"
+    atomic_save_index_pair(_make_index(2, [[1., 0.], [0., 1.]]),
+                          Path(f"{store}.index"), _make_manifest(source), faiss_module=faiss)
+    rag = RAGSystem({"rag": {"csv_path": str(source), "embedding_model": "model-a",
+                            "embedding_endpoint": "http://embedding.test/api/embeddings"}})
+    rag.molecules_df = frame
+    asyncio.run(rag._load_or_create_index(str(store)))
+    assert rag.index_status == "loaded"
+    rag.is_initialized = True
+    async def embedding(text):
+        return np.asarray([0., 1.])
+    monkeypatch.setattr(rag, "get_embedding", embedding)
+    monkeypatch.setattr(rag, "get_embedding_sync", lambda text: np.asarray([0., 1.]), raising=False)
+    # Legacy transport only: prevents real I/O while reproducing the old tool.
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SimpleNamespace(
+        status_code=200, json=lambda: {"embedding": [0., 1.]},
+    ))
+    return rag
+
+
+@pytest.mark.parametrize("mutation", [
+    {"row_mapping": [0, -1]}, {"row_mapping": [0, 99]},
+    {"row_mapping": [0, True]}, {"row_mapping": [0, "2"]},
+    {"row_mapping": [0]}, {"schema_version": 999},
+    {"index_sha256": "0" * 64}, {"source_sha256": "0" * 64},
+    {"embedding_model": "other-model"}, {"builder_version": "unknown"},
+])
+def test_both_retrieval_entries_reject_untrusted_manifest(retrieval_service, mutation):
+    rag = retrieval_service
+    rag.manifest = replace(rag.manifest, **mutation)
+    assert asyncio.run(rag.search_similar_molecules("query")) == []
+    result = RAGSearchTool(rag).execute("query")
+    assert result["success"] is False
+    assert not result.get("data")
+    assert result.get("error")
+
+
+@pytest.mark.parametrize("state", ["uninitialized", "missing_manifest", "source_changed", "source_missing"])
+def test_tool_cannot_bypass_unavailable_service(retrieval_service, state):
+    rag = retrieval_service
+    if state == "uninitialized":
+        rag.is_initialized = False
+    elif state == "missing_manifest":
+        rag.manifest = None
+    elif state == "source_changed":
+        rag.source_path.write_text("SMILES\nCCN\n")
+    else:
+        rag.source_path.unlink()
+    assert asyncio.run(rag.search_similar_molecules("query")) == []
+    assert RAGSearchTool(rag).execute("query")["success"] is False
+
+
+@pytest.mark.parametrize("labels", [[1, -1, 99, -2], []])
+def test_shared_search_skips_invalid_labels_and_empty_hits(retrieval_service, monkeypatch, labels):
+    rag = retrieval_service
+    monkeypatch.setattr(rag.vector_index, "search", lambda vector, k: (
+        np.ones((1, len(labels)), dtype=np.float32), np.asarray([labels], dtype=np.int64)))
+    ordinary = asyncio.run(rag.search_similar_molecules("query", k=20))
+    result = RAGSearchTool(rag).execute("query", k=20)
+    assert result["success"] is True
+    assert result["data"] == ordinary
+    assert [row["SMILES"] for row in ordinary] == (["CCC"] if labels else [])
+
+
+def test_large_k_returns_only_available_vectors(retrieval_service):
+    rag = retrieval_service
+    ordinary = asyncio.run(rag.search_similar_molecules("query", k=100))
+    result = RAGSearchTool(rag).execute("query", k=100)
+    assert result["data"] == ordinary
+    assert [row["source_index"] for row in ordinary] == [2, 0]
+
+
+@pytest.mark.parametrize("vector", [[1., 2., 3.], [float("nan"), 1.], [0., 0.], []])
+def test_invalid_query_vectors_do_not_produce_records(retrieval_service, monkeypatch, vector):
+    rag = retrieval_service
+    async def embedding(query):
+        return np.asarray(vector)
+    monkeypatch.setattr(rag, "get_embedding", embedding)
+    monkeypatch.setattr(rag, "get_embedding_sync", lambda query: np.asarray(vector), raising=False)
+    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SimpleNamespace(
+        status_code=200, json=lambda: {"embedding": vector}))
+    assert asyncio.run(rag.search_similar_molecules("query")) == []
+    assert RAGSearchTool(rag).execute("query")["success"] is False
+
+
+def test_uninjected_tool_does_not_import_global_web_app(monkeypatch):
+    imports = []
+    original = builtins.__import__
+    def guarded(name, *args, **kwargs):
+        if name == "src.web.app":
+            imports.append(name)
+            raise AssertionError("global Web app must not be imported")
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    result = RAGSearchTool().execute("query")
+    assert result["success"] is False
+    assert imports == []
+
+
+def test_actual_factories_share_injected_rag_service(retrieval_service, monkeypatch):
+    import src.agent.tools as factories
+    from src.agent.tooling.registration import REQUIRED_TOOLS
+    from src.web.app import MolecularChatApp
+    monkeypatch.setattr(factories, "get_core_tools", lambda model=None: [
+        SimpleNamespace(name=name) for name in REQUIRED_TOOLS
+    ])
+    monkeypatch.setattr(factories, "OPTIONAL_TOOLS", ["RAGSearchTool"])
+    app = MolecularChatApp.__new__(MolecularChatApp)
+    app.model = None
+    app.molecular_generator_model = None
+    app.rag_system = retrieval_service
+    app.agent_state_store = object()
+    app.agent_tool_registry = None
+    app.agent_system = app._create_chat_agent()
+    assert app.agent_system.tools["rag_search"].rag_system is retrieval_service
+    supervisor = app._create_supervisor_agent()
+    assert app.agent_tool_registry.resolve("rag_search").tool.rag_system is retrieval_service
+    assert app.agent_tool_registry.resolve("rag_database_search") is app.agent_tool_registry.resolve("rag_search")
+    assert supervisor.tool_registry is app.agent_tool_registry
+    assert app.agent_registration_report["errors"] == []
+
+
+def test_sync_tool_and_async_search_use_service_endpoint_and_close_client(retrieval_service, monkeypatch):
+    import httpx
+    rag = retrieval_service
+    # Use real methods with only the HTTP transport replaced, on one running loop.
+    rag.get_embedding = RAGSystem.get_embedding.__get__(rag)
+    rag.get_embedding_sync = lambda text: RAGSystem.get_embedding_sync(rag, text)
+    requests_seen, clients = [], []
+    def response(request):
+        requests_seen.append((str(request.url), json.loads(request.content)))
+        return httpx.Response(200, json={"embedding": [0., 1.]})
+    transport = httpx.MockTransport(response)
+    client_type = httpx.Client
+    def client(**kwargs):
+        instance = client_type(transport=transport, **kwargs)
+        clients.append(instance)
+        return instance
+    monkeypatch.setattr(httpx, "Client", client)
+    async def run():
+        async with httpx.AsyncClient(transport=transport) as async_client:
+            rag.embedding_client = async_client
+            ordinary = await rag.search_similar_molecules("query", k=2)
+            result = RAGSearchTool(rag).execute("query", k=2)
+            assert result["success"] is True
+            assert result["data"] == ordinary
+    asyncio.run(run())
+    assert len(requests_seen) == 2
+    assert all(url == "http://embedding.test/api/embeddings" for url, _ in requests_seen)
+    assert requests_seen[0][1] == requests_seen[1][1]
+    assert clients and all(client.is_closed for client in clients)
+
+
+@pytest.mark.parametrize("use_agent", [False, True])
+def test_chat_rag_info_preserves_structured_provenance(retrieval_service, use_agent):
+    from src.web.chat_handler import ChatHandler
+    class Socket:
+        messages = None
+        def __init__(self):
+            self.messages = []
+        async def send_text(self, text):
+            self.messages.append(json.loads(text))
+    class Model:
+        async def generate(self, *args, **kwargs):
+            return "offline test response"
+    class Agent:
+        def should_use_tools(self, message):
+            return True
+        def execute(self, message, **kwargs):
+            result = RAGSearchTool(retrieval_service).execute(message, k=2)
+            return {"success": result["success"], "final_answer": result["summary"],
+                    "tools_used": ["rag_search"], "tool_results": {"rag_search": result},
+                    "workflow_plan": {"name": "rag_search"}}
+    socket = Socket()
+    handler = ChatHandler(Model(), retrieval_service, Agent() if use_agent else None,
+                          {"inference": {"stream": False}})
+    asyncio.run(handler._process_message(socket, "检索数据库中类似分子", True, use_agent, rag_count=2))
+    info = next(message for message in socket.messages if message["type"] == "rag_info")
+    molecule = info["molecules"][0]
+    assert molecule["smiles"] == "CCC"
+    assert molecule["source_index"] == 2
+    assert molecule["provenance"]["vector_label"] == 1
+    assert molecule["provenance"]["source_sha256"] == retrieval_service.manifest.source_sha256
+    assert "provenance" not in molecule["properties"]
+    context = handler._format_rag_context(asyncio.run(retrieval_service.search_similar_molecules("query")))
+    assert retrieval_service.manifest.source_sha256 in context
+
+
+def test_rag_tool_import_and_execution_do_not_initialize_web_app_in_new_process():
+    code = '''
+import sys
+from src.agent.tools.rag_search_tool import RAGSearchTool
+assert 'src.web.app' not in sys.modules
+assert RAGSearchTool().execute('query')['success'] is False
+assert 'src.web.app' not in sys.modules
+'''
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code], capture_output=True,
+        text=True, encoding="utf-8", errors="replace", timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_endpoint_compatibility_argument_cannot_override_service(retrieval_service):
+    rag = retrieval_service
+    assert RAGSearchTool(rag, rag.embedding_endpoint).rag_system is rag
+    with pytest.raises(ValueError, match="injected RAG service"):
+        RAGSearchTool(rag, "http://other.test/api/embeddings")
+
+
+def test_sync_embedding_failure_closes_owned_client(retrieval_service, monkeypatch):
+    import httpx
+    rag = retrieval_service
+    rag.get_embedding_sync = RAGSystem.get_embedding_sync.__get__(rag)
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: httpx.Response(503)))
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client)
+    assert RAGSearchTool(rag).execute("query")["success"] is False
+    assert client.is_closed
+
+
+@pytest.mark.parametrize("ready", [True, False])
+@pytest.mark.parametrize("legacy_name", [True, False])
+def test_integrated_rag_workflow_preserves_registration_and_session_owner(
+    retrieval_service, tmp_path, monkeypatch, ready, legacy_name,
+):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.agent.persistence import SQLiteAgentStateStore
+    from src.agent.tooling.registration import REQUIRED_TOOLS
+    import src.agent.tools as factories
+    from src.web.app import MolecularChatApp
+    from src.web.agent_session_config import setup_agent_sessions
+    from src.web.routes import agent_workflow_routes
+
+    rag = retrieval_service
+    rag.is_initialized = ready
+    monkeypatch.setattr(factories, "get_core_tools", lambda model=None: [
+        SimpleNamespace(name=name) for name in REQUIRED_TOOLS
+    ])
+    monkeypatch.setattr(factories, "OPTIONAL_TOOLS", ["RAGSearchTool"])
+    app = MolecularChatApp.__new__(MolecularChatApp)
+    app.model = app.molecular_generator_model = None
+    app.rag_system = rag
+    app.agent_state_store = SQLiteAgentStateStore(tmp_path / "agent.sqlite")
+    app.agent_tool_registry = None
+    app.agent_system = app._create_chat_agent()
+    if legacy_name:
+        app.agent_system.tools["rag_search"].name = "rag_database_search"
+    monkeypatch.setattr("src.agent.supervisor.build_default_tools", lambda: pytest.fail("reuse registry"))
+    submitted, results = [], []
+
+    class Manager:
+        def submit(self, *, task_type, payload, handler, owner_session_id):
+            submitted.append((task_type, payload, owner_session_id))
+            results.append(handler(payload))
+            return SimpleNamespace(to_public_dict=lambda: {"result": results[-1]})
+
+    monkeypatch.setattr(agent_workflow_routes, "get_task_manager", lambda: Manager())
+    api = FastAPI()
+    setup_agent_sessions(api)
+    agent_workflow_routes.setup_agent_workflow_routes(api, app._create_supervisor_agent)
+    try:
+        with TestClient(api, base_url="http://localhost") as client:
+            response = client.post("/api/agent/workflows/run", json={
+                "query": "检索知识库中的分子", "skill_name": "rag_search",
+                "metadata": {"session_id": "untrusted", "owner_session_id": "untrusted"},
+            })
+        assert response.status_code == 200
+        assert results[-1]["status"] == ("succeeded" if ready else "failed")
+        assert submitted[0][0] == "agent_workflow"
+        assert submitted[0][1]["metadata"] == {}
+        assert submitted[0][2] and submitted[0][2] != "untrusted"
+        assert app.agent_registration_report["errors"] == []
+        registry = app.agent_tool_registry
+        adapter = registry.resolve("rag_search", require_available=False)
+        assert registry.resolve("rag_database_search", require_available=False) is adapter
+        assert adapter.tool.rag_system is rag
+        assert adapter.health()["available"] is ready
+        if ready:
+            assert rag.manifest.source_sha256 in response.text
+        else:
+            assert "rag_search" in app.agent_registration_report["unavailable_tools"]
+            assert "tool_unavailable" in response.text
+    finally:
+        if app.agent_tool_registry is not None:
+            app.agent_tool_registry.close()
