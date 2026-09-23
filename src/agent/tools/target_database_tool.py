@@ -5,6 +5,7 @@
 from typing import Any, Dict
 import logging
 import threading
+from src.target_identifiers import canonical_target_identifier
 
 from .base_tool import BaseMolecularTool
 
@@ -398,6 +399,7 @@ class TargetDatabaseTool(BaseMolecularTool):
             if value is None:
                 return
             text = str(value).strip()
+            text = canonical_target_identifier(text) or text
             if text and text not in queries:
                 queries.append(text)
 

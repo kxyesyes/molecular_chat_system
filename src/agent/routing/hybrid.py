@@ -10,6 +10,8 @@ from typing import Any
 
 from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
+from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
+from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.workflows import WorkflowCatalog
@@ -24,9 +26,6 @@ WORKFLOW_TOOLS = MappingProxyType(
     }
 )
 
-TARGET_PATTERN = re.compile(
-    r"\b(PDE\d+[A-Z]?|EGFR|BACE1|KRAS|BRAF|JAK2|ALK|MET|CDK2|KDR)\b", re.I
-)
 SMILES_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:[BCNOPSFIK]|Cl|Br)[A-Za-z0-9@+\-\[\]\(\)=#./\\]{2,}(?![A-Za-z])"
 )
@@ -93,11 +92,22 @@ class HybridSkillRouter:
             scores[skill] += value
             reasons[skill].append(reason)
 
-        has_target = bool(TARGET_PATTERN.search(text))
+        target_request = analyze_target_request(text)
+        has_target = bool(target_request.targets)
         input_validator = InputValidator()
         molecular_input = input_validator.analyze_molecular_input(text)
         has_smiles = bool(molecular_input.valid_smiles)
         generation = self._has_generation_intent(lower)
+        if (
+            generation
+            and (has_target or target_request.explicit)
+            and target_request.needs_clarification
+        ):
+            return RouteDecision(
+                selected_skill=None, confidence=0.0, source="fallback",
+                requires_confirmation=True,
+                reasons=["target_clarification_required", TARGET_CLARIFICATION],
+            )
 
         if self._contains(lower, "全面", "综合", "成药性", "comprehensive", "full analysis"):
             add("comprehensive_evaluation", 0.95, "comprehensive workflow phrase")
@@ -316,8 +326,10 @@ class HybridSkillRouter:
             "pdb",
             "活性",
         )
-        return any(item in text for item in greetings) and not any(
-            item in text for item in scientific
+        return (
+            any(item in text for item in greetings)
+            and not any(item in text for item in scientific)
+            and not TARGET_PATTERN.search(text)
         )
 
     def _apply_feedback(
