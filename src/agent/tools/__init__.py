@@ -50,7 +50,7 @@ def get_core_tools(molecular_generator_llm=None):
         CandidateRanker(),
     ]
 
-def get_optional_tool(tool_name, llm=None):
+def get_optional_tool(tool_name, llm=None, *, rag_system=None):
     """延迟加载可选工具"""
     if tool_name == 'MolecularDocking':
         from .molecular_docking import MolecularDocking
@@ -66,7 +66,7 @@ def get_optional_tool(tool_name, llm=None):
         return ActivityPredictorTool()
     elif tool_name == 'RAGSearchTool':
         from .rag_search_tool import RAGSearchTool
-        return RAGSearchTool()
+        return RAGSearchTool(rag_system=rag_system)
     elif tool_name == 'RXNChemistryAgent':
         from .rxn_chemistry_agent import RXNChemistryAgent
         return RXNChemistryAgent()
@@ -74,7 +74,7 @@ def get_optional_tool(tool_name, llm=None):
         raise ValueError(f"Unknown optional tool: {tool_name}")
 
 
-def get_all_tools(molecular_generator_llm=None):
+def get_all_tools(molecular_generator_llm=None, *, rag_system=None):
     """获取所有工具实例（核心 + 可选），用于 Skill 系统的工具池。"""
     import logging
     logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def get_all_tools(molecular_generator_llm=None):
 
     for tool_name in OPTIONAL_TOOLS:
         try:
-            tool = get_optional_tool(tool_name)
+            tool = get_optional_tool(tool_name, rag_system=rag_system)
             tools.append(tool)
             logger.info(f"✅ 可选工具加载成功: {tool_name}")
         except Exception as e:

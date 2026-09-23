@@ -24,34 +24,87 @@ class Tool:
 @pytest.mark.parametrize("ready", [True, False])
 @pytest.mark.parametrize("legacy_name", [False, True])
 def test_default_app_factory_rag_workflow_api(tmp_path, monkeypatch, ready, legacy_name):
+    import asyncio
+    import json
+    import faiss
+    import httpx
     import numpy as np
     import pandas as pd
     from src.agent.persistence import SQLiteAgentStateStore
-    from src.agent.tools import get_core_tools
+    from src.agent.tools import get_all_tools
+    from src.web.app import RAGSystem
+    from src.web.rag_index import (
+        CURRENT_SCHEMA_VERSION, RAGIndexManifest, atomic_save_index_pair, file_sha256,
+    )
 
-    class Index:
-        def search(self, embedding, k):
-            return np.array([[0.9]]), np.array([[0]])
-    rag = SimpleNamespace(is_initialized=ready, vector_index=Index() if ready else None,
-        molecules_df=pd.DataFrame([{"SMILES": "CCO", "source": "fixture-db"}]),
-        embedding_model_name="offline-embedding")
+    source = tmp_path / "molecules.csv"
+    frame = pd.DataFrame([
+        {"SMILES": "CCC", "source": "fixture-db"},
+        {"SMILES": "CCN", "source": "skipped-source-row"},
+        {"SMILES": "CCO", "source": "fixture-db"},
+    ])
+    frame.to_csv(source, index=False)
+    store = tmp_path / "vectors"
+    index_path = store.with_suffix(".index")
+    index = faiss.IndexFlatIP(2)
+    index.add(np.asarray([[1., 0.], [0., 1.]], dtype=np.float32))
+    manifest = RAGIndexManifest(
+        schema_version=CURRENT_SCHEMA_VERSION, source_path=str(source),
+        source_sha256=file_sha256(source), index_sha256="0" * 64,
+        embedding_model="offline-embedding", vector_dimension=2, vector_count=2,
+        row_mapping=[0, 2], created_at="2026-09-23T00:00:00+00:00",
+    )
+    persisted = atomic_save_index_pair(index, index_path, manifest, faiss_module=faiss)
+    rag = RAGSystem({"rag": {
+        "csv_path": str(source), "embedding_model": "offline-embedding",
+        "embedding_endpoint": "http://embedding.test/api/embeddings",
+    }})
+    rag.molecules_df = pd.read_csv(source)
     calls = []
-    def embed(*args, **kwargs):
-        calls.append(kwargs["json"]["prompt"])
-        return SimpleNamespace(status_code=200, json=lambda: {"embedding": [1., 0.]})
-    monkeypatch.setattr("src.agent.tools.rag_search_tool.requests.post", embed)
+
+    def embed(request):
+        payload = json.loads(request.content)
+        calls.append(payload["prompt"])
+        assert ready, "uninitialized RAG must not call the embedding endpoint"
+        assert request.method == "POST"
+        assert str(request.url) == rag.embedding_endpoint
+        assert payload["model"] == rag.embedding_model_name
+        return httpx.Response(200, json={"embedding": [0., 1.]})
+
+    # Replace only network transport: retain the real HTTP client, embedding
+    # method, manifest validator, FAISS search and row projection.
+    transport = httpx.MockTransport(embed)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request",
+                        lambda self, request: transport.handle_request(request))
+    asyncio.run(rag._load_or_create_index(str(store)))
+    assert rag.index_status == "loaded"
+    assert rag.manifest == persisted
+    assert rag.manifest.row_mapping == [0, 2]
+    assert calls == []
+    rag.is_initialized = ready
     app = MolecularChatApp.__new__(MolecularChatApp)
     app.model = object()
     app.molecular_generator_model = object()
     app.rag_system = rag
     app.agent_state_store = SQLiteAgentStateStore(tmp_path / "agent.sqlite")
     app.agent_tool_registry = None
-    # Keep the real application factories and real RAG adapter; avoid optional models.
-    rag_tool = RAGSearchTool()
-    if legacy_name:
-        rag_tool.name = "rag_database_search"
-    monkeypatch.setattr("src.agent.tools.get_all_tools", lambda model: get_core_tools(model) + [rag_tool])
+    # Keep both real application factories and tool factories; load only the
+    # optional RAG adapter, with no scientific model initialization.
+    monkeypatch.setattr("src.agent.tools.OPTIONAL_TOOLS", ["RAGSearchTool"])
+    factory_calls = []
+
+    def tools_factory(model, *, rag_system):
+        assert model is app.molecular_generator_model
+        assert rag_system is rag
+        factory_calls.append(rag_system)
+        tools = get_all_tools(model, rag_system=rag_system)
+        if legacy_name:
+            next(tool for tool in tools if tool.name == "rag_search").name = "rag_database_search"
+        return tools
+
+    monkeypatch.setattr("src.agent.tools.get_all_tools", tools_factory)
     app.agent_system = app._create_chat_agent()
+    rag_tool = next(tool for tool in app.agent_system.tools.values() if isinstance(tool, RAGSearchTool))
     monkeypatch.setattr("src.agent.supervisor.build_default_tools", lambda: pytest.fail("must reuse registered tools"))
     results = []
     class Manager:
@@ -64,13 +117,36 @@ def test_default_app_factory_rag_workflow_api(tmp_path, monkeypatch, ready, lega
     setup_agent_sessions(api)
     setup_agent_workflow_routes(api, app._create_supervisor_agent)
     try:
-        response = TestClient(api, base_url="http://localhost").post("/api/agent/workflows/run", json={
-            "query": "检索知识库中的乙醇", "skill_name": "rag_search"})
+        with TestClient(api, base_url="http://localhost") as client:
+            response = client.post("/api/agent/workflows/run", json={
+                "query": "检索知识库中的乙醇", "skill_name": "rag_search"})
         assert response.status_code == 200
         assert results[-1]["status"] == ("succeeded" if ready else "failed")
         assert calls == (["检索知识库中的乙醇"] if ready else [])
+        assert factory_calls == [rag]
+        assert app.agent_registration_report["errors"] == []
+        adapter = app.agent_tool_registry.resolve("rag_search", require_available=False)
+        assert app.agent_tool_registry.resolve("rag_database_search", require_available=False) is adapter
+        assert adapter.tool is rag_tool
+        assert adapter.tool.rag_system is rag
+        assert adapter.health()["available"] is ready
         if ready:
             assert "fixture-db" in response.text
+            tool_results = response.json()["data"]["result"]["result"]["tool_result_sequence"]
+            assert len(tool_results) == 1
+            assert tool_results[0]["success"] is True
+            records = tool_results[0]["data"]
+            assert [row["SMILES"] for row in records] == ["CCO", "CCC"]
+            assert [row["source_index"] for row in records] == [2, 0]
+            assert [row["provenance"]["vector_label"] for row in records] == [1, 0]
+            assert records[0]["similarity_score"] == pytest.approx(1.0)
+            assert records[0]["provenance"] == {
+                "source_path": str(source), "source_sha256": file_sha256(source),
+                "index_sha256": file_sha256(index_path),
+                "embedding_model": "offline-embedding",
+                "manifest_schema_version": CURRENT_SCHEMA_VERSION,
+                "builder_version": persisted.builder_version, "vector_label": 1,
+            }
         else:
             assert "rag_search" in app.agent_registration_report["unavailable_tools"]
             assert "tool_unavailable" in response.text
