@@ -171,12 +171,46 @@ class WorkflowOrchestrator:
         self,
         context: AgentContext,
         idempotency_key: str | None,
+        *,
+        allow_trace_rebind: bool | None = None,
     ) -> AgentContext:
-        if not self.state_store or not idempotency_key:
+        """Validate both identities before planning/starting; key is internal.
+
+        Supervisor scopes raw browser keys once and explicitly distinguishes
+        supplied traces from generated ones. Legacy unowned Python callers
+        retain key-based trace rebinding and changed-input checkpoint reuse.
+        """
+        from src.agent.runtime.run_session import RunClaimConflict
+
+        protected = context.session_id is not None or context.user_id is not None
+        if protected and (not self.state_store or not callable(
+                getattr(self.state_store, "claim_workflow_run", None))):
+            raise RunClaimConflict(None)
+        if not self.state_store:
             return context
-        existing = self.state_store.get_run_by_idempotency_key(idempotency_key)
-        if existing and existing["trace_id"] != context.trace_id:
-            return replace(context, trace_id=existing["trace_id"])
+        by_trace = self.state_store.get_run(context.trace_id)
+        # Do not filter foreign rows away: a collision is a denial, not a new
+        # run. The owner check below is shared by Supervisor and Session.
+        by_key = (self.state_store.get_run_by_idempotency_key(idempotency_key)
+                  if idempotency_key is not None else None)
+        for existing in (by_trace, by_key):
+            if existing is None:
+                continue
+            if (existing.get("session_id") != context.session_id
+                    or existing.get("user_id") != context.user_id):
+                raise RunClaimConflict(None)
+            if (context.session_id is not None or context.user_id is not None
+                    or idempotency_key is not None):
+                if (existing.get("query") != context.query
+                        or existing.get("skill_name") != context.active_skill
+                        or existing.get("idempotency_key") != idempotency_key):
+                    raise RunClaimConflict(None)
+        if by_key and by_key["trace_id"] != context.trace_id:
+            if allow_trace_rebind is None:
+                allow_trace_rebind = context.session_id is None and context.user_id is None
+            if by_trace is not None or not allow_trace_rebind:
+                raise RunClaimConflict(None)
+            return replace(context, trace_id=by_key["trace_id"])
         return context
 
     @staticmethod

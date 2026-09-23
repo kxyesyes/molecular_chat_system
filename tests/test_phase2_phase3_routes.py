@@ -34,10 +34,12 @@ def test_phase2_phase3_routes_are_available(tmp_path, monkeypatch):
     task_manager_module._MANAGER = None
 
     app = FastAPI()
+    from src.web.agent_session_config import setup_agent_sessions
+    setup_agent_sessions(app)
     setup_task_routes(app)
     setup_system_routes(app)
     setup_agent_workflow_routes(app, supervisor_factory=FakeSupervisor)
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://localhost")
     plan_response = client.post(
         "/api/agent/workflows/plan",
         json={

@@ -32,10 +32,19 @@ def setup_agent_workflow_routes(
 
     @app.post("/api/agent/workflows/run")
     async def run_workflow(request: Request):
+        session_id = request.scope.get("agent_session_id")
+        if not isinstance(session_id, str) or not session_id:
+            return api_error("SESSION_UNAVAILABLE", "Session service unavailable", status_code=503)
         payload: dict[str, Any] = await request.json()
         query = str(payload.get("query") or "").strip()
         if not query:
             return api_error("QUERY_REQUIRED", "请输入任务目标", status_code=422)
+
+        metadata = payload.get("metadata") or {}
+        if not isinstance(metadata, dict):
+            return api_error("INVALID_METADATA", "metadata must be an object", status_code=422)
+        metadata = {key: value for key, value in metadata.items()
+                    if key not in {"session_id", "user_id", "owner_session_id"}}
 
         def handler(task_payload: dict[str, Any]) -> dict[str, Any]:
             supervisor = create_supervisor()
@@ -43,6 +52,7 @@ def setup_agent_workflow_routes(
                 query=str(task_payload.get("query") or ""),
                 skill_name=task_payload.get("skill_name"),
                 metadata=task_payload.get("metadata") or {},
+                session_id=session_id,
             )
 
         record = get_task_manager().submit(
@@ -50,8 +60,9 @@ def setup_agent_workflow_routes(
             payload={
                 "query": query,
                 "skill_name": payload.get("skill_name"),
-                "metadata": payload.get("metadata") or {},
+                "metadata": metadata,
             },
             handler=handler,
+            owner_session_id=session_id,
         )
         return api_success(record.to_public_dict(), message="Agent 工作流任务已提交")

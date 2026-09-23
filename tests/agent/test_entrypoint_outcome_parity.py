@@ -153,7 +153,7 @@ def test_workflow_http_envelope_does_not_promote_scientific_partial(tmp_path, mo
     supervisor, _ = build_supervisor(tmp_path, observation)
     captured = {}
     class Manager:
-        def submit(self, *, task_type, payload, handler):
+        def submit(self, *, task_type, payload, handler, owner_session_id):
             captured.update(handler(payload))
             class Record:
                 def to_public_dict(self):
@@ -161,8 +161,10 @@ def test_workflow_http_envelope_does_not_promote_scientific_partial(tmp_path, mo
             return Record()
     monkeypatch.setattr(agent_workflow_routes, "get_task_manager", lambda: Manager())
     app = FastAPI()
+    from src.web.agent_session_config import setup_agent_sessions
+    setup_agent_sessions(app)
     agent_workflow_routes.setup_agent_workflow_routes(app, lambda: supervisor)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://localhost") as client:
         response = client.post("/api/agent/workflows/run", json={
             "query": "evaluate CCO", "skill_name": "comprehensive_evaluation"})
     assert response.status_code == 200

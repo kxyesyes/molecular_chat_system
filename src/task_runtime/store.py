@@ -670,11 +670,13 @@ class TaskStore:
         warnings: list[Any] | None = None,
         idempotency_digest: str | None = None,
         submission_digest: str | None = None,
+        owner_session_id: str | None = None,
         now: datetime | str | None = None,
     ) -> TaskRecord:
         task_id = _validate_required_string(task_id, "task_id")
         task_type = _validate_code(task_type, "task_type")
         backend = _validate_code(backend, "backend")
+        owner_session_id = _validate_optional_string(owner_session_id, "owner_session_id")
         external_workflow_id = _validate_optional_string(
             external_workflow_id, "external_workflow_id"
         )
@@ -708,9 +710,9 @@ class TaskStore:
                     task_id, task_type, status, input_json, backend,
                     external_workflow_id, progress, attempt,
                     warnings_json, input_manifest_path, provenance_json, phase,
-                    idempotency_digest, submission_digest,
+                    idempotency_digest, submission_digest, owner_session_id,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     task_id,
@@ -725,6 +727,7 @@ class TaskStore:
                     phase,
                     idempotency_digest,
                     submission_digest,
+                    owner_session_id,
                     timestamp,
                     timestamp,
                 ),
@@ -1007,6 +1010,16 @@ class TaskStore:
             raise KeyError(task_id)
         return TaskRecord.from_row(row)
 
+    def get_agent_owner(self, task_id: str) -> str | None:
+        """Read private authority, never inferred from a public task projection."""
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT owner_session_id FROM tasks "
+                "WHERE task_id = ? AND task_type = 'agent_workflow'",
+                (task_id,),
+            ).fetchone()
+        return row["owner_session_id"] if row else None
+
     def list(
         self,
         limit: int = 20,
@@ -1014,6 +1027,9 @@ class TaskStore:
         task_type: str | None = None,
         *,
         offset: int = 0,
+        enforce_agent_ownership: bool = False,
+        agent_session_id: str | None = None,
+        exclude_task_type: str | None = None,
     ) -> list[TaskRecord]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -1023,6 +1039,16 @@ class TaskStore:
         if task_type:
             clauses.append("task_type = ?")
             params.append(task_type)
+        if exclude_task_type:
+            clauses.append("task_type != ?")
+            params.append(exclude_task_type)
+        if enforce_agent_ownership:
+            clauses.append(
+                "(task_type != 'agent_workflow' OR "
+                "(owner_session_id IS NOT NULL AND owner_session_id != '' "
+                "AND owner_session_id = ?))"
+            )
+            params.append(agent_session_id or None)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend((max(1, min(200, int(limit))), max(0, int(offset))))
         with connection(self.db_path) as conn:

@@ -99,7 +99,7 @@ def test_same_trace_parallel_prepare_has_one_authoritative_claim(tmp_path, separ
             responses = list(pool.map(
                 lambda index: supervisors[index].run(
                     'CCO', skill_name='comprehensive_evaluation',
-                    trace_id='same',
+                    trace_id='same', session_id='browser-a',
                 ),
                 range(2),
             ))
@@ -405,5 +405,234 @@ def test_delegated_adapter_rejects_contradictory_raw_legacy_result(tmp_path):
         assert observation['error']['code'] == 'invalid_output'
         assert observation['formatted'] == ''
         assert store.latest_checkpoint('raw-conflict', 'evaluate')['status'] == 'failed'
+    finally:
+        registry.close()
+
+
+def test_browser_session_cannot_claim_another_sessions_trace(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / 'owner-bound.sqlite')
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        first = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='owned-trace',
+            session_id='browser-a',
+        )
+        before = store.get_run('owned-trace')
+        checkpoint_before = store.latest_checkpoint('owned-trace', 'evaluate')
+        second = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='owned-trace',
+            session_id='browser-b',
+        )
+
+        assert first['status'] == 'succeeded'
+        assert second['status'] in {'failed', 'rejected'}
+        assert tools['property_calculator'].calls == ['CCO']
+        persisted = store.get_run('owned-trace')
+        assert persisted == before
+        assert store.latest_checkpoint('owned-trace', 'evaluate') == checkpoint_before
+    finally:
+        registry.close()
+
+
+def test_browser_session_cannot_claim_legacy_unowned_trace(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / 'legacy-unowned.sqlite')
+    store.start_run({
+        'trace_id': 'legacy-trace',
+        'status': 'succeeded',
+        'query': 'CCO',
+        'skill_name': 'comprehensive_evaluation',
+    })
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        result = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='legacy-trace',
+            session_id='browser-a',
+        )
+        assert result['status'] in {'failed', 'rejected'}
+        assert tools['property_calculator'].calls == []
+        assert store.get_run('legacy-trace')['session_id'] is None
+    finally:
+        registry.close()
+
+
+def test_local_caller_cannot_claim_browser_owned_trace(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / 'local-boundary.sqlite')
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        first = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='browser-trace',
+            session_id='browser-a',
+        )
+        second = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='browser-trace',
+        )
+        assert first['status'] == 'succeeded'
+        assert second['status'] in {'failed', 'rejected'}
+        assert tools['property_calculator'].calls == ['CCO']
+        assert store.get_run('browser-trace')['session_id'] == 'browser-a'
+    finally:
+        registry.close()
+
+
+def test_raw_idempotency_key_is_scoped_and_not_persisted(tmp_path):
+    store_path = tmp_path / 'idempotency-scope.sqlite'
+    store = SQLiteAgentStateStore(store_path)
+    registry, _ = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        first = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', session_id='browser-a',
+            metadata={'idempotency_key': 'same-client-key'},
+        )
+        second = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', session_id='browser-b',
+            metadata={'idempotency_key': 'same-client-key'},
+        )
+        assert first['status'] == second['status'] == 'succeeded'
+        assert first['trace_id'] != second['trace_id']
+        with sqlite3.connect(store_path) as connection:
+            keys = [row[0] for row in connection.execute(
+                'SELECT idempotency_key FROM agent_runs ORDER BY trace_id'
+            ).fetchall()]
+        assert len(keys) == 2
+        assert len(set(keys)) == 2
+        assert 'same-client-key' not in keys
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize(
+    ('second_query', 'second_skill'),
+    [
+        ('CCC', 'comprehensive_evaluation'),
+        ('CCO', 'admet_assessment'),
+    ],
+)
+def test_same_owner_cannot_change_claimed_request_identity(
+    tmp_path, second_query, second_skill,
+):
+    store = SQLiteAgentStateStore(tmp_path / 'request-identity.sqlite')
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        first = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='stable-request',
+            session_id='browser-a',
+        )
+        second = supervisor.run(
+            second_query, skill_name=second_skill, trace_id='stable-request',
+            session_id='browser-a',
+        )
+        assert first['status'] == 'succeeded'
+        assert second['status'] in {'failed', 'rejected'}
+        assert tools['property_calculator'].calls == ['CCO']
+        assert store.get_run('stable-request')['query'] == 'CCO'
+    finally:
+        registry.close()
+
+
+def test_nondelegated_browser_run_uses_same_owner_boundary(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / 'nondelegated-owner.sqlite')
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools=tools, planner=SinglePlanner(), state_store=store,
+    )
+    try:
+        first = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='plain-trace',
+            session_id='browser-a',
+        )
+        second = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='plain-trace',
+            session_id='browser-b',
+        )
+        assert first['status'] == 'succeeded'
+        assert second['status'] in {'failed', 'rejected'}
+        assert tools['property_calculator'].calls == ['CCO']
+        assert store.get_run('plain-trace')['session_id'] == 'browser-a'
+    finally:
+        registry.close()
+
+
+def test_session_owner_cannot_be_supplied_through_metadata(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / 'metadata-owner.sqlite')
+    registry, _ = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        result = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', trace_id='metadata-trace',
+            session_id='trusted-session',
+            metadata={'session_id': 'attacker', 'user_id': 'attacker'},
+        )
+        assert result['status'] == 'succeeded'
+        persisted = store.get_run('metadata-trace')
+        assert persisted['session_id'] == 'trusted-session'
+        assert persisted['user_id'] is None
+        assert 'session_id' not in persisted['metadata']
+        assert 'user_id' not in persisted['metadata']
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize('value', ['', '   ', 123, 'x' * 257])
+def test_browser_idempotency_key_validation_fails_before_execution(tmp_path, value):
+    store = SQLiteAgentStateStore(tmp_path / 'invalid-key.sqlite')
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        result = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', session_id='browser-a',
+            metadata={'idempotency_key': value},
+        )
+        assert result['status'] == 'failed'
+        assert result['result']['error']['details']['reason'] == 'invalid_idempotency_key'
+        assert tools['property_calculator'].calls == []
+    finally:
+        registry.close()
+
+
+def test_same_session_idempotent_retry_reuses_trace(tmp_path):
+    store = SQLiteAgentStateStore(tmp_path / 'same-owner-key.sqlite')
+    registry, tools = build_registry()
+    supervisor = SupervisorAgent(
+        tools={}, planner=SinglePlanner(), tool_registry=registry,
+        specialists=build_default_specialists(), state_store=store,
+    )
+    try:
+        first = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', session_id='browser-a',
+            metadata={'idempotency_key': 'retry-key'},
+        )
+        second = supervisor.run(
+            'CCO', skill_name='comprehensive_evaluation', session_id='browser-a',
+            metadata={'idempotency_key': 'retry-key'},
+        )
+        assert first['status'] == second['status'] == 'succeeded'
+        assert first['trace_id'] == second['trace_id']
+        assert tools['property_calculator'].calls == ['CCO']
     finally:
         registry.close()

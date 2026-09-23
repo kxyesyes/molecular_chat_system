@@ -499,6 +499,8 @@ class MolecularChatApp:
         
         # Create FastAPI app
         self.app = FastAPI(title="Molecular Chat System")
+        from .agent_session_config import setup_agent_sessions
+        setup_agent_sessions(self.app)
         self._setup_routes()
 
     def _create_chat_agent(self):
