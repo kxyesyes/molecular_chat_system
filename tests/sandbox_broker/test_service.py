@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import hashlib
 import importlib.util
 import io
@@ -8,6 +9,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -42,6 +44,7 @@ from src.sandbox_broker.service import (
 from src.sandbox_broker.store import BrokerStore
 from src.sandbox_broker.telemetry import BrokerTelemetry, FailureClass
 from src.sandbox_broker.validation import StagedInput
+from tests.sandbox_broker.controlled_clock import ControlledClock
 
 
 ROOT = Path(__file__).parents[2]
@@ -3606,71 +3609,250 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
     assert leaked == []
 
 
-def test_hung_run_and_destroy_keep_shutdown_pending_after_hard_deadlines(
-    tmp_path: Path,
+@pytest.mark.parametrize("store_delay", [0.0, 0.04])
+def test_hung_shutdown_retains_real_sqlite_state_with_delayed_storage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, store_delay: float
 ) -> None:
-    class ResistantRunAndDestroy(FakeSandboxClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.release_run = asyncio.Event()
-            self.release_destroy = asyncio.Event()
-            self.destroy_started = asyncio.Event()
+    original_connect = BrokerStore._connect
+    original_cancel = SandboxBrokerService.cancel
+    cancellation_started = False
 
-        async def run(self, handle: SandboxHandle) -> SandboxCommandResult:
-            del handle
-            self.run_count += 1
-            self.running.set()
-            while not self.release_run.is_set():
-                try:
-                    await self.release_run.wait()
-                except asyncio.CancelledError:
-                    continue
-            return SandboxCommandResult(0, "", "")
+    async def cancel(service: SandboxBrokerService, job_id: str) -> object:
+        nonlocal cancellation_started
+        cancellation_started = True
+        return await original_cancel(service, job_id)
 
-        async def destroy(self, handle: SandboxHandle) -> None:
-            self.destroy_count += 1
-            self.destroy_started.set()
-            while not self.release_destroy.is_set():
-                try:
-                    await self.release_destroy.wait()
-                except asyncio.CancelledError:
-                    continue
-            self.destroyed_ids.append(handle.sandbox_id)
+    @contextmanager
+    def connect(store: BrokerStore):
+        if cancellation_started and store_delay:
+            time.sleep(store_delay)
+        with original_connect(store) as connection:
+            yield connection
 
-    async def scenario() -> tuple[object, float, list[str]]:
-        sdk = ResistantRunAndDestroy()
-        service, _, config = _service(tmp_path, sdk)
-        service._run_cancel_grace_seconds = 0.02
-        service._destroy_hard_timeout_seconds = 0.03
-        await service.start()
-        job = await service.submit(_prepared(config), "idem-hung-run-destroy")
-        await sdk.running.wait()
-        started = asyncio.get_running_loop().time()
-        await service.cancel(job.job_id)
-        await sdk.destroy_started.wait()
-        terminal = await service.wait_terminal(job.job_id)
-        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
-            await service.stop(timeout=0.05)
-        elapsed = asyncio.get_running_loop().time() - started
-        sdk.release_run.set()
-        sdk.release_destroy.set()
-        await service.stop(timeout=0.5)
-        await asyncio.sleep(0)
-        leaked = [
-            task.get_name()
-            for task in asyncio.all_tasks()
-            if task is not asyncio.current_task()
-            and task.get_name().startswith("sandbox-broker-")
-            and not task.done()
-        ]
-        return terminal, elapsed, leaked
+    monkeypatch.setattr(SandboxBrokerService, "cancel", cancel)
+    monkeypatch.setattr(BrokerStore, "_connect", connect)
+    asyncio.run(_real_storage_hung_shutdown(tmp_path))
 
-    terminal, elapsed, leaked = asyncio.run(scenario())
-    assert elapsed < 0.5
+
+class _ResistantRunAndDestroy(FakeSandboxClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.release_run = asyncio.Event()
+        self.release_destroy = asyncio.Event()
+        self.run_cancelled = asyncio.Event()
+        self.destroy_started = asyncio.Event()
+
+    async def run(self, handle: SandboxHandle) -> SandboxCommandResult:
+        del handle
+        self.run_count += 1
+        self.running.set()
+        while not self.release_run.is_set():
+            try:
+                await self.release_run.wait()
+            except asyncio.CancelledError:
+                self.run_cancelled.set()
+        return SandboxCommandResult(0, "", "")
+
+    async def destroy(self, handle: SandboxHandle) -> None:
+        self.destroy_count += 1
+        self.destroy_started.set()
+        while not self.release_destroy.is_set():
+            try:
+                await self.release_destroy.wait()
+            except asyncio.CancelledError:
+                continue
+        self.destroyed_ids.append(handle.sandbox_id)
+
+
+def _assert_hung_job_failed(terminal: object) -> None:
     assert terminal.status is BrokerJobStatus.FAILED
     assert terminal.error_code == BrokerErrorCode.CLEANUP_FAILED.value
     assert terminal.cleanup_status == "failed"
-    assert leaked == []
+
+
+def _assert_hung_tasks_retained(service: SandboxBrokerService, job_id: str) -> None:
+    assert job_id in service._cleanup_tasks, "cleanup task ownership lost"
+    assert not service._cleanup_tasks[job_id].done()
+    assert any(not task.done() for task in service._isolated_tasks), "run task ownership lost"
+
+
+def _assert_hung_shutdown_drained(service: SandboxBrokerService) -> None:
+    assert not service._cleanup_tasks
+    assert not service._isolated_tasks
+    assert not service._job_tasks
+    assert not service._create_tasks
+    assert not [
+        task.get_name()
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name().startswith("sandbox-broker-")
+        and not task.done()
+    ]
+
+
+async def _real_storage_hung_shutdown(tmp_path: Path) -> None:
+    """Real loop and SQLite lifecycle; watchdogs are not performance claims."""
+    sdk = _ResistantRunAndDestroy()
+    service, store, config = _service(tmp_path, sdk)
+    service._run_cancel_grace_seconds = 0.02
+    service._destroy_hard_timeout_seconds = 0.03
+    try:
+        await service.start()
+        job = await service.submit(_prepared(config), "idem-hung-run-destroy")
+        await asyncio.wait_for(sdk.running.wait(), timeout=5)
+        await service.cancel(job.job_id)
+        await asyncio.wait_for(sdk.destroy_started.wait(), timeout=5)
+        terminal = await asyncio.wait_for(service.wait_terminal(job.job_id), timeout=5)
+        _assert_hung_job_failed(terminal)
+        _assert_hung_job_failed(store.get(job.job_id))
+        _assert_hung_tasks_retained(service, job.job_id)
+        with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+            await service.stop(timeout=0.05)
+        assert service._shutdown_task is not None and not service._shutdown_task.done()
+        _assert_hung_tasks_retained(service, job.job_id)
+    finally:
+        sdk.release_run.set()
+        sdk.release_destroy.set()
+        await service.stop(timeout=5)
+        await asyncio.sleep(0)
+        _assert_hung_shutdown_drained(service)
+
+
+async def _logical_hung_shutdown(tmp_path: Path) -> None:
+    sdk = _ResistantRunAndDestroy()
+    service, _, config = _service(tmp_path, sdk)
+    service._run_cancel_grace_seconds = 0.02
+    service._destroy_hard_timeout_seconds = 0.03
+    observers = []
+    loop = asyncio.get_running_loop()
+    with ControlledClock(loop) as clock:
+        try:
+            await service.start()
+            job = await service.submit(_prepared(config), "idem-hung-run-destroy")
+            await clock.drain()
+            assert sdk.running.is_set()
+            started = loop.time()
+            await service.cancel(job.job_id)
+            await clock.drain()
+            assert sdk.run_cancelled.is_set()
+            await clock.advance(0.019)
+            assert not sdk.destroy_started.is_set(), "run grace expired early"
+            await clock.advance(started + 0.02 - loop.time())
+            assert sdk.destroy_started.is_set(), "run grace did not expire"
+            _assert_hung_tasks_retained(service, job.job_id)
+
+            destroy_started = loop.time()
+            terminal = asyncio.create_task(service.wait_terminal(job.job_id))
+            observers.append(terminal)
+            await clock.advance(0.029)
+            assert not terminal.done(), "destroy deadline expired early"
+            await clock.advance(destroy_started + 0.03 - loop.time())
+            assert terminal.done(), "destroy deadline did not expire"
+            _assert_hung_job_failed(terminal.result())
+            _assert_hung_tasks_retained(service, job.job_id)
+
+            stop_started = loop.time()
+            stopping = asyncio.create_task(service.stop(timeout=0.05))
+            observers.append(stopping)
+            await clock.advance(0.049)
+            assert not stopping.done(), "stop deadline expired early"
+            await clock.advance(stop_started + 0.05 - loop.time())
+            assert stopping.done(), "stop deadline did not expire"
+            with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
+                stopping.result()
+            assert service._shutdown_task is not None and not service._shutdown_task.done()
+            _assert_hung_tasks_retained(service, job.job_id)
+            # User-approved logical budget, not an SQLite/wall-clock SLA.
+            assert loop.time() - started < 0.5
+        finally:
+            sdk.release_run.set()
+            sdk.release_destroy.set()
+            for task in observers:
+                if not task.done():
+                    task.cancel()
+            await clock.drain()
+            await asyncio.gather(*observers, return_exceptions=True)
+            stopped = asyncio.create_task(service.stop(timeout=0.5))
+            await clock.advance(0.5)
+            assert stopped.done(), "released SDK did not drain shutdown"
+            stopped.result()
+            _assert_hung_shutdown_drained(service)
+
+
+def test_hung_run_and_destroy_keep_shutdown_pending_after_hard_deadlines(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_logical_hung_shutdown(tmp_path))
+
+
+@pytest.mark.parametrize(
+    "deadline,replacement,message",
+    [
+        (0.02, 0.01, "run grace expired early"),
+        (0.02, 0.04, "run grace did not expire"),
+        (0.03, 0.01, "destroy deadline expired early"),
+        (0.03, 0.06, "destroy deadline did not expire"),
+        (0.05, 0.01, "stop deadline expired early"),
+        (0.05, 0.10, "stop deadline did not expire"),
+    ],
+)
+def test_hung_shutdown_deadline_assertions_reject_timer_mutations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    deadline: float,
+    replacement: float,
+    message: str,
+) -> None:
+    # Sensitivity probe: change only the requested timer value; asyncio still
+    # registers and fires its real callbacks. No synthesized TimeoutError.
+    api = "wait" if deadline == 0.03 else "wait_for"
+    original = getattr(asyncio, api)
+    mutations = []
+
+    async def mutated_timer(awaitable, *, timeout=None, **kwargs):
+        if timeout == deadline:
+            mutations.append(timeout)
+            timeout = replacement
+        return await original(awaitable, timeout=timeout, **kwargs)
+
+    monkeypatch.setattr(asyncio, api, mutated_timer)
+    with pytest.raises(AssertionError, match=message):
+        asyncio.run(_logical_hung_shutdown(tmp_path))
+    assert mutations
+
+
+@pytest.mark.parametrize("registry", ["_cleanup_tasks", "_isolated_tasks"])
+def test_hung_shutdown_assertions_reject_lost_task_ownership(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: str
+) -> None:
+    original = SandboxBrokerService._destroy_once
+
+    async def lose_ownership(service, *args, **kwargs):
+        result = await original(service, *args, **kwargs)
+        getattr(service, registry).clear()
+        return result
+
+    monkeypatch.setattr(SandboxBrokerService, "_destroy_once", lose_ownership)
+    with pytest.raises(AssertionError, match="task ownership lost"):
+        asyncio.run(_logical_hung_shutdown(tmp_path))
+
+
+@pytest.mark.parametrize("logical", [False, True])
+def test_hung_shutdown_releases_resistant_sdk_after_intermediate_assertion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, logical: bool
+) -> None:
+    def fail_state_assertion(terminal):
+        raise AssertionError("injected intermediate state assertion")
+
+    monkeypatch.setattr(sys.modules[__name__], "_assert_hung_job_failed", fail_state_assertion)
+
+    async def scenario():
+        with pytest.raises(AssertionError, match="injected intermediate state assertion"):
+            await (_logical_hung_shutdown if logical else _real_storage_hung_shutdown)(tmp_path)
+        # Observe before asyncio.run performs its own cancellation on exit.
+        assert not [task for task in asyncio.all_tasks() if task is not asyncio.current_task()]
+
+    asyncio.run(scenario())
 
 
 def test_consumer_survives_store_get_baseexception_and_processes_next_job(
