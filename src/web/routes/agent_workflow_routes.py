@@ -12,6 +12,7 @@ from src.web.api_response import api_error, api_success
 def setup_agent_workflow_routes(
     app: FastAPI,
     supervisor_factory: Callable[[], SupervisorAgent] | None = None,
+    model_request_gate=None,
 ) -> None:
     create_supervisor = supervisor_factory or SupervisorAgent
 
@@ -55,7 +56,7 @@ def setup_agent_workflow_routes(
                 session_id=session_id,
             )
 
-        record = get_task_manager().submit(
+        submission = dict(
             task_type="agent_workflow",
             payload={
                 "query": query,
@@ -65,4 +66,9 @@ def setup_agent_workflow_routes(
             handler=handler,
             owner_session_id=session_id,
         )
+        manager = get_task_manager()
+        if model_request_gate is None:
+            record = manager.submit(**submission)
+        else:
+            record = await model_request_gate.submit_background(manager, **submission)
         return api_success(record.to_public_dict(), message="Agent 工作流任务已提交")

@@ -39,7 +39,7 @@ def _error_response(message: str, status_code: int = 400, **extra):
     return JSONResponse(status_code=status_code, content=payload)
 
 
-def setup_design_routes(app, model=None, config=None):
+def setup_design_routes(app, model=None, config=None, *, model_provider=None, model_request_gate=None):
     """注册分子设计相关API路由"""
     existing_paths = {getattr(route, "path", None) for route in app.routes}
     if existing_paths & _DESIGN_ROUTE_PATHS:
@@ -50,6 +50,8 @@ def setup_design_routes(app, model=None, config=None):
         fragment_csv_path=_FRAG_DB_PATH,
         save_dir=_SAVE_DIR,
         model=model,
+        model_provider=model_provider,
+        model_request_gate=model_request_gate,
     )
 
     # ──────────────────────────────────────────────────
