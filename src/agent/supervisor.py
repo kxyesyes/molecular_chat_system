@@ -11,34 +11,29 @@ from src.agent.contracts import (
     AgentExecutionError,
     AgentResult,
     ObservationStatus,
-    RunOutcome,
-    ToolResult,
 )
 from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
     generation_request_error_details,
     preflight_generation_request,
-    preserve_target_quality,
 )
 from src.agent.capabilities.catalog import TOOL_ALIASES
 from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
-from src.agent.planning import PlanCompiler, WorkflowPlan
+from src.agent.planning import WorkflowPlan
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.router import SkillRouter
-from src.agent.specialists import AgentTask, AgentTaskResult, SpecialistAgent
-from src.agent.tooling import RetryPolicy, TOOL_AGENT_OWNERS, ToolRegistry
+from src.agent.specialists import SpecialistAgent
+from src.agent.tooling import ToolRegistry
 from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
-from src.agent.runtime.task_state import TaskEventType
+from src.agent.runtime.delegated_executor import DelegatedWorkflowExecutor as _DelegatedWorkflowExecutor
 from src.agent.runtime.workflow_executor import (
-    PreparedWorkflow,
     WorkflowExecution,
     WorkflowExecutor,
 )
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
-from src.agent.validators import align_candidate_results
 
 
 RAG_TOOL_NAMES = frozenset(
@@ -47,45 +42,6 @@ RAG_TOOL_NAMES = frozenset(
 _MOL_COUNT_UNSET = object()
 
 
-class _DelegatedWorkflowExecutor:
-    """Adapt the existing specialist loop to the common harness boundary."""
-
-    def __init__(self, supervisor: "SupervisorAgent"):
-        self.supervisor = supervisor
-        self.compiler = PlanCompiler()
-        self.preflight_executor = WorkflowExecutor(
-            planner=supervisor.planner,
-            compiler=self.compiler,
-        )
-
-    def execute(
-        self,
-        *,
-        context: AgentContext,
-        policy: WorkflowPolicy,
-        all_tools: Mapping[str, Any],
-        event_callback: Any = None,
-        idempotency_key: str | None = None,
-        plan: WorkflowPlan | None = None,
-    ) -> WorkflowExecution:
-        del event_callback, idempotency_key
-        plan = plan or self.supervisor.planner.plan(context)
-        prepared = self.preflight_executor.prepare(
-            context=context,
-            policy=policy,
-            all_tools=all_tools,
-            plan=plan,
-        )
-        if isinstance(prepared, WorkflowExecution):
-            return prepared
-        assert isinstance(prepared, PreparedWorkflow)
-        execution_context, execution_plan = prepared.consume_execution_inputs()
-        execution = self.supervisor._run_delegated(
-            execution_context,
-            execution_plan,
-        )
-        execution.compiled_dependencies = prepared.compiled.dependencies
-        return execution
 
 
 class SupervisorAgent:
@@ -668,317 +624,6 @@ class SupervisorAgent:
                     execution.result.warnings.append(warning)
         return execution
 
-    def _run_delegated(
-        self,
-        context: AgentContext,
-        plan: WorkflowPlan,
-    ) -> WorkflowExecution:
-        steps = plan.steps
-        outputs: dict[str, Any] = {}
-        delegations: list[dict[str, Any]] = []
-        tool_results = []
-        tool_attempt_count = 0
-        skipped_steps: list[dict[str, str]] = []
-        semantic_evidence: list[dict[str, str]] = []
-        checkpoint_warnings: list[dict[str, str]] = []
-        idempotency_key = context.metadata.get("idempotency_key")
-
-        if self.state_store:
-            self.state_store.start_run(
-                {
-                    "trace_id": context.trace_id,
-                    "status": "running",
-                    "skill_name": context.active_skill,
-                    "query": context.query,
-                    "workflow_version": "1",
-                    "idempotency_key": idempotency_key,
-                    "user_id": context.user_id,
-                    "session_id": context.session_id,
-                    "metadata": context.metadata,
-                }
-            )
-        self._emit(
-            context,
-            TaskEventType.TASK_STARTED,
-            "Supervisor workflow started",
-            progress=0.0,
-        )
-        self._emit(
-            context,
-            TaskEventType.PLANNING_STARTED,
-            "Supervisor planning started",
-            progress=0.0,
-        )
-        self._emit(
-            context,
-            TaskEventType.PLANNING_COMPLETED,
-            "Supervisor planning completed",
-            progress=0.0,
-            payload={"steps": [self._step_to_dict(step) for step in steps]},
-        )
-
-        for index, step in enumerate(steps):
-            agent_name = TOOL_AGENT_OWNERS.get(step.tool_name)
-            specialist = self.specialists.get(agent_name or "")
-            if specialist is None:
-                missing = ToolResult.error_result(
-                    step.tool_name,
-                    AgentErrorCode.TOOL_UNAVAILABLE,
-                    f"No specialist owns tool {step.tool_name}",
-                )
-                missing.quality = {
-                    **missing.quality,
-                    "step_id": step.name,
-                    "output_key": step.output_key,
-                }
-                tool_results.append(missing)
-                delegations.append(
-                    {
-                        "task_id": f"{context.trace_id}:{step.name}",
-                        "agent_name": agent_name,
-                        "tool_name": step.tool_name,
-                        "status": "failed",
-                        "error": missing.error.to_dict(),
-                    }
-                )
-                if not step.continue_after_failure():
-                    break
-                continue
-
-            input_data = self.orchestrator._resolve_input(context, step, outputs)
-            semantic_input = self.orchestrator._resolve_semantic_input(
-                context,
-                step,
-                outputs,
-            )
-            decision = self.orchestrator.semantic_validator.validate(
-                step,
-                semantic_input,
-            )
-            if not decision.allowed:
-                skipped_steps.append(
-                    {
-                        "step_id": step.name,
-                        "status": "skipped_precondition",
-                        "requirement": str(decision.requirement or ""),
-                        "reason": str(decision.reason or ""),
-                    }
-                )
-                for remaining in steps[index + 1 :]:
-                    skipped_steps.append(
-                        {
-                            "step_id": remaining.name,
-                            "status": "skipped_precondition",
-                            "requirement": str(decision.requirement or ""),
-                            "reason": f"blocked_by:{step.name}",
-                        }
-                    )
-                break
-            if decision.evidence_digest:
-                semantic_evidence.append(
-                    {
-                        "step_id": step.name,
-                        "requirement": str(decision.requirement or ""),
-                        "evidence_digest": decision.evidence_digest,
-                    }
-                )
-            self._emit(
-                context,
-                TaskEventType.TOOL_STARTED,
-                f"Delegating {step.name}",
-                tool=step.tool_name,
-                progress=index / max(len(steps), 1),
-            )
-            task = AgentTask(
-                task_id=f"{context.trace_id}:{step.name}",
-                trace_id=context.trace_id,
-                agent_name=specialist.name,
-                objective=step.name,
-                inputs={"query": input_data},
-                allowed_tools=[step.tool_name],
-                dependencies=list(step.metadata.get("dependencies", [])),
-                retry_policy=RetryPolicy(
-                    max_attempts=int(step.metadata.get("max_attempts", 1))
-                ),
-                timeout_seconds=step.timeout_seconds or 120.0,
-                idempotency_key=f"{context.trace_id}:{step.name}",
-                metadata=step.metadata,
-            )
-            adapter = self.tool_registry.resolve(
-                step.tool_name,
-                require_available=False,
-            )
-            input_hash = self.orchestrator._input_hash(input_data)
-            model_version = str(step.metadata.get("model_version", ""))
-            checkpoint = self.orchestrator._compatible_checkpoint(
-                context.trace_id, step, input_hash, str(adapter.spec.version),
-                model_version, adapter_version=str(adapter.adapter_version),
-                state_store=self.state_store,
-            ) if self.state_store is not None else None
-            reused_result = None
-            if checkpoint is not None:
-                try:
-                    reused_result = self.orchestrator._result_from_checkpoint(step.tool_name, checkpoint)
-                except (AttributeError, KeyError, TypeError, ValueError):
-                    checkpoint_warnings.append({
-                        "step": step.name, "reason": "checkpoint_deserialization_failed"})
-            reusable = reused_result is not None
-            reused_outcome = (
-                reused_result.success, reused_result.status, deepcopy(reused_result.error)
-            ) if reusable else None
-            if reused_result is not None:
-                task_result = AgentTaskResult(
-                    task_id=task.task_id,
-                    status="succeeded",
-                    outputs={step.tool_name: reused_result.data},
-                    tool_results=[reused_result],
-                    metrics={"reused_checkpoint": True},
-                )
-            else:
-                tool_attempt_count += 1
-                task_result = specialist.execute_task(task, self.tool_registry)
-            normalized_results = []
-            task_result.outputs = {}
-            for item in task_result.tool_results:
-                item = self.orchestrator.validator.validate_tool_result(
-                    item, trusted_checkpoint=reusable)
-                candidate_source = step.metadata.get("candidate_source")
-                if candidate_source and item.success:
-                    item = align_candidate_results(
-                        outputs.get(str(candidate_source)), item, required=step.required)
-                item.quality = {
-                    **item.quality,
-                    "step_id": step.name,
-                    "output_key": step.output_key,
-                }
-                normalized_results.append(item)
-                if item.success:
-                    task_result.outputs[item.tool_name] = item.data
-            task_result.tool_results = normalized_results
-            aggregate = AgentResult.from_tool_results(context.trace_id, context.active_skill, normalized_results)
-            task_result.status = "succeeded" if aggregate.success else aggregate.outcome.value
-            task_result.error = aggregate.error
-            task_result.warnings = aggregate.warnings
-            task_result.evidence = aggregate.evidence
-            task_result.artifacts = aggregate.artifacts
-            tool_results.extend(task_result.tool_results)
-            if not reusable or any(
-                (item.success, item.status, item.error) != reused_outcome
-                for item in task_result.tool_results
-            ):
-                for item in task_result.tool_results:
-                    self._persist_delegated_result(
-                        context,
-                        step,
-                        input_data,
-                        item,
-                        tool_version=adapter.spec.version,
-                        adapter_version=adapter.adapter_version,
-                        model_version=model_version,
-                    )
-            if any(item.success for item in task_result.tool_results) and step.output_key:
-                output = task_result.outputs.get(step.tool_name)
-                if step.output_key == "target":
-                    source_result = next(
-                        (
-                            item
-                            for item in task_result.tool_results
-                            if item.tool_name == step.tool_name
-                        ),
-                        None,
-                    )
-                    if source_result is not None:
-                        output = preserve_target_quality(
-                            output,
-                            source_result.quality,
-                        )
-                outputs[step.output_key] = output
-            delegations.append(
-                {
-                    "task_id": task.task_id,
-                    "agent_name": specialist.name,
-                    "tool_name": step.tool_name,
-                    "status": task_result.status,
-                    "error": task_result.error.to_dict() if task_result.error else None,
-                    "metrics": task_result.metrics,
-                    "reused": reusable,
-                }
-            )
-            self._emit(
-                context,
-                (
-                    TaskEventType.TOOL_COMPLETED
-                    if all(item.success for item in task_result.tool_results) and task_result.tool_results
-                    else TaskEventType.TOOL_FAILED
-                ),
-                f"{step.name} {task_result.status}",
-                tool=step.tool_name,
-                progress=(index + 1) / max(len(steps), 1),
-                payload=task_result.to_dict(),
-            )
-            if not task_result.tool_results or any(not item.success for item in task_result.tool_results):
-                if not step.continue_after_failure():
-                    break
-
-        agent_result = AgentResult.from_tool_results(
-            trace_id=context.trace_id,
-            skill_name=context.active_skill,
-            tool_results=tool_results,
-            message=self.orchestrator._build_message(tool_results),
-            final_answer="\n\n".join(
-                item.formatted for item in tool_results if item.success and item.formatted
-            ),
-            metadata={
-                "skipped_steps": skipped_steps,
-                "semantic_evidence": semantic_evidence,
-                "checkpoint_warnings": checkpoint_warnings,
-                "request_metadata": {
-                    "requested_count": context.metadata["requested_count"]
-                } if "requested_count" in context.metadata else {},
-                "_harness_delegations": delegations,
-            },
-        )
-        if skipped_steps:
-            has_success = any(item.success for item in tool_results)
-            agent_result.success = False
-            agent_result.partial = has_success
-            agent_result.outcome = RunOutcome.PARTIAL if has_success else RunOutcome.FAILED
-            agent_result.message = (
-                "Workflow returned partial results because a scientific precondition failed"
-                if has_success else "Workflow failed because a scientific precondition failed"
-            )
-            agent_result.error = AgentExecutionError(
-                code=AgentErrorCode.VALIDATION_ERROR,
-                message="Scientific workflow precondition failed",
-                details={"skipped_steps": skipped_steps},
-            )
-        status = "succeeded" if agent_result.success else agent_result.outcome.value
-        self._emit(
-            context,
-            {
-                RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
-                RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
-                RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
-                RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
-                RunOutcome.FAILED: TaskEventType.TASK_FAILED,
-            }[agent_result.outcome],
-            agent_result.message,
-            progress=1.0,
-            payload=agent_result.to_legacy_dict(),
-        )
-        if self.state_store:
-            self.state_store.update_run_status(context.trace_id, status)
-        events = (
-            [event.to_dict() for event in self.event_bus.events]
-            if self.event_bus
-            else []
-        )
-        return WorkflowExecution(
-            plan=plan,
-            result=agent_result,
-            events=events,
-            tool_attempt_count=tool_attempt_count,
-        )
 
     @staticmethod
     def _format_delegated_run_result(
@@ -986,7 +631,7 @@ class SupervisorAgent:
     ) -> dict[str, Any]:
         result = execution.result
         serialized_results = result.to_legacy_dict()
-        delegations = list(result.metadata.pop("_harness_delegations", []))
+        delegations = list(result.metadata.get("_harness_delegations", []))
         return {
             "trace_id": result.trace_id,
             "status": "succeeded" if serialized_results["status"] == "completed" else serialized_results["status"],
@@ -1018,68 +663,6 @@ class SupervisorAgent:
             },
         }
 
-    def _persist_delegated_result(
-        self,
-        context: AgentContext,
-        step: WorkflowStep,
-        input_data: Any,
-        result,
-        tool_version: str = "1",
-        adapter_version: str = "1",
-        model_version: str = "",
-    ) -> None:
-        if not self.state_store:
-            return
-        legacy = result.to_legacy_dict()
-        input_hash = self.orchestrator._input_hash(input_data)
-        self.state_store.record_tool_execution(
-            {
-                "trace_id": context.trace_id,
-                "step_id": step.name,
-                "tool_name": step.tool_name,
-                "status": self.orchestrator._result_persistence_status(result),
-                "input": input_data,
-                "output": legacy,
-                "error": legacy.get("error"),
-                "elapsed_ms": result.elapsed_ms,
-            }
-        )
-        self.state_store.save_checkpoint(
-            {
-                "trace_id": context.trace_id,
-                "step_id": step.name,
-                "workflow_version": self.orchestrator.workflow_version,
-                "status": self.orchestrator._result_persistence_status(result),
-                "input_hash": input_hash,
-                "tool_name": step.tool_name,
-                "tool_version": tool_version,
-                "adapter_version": adapter_version,
-                "model_version": model_version,
-                "output": legacy,
-                "error": legacy.get("error"),
-            }
-        )
-
-    def _emit(
-        self,
-        context: AgentContext,
-        event: TaskEventType,
-        message: str,
-        tool: str | None = None,
-        progress: float | None = None,
-        payload: Any = None,
-    ) -> None:
-        if not self.event_bus:
-            return
-        self.event_bus.emit(
-            trace_id=context.trace_id,
-            event=event,
-            message=message,
-            skill=context.active_skill,
-            tool=tool,
-            progress=progress,
-            payload=payload,
-        )
 
     def _build_context(
         self,
