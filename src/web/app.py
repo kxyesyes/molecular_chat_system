@@ -9,7 +9,7 @@ import sys
 from typing import List, Dict, Any, Optional
 import httpx
 import yaml
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
@@ -28,7 +28,6 @@ from .user_llm_config import (
 from .models import OllamaModel, generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.retrieval import search_molecular_index
-from .rag_presentation import format_rag_context, rag_info_molecule
 from .rag_index import (
     CURRENT_SCHEMA_VERSION,
     RAGIndexCompatibilityError,
@@ -477,8 +476,6 @@ class MolecularChatApp:
             logger.error(f"❌ ChatHandler初始化失败: {e}")
             self.chat_handler = None
         
-        self.conversation_history = []
-        
         # Create FastAPI app
         self.app = FastAPI(title="Molecular Chat System")
         from .agent_session_config import setup_agent_sessions
@@ -909,243 +906,6 @@ class MolecularChatApp:
             ),
         }, ensure_ascii=False))
         await websocket.close(code=1011)
-
-    async def _handle_websocket(self, websocket: WebSocket):
-        """Handle WebSocket connections"""
-        await websocket.accept()
-        
-        try:
-            while True:
-                # Receive message
-                data = await websocket.receive_text()
-                message_data = json.loads(data)
-                
-                message = message_data.get("message", "")
-                enable_rag = message_data.get("enable_rag", True)
-                
-                if not message.strip():
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "Please enter a message"
-                    }))
-                    continue
-                
-                # Send acknowledgment
-                await websocket.send_text(json.dumps({
-                    "type": "status",
-                    "message": "Processing your message..."
-                }))
-
-                # Check for agent actions first
-                agent_used = False
-                agent_response = ""
-
-                # Retrieve relevant molecules if RAG is enabled
-                retrieved_molecules = []
-                rag_context = ""
-                
-                if enable_rag and self.rag_system.is_initialized:
-                    await websocket.send_text(json.dumps({
-                        "type": "status",
-                        "message": "Searching for relevant molecular data..."
-                    }))
-                    
-                    k = self.config.get("rag", {}).get("default_k", 2)
-                    retrieved_molecules = await self.rag_system.search_similar_molecules(message, k)
-                    
-                    if retrieved_molecules:
-                        rag_context = self._format_rag_context(retrieved_molecules)
-                
-                # Build prompt with agent context
-                if agent_used and agent_response:
-                    prompt = self._build_prompt_with_agent(message, agent_response, rag_context, retrieved_molecules)
-                else:
-                    prompt = self._build_prompt(message, rag_context, retrieved_molecules)
-                
-                # Send generation status
-                await websocket.send_text(json.dumps({
-                    "type": "status",
-                    "message": "AI is generating response..."
-                }))
-                
-                # Initialize response variable (THIS FIXES THE MAIN ISSUE)
-                full_response = ""
-                
-                # Generate response
-                if self.config.get("inference", {}).get("stream", True):
-                    # Streaming generation
-                    async for chunk in self.model.stream_generate(
-                        prompt,
-                        temperature=self.config.get("inference", {}).get("temperature", 0.7),
-                        max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
-                    ):
-                        if chunk:
-                            full_response += chunk
-                            await websocket.send_text(json.dumps({
-                                "type": "stream",
-                                "content": chunk
-                            }))
-                            await asyncio.sleep(0.01)
-                    
-                    # Send completion signal
-                    await websocket.send_text(json.dumps({
-                        "type": "complete",
-                        "content": full_response
-                    }))
-                else:
-                    # Non-streaming generation
-                    full_response = await generate_for_chat(
-                        self.model,
-                        prompt,
-                        temperature=self.config.get("inference", {}).get("temperature", 0.7),
-                        max_tokens=self.config.get("inference", {}).get("max_tokens", 1500)
-                    )
-                    await websocket.send_text(json.dumps({
-                        "type": "message",
-                        "message": full_response
-                    }))
-                
-                # Save conversation history (full_response is now always defined)
-                self.conversation_history.append({
-                    "user": message,
-                    "agent_used": agent_used,
-                    "agent_response": agent_response if agent_used else None,
-                    "rag_enabled": enable_rag,
-                    "molecules_retrieved": len(retrieved_molecules),
-                    "assistant": full_response
-                })
-                
-                # Send RAG info if molecules were retrieved
-                if retrieved_molecules:
-                    await websocket.send_text(json.dumps({
-                        "type": "rag_info",
-                        "molecules": [
-                            rag_info_molecule(mol)
-                            for mol in retrieved_molecules[:3]  # Show top 3
-                        ]
-                    }))
-                
-        except WebSocketDisconnect:
-            logger.info("WebSocket disconnected")
-        except Exception as e:
-            logger.error(f"WebSocket error: {e}")
-            try:
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": "An error occurred while processing your message"
-                }))
-            except:
-                pass
-    
-    def _format_rag_context(self, molecules: List[Dict[str, Any]]) -> str:
-        return format_rag_context(molecules)
-    
-    def _build_prompt(self, user_message: str, rag_context: str, retrieved_molecules: List[Dict[str, Any]]) -> str:
-        """Build the complete prompt for the model"""
-
-        # 根据模型选择合适的系统提示词
-        if "gmm-llama" in self.model.model_name.lower():
-            # 英文模型使用英文提示词
-            system_prompt = """You are an AI assistant specialized in molecular science and chemistry. You help users understand molecules, their properties, structures, and applications.
-
-Key guidelines:
-- Provide accurate, scientific information about molecules and chemistry
-- If molecular data is provided in the context, use it to enhance your responses
-- Explain complex concepts clearly and accessibly
-- When discussing SMILES notation, explain what it represents
-- If you're unsure about specific molecular properties, acknowledge the uncertainty
-- Be helpful and engaging while maintaining scientific accuracy
-- Please respond in Chinese for Chinese questions, and in English for English questions"""
-        else:
-            # 中文模型使用中文提示词
-            system_prompt = """你是一个专门从事分子科学和化学的AI助手。你帮助用户理解分子、它们的性质、结构和应用。
-
-主要指导原则:
-- 提供关于分子和化学的准确科学信息
-- 如果上下文中提供了分子数据,请使用它来增强你的回答
-- 清晰易懂地解释复杂概念
-- 当讨论SMILES表示法时,解释它代表什么
-- 如果你对特定分子性质不确定,请承认不确定性
-- 保持科学准确性的同时要有帮助性和吸引力
-- 对于中文问题请用中文回答,对于英文问题请用英文回答"""
-
-        # Build conversation context
-        conversation_context = ""
-        if self.conversation_history:
-            recent_history = self.conversation_history[-3:]  # Last 3 exchanges
-            conversation_context = "\nRecent conversation:\n"
-            for entry in recent_history:
-                conversation_context += f"Human: {entry['user']}\n"
-                conversation_context += f"Assistant: {entry['assistant']}\n"
-
-        # Build final prompt
-        prompt_parts = [system_prompt]
-
-        if conversation_context:
-            prompt_parts.append(conversation_context)
-
-        if rag_context:
-            prompt_parts.append(f"\nContext from molecular database:\n{rag_context}")
-
-        prompt_parts.append(f"\nHuman: {user_message}")
-        prompt_parts.append("Assistant:")
-
-        return "\n".join(prompt_parts)
-
-    def _build_prompt_with_agent(self, user_message: str, agent_response: str, rag_context: str, retrieved_molecules: List[Dict[str, Any]]) -> str:
-        """Build prompt with agent analysis results"""
-
-        # 根据模型选择合适的系统提示词
-        if "gmm-llama" in self.model.model_name.lower():
-            system_prompt = """You are an AI assistant specialized in molecular science and chemistry. You help users understand molecules, their properties, structures, and applications.
-
-An intelligent agent has already performed analysis on the user's request. Please use this analysis to provide a comprehensive response.
-
-Key guidelines:
-- Integrate the agent's analysis into your response naturally
-- Provide additional context and explanation where helpful
-- If molecular data is provided in the context, use it to enhance your responses
-- Explain complex concepts clearly and accessibly
-- Please respond in Chinese for Chinese questions, and in English for English questions"""
-        else:
-            system_prompt = """你是一个专门从事分子科学和化学的AI助手。你帮助用户理解分子、它们的性质、结构和应用。
-
-智能代理已经对用户的请求进行了分析。请使用这个分析来提供全面的回答。
-
-主要指导原则:
-- 自然地将代理的分析整合到你的回答中
-- 在有帮助的地方提供额外的上下文和解释
-- 如果上下文中提供了分子数据,请使用它来增强你的回答
-- 清晰易懂地解释复杂概念
-- 对于中文问题请用中文回答,对于英文问题请用英文回答"""
-
-        # Build conversation context
-        conversation_context = ""
-        if self.conversation_history:
-            recent_history = self.conversation_history[-3:]  # Last 3 exchanges
-            conversation_context = "\nRecent conversation:\n"
-            for entry in recent_history:
-                conversation_context += f"Human: {entry['user']}\n"
-                conversation_context += f"Assistant: {entry['assistant']}\n"
-
-        # Build final prompt
-        prompt_parts = [system_prompt]
-
-        if conversation_context:
-            prompt_parts.append(conversation_context)
-
-        if rag_context:
-            prompt_parts.append(f"\nContext from molecular database:\n{rag_context}")
-
-        # Add agent analysis
-        prompt_parts.append(f"\nAgent Analysis Results:\n{agent_response}")
-
-        prompt_parts.append(f"\nHuman: {user_message}")
-        prompt_parts.append("Assistant:")
-
-        return "\n".join(prompt_parts)
-
-
 
     async def initialize(self):
         """Initialize the application"""
