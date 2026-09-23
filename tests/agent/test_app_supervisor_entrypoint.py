@@ -41,11 +41,14 @@ def test_chat_agent_factory_returns_supervisor_with_local_generator(monkeypatch)
     app.model = FakeMainLLM()
     app.molecular_generator_model = FakeGeneratorLLM()
     app.agent_state_store = object()
+    app.rag_system = object()
 
-    monkeypatch.setattr(
-        "src.agent.tools.get_all_tools",
-        lambda generator_llm: [FakeTool("llm_molecular_generator")],
-    )
+    def tools_factory(generator_llm, *, rag_system):
+        assert generator_llm is app.molecular_generator_model
+        assert rag_system is app.rag_system
+        return [FakeTool("llm_molecular_generator")]
+
+    monkeypatch.setattr("src.agent.tools.get_all_tools", tools_factory)
 
     agent = app._create_chat_agent()
 

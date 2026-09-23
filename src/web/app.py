@@ -25,6 +25,8 @@ from .user_llm_config import (
     user_llm_signature, resolve_user_llm_request, default_user_llm_config,
 )
 from .models import OllamaModel, generate_for_chat
+from src.rag.retrieval import search_molecular_index
+from .rag_presentation import format_rag_context, rag_info_molecule
 from .rag_index import (
     CURRENT_SCHEMA_VERSION,
     RAGIndexCompatibilityError,
@@ -132,6 +134,10 @@ class RAGSystem:
             "embedding_model",
             "nomic-embed-text:latest",
         )
+        self.embedding_endpoint = rag_config.get(
+            "embedding_endpoint", "http://localhost:11434/api/embeddings"
+        )
+        self._index_sha256 = None
         self.vector_index = None
         self.molecules_df: Optional[pd.DataFrame] = None
         self.csv_path = Path(
@@ -198,7 +204,7 @@ class RAGSystem:
         """Get embedding for text using Ollama"""
         try:
             response = await self.embedding_client.post(
-                "http://localhost:11434/api/embeddings",
+                self.embedding_endpoint,
                 json={
                     "model": self.embedding_model_name,
                     "prompt": text
@@ -223,6 +229,7 @@ class RAGSystem:
         incompatible_reason: Optional[str] = None
         self.vector_index = None
         self.manifest = None
+        self._index_sha256 = None
 
         if index_path.is_file() and index_manifest_path.is_file():
             try:
@@ -252,6 +259,7 @@ class RAGSystem:
             else:
                 self.vector_index = candidate_index
                 self.manifest = candidate_manifest
+                self._index_sha256 = candidate_index_sha256
                 self.index_status = "loaded"
                 logger.info("Loaded compatible vector index and manifest")
                 return
@@ -356,6 +364,7 @@ class RAGSystem:
                 )
                 self.vector_index = candidate_index
                 self.manifest = persisted_manifest
+                self._index_sha256 = persisted_manifest.index_sha256
                 self.index_status = "created"
                 
                 logger.info(f"Created and saved vector index with {len(embeddings)} embeddings")
@@ -371,72 +380,41 @@ class RAGSystem:
             self.manifest = None
             self.index_status = "error: index creation failed"
     
+    def _require_retrieval_ready(self):
+        if (not self.is_initialized or self.vector_index is None
+                or self.manifest is None or self.molecules_df is None):
+            raise RAGIndexCompatibilityError("RAG vector database is not fully initialized")
+
+    def get_embedding_sync(self, text: str) -> np.ndarray:
+        """Thread-safe sync transport; never reuse the async client's event loop."""
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(
+                self.embedding_endpoint,
+                json={"model": self.embedding_model_name, "prompt": text},
+            )
+            response.raise_for_status()
+            return np.asarray(response.json().get("embedding", []))
+
+    def _search_embedding(self, embedding, k):
+        self._require_retrieval_ready()
+        return search_molecular_index(
+            index=self.vector_index, manifest=self.manifest, molecules=self.molecules_df,
+            source_path=self.source_path, index_sha256=self._index_sha256,
+            embedding_model=self.embedding_model_name, embedding=embedding, k=k,
+        )
+
+    def search_similar_molecules_sync(self, query: str, k: int = 2):
+        """Agent adapter: propagate failures instead of reporting a false no-hit."""
+        self._require_retrieval_ready()
+        return self._search_embedding(self.get_embedding_sync(query), k)
+
     async def search_similar_molecules(self, query: str, k: int = 2) -> List[Dict[str, Any]]:
-        """Search for similar molecules based on query"""
-        if (
-            not self.is_initialized
-            or self.vector_index is None
-            or self.manifest is None
-            or self.molecules_df is None
-            or self.molecules_df.empty
-        ):
-            return []
-        
+        """Keep the legacy list interface, using the same validated retrieval core."""
         try:
-            # Get query embedding
-            query_embedding = await self.get_embedding(query)
-            if len(query_embedding) == 0:
-                return []
-            
-            # Normalize query embedding
-            query_embedding = query_embedding.reshape(1, -1).astype(np.float32)
-            if query_embedding.shape[1] != int(self.vector_index.d):
-                logger.warning("RAG query embedding dimension is incompatible")
-                return []
-            faiss.normalize_L2(query_embedding)
-            
-            # Search with proper parameters
-            if self.vector_index is not None:
-                # Search with proper parameters - FAISS search method takes the query and k
-                # Ignore type checking errors for FAISS methods
-                distances, labels = self.vector_index.search(query_embedding, k)  # type: ignore
-                scores = distances
-                indices = labels
-            else:
-                return []
-            
-            # Return results
-            results = []
-            if self.molecules_df is not None and self.manifest is not None:
-                for score, label in zip(scores[0], indices[0]):
-                    vector_label = int(label)
-                    if vector_label < 0 or vector_label >= len(
-                        self.manifest.row_mapping
-                    ):
-                        continue
-                    source_position = self.manifest.row_mapping[vector_label]
-                    if source_position < 0 or source_position >= len(
-                        self.molecules_df
-                    ):
-                        continue
-                    mol_data = self.molecules_df.iloc[source_position].to_dict()
-                    mol_data['similarity_score'] = float(score)
-                    mol_data['source_index'] = source_position
-                    mol_data['provenance'] = {
-                        "source_path": self.manifest.source_path,
-                        "source_sha256": self.manifest.source_sha256,
-                        "index_sha256": self.manifest.index_sha256,
-                        "embedding_model": self.manifest.embedding_model,
-                        "manifest_schema_version": self.manifest.schema_version,
-                        "builder_version": self.manifest.builder_version,
-                        "vector_label": vector_label,
-                    }
-                    results.append(mol_data)
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"Error searching molecules: {e}")
+            self._require_retrieval_ready()
+            return self._search_embedding(await self.get_embedding(query), k)
+        except Exception:
+            logger.warning("RAG retrieval unavailable; no unverified records returned")
             return []
 
 class MolecularChatApp:
@@ -510,11 +488,8 @@ class MolecularChatApp:
 
         tools = {
             tool.name: tool
-            for tool in get_all_tools(self.molecular_generator_model)
+            for tool in get_all_tools(self.molecular_generator_model, rag_system=self.rag_system)
         }
-        for tool in tools.values():
-            if hasattr(tool, "rag_system") and tool.rag_system is None:
-                tool.rag_system = getattr(self, "rag_system", None)
         return SupervisorAgent(
             tools=tools,
             llm=self.model,
@@ -1016,12 +991,7 @@ class MolecularChatApp:
                     await websocket.send_text(json.dumps({
                         "type": "rag_info",
                         "molecules": [
-                            {
-                                "smiles": mol.get("SMILES", ""),
-                                "similarity": mol.get("similarity_score", 0),
-                                "properties": {k: v for k, v in mol.items() 
-                                            if k not in ["SMILES", "similarity_score"]}
-                            }
+                            rag_info_molecule(mol)
                             for mol in retrieved_molecules[:3]  # Show top 3
                         ]
                     }))
@@ -1039,24 +1009,7 @@ class MolecularChatApp:
                 pass
     
     def _format_rag_context(self, molecules: List[Dict[str, Any]]) -> str:
-        """Format retrieved molecules as context"""
-        if not molecules:
-            return ""
-        
-        context_parts = ["Relevant molecular data found:"]
-        
-        for i, mol in enumerate(molecules, 1):
-            smiles = mol.get("SMILES", "Unknown")
-            score = mol.get("similarity_score", 0)
-            
-            context_parts.append(f"{i}. SMILES: {smiles} (similarity: {score:.3f})")
-            
-            # Add other properties if available
-            for key, value in mol.items():
-                if key not in ["SMILES", "similarity_score"] and pd.notna(value):
-                    context_parts.append(f"   {key}: {value}")
-        
-        return "\n".join(context_parts)
+        return format_rag_context(molecules)
     
     def _build_prompt(self, user_message: str, rag_context: str, retrieved_molecules: List[Dict[str, Any]]) -> str:
         """Build the complete prompt for the model"""
