@@ -79,9 +79,8 @@ def _open_client(directory):
         # Import-time construction now has no scientific tools or persistent store.
         from src.web.app import app_instance
 
-        # Register each independently: even a shutdown exception must close models.
-        resources.callback(lambda: asyncio.run(app_instance.molecular_generator_model.close()))
-        resources.callback(lambda: asyncio.run(app_instance.model.close()))
+        # The application owns model cleanup; do not close its models a second time.
+        # Worker leak assertions run before the independent emergency safety net.
         resources.callback(lambda: asyncio.run(app_instance.shutdown()))
         session = TestClient(app_instance.app, base_url='http://localhost')
         resources.callback(session.close)
@@ -144,6 +143,7 @@ def test_worker_isolation_and_resource_cleanup(case):
     assert evidence['test_clients'] >= 1, evidence
     assert evidence['shutdown_calls'] == 1, evidence
     assert evidence['model_close_calls'] == [1, 1], evidence
+    assert evidence['request_gate_closed'] is True, evidence
     assert evidence['startup_calls'] == 0, evidence
     assert evidence['network_attempts'] == 0, evidence
     assert evidence['temporary_removed'] is True
@@ -240,6 +240,7 @@ def _worker(case):
                 'injected_error_seen': injected,
                 'shutdown_calls': shutdown.call_count,
                 'model_close_calls': [close_main.call_count, close_generator.call_count],
+                'request_gate_closed': app_instance.model_request_gate.closed,
                 'startup_calls': startup.call_count,
                 'network_attempts': len(network_attempts),
             }
@@ -248,6 +249,7 @@ def _worker(case):
             assert evidence['open_clients'] == 0, evidence
             assert evidence['shutdown_calls'] == 1, evidence
             assert evidence['model_close_calls'] == [1, 1], evidence
+            assert evidence['request_gate_closed'] is True, evidence
             assert evidence['startup_calls'] == 0, evidence
             assert evidence['network_attempts'] == 0, evidence
         finally:
