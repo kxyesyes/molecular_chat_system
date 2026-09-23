@@ -78,3 +78,25 @@ python -B -m pytest tests/agent tests/test_phase2_phase3_routes.py tests/test_us
 - PR37以及真实首页旧Starlette兼容依赖仍未解决，不能因为本机新版测试通过宣称CI或部署通过。
 - 模板兼容采用何种方案仍待用户确认；本批不修改模板调用、升级依赖或绕过真实首页。
 - 原始混杂工作区、来源树与真实科学资产不动；后续与T05-B组合需重新回归。
+
+## T05-B 组合验证追加（2026-09-24）
+
+T06-A 本地提交 `0cf6824` 与已独立双审的 T05-B `4d22a8d` 在本分支完成无冲突组合，head `1a0cfcbf502344ad5b381db067ada4cda9365df7`，tree `2ed2dbc51991afc7306a82db191f5e287c736140`。候选 tree 与事前 merge-tree 一致；不改 main、不推送。
+
+原 QUALITY 审查者只读集成复核 APPROVED：唯一交叉文件 app.py 为原 T06-A 删除补丁在 T05-B 上的逐字重放，其余 13 个变更文件精确来自已审快照；模型使用门、配置切换、关闭、正式 /ws 和会话边界完整保留。独立新测试加会话入口测试 10 passed，11.35 秒。
+
+父任务实际运行完整组合矩阵（MedChat Python，正常根 conftest、临时数据库、禁用真实服务）：
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE='0'
+$env:MEDCHAT_RUN_REAL_EXTERNAL_TESTS='0'
+$env:MEDCHAT_RUN_REAL_TESTS='0'
+$env:MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE='0'
+$env:RUN_REAL_TARGET_SEARCH='0'
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import os,sys,tempfile,subprocess; from pathlib import Path; tmp=tempfile.TemporaryDirectory(prefix='medchat-t05-t06-'); root=Path(tmp.name); os.environ['AGENT_STATE_DB']=str(root/'agent.sqlite'); os.environ['MEDCHAT_TASK_DB_PATH']=str(root/'tasks.sqlite'); result=subprocess.run([sys.executable,'-B','-m','pytest',*sys.argv[1:]]); tmp.cleanup(); sys.exit(result.returncode)" tests/agent tests/test_model_request_lifecycle.py tests/test_design_model_switch.py tests/test_molecular_design_architecture.py tests/test_llm_runtime_config.py tests/test_user_llm_routes.py tests/test_agent_llm_wiring.py tests/test_task_runtime.py tests/test_phase2_phase3_routes.py tests/test_agent_anti_hallucination_fallbacks.py tests/test_agent_platform_health_check.py tests/test_agent_session.py tests/test_agent_session_entrypoints.py tests/test_agent_task_ownership.py tests/test_rag_index_manifest.py tests/test_web_app_lifecycle.py tests/test_openai_compatible_model.py -q -p no:cacheprovider --tb=short -rs
+```
+
+结果：**4149 passed / 8 skipped / 7 warnings，256.00 秒，exit 0**。八项 skip 为两项 Windows 符号链接权限、默认关闭性能项、两项 POSIX 目录权限、两项需要独立 task store、一个需要 configured runtime 的既有测试；未新增跳过。七个 warning 为 SWIG/FastAPI 弃用提示。
+
+303 个 Python 文件内存编译及 diff 检查通过；测试完成时工作树干净，之后仅追加本节记录。此结果不代替旧 Starlette 兼容验收或 PR37 CI，未使用真实主模型/科学模型、未部署。
