@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import aclosing
 from contextvars import ContextVar
 from typing import AsyncIterator, Optional
 
@@ -160,12 +161,14 @@ class OpenAICompatibleModel:
 
         try:
             if self.client is not None:
-                async for content in self._stream_with_client(self.client, prompt, temperature, max_tokens):
-                    yield content
+                async with aclosing(self._stream_with_client(self.client, prompt, temperature, max_tokens)) as stream:
+                    async for content in stream:
+                        yield content
             else:
                 async with httpx.AsyncClient(timeout=150.0) as client:
-                    async for content in self._stream_with_client(client, prompt, temperature, max_tokens):
-                        yield content
+                    async with aclosing(self._stream_with_client(client, prompt, temperature, max_tokens)) as stream:
+                        async for content in stream:
+                            yield content
         except Exception as exc:
             logger.error(
                 "%s stream call failed (%s)",
