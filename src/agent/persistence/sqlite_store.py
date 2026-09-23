@@ -9,7 +9,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .base import RunOwnershipConflict
 from .redaction import contains_credential, contains_secret_material, redact_sensitive
+
+
+class _UnownedRun(dict):
+    """Internal guard marker, never a client field or persisted metadata."""
 
 
 def _json_dump(value: Any) -> str:
@@ -247,8 +252,10 @@ class SQLiteAgentStateStore:
                     metadata_json=excluded.metadata_json,
                     updated_at=excluded.updated_at
                 """
+        if isinstance(run, _UnownedRun) and not exclusive:
+            conflict += " WHERE agent_runs.session_id IS NULL AND agent_runs.user_id IS NULL"
         with self._lock, self._connect() as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO agent_runs (
                     trace_id, status, skill_name, query, workflow_version,
@@ -270,9 +277,28 @@ class SQLiteAgentStateStore:
                     now,
                 ),
             )
+            if isinstance(run, _UnownedRun) and cursor.rowcount != 1:
+                raise RunOwnershipConflict("Cannot replace an owned run")
+
+    def start_unowned_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None:
+        """Session-only guard; start_run's public legacy upsert is unchanged."""
+        if run.get("session_id") is not None or run.get("user_id") is not None:
+            raise RunOwnershipConflict("Expected an unowned local run")
+        try:
+            # Keep the existing overridable start hook (including retry tests).
+            if exclusive:
+                self.start_run(_UnownedRun(run), exclusive=True)
+            else:
+                self.start_run(_UnownedRun(run))
+        except sqlite3.IntegrityError as exc:
+            if exclusive:
+                # Decision-loop new runs use the legacy exclusive-start
+                # exception to reject replay without entering recovery.
+                raise
+            raise RunOwnershipConflict("Conflicting run identity") from exc
 
     def claim_workflow_run(self, run: dict[str, Any], *, expected_status: str | None) -> bool:
-        """Atomically claim a trace by the status observed before Session start.
+        """Atomically claim an owner/request-bound trace observed in preflight.
 
         A changed state never permits a second execution. Completed traces may
         be explicitly retried to reuse compatible checkpoints.
@@ -282,13 +308,23 @@ class SQLiteAgentStateStore:
         with self._lock, self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT status FROM agent_runs WHERE trace_id = ?",
+                """SELECT status, skill_name, query, idempotency_key,
+                          user_id, session_id
+                   FROM agent_runs WHERE trace_id = ?""",
                 (data["trace_id"],),
             ).fetchone()
             actual = row["status"] if row is not None else None
             if actual != expected_status or actual not in {
                 None, "pending", "succeeded", "completed", "partial", "failed",
             }:
+                return False
+            if row is not None and any((
+                row["session_id"] != data.get("session_id"),
+                row["user_id"] != data.get("user_id"),
+                row["query"] != data.get("query"),
+                row["skill_name"] != data.get("skill_name"),
+                row["idempotency_key"] != data.get("idempotency_key"),
+            )):
                 return False
             if row is None:
                 try:
@@ -460,12 +496,25 @@ class SQLiteAgentStateStore:
         result["metadata"] = _json_load(result.pop("metadata_json"), {})
         return result
 
-    def get_run_by_idempotency_key(self, idempotency_key: str) -> dict[str, Any] | None:
+    def get_run_by_idempotency_key(
+        self,
+        idempotency_key: str,
+        *,
+        session_id: str | None = None,
+        require_owner: bool = False,
+    ) -> dict[str, Any] | None:
         with self._connect() as connection:
-            row = connection.execute(
-                "SELECT trace_id FROM agent_runs WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
+            if require_owner:
+                row = connection.execute(
+                    """SELECT trace_id FROM agent_runs
+                       WHERE idempotency_key = ? AND session_id IS ?""",
+                    (idempotency_key, session_id),
+                ).fetchone()
+            else:
+                row = connection.execute(
+                    "SELECT trace_id FROM agent_runs WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
         return self.get_run(row["trace_id"]) if row else None
 
     def save_checkpoint(self, checkpoint: dict[str, Any]) -> None:

@@ -191,13 +191,18 @@ class PreparedWorkflow:
 
     def _run(self) -> AgentResult:
         context, plan = self.consume_execution_inputs()
-        return self.orchestrator.run(
-            context=context,
-            steps=plan.steps,
-            tools=self.tools,
-            continue_on_error=False,
-            idempotency_key=self.idempotency_key,
-        )
+        from src.agent.runtime.run_session import RunClaimConflict
+
+        try:
+            return self.orchestrator.run(
+                context=context,
+                steps=plan.steps,
+                tools=self.tools,
+                continue_on_error=False,
+                idempotency_key=self.idempotency_key,
+            )
+        except RunClaimConflict as exc:
+            return exc.to_result(context)
 
     def consume_execution_inputs(self) -> tuple[AgentContext, WorkflowPlan]:
         """Consume this preflight result and return isolated authoritative inputs."""

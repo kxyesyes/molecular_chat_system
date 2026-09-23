@@ -15,7 +15,7 @@ def factory(monkeypatch, tmp_path):
     monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent.sqlite"))
     def build():
         app = MolecularChatApp(str(tmp_path / "missing.yaml"))
-        return app, TestClient(app.app)
+        return app, TestClient(app.app, base_url="http://localhost")
     return build
 
 
@@ -115,7 +115,8 @@ def test_websocket_reports_invalid_user_config_without_starting_chat(factory, mo
     async def never(*args):
         raise AssertionError("chat must not run with stale credentials")
     app.chat_handler = Mock(handle_websocket=never)
-    with client.websocket_connect("/ws") as socket:
+    client.get("/")
+    with client.websocket_connect("/ws", headers={"host": "localhost", "origin": "http://localhost", "cookie": f"medchat_agent_session={client.cookies.get('medchat_agent_session')}"}) as socket:
         message = socket.receive_json()
         assert message["type"] == "error"
         assert "配置" in message["message"]
@@ -135,7 +136,8 @@ def test_connected_socket_revalidates_config_before_each_message(factory, monkey
         calls.append(app.active_llm_config["model_name"])
         await socket.send_json({"type": "done"})
     monkeypatch.setattr(app.chat_handler, "_process_message", process)
-    with client.websocket_connect("/ws") as socket:
+    client.get("/")
+    with client.websocket_connect("/ws", headers={"host": "localhost", "origin": "http://localhost", "cookie": f"medchat_agent_session={client.cookies.get('medchat_agent_session')}"}) as socket:
         assert socket.receive_json()["type"] == "connection_ready"
         save_user_llm_config(user_llm_config_path(), dict(default_user_llm_config(), model_name="new-model"))
         socket.send_json({"message": "hello"})

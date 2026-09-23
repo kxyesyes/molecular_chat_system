@@ -14,6 +14,7 @@ def pytest_configure(config):
         "MEDCHAT_USER_CONFIG_DIR": root / "user-config",
         "MEDCHAT_LLM_LOCK_DIR": root / "llm-locks",
         "MEDCHAT_ENV_FILE": root / "not-loaded.env",
+        "MEDCHAT_AGENT_SESSION_DB": root / "agent-sessions.sqlite",
     }
     config._llm_test_environment = {key: os.environ.get(key) for key in paths}
     os.environ.update({key: str(path) for key, path in paths.items()})
@@ -35,3 +36,4 @@ def isolated_user_llm_configuration(tmp_path, monkeypatch):
     monkeypatch.setenv("MEDCHAT_USER_CONFIG_DIR", str(tmp_path / "user-config"))
     monkeypatch.setenv("MEDCHAT_LLM_LOCK_DIR", str(tmp_path / "llm-locks"))
     monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / "not-loaded.env"))
+    monkeypatch.setenv("MEDCHAT_AGENT_SESSION_DB", str(tmp_path / "agent-sessions.sqlite"))

@@ -30,6 +30,7 @@ def _fake_openai_key(suffix: str) -> str:
 class FakeWebSocket:
     def __init__(self):
         self.messages = []
+        self.scope = {}
 
     async def send_text(self, payload):
         self.messages.append(json.loads(payload))
