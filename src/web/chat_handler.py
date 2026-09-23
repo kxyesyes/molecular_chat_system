@@ -132,6 +132,7 @@ class ChatHandler:
                     temperature,
                     mol_count,
                     conversation_history=conversation_history,
+                    session_id=websocket.scope.get("agent_session_id"),
                 )
                     
         except WebSocketDisconnect:
@@ -154,7 +155,8 @@ class ChatHandler:
                               enable_rag: bool, enable_tools: bool, 
                               rag_count: int = 5, temperature: float = 0.7,
                               mol_count: int | None = None,
-                              conversation_history: List[Dict[str, Any]] | None = None):
+                              conversation_history: List[Dict[str, Any]] | None = None,
+                              session_id: str | None = None):
         """处理用户消息 - 性能优化版"""
         history = (
             conversation_history
@@ -307,6 +309,7 @@ class ChatHandler:
                     event_callback=on_agent_event,
                     enable_rag=enable_rag,
                     enable_tools=enable_tools,
+                    session_id=session_id,
                 )
             )
         
@@ -589,6 +592,7 @@ class ChatHandler:
         event_callback=None,
         enable_rag: bool = True,
         enable_tools: bool = True,
+        session_id: str | None = None,
     ):
         """异步执行Agent（用于并行处理）"""
         try:
@@ -610,6 +614,8 @@ class ChatHandler:
                 "temperature": temperature,
                 "active_skill": active_skill,
             }
+            if session_id is not None:
+                execute_kwargs["session_id"] = session_id
             if mol_count is not None:
                 execute_kwargs["mol_count"] = mol_count
             if "event_callback" in execute_parameters:

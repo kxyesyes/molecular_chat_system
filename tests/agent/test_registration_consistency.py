@@ -55,14 +55,16 @@ def test_default_app_factory_rag_workflow_api(tmp_path, monkeypatch, ready, lega
     monkeypatch.setattr("src.agent.supervisor.build_default_tools", lambda: pytest.fail("must reuse registered tools"))
     results = []
     class Manager:
-        def submit(self, task_type, payload, handler):
+        def submit(self, task_type, payload, handler, owner_session_id):
             results.append(handler(payload))
             return SimpleNamespace(to_public_dict=lambda: {"result": results[-1]})
     monkeypatch.setattr("src.web.routes.agent_workflow_routes.get_task_manager", lambda: Manager())
     api = FastAPI()
+    from src.web.agent_session_config import setup_agent_sessions
+    setup_agent_sessions(api)
     setup_agent_workflow_routes(api, app._create_supervisor_agent)
     try:
-        response = TestClient(api).post("/api/agent/workflows/run", json={
+        response = TestClient(api, base_url="http://localhost").post("/api/agent/workflows/run", json={
             "query": "检索知识库中的乙醇", "skill_name": "rag_search"})
         assert response.status_code == 200
         assert results[-1]["status"] == ("succeeded" if ready else "failed")

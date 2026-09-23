@@ -4,12 +4,41 @@ from pathlib import Path
 from typing import Any, Protocol
 
 
+class RunOwnershipConflict(RuntimeError):
+    """A guarded local start encountered an owned or conflicting record."""
+
+
 class AgentStateStore(Protocol):
     db_path: Path
 
     def start_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None: ...
 
+    def start_unowned_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None:
+        """Atomically refuse replacing any owned row; legacy local upserts only."""
+        ...
+
     def get_run(self, trace_id: str) -> dict[str, Any] | None: ...
+
+    def claim_workflow_run(
+        self,
+        run: dict[str, Any],
+        *,
+        expected_status: str | None,
+    ) -> bool:
+        """Compare status, session/user, query/skill and key in one transaction.
+
+        Return True only after commit; never adopt an unowned record for an
+        owner. Protected execution must fail closed if this is unavailable.
+        """
+        ...
+
+    def get_run_by_idempotency_key(
+        self,
+        idempotency_key: str,
+        *,
+        session_id: str | None = None,
+        require_owner: bool = False,
+    ) -> dict[str, Any] | None: ...
 
     def transition_decision_continuation(
         self,

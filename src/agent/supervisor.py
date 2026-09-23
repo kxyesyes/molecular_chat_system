@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import asdict
 from copy import deepcopy
 from typing import Any, Mapping
@@ -28,6 +30,7 @@ from src.agent.specialists import SpecialistAgent
 from src.agent.tooling import ToolRegistry
 from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.runtime.run_session import RunClaimConflict
 from src.agent.runtime.delegated_executor import DelegatedWorkflowExecutor as _DelegatedWorkflowExecutor
 from src.agent.runtime.workflow_executor import (
     WorkflowExecution,
@@ -40,6 +43,7 @@ RAG_TOOL_NAMES = frozenset(
     {"rag_search", "rag_database_search", "database_search"}
 )
 _MOL_COUNT_UNSET = object()
+_MAX_IDEMPOTENCY_KEY_LENGTH = 256
 
 
 
@@ -133,6 +137,8 @@ class SupervisorAgent:
         active_skill=None,
         event_callback=None,
         capabilities: Mapping[str, bool] | None = None,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
         raw_requested_count: Any = (
@@ -227,6 +233,7 @@ class SupervisorAgent:
             active_skill=policy.name,
             temperature=temperature,
             mol_count=requested_count,
+            session_id=session_id,
             metadata=request_metadata,
         )
         request_tools = self._request_tools(context)
@@ -342,8 +349,12 @@ class SupervisorAgent:
         trace_id: str | None = None,
         metadata: dict[str, Any] | None = None,
         mol_count: Any = _MOL_COUNT_UNSET,
+        *,
+        session_id: str | None = None,
     ) -> dict[str, Any]:
         metadata = dict(metadata or {})
+        metadata.pop("session_id", None)
+        metadata.pop("user_id", None)
         try:
             self._preflight_context_count(
                 query, metadata, mol_count, skill_name
@@ -352,14 +363,30 @@ class SupervisorAgent:
             return self._invalid_run_response(
                 skill_name, trace_id, metadata, mol_count, exc
             )
-        idempotency_key = metadata.get("idempotency_key")
-        if self.state_store and idempotency_key:
-            existing = self.state_store.get_run_by_idempotency_key(idempotency_key)
-            if existing:
-                trace_id = existing["trace_id"]
+        raw_idempotency_key = metadata.pop("idempotency_key", None)
+        try:
+            idempotency_key = self._internal_idempotency_key(
+                raw_idempotency_key,
+                session_id=session_id,
+            )
+        except ValueError as exc:
+            return self._invalid_idempotency_response(
+                skill_name=skill_name,
+                trace_id=trace_id,
+                message=str(exc),
+            )
         context = self._build_context(
-            query, skill_name, trace_id, metadata, mol_count
+            query, skill_name, trace_id, metadata, mol_count, session_id
         )
+        try:
+            context = self.orchestrator._resolve_idempotent_context(
+                context, idempotency_key,
+                allow_trace_rebind=trace_id is None or session_id is None,
+            )
+        except RunClaimConflict as exc:
+            return self._format_run_result(
+                context.active_skill or "", {}, [], exc.to_result(context),
+            )
         workflow_plan = self.planner.plan(context)
         steps = workflow_plan.steps
         request_tools = self._request_tools(context)
@@ -591,6 +618,16 @@ class SupervisorAgent:
         executor: WorkflowExecutor,
         **kwargs: Any,
     ) -> WorkflowExecution:
+        context = kwargs["context"]
+        try:
+            kwargs["context"] = self.orchestrator._resolve_idempotent_context(
+                context, kwargs.get("idempotency_key"), allow_trace_rebind=False,
+            )
+        except RunClaimConflict as exc:
+            return WorkflowExecution(
+                plan=kwargs.get("plan") or WorkflowPlan(context.active_skill or "", []),
+                result=exc.to_result(context), events=[],
+            )
         harness = self.harness_factory.create(executor)
         harness_run = harness.execute(**kwargs)
         execution = harness_run.authoritative
@@ -612,7 +649,10 @@ class SupervisorAgent:
         if shadow_metadata is not None:
             execution.result.metadata["harness_shadow"] = shadow_metadata
             metadata_updates["harness_shadow"] = shadow_metadata
-        if self.state_store and metadata_updates:
+        # Preflight failures have not claimed/started a run. In particular,
+        # shadow diagnostics must not mutate a prior trace on plan rejection.
+        if (self.state_store and metadata_updates and execution.events
+                and not execution.result.metadata.get("run_claim_conflict")):
             try:
                 if self.state_store.get_run(execution.result.trace_id) is not None:
                     self.state_store.update_run_metadata(
@@ -672,10 +712,13 @@ class SupervisorAgent:
         trace_id: str | None,
         metadata: dict[str, Any] | None,
         mol_count: Any = _MOL_COUNT_UNSET,
+        session_id: str | None = None,
     ) -> AgentContext:
         policy = self._resolve_policy(query, skill_name)
         active_skill = policy.name if policy is not None else skill_name
         request_metadata = dict(metadata or {})
+        request_metadata.pop("session_id", None)
+        request_metadata.pop("user_id", None)
         if mol_count is not _MOL_COUNT_UNSET:
             request_metadata["requested_count"] = mol_count
         return AgentContext(
@@ -684,8 +727,66 @@ class SupervisorAgent:
             active_skill=active_skill,
             workflow_name=active_skill,
             mol_count=5 if mol_count is _MOL_COUNT_UNSET else mol_count,
+            session_id=session_id,
             metadata=request_metadata,
         )
+
+    @staticmethod
+    def _internal_idempotency_key(
+        value: Any,
+        *,
+        session_id: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("idempotency_key must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("idempotency_key must not be empty")
+        if len(value) > _MAX_IDEMPOTENCY_KEY_LENGTH:
+            raise ValueError("idempotency_key is too long")
+        if session_id is None:
+            return normalized
+        # This is the sole raw-client-key boundary. Downstream APIs receive
+        # the internal key and must not hash it a second time.
+        material = json.dumps(
+            ["agent-key-v1", session_id, normalized],
+            ensure_ascii=False, separators=(",", ":"),
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _invalid_idempotency_response(
+        *,
+        skill_name: str | None,
+        trace_id: str | None,
+        message: str,
+    ) -> dict[str, Any]:
+        error = AgentExecutionError(
+            code=AgentErrorCode.INVALID_INPUT,
+            message=message,
+            details={"reason": "invalid_idempotency_key"},
+        )
+        response_trace_id = trace_id or str(uuid4())
+        result = AgentResult(
+            trace_id=response_trace_id,
+            success=False,
+            message=message,
+            skill_name=skill_name,
+            error=error,
+        ).to_legacy_dict()
+        return {
+            "trace_id": response_trace_id,
+            "status": "failed",
+            "message": message,
+            "plan": {
+                "workflow_name": skill_name,
+                "steps": [],
+                "metadata": {},
+            },
+            "result": result,
+        }
 
     def _request_tools(self, context: AgentContext) -> dict[str, Any]:
         """Build a request-local tool view without mutating shared tools."""

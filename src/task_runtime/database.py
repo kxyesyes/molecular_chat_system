@@ -94,6 +94,7 @@ def _initialize_once(path: Path) -> None:
             "provenance_json": "TEXT NOT NULL DEFAULT '{}'",
             "idempotency_digest": "TEXT",
             "submission_digest": "TEXT",
+            "owner_session_id": "TEXT",
         }
         for name, declaration in migrations.items():
             if name not in columns:
