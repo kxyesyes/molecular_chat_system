@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import FrozenInstanceError
+from functools import wraps
 import hashlib
 import json
 import os
@@ -1007,8 +1008,157 @@ async def test_progress_warnings_are_deduplicated_and_bounded(tmp_path: Path) ->
         await backend.close()
 
 
+_OFFLOAD_METHODS = ("create", "get", "list", "claim_running", "request_cancel")
+
+
+async def _assert_store_offload(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    """Exercise real SQLite behind a gate; timeouts only bound broken handshakes."""
+    loop = asyncio.get_running_loop()
+    loop_thread = threading.get_ident()
+    entered = loop.create_future()
+    release_worker = threading.Event()
+    worker_finished = threading.Event()
+    handler_started = asyncio.Event()
+    release_handler = asyncio.Event()
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    original = getattr(store, method_name)
+    thread_error = f"TaskStore.{method_name} ran on the event-loop thread"
+
+    @wraps(original)
+    def guarded_call(*args, **kwargs):
+        thread_id = threading.get_ident()
+        # Check BEFORE waiting: an inline regression must fail, never deadlock
+        # the loop that is responsible for releasing this gate.
+        loop.call_soon_threadsafe(entered.set_result, thread_id)
+        try:
+            assert thread_id != loop_thread, thread_error
+            assert release_worker.wait(10), "store gate was not released"
+            return original(*args, **kwargs)
+        finally:
+            worker_finished.set()
+
+    async def handler(submission, cancel_event, progress):
+        handler_started.set()
+        await release_handler.wait()
+        return {"success": True}
+
+    backend = LocalTaskBackend(store, {"docking": handler})
+    operation = None
+    try:
+        # Arm get/list/cancel only after setup, so a nested get in create
+        # cannot stand in for the public backend.get path being tested.
+        if method_name not in {"create", "claim_running"}:
+            await backend.submit(_submission())
+            await asyncio.wait_for(handler_started.wait(), timeout=10)
+        monkeypatch.setattr(store, method_name, guarded_call)
+        if method_name in {"create", "claim_running"}:
+            operation = asyncio.create_task(backend.submit(_submission()))
+        elif method_name == "get":
+            operation = asyncio.create_task(backend.get("task-1"))
+        elif method_name == "list":
+            operation = asyncio.create_task(backend.list(task_type="docking"))
+        else:
+            operation = asyncio.create_task(backend.cancel("task-1", "probe"))
+
+        worker_thread = await asyncio.wait_for(asyncio.shield(entered), timeout=10)
+        assert worker_thread != loop_thread, thread_error
+
+        async def loop_progress_while_worker_waits() -> None:
+            await asyncio.sleep(0)
+            assert not release_worker.is_set()
+            assert not worker_finished.is_set()
+
+        await asyncio.wait_for(
+            asyncio.create_task(loop_progress_while_worker_waits()), timeout=10
+        )
+        # The gated call was reached and the loop progressed before release.
+        # Restore before further backend reads/cleanup; the pending call keeps
+        # its bound original and must still execute the real SQLite method.
+        monkeypatch.setattr(store, method_name, original)
+        release_worker.set()
+        result = await asyncio.wait_for(asyncio.shield(operation), timeout=10)
+        await asyncio.wait_for(handler_started.wait(), timeout=10)
+        assert worker_finished.is_set()
+        if method_name in {"create", "claim_running"}:
+            assert result.accepted is True
+        elif method_name == "get":
+            assert result.task_id == "task-1"
+            assert result.status is TaskStatus.RUNNING
+        elif method_name == "list":
+            assert [record.task_id for record in result] == ["task-1"]
+        else:
+            assert result.status is TaskStatus.CANCEL_REQUESTED
+        # A fresh SQLite reader checks actual persistence, not a to_thread mock.
+        expected = (
+            TaskStatus.CANCEL_REQUESTED
+            if method_name == "request_cancel"
+            else TaskStatus.RUNNING
+        )
+        assert TaskStore(store.db_path).get("task-1").status is expected
+    finally:
+        # Release every gate even when identity/progress/result assertions fail.
+        # Drain the public operation before close (submit may spawn a runner).
+        monkeypatch.setattr(store, method_name, original)
+        release_worker.set()
+        release_handler.set()
+        try:
+            if operation is not None:
+                await asyncio.gather(operation, return_exceptions=True)
+        finally:
+            await backend.close()
+        assert backend.background_task_count == 0
+
+
 @pytest.mark.anyio
-async def test_async_store_calls_and_run_claim_do_not_block_event_loop(tmp_path: Path) -> None:
+@pytest.mark.parametrize("method_name", _OFFLOAD_METHODS)
+async def test_async_store_calls_and_run_claim_do_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    await _assert_store_offload(tmp_path, monkeypatch, method_name)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("method_name", _OFFLOAD_METHODS)
+async def test_offload_contract_rejects_inline_store_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+) -> None:
+    async def inline_selected_call(func, /, *args, **kwargs):
+        if getattr(func, "__name__", None) == method_name:
+            return func(*args, **kwargs)
+        return await asyncio.to_thread(func, *args, **kwargs)
+
+    # In-memory mutation only, scoped to the backend module. Do not replace
+    # global asyncio.to_thread or write altered production code to disk.
+    backend_module = sys.modules[LocalTaskBackend.__module__]
+    monkeypatch.setattr(
+        backend_module,
+        "asyncio",
+        SimpleNamespace(**{**vars(asyncio), "to_thread": inline_selected_call}),
+    )
+    with pytest.raises(
+        AssertionError,
+        match=rf"TaskStore\.{method_name} ran on the event-loop thread",
+    ):
+        await _assert_store_offload(tmp_path, monkeypatch, method_name)
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(
+    os.environ.get("MEDCHAT_RUN_TASK_STORE_OFFLOAD_PERF") != "1",
+    reason=(
+        "opt-in wall-clock performance check: set MEDCHAT_RUN_TASK_STORE_OFFLOAD_PERF=1 "
+        "on a controlled runner; shared-CI scheduling gaps are not offload attribution"
+    ),
+)
+async def test_async_store_calls_and_run_claim_event_loop_latency_performance(tmp_path: Path) -> None:
     class SlowStore(TaskStore):
         def _slow(self) -> None:
             time.sleep(0.06)
