@@ -1,7 +1,7 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-24。源码基线：`main` 的 `85c4f3061ac33be1391e7b6cf7538c040f66d21c`。
-本文是维护导航，不是生产部署或真实科研验收通过声明。后续合并改变下列调用关系时，应同步更新本页和基线；本地候选补丁不算已经上线。
+核对日期：2026-09-24。源码基线：本地已审候选 `734cc473dab43d885bb1cc3e355006c3b3e05bd2`（含 T06-C 与 RAG 归位，尚须按顺序发布）。
+本文当前是待发布的维护导航，不表示上述候选已经进入 main、生产部署或真实科研验收通过。发布本页前须把基线更新为实际已合并提交；后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
 
@@ -10,7 +10,7 @@
 | 类别 | 实际位置与调用 | 维护边界 |
 |---|---|---|
 | 正式网页聊天 | [main.py](../main.py) → [MolecularChatApp](../src/web/app.py) 注册 `/ws` → [ChatHandler.handle_websocket](../src/web/chat_handler.py) | `_create_chat_agent()` 构造 `SupervisorAgent`；没有 ChatHandler 时以 1011 失败关闭，不回退到旧聊天实现。普通聊天不等于科研工具调用。 |
-| 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 `/api/agent/workflows/plan`、`/run` | 使用应用注入的 `_create_supervisor_agent()`，注册表审计、specialist 委派；`run` 经 `get_task_manager().submit()` 后调用 `SupervisorAgent.run()`。不要把它和聊天入口的工具装配方式写成完全相同。 |
+| 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 `/api/agent/workflows/plan`、`/run` | 使用应用注入的 `_create_supervisor_agent()`，注册表审计、specialist 委派；正式应用的 `run` 经 `ModelRequestGate.submit_background()` 转交 TaskManager，再调用 `SupervisorAgent.run()`，模型使用权覆盖实际 worker 生命周期。没有注入 gate 的独立构造仍兼容直接 submit。 |
 | 隔离模型决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[decision_chat.py](../src/web/decision_chat.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | 独立 loopback 验收应用；`ChatHandler.process_decision_message()` 是显式服务端桥接，正式 `/ws` 不根据浏览器参数自动启用它。不能把隔离验收通过描述为已切换生产 Agent。 |
 
 当前正式科学入口仍包含路由、计划和工作流执行。仓库同时有模型决策循环，但“代码已存在”不代表正式聊天已使用该循环，也不意味着可以删掉验证、任务运行时或恢复保护。
@@ -35,6 +35,7 @@ ChatHandler / 工作流 API
 | 状态、重试、恢复或候选对齐不一致 | [run_session.py](../src/agent/runtime/run_session.py)、[workflow_executor.py](../src/agent/runtime/workflow_executor.py)、[delegated_executor.py](../src/agent/runtime/delegated_executor.py) | 普通/委派执行共用 Session 生命周期；委派层保留授权、调用和结果信封差异，不能另写完整终态循环。 |
 | 工具异常、超时或旧返回格式 | [tooling/adapters.py](../src/agent/tooling/adapters.py)、[tools/base_tool.py](../src/agent/tools/base_tool.py) | `ToolResult` 中的状态、错误、warnings、artifacts、evidence、quality 不能退化为一段成功文本。 |
 | 数值、候选结构或来源不可信 | [validators](../src/agent/validators)、[contracts/result.py](../src/agent/contracts/result.py) | 保留领域校验、候选对齐和 partial/failed；模型缺失或 demo 不等于真实预测，未执行 Vina 不得给出已计算结合能。 |
+| 长历史或证据挤掉当前问题 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_handler.py](../src/web/chat_handler.py) | 分区字符预算不是精确 token 计数；保留完整问题和科学约束，历史/证据整块取舍，不截断 SMILES 或 JSON。输入自身超限应明确拒绝；关键状态放不下时直接保留工具结果，不强行交模型解读。 |
 
 [HarnessFactory](../src/agent/harness/factory.py) 默认 `legacy`；这指现有执行器适配，不是启用 `ReActMolecularAgent`。`shadow` 是旁路计划比较；`langgraph_canary` 是有界灰度，委派执行器明确不扩展该灰度范围。未知模式或可选依赖不可用会记录 warning 并回到既有执行器，不代表科学工具结果被允许模拟。
 
@@ -42,12 +43,12 @@ ChatHandler / 工作流 API
 
 ## 3. 模型、RAG、持久化各自负责什么
 
-- **主聊天模型**：应用配置加载与切换在 [app.py](../src/web/app.py)、[user_llm_config.py](../src/web/user_llm_config.py)，OpenAI-compatible 适配在 [openai_compatible_model.py](../src/agent/openai_compatible_model.py)。配置值、Key、运行时用户文件不得进入文档或 Git。
+- **主聊天模型**：应用配置加载与切换在 [app.py](../src/web/app.py)、[user_llm_config.py](../src/web/user_llm_config.py)，OpenAI-compatible 适配在 [openai_compatible_model.py](../src/agent/openai_compatible_model.py)。[model_lifecycle.py](../src/web/model_lifecycle.py) 让聊天、设计推荐、后台工作流共享排空边界：在途请求固定模型，切换等待实际消费者结束后关闭旧客户端。取消或任务表终态不等于底层 worker 已退出；挂起的 worker 仍可能让排空持续等待，本机制不强杀它。配置值、Key、运行时用户文件不得进入文档或 Git。
 - **分子生成模型**：应用独立构造 `molecular_generator_model`，默认本地 Ollama `gmm-llama:latest`；主模型切换不能重绑它。设计页主模型推荐入口另在 [design_routes.py](../src/web/routes/design_routes.py)、[molecular_design/service.py](../src/molecular_design/service.py)，不要与 SMILES 生成模型混为一谈。
-- **RAG**：当前基线 `RAGSystem` 仍在 `app.py`；索引/manifest 在 [rag_index.py](../src/web/rag_index.py)，工具入口在 [rag_search_tool.py](../src/agent/tools/rag_search_tool.py)。行映射统一补丁尚未进入本基线，不能声称所有入口已共享检索核心。
+- **RAG**：唯一 `RAGSystem` 在 [rag/service.py](../src/rag/service.py)，索引/manifest、不可变快照与原子写入在 [rag/index.py](../src/rag/index.py)，同步/异步检索共用 [rag/retrieval.py](../src/rag/retrieval.py) 的行映射与来源校验。工具 [rag_search_tool.py](../src/agent/tools/rag_search_tool.py) 接受应用显式注入的同一服务，不读取全局 Web 单例或另起 embedding 配置。`app.py.RAGSystem` 和 [web/rag_index.py](../src/web/rag_index.py) 保留同一对象兼容导出；测试注入点使用规范领域模块。未初始化或来源/索引不兼容时，同步服务抛出异常，工具适配器返回失败；异步兼容接口记录 warning 并返回空列表，不能仅凭空列表区分检索不可用与无命中。任何路径都不能把 FAISS 标签直接当原始行号。Web 展示投影另在 [rag_presentation.py](../src/web/rag_presentation.py)，保留 source_index/provenance。
 - **执行证据**：[event_bus.py](../src/agent/runtime/event_bus.py) 与 [SQLiteAgentStateStore](../src/agent/persistence/sqlite_store.py) 记录运行、事件、检查点及续接；[redaction.py](../src/agent/persistence/redaction.py) 负责敏感内容处理。排障用 trace_id 对齐实际步骤、工具结果和 artifact，不能只看最终文本。
 - **后台工作**：[TaskManager](../src/task_runtime/manager.py) 是工作流 API 使用的提交入口；[TaskRuntime](../src/task_runtime/runtime.py) 是带 staging、幂等、后端选择和收尾的异步科学任务门面，两者不是同一个类。Temporal/OpenSandbox 等边界见 [task_runtime](../src/task_runtime)；不要因都是“任务”就机械合并或删除资源清理。
-- **聊天与续接**：本基线正式 WebSocket 的历史列表按连接创建；这不等于身份鉴权、断线持久化或跨轮候选引用已完整实现。隔离决策续接已有独立保护，不能据此宣称主聊天“第 3 个分子”等科研对象引用已可靠打通。
+- **聊天与续接**：[agent_session_config.py](../src/web/agent_session_config.py) 组装服务端匿名会话，正式 WebSocket/工作流从 scope 取身份，任务访问按服务端归属过滤；它不是实名登录授权。聊天历史仍按连接创建，六处终态共用 `_append_history` 原位保留末 20 条；不是断线历史持久化或科研对象续接。隔离决策续接已有独立保护，但首页“第 3 个分子”还需要实际展示顺序、版本、归属和失效检查，不能从历史文本猜 SMILES。
 
 ## 4. 兼容代码与迁移状态
 
@@ -56,12 +57,12 @@ ChatHandler / 工作流 API
 | 已删除的旧 Skill 对象层与保留名称 | `src/agent/skills/`、`BaseSkill`、`SkillRegistry` 已移除，声明信息由 [WorkflowCatalog/WorkflowPolicy](../src/agent/workflows/catalog.py) 承接；[删除守卫测试](../tests/agent/test_no_legacy_skill_layer.py) 防止旧 import 回流。`SkillRouter`、`selected_skill`、`active_skill`、`skill_name` 是保留的兼容名称，不代表旧 Skill 对象仍存在，也不代表工作流已删除。 |
 | [react_agent.py](../src/agent/react_agent.py)、[agent_executor.py](../src/agent/agent_executor.py) | 旧接口仍有导出或测试支持，不是正式聊天工厂。先核对调用者并迁移科学断言，不能仅因名称旧就删除。 |
 | [routes/page_routes.py](../src/web/routes/page_routes.py)、[routes/websocket_routes.py](../src/web/routes/websocket_routes.py) | `routes/__init__.py` 仍公开导出。页面兼容层已委托 `register_main_routes()`；WebSocket 兼容注册直接委托 ChatHandler。不得在正式应用重复注册 `/ws`。 |
-| app.py 内旧私有聊天/提示函数、静态备份 | 本基线仍保留；T06 的删除候选已经单独核对，但本地已审补丁尚未合并。公共占位脚本不能因无业务逻辑就移除并造成 404。 |
+| 已删除的 app.py 旧私有聊天/提示函数、静态备份 | `_handle_websocket` 及仅服务它的三个提示 helper、旧应用级历史已删除，正式 `/ws` 仍唯一委托 ChatHandler。无引用的 `activity_prediction_v2.legacy.backup.js` 已删除；公共占位 `script.js`、`activity_prediction_v2.js` 保留，真实页面与静态路由测试检查加载次序、200/404 和清理。 |
 | 工具输入/输出 schema | `tooling/factory.py` 仍使用 `LegacyQueryInput(query: Any)`，`output_schema=None`；并非没有校验（适配器、领域和 Session 校验仍在）。T10 需逐工具迁移，不另造工作流 DSL。 |
 
-已进入本基线的清理：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08），以及单独批准的逻辑/集成/性能测试分离。
+本地候选基线包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位，以及独立批准的测试分层与新旧模板签名适配。
 
-尚待发布或另行设计：T01 RAG 统一、T03 分段输入预算、T05-B 全消费者切换/排空、T06 局部清理、PR #37 匿名归属；T09 科研对象跨轮不是匿名身份本身；T10 类型化工具与 T11 其余结构迁移不能标成已完成。页面模板新旧签名兼容也仍是已知发布前置项。
+仍未完成：T09 科研对象跨轮引用；T10 逐工具类型契约与 Planner 职责整理；T11 其他领域路由拆分和旧 Agent 支持面收缩。其设计与实现需分别验证，不能把匿名身份、一个目录迁移或文档更新视为这些任务已完成。正式首页仍未切换到隔离模型决策入口。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
@@ -73,6 +74,9 @@ ChatHandler / 工作流 API
 python -B -m pytest tests/agent/test_app_supervisor_entrypoint.py tests/test_web_app_lifecycle.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_supervisor_delegation.py tests/agent/test_workflow_run_session.py tests/agent/test_workflow_resume.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_candidate_alignment.py tests/agent/test_registration_consistency.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
+python -B -m pytest tests/test_rag_service_boundary.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_chat_input_budget.py tests/test_model_request_lifecycle.py tests/test_design_model_switch.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_legacy_chat_entry_cleanup.py tests/agent/test_chat_local_cleanup.py tests/test_static_placeholder_cleanup.py tests/test_main_routes_template_compat.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_no_legacy_skill_layer.py -q -p no:cacheprovider
 python -B -m pytest tests/agent -q -p no:cacheprovider
 python -B -m pytest tests -q -p no:cacheprovider
