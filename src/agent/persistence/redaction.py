@@ -146,6 +146,29 @@ _SECRET_URL_CANDIDATE = re.compile(
 _SECRET_URL_SCHEME_START = re.compile(r"(?i)\b[a-z]")
 _SECRET_URL_BODY = re.compile(r"[^\s<>\"']+")
 
+# Conservative starts for every branch in _CREDENTIAL_PATTERNS, _SECRET_LABEL,
+# _AUTHORIZATION_CREDENTIAL and _BEARER. These are hints, never acceptance rules.
+# Extend this list and the differential tests when adding a credential grammar.
+_ASCII_SECRET_STARTS = (
+    "bearer", "sk-", "akia", "asia", "gh", "github_pat_", "x", "api", "secret", "access",
+    "client", "private", "refresh", "id", "auth", "session", "set", "cookie",
+    "proxy", "credential", "password", "passwd", "pwd", "token",
+)
+
+
+def _secret_scan_start(value: str) -> int:
+    if len(value) < 1024 or not value.isascii():
+        return 0
+    lowered = value.lower()  # ASCII only: indices remain those of the original.
+    first = len(value)
+    for marker in _ASCII_SECRET_STARTS:
+        position = lowered.find(marker)
+        if position >= 0:
+            first = min(first, position)
+    # Include the optional opening quote. Search the original string with pos,
+    # not a suffix slice, so word boundaries and lookbehinds keep their context.
+    return max(0, first - 1)
+
 
 def _contains_secret_url(value: str) -> bool:
     consumed = 0
@@ -180,10 +203,13 @@ def contains_secret_material(value: Any) -> bool:
         return any(contains_secret_material(item) for item in value)
     if not isinstance(value, str):
         return False
+    start = _secret_scan_start(value)
     return bool(
-        looks_like_credential(value) or _SECRET_LABEL_ASSIGNMENT.search(value)
-        or _AUTHORIZATION_CREDENTIAL.search(value) or _BEARER.search(value)
-        or _contains_secret_url(value)
+        any(pattern.search(value, start) for pattern in _CREDENTIAL_PATTERNS)
+        or _SECRET_LABEL_ASSIGNMENT.search(value, start)
+        or _AUTHORIZATION_CREDENTIAL.search(value, start) or _BEARER.search(value, start)
+        # URL userinfo need not contain a known label/token prefix.
+        or ("://" in value and _contains_secret_url(value))
     )
 
 
