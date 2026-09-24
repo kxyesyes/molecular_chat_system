@@ -1,6 +1,67 @@
 # G1 static evidence report — freeze for parent SPEC → QUALITY
 
-Date: 2026-09-25. Status: **local implementation and focused offline acceptance complete; independent reviews, full Agent slot, and integration pending.** This is not closure of all package 6 features or packages 1–8, not a dynamic-entry release, and not true scientific/model acceptance.
+Date: 2026-09-25. Current status: **Parent reports SPEC2 closed the original two P2 findings; two further approved-spec gaps are now minimally fixed and locally verified, frozen for parent/SPEC review.** Revision base is `bf4a2cf55ffa34e96c3821d4e0c6ca5bdcf05422`; parent authorized a local freeze commit after focused verification, not publication. QUALITY, full Agent and integration remain pending. This is not closure of all package 6 features or packages 1–8, not a dynamic-entry release, and not true scientific/model acceptance.
+
+## SPEC2 revision — four-or-none descriptors and Chinese UI
+
+Parent-reported reviewer **348 passed** is independent review evidence, not a locally repeated result. Original step-consistency/weight findings are closed per parent; their fixes and regression tests remain included in this freeze from `bf4a2cf`. New changes still touch only the same two production files, two tests, this handoff and the plan. No snapshot/projector/ranker/result/ledger/CandidateSet/ACK/restore changes, no original dirty tree/assets, network, full Agent, model/server activation or push.
+
+1. **SPEC §6:** Both DTO boundaries previously accepted resealed `partial/partial_source` rows with one or more null metrics and displayed remaining numbers. Both now require **all four finite validated values** for `available` or `partial`; malformed whole events are rejected, never stripped/repaired. Rejection leaves the existing no-independent-properties cards and exact ACK path intact. Genuine partial property sources with all four metrics on their accepted row still pass; missing candidate rows retain four nulls and explicit unavailable state. The producer was not changed: any malformed positive row reaching final validation suppresses the sidecar, not the old terminal/candidates.
+2. **SPEC §§5–8:** One controlled `REASONS` map now supplies Chinese reason labels to property summaries, ranking and step displays. A real capture with an unreconstructable stored query displays `input_unverifiable` as “无法验证排序或性质输入” with no ranking score, rather than generic unprovided alone. Existing DOM now has exactly the six approved section headings and “本次结果快照”; MW uses Da, TPSA Å², LogP/QED no units. Re-review also aligned the exact report title, missing version “未记录”, “展示已截断” marker and fixed scientific-boundary sentence. Only text nodes/unchanged DOM primitives; no CSS redesign, raw reason markup, model prose, recomputation or invented defaults. Actual ranker weights remain displayed.
+
+### Actual SPEC2 RED → GREEN and focus
+
+- In-memory isolated MedChat Python runner, adapted from the existing RAG isolation recipe: temporary cwd/config/SQLite paths, cleared non-allowlisted environment, plugin autoload off, `-B`, no pytest cache, sockets denied except Windows asyncio's internal loopback socketpair. No source fixture copies or production assets needed for this selection. Normal conftest retained.
+- `test_evidence_report_frames.py -k "spec_four or spec_chinese"`: **33 failed, 26 passed, 11 deselected, 25.90s** before fixes → **59 passed, 11 deselected, 26.23s** after fixes. RED comprises 28 Python acceptance failures (14 incomplete nonempty-value subsets × succeeded/real-partial captures), two actual DOM numeric-leak failures and three missing-six-section failures. All-null, missing-key, bool/string negative cases already rejected and remain covered.
+- New matrix: 15 nonempty null-subsets of four descriptors + each descriptor individually absent/bool/string (27 cases), derived from each of actual succeeded and real partial captures. Python reseals before validation; Node receives the same rejected variants via `--spec-rows-stdin` and exercises actualMain, card mount and ACK. No handwritten positive report replaces the real capture. All four values on the original partial row continue to render.
+- `--spec-chinese-stdin` is driven by three real RDKit/SQLite captures: actual standard plan, partial properties, and only temporary stored-query modification that makes the real projector produce `input_unverifiable`. Checks exact section labels, snapshot marker, units, reason display, caveat, missing versions and no score when unavailable; confirms unchanged AgentResult, no model call and exact ACK. Additional explicitly negative DTO derivatives cover all 14 controlled reason labels, hostile reason rejection and truncation text; these are not claimed as 14 real tool executions.
+- **1373 passed, 7 warnings, 88.37s; no skip/xfail** across the same 20 mandatory focused Python files listed under the initial freeze below, using `-q -p no:cacheprovider --tb=short -rs`. This is an enumerated focus, **not full `tests/agent`**. Seven warnings are existing SWIG/FastAPI deprecations.
+- Five relevant Node scripts passed: task panel, workflow completion, structured molecule, scientific references and evidence report. Both changed JS files passed `node --check`; both changed Python files passed in-memory `compile(..., 'exec')`; `git diff --check` passed. Prior 279/1312 counts are historical stages, not this run.
+
+### Whole approved SPEC re-review (not independent approval)
+
+| SPEC | Rechecked source/test evidence and disposition |
+|---|---|
+| §§1–3 scope/compatibility | Static live-only sidecar; no old raw-array protocol, property fetch, model rewrite, G2/P7 activation or asset migration. Scope unchanged. |
+| §4 ownership/snapshot | `report_snapshot` reuses owned `_source` transaction and selected view TTL/order/version checks; `prepare_report_event` rechecks version/presentations. Snapshot ownership/current/read-only and frame race tests pass. |
+| §5 observation/input/row proof | `_accepted`, `_property_rows`, `_ranking` still require full live/checkpoint match, ledger/evidence/input/digest proof and exact static bindings. Contract mismatch/tamper/read-only tests pass. Four-or-none DTO fix adds no producer repair. Units and unknown version labels now match UI requirements. |
+| §6 DTO/bounds/states | Strict exact shape, detached JSON bounds, enum/cross-reference/digest guards remain. New missing-metric matrix and original step status/source/reason matrix pass both boundaries. No accepting malformed events by deleting fields. |
+| §7 report/ranking/outcomes | Six sections, exact title/caveat, controlled unavailable reasons, actual Top-N/order/scores/weights, source counts and original partial/failure labels verified by actual capture→DOM and existing ranker tests. No new ADMET/activity/docking numbers. |
+| §8 lifecycle/DOM/ACK | Snapshot marker added; existing no-store, late/conflicting/failed-terminal, report/property rendering failure, card identity/ACK/restore and nonmutation tests pass. DOM-only enrichment remains live-only; refresh restores no numeric report. No browser screenshot or active pagination feature claim. |
+| §9 package 7 | Static-only stays explicit; dynamic markers do not admit positive mapping. P7 integration fixture/admission/binding remains separately owned, not completed by a flag. |
+| §§10–11 acceptance/history | All 20 named mandatory Python suites rerun as focus, including real local RDKit/ranker/SQLite→frames→JS→ASGI confirm/restore. Historical design/audit evidence remains historical; full Agent, SPEC/QUALITY approval and integrated-main validation remain parent gates. |
+
+No further confirmed implementation gap was identified in this bounded source/test re-review. This is **not** exhaustive proof of every theoretical permutation: prior declared limits (concurrent-writer timing beyond controlled recheck, exhaustive multi-generator ambiguity/budget permutations, active pagination and visual browser acceptance) remain disclosed below. Parent/SPEC owns acceptance of those limits and the current fixes.
+
+## Faraday SPEC revision — uncommitted diff from `bf4a2cf`
+
+Historical first revision: parent subsequently reported these two P2 findings closed; its then-current commit restriction and results below are retained as history, superseded by the SPEC2 authorization/status above.
+
+Parent requested verification and minimal fixes only; **no full Agent (4C has the next slot), no push, no commit until parent review**. Both findings reproduced against actual `execute_standard_plan` → `capture` frames:
+
+1. Changing the failed ADMET step's status alone to `succeeded`, leaving null source and `source_failed`, then resealing its digest was accepted by Python/JS and reached the report DOM. Both DTO boundaries now require the following exact step/source/reason consistency. No producer/result/ledger/observation state is rewritten.
+
+| Step status | Required source | Allowed reason |
+|---|---|---|
+| `succeeded`, `partial` | Existing accepted source with identical `step_id`, `tool_name`, **and status** | `none` (source accepted; does not promote a partial observation) |
+| `failed`, `rejected`, `cancelled` | null | `source_failed` |
+| `skipped` | null | `source_unavailable` |
+| `unknown` | null | `source_mismatch`, `source_unavailable`, or `source_failed` (unverifiable source does not establish a positive status) |
+
+2. Actual `ranking_evidence.weights_used` was transported but absent from the DOM. Each Top-N entry now renders a text-only Chinese line from the recorded values, e.g. **实际排序权重：性质 1；ADMET 未提供；活性 未提供**. Null is not a fabricated zero. No score/weight normalization, recomputation or model rewriting. Tests compare report weights with the real ranker output, reject hostile weight strings, and assert frames/results remain unchanged after rendering.
+
+Production changes are only `src/agent/contracts/scientific_report.py` and `src/web/static/js/home/evidence_report.js`. Regression additions are only `tests/agent/test_evidence_report_frames.py` and `tests/home_evidence_report_test.js`; this handoff and the plan record the revision. CandidateSet/ACK/restore, snapshot/full-observation checks, post-candidate delivery, no-store/partial/error bypasses and static-only scope remain unchanged. Original dirty tree/assets and the parent's sandbox probe were not touched or rerun.
+
+### Actual revision RED → GREEN
+
+- `test_evidence_report_frames.py -k "spec_step or same_rdkit"`: **6 failed, 5 deselected, 5.77s** before production edits (two consistency failures; four actual frame→DOM weight failures), then **6 passed, 5 deselected, 5.95s** after the minimal fixes.
+- Explicit DOM-first check of the resealed ADMET forgery: **1 failed, 10 deselected, 2.76s** before production edits; it rendered a rejected/inconsistent report. The final Node path now refuses all 14 resealed inconsistent cases while preserving exact baseline candidate ACK, and keeps valid failure/rejected/cancelled/skipped plus real partial/unknown labels.
+- Final isolated focused run: **279 passed, 7 warnings, 34.92s; no skip/xfail**. Same runner/isolation as the initial freeze, with these paths and `-q -p no:cacheprovider --tb=short -rs`:
+  `tests/agent/test_evidence_report_contract.py`, `test_evidence_report_snapshot.py`, `test_evidence_report_frames.py`, `test_candidate_ranker.py`, `test_chat_handler_agent_events.py`, `test_chat_handler_partial_results.py`, `test_scientific_reference_web.py` (all under `tests/agent/`). Warnings remain SWIG/FastAPI deprecations.
+- All five relevant Node scripts passed: `home_agent_task_panel_test.js`, `home_workflow_completion_behavior_test.js`, `home_structured_molecule_render_test.js`, `home_scientific_references_test.js`, `home_evidence_report_test.js`. The Python driver runs the actual positive frame/ACK path and the new `--spec-steps-stdin` path; standalone report script remains the hostile preflight check.
+- `node --check` passed for changed helper and Node test; in-memory `compile(..., 'exec')` with `-B` passed for both changed Python files; `git diff --check` passed. Nothing staged or committed. Prior **1312**/13-Node results below belong to the initial freeze, not a newly repeated full focused run.
+
+SPEC retains approval ownership. Remaining sequence: parent/SPEC re-review of this working diff → QUALITY after SPEC approval → commit/integration only when authorized; full Agent remains in the parent queue.
 
 ## Exact scope and Git lineage
 
@@ -29,7 +90,7 @@ Four descriptors are copied from accepted independent property rows: molecular w
 
 Static checkpoints without a recorded output digest remain eligible only through full checkpoint/live equality plus owned source snapshot, evidence identity and exact static input hash proof. DTO labels that origin `checkpoint_snapshot`; it does not fill missing provenance or mutate the ledger. Dynamic request-binding markers do **not** enable numeric projection. P7 must separately establish admitted references and explicit verified bindings.
 
-## Actual RED → GREEN and offline verification
+## Initial freeze RED → GREEN and offline verification (`bf4a2cf`, historical)
 
 Runner: existing RAG isolation recipe adapted **in memory**, repository cwd replaced by a fresh temporary directory; normal conftest retained, `-B`, plugin autoload disabled, pytest cache disabled. Runtime config/state/DB/cache paths are temporary/nonexistent placeholders; real-service switches are zero. Python sockets denied except Windows asyncio's internal loopback socketpair. No production env/credentials/log/DB/index/weight reads. Node consumes synthetic frames via stdin; no fixture artifacts written into the original tree. No installed dependencies changed.
 

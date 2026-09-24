@@ -6,8 +6,11 @@
   const descriptors = ["molecular_weight", "logp", "tpsa", "qed"];
   const positive = s => s === "available" || s === "partial";
   const states = ["available", "partial", "not_provided", "unavailable", "invalid", "ambiguous"];
-  const reasons = ["none", "missing_source", "source_unavailable", "source_failed", "source_mismatch", "input_unverifiable",
-    "alignment_missing", "row_missing", "invalid_value", "ambiguous_source", "stale_source", "candidate_not_displayed", "partial_source", "unsupported_binding"];
+  const REASONS = Object.freeze({none:"无", missing_source:"未提供独立来源", source_unavailable:"独立来源不可用", source_failed:"来源执行失败",
+    source_mismatch:"来源记录不一致", input_unverifiable:"无法验证排序或性质输入", alignment_missing:"缺少候选对齐证据", row_missing:"未提供该候选的性质行",
+    invalid_value:"性质数值无效", ambiguous_source:"存在多个来源，无法唯一绑定", stale_source:"来源快照已失效", candidate_not_displayed:"候选未展示",
+    partial_source:"来源或证据不完整", unsupported_binding:"当前绑定方式尚不支持"});
+  const reasons = Object.keys(REASONS);
   const check = ok => { if (!ok) throw Error("Invalid scientific report"); };
   const exact = (o, fields) => check(o && !Array.isArray(o) && typeof o === "object" &&
     Object.keys(o).sort().join(" ") === fields.split(" ").sort().join(" "));
@@ -113,14 +116,22 @@
         }
         if (positive(r.state)) {
           check(sources.get(r.source_observation_id)?.tool_name === "property_calculator");
-          count(r.source_row_index); digest(r.row_digest); check(Object.values(r.values).some(v => v !== null));
-          if (r.state === "available") check(sources.get(r.source_observation_id).status === "succeeded" && Object.values(r.values).every(v => v !== null));
+          count(r.source_row_index); digest(r.row_digest); check(Object.values(r.values).every(v => v !== null));
+          if (r.state === "available") check(sources.get(r.source_observation_id).status === "succeeded");
         } else check(Object.values(r.values).every(v => v === null) && r.source_observation_id === null && r.source_row_index === null && r.row_digest === null);
       }
       for (const s of p.steps) {
         exact(s, "step_id tool_name status source_observation_id reason_code message"); text(s.step_id); text(s.tool_name); text(s.message, 256);
-        check(["succeeded", "partial", "failed", "rejected", "cancelled", "skipped", "unknown"].includes(s.status) && reasons.includes(s.reason_code));
-        check(s.source_observation_id === null || sources.has(s.source_observation_id));
+        check(["succeeded", "partial", "failed", "rejected", "cancelled", "skipped", "unknown"].includes(s.status));
+        if (["succeeded", "partial"].includes(s.status)) {
+          const source = sources.get(s.source_observation_id);
+          check(source && s.reason_code === "none" && ["step_id", "tool_name", "status"].every(k => s[k] === source[k]));
+        } else {
+          check(s.source_observation_id === null);
+          const allowedReasons = {failed:["source_failed"], rejected:["source_failed"], cancelled:["source_failed"],
+            skipped:["source_unavailable"], unknown:["source_mismatch", "source_unavailable", "source_failed"]};
+          check(allowedReasons[s.status].includes(s.reason_code));
+        }
       }
       const rank = p.ranking;
       exact(rank, "state reason_code source_observation_id generator_observation_id requested_top_n ranked_candidate_count top_candidates unrankable_candidates");
@@ -167,17 +178,35 @@
     if (!container || !trusted.has(report)) return {mounted:false};
     const box = document.createElement("section"); box.className = "scientific-evidence-report";
     box.style.cssText = "margin:16px 0;padding:16px;border:1px solid #cbd5e1;border-radius:8px;overflow-wrap:anywhere";
-    line(box, "h3", `科研证据报告 · ${report.target.label || "靶点未提供"} · ${labels[report.run_status]}`);
+    line(box, "h3", `靶点候选设计报告 · ${report.target.label || "未提供靶点"} · ${labels[report.run_status]}`);
+    line(box, "p", "本次结果快照");
+    line(box, "h4", "执行结果");
+    line(box, "p", labels[report.run_status]);
+    report.steps.forEach(s => line(box, "p", `${s.tool_name}：${labels[s.status]}；${REASONS[s.reason_code]}；${s.message}`));
+    line(box, "h4", "候选生成与来源");
     report.generations.forEach(g => line(box, "p", g.status === "unknown" ? "生成数量：未知" :
       `生成：请求 ${g.requested_count}，有效 ${g.valid_count}，去重后 ${g.unique_count}，无效 ${g.invalid_count}，重复 ${g.duplicate_count}，展示 ${g.displayed_count}`));
-    report.steps.forEach(s => line(box, "p", `${s.tool_name}：${labels[s.status]}；${s.message}`));
+    report.sources.forEach(s => line(box, "p", `来源 ${s.tool_name}@${s.tool_version} · ${s.model_name || s.method || "模型未记录"} · 版本 ${s.model_version || s.backend_version || "未记录"} · ${s.evidence_id} · ${s.output_digest_origin}`));
+    line(box, "h4", "独立性质证据");
+    report.property_rows.forEach(r => line(box, "p", `${r.candidate_id}：${labels[r.state]}；${REASONS[r.reason_code]}`));
+    if (!report.property_rows.length) line(box, "p", "未提供独立性质证据");
+    line(box, "h4", "实际 Top-N 排序");
     const rank = report.ranking;
-    line(box, "h4", positive(rank.state) ? `实际 Top-${rank.requested_top_n}：展示 ${rank.top_candidates.length} / 可排序 ${rank.ranked_candidate_count}（${labels[rank.state]}）` : `候选排序：${labels[rank.state]}`);
-    rank.top_candidates.forEach((r, i) => line(box, "p", `${i + 1}. ${r.candidate_id} · 优先级分数 ${r.score}；缺失证据：${r.missing_evidence.join("、") || "无"}`));
+    line(box, "p", positive(rank.state) ? `实际 Top-${rank.requested_top_n}：展示 ${rank.top_candidates.length} / 可排序 ${rank.ranked_candidate_count}（${labels[rank.state]}）；${REASONS[rank.reason_code]}` : `候选排序：${labels[rank.state]}；${REASONS[rank.reason_code]}`);
+    rank.top_candidates.forEach((r, i) => {
+      line(box, "p", `${i + 1}. ${r.candidate_id} · 优先级分数 ${r.score}；缺失证据：${r.missing_evidence.join("、") || "无"}`);
+      const weights = r.ranking_evidence.weights_used;
+      line(box, "p", `实际排序权重：性质 ${weights.properties}；ADMET ${weights.admet === null ? "未提供" : weights.admet}；活性 ${weights.activity === null ? "未提供" : weights.activity}`);
+    });
     rank.unrankable_candidates.forEach(r => line(box, "p", `${r.candidate_id}：不可排序（${r.reason}）`));
-    report.sources.forEach(s => line(box, "p", `来源 ${s.tool_name}@${s.tool_version} · ${s.model_name || s.method || "模型未提供"} · 版本 ${s.model_version || s.backend_version || "未提供"} · ${s.evidence_id} · ${s.output_digest_origin}`));
+    line(box, "h4", "未完成步骤与限制");
+    const incomplete = report.steps.filter(s => s.status !== "succeeded");
+    incomplete.forEach(s => line(box, "p", `${s.tool_name}：${labels[s.status]}；${REASONS[s.reason_code]}`));
+    if (!incomplete.length) line(box, "p", "记录中无未完成步骤；不代表证据齐全或实验验证。");
     report.warnings.forEach(w => line(box, "p", w));
-    if (Object.values(report.omitted).some(v => v > 0)) line(box, "p", `展示截断：${JSON.stringify(report.omitted)}`);
+    if (Object.values(report.omitted).some(v => v > 0)) line(box, "p", `展示已截断：${JSON.stringify(report.omitted)}`);
+    line(box, "h4", "科学解释边界");
+    line(box, "p", "计算生成与描述符/排序仅用于候选研究优先级，不代表已验证抑制剂、实验活性或临床结论；对接是否执行以实际工具证据为准。");
     container.appendChild(box); return {mounted:true};
   }
   function findPropertyRow(report, reference, generatorId, candidate) {
@@ -189,7 +218,8 @@
     const box = document.createElement("div");
     line(box, "strong", `独立 RDKit 描述符 · ${labels[row.state]}`);
     const names = ["分子量", "LogP", "TPSA", "QED"];
-    descriptors.forEach((k, i) => line(box, "div", `${names[i]}：${row.values[k] === null ? "未提供" : row.values[k]}`));
+    const units = [" Da", "", " Å²", ""];
+    descriptors.forEach((k, i) => line(box, "div", `${names[i]}：${row.values[k]}${units[i]}`));
     line(box, "small", `来源 ${source.evidence_id} · 行 ${row.source_row_index} · 非实验验证`);
     container.replaceChildren(box); return true;
   }

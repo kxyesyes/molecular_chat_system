@@ -12,6 +12,29 @@
 
 ## Review state and baseline
 
+### Current SPEC2 freeze — revision base `bf4a2cf`
+
+Parent reports the original two P2 findings closed, then authorized minimal TDD fixes for two more approved-spec gaps and a local commit after focused freeze. No full Agent/network/push; parent retains SPEC/QUALITY approval and integration authority. Reviewer-reported 348 passes are not counted as a local run.
+
+- [x] Task 1/6: actual capture-derived four-metric missing matrix (15 null subsets plus four descriptors × absent/bool/string), each from succeeded and genuine partial sources. Reseal Python DTOs; pass the same variants to actualMain/Node. Both boundaries reject incomplete positive rows; genuine partial rows with all four values still pass and bad sidecars preserve baseline ACK/cards.
+- [x] Task 4/6: controlled Chinese `REASONS`, six exact section headings, snapshot marker and fixed MW Da/TPSA Å² units; no rescore/invented values. Actual standard-plan/partial/unverifiable-input captures exercise DOM, not only handcrafted DTOs.
+- [x] Revisit whole approved SPEC. Also align exact title/caveat, absent version label and truncation marker within the same UI-only patch. Per-section evidence/remaining coverage limits are in the [SPEC2 freeze](../../handoff/2026-09-25-g1-evidence-report-freeze.md#spec2-revision--four-or-none-descriptors-and-chinese-ui).
+- [x] RED **33 failed / 26 passed** → GREEN **59 passed**; all 20 mandatory focused suites **1373 passed, 7 existing warnings, no skip/xfail**. Five Node scripts, changed JS syntax, in-memory Python compilation and whitespace checks passed. Full Agent was not run.
+- [ ] Parent/SPEC re-review followed by QUALITY; local freeze commit is authorized but not an approval or permission to push.
+- [ ] Parent-allocated full Agent and later integrated-main verification; G2/recovery and P7 remain separate.
+
+### Prior SPEC revision state — HEAD `bf4a2cf` (historical, original findings now closed)
+
+Faraday SPEC **not approved**, two P2 findings. Parent authorized minimal TDD fixes but **no commit until parent review, no push, no full Agent** (4C next slot). Current review target is the uncommitted diff from `bf4a2cf55ffa34e96c3821d4e0c6ca5bdcf05422`, not an approved replacement commit.
+
+- [x] Task 1/6: reproduce the resealed failed ADMET → `succeeded` forgery using actual standard-plan/capture frames. Require matching accepted source `step_id`/tool/status plus `none` reason for succeeded/partial; require null source and status-specific nonpositive reason for failed/rejected/cancelled/skipped/unknown, in both Python and JS. Preserve source outcomes without rewriting observations.
+- [x] Task 4/6/7: display actual `ranking_evidence.weights_used` in Chinese safe text for each Top-N entry; null is 未提供, no rescore/default values. Python checks copied real ranker weights; actual-main Node tests check DOM values, immutable frames and hostile strings.
+- [x] RED → GREEN: six regression failures became six passes; final narrow focus **279 passed, 7 existing warnings**, five related Node scripts plus syntax/in-memory compile/whitespace checks passed. Actual partial/unknown frames and 14 contradictory resealed step cases covered. See [revision evidence](../../handoff/2026-09-25-g1-evidence-report-freeze.md#faraday-spec-revision--uncommitted-diff-from-bf4a2cf).
+- [ ] Parent/SPEC re-review; SPEC owns remaining approval. QUALITY follows SPEC. No staging/commit in this revision turn.
+- [ ] Full Agent when parent allocates G1's slot; no claim that this narrow rerun repeats the initial 1312-test focused set or tests later main integrations.
+
+No implementation changes outside the two DTO/JS files, two test files and freeze/plan documentation. All original dirty paths/assets, CandidateSet/ACK/restore, source snapshot, full observation match, post-candidate delivery and static-only/P7 boundaries remain intact.
+
 **2026-09-25 execution update:** Parent approved the design and static-only implementation with local commits, no push before double review. Approved docs were committed in `72c1ad4` before merging requested main `e173d43` as `6b9e5c0`. The [freeze handoff](../../handoff/2026-09-25-g1-evidence-report-freeze.md) is the current implementation/verification record. The original planning text and unchecked checklist below are retained as review requirements, not an assertion that implementation is still unauthorized or that every checklist case is complete. Full Agent is queued by parent after Planner → 4C → G2 → ADMET; SPEC → QUALITY must precede publication. Static only; P7A1 reference admission/dynamic binding is not implemented.
 
 **PLAN ONLY, not implementation authorization.** [Design](../specs/2026-09-25-evidence-bound-report-cards-design.md) is the normative exact v1 schema/algorithm. Both docs share `e0d73d1` (audit `1581f3e` + requested main `3a68264`). PR #66 is now on that base; PR #67 candidate `9f3ce84` is CI-pending per parent, not merged here. Do not cherry-pick it opportunistically. Parent controls approved dependency head and functional-batch PR.

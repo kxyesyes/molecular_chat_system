@@ -161,9 +161,9 @@ def _validate_report(value):
             _require(s is not None and s["tool_name"] == "property_calculator")
             _count(r["source_row_index"])
             _digest(r["row_digest"])
-            _require(any(v is not None for v in r["values"].values()))
+            _require(all(v is not None for v in r["values"].values()))
             if r["state"] == "available":
-                _require(s["status"] == "succeeded" and all(v is not None for v in r["values"].values()))
+                _require(s["status"] == "succeeded")
         else:
             _require(all(v is None for v in r["values"].values()))
             _require(all(r[k] is None for k in ("source_observation_id", "source_row_index", "row_digest")))
@@ -173,8 +173,18 @@ def _validate_report(value):
         _text(s["tool_name"])
         _text(s["message"], 256)
         _require(s["status"] in {"succeeded", "partial", "failed", "rejected", "cancelled", "skipped", "unknown"})
-        _require(s["reason_code"] in REASONS)
-        _require(s["source_observation_id"] is None or s["source_observation_id"] in sources)
+        if s["status"] in {"succeeded", "partial"}:
+            source = sources.get(s["source_observation_id"])
+            _require(source is not None and s["reason_code"] == "none"
+                     and all(s[k] == source[k] for k in ("step_id", "tool_name", "status")))
+        else:
+            _require(s["source_observation_id"] is None)
+            allowed_reasons = {
+                "failed": {"source_failed"}, "rejected": {"source_failed"},
+                "cancelled": {"source_failed"}, "skipped": {"source_unavailable"},
+                "unknown": {"source_mismatch", "source_unavailable", "source_failed"},
+            }
+            _require(s["reason_code"] in allowed_reasons[s["status"]])
     rank = value["ranking"]
     _keys(rank, "state reason_code source_observation_id generator_observation_id requested_top_n "
           "ranked_candidate_count top_candidates unrankable_candidates")
