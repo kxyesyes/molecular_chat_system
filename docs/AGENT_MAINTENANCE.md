@@ -1,6 +1,6 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-25。当前分支基于 main `6af7292`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）、类药性评分/证据边界修复（#61）和终态标签修复（#62）。本分支继续提取聊天展示/提示职责，发布状态见[本批交接](handoff/chat-presentation-extraction.md)。代码合并不代表生产已更新。此前隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
+核对日期：2026-09-25。当前分支已同步 main `aa86377`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）、类药性评分/证据边界修复（#61）、终态标签（#62）与聊天展示/提示提取（#63）。本分支继续领域 API 等价拆分，发布状态见[本批交接](handoff/domain-api-separation.md)。代码合并不代表生产已更新。此前隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
 本文记录源码维护入口；是否合并以每节明确标注和 Git 历史为准，不表示已生产部署或通过真实科研验收。后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
@@ -11,6 +11,7 @@
 |---|---|---|
 | 正式网页聊天 | [main.py](../main.py) → [MolecularChatApp](../src/web/app.py) 注册 `/ws` → [ChatHandler.handle_websocket](../src/web/chat_handler.py) | `_create_chat_agent()` 构造 `SupervisorAgent`；没有 ChatHandler 时以 1011 失败关闭，不回退到旧聊天实现。普通聊天不等于科研工具调用。 |
 | 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 `/api/agent/workflows/plan`、`/run` | 使用应用注入的 `_create_supervisor_agent()`，注册表审计、specialist 委派；正式应用的 `run` 经 `ModelRequestGate.submit_background()` 转交 TaskManager，再调用 `SupervisorAgent.run()`，模型使用权覆盖实际 worker 生命周期。没有注入 gate 的独立构造仍兼容直接 submit。 |
+| 领域 HTTP API | [api_routes.py](../src/web/routes/api_routes.py) 兼容注册入口 → 同目录八个领域注册模块 | 原30个操作按原顺序注册；docking/runtime 按应用注入，getter仅在请求时解析。兼容 helper、logger 和 pharm3d 资源仍由 facade 持有，子模块动态使用显式 `_support`，不能每次 setup 新建线程池或运行时。 |
 | 隔离模型决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[decision_chat.py](../src/web/decision_chat.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | 独立 loopback 验收应用；`ChatHandler.process_decision_message()` 是显式服务端桥接，正式 `/ws` 不根据浏览器参数自动启用它。不能把隔离验收通过描述为已切换生产 Agent。 |
 
 当前正式科学入口仍包含路由、计划和工作流执行。仓库同时有模型决策循环，但“代码已存在”不代表正式聊天已使用该循环，也不意味着可以删掉验证、任务运行时或恢复保护。
@@ -80,7 +81,9 @@ ChatHandler / 工作流 API
 
 本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
 
-T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。本分支提取两个无状态聊天模块，ChatHandler 原方法保留薄委托；原有格式、字符预算和延迟求值保持一致，发布/验证以本批交接为准。仍未完成：T11 其他领域路由、其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。
+T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。两个无状态聊天模块已通过 PR #63 合并，原 helper 保留薄委托。当前领域路由拆分按八个模块维护：`docking_routes`、`molecule_utility_routes`、`docking_report_routes`、`reverse_target_routes`、`activity_prediction_routes`、`activity_model_routes`、`molecule_properties_routes`、`agent_metrics_routes`；发布/验证以本批交接为准。固定 API 基线保留各已验证 FastAPI/Pydantic profile 的完整描述，不抹去框架差异；未知版本要求补旧实现基线。性质端点的既有启发式 ADMET 标签问题单独登记，搬迁测试不构成科学有效性证明。
+
+仍未完成：其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 

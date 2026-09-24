@@ -6,8 +6,11 @@
 `aa86377`。合并前复核 head `d4860d7`、main目标、CI7/7、无未解决审查线程或更改请求；
 合并树与审查树一致。下方本地交接的“待发布”是历史状态，不表示仍未合并；未部署或启用模型。
 第3项在独立 `codex/domain-api-separation` 工作树实施：30个接口行为等价拆分，
-旧九文件基线169 passed、1 skipped、11 subtests passed。仍需完成新测试、实现、双审和CI，
-不能当作已完成；细节见[领域API交接](domain-api-separation.md)及[第1–8项台账](remaining-through-step8.md)。
+旧九文件基线169 passed、1 skipped、11 subtests passed；本地实现已完成，双审通过。
+联合5965 passed、3 skipped、7 warnings、11 subtests；本机/CI/deployment框架组合分别68 passed。
+保留两份旧实现固定schema基线，未知版本明确失败，不隐藏框架差异；生产算法/资源生命周期未变。
+发布及CI/合并仍待执行，不能当作第3项已交付或全8项完成。临时profile依赖目录清理被策略拒绝，
+未绕过；具体路径、RED/GREEN及遗留ADMET问题见[领域API交接](domain-api-separation.md)及[第1–8项台账](remaining-through-step8.md)。
 
 ## ChatHandler 纯展示/提示拆分（2026-09-25，本地完成）
 
