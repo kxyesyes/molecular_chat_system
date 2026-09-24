@@ -9,6 +9,7 @@ from src.agent.supervisor import SupervisorAgent
 from src.agent.tooling import build_tool_registry, LegacyPythonToolAdapter, ToolRegistry
 from src.agent.tooling.factory import LegacyQueryInput
 from tests.agent.test_family_activity_tool import family_row
+from tests.agent.test_analysis_contract import analysis_rows
 
 
 class FakeTool:
@@ -39,8 +40,8 @@ def build_tools():
             ],
         ),
         FakeTool("llm_molecular_generator", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
-        FakeTool("property_calculator", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
-        FakeTool("admet_predictor", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
+        FakeTool("property_calculator", analysis_rows("property_calculator", ("CCO", "CCN", "CCC"))),
+        FakeTool("admet_predictor", analysis_rows("admet_predictor", ("CCO", "CCN", "CCC"))),
         # Explicit synthetic family observations; no model assets or inference.
         FakeTool("activity_predictor", [family_row(smiles=s, requested_target="PDE5")
                                         for s in ("CCO", "CCN", "CCC")]),

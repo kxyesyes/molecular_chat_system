@@ -249,7 +249,9 @@ def test_registration_audit_rejects_logic_errors(fault):
 
 def test_optional_missing_registration_report_does_not_block_core():
     from src.agent.tooling.registration import audit_registration, REQUIRED_TOOLS
-    registry = build_tool_registry([Tool(name) for name in REQUIRED_TOOLS])
+    from src.agent.tools.property_calculator import PropertyCalculator
+    registry = build_tool_registry([PropertyCalculator() if name == "property_calculator" else Tool(name)
+                                    for name in REQUIRED_TOOLS])
     report = audit_registration(registry, build_default_specialists())
     assert not report["errors"]
     assert "activity_predictor" in report["unavailable_tools"]
@@ -323,7 +325,9 @@ def test_rag_readiness_can_recover_without_reregistering():
 
 def test_optional_adapter_unavailable_is_reported_without_blocking_others():
     from src.agent.tooling.registration import REQUIRED_TOOLS, audit_registration
-    registry = build_tool_registry([Tool(name) for name in REQUIRED_TOOLS | {"activity_predictor"}])
+    from src.agent.tools.property_calculator import PropertyCalculator
+    registry = build_tool_registry([PropertyCalculator() if name == "property_calculator" else Tool(name)
+                                    for name in REQUIRED_TOOLS | {"activity_predictor"}])
     adapter = registry.resolve("activity_predictor")
     adapter.set_available(False, "model missing")
     report = audit_registration(registry, build_default_specialists())

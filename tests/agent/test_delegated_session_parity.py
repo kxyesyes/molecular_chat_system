@@ -15,6 +15,7 @@ from src.agent.runtime import PreparedWorkflow
 from src.agent.specialists import build_default_specialists
 from src.agent.supervisor import SupervisorAgent, _DelegatedWorkflowExecutor
 from src.agent.tooling import build_tool_registry
+from tests.agent.test_analysis_contract import analysis_rows
 
 
 class FixtureTool:
@@ -30,7 +31,8 @@ class FixtureTool:
             self.barrier.wait(timeout=10)
         return ToolResult.success_result(
             self.name,
-            data=deepcopy(self.data) if self.data is not None else {"input": query},
+            data=(deepcopy(self.data) if self.data is not None else
+                  [dict(analysis_rows(self.name, (query,))[0], input=query)]),
             evidence=[{"source": "synthetic-only", "tool": self.name}],
             artifacts=[WorkflowArtifact("report", "synthetic.json", "Fixture only")],
             quality={"requested_count": 2} if self.name == "llm_molecular_generator" else {},
@@ -96,7 +98,8 @@ def test_corrupt_checkpoint_is_recomputed_and_reported(tmp_path, make_supervisor
     resumed = run(make_supervisor(SQLiteAgentStateStore(path), [tool], steps))
     assert resumed["status"] == "succeeded"
     assert tool.calls == ["CCO", "CCO"]
-    assert resumed["result"]["tool_result_sequence"][0]["data"] == {"input": "CCO"}
+    assert resumed["result"]["tool_result_sequence"][0]["data"] == [
+        dict(analysis_rows(tool.name)[0], input="CCO")]
     assert resumed["result"]["metadata"]["checkpoint_warnings"] == [
         {"step": "properties", "reason": "checkpoint_deserialization_failed"}
     ]
@@ -108,8 +111,8 @@ def test_corrupt_checkpoint_is_recomputed_and_reported(tmp_path, make_supervisor
 def test_delegated_candidate_order_and_evidence_match_common_session(tmp_path, make_supervisor):
     generator = FixtureTool("llm_molecular_generator", [{"smiles": "CCO"}, {"smiles": "CCN"}])
     properties = FixtureTool("property_calculator", [
-        {"smiles": "CCN", "fixture_value": 2},
-        {"smiles": "CCO", "fixture_value": 1},
+        dict(analysis_rows("property_calculator", ("CCN",))[0], fixture_value=2),
+        dict(analysis_rows("property_calculator")[0], fixture_value=1),
     ])
     steps = [
         WorkflowStep("baseline", properties.name, input_data="CCO", output_key="baseline"),
@@ -166,7 +169,9 @@ def test_concurrent_delegated_requests_do_not_share_returned_events(tmp_path, ma
     for response, query in zip(responses, ["CCO", "CCN"], strict=True):
         trace = response["trace_id"]
         assert response["status"] == "succeeded"
-        assert response["result"]["tool_result_sequence"][0]["data"] == {"input": query}
+        name = tool.name if query == "CCO" else other.name
+        assert response["result"]["tool_result_sequence"][0]["data"] == [
+            dict(analysis_rows(name, (query,))[0], input=query)]
         events = response["agent_events"]
         assert events
         assert {event["trace_id"] for event in events} == {trace}
