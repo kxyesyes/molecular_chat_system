@@ -18,7 +18,7 @@
 
 ## Task 1: Reproduce and isolate each case
 
-- [ ] Add regression cases covering both existing TestCase types. Use a temporary outer database/cache, call the actual setUp, and verify `get_db_path(case.root)` and `get_cache_dir(case.root)` remain rooted under that case. Exercise two different cases to prove paths differ. Always invoke doCleanups in finally.
+- [x] Add regression cases covering both existing TestCase types. Use a temporary outer database/cache, call the actual setUp, and verify `get_db_path(case.root)` and `get_cache_dir(case.root)` remain rooted under that case. Exercise two different cases to prove paths differ. Always invoke doCleanups in finally.
 
 ```python
 outer = {"TARGET_DB_PATH": str(tmp_path / "outside.sqlite"),
@@ -36,9 +36,9 @@ assert {key: os.environ.get(key) for key in outer} == outer
 assert not case.root.exists()
 ```
 
-- [ ] Also exercise the actual unittest runner with a synthetic assertion failure, verifying cleanup runs despite failure; preserve unrelated environment variables and restore initially absent variables. Use synthetic fixtures only, no user environment reads.
-- [ ] Run these new tests with MedChat Python under the established sanitized temporary runner. Record assertion failures before changing setup. Existing diagnostic RED (10 failures) is supporting evidence, not a substitute for the new regression RED.
-- [ ] Minimal setup in both existing cases, using scoped MonkeyPatch for only the two keys and registering cleanup immediately after resource creation:
+- [x] Also exercise the actual unittest runner with a synthetic assertion failure, verifying cleanup runs despite failure; preserve unrelated environment variables and restore initially absent variables. Use synthetic fixtures only, no user environment reads.
+- [x] Run these new tests with MedChat Python under the established sanitized temporary runner. Record assertion failures before changing setup. Existing diagnostic RED (10 failures) is supporting evidence, not a substitute for the new regression RED.
+- [x] Minimal setup in both existing cases, using scoped MonkeyPatch for only the two keys and registering cleanup immediately after resource creation:
 
 ```python
 environment = pytest.MonkeyPatch()
@@ -51,12 +51,12 @@ self.root = Path(self.temp_dir.name)
 ```
 
 Retain each existing temporary prefix. Remove now-redundant tearDown directory cleanup only after failure-path tests prove equivalent cleanup. Existing nested patch.dict tests must still override the isolated environment and prove configured path precedence unchanged.
-- [ ] Re-run new regression and both existing modules. Record which failure remains before changing CLI encoding.
+- [x] Re-run new regression and both existing modules. Record which failure remains before changing CLI encoding.
 
 ## Task 2: Explicit CLI encoding and network guard
 
-- [ ] Add a regression that wraps the real `subprocess.run`, asserts parent encoding and child output encoding, and still invokes the actual CLI. Preserve strict exit=1 and parsed PDE missing-target assertions. Use Chinese fixture text to ensure a non-ASCII round trip, not just ASCII JSON.
-- [ ] Run RED before the CLI change. Then change only this call:
+- [x] Add a regression that wraps the real `subprocess.run`, asserts parent encoding and child output encoding, and still invokes the actual CLI. Preserve strict exit=1 and parsed PDE missing-target assertions. Use Chinese fixture text to ensure a non-ASCII round trip, not just ASCII JSON.
+- [x] Run RED before the CLI change. Then change only this call:
 
 ```python
 completed = subprocess.run(
@@ -65,7 +65,7 @@ completed = subprocess.run(
 )
 ```
 
-- [ ] In `test_local_download_returns_cached_file_without_network` and `test_send_to_docking_uses_readable_chinese_message`, guard the real downloader HTTP request and retain all original assertions:
+- [x] In `test_local_download_returns_cached_file_without_network` and `test_send_to_docking_uses_readable_chinese_message`, guard the real downloader HTTP request and retain all original assertions:
 
 ```python
 with patch("src.target_search.downloader.requests.get",
@@ -75,15 +75,15 @@ request.assert_not_called()
 ```
 
 Use the equivalent context around `service.send_to_docking(structure["id"])`. Add a boundary regression that forces the cache path to miss and proves the guard rejects an actual download attempt; do not make that guard the product behavior and do not replace downloaded data with fallback results.
-- [ ] Run GREEN in the original shared absolute path runner without `-X utf8`; run both modules in reversed order. No real HTTP/model opt-in. Check no reader-thread UnicodeDecodeError appears.
+- [x] Run GREEN in the original shared absolute path runner without `-X utf8`; run both modules in reversed order. No real HTTP/model opt-in. Check no reader-thread UnicodeDecodeError appears.
 
 ## Task 3: Review, combined regression and handoff
 
-- [ ] Run `python -B -m pytest tests/test_target_test_isolation.py tests/test_target_db_validation.py tests/test_target_search.py -q -p no:cacheprovider` through the sanitized temporary environment from the existing RAG plan. Also run reversed existing-module order with the same hostile outer target paths.
-- [ ] Run related target/cache and Agent target-contract tests identified with `rg --files tests`; preserve platform skips and record exact paths/counts. No blanket network guards across unrelated suites.
+- [x] Run `python -B -m pytest tests/test_target_test_isolation.py tests/test_target_db_validation.py tests/test_target_search.py -q -p no:cacheprovider` through the sanitized temporary environment from the existing RAG plan. Also run reversed existing-module order with the same hostile outer target paths.
+- [x] Run related target/cache and Agent target-contract tests identified with `rg --files tests`; preserve platform skips and record exact paths/counts. No blanket network guards across unrelated suites.
 - [ ] Independently review spec compliance, then code quality; close any findings with RED/GREEN. The coordinator may run regressions while review is active, without editing the implementer's files.
-- [ ] Run `git diff --check`, in-memory compilation of modified Python, and `git diff --name-only 4ff859e -- src data config .github` (must be empty). Review assertion diff and secrets scan before staging exact task files.
-- [ ] Write handoff with baseline, commands, first failures, final results and remaining limits. Record PR57 separately as already merged `9eed743`; this batch does not change Web partial. Commit only approved test/docs files, no push/merge without the corresponding publication gate.
+- [x] Run `git diff --check`, in-memory compilation of modified Python, and `git diff --name-only 4ff859e -- src data config .github` (must be empty). Review assertion diff and secrets scan before staging exact task files.
+- [x] Write handoff with baseline, commands, first failures, final results and remaining limits. Record PR57 separately as already merged `9eed743`; this batch does not change Web partial. Commit only approved test/docs files, no push/merge without the corresponding publication gate.
 
 ## Self-review
 

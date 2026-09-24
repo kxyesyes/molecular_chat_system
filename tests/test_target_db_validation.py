@@ -1,9 +1,12 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -12,11 +15,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 class TargetDatabaseValidationTest(unittest.TestCase):
     def setUp(self):
+        environment = pytest.MonkeyPatch()
+        self.addCleanup(environment.undo)
+        environment.delenv("TARGET_DB_PATH", raising=False)
+        environment.delenv("TARGET_CACHE_DIR", raising=False)
         self.temp_dir = tempfile.TemporaryDirectory(prefix="target_db_validation_")
+        self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
 
     def _write_minimal_pde_seed(self):
         db_dir = self.root / "data" / "target_db"
@@ -70,7 +75,14 @@ class TargetDatabaseValidationTest(unittest.TestCase):
             "--strict",
             "--json",
         ]
-        completed = subprocess.run(command, capture_output=True, text=True, cwd=PROJECT_ROOT)
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            cwd=PROJECT_ROOT,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
+        )
 
         self.assertEqual(completed.returncode, 1)
         report = json.loads(completed.stdout)
