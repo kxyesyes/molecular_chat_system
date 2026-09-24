@@ -1,6 +1,6 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-24。源码基线：已合并的 main 提交 `7ffe41fb11806030576a44863247c2ebc7dd5cc7`（含 T06-C 与 RAG 服务/索引归位）。
+核对日期：2026-09-24。源码基线：已合并的 main 提交 `493dfdcf94959a260f690f73a06a7fbc9a57c72a`（含 RAG、活性和对接工具类型契约）。
 本文记录该源码基线的维护入口，不表示已生产部署或通过真实科研验收；后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
@@ -41,6 +41,20 @@ ChatHandler / 工作流 API
 
 [ModelDecisionLoop](../src/agent/harness/decision_loop.py) 通过决策协议、任务约束和预算控制动态追加动作，复用 `WorkflowRunSession`。其隔离入口、允许工具集合和续接存储必须由服务端组装，不接受浏览器任意覆盖。
 
+### 已接入 Registry 的类型契约
+
+[build_tool_registry](../src/agent/tooling/factory.py) 按规范工具名选择以下专用 `LegacyPythonToolAdapter` 子类；没有为它们建立第二个执行器或结果规范化循环。
+
+| 规范工具名与实现 | 输入和结果边界 |
+|---|---|
+| `rag_search`：[rag_contract.py](../src/agent/tooling/rag_contract.py) | 接受字符串或字符串 query；检查检索记录的 source_index、有限相似度与来源结构，保留额外 CSV 字段。来源字段形状正确不等于来源真实，索引/manifest/行映射验证仍由 RAG 服务负责。`rag_database_search` 经工厂别名归一化进入同一适配。 |
+| `activity_predictor`：[activity_contract.py](../src/agent/tooling/activity_contract.py) | 兼容字符串与结构化分子/靶点输入；检查原始和规范化成功、partial、失败观察及已知失败快照，复用活性科学校验。不训练、加载或启用模型，不改活性阈值。缺模型/demo 不能因通过类型校验就成为真实预测。 |
+| `molecular_docking`：[docking_contract.py](../src/agent/tooling/docking_contract.py) | 兼容文本、单层 query 包装和直接结构；可执行结构须显式给出 receptor、ligand/SMILES、center 与 size，不能借作业模型默认值补 box。复用 pose/能量/输入证明和 OpenSandbox hash、gvisor、image、cleanup 检查；不可信结果按现有规则清除。通过已验证快照传递的沙盒要求不能被外层 local 标记降低。 |
+
+三个输出视图的 `schema_version` 均为类元数据 `1`，不是新增 HTTP 字段。它们校验观察而不把 `model_dump()` 投影写回科学结果；既有 `execute_tool_compat` 继续负责结果规范化，合法状态、warnings、artifacts、evidence、quality 与来源不应在类型迁移中丢失。工具归属、一次调用内的超时/并发槽与关闭仍沿用既有适配层。
+
+其余工具尚使用 `LegacyQueryInput(query: Any)` / `output_schema=None`，但并非没有领域或 Session 校验。`prepare_receptor`、`prepare_ligand`、`run_docking`、`get_docking_result` 四个辅助工具也未因本次契约迁移开启其 `run()` 执行路径。类型契约和合成 pose 测试不替代真实 Vina 或模型验收。
+
 ## 3. 模型、RAG、持久化各自负责什么
 
 - **主聊天模型**：应用配置加载与切换在 [app.py](../src/web/app.py)、[user_llm_config.py](../src/web/user_llm_config.py)，OpenAI-compatible 适配在 [openai_compatible_model.py](../src/agent/openai_compatible_model.py)。[model_lifecycle.py](../src/web/model_lifecycle.py) 让聊天、设计推荐、后台工作流共享排空边界：在途请求固定模型，切换等待实际消费者结束后关闭旧客户端。取消或任务表终态不等于底层 worker 已退出；挂起的 worker 仍可能让排空持续等待，本机制不强杀它。配置值、Key、运行时用户文件不得进入文档或 Git。
@@ -58,11 +72,11 @@ ChatHandler / 工作流 API
 | [react_agent.py](../src/agent/react_agent.py)、[agent_executor.py](../src/agent/agent_executor.py) | 旧接口仍有导出或测试支持，不是正式聊天工厂。先核对调用者并迁移科学断言，不能仅因名称旧就删除。 |
 | [routes/page_routes.py](../src/web/routes/page_routes.py)、[routes/websocket_routes.py](../src/web/routes/websocket_routes.py) | `routes/__init__.py` 仍公开导出。页面兼容层已委托 `register_main_routes()`；WebSocket 兼容注册直接委托 ChatHandler。不得在正式应用重复注册 `/ws`。 |
 | 已删除的 app.py 旧私有聊天/提示函数、静态备份 | `_handle_websocket` 及仅服务它的三个提示 helper、旧应用级历史已删除，正式 `/ws` 仍唯一委托 ChatHandler。无引用的 `activity_prediction_v2.legacy.backup.js` 已删除；公共占位 `script.js`、`activity_prediction_v2.js` 保留，真实页面与静态路由测试检查加载次序、200/404 和清理。 |
-| 工具输入/输出 schema | `tooling/factory.py` 仍使用 `LegacyQueryInput(query: Any)`，`output_schema=None`；并非没有校验（适配器、领域和 Session 校验仍在）。T10 需逐工具迁移，不另造工作流 DSL。 |
+| 工具输入/输出 schema | RAG、活性、对接已接入上表专用类型边界；其他工具仍为通用兼容边界。逐工具迁移，不将“已迁移三个工具”说成所有工具都已类型化，也不另造工作流 DSL。 |
 
-本基线已包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位，以及独立批准的测试分层与新旧模板签名适配。
+本基线已包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位、T10-A 三个优先工具类型契约，以及独立批准的测试分层与新旧模板签名适配。
 
-仍未完成：T09 科研对象跨轮引用；T10 逐工具类型契约与 Planner 职责整理；T11 其他领域路由拆分和旧 Agent 支持面收缩。其设计与实现需分别验证，不能把匿名身份、一个目录迁移或文档更新视为这些任务已完成。正式首页仍未切换到隔离模型决策入口。
+仍未完成：T09 科研对象跨轮引用；T10-B Planner 职责整理；T11 其他领域路由、聊天提示/展示职责拆分和旧 Agent 支持面收缩。其他工具类型化仍须按实际契约逐项评估。其设计与实现需分别验证，不能把匿名身份、三个工具迁移或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
@@ -75,6 +89,7 @@ python -B -m pytest tests/agent/test_app_supervisor_entrypoint.py tests/test_web
 python -B -m pytest tests/agent/test_supervisor_delegation.py tests/agent/test_workflow_run_session.py tests/agent/test_workflow_resume.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_candidate_alignment.py tests/agent/test_registration_consistency.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
 python -B -m pytest tests/test_rag_service_boundary.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_rag_tool_contract.py tests/agent/test_activity_tool_contract.py tests/agent/test_activity_contract_integration.py tests/agent/test_docking_tool_contract.py tests/agent/test_docking_contract_integration.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_chat_input_budget.py tests/test_model_request_lifecycle.py tests/test_design_model_switch.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_legacy_chat_entry_cleanup.py tests/agent/test_chat_local_cleanup.py tests/test_static_placeholder_cleanup.py tests/test_main_routes_template_compat.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_no_legacy_skill_layer.py -q -p no:cacheprovider
