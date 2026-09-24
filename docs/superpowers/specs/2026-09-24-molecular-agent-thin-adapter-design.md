@@ -68,9 +68,12 @@ should_use_tools 采用规范 Router/policy 判定，不执行科学工具，不
   不能从按工具名聚合的字典重建序列。
 - 每条结果完整保留 data、formatted、error、warnings、artifacts、evidence、quality 及扩展来源。
   复用 canonical 序列化，不把类型 schema 当投影丢弃数据。
-- success 只表示整体完整成功；部分成功必须 `success=false, partial=true, status=partial`，
-  失败为 false/false/failed。这是修复旧错误成功语义，不改字段类型。
-  从规范 AgentResult/status 取得真值，不照抄 Supervisor 为聊天兼容设置的 success-or-partial。
+- success 只表示整体完整成功；部分成功必须 `success=false, partial=true, status=partial`。
+  `status` 原样保留规范 RunOutcome 的 completed/partial/failed/rejected/cancelled；
+  普通失败、拒绝、取消均不得变成 success，但不能将后两者压平为 failed。
+  混合观察的终态优先级直接遵循 AgentResult，不在适配层再次汇总或猜测。
+  这是修复旧错误成功语义，不改字段类型；从规范 AgentResult/status 取得真值，
+  不照抄 Supervisor 为聊天兼容设置的 success-or-partial。
 - used_tools 保留有序的实际尝试工具名（不去重），不把失败工具说成成功；是否成功看每项状态。
 - error 保留规范错误结构；partial 的步骤错误仍保留在各项结果，即使总体 error 为空。
 - response 来自规范 final_answer/message，不能额外调用 LLM 改写科学结果。
@@ -89,6 +92,8 @@ should_use_tools 采用规范 Router/policy 判定，不执行科学工具，不
 6. None 与省略、显式有效数量、0/False/非整数/越界、文本数量冲突保持既有批准语义。
 7. 生成工具接收正确 temperature/count；主 LLM 不替换本地生成器。
 8. optional tool 缺失、异常、重复调用、取消/超时保留规范错误和既有资源清理。
+   明确覆盖 rejected/cancelled 的外层状态与有序观察，以及混合成功/失败/取消时
+   与 AgentResult 一致的汇总；unavailable/invalid_input 等逐工具状态不压平。
 9. 老导入/签名/查询接口及正常非生成输入兼容；更新旧路由测试时只替换已批准行为，
    保留输入、数量和科学门禁断言，不删除保护用例。
 
@@ -102,3 +107,17 @@ Session/WorkflowExecutor、test_agent_llm_wiring 和反幻觉测试；再跑 Age
 报告真实 RED/GREEN、跳过原因、状态兼容变化与剩余 ReAct 风险。
 独立分支、精确暂存，不修改原始混杂工作树；发布和合并按仓库审批规则办理。
 本设计不宣称整个 T11 或任务书完成。书面设计确认后再写实施计划并进入 TDD。
+
+## 书面审阅前的状态契约复核
+
+2026-09-24 对照 `contracts/result.py` 的 `AgentResult.from_tool_results()` 和
+`to_legacy_dict()`、`contracts/scientific.py` 的 RunOutcome 核查，补明拒绝/取消不能
+被适配层压平为 failed；含成功观察的取消仍遵循既有 partial 汇总，不另造优先级。
+这是设计修订，不是已实施的适配器修复。
+
+使用已登记的隔离 runner，只替换当前 worktree 路径、清除继承配置并使用临时数据：
+`tests/agent/test_contracts.py` 实测 **5 passed，0.33s，exit0**；
+`tests/agent/test_scientific_contracts.py tests/agent/test_agent_event_stream.py`
+实测 **17 passed，1.07s，exit0**。现有用例实际覆盖 repeated tools、partial、
+rejected/cancelled 的序列化和混合取消；这些通过证明规范基线，不代表旧入口已修复。
+本轮仅修改本文，未改生产代码或测试，未调用真实工具、模型、部署服务。
