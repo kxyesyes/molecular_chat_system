@@ -147,6 +147,85 @@ for (const eventType of ["agent_event", "task_started", "tool_completed"]) {
   );
 }
 
+for (const event of ["planning_completed", "tool_completed"]) {
+  for (const [progress, progressText] of [
+    [undefined, "执行中"], [0.4, "40%"], [1, "100%"],
+  ]) {
+    const result = resolveAgentEventPresentation({ event, progress });
+    assert.strictEqual(result.progressText, progressText,
+      `${event} must show intermediate progress, not task completion`);
+    assert.strictEqual(result.terminal, false);
+    assert.strictEqual(result.itemClass, "is-complete",
+      "completed steps must retain their existing styling");
+  }
+}
+
+const terminalLabels = {
+  task_completed: "已完成",
+  task_partial: "部分完成",
+  task_failed: "失败",
+  task_rejected: "已拒绝",
+  task_cancelled: "已取消",
+};
+const terminalClasses = {
+  task_completed: "is-complete",
+  task_partial: "is-warning",
+  task_failed: "is-error",
+  task_rejected: "is-running",
+  task_cancelled: "is-running",
+};
+for (const [event, label] of Object.entries(terminalLabels)) {
+  for (const progress of [undefined, 0, 0.4, 1]) {
+    const result = resolveAgentEventPresentation({ event, progress });
+    assert.strictEqual(result.progressText, label,
+      `${event} label must take precedence over progress=${progress}`);
+    assert.strictEqual(result.terminal, true);
+    assert.strictEqual(result.itemClass, terminalClasses[event]);
+  }
+}
+assert.strictEqual(
+  resolveAgentEventPresentation({ event: "task_partial", type: "task_completed", progress: 1 }).progressText,
+  "部分完成",
+  "the canonical event must also determine the terminal label"
+);
+assert.strictEqual(
+  resolveAgentEventPresentation({ type: "task_cancelled", progress: 1 }).progressText,
+  "已取消",
+  "terminal labels must also support the legacy type field"
+);
+
+for (const event of ["future_event", "task_completed_extra", "constructor", "toString", "__proto__", "hasOwnProperty"]) {
+  for (const [progress, progressText] of [
+    [undefined, "执行中"], [-0.1, "0%"], [0.4, "40%"], [1.1, "100%"],
+  ]) {
+    const result = resolveAgentEventPresentation({ event, progress });
+    assert.strictEqual(result.progressText, progressText,
+      `${event} must fall back to normal progress, not a task-terminal label`);
+    assert.strictEqual(result.terminal, false);
+  }
+}
+
+const formatToolName = vm.runInNewContext(`(${extractFunction("formatToolName")})`);
+const getAgentEventLabel = vm.runInNewContext(
+  `(${extractFunction("getAgentEventLabel")})`,
+  { formatToolName }
+);
+for (const event of ["task_partial", "task_rejected", "task_cancelled"]) {
+  assert.strictEqual(getAgentEventLabel(event), terminalLabels[event]);
+  assert.strictEqual(getAgentEventLabel(event, "property_calculator"), terminalLabels[event]);
+}
+assert.strictEqual(getAgentEventLabel("task_completed"), "任务完成");
+assert.strictEqual(getAgentEventLabel("task_failed"), "任务失败");
+assert.strictEqual(getAgentEventLabel("future_event"), "Agent 事件");
+for (const [event, label, toolLabel] of [
+  ["tool_started", "工具调用", "调用 属性计算"],
+  ["tool_completed", "工具完成", "属性计算 完成"],
+  ["tool_failed", "工具失败", "属性计算 失败"],
+]) {
+  assert.strictEqual(getAgentEventLabel(event), label);
+  assert.strictEqual(getAgentEventLabel(event, "property_calculator"), toolLabel);
+}
+
 const requiredLazyPanelSnippets = [
   "const presentation = resolveAgentEventPresentation(event);",
   "presentation.eventType",

@@ -26,9 +26,9 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '/static/js/home/main.js?v=20260924-reference-visible-v1'
+    '/static/js/home/main.js?v=20260925-terminal-labels-v1'
   ),
-  "homepage must cache-bust the partial terminal styling fix"
+  "homepage must cache-bust the task terminal labels fix"
 );
 
 function extractFunction(functionName) {
@@ -152,8 +152,8 @@ const partialTerminalPresentation = resolveAgentEventPresentation({
 });
 assert.strictEqual(
   partialTerminalPresentation.progressText,
-  "100%",
-  "partial terminal events must display 100% progress"
+  "部分完成",
+  "partial terminal labels must take precedence over 100% progress"
 );
 assert.strictEqual(
   partialTerminalPresentation.itemClass,
