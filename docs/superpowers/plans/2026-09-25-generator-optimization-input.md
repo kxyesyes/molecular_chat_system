@@ -136,7 +136,8 @@ def test_supported_legacy_prose(boundary):
     tool, dispatch, _ = boundary
     tool.execute('optimize CCO into 2 molecules')
     assert dispatch.call_args.args[0]['base_smiles'] == 'CCO'
-    assert dispatch.call_args.args[0]['count'] == 2
+    # Baseline execution confirms optimization prose defaults to one.
+    assert dispatch.call_args.args[0]['count'] == 1
 
 
 def test_seed_spelling_reaches_real_prompt():
@@ -373,3 +374,93 @@ Expected: all pass. Existing generator tests cover metadata/method/text count pr
 ## Current design-turn verification
 
 During the design turn, only read-only source/Git inspection and creation of the two Markdown documents were performed. No runtime failure reproduction, pytest, compileall, model or scientific execution occurred then. Parent approval subsequently opened bounded TDD; full Agent/full-suite testing remains queued. Unchecked implementation steps are not evidence of completion.
+
+## Approved implementation execution record — frozen for parent review
+
+The results in this section supersede the planned checklist as execution evidence.
+No independent SPEC/QUALITY review is claimed by the implementer.
+
+### Baseline and authority
+
+- Parent approved bounded TDD, the two-document commit, and merge of reviewed `origin/main` at `1bba025`.
+- Corrected the historical audit location before the document commit: it is in the separate `historical-residual-disposition` worktree, not missing; reading it was unnecessary.
+- Document commit: `2efe821` (`docs: specify generator optimization input fidelity`).
+- Merge commit/current HEAD: `5e84087` (`origin/main` merged without conflicts). No changes to generator/parser/AGENTS/standards were introduced by that merge.
+- Implementation branch: `codex/generator-optimization-input`. Four source/test files and this execution record remain uncommitted and unstaged for parent double review. No push or PR.
+
+### Test isolation and commands
+
+The default Python and Anaconda base interpreter lacked RDKit; no packages were installed. All test evidence below uses the already installed `C:/Users/xkx52/.conda/envs/MedChat/python.exe` (pytest 9.1.0, RDKit 2025.03.6), as documented by the prior integration plans.
+
+Used the checked-in isolation runner in `docs/superpowers/plans/2026-09-24-rag-service-extraction.md`, with its repository set to this worktree, temporary prefix changed to `medchat-g2-`, and the evaluation-fixture copy block removed entirely because these focused tests do not need it. The runner clears inherited non-OS environment values without displaying them, configures temporary runtime paths and disabled real-service switches, changes cwd to the temporary directory, and invokes normal pytest with:
+
+```text
+<MedChat Python> -B -m pytest <absolute test paths> -q -p no:cacheprovider --tb=short -rs
+```
+
+No real `.env`, credentials, scientific assets, indexes, models, or external services were read/called by this workflow. Model outputs are fixed test doubles, not scientific evidence. The full isolation wrapper is recoverable from that checked-in runner; it creates no persistent runner file. The corrected RED summary alone used `--tb=no` to avoid repeating identical failure traces.
+
+### RED → GREEN evidence
+
+| Run | Exact test scope (paths below) | Result |
+| --- | --- | --- |
+| First actual-execution RED | NEW `::test_invalid_input_never_dispatches[False-optimize SMILES: CCO)((]` | 1 failed, 1.44s, exit 1. Actual `execute` dispatched once with `base_smiles='CCO'` for malformed `CCO)((`. |
+| Initial complete NEW RED | NEW | 73 failed, 18 passed, 4.06s, exit 1. Included one incorrect planned count expectation. |
+| Corrected complete NEW RED, before production edits | NEW | 72 failed, 19 passed, 1.20s, exit 1. Missing exception-type tests also failed as expected because the new subtype did not yet exist. |
+| Minimal implementation GREEN | NEW | 91 passed, 1.90s, exit 0. |
+| Six-file focus GREEN | FOCUS | 391 passed, 162 subtests passed, 3.24s, exit 0. |
+| Additional shared-parser consumer GREEN | CONSUMERS | 109 passed, 1.22s, exit 0. |
+
+`NEW` is `tests/agent/test_generator_optimization_input.py`.
+
+`FOCUS` is exactly:
+
+```text
+tests/agent/test_generator_optimization_input.py
+tests/test_llm_molecular_generator.py
+tests/agent/test_explicit_molecular_input.py
+tests/agent/test_reverse_target_complete_input.py
+tests/agent/test_drug_likeness_evidence.py
+tests/agent/test_generation_temperature_transport.py
+```
+
+`CONSUMERS` is exactly:
+
+```text
+tests/agent/test_admet_whole_input.py
+tests/agent/test_property_report_boundaries.py
+```
+
+The two final disjoint focused runs total 500 passed and 162 subtests passed, with no skips or warnings reported. This is not a full Agent or whole-repository run.
+
+The only correction to the approved test blueprint was evidence-based: baseline `optimize CCO into 2 molecules` uses the existing default count **1**, not 2. The test and blueprint now preserve 1. Production generation-count code was not changed. The focused test module also explicitly covers non-string, empty, blank, overlong, and oversized-batch inputs remaining ordinary invalid input rather than `MolecularInputMissing`.
+
+### Static checks and scope
+
+- `compileall -q src scripts`: passed with the MedChat interpreter and a temporary `sys.pycache_prefix`; no source imports/model execution and no bytecode left in the worktree.
+- `git diff --check`: no whitespace errors. New test file separately checked with `git diff --no-index --check`; no whitespace diagnostics (its diff exit 1 reflects a new file).
+- AST comparison against HEAD: all 16 generator methods other than `__init__`, `execute`, and `_analyze_generation_intent` are identical, including `should_use`, normalization, retries, prompts, output filtering and formatting. No method added/removed.
+- Shared parser lexical helper ASTs and grammar constants are identical. Only missing-candidate classification, import-unavailable type, and docstring were changed there; the new exception remains a `ValueError` subtype.
+- Diff against `1bba025` confirms Base, all `src/agent/tooling` files, generation-request contracts and RXN are untouched. No Package4C adapter or staged-helper activation.
+- Parsing occurs once during intent analysis before the retry loop, not in selection or per retry. All parsed batch members must validate before first-seed selection.
+
+### Frozen source/test snapshot
+
+SHA-256 of the final four implementation files (the plan record itself is excluded):
+
+```text
+src/agent/tools/llm_molecular_generator.py 0632ba9a9969d892853189c904130cecbfffd987265664aab6e2474f479a6e30
+src/agent/tools/molecular_input.py 9f6dea9398050367c2e573035090c68d81e8037bf52c1d8407caeec1a154e9f4
+tests/test_llm_molecular_generator.py 3ca8a7d03a40c825fab58069a159c7fa5e580fa1042c6c3ffd1e8fe3f2c3e4fb
+tests/agent/test_generator_optimization_input.py 3d93ce32dbcd1736c6c1534460ec199e0909d5c97a13f7a3633884782786871e
+```
+
+### Remaining parent gates
+
+Full Agent and whole-repository pytest were **not run**, honoring the parent-managed 4B RED/GREEN queue; wait for notification before using that slot. Independent SPEC then QUALITY review, and later Package4C integration regression, remain parent-owned. No real-model/scientific acceptance, health check, network access, implementation commit, push, or PR was performed. The conservative optimization-only pipe rejection remains the documented compatibility restriction.
+
+## Independent review checkpoint
+
+Independent SPEC approved the frozen four-file implementation: the reviewer reproduced the baseline in memory (72 failed, 19 passed), then independently ran the six-file set (391 passed, 162 subtests passed), checking exact seed spelling and one parse across retries. Independent QUALITY approved with its own isolated 500 passed and 162 subtests passed. Both verified the recorded hashes and no changes to out-of-scope algorithms, dispatch counts or cleanup.
+
+The parent will commit only these reviewed files/docs, integrate current reviewed main, and run focused plus full Agent tests. Full Agent is still pending; reviews and focused results are not a substitute for that gate or exact-head CI. Original dirty checkout and production assets remain untouched.

@@ -20,6 +20,11 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from .molecular_input import (
+    MolecularInputMissing,
+    MolecularInputUnavailable,
+    parse_molecular_smiles,
+)
 from src.agent.contracts.generation_request import (
     DEFAULT_GENERATION_COUNT,
     GenerationRequestError,
@@ -69,6 +74,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
             )
         )
         
+        self.exclude_words.update({'optimize', 'improve', 'modify'})
         self.llm = llm_model
         
         # LLM生成提示词模板
@@ -181,10 +187,25 @@ class LLMMolecularGenerator(BaseMolecularTool):
             logger.info(f"使用LLM生成分子: {query_text[:100]}")
             
             # 分析查询意图
-            intent = self._analyze_generation_intent(
-                query_text,
-                requested_count=requested_count,
-            )
+            try:
+                intent = self._analyze_generation_intent(
+                    query_text,
+                    requested_count=requested_count,
+                )
+            except MolecularInputUnavailable:
+                result['message'] = 'SMILES 校验暂不可用，未执行分子生成。'
+                result['error'] = {
+                    'code': 'tool_unavailable',
+                    'message': result['message'],
+                    'details': {'reason': 'optimization_input_validation_unavailable'},
+                }
+                return result
+            except ValueError:
+                return self._invalid_input_result(
+                    query_text,
+                    '优化输入中的 SMILES 无效或不受支持；请提供完整结构，不会提取片段替代。',
+                    details={'reason': 'invalid_optimization_input'},
+                )
             intent['temperature'] = temperature  # 注入温度参数
             intent['target_evidence'] = target_evidence
             intent['count'] = requested_count
@@ -440,8 +461,13 @@ class LLMMolecularGenerator(BaseMolecularTool):
         # 检查是否是优化任务
         if any(word in query_lower for word in ['optimize', '优化', 'improve', '改进', 'modify', '修改']):
             intent['type'] = 'optimization'
-            # 提取基础SMILES
-            smiles_list = self.extract_smiles(query)
+            if '|' in query:
+                raise ValueError('CXSMILES extensions are not supported for optimization.')
+            try:
+                smiles_list = parse_molecular_smiles(query, self)
+            except MolecularInputMissing:
+                # Only genuinely seedless prose retains description generation.
+                smiles_list = []
             if smiles_list:
                 intent['base_smiles'] = smiles_list[0]
         
