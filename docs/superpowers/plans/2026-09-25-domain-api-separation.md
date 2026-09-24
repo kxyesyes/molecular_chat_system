@@ -98,7 +98,7 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     setup_agent_metrics_routes(app, _support=support)
 ```
 
-Verify the utility endpoint's actual service dependency before fixing its signature: if it currently uses the injected docking service, pass that original object explicitly rather than creating a new one. Keep `current_task_runtime` a per-registration closure inside docking, resolving only on durable requests.
+The three utility endpoints use their current local RDKit imports and do not consume the injected docking service; keep their setup signature as shown. Keep `current_task_runtime` a per-registration closure inside docking, resolving only on durable requests.
 
 - [ ] Run boundary and existing focused suites to GREEN. Compare original/new endpoint ASTs accounting only for lexical relocation/support qualification, but do not use AST equality as a substitute for behavior tests.
 
