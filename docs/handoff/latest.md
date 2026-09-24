@@ -1,5 +1,12 @@
 # Latest handoff
 
+## 英文候选筛选短语（2026-09-24，本地独立分支）
+
+`codex/target-selection-phrase-pr` 修复句尾 `and/逗号 select top N` 被误当未知靶点的问题。
+只改共享解析边界，保留未知/多靶点/否定/选择性澄清和科学证据门禁。
+TDD失败记录、实际测试与发布依赖见[本批交接](target-selection-phrase.md)。
+本轮不合并 PR #53、不推送、不部署；需在后续获授权对齐 #53 后再发布，不能把本地通过当作已上线。
+
 ## T10-A：RAG 工具类型契约（2026-09-24）
 
 本批分支 `codex/rag-typed-contract-pr`，基于 main `3974f96`，只迁移注册表中的
