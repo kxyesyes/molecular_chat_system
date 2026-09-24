@@ -1,4 +1,4 @@
-# P8-A: Offline Strict Report Aggregation — Dual Review Approved, Integration Pending
+# P8-A: Offline Strict Report Aggregation — Reviewed Local Integration, Full Decision Pending
 
 ## Scope / baseline
 
@@ -160,3 +160,9 @@ Parent now reports **SPEC APPROVE — Euclid**, covering the approved specificat
 Historical failed reviews, counterexamples and RED outcomes above remain intact: initial Euclid four-P2 corrections, Socrates four-P2 corrections, and the second Socrates cross-slot ownership P2. Approval applies after those corrections, not retroactively to the failed freezes. Core source/test raw-byte SHA-256 remains the latest `14ae0da3...` / `828151e4...` pair recorded above.
 
 Parent authorizes an exact four-path local commit (aggregator, its tests, this design, existing P8 plan), followed by merge of already-fetched `origin/main` at `7b5611fed039aa7aebde62063f45e45e965cf23a` (PR75 / 4D inventory). Stop for parent direction if a source conflict requires manual resolution. Then rerun the original isolated 320 selection plus pre-inspected, offline evaluation collision focus; preserve core hashes. Full remains queued behind parent's G1 heavy run; no full/live/push/PR, no other worktree or real report/asset access. PR74 ADMET remains unmerged per parent status. This is local P8-A integration only, **not Package8 completion or real acceptance**. Await a full-test slot or parent's CI-only decision after verification.
+
+Local execution result: exact four-path commit `ba7dc505e116fdac6c803bdc8c8d7d414cfb404e`; merge `204a2e2676e5164017ccfab1be31b01d019f0e4c` includes authorized main `7b5611fed039aa7aebde62063f45e45e965cf23a`. Merge was automatic with no conflicts or manual source changes. Both reviewed core hashes remain byte-for-byte identical to the preceding ownership freeze. Incoming main changed generation/planner/registry contracts but not the existing evaluation models/scientific runner or the two existing evaluation test modules used here.
+
+Post-merge actual verification: original isolated selection **320 passed** (2.41 s), pre-inspected collision selection **83 passed** (2.27 s), both exit 0 with no failures/skips; two-file in-memory compilation passed in both runs. Collision selection covers PR75 inventory, generation/ranking adapter integration and 20 evaluation truth/data-flow/status nodes. The exact node list and exclusions are in the plan. No actual model/service/asset execution, external key use or `run_real` invocation occurred. Tests use synthetic records, patched generation calls, RDKit on literal test molecules and non-service registry fixtures; these are not real scientific acceptance evidence.
+
+The worker is locally frozen after a documentation-only evidence commit. Full remains unrun pending the parent's full slot or CI-only decision; no push or PR was created. Package8 is **not** declared complete, and ordinary WS/live collector/P7 dependencies remain outside this batch. Immutable live/final flags stay false.

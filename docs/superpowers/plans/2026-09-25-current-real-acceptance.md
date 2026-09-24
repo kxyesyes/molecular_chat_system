@@ -323,3 +323,43 @@ Parent reports Euclid SPEC APPROVE and Socrates QUALITY APPROVE after the final 
 Authorized sequence: commit exactly the two Python files and two existing P8 docs; merge already-fetched `origin/main` commit `7b5611fed039aa7aebde62063f45e45e965cf23a` (PR75, 4D inventory complete); stop and report any manual source conflict. Inspect newly integrated evaluation-related tests/imports for secrets/network/real execution before selecting offline collision focus. Rerun the original isolated 320 command, then the inspected related focus, retaining source/test hash equivalence. Local documentation commits are authorized. No other worktree, real report/assets, full/live, push or PR. Parent says G1 occupies the heavy full slot and PR74 ADMET is still in CI/unmerged; this worker will not alter that coordination state.
 
 After focused verification, freeze locally for a full slot or parent's CI-only decision. P8-A offline review/integration does not complete Package8; `live_execution_verified=false` and `final_acceptance=false` remain unchanged.
+
+### Executed local integration and post-merge focus
+
+- Exact four-path commit: `ba7dc505e116fdac6c803bdc8c8d7d414cfb404e` (`fix: enforce reviewed offline report invariants`). Review attribution and prior failed-review/TDD records included.
+- Merge commit: `204a2e2676e5164017ccfab1be31b01d019f0e4c`, second parent `7b5611fed039aa7aebde62063f45e45e965cf23a`. Automatic ort merge, no conflicts/manual source resolution. No fetch/network or other-worktree operation required.
+- Core raw-byte hashes unchanged: aggregator `14ae0da3afccefb9857e38497a429b5664f79b016daf73d657ff37e3c2733fb6`; test file `828151e4040c80fe55b8c3ef0a8d6ae6b5a63dc24e844d7ab9fb6c1af3cd9a21`.
+- `git diff --name-only ba7dc50 HEAD -- src/agent/evaluation tests/agent/test_evaluation_runner.py tests/agent/test_real_acceptance_checks.py` was empty immediately after merge: incoming changes did not modify those evaluation modules. Indirect collision focus targets the newly integrated factory/generation/ranking contracts and their existing truth consumers.
+- Original exact isolated command above rerun on merged tree: **320 passed**, pytest 2.41 s, exit 0, no failures/skips.
+- Collision focus below: **83 passed**, pytest 2.27 s, exit 0, no failures/skips. Same isolated inline wrapper and options; replace only the pytest test-path/node-ID selection with the list below. Both runs passed two-file in-memory compilation. Whitespace diff checks passed.
+
+Before execution the two whole-file selections and 20 evaluation test bodies/import paths were read. Inventory constructs non-service fixtures; generation integration replaces `_generate_with_retry` or uses no model, and property/ranking checks operate on literal synthetic molecules. Selected evaluation nodes consume in-memory ToolResult/plan/truth records. Excluded dataset-reading tests, external-model probe/key fixture, scientific runner/store construction and every `run_real` test. Importing the test module's callable definitions is not invocation; no real launcher was run. No actual weights/datasets, production stores or real report files were read. Cleared child environment/private cwd/network+project-asset guard and 120-second deadline remained in effect; private synthetic test directories retained, not claimed cleaned.
+
+Exact collision pytest selections (each path resolved under this worktree by the existing wrapper):
+
+```text
+tests/agent/test_tool_contract_inventory.py
+tests/agent/test_generation_ranking_contract_integration.py
+tests/agent/test_evaluation_runner.py::test_generation_data_flow_check_requires_downstream_consumption
+tests/agent/test_evaluation_runner.py::test_generation_check_accepts_validated_candidate_set_provenance
+tests/agent/test_evaluation_runner.py::test_generation_check_rejects_conflicting_candidate_models
+tests/agent/test_evaluation_runner.py::test_generation_check_rejects_conflicting_top_level_model
+tests/agent/test_evaluation_runner.py::test_generation_check_passes_when_all_model_provenance_agrees
+tests/agent/test_evaluation_runner.py::test_generation_check_requires_model_provenance
+tests/agent/test_evaluation_runner.py::test_generation_data_flow_check_accepts_hit_to_lead_candidates_plan
+tests/agent/test_evaluation_runner.py::test_generation_repeat_stats_check_requires_each_requested_round
+tests/agent/test_evaluation_runner.py::test_rag_truth_check_allows_sources_or_explicit_no_hit
+tests/agent/test_real_acceptance_checks.py::test_generation_truth_check_rejects_invalid_or_duplicate_candidates
+tests/agent/test_real_acceptance_checks.py::test_execution_exception_takes_precedence_over_dependent_truth_failures
+tests/agent/test_real_acceptance_checks.py::test_claim_truth_check_rejects_claim_without_evidence
+tests/agent/test_real_acceptance_checks.py::test_data_flow_check_requires_bound_generation_output
+tests/agent/test_real_acceptance_checks.py::test_generation_check_requires_valid_unique_requested_count
+tests/agent/test_real_acceptance_checks.py::test_target_design_truth_check_rejects_generation_after_empty_target_evidence
+tests/agent/test_real_acceptance_checks.py::test_target_design_truth_check_accepts_documented_precondition_skip
+tests/agent/test_real_acceptance_checks.py::test_safe_target_gate_marks_dependent_truth_checks_skipped_not_failed
+tests/agent/test_real_acceptance_checks.py::test_candidate_identity_truth_check_requires_exact_downstream_subset
+tests/agent/test_real_acceptance_checks.py::test_candidate_identity_truth_check_marks_missing_required_properties_partial
+tests/agent/test_real_acceptance_checks.py::test_candidate_identity_truth_check_rejects_smiles_reassigned_to_known_id
+```
+
+Append the unchanged pytest options `--noconftest -c <worktree>/pytest.ini -q -p no:cacheprovider --tb=short`. These 83 focused cases are not a full-suite result or a substitute for live science. Local two-doc evidence commit is authorized; no further code edits were needed. Freeze awaiting parent's full-slot or CI-only decision. No full/live/push/PR; PR74 status is parent-reported, not an independently queried or merged dependency. Package8 remains incomplete.
