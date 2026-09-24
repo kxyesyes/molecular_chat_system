@@ -28,3 +28,9 @@ Confirmed separate defect: secure_io.read_file_snapshot compares child-driven di
 Reviewed Planner implementation committedf7e8bbb. Separate snapshot PR #68 merged as e173d432f767fe76e1c1f101d9cd8824ffee612d after independent SPEC/QUALITY and exact-headCI8/8, including Linux task-runtime tests. Its reviewed/merged tree189c179cc52c71ddd8a21cc0a908cba65530492b matched. Integrated that reviewed main (including analysis/route/reverse updates) here without conflicts as39d4e22; Planner implementation did not change.
 
 Post-integration original five baseline files +test_planner_responsibilities.py +tests/task_runtime/test_secure_snapshot_boundary.py:605 passed3 POSIX-skipped6.04s, exit0. Full Agent queued after package4C in the shared heavy-test slot. This is not yet a passing full integrated run or publication approval; earlier failures remain above.
+
+## Full integrated result and publication gate
+
+Main including target-contract PR #69 (`16b91575229be987b0c5cf3d8d9039135d8ade29`) was mechanically merged without changing the reviewed Planner implementation. The existing isolated MedChat runner, with `tests/agent` as its sole path argument, completed: **6351 passed, 2 skipped, 7 warnings in 304.15s**, exit 0. Skips: directory symlinks unavailable (`test_decision_chat_acceptance.py:149`) and the disabled opt-in performance test (`test_harness_shadow.py:277`). Existing SWIG/FastAPI deprecation warnings were retained.
+
+This is the first completed passing full regression after integrating the separately reviewed snapshot fix and current tool contracts; it does not erase the earlier failures or uniquely attribute historical uninstrumented failures. No scientific provider, trained model, production state or deployment was activated. SPEC/QUALITY approvals still apply to the unchanged selector/parsing implementation. Publication requires fresh exact-head CI and review-state checks.
