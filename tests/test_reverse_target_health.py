@@ -267,11 +267,25 @@ class ReverseTargetHealthTest(unittest.TestCase):
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             check=False,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("ModuleNotFoundError", result.stderr)
+        self.assertIsInstance(result.stdout, str)
+        self.assertIn("--limit", result.stdout)
+        self.assertIn("获取记录数", result.stdout)
+
+    def test_fetch_cli_help_preserves_parent_output_encoding(self):
+        previous_encoding = os.environ.get("PYTHONIOENCODING")
+        for encoding in ("ascii", "gbk:strict"):
+            with self.subTest(encoding=encoding):
+                with patch.dict(os.environ, {"PYTHONIOENCODING": encoding}):
+                    self.test_documented_fetch_cli_runs_directly_from_project_root()
+                    self.assertEqual(os.environ["PYTHONIOENCODING"], encoding)
+        self.assertEqual(os.environ.get("PYTHONIOENCODING"), previous_encoding)
 
     @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
     def test_fingerprint_cli_completes_under_windows_gbk_console(self):
