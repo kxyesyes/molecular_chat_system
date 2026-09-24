@@ -5,7 +5,7 @@ from src.agent.specialists import build_default_specialists
 from test_supervisor_delegation import build_registry
 import pytest
 from src.agent.persistence import SQLiteAgentStateStore
-from src.agent.orchestrators import WorkflowStep
+from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning import WorkflowPlan
 import json
 import sqlite3
@@ -184,6 +184,62 @@ def test_delegated_checkpoint_uses_registered_tool_version(tmp_path, metadata_ve
                 ('versioned',),
             ).fetchall()
         assert set(versions) == {('1', 'model-pin'), ('2', 'model-pin')}
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize('delegated', [False, True], ids=['nondelegated', 'delegated'])
+def test_custom_workflow_version_persists_and_controls_resume(tmp_path, delegated):
+    store_path = tmp_path / 'workflow-version.sqlite'
+    registry, tools = build_registry()
+    tool = tools['property_calculator']
+    tool.output = {'fixture_revision': 'original'}
+    try:
+        for version, reused_steps, call_count, expected_output in (
+            ('custom-workflow-v7', [], 1, 'original'),
+            ('custom-workflow-v7', ['evaluate'], 1, 'original'),
+            ('custom-workflow-v8', [], 2, 'fresh'),
+        ):
+            # Reopen persistence and rebuild the entrypoint, as after a restart.
+            store = SQLiteAgentStateStore(store_path)
+            supervisor = SupervisorAgent(
+                tools={} if delegated else {'property_calculator': tool},
+                planner=SinglePlanner(),
+                orchestrator=WorkflowOrchestrator(
+                    state_store=store, workflow_version=version,
+                ),
+                tool_registry=registry if delegated else None,
+                specialists=build_default_specialists() if delegated else None,
+                state_store=store,
+            )
+            response = supervisor.run(
+                'CCO', skill_name='comprehensive_evaluation', trace_id='workflow-version',
+            )
+            assert response['status'] == 'succeeded'
+            assert response['result']['metadata']['reused_steps'] == reused_steps
+            assert response['result']['tool_result_sequence'][0]['data'] == {
+                'fixture_revision': expected_output,
+            }
+            assert tool.calls == ['CCO'] * call_count
+            run = store.get_run('workflow-version')
+            checkpoint = store.latest_checkpoint('workflow-version', 'evaluate')
+            assert run['status'] == checkpoint['status'] == 'succeeded'
+            assert run['workflow_version'] == checkpoint['workflow_version'] == version
+            with sqlite3.connect(store_path) as connection:
+                assert connection.execute(
+                    'SELECT workflow_version FROM agent_runs WHERE trace_id = ?',
+                    ('workflow-version',),
+                ).fetchall() == [(version,)]
+                checkpoint_versions = connection.execute(
+                    'SELECT DISTINCT workflow_version FROM agent_checkpoints WHERE trace_id = ?',
+                    ('workflow-version',),
+                ).fetchall()
+            assert set(checkpoint_versions) == (
+                {('custom-workflow-v7',)} if call_count == 1
+                else {('custom-workflow-v7',), ('custom-workflow-v8',)}
+            )
+            # A compatible restart must restore the old observation, not execute.
+            tool.output = {'fixture_revision': 'fresh'}
     finally:
         registry.close()
 
