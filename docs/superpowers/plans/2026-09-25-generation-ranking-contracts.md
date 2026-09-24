@@ -680,3 +680,58 @@ and collision-focused tests; run exactly one full tests/agent via the existing
 isolated runner. Stop and diagnose any failure without weakening assertions or
 contracts. No push or PR. The historical pre-P2 6640-pass full is not evidence
 for this required post-P2 gate. Actual merge/focus/full results follow below.
+
+### Post-P2 latest-main gate completed: full GREEN at 5e600a6
+
+Committed exactly the three authorized dirty files as `d8ccc76` (typed supervisor
+success fixture, adversarial telemetry fixture, this plan including dual-review
+record). Merged main `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5` without conflicts
+as **`5e600a6b9e371f1fcc537368b1bf8cfe4d17f6cb`**. No local production adjustment
+was needed. Planner, target and analysis implementations match reviewed main;
+factory diff against main remains only the two 4C contract selections/import.
+The reviewed eight-file 4C aggregate remains unchanged.
+
+Collision FOCUS included the previous 30 complete files plus these seven actual
+PR70/71-related files (37 complete files total; no deselection):
+
+```text
+tests/agent/test_delegated_session_lifecycle.py
+tests/agent/test_planner_responsibilities.py
+tests/agent/test_task_planner.py
+tests/agent/test_planner_step_templates.py
+tests/agent/test_target_identity_alignment.py
+tests/agent/test_target_selection_phrase.py
+tests/agent/test_prompt_acceptance.py
+```
+
+The already-included test_workflow_resume.py covers PR70's other modified file.
+Same existing isolated runner, host MedChat profile: **3134 passed, 7 warnings,
+162 subtests passed in 79.95s**, exit 0. All 326 tracked src/scripts Python files
+compiled in memory. `git diff --check` passed; worktree was clean before full.
+Minimum-profile evidence remains the prior post-P2 2498-case run, not a new
+post-PR70/71 minimum-profile run.
+
+Then ran exactly one authorized post-P2 full Agent with sole path `tests/agent`
+through the same isolated runner (child options `-q -p no:cacheprovider --tb=short
+-rs`), session 51531. Result: **6676 passed, 2 skipped, 7 warnings in 300.25s**,
+exit 0. Full-run HEAD was and remains
+`5e600a6b9e371f1fcc537368b1bf8cfe4d17f6cb`. No edits, merges, second full or other
+heavy runs occurred while it ran. Exact skips:
+
+- `tests/agent/test_decision_chat_acceptance.py:149`: directory symlinks unavailable.
+- `tests/agent/test_harness_shadow.py:277`: performance test disabled.
+
+Post-run eight-file aggregate was rechecked equal to the dual-reviewed snapshot:
+`c9d5cd9a50b0e4463d7ce664ed81de37073b610712d7e4770d462ba7a4d40993`.
+This full is the current post-P2 gate; historical pre-P2 6640 remains separate.
+No scientific model/provider activation, asset reads or model-quality claims.
+
+Parent reported G2 PR72 at `548baca8f1c59acb6e9dbe59a7c8787b722129cd` with CI
+in progress during this run. It was not integrated. Parent will coordinate G2
+integration and focused verification before 4C publication; this full must not
+be presented as covering that later snapshot. Heavy slot released on completion.
+
+Ready and frozen: code/tests are committed at the exact full HEAD; only this
+new results record is uncommitted. No push or PR created. Dual review applies to
+unchanged 4C code/tests, and current integration/full evidence is recorded here;
+publication and subsequent G2 integration remain parent-owned.
