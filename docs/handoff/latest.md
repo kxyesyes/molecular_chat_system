@@ -1,5 +1,17 @@
 # Latest handoff
 
+## ChatHandler 纯展示/提示拆分（2026-09-25，本地完成）
+
+第1项 PR #62 已 squash 合并为 `6af7292`，合并树与审查 head 相同；未部署。
+第2项独立分支 `codex/chat-presentation-extraction` 提取两个无状态模块，旧 helper 保留薄兼容委托。
+科学正文、失败/partial、安全摘要、覆写钩子、提示预算与资源生命周期保持；不修改模型或生产入口。
+独立 SPEC、QUALITY 均通过；联合回归 **5728 passed、2 skipped、7 warnings**，
+最终边界补跑 **99 passed**，五个 Node 回归、JS语法及314路径内存编译通过。
+跳过为 Windows 目录符号链接不可用和未启用性能测试，不能视为真实模型验收。
+本地实现完成，发布/CI/合并待执行；原始混杂工作树未动。
+完整 RED/GREEN、命令、范围和限制见[本批交接](chat-presentation-extraction.md)。
+用户已授权按推荐方案完成第1–8项及通过门禁后的合并；[完成台账](remaining-through-step8.md)仍明确第3–8项未完成，部署不在范围内。
+
 ## main 集成验收与终态展示修复（2026-09-25，本地）
 
 独立分支 `codex/main-integration-acceptance`，基线为已合并PR #61后的main `c2aee30`。

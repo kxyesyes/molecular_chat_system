@@ -1,6 +1,6 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-25。当前源码基线为 main `c2aee30`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）与类药性评分/证据边界修复（#61）。代码已合并不代表生产已更新。本轮隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
+核对日期：2026-09-25。当前分支基于 main `6af7292`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）、类药性评分/证据边界修复（#61）和终态标签修复（#62）。本分支继续提取聊天展示/提示职责，发布状态见[本批交接](handoff/chat-presentation-extraction.md)。代码合并不代表生产已更新。此前隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
 本文记录源码维护入口；是否合并以每节明确标注和 Git 历史为准，不表示已生产部署或通过真实科研验收。后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
@@ -35,7 +35,8 @@ ChatHandler / 工作流 API
 | 状态、重试、恢复或候选对齐不一致 | [run_session.py](../src/agent/runtime/run_session.py)、[workflow_executor.py](../src/agent/runtime/workflow_executor.py)、[delegated_executor.py](../src/agent/runtime/delegated_executor.py) | 普通/委派执行共用 Session 生命周期；委派层保留授权、调用和结果信封差异，不能另写完整终态循环。 |
 | 工具异常、超时或旧返回格式 | [tooling/adapters.py](../src/agent/tooling/adapters.py)、[tools/base_tool.py](../src/agent/tools/base_tool.py) | `ToolResult` 中的状态、错误、warnings、artifacts、evidence、quality 不能退化为一段成功文本。 |
 | 数值、候选结构或来源不可信 | [validators](../src/agent/validators)、[contracts/result.py](../src/agent/contracts/result.py) | 保留领域校验、候选对齐和 partial/failed；模型缺失或 demo 不等于真实预测，未执行 Vina 不得给出已计算结合能。 |
-| 长历史或证据挤掉当前问题 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_handler.py](../src/web/chat_handler.py) | 分区字符预算不是精确 token 计数；保留完整问题和科学约束，历史/证据整块取舍，不截断 SMILES 或 JSON。输入自身超限应明确拒绝；关键状态放不下时直接保留工具结果，不强行交模型解读。 |
+| 长历史或证据挤掉当前问题 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_prompt_builder.py](../src/web/chat_prompt_builder.py)、[chat_handler.py](../src/web/chat_handler.py) | 分区字符预算不是精确 token 计数；保留完整问题和科学约束，历史/证据整块取舍，不截断 SMILES 或 JSON。输入自身超限应明确拒绝；关键状态放不下时直接保留工具结果，不强行交模型解读。 |
+| partial/失败展示与安全摘要 | [agent_result_presentation.py](../src/web/agent_result_presentation.py)、[chat_handler.py](../src/web/chat_handler.py) | 纯投影保留科学正文和失败步骤；兼容入口传入当前 sanitizer 覆写。诊断、WebSocket、历史及资源清理仍由 handler 拥有；不能因提取改变状态或让主模型改写 partial 结果。 |
 
 [HarnessFactory](../src/agent/harness/factory.py) 默认 `legacy`；这指现有执行器适配，不是启用 `ReActMolecularAgent`。`shadow` 是旁路计划比较；`langgraph_canary` 是有界灰度，委派执行器明确不扩展该灰度范围。未知模式或可选依赖不可用会记录 warning 并回到既有执行器，不代表科学工具结果被允许模拟。
 
@@ -79,7 +80,7 @@ ChatHandler / 工作流 API
 
 本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
 
-T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。仍未完成：T11 其他领域路由、聊天提示/展示职责的后续拆分。其他工具类型化、Planner 选择与参数解析拆分仍须按实际契约逐项评估；不因文件较大自动批准重构。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
+T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。本分支提取两个无状态聊天模块，ChatHandler 原方法保留薄委托；原有格式、字符预算和延迟求值保持一致，发布/验证以本批交接为准。仍未完成：T11 其他领域路由、其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
