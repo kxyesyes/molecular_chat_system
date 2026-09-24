@@ -81,7 +81,7 @@ Use the equivalent context around `service.send_to_docking(structure["id"])`. Ad
 
 - [x] Run `python -B -m pytest tests/test_target_test_isolation.py tests/test_target_db_validation.py tests/test_target_search.py -q -p no:cacheprovider` through the sanitized temporary environment from the existing RAG plan. Also run reversed existing-module order with the same hostile outer target paths.
 - [x] Run related target/cache and Agent target-contract tests identified with `rg --files tests`; preserve platform skips and record exact paths/counts. No blanket network guards across unrelated suites.
-- [ ] Independently review spec compliance, then code quality; close any findings with RED/GREEN. The coordinator may run regressions while review is active, without editing the implementer's files.
+- [x] Independently review spec compliance, then code quality; close any findings with RED/GREEN. The coordinator may run regressions while review is active, without editing the implementer's files.
 - [x] Run `git diff --check`, in-memory compilation of modified Python, and `git diff --name-only 4ff859e -- src data config .github` (must be empty). Review assertion diff and secrets scan before staging exact task files.
 - [x] Write handoff with baseline, commands, first failures, final results and remaining limits. Record PR57 separately as already merged `9eed743`; this batch does not change Web partial. Commit only approved test/docs files, no push/merge without the corresponding publication gate.
 

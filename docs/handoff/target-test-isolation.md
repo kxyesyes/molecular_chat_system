@@ -2,7 +2,7 @@
 
 ## Scope and review state
 
-Implementation and local self-review only; independent **SPEC then QUALITY remain pending**. The overall taskbook is not complete. No push, PR, merge, rebase, deployment, real model, API credential, or real-network opt-in was performed.
+Independent **SPEC and QUALITY approved**; local implementation is complete and rebased onto main `9eed743`, with unchanged task patches. Publication awaits authorization. The overall taskbook is not complete. No deployment, real model or API credential use was performed. The stage history below records the earlier pre-rebase evidence without rewriting it.
 
 - Worktree: `D:/MedChat/molecular_chat_system_worktrees/target-test-isolation`.
 - Branch: `codex/target-test-isolation`.
@@ -118,3 +118,39 @@ The runner appends `-q -p no:cacheprovider --tb=short -rs` to each invocation an
 - Task-file/diff credential-pattern review found no credentials. Only the five approved test/document paths are staged for the delivering commit.
 - Static review is limited to the task diff. No full-repository passing result is claimed; the coordinator can run broader/full verification on the stable commit. No Linux run or real scientific-tool acceptance was performed. Deployment health checks and JavaScript checks are not applicable to this test-only write set.
 - Independent specification and quality review gates remain open. Commit/publication state is reported with the delivering commit; there is no push or PR for this batch.
+
+## Coordinator final verification and integration
+
+Both independent reviewers approved implementation `a0866ea`, each running the focused 51 tests in normal and reversed order. They independently confirmed Windows `cp936` / UTF-8 mode 0, all 193 original assertions and all 42 original test methods preserved, and no duplicate collection, broad environment resets, production changes or weakened timeouts. No review findings remain open; the preceding self-review section describes the earlier stage only.
+
+The full repository `tests` run on **a0866ea / product base 4ff859e** completed:
+
+**12154 passed, 252 skipped, 10 warnings, 171 subtests passed in 1307.49s (21:47), exit 0.**
+
+Command: the same sanitized runner above, with the single argument `tests` (therefore normal `python -B -m pytest <repo>/tests -q -p no:cacheprovider --tb=short -rs`). No `-X utf8`, changed timeout or extra skip flag was used. The former target-fixture/CLI failures did not recur. This is one real whole-tests execution on the stated baseline, not a sum of focused runs, and not whole-tests evidence for the later rebased tree.
+
+Skipped cases include Windows/POSIX/Linux capabilities, symlink privileges, explicitly disabled real-service/performance/integration gates, unavailable docker/promtool, task-store setup conditions and pre-existing superseded trust-coverage cases. They remain skipped, not passed. There is still an **unrelated reader-thread GBK UnicodeDecodeError warning** in `tests/test_reverse_target_health.py::ReverseTargetHealthTest::test_documented_fetch_cli_runs_directly_from_project_root`, whose subprocess text capture lacks an explicit encoding. That test checks return code/stderr but not help stdout. It was not changed in this two-module batch. Other warnings are existing SWIG/FastAPI/PyG deprecations and tensor-construction performance. Exit 0 must not be called warning-free validation.
+
+After the full process terminated, `git rebase origin/main` applied all three local commits cleanly onto **9eed743**. Implementation now **4c61f75**. `git range-diff 4ff859e..a0866ea 9eed743..4c61f75` reports all three patches `=`; `git diff --exit-code a0866ea --` followed by the three task test files is empty. No test changed during the full run.
+
+On the rebased tree, the same runner executed these 13 paths in one process:
+
+```text
+tests/test_target_test_isolation.py
+tests/test_target_db_validation.py
+tests/test_target_search.py
+tests/test_target_search_fallback.py
+tests/agent/test_target_selection_phrase.py
+tests/agent/test_target_selection_execution.py
+tests/agent/test_target_identity_alignment.py
+tests/agent/test_target_driven_design_workflow.py
+tests/agent/test_chat_handler_partial_results.py
+tests/agent/test_chat_handler_agent_events.py
+tests/agent/test_chat_input_budget.py
+tests/agent/test_chat_local_cleanup.py
+tests/test_model_request_lifecycle.py
+```
+
+Result: **862 passed, 2 skipped, 4 warnings, 48.04s, exit 0**. This specifically combines the target isolation change with newly merged Web partial/lifecycle behavior. Skips are real target lookup disabled and Windows symlink privilege; warnings are existing FastAPI lifecycle deprecations. It is not a second whole-repository run.
+
+Final task diff relative to main has six test/docs files and no `src`, `data`, `config`, `.github` or shared conftest changes. All live test/review handles have completed. Next gate: permission to publish the independent draft PR; merging that new PR requires separate specific authorization. Taskbook T09 and remaining T11 decomposition are still unfinished. The reverse-target CLI warning is a separate follow-up, not silently declared fixed here.
