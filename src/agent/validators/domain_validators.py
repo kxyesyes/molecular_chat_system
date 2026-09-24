@@ -223,6 +223,7 @@ class ActivityResultValidator:
             and (
                 entry.get("activity_score") is not None
                 or entry.get("pic50") is not None
+                or entry.get("pIC50") is not None
             )
             for entry in entries
         )

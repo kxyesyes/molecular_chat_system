@@ -205,7 +205,43 @@ class SupervisorAgent:
                     },
                 },
             }
-        policy = self._resolve_policy(query, active_skill)
+        decide = getattr(self.skill_router, "decide", None)
+        if active_skill is None and callable(decide):
+            # Consume the full decision once: route() intentionally returns only
+            # a policy and cannot convey the input-confirmation boundary.
+            decision = decide(query, llm=self.llm)
+            policy = (self.catalog.get(decision.selected_skill)
+                      if decision.selected_skill else None)
+            if policy is not None:
+                from .metrics import metrics_system
+
+                metrics_system.record_route_attempt(policy.name, True)
+            if decision.requires_confirmation:
+                error = AgentExecutionError(
+                    code=AgentErrorCode.INVALID_INPUT,
+                    message=("输入无效或信息不足；请检查 SMILES、靶点及 "
+                             "receptor/docking box 参数。"),
+                    details={"requires_confirmation": True,
+                             "reasons": list(decision.reasons)},
+                )
+                result = AgentResult(
+                    trace_id=f"agent-{uuid4().hex[:12]}", success=False,
+                    message=error.message, final_answer=error.message,
+                    skill_name=decision.selected_skill, error=error,
+                )
+                return {
+                    **result.to_legacy_dict(),
+                    "trace_id": result.trace_id,
+                    "final_answer": result.final_answer,
+                    "tools_used": [], "active_skill": result.skill_name,
+                    "agent_result": result, "agent_events": [],
+                    "workflow_plan": {"workflow_name": result.skill_name,
+                                      "steps": [], "metadata": {}},
+                }
+        else:
+            # Explicit workflows and route-only injected legacy routers keep
+            # their existing contract; scientific validators still run.
+            policy = self._resolve_policy(query, active_skill)
         if policy is None:
             return {
                 "success": False,

@@ -15,7 +15,7 @@ class FakeTool:
         }
 
 
-def test_comprehensive_workflow_runs_standard_planned_chain():
+def test_comprehensive_workflow_runs_standard_planned_chain(monkeypatch):
     planned_tool_names = [
         "property_calculator",
         "drug_likeness_assessment",
@@ -24,12 +24,9 @@ def test_comprehensive_workflow_runs_standard_planned_chain():
         "reverse_target_predictor",
         "target_database_search",
     ]
-    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
-    agent.llm = None
-    agent.max_iterations = 5
-    agent.skill_router = None
-    agent._active_skill = None
-    agent.tools = {name: FakeTool(name) for name in planned_tool_names}
+    tools = {name: FakeTool(name) for name in planned_tool_names}
+    monkeypatch.setattr("src.agent.tools.get_all_tools", lambda _llm: list(tools.values()))
+    agent = ReActMolecularAgent()
 
     result = agent.execute(
         "请全面评估 CCO 的成药性",

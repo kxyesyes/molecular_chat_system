@@ -126,6 +126,12 @@ test_family_activity_tool.py、test_target_driven_design_workflow.py。
 
 ## 8. 交付与完成条件
 
+实施中共享缺口已通过公共模块测试复现，用户于同日明确同意纳入两处最小修复：
+Supervisor.execute 自动路由消费完整decide，requires_confirmation时在工具执行前
+返回结构化invalid_input与路由原因；保留显式策略/旧route-only注入合同，不扩展plan/run。
+ActivityResultValidator补识别pIC50并复用既有模型来源/demo检查，不更改算法或阈值。
+不在ReAct复制安全规则，不改变公共route返回类型。
+
 没有 ReAct 私有科学执行循环或直接 tool.execute；全部关键科学断言已在真实共享入口验证；
 旧公共接口可用、状态和来源不丢、工具禁用/输入拒绝仍有效。记录实际删除的重复职责，
 不以文件行数或测试通过总数代替行为证明。
