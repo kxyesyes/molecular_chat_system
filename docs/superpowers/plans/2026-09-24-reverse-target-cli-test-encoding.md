@@ -14,7 +14,7 @@ Approved design: `docs/superpowers/specs/2026-09-24-reverse-target-cli-test-enco
 
 ## Task 1 — regression first
 
-- [ ] Add these assertions after the original help return-code/stderr assertions, leaving the original subprocess arguments unchanged:
+- [x] Add these assertions after the original help return-code/stderr assertions, leaving the original subprocess arguments unchanged:
 
 ```python
 self.assertIsInstance(result.stdout, str)
@@ -22,7 +22,7 @@ self.assertIn("--limit", result.stdout)
 self.assertIn("获取记录数", result.stdout)
 ```
 
-- [ ] Add one regression method in the same TestCase. It calls the original test method (which invokes the actual CLI), not a copied subprocess implementation:
+- [x] Add one regression method in the same TestCase. It calls the original test method (which invokes the actual CLI), not a copied subprocess implementation:
 
 ```python
 def test_fetch_cli_help_preserves_parent_output_encoding(self):
@@ -35,24 +35,24 @@ def test_fetch_cli_help_preserves_parent_output_encoding(self):
     self.assertEqual(os.environ.get("PYTHONIOENCODING"), previous_encoding)
 ```
 
-- [ ] Run both nodes using the runner below with strict reader-thread warnings. Record actual RED: missing/garbled Chinese stdout or decoding failure, not dependency/collection failure. Existing test and new encoding regression must both be exercised before fixing.
+- [x] Run both nodes using the runner below with strict reader-thread warnings. Record actual RED: missing/garbled Chinese stdout or decoding failure, not dependency/collection failure. Existing test and new encoding regression must both be exercised before fixing.
 
 ## Task 2 — minimal GREEN
 
-- [ ] In the original test's subprocess call only, add:
+- [x] In the original test's subprocess call only, add:
 
 ```python
 encoding="utf-8",
 env={**os.environ, "PYTHONIOENCODING": "utf-8"},
 ```
 
-- [ ] Re-run the two nodes under the same runner and strict warning policy. No errors=ignore/replace, no pytest warning suppression. If a different failure occurs, diagnose before any further edit.
+- [x] Re-run the two nodes under the same runner and strict warning policy. No errors=ignore/replace, no pytest warning suppression. If a different failure occurs, diagnose before any further edit.
 
 ## Task 3 — regression and review
 
-- [ ] Run full `tests/test_reverse_target_health.py`, then combine it with `tests/test_target_test_isolation.py`, `tests/test_target_db_validation.py`, `tests/test_target_search.py`; reverse file order and re-run. Existing GBK fingerprint CLI must actually run where RDKit is available; skipped is not passed.
-- [ ] Compile changed test in memory with `python -B`; `git diff --check`; verify `git diff 3567096 -- src data config .github tests/conftest.py` empty and unchanged AST of the existing GBK test.
-- [ ] Independent read-only review of final diff against design, preserving original assertions and checking encoding isolation. Perform broader verification locally while review runs; address findings before final commit.
+- [x] Run full `tests/test_reverse_target_health.py`, then combine it with `tests/test_target_test_isolation.py`, `tests/test_target_db_validation.py`, `tests/test_target_search.py`; reverse file order and re-run. Existing GBK fingerprint CLI must actually run where RDKit is available; skipped is not passed.
+- [x] Compile changed test in memory with `python -B`; `git diff --check`; verify `git diff 3567096 -- src data config .github tests/conftest.py` empty and unchanged AST of the existing GBK test.
+- [x] Independent read-only review of final diff against design, preserving original assertions and checking encoding isolation. Perform broader verification locally while review runs; address findings before final commit.
 - [ ] Update handoff with exact RED/GREEN, scopes/skips/warnings, no broad success claim; explicitly stage task paths and commit. Publishing/new PR merge follow repository authorization gates. No deployment or real service invocation.
 
 ## Reproducible runner
