@@ -140,7 +140,8 @@ def test_web_runtime_uses_the_canonical_ollama_model_class():
 
     assert app_module.OllamaModel is model_module.OllamaModel
     assert app_module.OllamaModel.__module__ == "src.web.models.ollama_model"
-    assert app_module.RAGSystem.__module__ == "src.web.app"
+    assert app_module.RAGSystem is importlib.import_module("src.rag.service").RAGSystem
+    assert app_module.RAGSystem.__module__ == "src.rag.service"
 
     tool_registry = (
         PROJECT_ROOT / "src" / "agent" / "tools" / "__init__.py"

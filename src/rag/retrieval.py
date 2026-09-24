@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from src.web.rag_index import RAGIndexCompatibilityError, validate_manifest
+from src.rag.index import RAGIndexCompatibilityError, validate_manifest
 
 
 def search_molecular_index(*, index, manifest, molecules, source_path,
