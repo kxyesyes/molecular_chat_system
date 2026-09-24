@@ -71,7 +71,12 @@ def test_default_rag_owner_keeps_outcome_and_evidence_across_entrypoints(
 
 
 def test_health_telemetry_does_not_raise_or_publish_invalid_raw_status():
-    # Generic adapter telemetry, not an analysis observation contract.
+    from dataclasses import replace
+    from src.agent.tooling import LegacyPythonToolAdapter, ToolRegistry
+    from src.agent.tooling.factory import LegacyQueryInput
+
+    # Generic telemetry deliberately receives invalid raw status. Keep the real
+    # factory policy, but opt only this probe out of the scientific contract.
     observation = ToolResult('candidate_ranker', True, 'fixture')
     observation.status = 'synthetic-private-provider-text'
 
@@ -80,7 +85,11 @@ def test_health_telemetry_does_not_raise_or_publish_invalid_raw_status():
         def execute(self, query):
             return observation
 
-    registry = build_tool_registry([Tool()])
+    tool = Tool()
+    spec = build_tool_registry([tool]).resolve(tool.name, require_available=False).spec
+    registry = ToolRegistry()
+    registry.register(LegacyPythonToolAdapter(
+        replace(spec, input_schema=LegacyQueryInput, output_schema=None), tool))
     try:
         adapter = registry.resolve('candidate_ranker')
         result = adapter.execute({'query': 'CCO'})

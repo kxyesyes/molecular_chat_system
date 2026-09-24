@@ -520,6 +520,10 @@ class SQLiteAgentStateStore:
         from .scientific_references import sources
         return sources(self, trace_id, session_id=session_id)
 
+    def get_scientific_report_snapshot(self, trace_id: str, *, session_id: str, references):
+        from .scientific_references import report_snapshot
+        return report_snapshot(self, trace_id, session_id=session_id, references=references)
+
     def publish_scientific_presentation(
         self, trace_id: str, *, session_id: str,
         selections: list[dict[str, str]], target: str | None = None,

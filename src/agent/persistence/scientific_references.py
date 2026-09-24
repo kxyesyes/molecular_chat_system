@@ -170,6 +170,45 @@ def sources(store, trace_id, *, session_id):
             return None
 
 
+def report_snapshot(store, trace_id, *, session_id, references):
+    """Internal live report input, read-only and owner-bound. Never a restore DTO."""
+    if not _identity(trace_id, session_id):
+        return None
+    try:
+        references = json.loads(reference_json(references))
+        if type(references) is not list or not 1 <= len(references) <= 8:
+            return None
+        with closing(store._connect()) as connection, connection:
+            connection.execute("BEGIN")
+            row, metadata, views, latest, version = _source(connection, trace_id, session_id)
+            selected, ids = [], set()
+            now = time.time()
+            for ref in references:
+                if type(ref) is not dict or set(ref) != {
+                        "trace_id", "presentation_id", "revision", "ordered_keys"}:
+                    return None
+                matches = [item["presentation"] for item in views if
+                    item["presentation"]["presentation_id"] == ref["presentation_id"]]
+                if len(matches) != 1 or ref["presentation_id"] in ids:
+                    return None
+                view = matches[0]
+                expected = {"trace_id": trace_id, "presentation_id": view["presentation_id"],
+                    "revision": view["revision"], "ordered_keys": [[c["observation_id"],
+                    c["candidate"]["candidate_id"]] for c in view["ordered_candidates"]]}
+                if (ref != expected or view["source_trace_id"] != trace_id
+                        or view["source_version"] != version
+                        or not view["created_at"] <= now < view["expires_at"]):
+                    return None
+                ids.add(ref["presentation_id"])
+                selected.append(view)
+            run = {k: row[k] for k in ("trace_id", "status", "workflow_version", "query", "skill_name")}
+            run["metadata"] = metadata
+            return {"run": run, "latest": latest, "source_version": version,
+                    "presentations": selected}
+    except (ValueError, TypeError, KeyError, RecursionError):
+        return None
+
+
 def publish(store, trace_id, *, session_id, selections, target=None):
     if not _identity(trace_id, session_id):
         return None
