@@ -45,6 +45,10 @@ jobs:
             pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
             pytest_args: ""
             command_timeout: 600
+          - name: root-activity
+            pytest_target: "tests/test_activity*.py"
+            pytest_args: ""
+            command_timeout: 600
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -60,7 +64,7 @@ jobs:
           cache: pip
 
       - name: Set up Node.js for family acceptance chain
-        if: matrix.name == 'root'
+        if: matrix.name == 'root' || matrix.name == 'root-activity'
         uses: actions/setup-node@v4
         with:
           node-version: "20"
@@ -71,7 +75,15 @@ jobs:
           python -m pip install -r requirements-ci.txt
 
       - name: Run Python tests
-        run: timeout ${{ matrix.command_timeout }}s python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }}
+        shell: bash
+        run: |
+          extra_args=()
+          if [ "${{ matrix.name }}" = "root" ]; then
+            for activity_test in tests/test_activity*.py; do
+              extra_args+=(--ignore "$activity_test")
+            done
+          fi
+          timeout ${{ matrix.command_timeout }}s python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }} "${extra_args[@]}"
 
   static-quality:
     runs-on: ubuntu-latest
