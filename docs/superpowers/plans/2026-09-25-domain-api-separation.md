@@ -37,6 +37,8 @@ def test_registration_contract():
 
 The complete test must compare all 30 manifest entries, not only endpoints shown here. Keep names, OpenAPI request/response schema refs, defaults, aliases, ranges and required fields fixed; exclude only Python module/qualname, which necessarily move.
 
+Profile follow-up: capture full original-registrar fixtures for the verified CI, deployment and local FastAPI/Pydantic pairs listed in the design; select explicitly by installed versions and fail unknown profiles. Preserve the local snapshot, share genuinely identical profile snapshots, and document regeneration from the old revision. First reproduce the existing fixed-fixture failure under the CI profile, then rerun boundary tests under all three isolated profiles. Do not normalize away upload or ValidationError descriptions or change production code for this test-only compatibility issue.
+
 - [ ] Run characterization against the baseline before moving. Use the existing isolated runner from `docs/superpowers/plans/2026-09-24-rag-service-extraction.md` with this worktree substituted. Never import app from a user-configured cwd or load runtime assets.
 - [ ] Add boundary tests requiring all eight modules and their registration ownership; prove RED due to absent domain modules/delegation. Imports should occur inside tests to distinguish intentional failures from fixture-collection errors.
 - [ ] Preserve existing runtime behavior assertions; add fixed assertions for any uncovered operation using fake services/temporary inputs. Do not bless an ADMET heuristic as genuine inference.
