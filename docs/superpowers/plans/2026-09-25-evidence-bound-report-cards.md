@@ -12,6 +12,14 @@
 
 ## Review state and baseline
 
+### Post-full PR74 main delta — light GREEN at `b884465`
+
+- [x] Full session 62470 completed/released before any PR74 merge. Commit the finished full record as `7724310`; verify local authorized main **`c3195f96c4a80aac40ac958d351ecea6b12f3c31`** and tree **`765c9edf9afc5b1c616de5df56d1c3f212c111fc`**.
+- [x] Merge PR74 without conflicts as **`b88446591ec1c4f929bafdbe8f24cfea13828e7a`** (tree `b9c2bb56c11e16105426b2baa60b15d12a4c8247`); no overlap with the 20 G1 files or local implementation/test change.
+- [x] Eleven-file G1 + ADMET status/URL/route cross-focus, session **13524**: **1316 passed, 62.89s**, no warning/skip/failure. Five Node scripts passed again. Exact paths and source aggregate are recorded in the [post-full delta handoff](../../handoff/2026-09-25-g1-evidence-report-freeze.md#post-full-pr74-delta--light-cross-focus-only).
+- [x] No second full or heavy-slot reacquisition. Full **6914/2 skips** and minimum-profile **634** remain evidence for earlier `fcb84bd`, not this new merged snapshot. Only the two G1 docs are updated/explicitly committed afterward.
+- [ ] Parent final integration/publication decision; no push/PR authorization.
+
 ### Current authorized integration/full gate — GREEN at `fcb84bd`
 
 Parent reports Faraday SPEC **APPROVE (407 + 5 Node)** and Descartes QUALITY **APPROVE (413 + 5 Node + 3 SQLite/race probes)** for `a90581b`, 20 hashes unchanged. These are independent parent-supplied review results, not local retests. No G1 implementation/test changes after that approval.

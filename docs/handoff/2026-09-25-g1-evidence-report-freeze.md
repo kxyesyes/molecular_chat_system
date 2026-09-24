@@ -1,6 +1,32 @@
 # G1 static evidence report — freeze for parent SPEC → QUALITY
 
-Date: 2026-09-25. Current status: **G1 `a90581b` dual-approved per parent; authorized local PR73 + PR75 main integration and the single isolated full Agent run are GREEN.** Full snapshot is `fcb84bd4bf207593078d8c4871f49539b3641e93`; heavy slot released. Parent retains final integration/publication authority. This is not closure of all package 6 features or packages 1–8, not a dynamic-entry release, and not true scientific/model acceptance. Earlier review-pending restrictions/results below are historical and superseded by the integration record immediately below.
+Date: 2026-09-25. Current status: **G1 `a90581b` dual-approved per parent; authorized local PR73 + PR75 integration/full are GREEN, followed by separately authorized PR74 integration/light focus GREEN.** Full snapshot remains `fcb84bd4bf207593078d8c4871f49539b3641e93`; post-full ADMET integration is `b88446591ec1c4f929bafdbe8f24cfea13828e7a`. Heavy slot released, no second full. Parent retains final integration/publication authority. This is not closure of all package 6 features or packages 1–8, not a dynamic-entry release, and not true scientific/model acceptance. Earlier review-pending restrictions/results below are historical and superseded by the integration records immediately below.
+
+## Post-full PR74 delta — light cross-focus only
+
+After full session 62470 exited and the heavy slot was explicitly released, the completed PR73/75/full record was committed as **`7724310`**. Local main then updated and parent supplied explicit PR74 authorization: **`c3195f96c4a80aac40ac958d351ecea6b12f3c31`**, expected tree **`765c9edf9afc5b1c616de5df56d1c3f212c111fc`**. Both exact values were verified locally. Parent's reported head `9a9eb8d` / CI8 / unresolved0 / equal tree is attributed status, not a network check here.
+
+Merged without conflicts as **`b88446591ec1c4f929bafdbe8f24cfea13828e7a`**, tree **`b9c2bb56c11e16105426b2baa60b15d12a4c8247`**. PR74 changed nine upstream files: analysis adapter allows uncomputed ADMET alert nulls; ADMET producer/display preserves unknown evidence and safe source URLs; molecule-properties endpoint no longer fabricates ADMET values; corresponding contract/route/status tests and two design/plan documents. None overlaps the 20 G1 implementation/review paths. No manual production resolution or local source/test edits were needed.
+
+Ran only an **11-file G1 + ADMET status cross-focus**, session **13524**, same existing isolated host runner: **1316 passed in 62.89s, exit 0, no warnings/skips/failures**. Exact paths:
+
+```text
+tests/agent/test_evidence_report_contract.py
+tests/agent/test_evidence_report_snapshot.py
+tests/agent/test_evidence_report_frames.py
+tests/agent/test_analysis_contract.py
+tests/agent/test_chat_handler_partial_results.py
+tests/agent/test_property_report_boundaries.py
+tests/agent/test_candidate_ranker.py
+tests/agent/test_admet_whole_input.py
+tests/test_admet_unknown_evidence.py
+tests/test_molecule_properties_unknown.py
+tests/test_api_route_boundary.py
+```
+
+The same five Node scripts passed again. This checks G1 real static capture/partial/unknown/failed-step/DTO→DOM/ACK plus ADMET sparse/null/failure semantics, inert safe diagnostic source handling, actual RDKit/basic properties and exact endpoint contract. Controlled fixtures are not model/provider/efficacy acceptance; URL tests do not fetch their URLs. G1 source/test aggregate remains **`2c48070b69bff63d1bbfcb252c2ffbc709e62e5a5131ae16d2f548584205d2c4`**. Only this G1 handoff and plan are amended with the evidence after the merge.
+
+**No full rerun, root full, minimum-profile rerun, or heavy-slot reacquisition.** The 6914-pass full and 634-pass minimum profile below stay tied to **`fcb84bd` before PR74**, not to `b884465`. This is the explicitly requested post-full light-delta verification; parent retains further publication/integration decisions.
 
 ## Authorized main integration and one full Agent run — GREEN
 
