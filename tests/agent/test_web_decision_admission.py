@@ -337,3 +337,88 @@ def test_review_project_nominal_explanations_without_retrieval(setup_loop, query
 ])
 def test_review_nominal_topic_cannot_authorize_following_action(setup_loop, query):
     require_admission_rejection(setup_loop, query, enable_tools=False)
+
+
+@pytest.mark.parametrize('query', [
+    '计算 CCO 的性质然后预测', '计算 CCO 的分子量并查询',
+    '计算 CCO 的性质预测', '计算 CCO 的性质\n评估',
+    '计算 CCO 的性质\r分析', '计算 CCO 的性质；搜索',
+    '计算 CCO 的性质;查找', 'Calculate molecular weight for CCO and then predict',
+    'Calculate molecular weight for CCO; lookup', 'CCO 的分子量然后计算',
+    '计算并预测 CCO 的性质',
+    # Deliberately unsupported compound grammar, even with known endpoints.
+    '计算 CCO 的分子量并计算 logP', '计算 CCO 的性质并评估类药性',
+])
+def test_review_action_must_have_its_own_bounded_obligation(setup_loop, query):
+    require_admission_rejection(setup_loop, query)
+
+
+@pytest.mark.parametrize('query', [
+    '计算第一个和第二个分子的性质；SMILES: CCO',
+    '计算性质；SMILES: CCO\n计算第二个分子的性质',
+    '计算性质；SMILES: CCO\r计算第二个分子的性质',
+    '计算性质；SMILES: CCO;计算第二个分子的性质',
+    '计算第二个分子和 CCO 的分子量',
+    '计算第一个分子的性质；SMILES: CCO',
+    '计算第1个和第2个分子的性质；SMILES: CCO',
+    'Calculate molecular weight for the first and second molecules; SMILES: CCO',
+    'Calculate molecular weight for the second molecule and CCO',
+    '计算第一个和第二个分子的性质',
+    'Calculate molecular weight for the first and second molecules',
+])
+def test_review_ordinals_cannot_collapse_requested_subjects(setup_loop, query):
+    require_admission_rejection(setup_loop, query)
+
+
+@pytest.mark.parametrize('query', [
+    '计算 CCO 的性质和类药性',
+    '计算性质和类药性，包含 logP 和分子量；SMILES: OCC; CCN',
+])
+def test_review_single_action_multiple_obligations_still_execute(setup_loop, query):
+    request, result, bundle, code = exercise_admission_loop(setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.required_tools == {'property_calculator', 'drug_likeness_assessment'}
+    assert result.metadata['task_acceptance']['satisfied']
+    assert len(result.tool_results) == 2 and len(bundle.tools[0].calls) == 1
+
+
+def test_review_explicit_replacement_still_ignores_old_browser_reference(setup_loop):
+    import asyncio
+    from src.agent.tools.property_calculator import PropertyCalculator
+    class OldReferences:
+        def resolve(self, *args, **kwargs):
+            pytest.fail('explicit replacement must not resolve old browser hints')
+    query = '计算分子量；SMILES: OCC'
+    request = api().prepare_decision_request(
+        {'message': query, 'reference': {'stale': True}, 'selection': {'stale': True}},
+        session_id='owner', trace_id='replacement', references=OldReferences())
+    assert request.context.query == query and request.context.resolved_molecule is None
+    assert request.requirements.molecular_results[0].expected_smiles == ('OCC',)
+    bundle = setup_loop([tool(), finish_last], [PropertyCalculator()])
+    result = asyncio.run(bundle.loop.run(request.context, request_kind=request.request_kind,
+        allowed_tools=request.allowed_tools, required_tools=request.required_tools,
+        requirements=request.requirements))
+    assert result.success and result.metadata['task_acceptance']['satisfied']
+    assert result.tool_results[0].data[0]['smiles'] == 'OCC'
+
+
+@pytest.mark.parametrize('query', [
+    '计算刚才第二个分子的属性', 'Calculate molecular weight for the second molecule',
+])
+def test_review_single_confirmed_ordinal_still_binds_through_admission(tmp_path, setup_loop, query):
+    import asyncio
+    from test_scientific_reference_execution import confirmed
+    from src.agent.tools.property_calculator import PropertyCalculator
+    store, references, pointer = confirmed(tmp_path)
+    request = api().prepare_decision_request({'message': query, 'reference': pointer},
+        session_id='owner', trace_id='ordinal-control', references=references)
+    assert request.context.query == query
+    assert request.context.resolved_molecule.canonical_smiles == 'CCN'
+    assert request.requirements.molecular_results[0].expected_smiles == ('CCN',)
+    bundle = setup_loop([tool(), finish_last], [PropertyCalculator()])
+    bundle.loop.store = store
+    result = asyncio.run(bundle.loop.run(request.context, request_kind=request.request_kind,
+        allowed_tools=request.allowed_tools, required_tools=request.required_tools,
+        requirements=request.requirements))
+    assert result.success and result.metadata['task_acceptance']['satisfied']
+    assert [row['smiles'] for row in result.tool_results[0].data] == ['CCN']

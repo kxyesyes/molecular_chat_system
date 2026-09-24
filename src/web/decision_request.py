@@ -159,29 +159,53 @@ def _require_complete_coverage(query, tools, metrics):
         'activity_predictor': r'活性|\b(?:activity|potency|pic50|ic50)\b',
         'target_database_search': r'靶点结构|靶点|结构|\b(?:target|structures?)\b',
     }
-    tokens = [*(_METRICS[m] for m in metrics), *(obligations[t] for t in sorted(tools)),
-        r'计算|预测|评估|分析|查询|搜索|查找|\b(?:calculate|compute|predict|assess|evaluate|analy[sz]e|search|find|lookup)\b',
-        # Only singular reference ordinals; exact range/ACK/owner checks remain
-        # in ScientificReferenceService. Counts/quantifiers are not terminals.
-        r'第(?:[一二三四五六七八九十]{1,3}|[1-9][0-9]?)个',
+    result_tokens = [*(_METRICS[m] for m in metrics), *(obligations[t] for t in sorted(tools))]
+    tokens = [
+        '(?P<obligation>' + '|'.join(result_tokens) + ')',
+        r'(?P<action>计算|预测|评估|分析|查询|搜索|查找|\b(?:calculate|compute|predict|assess|evaluate|analy[sz]e|search|find|lookup)\b)',
+        # One ordinal-only reference surface; range/ACK/owner checks still
+        # belong to ScientificReferenceService. Never erase another subject.
+        r'(?P<ordinal>第(?:[一二三四五六七八九十]{1,3}|[1-9][0-9]?)个|\b(?:first|second|third)\b)',
         r'刚才|上一个|这个|该|分子|化合物|候选',
-        r'\b(?:previous|selected|first|second|third|molecules?|compounds?|candidates?)\b',
+        r'\b(?:previous|selected|molecules?|compounds?|candidates?)\b',
         r'请|帮我|包含|然后|针对|的|和|及|与|并|对',
         r'\b(?:please|molecular|the|of|for|and|then|with|including|against)\b',
         r'\s+|[，,;；、。!?！？()（）\x22\x27`]',
     ]
     syntax = re.compile('|'.join('(?:' + token + ')' for token in tokens), re.I)
     position = 0
+    seen_action = seen_obligation = False
+    ordinal_count = 0
     while position < len(query):
         match = structure.match(query, position) if structure is not None else None
         if match is None and subjects:
             match = _MARKER.match(query, position)
         if match is None and tools & {'activity_predictor', 'target_database_search'}:
             match = TARGET_PATTERN.match(query, position)
-        match = match or syntax.match(query, position)
+        if match is None:
+            match = syntax.match(query, position)
+            role = match.lastgroup if match else None
+            if role == 'action':
+                # A1 supports at most one action, preceding its obligations.
+                # Do not borrow an earlier noun for a trailing verb or infer
+                # bindings for compound actions, even known/known compounds.
+                if seen_action or seen_obligation:
+                    raise DecisionAdmissionError('request_clarification_required')
+                seen_action = True
+            elif role == 'obligation':
+                seen_obligation = True
+            elif role == 'ordinal':
+                ordinal_count += 1
+                # Browser selection replacement is separate: plain explicit
+                # SMILES still wins over old hints. Textual ordinal + SMILES
+                # is ambiguous co-reference/addition, so do not guess.
+                if ordinal_count > 1 or subjects:
+                    raise DecisionAdmissionError('request_clarification_required')
         if match is None:
             raise DecisionAdmissionError('request_clarification_required')
         position = match.end()
+    if not seen_obligation:
+        raise DecisionAdmissionError('request_clarification_required')
 
 
 def prepare_decision_request(payload, *, session_id, trace_id, references=None, config_generation=None):
