@@ -1,7 +1,7 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-24。源码基线：已合并的 main 提交 `493dfdcf94959a260f690f73a06a7fbc9a57c72a`（含 RAG、活性和对接工具类型契约）。
-本文记录该源码基线的维护入口，不表示已生产部署或通过真实科研验收；后续调用关系变化也应同步更新本页。
+核对日期：2026-09-24。源码范围：main 基线 `75d6a3abc6f6d79e96bf38a019ce2980576c100e`（含 RAG、活性和对接工具类型契约）及本次五类 Planner 纯步骤模板提取。
+本文记录随代码交付的维护入口，不表示已合并、生产部署或通过真实科研验收；后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
 
@@ -30,7 +30,7 @@ ChatHandler / 工作流 API
 | 问题 | 优先查找的源码 | 必须保留的契约 |
 |---|---|---|
 | 路由错、靶点别名或否定意图丢失 | [router.py](../src/agent/router.py)、[routing/hybrid.py](../src/agent/routing/hybrid.py)、[target_request.py](../src/agent/contracts/target_request.py) | 不靠关键词强行运行工具；输入不完整应澄清，显式否定约束不能被删去。 |
-| 步骤或上下游输入错 | [task_planner.py](../src/agent/planning/task_planner.py)、[compiler.py](../src/agent/planning/compiler.py)、[bindings.py](../src/agent/planning/bindings.py) | `output_key` 本身不是数据流证明；检查实际 selector、转换和工具收到的输入，保留生成候选的可信来源。 |
+| 步骤或上下游输入错 | [task_planner.py](../src/agent/planning/task_planner.py)、[step_templates.py](../src/agent/planning/step_templates.py)、[compiler.py](../src/agent/planning/compiler.py)、[bindings.py](../src/agent/planning/bindings.py) | Planner 保留选择、参数解析和计划元数据；五类纯模板只构造步骤。`output_key` 本身不是数据流证明；检查实际 selector、转换和工具收到的输入，保留生成候选的可信来源。 |
 | 工具归属、别名或重复实例 | [tooling/factory.py](../src/agent/tooling/factory.py)、[registration.py](../src/agent/tooling/registration.py)、[specialists](../src/agent/specialists) | 未知归属失败关闭；别名归一化；工作流工厂复用注册表已有工具，不建立第二个池。 |
 | 状态、重试、恢复或候选对齐不一致 | [run_session.py](../src/agent/runtime/run_session.py)、[workflow_executor.py](../src/agent/runtime/workflow_executor.py)、[delegated_executor.py](../src/agent/runtime/delegated_executor.py) | 普通/委派执行共用 Session 生命周期；委派层保留授权、调用和结果信封差异，不能另写完整终态循环。 |
 | 工具异常、超时或旧返回格式 | [tooling/adapters.py](../src/agent/tooling/adapters.py)、[tools/base_tool.py](../src/agent/tools/base_tool.py) | `ToolResult` 中的状态、错误、warnings、artifacts、evidence、quality 不能退化为一段成功文本。 |
@@ -76,7 +76,9 @@ ChatHandler / 工作流 API
 
 本基线已包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位、T10-A 三个优先工具类型契约，以及独立批准的测试分层与新旧模板签名适配。
 
-仍未完成：T09 科研对象跨轮引用；T10-B Planner 职责整理；T11 其他领域路由、聊天提示/展示职责拆分和旧 Agent 支持面收缩。其他工具类型化仍须按实际契约逐项评估。其设计与实现需分别验证，不能把匿名身份、三个工具迁移或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
+本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
+
+仍未完成：T09 科研对象跨轮引用；T11 其他领域路由、聊天提示/展示职责拆分和旧 Agent 支持面收缩。其他工具类型化仍须按实际契约逐项评估。其设计与实现需分别验证，不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
@@ -90,6 +92,7 @@ python -B -m pytest tests/agent/test_supervisor_delegation.py tests/agent/test_w
 python -B -m pytest tests/agent/test_candidate_alignment.py tests/agent/test_registration_consistency.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
 python -B -m pytest tests/test_rag_service_boundary.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_rag_tool_contract.py tests/agent/test_activity_tool_contract.py tests/agent/test_activity_contract_integration.py tests/agent/test_docking_tool_contract.py tests/agent/test_docking_contract_integration.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_planner_step_templates.py tests/agent/test_planner_template_execution.py tests/agent/test_task_planner.py tests/agent/test_plan_compiler.py tests/agent/test_binding_resolver.py tests/agent/test_workflow_executor.py tests/agent/test_decision_loop.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_chat_input_budget.py tests/test_model_request_lifecycle.py tests/test_design_model_switch.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_legacy_chat_entry_cleanup.py tests/agent/test_chat_local_cleanup.py tests/test_static_placeholder_cleanup.py tests/test_main_routes_template_compat.py -q -p no:cacheprovider
 python -B -m pytest tests/agent/test_no_legacy_skill_layer.py -q -p no:cacheprovider
