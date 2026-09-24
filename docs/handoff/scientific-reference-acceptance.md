@@ -88,3 +88,19 @@ git diff --check
 - 未测试运行中任意指令点硬崩溃后的exactly-once，也未调用Ollama/真实主模型/活性权重/Vina；本次验证科研引用链路，不是整个科研能力或生产负载认证。
 - 实测发现既有 `src/agent/tools/drug_likeness_assessment.py:336` 将Lipinski符合解读为“预测具有良好的口服生物利用度”，与属性工具的证据边界冲突。这是未修复的独立科学文案问题，建议下一独立批次TDD处理；不把它混进本批引用修复或隐瞒。
 - PR/CI/具体合并授权及生产验收尚未执行；本地通过不等于已上线或整个任务书完成。
+
+## 后续发布与首轮CI（2026-09-24）
+
+用户继续下一步后，发布上述4个本地提交至同名分支，创建并附加
+[Draft PR #60](https://github.com/kxyesyes/molecular_chat_system/pull/60)，目标main，head `64793ec`；未合并或部署。
+首轮[quality 36021416178](https://github.com/kxyesyes/molecular_chat_system/actions/runs/36021416178)
+失败，保留原记录，不通过简单重跑隐藏：5个检查成功，root失败，汇总门禁随之失败。
+
+root实际 **1 failed、3562 passed、81 skipped、5572 warnings，562.98s**。唯一失败为
+`tests/test_static_placeholder_cleanup.py::test_current_template_script_order_and_local_urls[home]`：
+精确脚本清单未包含本批实际新增的 `scientific_references.js`。本地隔离复现
+**1 failed、6 passed，33.04s**；仅在 `molecule_candidates.js` 后补齐该脚本，
+保持精确顺序、所有本地URL 200、旧资产禁止项、资源排空及禁止外联断言不变，
+GREEN **7 passed，25.75s**。两项相关首页Node回归和diff通过。未改生产逻辑、超时或CI门禁。
+独立窄复审APPROVED、无发现：11个脚本与模板精确一致，移除新增项即还原原测试（忽略换行差异）；其余断言/隔离/清理未变。复审仅只读比较与diff检查，未另跑pytest。
+修正后CI结果以PR记录和后续回复为准，首轮不称通过。

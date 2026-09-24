@@ -1,5 +1,12 @@
 # Latest handoff
 
+## T09 发布：Draft PR #60 与CI清单修正（2026-09-24）
+
+已发布T09分支至 [PR #60](https://github.com/kxyesyes/molecular_chat_system/pull/60)，未合并/部署。
+首轮CI五项成功，但root的首页精确脚本清单漏列本批新增引用模块；已实际复现后仅补清单，
+未改业务代码或弱化门禁。聚焦回归由1 failed/6 passed转为7 passed；首轮CI失败证据保留在
+[验收交接](scientific-reference-acceptance.md)。最新head/CI以PR为准，不把原始本地结果替代CI。
+
 ## T09：故障恢复与浏览器验收第三增量（2026-09-24）
 
 独立分支 `codex/scientific-reference-continuity` 在 `212e454` 上补故障、取消、锁、
