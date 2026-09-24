@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from copy import deepcopy
+
 import pytest
 
 from src.agent.contracts import (
@@ -61,6 +63,47 @@ def test_checkpoint_restores_artifacts_in_result_state_and_evidence(tmp_path):
     assert [a.to_dict() for a in resumed.artifacts] == [artifact.to_dict()]
     assert resumed.metadata["workflow_state"]["artifacts"] == [artifact.to_dict()]
     assert resumed.metadata["evidence_ledger"][0]["artifacts"] == [artifact.to_dict()]
+
+
+def test_checkpoint_double_restore_isolates_nested_artifact_metadata():
+    checkpoint = {
+        "status": "succeeded",
+        "output": {
+            "success": True,
+            "status": "succeeded",
+            "artifacts": [{
+                "artifact_type": "report",
+                "path": "outputs/synthetic.json",
+                "label": "Synthetic reference",
+                "metadata": {
+                    "provenance": {"source": "fixture"},
+                    "entries": [{"labels": ["original"]}],
+                },
+            }],
+        },
+    }
+    original = deepcopy(checkpoint)
+    first = WorkflowOrchestrator._result_from_checkpoint("fixture", checkpoint)
+    second = WorkflowOrchestrator._result_from_checkpoint("fixture", checkpoint)
+    expected = original["output"]["artifacts"][0]["metadata"]
+
+    assert len(first.artifacts) == len(second.artifacts) == 1
+    assert first.artifacts[0].metadata == second.artifacts[0].metadata == expected
+    first.artifacts[0].metadata["provenance"]["source"] = "first"
+    first.artifacts[0].metadata["entries"][0]["labels"].append("first")
+    assert second.artifacts[0].metadata == expected
+    assert checkpoint == original
+
+    first_metadata = deepcopy(first.artifacts[0].metadata)
+    second.artifacts[0].metadata["provenance"]["source"] = "second"
+    second.artifacts[0].metadata["entries"][0]["labels"].append("second")
+    assert first.artifacts[0].metadata == first_metadata
+    assert checkpoint == original
+
+    second_metadata = deepcopy(second.artifacts[0].metadata)
+    checkpoint["output"]["artifacts"][0]["metadata"]["entries"][0]["labels"].append("checkpoint")
+    assert first.artifacts[0].metadata == first_metadata
+    assert second.artifacts[0].metadata == second_metadata
 
 
 @pytest.mark.parametrize("artifacts", ["bad", [{}], [{"artifact_type": "report", "path": 7, "label": "x"}]])
