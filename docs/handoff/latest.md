@@ -1,5 +1,14 @@
 # Latest handoff
 
+## 第2项发布完成／第3项开始（2026-09-25）
+
+[PR #63](https://github.com/kxyesyes/molecular_chat_system/pull/63) 已按用户默认授权 squash 合并为
+`aa86377`。合并前复核 head `d4860d7`、main目标、CI7/7、无未解决审查线程或更改请求；
+合并树与审查树一致。下方本地交接的“待发布”是历史状态，不表示仍未合并；未部署或启用模型。
+第3项在独立 `codex/domain-api-separation` 工作树实施：30个接口行为等价拆分，
+旧九文件基线169 passed、1 skipped、11 subtests passed。仍需完成新测试、实现、双审和CI，
+不能当作已完成；细节见[领域API交接](domain-api-separation.md)及[第1–8项台账](remaining-through-step8.md)。
+
 ## ChatHandler 纯展示/提示拆分（2026-09-25，本地完成）
 
 第1项 PR #62 已 squash 合并为 `6af7292`，合并树与审查 head 相同；未部署。
