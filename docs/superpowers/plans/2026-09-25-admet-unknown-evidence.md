@@ -678,3 +678,33 @@ tests/agent/test_generation_ranking_contract_integration.py
 No skips/failures/retries; counts are 1106 original focused cases plus 322 cases from the two added contract files. Existing AnyIO assertion-rewrite warning and minimum protected-namespace warning retained. No extra full run: single full result **6468 passed / two skipped / eight warnings / 287.49s** is still exclusively old-base `d12908f / c31e6729`, not this PR73 snapshot. `python -m compileall -q src scripts`, `git diff --check`, clean merged-worktree and reviewed-file equality checks passed.
 
 After tests, only these two approved ADMET documents are updated and explicitly staged for the authorized evidence commit. No source/test changes after validation. Final local commit is ready for parent-controlled push/PR; this worker does not push, open a PR or modify published production, keys, providers or scientific assets. Parent can identify the tested code using the exact merge SHA/tree above; the evidence commit changes documentation only.
+
+### PR74 first static-quality failure and uncommitted fixture-only correction
+
+Parent created draft PR74 with head `153d6b6f85b59ccc892fdb2072f5492e6e95d48c` and reports its first static-quality failure: run **36067075277**, job **107859220556**, credential scan named `tests/test_admet_unknown_evidence.py`; Node checks passed. This records the failed first CI attempt, not an all-green PR. Remote job status is parent-provided (local gh CLI unavailable); the causal scan failure was independently reproduced locally from the actual workflow step. PR74 is linked to this task; no remote mutation/push or rerun was performed.
+
+Read-only diagnosis before editing:
+
+- `.github/workflows/quality.yml` runs `git grep -IlE` over tracked non-document files for credential-shaped material; it reports filenames only and converts grep match exit0 to failing job exit1. It is intentionally a textual static gate, not a credential authenticator.
+- Exactly one match was located at test line 381. Only masked metadata was emitted: length 35 and equality to the known authored alphabet/digit fixture. Git blame attributes it to implementation commit `7ddac1b`; the value is a hardcoded member of `test_unsafe_diagnostic_sources_are_not_restored`, not read from environment, files containing credentials, or a provider. This is the synthetic negative sample added during URL redaction TDD, not a discovered real credential. No full candidate is printed or included here.
+- Existing `tests/agent/test_credential_scan_budget.py` constructs synthetic credential-shaped families using concatenation/repetition rather than complete static literals. Apply the same principle with runtime `join` for this one URL sample. No allowlisting, scanner weakening, gate change, expected-value change, production edit or test removal.
+- Earlier pytest passes did not exercise this tracked-file static gate; failure to run it before handoff allowed the authored synthetic representation to reach the first CI attempt. Preserve all prior historical evidence without treating it as proof of static-quality success.
+
+Executed the **unmodified scanner script extracted from quality.yml** through existing Git Bash, from the worktree, before and after the one-line edit. RED: printed only the test filename and exited **1**. GREEN: no matched files and exited **0**. Workflow file remains byte-identical to HEAD. Do not confuse this local GREEN with a new remote CI run: PR head is still unchanged.
+
+Runtime/coverage proof used AST parsing without importing/running providers: evaluated all **14** old/new source parameter values and verified exact equality; the single runtime credential-shaped case still matches its original shape. Substituting the original list AST back for the new assembly list makes the complete test AST identical. Thus both Boolean states, nested/top-level redaction, every existing assertion and all other test code remain unchanged. Only fixture source representation differs.
+
+Same exact twelve-file FOCUS set from the PR73 section, isolated runner/network guard and existing profiles:
+
+| Check | Actual result |
+|---|---|
+| Exact static scan before change | RED, exit1, only `tests/test_admet_unknown_evidence.py` reported. |
+| Exact static scan after change | GREEN, exit0, no tracked non-document matches. |
+| Host FOCUS | **1428 passed**, one existing warning, **18.05s**, exit0. |
+| Minimum FOCUS | **1428 passed**, three existing warnings, **19.01s**, exit0. |
+
+No skips, failed test retries, Node rerun, full suite or external model/provider/asset work. Existing warning types retained. Targeted `python -m compileall -q tests/test_admet_unknown_evidence.py` and `git diff --check` passed. Scanner, workflow expectations and all production files are unchanged. Only this test plus the two approved documents may be modified, and nothing is staged/committed/pushed pending parent re-review.
+
+Uncommitted replacement test SHA256: `393d51265f878ab6400dc3e08d566b78085592f86bb12456979a1f0240a51b77` (previous `cfef9541d1d7326d0eae138f66b13b7d907a50ab5cd2ab61a4f1b56b68b30799`). Other six code/test hashes retain their recorded values. Replacement seven-file aggregate, same sorted-path/space/lowercase-hash/LF/final-LF UTF-8 convention: **`75a8cab7d2d23974eb9ce81985eb7f451916a66bc84a553a2519fe3352b2cfee`**. Previous reviewed aggregate `1ef2e89d…` remains the historical pre-correction snapshot; the new aggregate is not yet parent-approved. HEAD remains `153d6b6f85b59ccc892fdb2072f5492e6e95d48c`.
+
+Publication checkpoint: original independent QUALITY reviewer Feynman approved this fixture-only delta after independently checking 14/14 runtime values, unchanged remaining AST/production hashes, exact static scan exit0 and aggregate `75a8cab7…2b2cfee`. No pytest/full was rerun by that reviewer; the worker's 1428-pass host/minimum results remain separately attributed. Parent authorizes an explicit three-path commit/push to the existing PR74. The first failed CI is retained; all eight required checks must pass on the replacement head before merge.

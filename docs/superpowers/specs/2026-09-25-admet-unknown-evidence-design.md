@@ -1,6 +1,6 @@
 # ADMET unknowns and evidence-preserving presentation
 
-Date: 2026-09-25. Status: **SPEC/QUALITY approved (parent-confirmed), exact nine-file commit 7ddac1b created; old-base Agent full GREEN at d12908f only (6468 passed, two skipped). G2 and PR73/main 0295e99 now integrated; latest host/minimum FOCUS including both new 4C contract files each 1428 passed. Reviewed seven-file hash unchanged. Ready for parent push/PR coordination; no second full, root full, push or PR by this worker**.
+Date: 2026-09-25. Status: **draft PR74 at 153d6b6 has a first static-quality failure on an authored synthetic credential-shaped fixture. One-line runtime-assembly correction is locally scan-GREEN and host/minimum FOCUS each 1428 passed; pending parent re-review, uncommitted/unpushed. Production/scientific code unchanged; no new full run**.
 
 ## 1. Scope, baseline, and authority
 
@@ -191,6 +191,12 @@ Parent reports PR73 merged after 8/8 CI and zero unresolved review threads; thos
 The exact twelve-file light set is the original ten-file FOCUS plus `tests/agent/test_generation_ranking_contract.py` and `tests/agent/test_generation_ranking_contract_integration.py`. On the merged snapshot, host **1428 passed, one existing warning, 17.73s**; minimum **1428 passed, three existing warnings, 17.49s**; both exit0 with no skips or retries. Existing isolated offline runner/network guard and dependency profiles only, no models/providers/assets or installation. Compileall and diff checks passed.
 
 All seven ADMET code/test files remain identical to reviewed commit `7ddac1b`, and their raw-byte aggregate is still `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`. Subsequent local documentation commit records this evidence only. Original single Agent-full result remains scoped to `d12908f`, not PR73; no second Agent full or root full was run. This snapshot is ready for parent-controlled push/PR; this worker has not pushed, created a PR or changed published production.
+
+## 14. PR74 initial static-quality failure: synthetic fixture representation
+
+Parent reports draft PR74 at `153d6b6`, run `36067075277`, job `107859220556`, failed the tracked non-document credential scan after Node checks passed. Read-only local tracing of `.github/workflows/quality.yml` reproduced the exact failure. There was one match at `tests/test_admet_unknown_evidence.py:381`: the fixed alphabet/digit synthetic credential-shaped URL fixture authored in `7ddac1b`. Masked equality/length and blame checks establish its test origin; it is not loaded from credentials, environment or a provider. No full candidate is reproduced in this record. Remote CI status is parent-reported; the unavailable local gh CLI did not independently re-poll it.
+
+Only that fixture expression changes to runtime `join` assembly, following existing synthetic-token assembly in repository tests. Its evaluated URL and all 14 source parameter values are identical; the credential-shaped negative case remains covered in success/failure and nested source paths. Replacing only the assembly expression with the original list makes the complete test AST identical, proving no assertion/coverage weakening. No scanner/gate/production change. The unmodified workflow scanner is RED before and GREEN after; original twelve-file FOCUS passes 1428 cases on each host/minimum profile. Exact evidence and the superseding uncommitted hash are in the plan. Historical review/test evidence is retained, but this test-representation delta awaits parent re-review; no commit/push/full/provider/model/asset work.
 
 ## Historical design-only handoff (before implementation authorization)
 
