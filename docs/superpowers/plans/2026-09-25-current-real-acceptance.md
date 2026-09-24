@@ -144,4 +144,123 @@ Decision scripts/family item have no `--repeat`: the approved orchestrator must 
 - [ ] **Authorized preflight then three real rounds.** Verify trusted asset snapshots/hashes, real tool versions/readiness and provider configuration in child only. No source model activation, no dataset training, no service/model auto-start. Run supplemental contract/replay/isolated suites with honest labels; run complete ordinary-entry matrix on final revision. Stage-scoped failures block dependent claims without fabricating completion.
 - [ ] **Verify, clean, hand off.** Retain only approved sanitized summaries/scientific outputs needed for review; close sockets/clients/SQLite and terminate only owned descendants. Before deletion, verify absolute paths stay under owned root, no links/reparse traversal and ownership released. Uncertainty retains private state with cleanup failure; never broad delete caches/assets or kill by process name. Parent receives matrix of passes/failures/partials/pending dependencies, all 3 rounds and exact revision, not a deployment claim.
 
-**Current result:** Design/inventory complete only. All real availability, actual latest integrated execution, package-7 ordinary-entry coverage and final scientific acceptance remain unverified/pending. No test/compile/health command was run; no commit or PR was created.
+**Inventory-stage result (before P8-A below):** Design/inventory complete only. All real availability, actual latest integrated execution, package-7 ordinary-entry coverage and final scientific acceptance remained unverified/pending. At that stage no test/compile/health command was run and no commit or PR was created. The subsequent approved P8-A work is recorded below; it does not establish real acceptance.
+
+## P8-A implementation / review-freeze ledger (2026-09-25)
+
+Parent approved the precise offline design and TDD. This completes **P8-A report consistency only**, not package 8 real acceptance or package 7. Scope: new `src/agent/evaluation/aggregation.py`, new `tests/agent/test_evaluation_aggregation.py`, this plan and the approved small design. No existing scientific runner/CLI/models/Web code changed. Two existing pure scientific helpers (tool-order and provenance completeness) are reused.
+
+### Evidence from this batch
+
+| Stage | Actual result |
+|---|---|
+| Initial subprocess command including recursive cleanup | Tool policy rejected command before execution; no RED evidence |
+| Initial over-broad read guard | 1 collection error: guard blocked RDKit's installed built-in fragment rules; narrowed guard to project assets, not scientific models/data. Not counted as behavioral RED |
+| Callable positive control | RED 1 assertion failure (`aggregation callable missing`), then GREEN 1 passed |
+| Exact case×round + existing truth/provenance behavior | RED 23 failed / 1 passed; GREEN 24 passed |
+| Builtin/type/size/depth boundary + missing strict policy | RED 24 failed / 24 passed; GREEN 48 passed |
+| Source/cleanup record linkage | RED 25 failed / 49 passed; GREEN 74 passed |
+| Pose and expected rejection/partial | RED 17 failed / 80 passed; implementation run 1 failed / 96 passed due to a test assertion accidentally moved into wrong function (NameError). Restored assertion to original test; GREEN 97 passed |
+| Consumed-leaf/partial-link/known-contradiction checks | RED 22 failed / 99 passed (including malformed values raising rather than returning fixed failure); GREEN 121 passed |
+| Tuple compatibility and existing result authority | RED 4 failed / 125 passed; GREEN 129 passed |
+| First related-regression + two-file in-memory compile | 136 passed, 0 skipped, 0 failed; compile passed |
+| Final null-pose/event-status/error/demo-type regressions | RED 4 failed / 129 passed; final combined GREEN **140 passed, 0 skipped, 0 failed**, 2.10 s pytest, exit 0; two-file in-memory compile passed |
+
+Final combined set = **133 new focused tests + 7 existing pure regression tests**. These are synthetic in-memory consistency tests; none is real scientific/provider evidence. Some added defensive examples already passed from earlier groups; counts above preserve that fact instead of claiming every new test independently went RED.
+
+Existing related node IDs (no dataset tests selected):
+
+- `tests/agent/test_evaluation_runner.py::test_scientific_stability_summary_reports_latency_and_failure_types`
+- `tests/agent/test_evaluation_runner.py::test_replay_never_promotes_original_failure_to_passed`
+- `tests/agent/test_evaluation_runner.py::test_replay_fails_skill_tool_and_forbidden_tool_contract_violations`
+- `tests/agent/test_evaluation_runner.py::test_replay_reports_strict_status_rates_separately_from_completion_rate`
+- `tests/agent/test_evaluation_runner.py::test_workflow_score_penalizes_order_and_fabrication`
+- `tests/agent/test_real_acceptance_checks.py::test_structured_provenance_score_requires_input_hash_summaries_and_event_trace`
+- `tests/agent/test_real_acceptance_checks.py::test_tool_provenance_uses_persisted_execution_input_and_hash`
+
+### Isolation / exact final command
+
+Used the installed MedChat Python path already documented in the earlier RAG extraction plan. The following was an inline test command, **not a new checked-in launcher or live service**. Child environment is cleared before explicit nonsecret test values are supplied; no ambient secret values enumerated/read. No conftest is loaded, no plugin autoload, no model or service starts. Imported library code includes bundled RDKit rule tables, not project datasets/weights. Network and project data/report/log opens are guarded. Tests consume only their in-memory fixtures and source code.
+
+Private synthetic test directories were intentionally **retained**, not claimed cleaned: the initial recursive-cleanup command was policy-rejected; subsequent commands omitted deletion. Test child exited and was waited/disposed. This is not production cleanup evidence. No broad cleanup, hidden deletion fallback or user-asset operation was attempted.
+
+```powershell
+$root = 'D:/MedChat/molecular_chat_system_worktrees/current-real-acceptance'
+$base = 'C:/Users/xkx52/AppData/Local/Temp'
+$private = [IO.Path]::GetFullPath((Join-Path $base ('p8a-' + [guid]::NewGuid().ToString('N'))))
+[IO.Directory]::CreateDirectory($private) | Out-Null
+$p = [Diagnostics.ProcessStartInfo]::new()
+$p.FileName = 'C:/Users/xkx52/.conda/envs/MedChat/python.exe'
+$p.WorkingDirectory = $private
+$p.UseShellExecute = $false
+$p.CreateNoWindow = $true
+$p.RedirectStandardOutput = $true
+$p.RedirectStandardError = $true
+$p.Environment.Clear()
+$p.Environment['SystemRoot'] = 'C:/Windows'
+$p.Environment['WINDIR'] = 'C:/Windows'
+$p.Environment['PATH'] = 'C:/Users/xkx52/.conda/envs/MedChat;C:/Users/xkx52/.conda/envs/MedChat/Library/bin;C:/Windows/System32'
+foreach ($key in @('TEMP','TMP','HOME','USERPROFILE','APPDATA','LOCALAPPDATA')) { $p.Environment[$key] = $private }
+$p.Environment['PYTHONPATH'] = $root
+$p.Environment['PYTEST_DISABLE_PLUGIN_AUTOLOAD'] = '1'
+$p.Environment['PYTHONDONTWRITEBYTECODE'] = '1'
+$p.Environment['MEDCHAT_USER_CONFIG_DIR'] = (Join-Path $private 'user-config')
+$p.Environment['MEDCHAT_ENV_FILE'] = (Join-Path $private 'unused.env')
+$p.Environment['MOLECULAR_CHAT_CONFIG'] = (Join-Path $private 'unused.yaml')
+$p.Environment['AGENT_STATE_DB'] = (Join-Path $private 'agent.sqlite')
+$p.Environment['MEDCHAT_TASK_DB_PATH'] = (Join-Path $private 'tasks.sqlite')
+$p.Environment['TARGET_DB_PATH'] = (Join-Path $private 'targets.sqlite')
+$p.Environment['TARGET_CACHE_DIR'] = (Join-Path $private 'target-cache')
+$p.Environment['ACTIVITY_MODEL_DIR'] = (Join-Path $private 'models')
+$p.Environment['REVERSE_TARGET_DATA_DIR'] = (Join-Path $private 'reverse')
+$p.Environment['AGENT_HARNESS_MODE'] = 'legacy'
+$p.Environment['MEDCHAT_TASK_BACKEND'] = 'local'
+$p.Environment['MEDCHAT_TEMPORAL_CANARY_PERCENT'] = '0'
+$code = @'
+import sys
+from pathlib import Path
+repo = Path(sys.argv[1])
+def audit(event, args):
+    if event in ('socket.connect', 'socket.getaddrinfo'):
+        raise RuntimeError('network forbidden in offline P8-A')
+    if event == 'open' and isinstance(args[0], (str, bytes)):
+        name = str(args[0]).replace('\\', '/').lower()
+        if name.startswith(str(repo).replace('\\', '/').lower() + '/') and any('/' + part + '/' in name for part in ('data', 'outputs', 'logs')):
+            raise RuntimeError('asset read forbidden in offline P8-A')
+sys.addaudithook(audit)
+for relative in ('src/agent/evaluation/aggregation.py', 'tests/agent/test_evaluation_aggregation.py'):
+    compile((repo / relative).read_text(encoding='utf-8'), relative, 'exec')
+print('Two-file in-memory compile: passed')
+import pytest
+raise SystemExit(pytest.main([str(repo / 'tests/agent/test_evaluation_aggregation.py'),
+    str(repo / 'tests/agent/test_evaluation_runner.py') + '::test_scientific_stability_summary_reports_latency_and_failure_types',
+    str(repo / 'tests/agent/test_evaluation_runner.py') + '::test_replay_never_promotes_original_failure_to_passed',
+    str(repo / 'tests/agent/test_evaluation_runner.py') + '::test_replay_fails_skill_tool_and_forbidden_tool_contract_violations',
+    str(repo / 'tests/agent/test_evaluation_runner.py') + '::test_replay_reports_strict_status_rates_separately_from_completion_rate',
+    str(repo / 'tests/agent/test_evaluation_runner.py') + '::test_workflow_score_penalizes_order_and_fabrication',
+    str(repo / 'tests/agent/test_real_acceptance_checks.py') + '::test_structured_provenance_score_requires_input_hash_summaries_and_event_trace',
+    str(repo / 'tests/agent/test_real_acceptance_checks.py') + '::test_tool_provenance_uses_persisted_execution_input_and_hash',
+    '--noconftest', '-c', str(repo / 'pytest.ini'), '-q', '-p', 'no:cacheprovider', '--tb=short']))
+'@
+foreach ($arg in @('-B','-s','-c',$code,$root)) { $p.ArgumentList.Add($arg) }
+$process = [Diagnostics.Process]::Start($p)
+$out = $process.StandardOutput.ReadToEndAsync()
+$err = $process.StandardError.ReadToEndAsync()
+if (-not $process.WaitForExit(120000)) { $process.Kill($true); $process.WaitForExit(); throw 'P8-A focused deadline exceeded; private directory retained' }
+$out.GetAwaiter().GetResult()
+$err.GetAwaiter().GetResult()
+$code = $process.ExitCode
+$process.Dispose()
+if (-not $private.StartsWith([IO.Path]::GetFullPath($base) + [IO.Path]::DirectorySeparatorChar)) { throw 'Cleanup path outside owned base' }
+Write-Output 'Private synthetic test directory retained (no recursive deletion requested).'
+exit $code
+```
+
+### Review handoff
+
+- Immutable output limitations: `live_execution_verified=false`, `final_acceptance=false`, `scope=offline_report_validation` even on gate passed.
+- Supplemental IDs/hashes are checked only for internal consistency, not authenticity or filesystem reality. Prospective provider-request/tool-execution linkage remains collector work; current reports without it cannot silently pass the strict gate.
+- `details.scientific_status` preserves the existing source **case status**, which must not be confused with raw underlying scientific tool outcome. No final scientific success claim is made.
+- Known batch limits: one required pose observation per case×round; two fixed negative truth-check reasons; no JSON CLI/report adapters, artifact reader, source authenticator or normal WS launcher.
+- Full pytest/compileall/health/live acceptance not run; full needs parent's queue, live needs a separately authorized batch.
+- Freeze for two independent parent-arranged reviews (spec/quality). No review approval claimed, no push/PR/merge-to-main.
