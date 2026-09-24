@@ -27,6 +27,8 @@
       maxCandidates: 32,
     });
   let referenceStatusElement = null;
+  const evidenceReportLifecycle = window.HomeEvidenceReport?.createLifecycle();
+  const evidenceReportViews = new WeakMap(); // live DOM lifetime only; never storage/restore
   let tabStorage;
   try { tabStorage = window.sessionStorage; } catch (_) { tabStorage = null; }
   const scientificReferences = window.HomeScientificReferences?.createController({
@@ -51,6 +53,11 @@
   });
 
   function displayCandidateCollections(element, payloads) {
+    const report = evidenceReportLifecycle?.take(payloads[0]?.traceId);
+    if (report) {
+      evidenceReportViews.set(element, report);
+      try { window.HomeEvidenceReport.renderReport(element, report); } catch (_) { /* Optional display only. */ }
+    }
     if (scientificReferences) {
       void scientificReferences.present(payloads, payload => renderMoleculeCandidates(element, payload));
     } else {
@@ -209,6 +216,7 @@
     ws = null;
     protocolDesyncedSocket = null;
     moleculeCandidateLifecycle.clear();
+    if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
     const wsUrl = `ws://${window.location.host}/ws`;
 
     console.log(`=== 尝试连接WebSocket ===`);
@@ -274,6 +282,7 @@
         clearTimeout(connectionTimeout);
         if (protocolDesyncedSocket !== socket) {
           moleculeCandidateLifecycle.clear();
+          if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
         }
         console.error("❌ WebSocket错误:", {
           error: error,
@@ -289,6 +298,7 @@
         clearTimeout(connectionTimeout);
         moleculeCandidateLifecycle.clear();
         protocolDesyncedSocket = null;
+        if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
         ws = null;
         console.log("🔌 WebSocket连接关闭:", {
           code: event.code,
@@ -327,6 +337,7 @@
       };
     } catch (error) {
       moleculeCandidateLifecycle.clear();
+      if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
       console.error("❌ 创建WebSocket连接失败:", {
         error: error.message,
         stack: error.stack,
@@ -484,11 +495,21 @@
             );
           } else if (!moleculeCandidateLifecycle.enqueue(normalized)) {
             console.warn("Ignored duplicate or over-limit molecule candidate payload");
+          } else if (typeof evidenceReportLifecycle !== "undefined") {
+            evidenceReportLifecycle?.observeTrace(normalized.traceId);
           }
           break;
         }
 
+        case "scientific_report":
+          if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.enqueue(message);
+          break;
+
         case "complete":
+          if (["failed", "rejected", "cancelled"].includes(message.status)) {
+            if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
+            moleculeCandidateLifecycle.clear();
+          }
           completeLastMessage(message.content);
           clearToolStatus(); // 清除工具状态显示
           break;
@@ -516,6 +537,7 @@
             }
           } finally {
             moleculeCandidateLifecycle.clear();
+            if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
           }
           break;
         }
@@ -530,6 +552,7 @@
 
         case "error":
           moleculeCandidateLifecycle.clear();
+          if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
           const errorMsg = message.message || message.error || "未知错误";
           console.error("❌ 服务器返回错误:", {
             message: errorMsg,
@@ -1330,6 +1353,7 @@
       ws.send(payloadStr);
       scientificReferences?.startRequest();
       moleculeCandidateLifecycle.startRequest();
+      if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.startRequest();
 
       // 清空输入框
       elements.input.value = "";
@@ -1340,6 +1364,7 @@
       console.log("✅ 消息发送成功");
     } catch (error) {
       moleculeCandidateLifecycle.clear();
+      if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
       console.error("❌ 发送消息时出错:", {
         error: error.message,
         stack: error.stack,
@@ -1802,6 +1827,7 @@
       displayCandidateCollections(lastMessage, candidatePayloads);
     } finally {
       moleculeCandidateLifecycle.clear();
+      if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
     }
   }
 
@@ -3798,6 +3824,15 @@
         unavailable.textContent =
           "当前候选事件未携带经独立性质工具验证的属性";
         propertiesContainer.appendChild(unavailable);
+        try {
+          const report = typeof evidenceReportViews !== "undefined" ? evidenceReportViews.get(messageElement) : null;
+          const collection = report?.collections.find(c => c.reference.presentation_id === payload.reference?.presentation_id);
+          if (collection) {
+            const row = window.HomeEvidenceReport.findPropertyRow(report, payload.reference, collection.generator_observation_id, candidate);
+            const source = report.sources.find(s => s.observation_id === row?.source_observation_id);
+            window.HomeEvidenceReport.renderProperties(propertiesContainer, row, source);
+          }
+        } catch (_) { /* Enrichment failure cannot suppress card mounting or ACK. */ }
         infoSection.appendChild(propertiesContainer);
 
         // SMILES 折叠区域

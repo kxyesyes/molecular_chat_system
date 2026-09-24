@@ -26,7 +26,7 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '/static/js/home/main.js?v=20260925-terminal-labels-v1'
+    '/static/js/home/main.js?v=20260925-evidence-report-v1'
   ),
   "homepage must cache-bust the task terminal labels fix"
 );
