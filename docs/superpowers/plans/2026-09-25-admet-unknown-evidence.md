@@ -12,17 +12,17 @@
 
 ## Authorization and prerequisites
 
-**Written design and plan accepted by parent; TDD waits for the parent-supplied merged 4A baseline.** Parent authorizes updating and locally committing this plan and its sibling spec only. No implementation, test creation, test runs, push, PR or merge is authorized in this documentation phase. Do not repeat questions about accepted recommended choices. Code blocks below remain prospective test/implementation guidance, not files installed by this task. Parent packages 1–8 retain their own deliverables and scientific-truth invariant; the eight local tasks below do not replace those packages.
+**Written design and plan accepted; reviewed 4A integrated; bounded TDD authorized.** Parent supplied PR67's merged baseline and authorized origin/main integration followed by this plan, with **no commits after implementation or push**. Implementation is now local/uncommitted; focused and minimum-profile tests pass. Full Agent/full-repository tests await the parent's heavy slot. Independent implementation review is outstanding. Do not repeat accepted choice questions. Parent packages 1–8 retain their own deliverables and scientific-truth invariant; the eight local tasks below do not replace those packages.
 
 Spec: `docs/superpowers/specs/2026-09-25-admet-unknown-evidence-design.md`.
 
-Branch/original source-inspection base: `codex/admet-unknown-evidence` / `0e54a1e1038dbf51ea0462ba79c14df91ba13161`. Parent confirms **PR64 merged at `ecd6cca`**, and reports **4A PR67 all 8 CI checks passing, awaiting integration**. These updates are parent-provided, not independently re-polled here. Do not amend PR64 or integrate source during this documentation update. The 4A file does not exist at this task's original base. Earlier read-only sibling observation is commit `52498a8bb7c9d1be4a9db002b09d5756937eab8a`; the spec records its exact source/test hashes. That historical snapshot is not a substitute for the merged baseline the parent will supply.
+Branch/original source-inspection base: `codex/admet-unknown-evidence` / `0e54a1e1038dbf51ea0462ba79c14df91ba13161`. PR64 merged at `ecd6cca`; PR67 merged at `1bba0256409a06317486530e5c1cfa6598b8e381`, tree `71b1a064862faa8f0711d5e74e1faf67386ffedd`, reviewed head `9f3ce84`. Parent reports latest CI8/8, unresolved0. Local origin/main/tree verification passed. Integration merge `6719b129ddfc431f375bab667bca2476345f6151` precedes all implementation; only the newer origin/main handoff status was selected in one documentation conflict. No cherry-pick duplication and no production conflicts. The earlier inspected sibling snapshot remains historical provenance, not the execution base.
 
 - [x] Parent reviewed and accepted the written spec and plan, including endpoint sibling metadata, conservative dictionary rule interpretation and metadata-only row exclusion. Preserve available source/method/failure diagnostics when excluding those rows.
 - [x] Parent confirmed PR64 landing at `ecd6cca`.
-- [ ] Parent supplies the merged reviewed 4A PR67 baseline; only then enter TDD and integrate the reviewed dependency through the parent's normal workflow. Do not copy a sibling module or alter main. Passing CI alone does not satisfy this start gate.
-- [ ] Re-read applicable AGENTS, working status, the two production modules, reviewed `analysis_contract.py` and its tests; reconcile changed method signatures before touching code.
-- [ ] Run offline in an approved isolated Python environment with real in-memory RDKit and the matching frozen FastAPI/Pydantic profile. Use temporary runtime directories and the isolated runner pattern recorded in `docs/superpowers/plans/2026-09-24-rag-service-extraction.md`; no secrets, `.env`, local scientific assets, external network, app lifespan or real provider calls. Do not install packages implicitly.
+- [x] Parent supplied merged reviewed PR67; integrate origin/main into the clean branch before TDD, without cherry-picks or main edits.
+- [x] Re-read applicable AGENTS, working status, the two production modules, reviewed `analysis_contract.py` and its tests; reconcile changed method signatures before touching code.
+- [x] Focused/minimum runs use the approved isolated environment, temporary runtime directories, in-memory RDKit and frozen framework profiles. No package installation, real-service activation or scientific assets. Final runs additionally block socket connections except Windows asyncio's internal socketpair.
 
 ## Future file map
 
@@ -396,6 +396,201 @@ git status --short
 - [ ] Parent QUALITY review: confirm TDD RED/GREEN evidence, unchanged numerical output and required leaves, valid/negative input coverage, reviewed-4A integration and clean file scope. No independent review is claimed until actually performed.
 - [ ] Hand off branch/base, exact files, commands and counts/skips/failures, remaining CI/review dependencies. Stop before staging/commit/push/PR/merge unless separately authorized. Subsequent publication must be a distinct behavior PR, not a rewrite of PR64; parent controls main integration.
 
-## Current design-only verification record
+## Historical design-only verification record
 
 Read source and tests at the recorded bases, considered three alternatives and performed spec/plan consistency review. Parent subsequently accepted the written design/plan, confirmed PR64 merged at `ecd6cca`, reported PR67's 8 passing CI checks, authorized a documentation-only local commit and instructed waiting for the merged 4A baseline. Those parent-provided facts supersede the initial pending-review/PR64-pending/no-commit state; they are not a claim of a new remote audit. Only the two permitted Markdown documents were created/updated using apply_patch. No source/test implementation or execution occurred; no provider, secret or model/asset was used. Future implementation SPEC/QUALITY approval, automated test results and 4A merge completion are not claimed. The next action after this documentation commit is to await the parent's merged 4A baseline, not to begin dependency-missing implementation.
+
+## Execution record — local implementation, awaiting heavy slot
+
+### Integration and boundaries
+
+- Clean initial branch `codex/admet-unknown-evidence`, HEAD `5a4b3a8`; local origin/main equaled the supplied PR67 merge SHA/tree. `git merge --no-edit origin/main` produced one conflict in `docs/handoff/remaining-through-step8.md` (old pending PR64 text versus main's merged status). Resolved only that hunk to origin/main via apply_patch, explicitly staged that file, and completed the authorized integration merge `6719b129ddfc431f375bab667bca2476345f6151`. The merged index differed from origin/main only by this plan and its spec. No duplicate cherry-pick, no production conflict, no main branch edit.
+- Tasks 1–7 implemented in the approved seven code/test paths; this plan/spec are the only additional implementation-phase documentation writes. No generic adapter, factory, scoring, algorithm, threshold, property units or source numbers changed. No implementation commit/push/PR.
+- Route returns the five exact Unknown labels and sibling unavailable/not-calculated metadata without constructing ADMET. Legacy-label characterization updated only here, after PR64; frozen OpenAPI/profile fixtures unchanged.
+- ADMET uses three null uncomputed alerts, RDKit-rule/SA provenance labels, strict display-only value handling, conservative partial-rule detail text, whole-label solubility interpretation and no CNS safety/activity inference. Real calculations and historical units retained without certifying the units.
+- Metadata-only output fails with `data=None`, not an invented scientific row. `quality.unassessed_admet` retains supplied method/version/source/provenance/warnings/error/reason/failure_reason; missing fields are not invented. Reuses existing bounded metadata sanitization for diagnostic fields only, so safe reasons survive without exposing private payloads. Existing compatibility normalization/failure snapshots carry that diagnostic context. No generic lifecycle/status changes.
+- 4A delta is exactly one strict `TypeAdapter(bool | None)` used at pains/brenk/zinc; global `_BOOL`, all other known required leaves and validation/worker lifecycle remain unchanged.
+
+### Offline runner and reproducible path sets
+
+Used the PowerShell-extracted runner in `docs/superpowers/plans/2026-09-24-rag-service-extraction.md`, replacing its worktree path with this worktree and output marker with `ADMET_PYTEST_EXIT`. Interpreter: existing MedChat Conda Python; `-B`, isolated temporary cwd, cleared inherited secret/config environment, isolated SQLite/cache/user-config paths, all real-service switches disabled, no dependency installation. Checked-in evaluation case files copied by that existing runner are test fixtures, not scientific assets. All pytest invocations use `-q -p no:cacheprovider --tb=short -rs`.
+
+BASE paths: `tests/test_molecule_properties_unknown.py`, `tests/test_admet_unknown_evidence.py`, `tests/test_admet_predictor_fallback.py`, `tests/agent/test_admet_whole_input.py`.
+
+RED paths: `tests/test_molecule_properties_unknown.py`, `tests/test_admet_unknown_evidence.py`, `tests/agent/test_analysis_contract.py`.
+
+FOCUS paths (the exact Task 8 focused command):
+
+```text
+tests/test_molecule_properties_unknown.py
+tests/test_admet_unknown_evidence.py
+tests/test_admet_predictor_fallback.py
+tests/test_api_route_boundary.py
+tests/agent/test_admet_whole_input.py
+tests/agent/test_analysis_contract.py
+tests/agent/test_domain_result_validators.py
+tests/agent/test_scientific_contracts.py
+tests/agent/test_real_acceptance_checks.py
+tests/agent/test_candidate_ranker.py
+```
+
+The last three “acceptance/science” files above test offline validation logic/fixtures, not live providers. Minimum profile prepended the **existing** temporary CI dependency target `medchat-domain-api-profiles-20260925-b831/ci` to subprocess PYTHONPATH (no install); reported/asserted FastAPI 0.104.1 / Pydantic 2.5.0. Deployment focused profile used its existing `deployment` sibling (0.115.6 / 2.10.4). Host is 0.135.3 / 2.12.5.
+
+Final profile commands additionally replace the runner's child `-m pytest` with the following in-memory `-c` bootstrap (remaining path/options argv unchanged). This is a process-local validation guard, not a repository or generic adapter edit:
+
+```python
+import inspect, socket, sys
+original_connect = socket.socket.connect
+def offline_connect(self, address):
+    if any(frame.function == "_fallback_socketpair"
+           and frame.frame.f_globals.get("__name__") == "socket"
+           for frame in inspect.stack()):
+        return original_connect(self, address)
+    raise AssertionError("Offline validation cannot connect to a service")
+def offline_block(*args, **kwargs):
+    raise AssertionError("Offline validation cannot connect to a service")
+socket.socket.connect = offline_connect
+socket.socket.connect_ex = offline_block
+socket.create_connection = offline_block
+import pydantic, fastapi
+print("OFFLINE_PROFILE=" + fastapi.__version__ + "/" + pydantic.__version__)
+import pytest
+sys.exit(pytest.main(sys.argv[1:]))
+```
+
+### Actual RED/GREEN results (not full-suite evidence)
+
+| Stage | Actual result | Scope/meaning |
+|---|---|---|
+| Pre-change preservation baseline | 63 passed, 2.00s, exit0 | BASE before adding defect assertions; actual RDKit values/counts/formulas and legacy error shapes. |
+| Initial RED | 179 failed, 532 passed, 7.80s, exit1 | RED paths before production edits: endpoint constructor, unknown/pass/safety/text defects and null alert contract rejection. |
+| Initial GREEN | 859 passed, 12.22s, exit0 | RED plus API-boundary, fallback, whole-input and domain-validator files. |
+| Failure diagnostic privacy RED | 1 failed, 0.96s, exit1 | `test_failure_metadata_keeps_safe_reason_without_private_payload` demonstrated unsanitized synthetic diagnostic details; no real secrets. |
+| Expanded host FOCUS GREEN | 943 passed, 12.72s, exit0 | Added diagnostic safety/presence/partial-rule/SA/sparse-null cases; existing bounded sanitizer reused. |
+| First minimum-profile run | 2 failed, 941 passed, 1 warning, 14.32s, exit1 | New test incorrectly assumed nonempty missing-SMILES error string across frameworks; not a numerical/production failure. |
+| Final minimum FOCUS, network guard | 943 passed, 3 warnings, 12.48s, exit0 | Pydantic 2.5.0 / FastAPI 0.104.1; zero skipped. |
+| Final host FOCUS, network guard | 943 passed, 1 warning, 11.93s, exit0 | Pydantic 2.12.5 / FastAPI 0.135.3; zero skipped. |
+| Deployment targeted, network guard | 254 passed, 3 warnings, 6.08s, exit0 | New two test files plus `test_api_route_boundary.py`, 2.10.4 / 0.115.6; zero skipped. |
+
+Minimum-profile failure investigation followed systematic-debugging: loaded the original route source from `git show 6719b12:src/web/routes/molecule_properties_routes.py` into an in-memory module under the CI profile; both `{}` and empty-SMILES returned HTTP-compatible failure with `error: ''`. Starlette 0.27.0 `str(HTTPException(...))` is empty; host 1.0.0 contains status/detail. Changed only the new test to assert the exact exception-string representation of its active framework. No error-handler changes or frozen-fixture normalization. This was a demonstrated profile difference, not a load-induced retry. Final guard bootstrap imports FastAPI before pytest, producing one host/two minimum or deployment AnyIO assertion-rewrite warnings; minimum additionally has the existing Pydantic protected-namespace warning, deployment an existing BlockingPortal deprecation. Warnings are retained, not suppressed.
+
+### Static preservation and outstanding work
+
+- Source AST comparison to `6719b12` confirms the entire `_predict_admet_with_rdkit` method is identical after normalizing only the three intentional None alert literals and removing the added SA-method metadata entry. All scientific formulas, numbers, thresholds and descriptor calls therefore remain unchanged. `should_use` and `_check_adme_backend` AST also identical. Route basic-property dict AST identical; no ADMETPredictor name remains in the route.
+- All **322** tracked Python files in `src`/`scripts` memory-compiled successfully; the existing MedChat Python also ran `-m compileall -q src scripts` successfully (exit0; only ignored bytecode caches). `git diff --check` passed. No JS changes or JS test claim. No deployment/health/real/all acceptance run.
+- Parent resource-coordination instruction received before long runs: focused/minimum permitted; **full Agent and full repository not started**. Reported ready for the hub heavy slot after final focus/minimum results; wait for allocation. Do not infer success from timeout retries or resource contention. No full-suite counts claimed.
+- Implementation and tests are held for further verification/independent SPEC then QUALITY; no review approval is claimed. After heavy-slot full verification, refresh this record and freeze the exact snapshot. No implementation staging/commit/push is permitted.
+
+Historical pre-P2 code/test SHA256 snapshot (superseded below; docs excluded to avoid self-reference):
+
+```text
+src/agent/tools/admet_predictor.py 9b84797ec33c773a36661d9eae4b69796638d2f043fda3bf236d35808b854821
+src/agent/tooling/analysis_contract.py df1362e0fe5e7c2f9453b43f8d7292e5764d501e98f02be67c0c1f981de02871
+src/web/routes/molecule_properties_routes.py 10abf4b48a620948cd2af8e3df6da05fa3d96ed9b1ef9b96b7b21af064cba5bf
+tests/test_admet_unknown_evidence.py 14dafa7d9458d18115527f591a621b282e2ab3e16df47de58d765991afc960c0
+tests/test_molecule_properties_unknown.py e173f5cee5efbb2dc2f8000561e3d1cad2ec99509673579ee6f18fe50af4ce33
+tests/agent/test_analysis_contract.py 9409174207233bff5d7afe449e0d4f20feab650886e6c0166bc6d950cbffffcf
+tests/test_api_route_boundary.py 2a470e8f05af1139d73c59a36cd59e22712951bd4d29a025490d6964916b270f
+```
+
+### SPEC Noether P2 correction and replacement freeze (2026-09-25)
+
+Status: **ready for SPEC re-review, not SPEC-approved; no QUALITY yet**. Parent's later instruction supersedes the heavy-slot waiting instruction above: hand off the frozen snapshot and release the worker. Full Agent/full repository remain **not run**; parent owns reviewed-snapshot/latest-main heavy verification. No new merge, staging, implementation commit or push; branch remains `codex/admet-unknown-evidence`, HEAD `6719b129ddfc431f375bab667bca2476345f6151`.
+
+Receiving-code-review/systematic-debugging/TDD: verified existing redaction/source contracts before changing production. The generic URL pass is followed by an absolute-path regex that corrupts public URLs. The failure path applies it twice. Source-specific target-evidence allowlists cannot serve as general ADMET provenance sanitization. Preserve the shared sanitizer unchanged; add only a field-level source exception after bounded sanitization, reusing its credential-only detector. See spec section 9 for exact conservative URL semantics and limitations. Source preservation is not source verification or scientific certification.
+
+P2 delta is only `src/agent/tools/admet_predictor.py`, `tests/test_admet_unknown_evidence.py`, and these two documentation files. The other five frozen code/test files retain their previous hashes. Forty-one new cases cover the actual ADME.calculate fixture, raw/compat/typed normalization, failed/no-row and explicit False observation, nested provenance, unsafe credential/query/userinfo/token/encoded/path inputs, and bounded restoration. Numerical calculations, formulas, thresholds, historical units, status mechanism, global redaction and three-leaf-only 4A contract remain unchanged.
+
+All new test runs used the isolated runner and hard network guard above. No live providers, models, server, assets or dependency installation. Historical **943 host / 943 minimum / 254 deployment** results above are retained as pre-P2 evidence, not relabelled as coverage of this defect. Deployment was not rerun after P2.
+
+| P2 stage | Actual result | Scope |
+|---|---|---|
+| Source regression RED, before production fix | 12 failed, 28 passed, 1 warning, 1.00s, exit1 | New `test_public_source_url_survives_actual_backend` and `test_unsafe_diagnostic_sources_are_not_restored`; all 12 fail at the exact corrupted source assertion. |
+| Bounded-restoration RED | 1 failed, 1 warning, 0.72s, exit1 | `test_source_preservation_does_not_bypass_diagnostic_bounds_or_secret_keys`, same public URL loss. Corrected the fixture nesting to exercise the existing depth-4 cutoff; no sanitizer contract changed. |
+| ADMET file GREEN | 216 passed, 1 warning, 1.25s, exit0 | `tests/test_admet_unknown_evidence.py`. |
+| Host FOCUS GREEN | 984 passed, 1 warning, 13.01s, exit0 | Same exact ten FOCUS files above; previous 943 plus 41 new cases. |
+| Minimum FOCUS GREEN | 984 passed, 3 warnings, 14.27s, exit0 | Same FOCUS files, existing minimum dependency target (0.104.1 / 2.5.0). |
+| Existing redaction/source contracts | 78 passed, 1 warning, 2.75s, exit0 | Paths below, host profile; no changes to these tests or production contracts. |
+
+The 78-case command arguments to the same runner:
+
+```text
+tests/agent/test_agent_persistence.py
+tests/agent/test_credential_scan_budget.py
+tests/agent/test_semantic_input_gates.py::test_official_identity_urls_can_establish_source_specific_identity
+tests/agent/test_semantic_input_gates.py::test_every_target_text_field_applies_nfkc_instruction_and_credential_boundary
+```
+
+No skips or resource-timeout retries. Warning types are unchanged from the earlier runner/profile record. Targeted `python -m compileall -q src/agent/tools/admet_predictor.py tests/test_admet_unknown_evidence.py` and `git diff --check` passed. These are focused/static results, not full-suite evidence.
+
+Replacement seven-file SHA256 freeze (raw bytes, docs excluded):
+
+```text
+src/agent/tooling/analysis_contract.py df1362e0fe5e7c2f9453b43f8d7292e5764d501e98f02be67c0c1f981de02871
+src/agent/tools/admet_predictor.py 33777737bd4d32c62f47008da7bb9ace02455ee8cc5d8e1a0d7390e7114150d2
+src/web/routes/molecule_properties_routes.py 10abf4b48a620948cd2af8e3df6da05fa3d96ed9b1ef9b96b7b21af064cba5bf
+tests/agent/test_analysis_contract.py 9409174207233bff5d7afe449e0d4f20feab650886e6c0166bc6d950cbffffcf
+tests/test_admet_unknown_evidence.py b0b2eab95e307cf9641120fb912d6d897031f4734e8762db8a86e0f9eabad32f
+tests/test_api_route_boundary.py 2a470e8f05af1139d73c59a36cd59e22712951bd4d29a025490d6964916b270f
+tests/test_molecule_properties_unknown.py e173f5cee5efbb2dc2f8000561e3d1cad2ec99509673579ee6f18fe50af4ce33
+```
+
+Aggregate SHA256: `8583306c7351a07f613f328440d4f960349bbeffd8ea1edf0ca2e9356dfcae33`, computed from the sorted lines above, each `relative_path + " " + lowercase_sha256`, UTF-8, LF separators and final LF. Supersedes pre-P2 aggregate `4d4462ce3207bea763c97c329280bff4dc833f3f5548df85dbe6a42c87bef912`. No more changes pending this SPEC handoff; independent approval remains outstanding.
+
+### QUALITY Feynman P2: embedded paths, correction and replacement freeze
+
+Status: **locally corrected, frozen for the same QUALITY reviewer's re-review; not approved**. This section supersedes the previous freeze and review status, not its historical test evidence. User authorized only the local bounded correction and focused host/minimum runs. No main/PR71 integration; no staging, commit or push. Branch `codex/admet-unknown-evidence`, HEAD `6719b129ddfc431f375bab667bca2476345f6151` unchanged. **Full Agent/full repository not run** (parent G2 occupies heavy resources); no worker waits for a heavy slot.
+
+Verified through receiving-code-review/systematic-debugging/TDD: the restoration predicate allows `:` and `//` in the parsed path, so it can undo machine-path redaction. Added behavior regressions before changing production. The production fix adds exactly four lines (two comments plus `if ':' in parsed.path or '//' in parsed.path: return False`) to `_public_source_url`; no shared sanitizer or restoration traversal change. Removing those exact four lines from current producer bytes in memory reproduces the previous producer SHA256 `33777737bd4d32c62f47008da7bb9ace02455ee8cc5d8e1a0d7390e7114150d2`, confirming no other producer changes. All scientific calculations, formulas, thresholds, legacy units, metadata methods/reasons and 4A semantics are untouched.
+
+The 96-case embedded-path matrix exercises eight shapes: drive forward slash, nested lowercase drive, file URI with drive, file URI with POSIX path, slash-normalized UNC, backslash drive, backslash UNC and file URI with UNC authority. Each runs actual injected ADME.calculate through raw/compat/typed, both metadata-only failure and medicinal.pains=False success, and top-level/nested provenance.source. It asserts source is not restored, machine filename does not survive even in typed failure snapshots, the existing one/two-pass sanitized result is preserved, method/version/error/reason/warnings remain, failure has no scientific row, False remains False, and input is unchanged. Public reference tests now include HTTP, HTTPS, root URL and ordinary trailing-slash paths. Added explicit bounded dictionary/list-cycle tests. Previous credential/depth/item/sensitive-parent tests are retained unchanged.
+
+Before fix, six forward-slash/URI forms failed every combination (72 failures); backslash forms were already protected. Public URLs and cycles already passed. Exact command arguments for the same isolated runner/network guard used above, unchanged between RED and GREEN:
+
+```text
+tests/test_admet_unknown_evidence.py::test_embedded_machine_paths_are_not_restored
+tests/test_admet_unknown_evidence.py::test_public_source_url_survives_actual_backend
+tests/test_admet_unknown_evidence.py::test_source_restoration_keeps_cycles_bounded_without_mutating_input
+```
+
+| Stage | Actual result |
+|---|---|
+| Behavior RED, before production change | **72 failed, 62 passed**, 1 warning, 2.31s, exit1; failure is exact equality to the unsafe original source. |
+| Same behavior GREEN, after four-line change | **134 passed**, 1 warning, 1.54s, exit0. |
+| Host ten-file FOCUS | **1106 passed**, 1 warning, 13.85s, exit0; FastAPI 0.135.3 / Pydantic 2.12.5. |
+| Minimum ten-file FOCUS | **1106 passed**, 3 warnings, 15.62s, exit0; existing FastAPI 0.104.1 / Pydantic 2.5.0 target, no install. |
+
+Counts are previous 984 plus 96 embedded-path cases, 24 additional public URL cases and two cycle cases. No skips, load-induced timeout or retry. Warnings remain the existing AnyIO rewrite/profile warnings documented above. Historical 943/254 and 984 results remain historical; deployment and full suites were not rerun. Targeted `python -m compileall -q src/agent/tools/admet_predictor.py tests/test_admet_unknown_evidence.py` and `git diff --check` passed.
+
+Exact synthetic before/after evidence for Feynman's two examples (no real machine paths or credentials): before, **both success and failure restored each complete input string** below. After, the predicate returns False; a separate isolated in-memory diagnostic probe confirmed the following literal results. The behavior matrix verifies that actual raw/compat/typed producers use these same one/two-pass results.
+
+| Synthetic input | After success (one pass) | After metadata-only failure (two passes) |
+|---|---|---|
+| `https://example.org/C:/private/backend.py` | `https:/[redacted]` | `https:[redacted]` |
+| `https://example.org/adme/file:///C:/Users/Example/backend.py` | `https:/[redacted]//[redacted]` | `https:[redacted]/[redacted]` |
+
+These deliberately preserve the global sanitizer's existing output, not a new URL normalizer. Ordinary `https://example.org/adme/reference` remains byte-for-byte intact. General RFC-valid path colons/repeated slashes are conservatively ineligible for source restoration; no scheme separators are removed from legitimate ordinary public sources.
+
+Replacement seven-file SHA256 freeze (raw bytes, docs excluded; other five hashes unchanged):
+
+```text
+src/agent/tooling/analysis_contract.py df1362e0fe5e7c2f9453b43f8d7292e5764d501e98f02be67c0c1f981de02871
+src/agent/tools/admet_predictor.py 43435e9e3df03a3b23de2c9fba44f50746aec8cbb7aace77141f84a15c8586fb
+src/web/routes/molecule_properties_routes.py 10abf4b48a620948cd2af8e3df6da05fa3d96ed9b1ef9b96b7b21af064cba5bf
+tests/agent/test_analysis_contract.py 9409174207233bff5d7afe449e0d4f20feab650886e6c0166bc6d950cbffffcf
+tests/test_admet_unknown_evidence.py cfef9541d1d7326d0eae138f66b13b7d907a50ab5cd2ab61a4f1b56b68b30799
+tests/test_api_route_boundary.py 2a470e8f05af1139d73c59a36cd59e22712951bd4d29a025490d6964916b270f
+tests/test_molecule_properties_unknown.py e173f5cee5efbb2dc2f8000561e3d1cad2ec99509673579ee6f18fe50af4ce33
+```
+
+Aggregate SHA256: `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`, using the same sorted-path/space/lowercase-hash/LF/final-LF UTF-8 convention above. Supersedes `8583306c7351a07f613f328440d4f960349bbeffd8ea1edf0ca2e9356dfcae33`. Only producer, ADMET regression tests and the two approved documents changed in this correction. Frozen pending Feynman re-review; no approval or full-suite claim.
+
+### Review closure and authorized nine-file local commit
+
+Parent now confirms **Feynman QUALITY approved** the exact `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744` snapshot, independently reporting **1184 passed, one existing warning plus boundary probes**. Parent also confirms prior SPEC approval of scientific semantics and URL preservation; the final four-line path guard is closed by QUALITY. These are parent-reported independent reviewer results, distinct from this worker's 1106 host/minimum runs. Recomputed local seven-file aggregate matches the approved hash before recording/committing. No science/code changes accompany this review record.
+
+Explicit new authority: commit exactly the seven reviewed code/test files plus the two approved design/plan documents, then merge the latest locally fetched origin/main into the current branch. No cherry-pick duplication, push or PR. Initial observed main is `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`; imminent G2/PR72 is not assumed integrated. Record actual merge SHA and any conflicts after executing, then run integrated host/minimum FOCUS plus collision-related checks. Previous no-commit/merge restrictions are historical; all no-provider/key/model/asset/published-production restrictions remain.
+
+**Full Agent/full repository must not run now** (parent 4C/Russell heavy run active). Integrated light verification is pending; completion means ready for the parent's full slot, not full-suite success. Exact nine-path allowlist is the seven-file freeze above plus `docs/superpowers/specs/2026-09-25-admet-unknown-evidence-design.md` and `docs/superpowers/plans/2026-09-25-admet-unknown-evidence.md`. Stage each explicit path, verify the index allowlist and diff checks, then create the local reviewed implementation commit.
+
+Subsequent resource authorization, before commit: parent reports 4C full completed (6676 passed, two skipped, 300.25s; independent parent evidence) and assigns this worker the heavy slot. After integrated host/minimum FOCUS is GREEN, record the exact snapshot and run **one `tests/agent` full collection** in the existing isolated offline runner. No root full suite, push or PR. G2/PR72 is still pending according to parent and may merge during the run: **no merging or editing mid-run**; any fetched-main delta is considered only afterward with light verification. This supersedes the immediately preceding heavy-slot prohibition only for that one Agent run, which has not yet started.

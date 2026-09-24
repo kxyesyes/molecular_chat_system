@@ -605,9 +605,9 @@ def test_pose_helpers_reconstruct_requested_coordinates_from_synthetic_file(tmp_
     assert (position.x, position.y, position.z) == pytest.approx((5.0, 2.0, 3.0))
 
 
-def test_historical_properties_heuristic_is_not_scientific_validation(monkeypatch):
-    # This freezes a known defect for mechanical extraction ONLY: absent private
-    # ADMET method -> rules and a fixed hepatotoxicity label without provenance.
+def test_properties_endpoint_reports_unknown_admet_after_behavior_fix(monkeypatch):
+    # Post-PR64 behavior correction: replace unsupported labels, not the frozen
+    # registration/HTTP contract. Successful basic descriptors are not ADMET evidence.
     fake_module(monkeypatch, "src.agent.tools", ADMETPredictor=lambda: object())
     with TestClient(registered_app()) as client:
         response = client.post("/api/molecule/properties", json={"smiles": "CC"})
@@ -615,6 +615,10 @@ def test_historical_properties_heuristic_is_not_scientific_validation(monkeypatc
     data = response.json()
     assert data["success"] is True  # Legacy HTTP shape, not a scientific claim.
     assert data["properties"]["admet"] == {
-        "bbb_penetration": "High", "cyp_inhibition": "Low", "hepatotoxicity": "Low",
-        "solubility": "Good", "bioavailability": "Moderate",
+        "bbb_penetration": "Unknown", "cyp_inhibition": "Unknown", "hepatotoxicity": "Unknown",
+        "solubility": "Unknown", "bioavailability": "Unknown",
+    }
+    assert data["properties"]["admet_metadata"] == {
+        "availability": "unavailable", "method": "not_calculated",
+        "warning": "ADMET未计算；本接口仅计算基础理化性质，不能据此判断毒性、CNS安全性或体内表现。",
     }
