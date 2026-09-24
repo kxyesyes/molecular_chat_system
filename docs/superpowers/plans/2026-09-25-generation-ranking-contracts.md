@@ -364,3 +364,42 @@ registry fix, not this worker. Parent reported 4B FULL RED running after main
 `1bba025`; no 4B helper code was available at this checkpoint. These integration
 fixes remain pending until the authorized 4A/main combination is present. Frozen
 4C implementation/test hashes above are unchanged; only this plan was appended.
+
+### Actual 4A integration checkpoint (supersedes pending integration above)
+
+Parent authorized the bounded implementation's local unreviewed commit
+`a458ade`, followed by main integration. Merge `c088f65` incorporates exact main
+`1bba0256409a06317486530e5c1cfa6598b8e381` without conflicts. Factory changes
+remain additive: only the two generation/ranking contracts differ from main;
+4A's analysis selections remain intact. No unmerged 4B code was consumed.
+
+Before editing either merged consumer fixture, the two exact node IDs documented
+above produced **3 failed, 1.38s** (both dynamic outcomes rejected generic input
+as INVALID_INPUT before the downstream guard; RAG received the typed ranker).
+The fixes explicitly construct a test-local LegacyPythonToolAdapter using the
+registry-derived spec with LegacyQueryInput/output_schema=None. Dynamic fixture
+opt-in is enabled only for its contradictory observation test. Tool names,
+downstream assertions and all default typed paths are unchanged. No production
+escape hatch, adapter change, or scientific contract weakening was introduced.
+
+| Integrated verification at c088f65 plus fixture fixes | Actual outcome |
+| --- | --- |
+| Complete test_dynamic_run_session.py + test_rag_tool_contract.py | 366 passed, 6.60s |
+| FOCUS: prior complete FOCUS + supervisor_runtime_integration + dynamic_run_session + analysis_contract (25 files total) | 2029 passed, 7 warnings, 162 subtests passed, 27.83s |
+| Same 25 files under existing minimum dependency profile, asserted Pydantic 2.5.0 | 2029 passed, 8 warnings, 162 subtests passed, 29.43s |
+| In-memory source-byte compile, tracked src/scripts plus five changed/new tests | 328 files passed |
+| git diff --check | Passed |
+
+Both profiles use the existing runner extracted from
+`docs/superpowers/plans/2026-09-24-rag-service-extraction.md`, with only its cwd
+replacement and the documented minimum-profile substitution. Existing warnings
+were not suppressed. These are focused results, **not a full Agent GREEN**.
+
+Parent subsequently requested secure_io sibling-mtime fix PR68, exact fetched
+main `e173d432f767fe76e1c1f101d9cd8824ffee612d`, before any new full Agent run.
+The current combined fixture work and this record will be committed locally as
+unreviewed, then that main merged. Full Agent remains deferred until parent
+releases the heavy-test slot (4B GREEN active session 88542); this worker is next,
+with planner queued afterward. Repeat focus/min on the new integration before
+requesting the full slot. Independent SPEC/QUALITY and external publication
+remain parent-owned; no push or PR from this worker.
