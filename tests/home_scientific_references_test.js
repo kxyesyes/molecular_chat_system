@@ -148,8 +148,8 @@ async function restoredVisibilityTest(payload) {
   assert.equal(chatVisible, false, "a connection without a valid restored view must keep the welcome screen");
   renderRestore(payload);
   const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
-  assert(template.includes('/static/js/home/main.js?v=20260924-reference-visible-v1'),
-    "restoration visibility fix must invalidate the previous cached main script");
+  assert(template.includes('/static/js/home/main.js?v=20260925-terminal-labels-v1'),
+    "terminal labels fix must invalidate the previous cached main script and preserve restoration visibility");
 }
 
 function rendererTest(payload) {

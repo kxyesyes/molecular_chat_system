@@ -1,7 +1,7 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-24。本页原维护基线包含 main `5f56053`、MolecularAgent/ReAct 兼容适配；科研续接段落现按独立分支 `codex/scientific-reference-continuity`（基于 `9f065b3`，含 `632af8b`、`212e454` 及本批验收修复）更新。未合并批次不代表生产已更新。
-本文记录随代码交付的维护入口，不表示已合并、生产部署或通过真实科研验收；后续调用关系变化也应同步更新本页。
+核对日期：2026-09-25。当前源码基线为 main `c2aee30`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）与类药性评分/证据边界修复（#61）。代码已合并不代表生产已更新。本轮隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
+本文记录源码维护入口；是否合并以每节明确标注和 Git 历史为准，不表示已生产部署或通过真实科研验收。后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
 
@@ -79,11 +79,11 @@ ChatHandler / 工作流 API
 
 本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
 
-T09 科研对象跨轮引用已在上述独立分支实现及离线验收，具体边界见下节；发布、CI和具体合并授权仍是独立门禁。仍未完成：T11 其他领域路由、聊天提示/展示职责拆分和旧 Agent 支持面收缩。其他工具类型化仍须按实际契约逐项评估。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
+T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。仍未完成：T11 其他领域路由、聊天提示/展示职责的后续拆分。其他工具类型化、Planner 选择与参数解析拆分仍须按实际契约逐项评估；不因文件较大自动批准重构。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
-### 科研对象续接（独立分支已实现，非生产发布声明）
+### 科研对象续接（已合并，非生产部署声明）
 
 - 权威对象：[scientific_references.py](../src/agent/contracts/scientific_references.py)；专用原子存储：[persistence/scientific_references.py](../src/agent/persistence/scientific_references.py)。确认的展示顺序、来源观察、修订和归属共同定位候选，固定24小时，不随恢复/重放续期。
 - Web投影及解析：[web/scientific_references.py](../src/web/scientific_references.py)；确认/恢复路由：[scientific_reference_routes.py](../src/web/routes/scientific_reference_routes.py)。来源版本变化、失效、跨会话、协议损坏失败关闭，不从客户端SMILES或聊天历史重建事实。

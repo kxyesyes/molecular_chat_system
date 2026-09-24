@@ -1915,9 +1915,16 @@
       typeof event.progress === "number"
         ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
         : null;
+    const terminalLabels = {
+      task_completed: "已完成",
+      task_partial: "部分完成",
+      task_failed: "失败",
+      task_rejected: "已拒绝",
+      task_cancelled: "已取消",
+    };
     const progressText =
-      eventType.includes("completed") || eventType === "task_completed"
-        ? "已完成"
+      Object.prototype.hasOwnProperty.call(terminalLabels, eventType)
+        ? terminalLabels[eventType]
         : percent !== null
         ? `${percent}%`
         : "执行中";
@@ -1981,6 +1988,9 @@
       task_started: "任务开始",
       task_completed: "任务完成",
       task_failed: "任务失败",
+      task_partial: "部分完成",
+      task_rejected: "已拒绝",
+      task_cancelled: "已取消",
       tool_started: toolText ? `调用 ${toolText}` : "工具调用",
       tool_completed: toolText ? `${toolText} 完成` : "工具完成",
       tool_failed: toolText ? `${toolText} 失败` : "工具失败",
