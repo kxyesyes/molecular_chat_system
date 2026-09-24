@@ -20,7 +20,7 @@
 
 ## Task 1：Web 信封端到端最小修复（测试/实现是同一有界任务）
 
-- [ ] 先写独立 partial 信封测试。基础输入包括 success 两值、status=partial、final_answer 中
+- [x] 先写独立 partial 信封测试。基础输入包括 success 两值、status=partial、final_answer 中
   固定工具正文、一个成功观察和一个失败观察，以及同一个 workflow_plan；合成值不宣称真实科研预测。
 
 ```python
@@ -52,32 +52,32 @@ assert completed[0]["failed_steps"][0]["tool_name"] == "candidate_ranker"
 assert model.generate_calls == 0
 ```
 
-- [ ] 用下述隔离 runner 跑专项文件，保存真实 RED 数量及失败原因。测试导入/setup 错误不算 RED。
-- [ ] 扩展矩阵：success 两值、无 status+partial=true、completed+partial=true、显式终态
+- [x] 用下述隔离 runner 跑专项文件，保存真实 RED 数量及失败原因。测试导入/setup 错误不算 RED。
+- [x] 扩展矩阵：success 两值、无 status+partial=true、completed+partial=true、显式终态
   failed/rejected/cancelled+success=true、未知 status、畸形 success；有无计划、总结开关两值。
-- [ ] 测试有界字段、同工具不同 step_id、sequence 优先不重复 fallback、skipped_steps、无正文、
+- [x] 测试有界字段、同工具不同 step_id、sequence 优先不重复 fallback、skipped_steps、无正文、
   缺原因、凭据与路径污染、超限摘要、complete/历史一致、候选仍受现有校验约束。
-- [ ] 最小实现状态判定，允许状态 completed/partial/failed/rejected/cancelled；显式终态优先。
+- [x] 最小实现状态判定，允许状态 completed/partial/failed/rejected/cancelled；显式终态优先。
   状态 missing 时 partial 必须严格 true，否则沿用 success。未知/非字符串状态走 failed。
   将原 `if agent_result.get('success')` 调整为规范状态分支，不改 Supervisor 字典。
-- [ ] partial 处理前保持真实事件队列 drain；调用现有 `_send_molecule_candidate_events`，不替代
+- [x] partial 处理前保持真实事件队列 drain；调用现有 `_send_molecule_candidate_events`，不替代
   CandidateSet 校验。组装有界失败摘要，发送 agent_result 后 complete，写同内容 history 并 return。
   不走 LLM/legacy RAG；保留外层 finally 的 finish_on_cancel。
-- [ ] 复用 `_sanitize_agent_failure_text`/`_sanitize_agent_warnings`；新方法只投影设计列明字段，
+- [x] 复用 `_sanitize_agent_failure_text`/`_sanitize_agent_warnings`；新方法只投影设计列明字段，
   error 限 code/message，不把 details 或原始输入放入 UI。超限明确文字提示摘要被截断。
-- [ ] 新方法的测试须先失败；实现后重跑专项与既有 ChatHandler 测试，修复回归而非放宽断言。
-- [ ] 加入实际 Supervisor/Session 的 candidate_ranker 失败测试：合成工具进入真实执行路径，
+- [x] 新方法的测试须先失败；实现后重跑专项与既有 ChatHandler 测试，修复回归而非放宽断言。
+- [x] 加入实际 Supervisor/Session 的 candidate_ranker 失败测试：合成工具进入真实执行路径，
   断言 tool_failed 存在、partial 正文有排序失败、工具成功正文仍在、无额外模型调用。
-- [ ] 规格审查通过后做质量审查；任何重要反馈先补可复现测试再修复，复审通过后进入联合回归。
+- [x] 规格审查通过后做质量审查；任何重要反馈先补可复现测试再修复，复审通过后进入联合回归。
 
 ## Task 2：联合验证与本地交付
 
-- [ ] 运行完整 tests/agent 和请求生命周期等23路径（列表见 ReAct/MolecularAgent 交接），
+- [x] 运行完整 tests/agent 和请求生命周期等23路径（列表见 ReAct/MolecularAgent 交接），
   加跑 `tests/home_workflow_completion_behavior_test.js`、`tests/home_agent_task_panel_test.js`。
-- [ ] 隔离断网 contract 报告须读取 status，不能仅检查脚本退出码。
-- [ ] 内存 compile src/scripts 与 git diff --check；精确扫描任务文件凭据候选，仅输出命中数量。
-- [ ] 写交接，区分合成工具集成与真实模型/浏览器验收；记录首次失败、警告、跳过与未完成事项。
-- [ ] 只暂存本批文件，本地 Conventional Commit；推送或合并需另外授权。
+- [x] 隔离断网 contract 报告须读取 status，不能仅检查脚本退出码。
+- [x] 内存 compile src/scripts 与 git diff --check；精确扫描任务文件凭据候选，仅输出命中数量。
+- [x] 写交接，区分合成工具集成与真实模型/浏览器验收；记录首次失败、警告、跳过与未完成事项。
+- [x] 只暂存本批文件，本地 Conventional Commit；推送或合并需另外授权。
 
 ## 精确隔离命令
 

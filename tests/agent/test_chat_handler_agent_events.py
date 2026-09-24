@@ -247,7 +247,7 @@ def _candidate_agent_result(
     }
     return {
         "success": agent_success,
-        "status": "succeeded" if agent_success else "failed",
+        "status": "completed" if agent_success else "failed",
         "final_answer": (
             "generated validated candidates"
             if agent_success
@@ -1404,15 +1404,21 @@ def test_malformed_agent_result_is_safe_terminal_without_rag_or_model(
 
 
 def test_post_agent_processing_exception_is_safe_terminal_without_fallback():
+    class ExplodingToolsUsed:
+        def __iter__(self):
+            raise RuntimeError(
+                "private-post-processing-token at C:/Users/reviewer/private.txt"
+            )
+
     result = {
         "success": True,
         "status": "completed",
         "final_answer": "must not be used after post-processing failure",
-        "tools_used": ["rag_search"],
+        "tools_used": ExplodingToolsUsed(),
         "active_skill": "rag_search",
         "trace_id": "trace-post-processing",
         "warnings": [],
-        "tool_results": ExplodingToolResults(),
+        "tool_results": {},
         "agent_events": [],
         "workflow_plan": {"workflow_name": "rag_search"},
     }

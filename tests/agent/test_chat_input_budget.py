@@ -39,11 +39,13 @@ def test_actual_model_input_keeps_complete_question_and_constraints(stream, sour
         def should_use_tools(self, message):
             return True
         def execute(self, *args, **kwargs):
-            return dict(success=True, partial=True, status="partial", warnings=["模型不可用"],
-                final_answer='{"status":"partial","source":"tool-source","data":"' + "证据" * 20000 + '"}',
-                tools_used=[], tool_results={})
+            return dict(success=True, partial=False, status="completed", warnings=["适用范围仅限性质计算"],
+                provenance={"source": "tool-source", "method": "synthetic-property-fixture"},
+                final_answer='{"status":"completed","source":"tool-source","data":"' + "证据" * 20000 + '"}',
+                tools_used=[], tool_results={}, workflow_plan={"steps": []})
     handler = ChatHandler(model, Rag(), Agent() if source == "tools" else None,
-        {"inference": {"stream": stream, "input_max_chars": 7000}})
+        {"inference": {"stream": stream, "input_max_chars": 7000},
+         "agent": {"summarize_workflow_results": True}})
     asyncio.run(handler._process_message(socket, question, source == "rag", source == "tools",
         conversation_history=history if source == "history" else []))
     assert len(model.prompts) == 1
@@ -54,7 +56,10 @@ def test_actual_model_input_keeps_complete_question_and_constraints(stream, sour
     if source == "rag":
         assert any(item["type"] == "rag_info" for item in socket.messages)
     if source == "tools":
-        assert "partial" in prompt and "不可" in prompt
+        assert '"status":"completed"' in prompt
+        assert '"partial":false' in prompt
+        assert "适用范围仅限性质计算" in prompt
+        assert "tool-source" in prompt and "synthetic-property-fixture" in prompt
         assert "系统已使用专业工具完成分析" not in prompt
 
 
@@ -124,26 +129,50 @@ def test_invalid_budget_rejected_without_model(value):
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_workflow_interpretation_keeps_partial_and_source(stream):
+@pytest.mark.parametrize("status", ["partial", "completed"])
+def test_workflow_sources_survive_partial_bypass_or_completed_interpretation(stream, status):
+    partial = status == "partial"
+    warning = "activity model unavailable" if partial else "property-only scope"
+    evidence = {"status": status, "source": "RDKit:1", "molecular_weight": 46.07}
+    if partial:
+        evidence["error"] = "model unavailable"
+    body = json.dumps(evidence)
+
     class Agent:
         def should_use_tools(self, message):
             return True
         def execute(self, *args, **kwargs):
-            return {"success": True, "partial": True, "status": "partial",
-                "warnings": ["activity model unavailable"], "workflow_plan": {"steps": []},
-                "final_answer": '{"status":"partial","error":"model unavailable","source":"RDKit:1"}',
+            return {"success": True, "partial": partial, "status": status,
+                "warnings": [warning], "workflow_plan": {"steps": []},
+                "provenance": {"source": "RDKit:1", "method": "synthetic-property-fixture"},
+                "final_answer": body,
                 "tools_used": [], "tool_results": {}}
     model, socket = Model(), Socket()
     handler = ChatHandler(model, None, Agent(), {
         "inference": {"stream": stream}, "agent": {"summarize_workflow_results": True}})
     question = "解释此分析 SMILES: " + "C" * 150 + "，保留所有失败信息。"
     asyncio.run(handler._process_message(socket, question, False, True))
-    assert len(model.prompts) == 1
-    assert question in model.prompts[0]
-    assert "RDKit:1" in model.prompts[0]
-    assert "model unavailable" in model.prompts[0]
-    assert "partial" in model.prompts[0]
-    assert "系统已使用专业工具完成分析" not in model.prompts[0]
+    if partial:
+        assert not model.prompts
+        completed = [item for item in socket.messages if item["type"] == "complete"]
+        assert len(completed) == 1
+        assert completed[0]["status"] == "partial"
+        assert completed[0]["partial"] is True
+        assert completed[0]["warnings"] == [warning]
+        assert body in completed[0]["content"]
+        assert "RDKit:1" in completed[0]["content"]
+        assert "model unavailable" in completed[0]["content"]
+        assert handler.conversation_history[-1]["assistant"] == completed[0]["content"]
+    else:
+        assert len(model.prompts) == 1
+        assert question in model.prompts[0]
+        assert len(model.prompts[0]) <= handler._input_limit()
+        assert "RDKit:1" in model.prompts[0]
+        assert "synthetic-property-fixture" in model.prompts[0]
+        assert warning in model.prompts[0]
+        assert '"status":"completed"' in model.prompts[0]
+        assert '"partial":false' in model.prompts[0]
+        assert "系统已使用专业工具完成分析" not in model.prompts[0]
 
 
 def test_nested_rag_evidence_remains_atomic_and_bounded():
@@ -189,24 +218,42 @@ def test_oversize_narrative_preserves_error_and_provenance_details():
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_required_metadata_too_large_skips_interpretation(stream):
+@pytest.mark.parametrize("status", ["partial", "completed"])
+def test_required_metadata_too_large_skips_interpretation(stream, status):
+    partial = status == "partial"
+    warning = "模型不可用" if partial else "适用范围仅限性质计算"
+    body = ("仅性质计算完成，活性模型不可用。" if partial else "性质计算完成。")
+    body += "来源 RDKit:1；MW=46.07。"
+
     class Agent:
         def should_use_tools(self, message):
             return True
         def execute(self, *args, **kwargs):
-            return {"success": True, "partial": True,
-                "warnings": ["模型不可用" * 5000], "workflow_plan": {"steps": []},
-                "final_answer": "仅性质计算完成，活性模型不可用。",
+            return {"success": True, "partial": partial, "status": status,
+                "warnings": [warning * 5000], "workflow_plan": {"steps": []},
+                "provenance": {"source": "RDKit:1", "method": "synthetic-property-fixture"},
+                "final_answer": body,
                 "tools_used": [], "tool_results": {}}
     model, socket = Model(), Socket()
     handler = ChatHandler(model, None, Agent(), {
         "inference": {"stream": stream}, "agent": {"summarize_workflow_results": True}})
     asyncio.run(handler._process_message(socket, "解释结果", False, True))
     assert not model.prompts
-    assert socket.messages[-1]["type"] == "complete"
-    assert socket.messages[-1]["error"]["code"] == "interpretation_budget_exceeded"
-    assert "活性模型不可用" in socket.messages[-1]["content"]
-    assert "未进行模型总结" in socket.messages[-1]["content"]
+    completed = [item for item in socket.messages if item["type"] == "complete"]
+    assert len(completed) == 1
+    assert body in completed[0]["content"]
+    assert handler.conversation_history[-1]["assistant"] == completed[0]["content"]
+    if partial:
+        assert completed[0]["status"] == "partial"
+        assert completed[0]["partial"] is True
+        assert completed[0]["error"] is None
+        assert "活性模型不可用" in completed[0]["content"]
+        assert "摘要已截断" in completed[0]["content"]
+        assert len(completed[0]["warnings"]) <= 20
+        assert all(len(item) <= 256 for item in completed[0]["warnings"])
+    else:
+        assert completed[0]["error"]["code"] == "interpretation_budget_exceeded"
+        assert "未进行模型总结" in completed[0]["content"]
 
 
 def test_empty_rag_records_cannot_exceed_budget():

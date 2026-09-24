@@ -90,8 +90,8 @@ class Agent:
             if self.rag else {},
         }
         if self.interpretation_overflow:
-            result.update(partial=True, warnings=["模型不可用" * 5000],
-                          final_answer="仅性质计算完成，活性模型不可用。")
+            result.update(partial=False, warnings=["适用范围仅限性质计算" * 5000],
+                          final_answer="性质计算完成，来源为合成测试。")
         return result
 
 
@@ -256,7 +256,7 @@ def test_interpretation_budget_terminal_keeps_three_field_shape_and_appends_once
     assert len(terminal) == 1
     assert terminal[0]["type"] == "complete"
     assert terminal[0]["error"] == {"code": "interpretation_budget_exceeded"}
-    assert "活性模型不可用" in terminal[0]["content"]
+    assert "性质计算完成，来源为合成测试。" in terminal[0]["content"]
     assert "未进行模型总结" in terminal[0]["content"]
     assert len(history) == 20 and len(history.appended) == 1
     assert all(after is old for after, old in zip(history[:-1], before[4:]))
