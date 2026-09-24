@@ -18,6 +18,11 @@ _LABEL = re.compile(
     r'\b(?:against|target(?:ing)?)\s*[:=]?)\s*' + _VALUE, re.I,
 )
 _FOLLOWING = re.compile(r'\s*(?:和|及|与|、|[,，/]|\band\b|\bor\b)\s*' + _VALUE, re.I)
+_CANDIDATE_SELECTION = re.compile(
+    r'[ \t]*(?:[,，]|\band\b)[ \t]*select[ \t]+top[ \t]+'
+    r'(?:100|[1-9][0-9]?)(?:[ \t]+(?:candidates|molecules))?'
+    r'(?:[ \t]*[.!?。！？])?(?u:\s*)', re.I | re.ASCII,
+)
 _FOR = re.compile(r'\bfor\s+' + _VALUE, re.I)
 _IDENTIFIER = re.compile(r'(?<![A-Za-z0-9_-])([A-Za-z][A-Za-z0-9_-]*)(?![A-Za-z0-9_-])')
 _ACTION_WORDS = frozenset({
@@ -55,6 +60,14 @@ def _identifier_like(value: str) -> bool:
     )
 
 
+def _is_candidate_selection(query: str, following: re.Match[str]) -> bool:
+    """Only a complete terminal selection clause ends the target list."""
+    return (
+        following[1].casefold() == 'select'
+        and _CANDIDATE_SELECTION.fullmatch(query, following.start()) is not None
+    )
+
+
 def analyze_target_request(query: str) -> TargetRequest:
     targets = target_mentions(query)
     values = []
@@ -85,7 +98,7 @@ def analyze_target_request(query: str) -> TargetRequest:
         values.append(match[1])
         consumed_end = match.end()
         while following := _FOLLOWING.match(query, consumed_end):
-            if following[1].casefold() in _ACTION_WORDS:
+            if following[1].casefold() in _ACTION_WORDS or _is_candidate_selection(query, following):
                 break
             values.append(following[1])
             consumed_end = following.end()

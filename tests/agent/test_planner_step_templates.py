@@ -234,15 +234,13 @@ def test_existing_alias_and_search_design_promotion_preserved():
         planner.plan(_context("target_driven_design", TARGET_QUERY)))
 
 
-def test_existing_select_top_target_clarification_is_not_changed_by_extraction():
-    plan = TaskPlanner().plan(_context(
-        "target_driven_design", "Design 2 molecules for PDE5A and select top 3",
-    ))
-    assert plan.steps == []
-    assert plan.metadata == {
-        "reason": "target_clarification_required", "target_candidates": ["PDE5A"],
-        "message": "请明确本次使用的单一靶点标识；多个靶点、未知标识或否定/切换/选择性条件不能自动选择。",
-    }
+def test_bounded_select_top_clause_preserves_full_target_template_contract():
+    query = "Design 2 molecules for PDE5A and select top 3"
+    _, skill, _, metadata, steps = deepcopy(next(case for case in CASES if case[0] == "target"))
+    # The approved parser fix changes admission, not the template or data bindings.
+    steps[1]["input_data"] = _request(query)
+    plan = TaskPlanner().plan(_context(skill, query))
+    assert asdict(plan) == {"workflow_name": skill, "metadata": metadata, "steps": steps}
 
 
 def test_public_workflow_plan_export_keeps_identity():
