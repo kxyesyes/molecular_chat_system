@@ -59,6 +59,11 @@ success=true；明确标记 demo 的合成活性输出两条路径均被接受�
 如发现必须改变共享 Router/Supervisor 的策略才能实现上述保护，应先用实际入口复现并提出
 最小共享修复，不在 ReAct 边界复制一个新的安全策略或直接调工具兜底。
 
+书面复核已确认 Supervisor._resolve_policy 当前调用 route()，不能假定它完整保留
+requires_confirmation。实施计划第一步须建立 Supervisor 与 ReAct 双公开入口的拒绝回归；
+若实测旁路，先报告最小共享修复范围，不复制 MolecularAgent 的局部拒绝分支，也不把
+普通 route() 兼容接口全局改成另一种返回类型。本设计不将这一共享缺口宣称已修复。
+
 ## 5. 参数和模型边界
 
 - mol_count 哨兵表示省略，委托时省略该参数；显式 None、False、0、非整数及越界不能
@@ -85,6 +90,9 @@ workflow_plan、status、partial、error、warnings、artifacts、evidence、met
 - completed/partial/failed/rejected/cancelled 及混合观察优先级直接沿用 AgentResult，
   不照抄 Supervisor 为历史聊天兼容设置的 success-or-partial。
 - 每个 ToolResult 的数据、formatted、quality、错误和来源保留，不做 schema 投影式删字段。
+- 观察 status=partial 不保证总体 partial：现有 AgentResult 只将 success=true 且无 error
+  的观察算作已完成部分。单条 partial/success=false 可能汇总为 failed；保留其观察状态
+  和部分证据，写精确迁移测试，不在 ReAct 私自更改总体优先级或伪造 success=true。
 - tools_used 来自实际 tool_started 事件，顺序及重复保留；输入绑定失败不能伪装成已调用。
 - final_answer 来自规范结果；不追加主模型润色，不把 demo、失败、不可用说成完成计算。
 - 无匹配及预校验失败若没有 agent_result，也必须返回一致非成功边界和真实错误，
@@ -109,6 +117,8 @@ test_react_agent_workflow_routing.py、test_workflow_skills.py、test_comprehens
 test_family_activity_tool.py、test_target_driven_design_workflow.py。
 私有 `_execute_tool` 的禁止调用断言改到真实 public execute/规范授权入口；生成优先断言
 改为实际生成工具收到输入、数量和温度。允许更新错误文案，不删除科学判定或伪造成功夹具。
+明确保留引用/否定的生成语义、文本数量冲突、别名授权和生成候选携带原始靶点的断言；
+不用仅经 __new__ 拼接对象、绕过构造或私有方法补丁的测试代替公开组装验收。
 
 验证顺序：聚焦 RED/GREEN → 六文件回归 → Agent/Web 联合回归 → 离线 contract →
 源码内存编译和 diff 检查 → 独立规格/质量审查。沿用已登记隔离 runner、临时库/配置、
@@ -123,3 +133,6 @@ test_family_activity_tool.py、test_target_driven_design_workflow.py。
 仅在独立分支精确提交本批文件；原始混杂工作树不动。PR #54 英文修复与 #55 MolecularAgent
 已独立发布，不将它们混作本批。ReAct 本批待书面设计审阅后写实施计划和进入 TDD；
 发布与具体合并继续遵守仓库门禁。此设计不代表整个任务书完成或生产入口已迁移。
+
+独立只读规格审查：APPROVED with caveats；以上共享路由拒绝、partial 汇总和公开构造
+覆盖边界已据实际源码补明。审查未运行测试或真实服务，不将规格审查作为实现验收。
