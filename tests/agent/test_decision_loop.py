@@ -84,10 +84,27 @@ def finish_last(messages):
 def setup_loop(tmp_path):
     registries = []
 
-    def build(decisions, tools=None, **kwargs):
+    def build(decisions, tools=None, *, legacy_tools=(), **kwargs):
         from src.agent.harness.decision_loop import ModelDecisionLoop
         supplied = tools if tools is not None else [CountingTool()]
         registry = build_tool_registry(supplied)
+        if legacy_tools:
+            # Explicit downstream-guard probes only: domain adapters correctly
+            # reject these intentionally contradictory observations earlier.
+            # No invocation/resources have started; the final registry owns and
+            # closes every supplied tool once, including each retained adapter.
+            from src.agent.tooling.adapters import LegacyPythonToolAdapter
+            from src.agent.tooling.factory import LegacyQueryInput
+            from src.agent.tooling.registry import ToolRegistry
+            adapters = registry.as_mapping()
+            assert set(legacy_tools) <= adapters.keys()
+            registry = ToolRegistry()
+            for name, adapter in adapters.items():
+                if name in legacy_tools:
+                    adapter = LegacyPythonToolAdapter(
+                        replace(adapter.spec, input_schema=LegacyQueryInput, output_schema=None),
+                        adapter.tool, readiness_unknown=adapter.readiness_unknown)
+                registry.register(adapter)
         registries.append(registry)
         store = SQLiteAgentStateStore(tmp_path / f'state-{len(registries)}.sqlite')
         bus = AgentEventBus(state_store=store)

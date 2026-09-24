@@ -146,7 +146,9 @@ def test_production_registry_preserves_retryable_provider_failure_contract():
             "stale": True,
         }
     ]
-    assert result.quality == {"status": "partial", "retryable": True}
+    assert result.quality == {
+        "status": "partial", "retryable": True, "lookup_status": "unavailable",
+    }
 
 
 def test_production_registry_does_not_retry_nonretryable_provider_failure():
@@ -223,6 +225,8 @@ def test_production_registry_preserves_actual_target_tool_service_evidence():
         "status": "partial",
         "service_statuses": ["unavailable"],
         "retryable": True,
+        "lookup_status": "unavailable",
+        "lookup_path": ["local", "UniProt"],
     }
 
 
