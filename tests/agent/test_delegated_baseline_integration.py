@@ -71,17 +71,18 @@ def test_default_rag_owner_keeps_outcome_and_evidence_across_entrypoints(
 
 
 def test_health_telemetry_does_not_raise_or_publish_invalid_raw_status():
-    observation = ToolResult('property_calculator', True, 'fixture')
+    # Generic adapter telemetry, not an analysis observation contract.
+    observation = ToolResult('candidate_ranker', True, 'fixture')
     observation.status = 'synthetic-private-provider-text'
 
     class Tool:
-        name = 'property_calculator'
+        name = 'candidate_ranker'
         def execute(self, query):
             return observation
 
     registry = build_tool_registry([Tool()])
     try:
-        adapter = registry.resolve('property_calculator')
+        adapter = registry.resolve('candidate_ranker')
         result = adapter.execute({'query': 'CCO'})
         assert result is observation  # downstream validation still sees raw input
         health = adapter.health()
