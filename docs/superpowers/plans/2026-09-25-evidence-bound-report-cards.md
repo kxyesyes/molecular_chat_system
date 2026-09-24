@@ -12,6 +12,39 @@
 
 ## Review state and baseline
 
+### PR77 root CI correction — uncommitted QUALITY freeze at `400beaf`
+
+Fixed baseline **`400beaf066620aeaf504b4f48a83050599d250dd`**, branch `codex/historical-residual-disposition`. Parent reports PR77 root failure in [run 36069659921 / job 107867398126](https://github.com/kxyesyes/molecular_chat_system/actions/runs/36069659921/job/107867398126): `tests/test_static_placeholder_cleanup.py::test_current_template_script_order_and_local_urls[home]`. Preserve this as a genuine CI RED. Main PR76 `5ad08ac` is not merged; no commit, staging, push, full/root-full or model/server activation in this correction.
+
+The actual isolated whole root module reproduced **1 failed, 6 passed in 18.13s**, exit 1, session 51112. The failing child assertion is line 56; line 128 is the parent process forwarding its exit status. Home returned HTTP 200. Actual script basenames have 12 entries versus 11 in `PAGE_SCRIPTS`: only `evidence_report.js` after `scientific_references.js` was missing from the literal expected list. Removing that single name in a read-only sequence comparison leaves identical order. Query/cache parameters are stripped by `urlsplit` and are not the cause. The helper exports `HomeEvidenceReport` before `main.js:30` consumes it; production ordering is correct.
+
+Parent authorized exactly one test-literal insertion at line 38, leaving every assertion and production file untouched. `apply_patch` inserted `'evidence_report.js'` between `'scientific_references.js'` and `'formatters.js'`. All test function/class ASTs match HEAD; there was no skip, deletion, relaxed comparison, URL exception, fixture change or production adjustment.
+
+**GREEN:** identical isolated whole-module invocation, session **34100**: **7 passed in 17.89s**, exit 0, no warning/skip/failure. All five existing G1 Node scripts pass; the original root-level Node cache test is `tests/home_workflow_completion_behavior_test.js` (main-script token assertion), already one of those five, not a sixth distinct test. The standalone evidence-report Node run checks hostile preflight; no new Python-driven frame suite or Agent full was run in this bounded correction. In-memory compile and `git diff --check` pass.
+
+Reproducible command (run from this worktree; normal conftest, sanitized temporary runtime cwd/config, original worker isolation retained):
+
+```powershell
+$plan = Get-Content docs/superpowers/plans/2026-09-24-rag-service-extraction.md -Raw
+$m = [regex]::Match($plan, '(?s)\$runner = @''\r?\n(.*?)\r?\n''@')
+if (-not $m.Success) { throw 'Isolation runner missing' }
+$runner = $m.Groups[1].Value.Replace('D:/MedChat/molecular_chat_system_worktrees/rag-service-extraction-pr', 'D:/MedChat/molecular_chat_system_worktrees/historical-residual-disposition')
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" tests/test_static_placeholder_cleanup.py
+
+node tests/home_agent_task_panel_test.js
+node tests/home_workflow_completion_behavior_test.js
+node tests/home_structured_molecule_render_test.js
+node tests/home_scientific_references_test.js
+node tests/home_evidence_report_test.js
+```
+
+The runner adds `-q -p no:cacheprovider --tb=short -rs`; the same root invocation records both RED and GREEN. Old full **6914 passed / 2 skipped** is `tests/agent`-only evidence on `fcb84bd`, and did not exercise this root module; it does not negate this CI failure. The 16 existing G1 source/test files retain aggregate SHA-256 **`2c48070b69bff63d1bbfcb252c2ffbc709e62e5a5131ae16d2f548584205d2c4`** (the handoff's path-plus-byte-hash recipe).
+
+- [x] One-literal patch only in `tests/test_static_placeholder_cleanup.py`; original G1 16 files unchanged.
+- [x] Whole root module 7 GREEN, existing five Node/cache checks GREEN; preserve original CI and local RED evidence.
+- [x] Update only this plan and the companion G1 design; freeze **three uncommitted files** for original QUALITY review.
+- [ ] Original QUALITY approval for this **one-test + two-doc** increment; later commit/push/CI rerun requires parent instruction. Local GREEN is not a claim that PR77 CI passed or is approved to merge.
+
 ### Post-full PR74 main delta — light GREEN at `b884465`
 
 - [x] Full session 62470 completed/released before any PR74 merge. Commit the finished full record as `7724310`; verify local authorized main **`c3195f96c4a80aac40ac958d351ecea6b12f3c31`** and tree **`765c9edf9afc5b1c616de5df56d1c3f212c111fc`**.
@@ -225,6 +258,7 @@ Files: new `evidence_report.js`, narrow `main.js`, `index.html`, new Node test.
 - [ ] Implement the fixed helper API above and design §§6–8. Mount a Chinese report block using text nodes alongside existing content; decorate already-mounted card property containers through exact row lookup. Do not change candidate event normalization, introduce a `properties` field into CandidateSet, restore `selectMoleculeCandidates` or change complete signature.
 - [ ] Wire lifecycle start/trace observation/report enqueue/terminal take/clear/disconnect and pagination. Retain baseline candidate renderer's mount result even if optional enrichment fails. No report storage; refresh restores only structures using unchanged reference protocol and explicit no-independent-property message.
 - [ ] Add helper include before main, cache-bust only relevant helper/main assets. Update only the literal current-main token expectation in `tests/home_workflow_completion_behavior_test.js` to the new approved token; preserve all completion/terminal-label behavior assertions. Keep old lineage comments needed by current tests; do not relax substantive existing Node trust assertions. Run new Node suite and all four original Node suites to GREEN, plus `node --check` for changed/new scripts.
+- [ ] Whenever a helper script is added, update the exact corresponding `PAGE_SCRIPTS` literal in `tests/test_static_placeholder_cleanup.py` and run the entire isolated root module. Keep strict order, local URLs, forbidden/placeholder assets and cleanup assertions; Agent-only full/Node cache checks cannot replace this gate. PR77's correction and actual RED/GREEN are recorded above.
 
 ## Task 7 — Same-frame end-to-end and required original regressions
 
@@ -258,6 +292,7 @@ tests/agent/test_evidence_report_frames.py
 
 Use `-q -p no:cacheprovider --tb=short -rs`. `test_analysis_contract.py` depends on the approved integration gate; its absence is a blocked dependency, not a skip masquerading as success. Browser-lab/environment skips are reported exactly; do not start a live service or read production assets to remove them silently.
 
+- [ ] Run the complete isolated root module `tests/test_static_placeholder_cleanup.py` with the same options (command above), independently of the Agent suite; all seven tests must pass. Keep the original homepage cache-token assertion in `tests/home_workflow_completion_behavior_test.js` below.
 - [ ] Run all existing Node suites with their substantive assertions preserved (only the Task 6 cache-token literal adapts) plus the new report suite; required named core:
 
 ```text
