@@ -599,3 +599,489 @@ def test_known_contradictions_never_pass_as_opaque_extensions(change):
     elif change == 'nonboolean_demo_quality':
         row['tool_provenance'][0]['quality']['model_provenance'] = {'demo_mode': 1}
     assert gate(inputs) == 'failed'
+
+
+def two_tool_reports(*, repeated_tool=False):
+    inputs = reports()
+    second_tool = 'property_calculator' if repeated_tool else 'admet_predictor'
+    inputs[0][0].expected_tools.append(second_tool)
+    for iteration, source in zip(inputs[1], inputs[2]['sources']):
+        row = iteration['results'][0]
+        execution = f"exec-{iteration['iteration']}-second"
+        row['expected_tools'].append(second_tool)
+        row['actual_tools'].append(second_tool)
+        record = deepcopy(row['tool_provenance'][0])
+        record.update(tool_name=second_tool, step_id='second-step', quality={'execution_id': execution})
+        row['tool_provenance'].append(record)
+        terminal = deepcopy(row['events'][0])
+        terminal.update(tool=second_tool, payload={'execution_id': execution})
+        row['events'].append(terminal)
+        source['tool_execution_ids'].append(execution)
+    return inputs
+
+
+@pytest.mark.parametrize('repeated_tool', [False, True])
+def test_spec_p1_two_tool_associations_positive_control(repeated_tool):
+    assert gate(two_tool_reports(repeated_tool=repeated_tool)) == 'passed'
+
+
+@pytest.mark.parametrize('repeated_tool', [False, True])
+def test_spec_p1_swapped_terminal_execution_ids_rejected(repeated_tool):
+    inputs = two_tool_reports(repeated_tool=repeated_tool)
+    terminals = inputs[1][0]['results'][0]['events']
+    first, second = (terminal['payload']['execution_id'] for terminal in terminals)
+    terminals[0]['payload']['execution_id'] = second
+    terminals[1]['payload']['execution_id'] = first
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'tool_execution_association_mismatch' in result.results[0].details['reason_codes']
+
+
+def terminal_outcome_reports(success):
+    inputs = reports()
+    inputs[0][0].expected_events = []
+    if not success:
+        inputs[0][0].scientific_acceptance['strict_report']['outcome'] = 'preserved_partial'
+    for iteration in inputs[1]:
+        row = iteration['results'][0]
+        row['tool_provenance'][0]['success'] = success
+        row['events'][0]['event'] = 'tool_completed' if success else 'tool_failed'
+        if not success:
+            row['status'] = 'partial'
+    return inputs
+
+
+@pytest.mark.parametrize('success', [True, False])
+def test_spec_p2_consistent_terminal_outcome_positive_control(success):
+    assert gate(terminal_outcome_reports(success)) == 'passed'
+
+
+@pytest.mark.parametrize('success', [True, False])
+def test_spec_p2_terminal_name_must_match_provenance_even_without_expected_events(success):
+    inputs = terminal_outcome_reports(success)
+    inputs[1][0]['results'][0]['events'][0]['event'] = 'tool_failed' if success else 'tool_completed'
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert result.metrics['scientific_complete'] is False
+    assert 'tool_event_outcome_mismatch' in result.results[0].details['reason_codes']
+
+
+def test_spec_p2_missing_provenance_outcome_is_not_inferred_from_terminal_name():
+    inputs = terminal_outcome_reports(False)
+    inputs[1][0]['results'][0]['tool_provenance'][0].pop('success')
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'partial'
+    assert 'tool_outcome_missing' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('payload', [
+    {'decision_id': 'unexpected-decision', 'provider_request_id': 'unexpected-request'},
+    {'provider_request_id': 'unexpected-request'}, {'decision_id': 'unexpected-decision'}])
+def test_spec_p3_observed_provider_decision_contradicts_none_policy(payload):
+    inputs = reports()
+    row = inputs[1][0]['results'][0]
+    row['events'].append({'event': 'planning_completed', 'trace_id': 'trace-1', 'payload': payload})
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'unexpected_provider_request' in result.results[0].details['reason_codes']
+
+
+def test_spec_p3_unmarked_static_planning_is_not_provider_evidence():
+    inputs = reports()
+    inputs[1][0]['results'][0]['events'].append({
+        'event': 'planning_completed', 'trace_id': 'trace-1', 'payload': {}})
+    assert gate(inputs) == 'passed'
+
+
+def test_spec_p3_linked_live_policy_keeps_its_offline_positive_control():
+    result = aggregate(*live_reports())
+    assert result.metrics['gate_status'] == 'passed'
+    assert result.metrics['live_execution_verified'] is result.metrics['final_acceptance'] is False
+
+
+@pytest.mark.parametrize('claims', [
+    {'binding_energy_numeric': {'status': 'passed', 'binding_energy': -6.7}},
+    {'vina_pose': {'status': 'passed', 'pose_file_exists': True}},
+    {'binding_energy_numeric': {'status': 'passed', 'binding_energy': -6.7},
+     'vina_pose': {'status': 'passed', 'pose_file_exists': True}},
+    {'binding_energy_numeric': {'status': 'passed'}},
+    {'future_check': {'status': 'passed', 'binding_energy': -6.7}},
+    {'future_check': {'status': 'passed', 'pose_file_exists': True}},
+])
+def test_spec_p4_rejection_cannot_include_positive_scientific_truth_claims(claims):
+    inputs = rejection_reports()
+    inputs[1][0]['results'][0]['truth_checks'].update(claims)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'rejection_has_positive_truth_claim' in result.results[0].details['reason_codes']
+
+
+def test_spec_p4_unknown_truth_is_not_assumed_to_be_valid_negative_evidence():
+    inputs = rejection_reports()
+    inputs[1][0]['results'][0]['truth_checks']['future_check'] = {'status': 'passed'}
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'partial'
+    assert 'rejection_truth_unclassified' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('with_neutral_check', [False, True])
+def test_spec_p4_valid_negative_and_neutral_safety_check_are_preserved(with_neutral_check):
+    inputs = rejection_reports()
+    if with_neutral_check:
+        for iteration in inputs[1]:
+            iteration['results'][0]['truth_checks']['scientific_claim_evidence'] = {
+                'status': 'passed', 'reason': 'all_claims_have_evidence'}
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'passed'
+    assert result.metrics['scientific_complete'] is False
+    assert result.metrics['live_execution_verified'] is result.metrics['final_acceptance'] is False
+
+
+def test_spec_p4_successful_pose_positive_control_is_not_rejection_policy():
+    assert gate(pose_reports()) == 'passed'
+
+
+def omit_quality_link(inputs, missing):
+    if missing == 'source':
+        inputs[2]['sources'].pop(0)
+    elif missing == 'policy':
+        inputs[0][0].scientific_acceptance.pop('strict_report')
+    elif missing != 'none':
+        inputs[2]['sources'][0].pop(missing)
+
+
+@pytest.mark.parametrize('missing', ['none', 'source', 'trace_id', 'policy'])
+@pytest.mark.parametrize('event_name', ['tool_completed', 'tool_failed'])
+def test_quality_tools_orphan_terminal_cannot_disappear_under_empty_summary(missing, event_name):
+    inputs = rejection_reports()
+    inputs[1][0]['results'][0]['events'].append({
+        'event': event_name, 'tool': 'property_calculator', 'trace_id': 'trace-1',
+        'payload': {'execution_id': 'undeclared-exec', 'success': event_name == 'tool_completed'}})
+    omit_quality_link(inputs, missing)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'tool_events_mismatch' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('missing', ['none', 'source', 'trace_id', 'policy', 'tool_execution_ids'])
+@pytest.mark.parametrize('contradiction', ['swapped_ids', 'outcome', 'tool', 'trace'])
+def test_quality_tools_independent_contradiction_survives_missing_link(missing, contradiction):
+    inputs = two_tool_reports()
+    inputs[0][0].expected_events = []
+    events = inputs[1][0]['results'][0]['events']
+    if contradiction == 'swapped_ids':
+        events[0]['payload'], events[1]['payload'] = events[1]['payload'], events[0]['payload']
+    elif contradiction == 'outcome':
+        events[0]['event'] = 'tool_failed'
+    elif contradiction == 'tool':
+        events[0]['tool'] = 'molecular_docking'
+    else:
+        events[0]['trace_id'] = 'other-trace'
+    omit_quality_link(inputs, missing)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    reasons = result.results[0].details['reason_codes']
+    assert ('tool_event_outcome_mismatch' if contradiction == 'outcome'
+            else 'tool_execution_association_mismatch') in reasons
+    assert result.metrics['scientific_complete'] is False
+    assert result.metrics['live_execution_verified'] is result.metrics['final_acceptance'] is False
+
+
+@pytest.mark.parametrize('missing', ['none', 'source', 'trace_id', 'policy', 'tool_execution_ids'])
+def test_quality_tools_consistent_records_keep_positive_or_partial(missing):
+    inputs = two_tool_reports()
+    omit_quality_link(inputs, missing)
+    assert gate(inputs) == ('passed' if missing == 'none' else 'partial')
+
+
+@pytest.mark.parametrize('missing', ['none', 'trace_id', 'policy', 'revision'])
+@pytest.mark.parametrize('event_name', ['planning_completed', 'provider_response'])
+def test_quality_provider_undeclared_orphan_request_is_not_filtered(missing, event_name):
+    inputs = live_reports()
+    inputs[1][0]['results'][0]['events'].append({'event': event_name, 'trace_id': 'trace-1',
+        'payload': {'provider_request_id': 'undeclared-request'}})
+    omit_quality_link(inputs, missing)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'source_link_mismatch' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('missing', ['none', 'source', 'trace_id', 'policy'])
+def test_quality_provider_duplicate_observed_request_survives_missing_source(missing):
+    inputs = live_reports()
+    inputs[1][0]['results'][0]['events'].append({'event': 'planning_completed', 'trace_id': 'trace-1',
+        'payload': {'provider_request_id': 'request-1'}})
+    omit_quality_link(inputs, missing)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'reused_observed_request' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('missing_marker', ['decision_id', 'provider_request_id'])
+def test_quality_provider_missing_counterpart_is_partial_not_invented(missing_marker):
+    inputs = live_reports()
+    inputs[1][0]['results'][0]['events'][-1]['payload'].pop(missing_marker)
+    assert gate(inputs) == 'partial'
+
+
+def test_quality_provider_complete_extra_link_and_static_planning_are_preserved():
+    inputs = live_reports()
+    inputs[1][0]['results'][0]['events'].extend([
+        {'event': 'planning_completed', 'trace_id': 'trace-1', 'payload': {}},
+        {'event': 'planning_completed', 'trace_id': 'trace-1', 'payload': {
+            'provider_request_id': 'extra-request', 'decision_id': 'extra-decision'}}])
+    inputs[2]['sources'][0]['provider_request_ids'].append('extra-request')
+    assert gate(inputs) == 'passed'
+
+
+def test_quality_provider_declared_orphan_request_is_partial_until_decision_arrives():
+    inputs = live_reports()
+    inputs[1][0]['results'][0]['events'].append({'event': 'planning_completed', 'trace_id': 'trace-1',
+        'payload': {'provider_request_id': 'extra-request'}})
+    inputs[2]['sources'][0]['provider_request_ids'].append('extra-request')
+    assert gate(inputs) == 'partial'
+
+
+@pytest.mark.parametrize('missing', ['none', 'artifact', 'source', 'observed_sha256'])
+@pytest.mark.parametrize('flag,expected', [
+    (True, 'passed'), (False, 'failed'), ([], 'failed'), ('false', 'failed'),
+    (None, 'failed'), (0, 'failed'), (1, 'failed'), ({}, 'failed'), ('missing', 'partial')])
+def test_quality_pose_actual_flag_not_passed_label_or_artifact_controls_verdict(missing, flag, expected):
+    inputs = pose_reports()
+    truth = inputs[1][0]['results'][0]['truth_checks']['vina_pose']
+    if flag == 'missing':
+        truth.pop('pose_file_exists')
+    else:
+        truth['pose_file_exists'] = flag
+    if missing == 'artifact':
+        inputs[2]['artifacts'].pop(0)
+    elif missing == 'observed_sha256':
+        inputs[2]['artifacts'][0].pop('observed_sha256')
+    else:
+        omit_quality_link(inputs, missing)
+    if expected == 'passed' and missing != 'none':
+        expected = 'partial'
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == expected
+    if type(flag) is bool and flag is False:
+        assert 'pose_file_absent' in result.results[0].details['reason_codes']
+    elif flag == 'missing':
+        assert 'pose_file_observation_missing' in result.results[0].details['reason_codes']
+    elif type(flag) is not bool:
+        assert result.metrics['reason_codes'] == ['invalid_input']
+    assert result.metrics['live_execution_verified'] is result.metrics['final_acceptance'] is False
+
+
+@pytest.mark.parametrize('energy', [True, [], '-6.7'])
+def test_quality_pose_missing_artifact_cannot_mask_invalid_reported_energy(energy):
+    inputs = pose_reports()
+    inputs[2]['artifacts'].pop(0)
+    inputs[1][0]['results'][0]['truth_checks']['binding_energy_numeric']['binding_energy'] = energy
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'pose_energy_mismatch' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('missing', ['source', 'trace_id', 'tool_execution_ids', 'policy'])
+def test_quality_independent_duplicate_execution_cannot_become_partial(missing):
+    inputs = two_tool_reports(repeated_tool=True)
+    row = inputs[1][0]['results'][0]
+    row['events'][1]['payload']['execution_id'] = 'exec-1'
+    row['tool_provenance'][1]['quality']['execution_id'] = 'exec-1'
+    omit_quality_link(inputs, missing)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert 'reused_observed_execution' in result.results[0].details['reason_codes']
+
+
+@pytest.mark.parametrize('payload_success,expected', [(False, 'partial'), (True, 'failed')])
+@pytest.mark.parametrize('missing', ['none', 'source'])
+def test_quality_independent_terminal_outcome_with_unknown_provenance(missing, payload_success, expected):
+    inputs = terminal_outcome_reports(False)
+    row = inputs[1][0]['results'][0]
+    row['tool_provenance'][0].pop('success')
+    row['events'][0]['payload']['success'] = payload_success
+    omit_quality_link(inputs, missing)
+    assert gate(inputs) == expected
+
+
+@pytest.mark.parametrize('missing', ['source', 'trace_id'])
+@pytest.mark.parametrize('model_kind', ['scripted', 'real_provider'])
+def test_quality_independent_model_kind_vs_policy_survives_missing_source(missing, model_kind):
+    inputs = live_reports()
+    inputs[1][0]['results'][0]['decision_model_kind'] = model_kind
+    omit_quality_link(inputs, missing)
+    assert gate(inputs) == ('failed' if model_kind == 'scripted' else 'partial')
+
+
+@pytest.mark.parametrize('contradict_trace', [False, True])
+def test_quality_independent_missing_execution_ids_do_not_mask_trace_facts(contradict_trace):
+    inputs = reports()
+    row = inputs[1][0]['results'][0]
+    row['events'][0]['payload'].pop('execution_id')
+    row['tool_provenance'][0]['quality'].pop('execution_id')
+    if contradict_trace:
+        row['events'][0]['trace_id'] = 'other-trace'
+    omit_quality_link(inputs, 'source')
+    assert gate(inputs) == ('failed' if contradict_trace else 'partial')
+
+
+def ownership_reports(*, pose=False):
+    """Two cases x three rounds; each slot owns distinct synthetic identities."""
+    inputs = pose_reports() if pose else live_reports()
+    second = deepcopy(inputs[0][0])
+    second.case_id = 'case-2'
+    inputs[0].append(second)
+    for iteration in inputs[1]:
+        n = iteration['iteration']
+        row = deepcopy(iteration['results'][0])
+        row['case_id'] = second.case_id
+        for event in row['events']:
+            event['trace_id'] += '-second'
+            for field in ('execution_id', 'provider_request_id', 'decision_id'):
+                if field in event['payload']:
+                    event['payload'][field] += '-second'
+        row['tool_provenance'][0]['trace_id'] += '-second'
+        row['tool_provenance'][0]['quality']['execution_id'] += '-second'
+        iteration['results'].append(row)
+        iteration['case_count'] = 2
+        source = deepcopy(inputs[2]['sources'][n - 1])
+        source['case_id'] = second.case_id
+        source['trace_id'] += '-second'
+        for field in ('tool_execution_ids', 'provider_request_ids'):
+            source[field] = [value + '-second' for value in source[field]]
+        inputs[2]['sources'].append(source)
+        if pose:
+            artifact = deepcopy(inputs[2]['artifacts'][n - 1])
+            artifact.update(case_id=second.case_id, artifact_id=f'poses/second-{n}.pdbqt')
+            artifact['trace_id'] += '-second'
+            artifact['tool_execution_id'] += '-second'
+            inputs[2]['artifacts'].append(artifact)
+    return inputs
+
+
+def ownership_slot(inputs, across):
+    case_id, n = ('case-1', 2) if across == 'round' else ('case-2', 1)
+    row = next(r for r in inputs[1][n - 1]['results'] if r['case_id'] == case_id)
+    source = next(s for s in inputs[2]['sources'] if (s['case_id'], s['round']) == (case_id, n))
+    artifact = next((a for a in inputs[2]['artifacts'] if (a['case_id'], a['round']) == (case_id, n)), None)
+    return row, source, artifact
+
+
+@pytest.mark.parametrize('across', ['case', 'round'])
+@pytest.mark.parametrize('missing_source', [False, True])
+@pytest.mark.parametrize('repeated', [False, True])
+@pytest.mark.parametrize('kind', ['provider_request', 'execution', 'trace', 'artifact'])
+def test_ownership_matrix_observed_identity_cannot_belong_to_two_slots(across, missing_source, repeated, kind):
+    inputs = ownership_reports(pose=kind == 'artifact')
+    row, source, artifact = ownership_slot(inputs, across)
+    if missing_source:
+        inputs[2]['sources'].remove(source)
+    if repeated:
+        if kind == 'provider_request':
+            row['events'][-1]['payload']['provider_request_id'] = 'request-1'
+        elif kind == 'execution':
+            row['events'][0]['payload']['execution_id'] = 'exec-1'
+            row['tool_provenance'][0]['quality']['execution_id'] = 'exec-1'
+        elif kind == 'trace':
+            for record in row['events'] + row['tool_provenance']:
+                record['trace_id'] = 'trace-1'
+        else:
+            artifact['artifact_id'] = inputs[2]['artifacts'][0]['artifact_id']
+    before = deepcopy(inputs)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == ('failed' if repeated else 'partial' if missing_source else 'passed')
+    if repeated:
+        assert f'reused_{kind}_identity' in result.metrics['reason_codes']
+    else:
+        assert result.metrics['reason_codes'] == []
+    assert result.metrics['live_execution_verified'] is result.metrics['final_acceptance'] is False
+    assert inputs == before
+
+
+@pytest.mark.parametrize('missing_source', [False, True])
+def test_ownership_same_slot_started_completed_and_declared_are_not_duplicates(missing_source):
+    inputs = ownership_reports()
+    row, source, _ = ownership_slot(inputs, 'round')
+    started = deepcopy(row['events'][0])
+    started['event'] = 'tool_started'
+    row['events'].insert(0, started)
+    if missing_source:
+        inputs[2]['sources'].remove(source)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == ('partial' if missing_source else 'passed')
+    assert result.metrics['reason_codes'] == []
+
+
+@pytest.mark.parametrize('origin', ['source', 'provenance', 'started_event', 'artifact'])
+@pytest.mark.parametrize('kind', ['execution', 'trace'])
+def test_ownership_union_compares_facts_even_when_other_slot_metadata_is_absent(origin, kind):
+    inputs = ownership_reports(pose=True)
+    row, source, artifact = ownership_slot(inputs, 'round')
+    inputs[2]['sources'].remove(source)
+    # Source-only vs observed-only is still an ownership conflict, not a duplicate count.
+    if origin == 'source':
+        field = 'tool_execution_ids' if kind == 'execution' else 'trace_id'
+        inputs[2]['sources'][0][field] = ['foreign-id'] if kind == 'execution' else 'foreign-id'
+    elif origin == 'provenance':
+        record = inputs[1][0]['results'][0]['tool_provenance'][0]
+        (record['quality'] if kind == 'execution' else record)[
+            'execution_id' if kind == 'execution' else 'trace_id'] = 'foreign-id'
+    elif origin == 'started_event':
+        inputs[1][0]['results'][0]['events'].insert(0, {'event': 'tool_started',
+            'trace_id': 'foreign-id' if kind == 'trace' else 'trace-1',
+            'payload': {'execution_id': 'foreign-id' if kind == 'execution' else 'exec-1'}})
+    else:
+        inputs[2]['artifacts'][0]['tool_execution_id' if kind == 'execution' else 'trace_id'] = 'foreign-id'
+        inputs[2]['artifacts'][0].pop('step_id')
+    artifact['tool_execution_id' if kind == 'execution' else 'trace_id'] = 'foreign-id'
+    artifact.pop('step_id')
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert f'reused_{kind}_identity' in result.metrics['reason_codes']
+
+
+@pytest.mark.parametrize('kind', ['provider_request', 'execution', 'trace', 'decision', 'artifact'])
+@pytest.mark.parametrize('repeated', [False, True])
+def test_ownership_no_sources_still_checks_orphan_observations(kind, repeated):
+    inputs = ownership_reports(pose=kind == 'artifact')
+    row, _, artifact = ownership_slot(inputs, 'round')
+    inputs[2]['sources'].clear()
+    if kind == 'artifact':
+        if repeated:
+            artifact['artifact_id'] = inputs[2]['artifacts'][0]['artifact_id']
+        artifact.pop('trace_id')
+    else:
+        field = kind + '_id'
+        value = {'provider_request': 'request-1', 'execution': 'exec-1',
+                 'trace': 'trace-1', 'decision': 'decision-1'}[kind] if repeated else 'independent-id'
+        event = {'event': 'tool_started', 'trace_id': 'trace-2', 'payload': {}}
+        (event if kind == 'trace' else event['payload'])[field] = value
+        row['events'].insert(0, event)
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == ('failed' if repeated else 'partial')
+    assert result.metrics['reason_codes'] == ([f'reused_{kind}_identity'] if repeated else [])
+
+
+def test_ownership_identity_namespaces_and_equal_pose_hashes_are_not_cross_slot_reuse():
+    inputs = ownership_reports(pose=True)
+    row, source, artifact = ownership_slot(inputs, 'round')
+    # Round 2 trace text equals round 1 execution text; these are different identities.
+    source['trace_id'] = artifact['trace_id'] = 'exec-1'
+    for record in row['events'] + row['tool_provenance']:
+        record['trace_id'] = 'exec-1'
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'passed'
+    assert result.metrics['reason_codes'] == []
+
+
+def test_ownership_declared_identity_is_checked_without_its_case_observation():
+    inputs = ownership_reports()
+    row, source, _ = ownership_slot(inputs, 'round')
+    inputs[1][0]['results'].pop(0)
+    inputs[1][0]['case_count'] = 1
+    inputs[2]['sources'].remove(source)
+    row['events'][-1]['payload']['provider_request_id'] = 'request-1'
+    result = aggregate(*inputs)
+    assert result.metrics['gate_status'] == 'failed'
+    assert result.metrics['reason_codes'] == ['reused_provider_request_identity']

@@ -264,3 +264,62 @@ exit $code
 - Known batch limits: one required pose observation per case×round; two fixed negative truth-check reasons; no JSON CLI/report adapters, artifact reader, source authenticator or normal WS launcher.
 - Full pytest/compileall/health/live acceptance not run; full needs parent's queue, live needs a separately authorized batch.
 - Freeze for two independent parent-arranged reviews (spec/quality). No review approval claimed, no push/PR/merge-to-main.
+
+## P8-A Euclid SPEC correction ledger
+
+Parent returned four P2 findings; prior SPEC was not approved. Starting tree clean at `3309dad` (implementation `6ca2c5c`). Minimal corrections touch only the same aggregator, its test file and these two design/plan documents. No commit/staging/push; HEAD stays unchanged. Code/test content hashes and precise corrected invariants are recorded in `docs/superpowers/specs/2026-09-25-current-real-acceptance-aggregate-design.md` for the same SPEC reviewer.
+
+Reused the inline isolated command above, with only the pytest selection changed for each RED/GREEN pair: select `tests/agent/test_evaluation_aggregation.py`, add `-k spec_p1`, `-k spec_p2`, `-k spec_p3` or `-k spec_p4`, omit the seven related node IDs during each pair. Same `--noconftest -c pytest.ini -q -p no:cacheprovider --tb=short`, cleared child environment, private cwd, network/project-asset guard, 120-second deadline and two-file in-memory compile. The final combined run used the exact original inline command above including all seven existing node IDs. No actual asset/report inputs were used; fixture records are in memory. Private test directories retained, not claimed cleaned.
+
+| Group | Actual RED | Actual GREEN |
+|---|---|---|
+| P1 terminal/provenance association (distinct and repeated tools) | 2 failed, 2 passed, 133 deselected; incorrect `passed` instead of `failed` | 4 passed, 133 deselected |
+| P2 terminal name vs success, including unknown outcome | 3 failed, 2 passed, 137 deselected; incorrect `passed` instead of `failed`/`partial` | 5 passed, 137 deselected |
+| P3 observed provider evidence under none policy | 3 failed, 2 passed, 142 deselected; incorrect `passed` instead of `failed` | 5 passed, 142 deselected |
+| P4 positive claim / unknown check inside expected rejection | 7 failed, 3 passed, 147 deselected; incorrect `passed` instead of `failed`/`partial` | 10 passed, 147 deselected |
+| Combined aggregator + seven existing pure regression nodes | — | **164 passed**, 0 failed, 0 skipped; pytest 1.96 s, exit 0 |
+
+All four behavioral REDs used the actual aggregator and in-memory records; no mocked aggregate return. Final two-file in-memory compile and `git diff --check` passed. No producer changes, authentication claims, live/full execution or external coordination. `live_execution_verified=false` / `final_acceptance=false` are unchanged. Work is content-frozen awaiting the same SPEC re-review, not declared approved.
+
+## P8-A Socrates QUALITY correction ledger
+
+Starting state: uncommitted Euclid correction freeze above, 164-pass baseline, HEAD still `3309dad`; parent reports four QUALITY P2 findings and no approval. Scope stays aggregator + its tests + these two docs. The implementation uses one observed-record verification pass before supplementary completeness checks; pose truth facts are checked before artifact completeness. Public API/scientific models remain unchanged. No four-case blacklist, new framework, I/O or producer changes.
+
+TDD sequence: tools/association (QUALITY findings 1 and 4 share the same gating defect), provider observations (finding 2), pose flags (finding 3), then the same independence invariant's adjacent duplicate/outcome/scripted cases. Each group first ran against the pre-fix implementation, then received its minimal fix; neighboring correct and partial controls were retained.
+
+Commands: reuse the exact isolated inline PowerShell command under `Isolation / exact final command` above. For grouped runs omit its seven related node-ID lines, select the same aggregator test file, and append `'-k', 'quality_tools'`, `'quality_provider'`, `'quality_pose'` or `'quality_independent'` respectively to the existing pytest arguments. Both combined runs used the unchanged exact command including all seven related nodes. Same cleared child environment, private cwd, network/project-asset guard, `--noconftest`, disabled cache/bytecode/plugin autoload, 120-second deadline and two-file in-memory compilation. Test inputs are synthetic in-memory reports, never real report/assets/user text.
+
+| Group | Actual RED | Actual GREEN |
+|---|---|---|
+| Tools: orphan completed/failed terminals; swapped IDs/outcome/tool/trace × absent source/trace/policy/IDs; valid/partial neighbors | 20 failed, 13 passed, 157 deselected | 33 passed, 157 deselected |
+| Provider: orphan request on planning/other event, absent trace/policy/revision, observed duplicate without source, missing counterpart and complete/static controls | 13 failed, 3 passed, 190 deselected | 16 passed, 190 deselected |
+| Pose: true/false/absent/malformed flag × absent artifact/source/hash, invalid reported energy without artifact | 35 failed, 4 passed, 206 deselected | 39 passed, 206 deselected |
+| First combined checkpoint | — | 252 passed, pytest 2.23 s, exit 0 |
+| Independence neighbors: duplicate execution IDs, terminal name vs payload with unknown provenance, scripted model vs policy without source, missing IDs vs independent trace facts | 7 failed, 7 passed, 245 deselected | 14 passed, 245 deselected |
+| Final combined aggregator + seven existing pure nodes | — | **266 passed**, pytest 1.95 s, exit 0; no failures/skips |
+
+REDs were actual aggregator assertions, not mocked returns or collection errors. Some assertion failures intentionally exposed missing contradiction/missing-observation reason codes when another independent failure/partial already controlled the verdict; the provider group also reproduced a false failure for a fully declared orphan whose missing decision should be partial. Thus the fixes preserve partial semantics as well as reject contradictions. Final in-memory compilation and diff whitespace check passed.
+
+Freeze identity and invariant details are in the design's `Socrates QUALITY P2 corrections` section. No full/live, actual assets/env/userstores, staging/commit/push or PR. No source/config changes outside the approved files. Test process exited; private synthetic directories are retained under the existing wrapper and are not presented as verified cleanup. Both immutable live/final flags remain false. Stop implementation for parent-arranged **same QUALITY recheck**, not a claim of approval or real scientific acceptance.
+
+## P8-A second QUALITY: cross-slot identity ownership
+
+Parent reports four previous findings closed but one further P2: missing supplementary source hides observed cross-slot reuse. Starting content is the 266-pass freeze above; HEAD remains `3309dad`. Same file scope and offline restrictions. The minimal correction replaces separate global source/decision/artifact occurrence scans with one typed identity-to-case×round ownership check over all supplied declarations and observations, before completeness gates. Existing within-slot same-role duplicate rejection remains intact.
+
+First write/run 42 tests: 32-case matrix of identity kind (request/execution/trace/artifact) × cross-case/cross-round × source present/missing × observed repeat/nonrepeat; two same-slot declared+provenance+tool_started/tool_completed controls; eight source/provenance/started-event/artifact identity-origin comparisons against incomplete pose records. Actual RED: **20 failed, 22 passed, 259 deselected**. Failures included the reported partial-instead-of-failed result plus missing global conflict reasons where a separate local contradiction already failed. Artifact-ID preservation and correct/partial controls passed before the fix. No collection errors or mocked aggregator returns.
+
+After adding the unified ownership function: **42 passed, 259 deselected**; combined exact focused command: **308 passed**, pytest 2.12 s, exit 0. Then add 12 neighboring regression assertions for all sources absent, orphan markers including decision IDs, missing artifact association, cross-namespace text equality/equal pose hashes, and declared-only versus observed-only ownership. They all passed without further production changes; this supplemental run is not represented as another RED→GREEN cycle. Ownership selection: **54 passed, 259 deselected**.
+
+Final combined result: **320 passed**, pytest 2.42 s, exit 0, no failures/skips; original 266 tests unchanged. Two-file in-memory compilation and `git diff --check` passed. Commands reuse `Isolation / exact final command` above unchanged for combined runs; ownership-only runs omit the seven related node-ID lines and append `'-k', 'ownership'` to the same pytest arguments. Same isolated cleared-env private child, 120-second deadline, no conftest/plugin/cache/bytecode, no network/project assets. Fixtures are wholly synthetic in-memory records.
+
+All existing globally compared identity kinds were audited: source request/execution/trace, observed decision IDs, and strict pose artifact IDs. Ownership also includes corresponding event/provenance/pose trace and execution observations; no generic path parser or new identity metadata was added. Missing source/step/case observation cannot mask a known cross-slot conflict. Same-slot corroboration is not double-counted; equal content hashes and shared run/revision remain valid. Global failures coexist with per-slot partial reasons rather than rewriting raw scientific case status.
+
+New code/test hashes are in the design's `Socrates second QUALITY` section. Exactly the original two Python files and two docs remain modified and unstaged; no commit/push/full/live, actual assets/env/userstores or external coordination. Private synthetic test directories retained, not claimed cleaned. Freeze for **the original QUALITY recheck**; no approval or actual execution proof asserted, immutable live/final flags stay false.
+
+## Parent-approved local commit and integration checkpoint
+
+Parent reports Euclid SPEC APPROVE and Socrates QUALITY APPROVE after the final same-spec invariant correction. Socrates's independent evidence is parent-reported **320 baseline + 37 identity + 1168 malformed-input checks**; this worker does not claim those independent runs as its own. Prior failed freezes and complete RED/GREEN ledgers remain preserved above. This worker's last actual focused result is 320 passed.
+
+Authorized sequence: commit exactly the two Python files and two existing P8 docs; merge already-fetched `origin/main` commit `7b5611fed039aa7aebde62063f45e45e965cf23a` (PR75, 4D inventory complete); stop and report any manual source conflict. Inspect newly integrated evaluation-related tests/imports for secrets/network/real execution before selecting offline collision focus. Rerun the original isolated 320 command, then the inspected related focus, retaining source/test hash equivalence. Local documentation commits are authorized. No other worktree, real report/assets, full/live, push or PR. Parent says G1 occupies the heavy full slot and PR74 ADMET is still in CI/unmerged; this worker will not alter that coordination state.
+
+After focused verification, freeze locally for a full slot or parent's CI-only decision. P8-A offline review/integration does not complete Package8; `live_execution_verified=false` and `final_acceptance=false` remain unchanged.

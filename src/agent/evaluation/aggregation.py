@@ -125,6 +125,7 @@ def _validate(cases, iterations, evidence, expected_rounds):
             truth = row.get('truth_checks', {})
             _require(type(truth) is dict and all(type(v) is dict for v in truth.values()))
             _require(all(type(v['status']) is str for v in truth.values() if 'status' in v))
+            _require(all(type(v['pose_file_exists']) is bool for v in truth.values() if 'pose_file_exists' in v))
             for event in row.get('events', []):
                 _require(type(event.get('event')) is str and type(event.get('payload', {})) is dict)
                 for field in ('execution_id', 'decision_id', 'provider_request_id'):
@@ -212,13 +213,6 @@ def aggregate_scientific_reports(
     pose_expected = {(case.case_id, n) for case in cases for n in expected_rounds
                      if (case.scientific_acceptance.get('strict_report') or {}).get('require_new_pose')}
     artifacts = _index_records(evidence.get('artifacts', []), pose_expected, errors)
-    for field in ('trace_id', 'provider_request_ids', 'tool_execution_ids'):
-        seen = set()
-        for source in sources.values():
-            values = [source[field]] if field == 'trace_id' and field in source else source.get(field, [])
-            if len(values) != len(set(values)) or seen.intersection(values):
-                errors.append('reused_source_identity')
-            seen.update(values)
     for iteration in iterations:
         n = iteration['iteration']
         if n not in expected_rounds or n in rounds:
@@ -233,14 +227,7 @@ def aggregate_scientific_reports(
                 errors.append('unexpected_or_duplicate_case')
                 continue
             rows[key] = row
-    decisions = [event.get('payload', {}).get('decision_id') for row in rows.values()
-                 for event in row.get('events', []) if event.get('event') == 'planning_completed'
-                 and event.get('payload', {}).get('decision_id')]
-    if len(decisions) != len(set(decisions)):
-        errors.append('reused_decision_identity')
-    artifact_ids = [r['artifact_id'] for r in artifacts.values() if type(r.get('artifact_id')) is str]
-    if len(artifact_ids) != len(set(artifact_ids)):
-        errors.append('reused_artifact_identity')
+    _global_identity_checks(rows, sources, artifacts, errors)
     results = []
     for case in cases:
         for n in expected_rounds:
@@ -270,6 +257,48 @@ def aggregate_scientific_reports(
                          'outcome': (case.scientific_acceptance.get('strict_report') or {}).get('outcome'),
                          'reason_codes': sorted(set(failures + incomplete))}))
     return _report(results, len(expected), len(rows), errors)
+
+
+def _global_identity_checks(rows, sources, artifacts, errors):
+    """Identity ownership is case x round, not a count of corroborating records."""
+    owners = {}
+
+    def own(kind, value, slot):
+        # Missing/malformed fields retain their existing completeness/schema gates.
+        if type(value) is not str or not value:
+            return
+        identity = (kind, value)
+        if identity in owners and owners[identity] != slot:
+            errors.append(f'reused_{kind}_identity')
+        else:
+            owners[identity] = slot
+
+    for slot, source in sources.items():
+        own('trace', source.get('trace_id'), slot)
+        for field, kind in (('provider_request_ids', 'provider_request'), ('tool_execution_ids', 'execution')):
+            values = source.get(field, [])
+            if len(values) != len(set(values)):
+                errors.append('reused_source_identity')
+            for value in values:
+                own(kind, value, slot)
+    for slot, row in rows.items():
+        decisions = []
+        for event in row.get('events', []):
+            own('trace', event.get('trace_id'), slot)
+            payload = event.get('payload', {})
+            for field, kind in (('execution_id', 'execution'), ('provider_request_id', 'provider_request'),
+                                ('decision_id', 'decision')):
+                own(kind, payload.get(field), slot)
+            if event['event'] == 'planning_completed' and payload.get('decision_id'):
+                decisions.append(payload['decision_id'])
+        if len(decisions) != len(set(decisions)):
+            errors.append('reused_decision_identity')
+        for record in row.get('tool_provenance', []):
+            own('trace', record.get('trace_id'), slot)
+            own('execution', record.get('quality', {}).get('execution_id'), slot)
+    for slot, artifact in artifacts.items():
+        for field, kind in (('artifact_id', 'artifact'), ('trace_id', 'trace'), ('tool_execution_id', 'execution')):
+            own(kind, artifact.get(field), slot)
 
 
 def _index_records(records, expected, errors, *, cleanup=False):
@@ -310,66 +339,108 @@ def _linked_ids(declared, observed, failures, incomplete):
         failures.append('source_link_mismatch')
 
 
+def _observed_checks(row, failures, incomplete):
+    """Compare observed facts before any supplementary completeness gates."""
+    provenance, events = row.get('tool_provenance', []), row.get('events', [])
+    terminals = [e for e in events if e.get('event') in ('tool_completed', 'tool_failed')]
+    actual = list(row.get('actual_tools', []))
+    if [p.get('tool_name') for p in provenance] != actual:
+        failures.append('executed_tools_mismatch')
+    if [e.get('tool') for e in terminals] != actual:
+        failures.append('tool_events_mismatch')
+    observed = [p.get('quality', {}).get('execution_id') for p in provenance]
+    emitted = [e.get('payload', {}).get('execution_id') for e in terminals]
+    if any(not v for v in observed + emitted):
+        incomplete.append('source_link_missing')
+    observed, emitted = [v for v in observed if v], [v for v in emitted if v]
+    if any(len(ids) != len(set(ids)) for ids in (observed, emitted)):
+        failures.append('reused_observed_execution')
+    for event in terminals:
+        success = event.get('payload', {}).get('success')
+        if success is not None and event['event'] != ('tool_completed' if success else 'tool_failed'):
+            failures.append('tool_event_outcome_mismatch')
+    for event, record in zip(terminals, provenance):
+        terminal_id = event.get('payload', {}).get('execution_id')
+        execution_id = record.get('quality', {}).get('execution_id')
+        for terminal_value, record_value in (
+            (event.get('tool'), record.get('tool_name')),
+            (event.get('trace_id'), record.get('trace_id')),
+            (terminal_id, execution_id),
+        ):
+            if terminal_value is not None and record_value is not None and terminal_value != record_value:
+                failures.append('tool_execution_association_mismatch')
+        success = record.get('success')
+        if success is None:
+            incomplete.append('tool_outcome_missing')
+        elif event['event'] != ('tool_completed' if success else 'tool_failed'):
+            failures.append('tool_event_outcome_mismatch')
+        if ('success' in event.get('payload', {}) and success is not None
+                and event['payload']['success'] is not success):
+            failures.append('tool_event_outcome_mismatch')
+    requests = []
+    for event in events:
+        payload = event.get('payload', {})
+        if 'decision_id' not in payload and 'provider_request_id' not in payload:
+            continue
+        if (event['event'] != 'planning_completed' or 'decision_id' not in payload
+                or 'provider_request_id' not in payload):
+            incomplete.append('source_link_missing')
+        if 'provider_request_id' in payload:
+            requests.append(payload['provider_request_id'])
+    if len(requests) != len(set(requests)):
+        failures.append('reused_observed_request')
+    return observed, emitted, requests
+
+
 def _source_checks(case, row, source, evidence, failures, incomplete):
+    observed, emitted, requests = _observed_checks(row, failures, incomplete)
+    policy = case.scientific_acceptance.get('strict_report')
+    if policy and policy['decision_source'] == 'none' and any(
+        event.get('payload', {}).get('provider_request_id') or event.get('payload', {}).get('decision_id')
+        for event in row.get('events', [])
+    ):
+        failures.append('unexpected_provider_request')
+    if policy and policy['decision_source'] == 'live_provider' and (
+        row.get('decision_model_kind') == 'scripted' or row.get('decision_model') == 'scripted'
+    ):
+        failures.append('source_policy_mismatch')
     if source is None:
         incomplete.append('source_missing')
         return
     _association(source, evidence, failures, incomplete)
-    policy = case.scientific_acceptance.get('strict_report')
-    if policy is None:
-        return
-    for field in ('decision_source', 'entry_path'):
-        if field not in source:
+    if policy is not None:
+        for field in ('decision_source', 'entry_path'):
+            if field not in source:
+                incomplete.append('source_description_missing')
+            elif source[field] != policy[field]:
+                failures.append('source_policy_mismatch')
+        proof = source.get('proof_class')
+        allowed = {'scripted'} if policy['decision_source'] == 'scripted' else (
+            {'real_decision'} if policy['decision_source'] == 'live_provider' else {'real_tool'})
+        if proof is None:
             incomplete.append('source_description_missing')
-        elif source[field] != policy[field]:
-            failures.append('source_policy_mismatch')
+        elif proof not in allowed:
+            failures.append('proof_class_conflict')
     for field in ('demo_mode', 'fallback_used'):
         if source.get(field) is True:
             failures.append('nonreal_tool_source')
         elif source.get(field) is not False:
             incomplete.append('source_description_missing')
-    proof = source.get('proof_class')
-    allowed = {'scripted'} if policy['decision_source'] == 'scripted' else (
-        {'real_decision'} if policy['decision_source'] == 'live_provider' else {'real_tool'})
-    if proof is None:
-        incomplete.append('source_description_missing')
-    elif proof not in allowed:
-        failures.append('proof_class_conflict')
     trace = source.get('trace_id')
     if trace is None:
         incomplete.append('source_link_missing')
-        return
     provenance, events = row.get('tool_provenance', []), row.get('events', [])
-    if any(item.get('trace_id') != trace for item in (*provenance, *events)):
+    if trace is not None and any(item.get('trace_id') != trace for item in (*provenance, *events)):
         failures.append('trace_mismatch')
-    if row.get('actual_tools'):
-        if [p.get('tool_name') for p in provenance] != list(row['actual_tools']):
-            failures.append('executed_tools_mismatch')
+    if row.get('actual_tools') or provenance or emitted:
         declared = source.get('tool_execution_ids', [])
-        observed = [p.get('quality', {}).get('execution_id') for p in provenance]
-        terminals = [e for e in events if e.get('event') in ('tool_completed', 'tool_failed')]
-        emitted = [e.get('payload', {}).get('execution_id') for e in terminals]
-        if any(not v for v in observed + emitted):
-            incomplete.append('source_link_missing')
-        if [e.get('tool') for e in terminals] != list(row['actual_tools']):
-            failures.append('tool_events_mismatch')
-        if any('success' in event.get('payload', {}) and event['payload']['success'] is not record.get('success')
-               for event, record in zip(terminals, provenance)):
-            failures.append('tool_event_outcome_mismatch')
-        _linked_ids(declared, [v for v in observed if v], failures, incomplete)
-        _linked_ids(declared, [v for v in emitted if v], failures, incomplete)
+        _linked_ids(declared, observed, failures, incomplete)
+        _linked_ids(declared, emitted, failures, incomplete)
     elif source.get('tool_execution_ids'):
         failures.append('unexpected_tool_execution')
-    if policy['decision_source'] == 'live_provider':
-        if row.get('decision_model_kind') == 'scripted' or row.get('decision_model') == 'scripted':
-            failures.append('source_policy_mismatch')
-        decisions = [e for e in events if e.get('event') == 'planning_completed'
-                     and e.get('payload', {}).get('decision_id')]
-        request_ids = [e.get('payload', {}).get('provider_request_id') for e in decisions]
-        if any(not v for v in request_ids):
-            incomplete.append('source_link_missing')
-        _linked_ids(source.get('provider_request_ids', []), [v for v in request_ids if v], failures, incomplete)
-    elif policy['decision_source'] == 'none' and source.get('provider_request_ids'):
+    if requests or source.get('provider_request_ids') or (policy and policy['decision_source'] == 'live_provider'):
+        _linked_ids(source.get('provider_request_ids', []), requests, failures, incomplete)
+    if policy and policy['decision_source'] == 'none' and source.get('provider_request_ids'):
         failures.append('unexpected_provider_request')
 
 
@@ -386,6 +457,13 @@ def _scientific_checks(case, row, failures, incomplete):
                    and checks.get(name, {}).get('status') == 'passed'
                    and checks.get(name, {}).get('reason') == reason for name, reason in reasons.items()):
             failures.append('rejection_reason_unverified')
+        for name, check in checks.items():
+            if (name in ('binding_energy_numeric', 'vina_pose') and check.get('status') == 'passed'
+                    or _finite_number(check.get('binding_energy')) or check.get('pose_file_exists') is True):
+                failures.append('rejection_has_positive_truth_claim')
+            elif name not in (*reasons, 'scientific_claim_evidence'):
+                # Unknown checks cannot certify a negative outcome by their label.
+                incomplete.append('rejection_truth_unclassified')
         if original not in {'failed', 'passed'} or any(p.get('success') is True for p in row.get('tool_provenance', [])):
             failures.append('rejection_has_scientific_success')
         if row.get('error'):
@@ -441,6 +519,17 @@ def _scientific_checks(case, row, failures, incomplete):
 
 
 def _pose_checks(row, artifact, evidence, failures, incomplete):
+    truth = row.get('truth_checks', {})
+    pose_exists = truth.get('vina_pose', {}).get('pose_file_exists')
+    if pose_exists is False:
+        failures.append('pose_file_absent')
+    elif pose_exists is not True:
+        incomplete.append('pose_file_observation_missing')
+    reported_energy = truth.get('binding_energy_numeric', {}).get('binding_energy')
+    if reported_energy is None:
+        incomplete.append('pose_energy_observation_missing')
+    elif not _finite_number(reported_energy):
+        failures.append('pose_energy_mismatch')
     if artifact is None:
         incomplete.append('pose_observation_missing')
         return
@@ -455,13 +544,10 @@ def _pose_checks(row, artifact, evidence, failures, incomplete):
             or not all(re.fullmatch(r'[A-Za-z0-9_.-]+', part) for part in path.split('/'))):
         failures.append('pose_identifier_invalid')
     energy = artifact.get('binding_energy')
-    reported_energy = row.get('truth_checks', {}).get('binding_energy_numeric', {}).get('binding_energy')
     if ('binding_energy' in artifact and not _finite_number(energy)
             or 'unit' in artifact and artifact['unit'] != 'kcal/mol'):
         failures.append('pose_energy_invalid')
-    if reported_energy is None:
-        incomplete.append('pose_energy_observation_missing')
-    elif not _finite_number(reported_energy) or energy is not None and energy != reported_energy:
+    if reported_energy is not None and energy is not None and energy != reported_energy:
         failures.append('pose_energy_mismatch')
     if 'byte_size' in artifact and (type(artifact['byte_size']) is not int or artifact['byte_size'] <= 0):
         failures.append('pose_size_invalid')

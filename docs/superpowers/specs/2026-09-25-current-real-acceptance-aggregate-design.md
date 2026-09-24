@@ -1,4 +1,4 @@
-# P8-A: Offline Strict Report Aggregation — Approved, Review Freeze
+# P8-A: Offline Strict Report Aggregation — Dual Review Approved, Integration Pending
 
 ## Scope / baseline
 
@@ -87,3 +87,76 @@ P8-A does not call `chemistry_metrics`; it reuses only the scientific tool-order
 For the future authorized real collector, validity evidence must include the actual RDKit runtime version and successful parser/canonicalization/deduplication observations tied to the same candidate/input/output identities and execution trace, with fallback/unavailable status explicitly retained. Missing RDKit or absent execution observations blocks the real-validity gate; nonempty-string fallback is insufficient. This is a recorded acceptance requirement, not an implemented new assertion or an out-of-scope producer fix.
 
 No code/test changes or test runs for this follow-up; implementation freeze remains `6ca2c5c`. Parent-reported coordination context only (not independently queried): PR72/G2 open at `548baca`; 4C full running. Workers do not run full/live or inspect project assets, ambient environment values or user stores.
+
+## Euclid SPEC P2 corrections — uncommitted content freeze
+
+Euclid's four P2 findings were reproduced against the clean starting tree at `3309dad` (code `6ca2c5c`). Initial SPEC code approval was **not** granted. The following changes stay within the original internal-consistency contract and await the **same SPEC** re-review; no authentication, collector, I/O or producer framework was added.
+
+1. Terminal execution IDs are now checked at each provenance index as `(tool, trace_id, execution_id)`, not only as independent sets. Swapping terminal IDs is rejected for distinct tools and for repeated invocations of the same tool. Missing links remain incomplete; existing count/order/trace checks still apply.
+2. Terminal event name must agree with the corresponding provenance success boolean (`tool_completed` for true, `tool_failed` for false), even with `expected_events=[]` and no payload success field. Missing provenance outcome remains incomplete. Valid failed-tool preservation is retained.
+3. `decision_source=none` rejects observed event decision/provider-request IDs even when supplementary request IDs are empty (or source details missing). Unmarked static planning events remain allowed; correctly linked live-policy records remain offline-only positive controls.
+4. Expected rejection cannot contain passed `binding_energy_numeric`/`vina_pose` claims, or explicit finite `binding_energy`/true `pose_file_exists` observations even under a different check name. Unknown additional check semantics are partial, not assumed negative. The existing fixed negative checks and neutral `scientific_claim_evidence` safety check remain usable; a normal positive pose case still passes report consistency. This is intentionally a narrow consistency rule, not a new scientific validator.
+
+Behavioral RED→GREEN records and exact reused command context are appended to the plan. Final focused result: **164 passed (157 aggregator + 7 existing pure regression), no failures/skips**; two-file in-memory compile and diff whitespace check passed. All new RED results were actual incorrect-pass assertions, with neighboring positive controls preserved. No full/live, project asset/user-store/environment-secret reads, commit, staging or push in this correction batch. Private synthetic test directories remain retained under the previously documented test wrapper.
+
+Content freeze SHA-256 (raw working-tree bytes, **not a new commit**):
+
+| File | SHA-256 |
+|---|---|
+| `src/agent/evaluation/aggregation.py` | `92a15f6a79abf94b77d40b07877d838c3d73522ce41d032f0d5ea67a397f2c42` |
+| `tests/agent/test_evaluation_aggregation.py` | `a24fc5925b00a428b12e1f64faf011bd760c6708f58bee401a1ecb55c73ee6df` |
+
+Base HEAD remains `3309dad0d8f1a26504682f934061b227530f9ac6`; changed source/tests and docs are intentionally uncommitted for parent review. Both `live_execution_verified` and `final_acceptance` remain always false. No SPEC approval is claimed by these passing tests.
+
+## Socrates QUALITY P2 corrections — replacement content freeze
+
+Parent returned four QUALITY P2 findings against the 164-pass Euclid correction tree; QUALITY approval was **not** granted. This section supersedes the previous working-tree hashes, not the historical TDD evidence. No commit was made. The same two Python files and two documents remain the complete change scope.
+
+The correction is an invariant pass, not four fixture-specific exceptions:
+
+- `_observed_checks` examines all terminal records before source/policy/trace completeness gates, even when `actual_tools=[]`. Terminal and provenance sequences must each agree with the actual-tools summary. At each paired index, every available tool/trace/execution fact is compared independently; a missing execution ID cannot hide a trace contradiction. Duplicate observed execution identities fail without needing supplementary IDs. Event name, payload success and provenance success are checked wherever each comparison is possible; unknown provenance success remains incomplete, not inferred from the event.
+- Every event carrying either decision or provider-request identity participates in observation checks, including a request without a decision ID. No request is removed by the `planning_completed + decision_id` filter. Duplicated observed request identities fail independently of source availability. Observed requests are compared with source declarations even when policy or source trace is missing. A fully declared orphan request lacking its decision counterpart is partial; an extra undeclared request contradicting a supplied nonempty declaration fails. Unmarked static planning is allowed; other marked event kinds remain incomplete until supported planning linkage exists. This does not authenticate a provider.
+- Existing none-policy/provider-marker and live-policy/scripted-model contradictions are checked before the missing-source return. Missing policy prevents policy comparison only; it does not suppress comparisons among supplied facts. Known contradictions retain failed precedence alongside missing-field reasons.
+- Required pose consistency now consumes `truth_checks.vina_pose.pose_file_exists`: explicit `False` fails, absent field is partial, present non-boolean (including null, numeric, string or container) fails the bounded input contract. `True` alone is insufficient: existing energy/hash/current-run/provenance/artifact requirements still apply. Reported pose flag and numeric-energy validity are evaluated before the missing-artifact return. No filesystem existence or hash computation occurs.
+
+The public callable, existing EvaluationCase/EvaluationReport models and scientific helper reuse are unchanged. No producer, collector, launcher, I/O or new scientific framework was added. `live_execution_verified=false`, `final_acceptance=false` and offline report-consistency scope remain unconditional; this is not security certification or real execution proof.
+
+Final focused result: **266 passed (259 aggregator + 7 existing pure regression nodes)**, no failures/skips, exit 0. Four grouped RED→GREEN sequences and exact command reuse are recorded in the plan. Two-file in-memory compilation and `git diff --check` passed. No full/live, assets, ambient env/secrets or user-store reads; no staging/commit/push/PR. Owned synthetic test directories remain retained, not claimed cleaned. Await the same QUALITY recheck; no review approval claimed.
+
+Replacement SHA-256 freeze (raw working-tree bytes):
+
+| File | SHA-256 |
+|---|---|
+| `src/agent/evaluation/aggregation.py` | `f9a366987d34868b4e9698abfd03f129ce5f3935a52251f6a107b5f33613c9af` |
+| `tests/agent/test_evaluation_aggregation.py` | `f7369dc8bf864495f0bfb0e0e515189bfa29e1f1ff275a36a6c5530f7a5149cf` |
+
+Branch remains `codex/current-real-acceptance`, HEAD `3309dad0d8f1a26504682f934061b227530f9ac6`. Review the uncommitted content at these hashes, not HEAD alone.
+
+## Socrates second QUALITY — global identity ownership freeze
+
+Parent reports the original four QUALITY findings closed, but a further P2 remained: global uniqueness previously scanned supplementary sources, while observed request/execution duplicates were checked only within a case result. Removing a source could therefore hide reuse across case×round slots. This section supersedes the preceding content hashes; no QUALITY approval or new commit is claimed.
+
+`_global_identity_checks` now assigns each supplied identity `(kind, value)` to an owner `(case_id, round)` before per-slot source/policy/artifact completeness checks. The union includes source trace/request/execution declarations, **all** event trace/request/execution/decision markers regardless of event name or missing counterpart, provenance trace/execution IDs, and strict pose artifact ID/trace/execution fields. Another occurrence in the same slot corroborates ownership; another slot is a global failure. It cannot be masked by missing source, missing row observation, missing artifact step, or later passes. Fixed global reasons are `reused_trace_identity`, `reused_provider_request_identity`, `reused_execution_identity`, `reused_decision_identity`, `reused_artifact_identity`; values are never echoed.
+
+This is ownership, not blanket occurrence counting: source + provenance + tool_started + tool_completed may legitimately share an execution/trace identity in one slot. Existing same-role duplicate checks remain (duplicate IDs within one source list, repeated terminal/provenance execution IDs, repeated observed provider requests and completed decisions); they are not weakened into permitted extra executions. Missing observations without reuse still remain partial. Identity namespaces are separate; run/revision, tool/step names and input/output content hashes are deliberately not globally unique. Equal pose hashes across distinct executions remain allowed.
+
+Pose audit: the previous global `artifacts[].artifact_id` duplicate check had no source early gate and is retained through the unified owner check. Its trace/execution fields now participate even without the step/metadata needed for local pose association. No new meaning is inferred from generic `artifact_paths`, filesystem filenames or arbitrary free-form result fields; no artifact reader or path alias resolution is introduced. Malformed/missing fields retain existing schema/completeness handling. The same public API and unconditional offline/live/final flags are unchanged.
+
+Focused evidence: original **266 tests unchanged** + 54 ownership tests = **320 passed** (313 aggregator + 7 existing pure nodes), no failures/skips, exit 0; two-file in-memory compile and diff check passed. The initial 42-case matrix actually produced **20 failed / 22 passed**, then **42 passed** after the minimal owner-check correction. Twelve further boundary/positive regression cases passed without another implementation change; they are not claimed as additional RED cycles. Detailed selections and results are in the plan.
+
+Latest raw-byte content freeze for the same QUALITY reviewer:
+
+| File | SHA-256 |
+|---|---|
+| `src/agent/evaluation/aggregation.py` | `14ae0da3afccefb9857e38497a429b5664f79b016daf73d657ff37e3c2733fb6` |
+| `tests/agent/test_evaluation_aggregation.py` | `828151e4040c80fe55b8c3ef0a8d6ae6b5a63dc24e844d7ab9fb6c1af3cd9a21` |
+
+Still exactly two Python files + two docs, unstaged/uncommitted at HEAD `3309dad0d8f1a26504682f934061b227530f9ac6`. No full/live, assets/env/user-store reads, commit/push/PR or producer change. Retained private synthetic test directories are not a cleanup attestation. `live_execution_verified=false` / `final_acceptance=false` remain unconditional. Freeze for the original QUALITY reviewer, not real acceptance.
+
+## Parent-authorized review closure and local integration
+
+Parent now reports **SPEC APPROVE — Euclid**, covering the approved specification, and **QUALITY APPROVE — Socrates**, covering the latest ownership correction. Parent characterizes the last revision as completion of the same invariants, not expanded scope. Socrates independently ran the 320-test baseline plus 37 identity and 1168 malformed-input checks, according to the parent; these independent results are attributed to Socrates and were not rerun or inspected as actual report files by this worker.
+
+Historical failed reviews, counterexamples and RED outcomes above remain intact: initial Euclid four-P2 corrections, Socrates four-P2 corrections, and the second Socrates cross-slot ownership P2. Approval applies after those corrections, not retroactively to the failed freezes. Core source/test raw-byte SHA-256 remains the latest `14ae0da3...` / `828151e4...` pair recorded above.
+
+Parent authorizes an exact four-path local commit (aggregator, its tests, this design, existing P8 plan), followed by merge of already-fetched `origin/main` at `7b5611fed039aa7aebde62063f45e45e965cf23a` (PR75 / 4D inventory). Stop for parent direction if a source conflict requires manual resolution. Then rerun the original isolated 320 selection plus pre-inspected, offline evaluation collision focus; preserve core hashes. Full remains queued behind parent's G1 heavy run; no full/live/push/PR, no other worktree or real report/asset access. PR74 ADMET remains unmerged per parent status. This is local P8-A integration only, **not Package8 completion or real acceptance**. Await a full-test slot or parent's CI-only decision after verification.
