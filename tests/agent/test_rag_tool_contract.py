@@ -290,7 +290,7 @@ def test_validation_stays_inside_timeout_and_holds_slot_until_worker_finishes():
 
 def test_non_rag_factory_retains_legacy_schema_and_payload():
     tool = ResultTool({"success": True, "data": {"arbitrary": 1}})
-    tool.name = "property_calculator"
+    tool.name = "candidate_ranker"  # Analysis tools now have their own contract.
     adapter = build_tool_registry([tool]).resolve(tool.name, require_available=False)
     assert type(adapter) is LegacyPythonToolAdapter
     assert adapter.spec.output_schema is None

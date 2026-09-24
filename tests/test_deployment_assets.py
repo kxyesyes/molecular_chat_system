@@ -99,6 +99,7 @@ docking:
             'pytest_target: "tests/sandbox_broker/test_api.py"',
             'pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"',
             'pytest_target: "tests/task_runtime"',
+            'pytest_target: "tests/test_activity*.py"',
             'pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"',
             "python -m compileall -q src scripts",
             "find tests -maxdepth 1 -type f -name '*_test.js'",
@@ -110,7 +111,7 @@ docking:
         self.assertIn('python-version: "3.10"', source)
         self.assertEqual(source.count("--timeout=60"), 2)
         self.assertEqual(source.count('pytest_args: "--timeout=60"'), 2)
-        self.assertEqual(source.count("command_timeout:"), 5)
+        self.assertEqual(source.count("command_timeout:"), 6)
         self.assertIn("command_timeout: 180", source)
         self.assertIn("git grep -IlE", source)
         self.assertNotIn("git grep -nE", source)

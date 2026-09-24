@@ -15,6 +15,7 @@ from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.run_session import WorkflowRunSession, SessionLifecycleError
 from src.agent.tooling.factory import build_tool_registry
+from tests.agent.test_analysis_contract import analysis_rows
 from tests.agent.test_family_activity_tool import boundary as family_boundary, conflict_row
 
 
@@ -61,7 +62,13 @@ class CountingTool:
         if self.fail:
             return ToolResult.error_result(self.name, AgentErrorCode.MODEL_UNAVAILABLE,
                                           'Test dependency unavailable', warnings=['test-warning'])
-        return ToolResult.success_result(self.name, {'smiles': 'CCO', 'molecular_weight': 46.069},
+        rows = (analysis_rows(self.name) if self.name in {
+            'property_calculator', 'drug_likeness_assessment', 'admet_predictor',
+        } else {'smiles': 'CCO', 'molecular_weight': 46.069})
+        if self.name == 'property_calculator':
+            # Preserve this explicit fixture's observed precision/assertions.
+            rows[0]['properties']['molecular_weight'] = 46.069
+        return ToolResult.success_result(self.name, rows,
                                          quality={'demo_mode': self.demo}, warnings=['test-warning'])
 
 
@@ -94,7 +101,7 @@ def setup_loop(tmp_path):
 
 def run(bundle, **kwargs):
     return asyncio.run(bundle.loop.run(AgentContext('SMILES: CCO', 'trace-test'),
-        allowed_tools={'property_calculator', 'drug_likeness_assessment'},
+        allowed_tools=kwargs.pop('allowed_tools', {'property_calculator', 'drug_likeness_assessment'}),
         required_tools=kwargs.pop('required_tools', {'property_calculator'}),
         request_kind=kwargs.pop('request_kind', 'scientific'), event_bus=bundle.bus, **kwargs))
 
@@ -287,10 +294,13 @@ def test_only_cited_review_can_finish_and_other_constraints_remain_unsatisfied(s
             ids.append(observations[0]['quality']['evidence_id'])
         return finish(ids)
     b = setup_loop([tool('activity_predictor'), tool(), finish_selected], [activity, CountingTool()])
+    # A complete typed property result necessarily includes QED. Keep an
+    # independently unmet subject requirement instead of omitting a descriptor.
+    criteria = requirements(count, metrics, **({'expected_smiles': ['CCN']} if count == 1 else {}))
     result = asyncio.run(b.loop.run(AgentContext('预测PDE5A活性；SMILES: CCO', 'cited-review'),
         request_kind='scientific', allowed_tools={'activity_predictor', 'property_calculator'},
         required_tools={'activity_predictor', 'property_calculator'} if cite_review else {'property_calculator'},
-        requirements=requirements(count, metrics), event_bus=b.bus))
+        requirements=criteria, event_bus=b.bus))
     assert not result.success and result.outcome == RunOutcome.PARTIAL
     assert result.metadata['stop_reason'] == 'task_requirements_unfulfilled'
     assert result.error is not None
