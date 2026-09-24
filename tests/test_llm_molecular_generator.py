@@ -216,7 +216,7 @@ class LLMMolecularGeneratorTest(unittest.TestCase):
 
         with (
             mock.patch.object(generator, "_check_rdkit", return_value=True),
-            mock.patch.object(generator, "extract_smiles", return_value=["CCO"]),
+            mock.patch.object(generator_module, "parse_molecular_smiles", return_value=["CCO"]),
             mock.patch.object(generator, "validate_smiles", return_value=True),
             mock.patch.object(generator_module, "RDKIT_AVAILABLE", False),
         ):
