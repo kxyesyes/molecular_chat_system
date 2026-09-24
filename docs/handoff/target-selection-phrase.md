@@ -1,7 +1,8 @@
 # 英文候选筛选短语：本地修复交接
 
 日期：2026-09-24。分支 `codex/target-selection-phrase-pr`，基线 `75d6a3a`。
-用户已确认书面设计并授权 TDD；本批不合并 PR #53、不推送、不部署、不启用模型。
+用户已确认书面设计并授权 TDD；本批不推送、不部署、不启用模型。
+后续确认已授权合并 PR #53，现已合并为 `5f56053`；本分支通过 `4ea8012` 对齐该基线。
 
 ## 修复前后
 
@@ -79,7 +80,33 @@ $runner | & $python -B -c "import sys; exec(sys.stdin.read())" @joint
 
 ## 未完成与下一步
 
-- 本分支尚未发布，PR #53 未在本轮获合并授权。
-- #53 获明确授权合并后，本分支需对齐基线，将其刻画旧 select 澄清行为的特征测试更新为新行为，再做联合回归和 CI。当前基线没有该文件，未声称完成这项工作。
+- 本分支尚未发布，无新 PR/CI；不得将本地回归称为远端 CI。
+- PR #53 已获后续明确授权并 squash 合并；已对齐并更新旧 select 澄清特征测试。
 - 不修改原始工作树的13项历史改动；未部署，用户正在运行的服务不会自动切换到本地修复。
 - 跨轮候选引用、旧 Agent 接口等任务书余项不属于此修复，仍需独立处理。
+
+## PR #53 合并后的集成验证
+
+PR #53 最新 7/7 CI、无未解决审查意见核验后，授权 squash 合并为
+`5f56053bb457187ea71d22671265ff63a466aeba`。合并树与已审 head `97fc57e` 一致。
+本分支 merge `origin/main` 产生 `4ea8012`，未改写历史。
+
+旧测试 `test_existing_select_top_target_clarification_is_not_changed_by_extraction`
+实测 **1 failed，1.66s**：它要求空计划，与本批批准的合法筛选行为冲突。
+仅将这一条更新为完整手写 target fixture 比较，替换 query，保留六步顺序、输入绑定、
+证据前置条件、输出契约和 required/optional 断言；不改 Planner 模板或科学校验。
+
+隔离 runner 实际运行四文件 target_selection_phrase、target_selection_execution、
+planner_step_templates、planner_template_execution：**252 passed，1.74s**。
+独立集成审查通过：fixture 非同实现自证，解析修复与既有审查版本一致，规范执行器未变。
+审查者未运行测试，其结论不替代本地测试。
+
+集成后离线 contract（阻断 socket）：**34/34 passed**，报告
+`scratch/target-selection-phrase-integrated-contract.json`，SHA256
+`c9f8d11e287f49e4b68d84e42032bd5a242ebcf868ec63a7767d5a22112851eb`。
+src/scripts **306 文件内存编译通过**，未写 pyc。
+
+集成后使用上文同一23路径命令重新运行：**5421 passed、9 skipped、7 warnings、
+9 subtests passed，276.62s，exit0**；隔离 runner 清理后输出 `T11A_PYTEST_EXIT=0`。
+新增79项来自合入的Planner模板/执行测试，跳过原因与上述分类一致。
+精确范围 `git diff --check` 通过，凭据候选扫描0命中；未运行真实模型或部署验收。
