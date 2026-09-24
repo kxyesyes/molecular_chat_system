@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import replace
-
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.specialists import build_default_specialists
 from src.agent.supervisor import SupervisorAgent
-from src.agent.tooling import build_tool_registry, LegacyPythonToolAdapter, ToolRegistry
-from src.agent.tooling.factory import LegacyQueryInput
+from src.agent.tooling import build_tool_registry
+from src.agent.tools.candidate_ranker import CandidateRanker
 from tests.agent.test_family_activity_tool import family_row
 from tests.agent.test_analysis_contract import analysis_rows
 
@@ -20,6 +18,9 @@ class FakeTool:
 
     def execute(self, query):
         self.calls.append(query)
+        if self.name == "candidate_ranker":
+            # Success-path fixture must exercise the real typed ranking shape.
+            return CandidateRanker().execute(query)
         return {
             "success": True,
             "message": "ok",
@@ -61,26 +62,10 @@ def test_tool_registry_factory_assigns_declared_agent_owners():
     )
 
 
-def runtime_fixture_registry(tools):
-    # These persistence/idempotency tests deliberately use a query sentinel,
-    # not a scientific ranking. Keep their legacy observation and downstream
-    # assertions without exempting the production typed ranker or renaming it.
-    typed = build_tool_registry(tools)
-    registry = ToolRegistry()
-    for adapter in typed.as_mapping().values():
-        if adapter.spec.name == "candidate_ranker":
-            adapter = LegacyPythonToolAdapter(
-                replace(adapter.spec, input_schema=LegacyQueryInput, output_schema=None),
-                adapter.tool,
-            )
-        registry.register(adapter)
-    return registry
-
-
 def test_delegated_supervisor_persists_run_events_and_tool_results(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     event_bus = AgentEventBus(state_store=store)
-    registry = runtime_fixture_registry(build_tools())
+    registry = build_tool_registry(build_tools())
     supervisor = SupervisorAgent(
         tool_registry=registry,
         specialists=build_default_specialists(),
@@ -110,7 +95,7 @@ def test_delegated_supervisor_persists_run_events_and_tool_results(tmp_path):
 def test_delegated_supervisor_reuses_idempotent_completed_steps(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.sqlite3")
     tools = build_tools()
-    registry = runtime_fixture_registry(tools)
+    registry = build_tool_registry(tools)
 
     first = SupervisorAgent(
         tool_registry=registry,

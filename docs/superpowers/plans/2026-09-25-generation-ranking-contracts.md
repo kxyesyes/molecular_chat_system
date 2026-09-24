@@ -403,3 +403,280 @@ releases the heavy-test slot (4B GREEN active session 88542); this worker is nex
 with planner queued afterward. Repeat focus/min on the new integration before
 requesting the full slot. Independent SPEC/QUALITY and external publication
 remain parent-owned; no push or PR from this worker.
+
+### PR68 integrated; ready for the full Agent slot
+
+Committed the two fixture fixes and preceding checkpoint locally as unreviewed
+`24d7e9c`. Authorized merge `c5791f6` now contains exact main
+`e173d432f767fe76e1c1f101d9cd8824ffee612d`; ancestry verified. Merge was clean,
+with no factory changes or local edits to secure_io. The 4C production module,
+factory and two new test files are unchanged from the preceding checkpoint.
+
+Reran the same complete 25-file FOCUS serially with the same isolated runner:
+
+| Post-PR68 profile | Actual outcome |
+| --- | --- |
+| Host MedChat | 2029 passed, 7 warnings, 162 subtests passed, 29.50s; exit 0 |
+| Existing minimum profile, asserted Pydantic 2.5.0 | 2029 passed, 8 warnings, 162 subtests passed, 28.70s; exit 0 |
+
+No warning suppression or contract weakening. `git diff --check` is clean. Only
+this results record is uncommitted after the authorized fixture commit/merge.
+**Ready for full Agent, not started:** wait for parent's explicit heavy-slot
+release after 4B session 88542. There is no full-suite GREEN claim for this
+snapshot. No push, PR, independent review approval or scientific-quality claim.
+
+### Released-slot full Agent result: one remaining generic fixture failure
+
+Parent released the heavy slot after 4B completed. Ran exactly one full Agent
+invocation on frozen HEAD `c5791f641262ecc0ebf17b4e716bb4f0993b7854`, using the
+same extracted isolation runner with sole path argument `tests/agent` (underlying
+pytest: `-q -p no:cacheprovider --tb=short -rs`). Session 30511 completed with
+exit 1: **6420 passed, 1 failed, 2 skipped, 7 warnings in 280.29s**. No other heavy
+run was launched; slot released back to parent for queued Planner.
+
+Failure:
+`tests/agent/test_delegated_baseline_integration.py::test_health_telemetry_does_not_raise_or_publish_invalid_raw_status`,
+line 87 (`assert result is observation`). This existing generic telemetry probe
+uses candidate_ranker, query='CCO', and an intentionally invalid raw status. The
+typed factory adapter rejects its non-ranking input before returning that raw
+observation. Read-only inspection confirms the test explicitly describes generic
+adapter telemetry; its health/redaction assertions must remain intact. A scoped
+test-local LegacyPythonToolAdapter construction, as used for the other generic
+probes, is the proposed correction. **Not implemented or rerun at this frozen
+checkpoint; reporting the failure before any change.** No contract weakening.
+
+Exact skips:
+
+- `tests/agent/test_decision_chat_acceptance.py:149`: directory symlinks unavailable.
+- `tests/agent/test_harness_shadow.py:277`: performance test disabled.
+
+Frozen code/test SHA-256 values (plan excluded):
+
+```text
+src/agent/tooling/factory.py 3cee838682590d3b0e9c486231aa2d3ebf5c595e28e13b13cb0befc5fd833215
+src/agent/tooling/generation_ranking_contract.py d02e10fde7f0224f585ca2046a65a3bf90e44b74a547aa03368ca4c6bb94786d
+tests/agent/test_dynamic_run_session.py a8a2f17255631aed48e691f736d0c1e5c395b648d4b145948b31c09c5aadd632
+tests/agent/test_generation_ranking_contract.py 7c60de25aff6ae55798307c8c1924c1b204db7f7c64a867287941e97ce4630a4
+tests/agent/test_generation_ranking_contract_integration.py f932a2df092c77077dff75eac04780e6d2466b5d970ec85a193646f6e83f3a78
+tests/agent/test_rag_tool_contract.py 3923a00d98da876af4a7f5f8bd590715d392fb597b6bdbb733ef9319424cc173
+tests/agent/test_supervisor_runtime_integration.py bcd880c29f6a83853c04ea8f54484b568d0d1b407f9fed5e1847f331207b4464
+```
+
+Ordinal path-sorted `path + space + sha256 + LF`, UTF-8 aggregate SHA-256:
+`c86ec686597a2b998fb57169abe1ee447a59d24361a20b01bade936e7c7e7c4d`.
+Only this plan is dirty; production/tests remain frozen. Prior post-PR68 FOCUS
+and minimum-profile evidence (each 2029 passed + 162 subtests) is retained, but
+does not include the newly identified generic telemetry fixture.
+
+### PR69 integration and authorized telemetry fixture correction
+
+Merged reviewed target-contract main `16b91575229be987b0c5cf3d8d9039135d8ade29`
+as `bcb7d541b44b8d609fda7c77232b3fe5fe0c6730`. Conflicts occurred only in
+factory imports and input/output/adapter selectors; resolution retains both 4B
+and 4C branches additively. Diff against that main contains only the 4C import
+and its two exact-name selections. Verified byte-identical 4B target_contract,
+target tests, registry tests, and three decision fixture files against reviewed
+main. Existing 4C production module and tests were unchanged by this merge.
+
+Before the telemetry correction, merged host FOCUS reported **2497 passed,
+1 failed, 7 warnings, 162 subtests passed, 65.75s**; minimum Pydantic 2.5.0 profile
+reported **2497 passed, 1 failed, 3968 warnings, 162 subtests passed, 71.48s**.
+The sole failure in both was the previously reported health telemetry fixture.
+
+Parent explicitly authorized only a test-local generic adapter replacement.
+First reran its exact node on the merged baseline: **1 failed, 1.02s, exit 1**.
+Then changed only that function in
+`tests/agent/test_delegated_baseline_integration.py`: derive ToolSpec from the
+actual factory for the same candidate_ranker object, replace only input_schema
+with LegacyQueryInput and output_schema with None, and register an explicit
+LegacyPythonToolAdapter in a local registry. No invocation/resources start in
+the temporary factory construction; the executing registry retains closure
+ownership. All tool names, inputs, raw status and downstream assertions remain
+unchanged. AST comparison of every existing assertion in the file passed.
+No production changes were made to fix this failure.
+
+Post-fix verification, same isolation runner and unchanged profile setup:
+
+| Scope/profile | Actual outcome |
+| --- | --- |
+| Complete test_delegated_baseline_integration.py | 11 passed, 2.36s, exit 0 |
+| Merged 30-file host FOCUS | 2498 passed, 7 warnings, 162 subtests passed, 74.67s, exit 0 |
+| Same 30 files, asserted Pydantic 2.5.0 | 2498 passed, 3968 warnings, 162 subtests passed, 78.63s, exit 0 |
+| In-memory compilation, tracked src/scripts plus six changed/new tests | 330 files passed |
+| git diff --check | Passed |
+
+The minimum-profile warning increase is from the three decision fixture files'
+Pydantic v1/v2 `__fields__` compatibility paths, in addition to previously
+reported warnings; identical counts before/after the fixture fix. No warning
+filters or skips added. Initial ad-hoc AST check hit Windows GBK decoding of
+git-show UTF-8 output; rerunning with explicit UTF-8 passed. No repository code
+was changed for that check.
+
+Exact merged FOCUS path arguments (30 complete files, no deselection):
+
+```text
+tests/agent/test_generation_ranking_contract.py
+tests/agent/test_generation_ranking_contract_integration.py
+tests/test_llm_molecular_generator.py
+tests/agent/test_candidate_ranker.py
+tests/agent/test_generation_temperature_transport.py
+tests/agent/test_generated_candidate_validation.py
+tests/agent/test_candidate_contracts.py
+tests/agent/test_candidate_alignment.py
+tests/agent/test_tool_adapter_compat.py
+tests/agent/test_tool_adapters.py
+tests/agent/test_tool_registry.py
+tests/agent/test_target_driven_design_workflow.py
+tests/agent/test_binding_resolver.py
+tests/agent/test_plan_compiler.py
+tests/agent/test_planner_template_execution.py
+tests/agent/test_registration_consistency.py
+tests/agent/test_activity_tool_contract.py
+tests/agent/test_docking_tool_contract.py
+tests/agent/test_rag_tool_contract.py
+tests/agent/test_result_validator.py
+tests/agent/test_delegated_session_parity.py
+tests/agent/test_workflow_resume.py
+tests/agent/test_supervisor_runtime_integration.py
+tests/agent/test_dynamic_run_session.py
+tests/agent/test_analysis_contract.py
+tests/agent/test_target_tool_contract.py
+tests/agent/test_decision_loop.py
+tests/agent/test_decision_migration_boundaries.py
+tests/agent/test_decision_spec_findings.py
+tests/agent/test_delegated_baseline_integration.py
+```
+
+### Current frozen SPEC handoff (supersedes earlier snapshots)
+
+HEAD `bcb7d541b44b8d609fda7c77232b3fe5fe0c6730`, branch
+`codex/generation-ranking-contracts`. Only the authorized telemetry fixture and
+this accumulated plan record are uncommitted. No push/PR, no second full Agent
+run; the full slot belongs to parent Planner. A later full run requires a new
+slot release. The historical full RED remains recorded; focused GREEN must not
+be described as full-suite GREEN. Independent SPEC then QUALITY remain pending
+with the parent.
+
+Frozen code/test SHA-256 (eight 4C files; plan excluded):
+
+```text
+src/agent/tooling/factory.py 51da6427192db5c546ad731af260d415d3a8f0130d6a4c077dd4df66a1238a3f
+src/agent/tooling/generation_ranking_contract.py d02e10fde7f0224f585ca2046a65a3bf90e44b74a547aa03368ca4c6bb94786d
+tests/agent/test_delegated_baseline_integration.py 089f06ad3318eb8bca27e066b1a126cb8bd34a148d9465cde759f6053b61c5fb
+tests/agent/test_dynamic_run_session.py a8a2f17255631aed48e691f736d0c1e5c395b648d4b145948b31c09c5aadd632
+tests/agent/test_generation_ranking_contract.py 7c60de25aff6ae55798307c8c1924c1b204db7f7c64a867287941e97ce4630a4
+tests/agent/test_generation_ranking_contract_integration.py f932a2df092c77077dff75eac04780e6d2466b5d970ec85a193646f6e83f3a78
+tests/agent/test_rag_tool_contract.py 3923a00d98da876af4a7f5f8bd590715d392fb597b6bdbb733ef9319424cc173
+tests/agent/test_supervisor_runtime_integration.py bcd880c29f6a83853c04ea8f54484b568d0d1b407f9fed5e1847f331207b4464
+```
+
+Ordinal path-sorted UTF-8 `path + space + sha256 + LF` aggregate:
+`68bd4d2fb88f2f3e76f0dcdc9e88bdeb0042581b00070498d4117893d1d904d7`.
+The exact change set against reviewed main16b is those eight code/test files
+plus this plan and the existing generation-ranking design document. No generic
+adapter, target/analysis contract, producer, scoring or scientific asset changes.
+
+### Authorized latest frozen full Agent: GREEN
+
+Parent released the heavy slot after Planner's full completed and explicitly
+authorized one full Agent run on `bcb7d54` plus the telemetry fixture GREEN diff,
+without waiting for independent SPEC. Ran the same isolated runner with sole
+path argument `tests/agent`, session 73002: **6640 passed, 2 skipped, 7 warnings
+in 287.79s**, exit 0. No code/test edits or merges occurred during this run.
+
+Exact skips remain unchanged:
+
+- `tests/agent/test_decision_chat_acceptance.py:149`: directory symlinks unavailable.
+- `tests/agent/test_harness_shadow.py:277`: performance test disabled.
+
+Post-run HEAD verified as `bcb7d541b44b8d609fda7c77232b3fe5fe0c6730`; the eight-file
+aggregate rechecked equal to
+`68bd4d2fb88f2f3e76f0dcdc9e88bdeb0042581b00070498d4117893d1d904d7`.
+No new full run follows this result. Heavy slot released to parent G2 immediately
+on completion. Host/min FOCUS evidence above remains valid for the same code/test
+snapshot. Independent SPEC/QUALITY remain pending; full GREEN is not review
+approval or a scientific/model-quality claim.
+
+Parent reported PR70's two added recovery-test files merged while this full was
+running. PR70 was deliberately not integrated mid-run. This full result applies
+only to the exact frozen snapshot above; later PR70 integration may use separately
+recorded light focused verification and must not be relabelled as this full run.
+Only this accumulated plan record and the authorized telemetry fixture remain
+uncommitted. Frozen for parent review; no push or external publication.
+
+### SPEC Anscombe P2: restore typed supervisor success-path fixtures
+
+Independent SPEC did **not approve** the preceding snapshot: the normal
+persistence/idempotency success tests in test_supervisor_runtime_integration.py
+were incorrectly treated as generic adversarial probes. Their runtime_fixture_registry
+replaced candidate_ranker with LegacyPythonToolAdapter/output_schema=None, hiding
+an invalid query-sentinel ranking result. The earlier rationale for this override
+is rejected and superseded here. Historical full **6640 passed** remains accurate
+for its earlier snapshot, but neither resolves this finding nor verifies this fix.
+
+Parent authorized a minimal test-only TDD correction. First removed the helper
+and its Legacy imports and changed both success tests back to build_tool_registry,
+leaving the sentinel unchanged. Exact RED path arguments:
+
+```text
+tests/agent/test_supervisor_runtime_integration.py::test_delegated_supervisor_persists_run_events_and_tool_results
+tests/agent/test_supervisor_runtime_integration.py::test_delegated_supervisor_reuses_idempotent_completed_steps
+```
+
+Both failed with `partial != succeeded`: **2 failed, 2.66s, exit 1**, matching
+SPEC's independent memory probe. An initial shell attempt did not reach pytest
+because the session-local runner string was unavailable; re-extracted the same
+existing documented runner before the actual RED above. No test failure is
+inferred from that shell error.
+
+Minimal GREEN: FakeTool.execute still records every call, but for its exact
+candidate_ranker fixture now returns actual `CandidateRanker().execute(query)`.
+Both success paths use the default typed registry, with no schema overrides.
+Other fixture payloads and every pre-existing assertion remain unchanged (AST
+comparison verified). This calls only the existing deterministic ranker, not a
+model/provider; no production implementation, scoring, evidence rule, or asset
+changed. Truly adversarial generic probes in other test files retain their
+separately authorized local adapters.
+
+| Post-P2 verification | Actual outcome |
+| --- | --- |
+| Complete test_supervisor_runtime_integration.py | 3 passed, 2.34s, exit 0 |
+| Same exact 30-file merged host FOCUS listed above | 2498 passed, 7 warnings, 162 subtests passed, 74.38s, exit 0 |
+| Same FOCUS, asserted Pydantic 2.5.0 minimum profile | 2498 passed, 3968 warnings, 162 subtests passed, 69.86s, exit 0 |
+| Existing assertions unchanged; no Legacy success override (AST) | Passed |
+| In-memory compilation, same 330 Python files | Passed |
+| git diff --check | Passed |
+
+No warning suppression, assertion weakening, added skip, or full Agent run in
+this follow-up. G2 owns the heavy slot. No merge/commit/push occurred. This
+follow-up changed only test_supervisor_runtime_integration.py and this plan;
+earlier uncommitted telemetry fixture remains unchanged.
+
+Current frozen HEAD remains `bcb7d541b44b8d609fda7c77232b3fe5fe0c6730`. Of the
+eight code/test hashes above, only supervisor_runtime_integration changes to:
+
+```text
+tests/agent/test_supervisor_runtime_integration.py 4f33d6e6c1e9cbab3b7677b765f24ab47c9316197ce178749a49fea0ac34b596
+```
+
+New eight-file aggregate (same ordinal sorting, UTF-8 and LF algorithm):
+`c9d5cd9a50b0e4463d7ce664ed81de37073b610712d7e4770d462ba7a4d40993`.
+The other seven file hashes are unchanged. Freeze for independent SPEC re-review
+first, then QUALITY; neither approval is claimed. No post-P2 full GREEN claim.
+
+### Parent-confirmed dual review and post-P2 integration gate
+
+Parent confirmed independent SPEC/Anscombe approval of the P2 correction and
+QUALITY/Helmholtz APPROVED for exact HEAD bcb7d54 plus eight-file aggregate
+`c9d5cd9a50b0e4463d7ce664ed81de37073b610712d7e4770d462ba7a4d40993`.
+QUALITY reported its own 352 + 3 focused tests. These are parent-reported
+independent reviews, distinct from this worker's verification above.
+
+After G2 full completed, parent released the local heavy slot and authorized:
+commit only the three currently dirty paths (this plan, delegated_baseline
+telemetry fixture, supervisor_runtime success fixture); merge fetched main
+`5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5` (PR70/71); verify integration differences
+and collision-focused tests; run exactly one full tests/agent via the existing
+isolated runner. Stop and diagnose any failure without weakening assertions or
+contracts. No push or PR. The historical pre-P2 6640-pass full is not evidence
+for this required post-P2 gate. Actual merge/focus/full results follow below.
