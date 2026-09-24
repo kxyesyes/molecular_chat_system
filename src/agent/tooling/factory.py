@@ -11,6 +11,10 @@ from .adapters import LegacyPythonToolAdapter
 from .activity_contract import ActivityPredictInput, ActivityPredictOutput, ActivityToolAdapter
 from .docking_contract import DockingInput, DockingOutput, DockingToolAdapter
 from .rag_contract import RAGSearchInput, RAGSearchOutput, RAGToolAdapter
+from .generation_ranking_contract import (
+    GenerationInput, GenerationOutput, GenerationToolAdapter,
+    RankingInput, RankingOutput, RankingToolAdapter,
+)
 from .registry import ToolRegistry
 from .spec import RetryPolicy, ToolSpec
 
@@ -72,9 +76,13 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             version=str(getattr(tool, "version", "1")),
             description=str(getattr(tool, "description", name)),
             input_schema=(RAGSearchInput if name == "rag_search" else
+                          GenerationInput if name == "llm_molecular_generator" else
+                          RankingInput if name == "candidate_ranker" else
                           DockingInput if name == "molecular_docking" else
                           ActivityPredictInput if name == "activity_predictor" else LegacyQueryInput),
             output_schema=(RAGSearchOutput if name == "rag_search" else
+                           GenerationOutput if name == "llm_molecular_generator" else
+                           RankingOutput if name == "candidate_ranker" else
                            DockingOutput if name == "molecular_docking" else
                            ActivityPredictOutput if name == "activity_predictor" else None),
             capabilities=capabilities,
@@ -100,6 +108,8 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             aliases=aliases,
         )
         adapter_class = (RAGToolAdapter if name == "rag_search" else
+                         GenerationToolAdapter if name == "llm_molecular_generator" else
+                         RankingToolAdapter if name == "candidate_ranker" else
                          DockingToolAdapter if name == "molecular_docking" else
                          ActivityToolAdapter if name == "activity_predictor" else LegacyPythonToolAdapter)
         registry.register(adapter_class(spec, tool, readiness_unknown=name in LAZY_RUNTIME_TOOLS))

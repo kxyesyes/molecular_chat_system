@@ -178,4 +178,189 @@ Static source/test-path inspection only; no pytest, compileall, model execution 
 
 ### Parent approval and implementation authorization
 
-Parent accepted this bounded design with the two corrections above. Commit only design/plan, then merge origin/main before TDD. Package 4A is approved at a80df26 and merged by PR64 at ecd6cca; mirror its worker containment without importing its adapter. Implementation remains uncommitted for parent review/release. Minimum Pydantic profile is supplied separately by the parent; use the read-only 4A plan's isolated profile setup.
+Parent accepted this bounded design with the two corrections above. Commit only design/plan, then merge origin/main before TDD. Package 4A is approved at a80df26; current main includes the separate domain-API PR64 at ecd6cca. Mirror approved 4A worker containment without importing its adapter. Implementation remains uncommitted for parent review/release. Minimum Pydantic profile is supplied separately by the parent; use the read-only 4A plan's isolated profile setup.
+
+## Implementation evidence (2026-09-25)
+
+Design/plan-only commit: `a93a7d7`. Authorized merge of `origin/main` (`ecd6cca`):
+`6fb78dc`. Implementation baseline is that merge; no implementation commit/PR.
+Approved 4A was read using `git show a80df26:...`, not merged or edited. The
+existing local runner document was verified present; the earlier contrary design
+claim was corrected before the design commit.
+
+All pytest commands use this existing isolation runner, normal child pytest,
+cleared inherited credentials/config environment, temporary cwd/runtime paths and
+disabled real-service switches. The runner copies only the three checked-in
+evaluation case fixtures, never model weights, production indexes or secrets.
+The tests' fixed local responses/descriptor values are synthetic contract inputs,
+not model-quality or experimental evidence.
+
+```powershell
+$plan=Get-Content docs/superpowers/plans/2026-09-24-rag-service-extraction.md -Raw
+$m=[regex]::Match($plan,'(?s)\$runner = @''\r?\n(.*?)\r?\n''@')
+if(-not $m.Success){throw 'Isolation runner missing'}
+$runner=$m.Groups[1].Value.Replace('D:/MedChat/molecular_chat_system_worktrees/rag-service-extraction-pr','D:/MedChat/molecular_chat_system_worktrees/generation-ranking-contracts')
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" @paths
+```
+
+The child adds `-q -p no:cacheprovider --tb=short -rs`. Path sets:
+
+- **BASE**: the Task 5 focused command minus the two new test paths; nine files.
+- **NEW**: `tests/agent/test_generation_ranking_contract.py` and
+  `tests/agent/test_generation_ranking_contract_integration.py`.
+- **FOCUS**: NEW plus all twenty existing paths in Task 5.
+- **MIN**: NEW + BASE, through the retained Pydantic 2.5.0 profile.
+- **FULL**: `tests/agent`, one serial heavy run after FOCUS and MIN complete.
+
+| Stage | Actual outcome |
+| --- | --- |
+| BASE before implementation | 246 passed, 162 subtests passed, 2.31s |
+| Initial contract RED, first new file only | 87 failed, 31 passed, 2.99s |
+| Initial contract GREEN | 118 passed, 1.36s |
+| Expanded NEW first collection | 1 collection error: pytest reserves parametrize name `request`; changed only the test parameter name |
+| Expanded NEW regression RED | 2 failed, 308 passed, 4.18s |
+| FOCUS after caller-exception correction | 1521 passed, 7 existing warnings, 162 subtests passed, 17.24s |
+| MIN (asserted Pydantic 2.5.0) | 556 passed, 1 existing warning, 162 subtests passed, 4.57s |
+
+Initial RED reproduced actual direct-domain-wrapper metadata/outputs loss,
+accepted malformed observations, wrong input types, unchecked failure snapshots,
+and redaction running on the caller after slot release. Event-controlled deadline
+tests timed out waiting for the caller's redaction, demonstrating that omission
+before production code was added. Subsequent raw/normalized stage tests cover
+success/partial/failure, capacity exhaustion during late validation, and slot
+reuse only after complete worker postprocessing.
+
+The expanded RED isolated a genuine implementation defect: catching
+CandidateValidationUnavailable around the inherited guarded call also intercepted
+the caller validator's exception. The fix introduces a private marker only around
+our own domain check; caller exceptions retain the generic adapter classification.
+The two failing assertions were retained and now pass. No generic adapter change
+or scientific-rule relaxation was used.
+
+Minimum profile setup, after reading `tests/fixtures/api_route_contract_profiles.md`
+and the approved 4A plan read-only:
+
+```powershell
+$runner=$runner.Replace('"PYTHONPATH": str(repo)', '"PYTHONPATH": r"C:/Users/xkx52/AppData/Local/Temp/medchat-domain-api-profiles-20260925-b831/ci" + os.pathsep + str(repo)')
+$runner=$runner.Replace('[sys.executable, "-B", "-m", "pytest"]','[sys.executable, "-B", "-c", "import sys, pydantic; assert pydantic.__version__ == ''2.5.0''; print(''PYDANTIC_PROFILE='' + pydantic.__version__); import pytest; sys.exit(pytest.main(sys.argv[1:]))"]')
+```
+
+No dependencies installed or changed. Host warnings are existing SWIG/FastAPI
+deprecations; minimum-profile warning is the existing model_provenance protected
+namespace. Four implementation/test Python files compile in memory from source
+bytes (no pyc; explicit substitution for compileall), and `git diff --check`
+passes. Generic adapters, existing activity/docking/RAG contracts, producers,
+candidate/domain validators and scoring code remain unchanged.
+
+### Full-run findings, timing lesson and final verification
+
+The one serial heavy FULL run completed with **2 failed, 5941 passed, 2 skipped,
+7 warnings in 290.35s**, exit 1. Skips were Windows directory symlinks unavailable
+(`test_decision_chat_acceptance.py:149`) and the disabled performance test
+(`test_harness_shadow.py:277`). The two failures were:
+
+- `tests/agent/test_supervisor_runtime_integration.py::test_delegated_supervisor_persists_run_events_and_tool_results`
+- `tests/agent/test_supervisor_runtime_integration.py::test_delegated_supervisor_reuses_idempotent_completed_steps`
+
+Root cause: these persistence/idempotency fixtures deliberately return a
+`{"query": ...}` sentinel for candidate_ranker, not a CandidateRanking observation.
+The new output boundary correctly rejected it, so the overall run became partial.
+Reported the failures before altering anything. Applied the parent's explicit
+consumer-fixture rule: a local `runtime_fixture_registry` uses
+LegacyPythonToolAdapter/LegacyQueryInput/no output schema **only for that sentinel
+ranker in these two tests**. Kept the scientific name, all downstream assertions,
+the factory ownership test and every production contract unchanged. No other
+existing test needed a fix. This is the sole additional existing-file write.
+
+The parent's 4B timing lesson prompted twelve controlled-clock cases, parameterized
+over both tools, canonical ToolResult vs raw dict, and elapsed_ms None/0/123.
+They observe the worker's validation stages and set only the framework clock to
+10.0 -> 10.875. Canonical None remains None through both worker checks and becomes
+875 only at the outer framework handoff; supplied 0/123 survive. Raw dict retains
+the generic adapter's historical compat timing (normalized elapsed None, then
+framework duration). Here the inherited guarded invocation already bypasses the
+completed proxy for canonical ToolResult, so **no production timing change was
+needed**. The test demonstrates that fact rather than assuming it from 4A/4B.
+
+| Final verification | Actual outcome |
+| --- | --- |
+| NEW + supervisor_runtime_integration + generation_temperature_transport + tool_adapter_compat + tool_adapters + delegated_session_parity (all under tests/agent) | 363 passed, 7.11s |
+| MIN + tests/agent/test_supervisor_runtime_integration.py | 571 passed, 1 existing warning, 162 subtests passed, 6.75s |
+| FOCUS + tests/agent/test_supervisor_runtime_integration.py | 1536 passed, 7 existing warnings, 162 subtests passed, 17.84s |
+| In-memory source-byte compile | 325 files: all tracked Python under src/scripts plus new module and three changed/new test files |
+| git diff --check | Passed |
+
+Final FOCUS and MIN include the timing tests and repaired runtime fixture. The
+heavy full run preceded those test-only changes; it was not repeated, so there is
+**no post-fixture full-suite GREEN claim**. No production code changed after that
+full run. Parent can repeat the full suite on its final combined integration.
+
+### Frozen handoff
+
+Branch remains `codex/generation-ranking-contracts`, HEAD `6fb78dc`. The parent
+later reported main `3a68264` and 4A PR67 at `9f3ce84` with CI pending; neither was
+automatically merged into this implementation. Independent SPEC/QUALITY review,
+latest-main/4A integration, implementation commit and PR remain parent-owned.
+
+Uncommitted write set is exactly the four implementation/test files in the table,
+`tests/agent/test_supervisor_runtime_integration.py`, and this plan. No other
+worktree edits, production model calls, secret access, scientific asset reads,
+dependency changes, deployment, push or PR. No generic adapter, producer,
+CandidateSet/domain validator or scoring formula changes. Design-only commit and
+authorized main merge are the only new commits.
+
+Frozen code/test file SHA-256 (plan excluded to avoid self-reference):
+
+```text
+src/agent/tooling/factory.py dcc1a38d5296bcc6283f1105ffe8be0fcfca3df0b6bbc72f2b1ee22179d9f0cc
+src/agent/tooling/generation_ranking_contract.py d02e10fde7f0224f585ca2046a65a3bf90e44b74a547aa03368ca4c6bb94786d
+tests/agent/test_generation_ranking_contract.py 7c60de25aff6ae55798307c8c1924c1b204db7f7c64a867287941e97ce4630a4
+tests/agent/test_generation_ranking_contract_integration.py f932a2df092c77077dff75eac04780e6d2466b5d970ec85a193646f6e83f3a78
+tests/agent/test_supervisor_runtime_integration.py 895ee22e04b77ccc52049998335d9ba347877f003ff83ef5382b46acf410e74e
+```
+
+Sorted `path + space + sha256 + LF` aggregate SHA-256:
+`d381ecbb8113d0707733254a4d31a4f8b6aa2c5240f9ebb5b47a76f381e72fa4`.
+This is a worker handoff, not independent review approval or scientific validation.
+
+### Parent correction: pending 4A consumer-fixture integration
+
+Read-only inspection of actual `9f3ce84` diffs confirmed two additional 4C
+integration cases. They are not present under those ranker names at this worktree's
+current HEAD, so no speculative merge or fixture edit was performed:
+
+1. `tests/agent/test_dynamic_run_session.py::test_dynamic_completion_rejects_preserved_structured_error`
+   (both outcome parameters): 4A renamed the intentionally contradictory
+   property_calculator observation/source to candidate_ranker to reach the
+   downstream session guard. When integrating 4A, keep the name and all error,
+   terminal-event and outcome assertions; add an explicit test-local generic
+   registry option to `make_session`, enabled only for this contradiction test.
+   Use LegacyPythonToolAdapter with the registry-derived spec replaced to
+   LegacyQueryInput/output_schema=None. The default fixture path remains typed.
+2. `tests/agent/test_rag_tool_contract.py::test_non_rag_factory_retains_legacy_schema_and_payload`:
+   4A lines 292–296 renamed its arbitrary-output legacy regression to
+   candidate_ranker. When integrating, preserve its name and `query=123` accepted
+   payload assertion, but explicitly construct the generic adapter rather than
+   expecting the now-typed factory entry to be legacy:
+
+   ```python
+   spec = build_tool_registry([tool]).resolve(tool.name, require_available=False).spec
+   adapter = LegacyPythonToolAdapter(
+       replace(spec, input_schema=LegacyQueryInput, output_schema=None), tool)
+   ```
+
+   Import replace/LegacyQueryInput locally or in this test module as appropriate;
+   do not introduce a production generic escape hatch or rename another tool.
+
+Mandatory post-integration FOCUS adds **both complete files** above. In particular,
+the existing successful RAG FOCUS result covered the baseline property_calculator
+sentinel, not 4A's later candidate_ranker version; it does not prove that combined
+fixture passes. Record combined RED and focused GREEN before claiming integration
+complete. No new full run while the parent owns the heavy-test slot.
+
+The analogous target-name changes in `test_decision_migration_boundaries.py` and
+`test_decision_spec_findings.py` belong to parent 4B's explicit test-local generic
+registry fix, not this worker. Parent reported 4B FULL RED running after main
+`1bba025`; no 4B helper code was available at this checkpoint. These integration
+fixes remain pending until the authorized 4A/main combination is present. Frozen
+4C implementation/test hashes above are unchanged; only this plan was appended.
