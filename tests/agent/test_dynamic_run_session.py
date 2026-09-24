@@ -24,6 +24,7 @@ from src.agent.runtime.task_state import TaskEventType
 from src.agent.tooling.factory import build_tool_registry
 from src.agent.validators import AgentResultValidator
 from src.agent.validators.molecule_candidates import sanitize_generated_candidates
+from tests.agent.test_analysis_contract import analysis_rows
 
 
 class ContractTool:
@@ -35,7 +36,7 @@ class ContractTool:
     def __init__(self, result=None):
         self.calls = []
         self.result = result or ToolResult.success_result(
-            self.name, {"input": "contract-only"}, warnings=["test-warning"])
+            self.name, [dict(analysis_rows(self.name)[0], input="contract-only")], warnings=["test-warning"])
 
     def execute(self, query):
         self.calls.append(deepcopy(query))
@@ -94,11 +95,15 @@ def settle(bundle, step=None):
 
 @pytest.mark.parametrize("outcome", [None, RunOutcome.COMPLETED])
 def test_dynamic_completion_rejects_preserved_structured_error(make_session, outcome):
-    observed = ToolResult.success_result("property_calculator", {"input": "contract-only"})
+    # Exercise session-level contradiction handling through the generic adapter;
+    # analysis adapters now reject contradictions at their own earlier boundary.
+    observed = ToolResult.success_result("candidate_ranker", {"input": "contract-only"})
     observed.error = AgentExecutionError(AgentErrorCode.MODEL_UNAVAILABLE, "offline failure")
-    bundle = make_session(source=ContractTool(observed))
+    source = ContractTool(observed)
+    source.name = "candidate_ranker"
+    bundle = make_session(source=source)
     bundle.session.start()
-    settle(bundle)
+    settle(bundle, action(tool_name=source.name))
     assert bundle.session.results[0].error == observed.error
     if outcome is None:
         final = bundle.session.finish_dynamic("model unavailable")
@@ -243,7 +248,7 @@ def test_dynamic_identity_rejects_wrong_tool_result(make_session):
 
 def test_dynamic_authoritative_version_bindings_and_digest(make_session):
     forged = ToolResult.success_result(
-        "property_calculator", {"input": "contract"},
+        "property_calculator", [dict(analysis_rows("property_calculator")[0], input="contract")],
         quality={"tool_version": "forged", "operation_key": "forged",
                  "request_input_digest": "forged", "input_evidence_ids": ["forged"]},
         provenance=ToolProvenance("property_calculator", tool_version="forged",
@@ -271,9 +276,9 @@ def test_candidate_alignment_digest_matches_accepted_not_raw_data(make_session, 
     # Uses real RDKit alignment; no monkeypatch or fake green when unavailable.
     candidates = sanitize_generated_candidates(
         [{"smiles": "CCO"}], requested_count=1).candidate_set.to_dict()
-    raw = [{"smiles": "CCC"}]
+    raw = analysis_rows("property_calculator", ("CCC",))
     if matches:
-        raw.insert(0, {"smiles": "OCC"})
+        raw.insert(0, analysis_rows("property_calculator", ("OCC",))[0])
     b = make_session(source=ContractTool(ToolResult.success_result("property_calculator", raw)))
     b.session.start()
     b.session.outputs["candidates"] = candidates
@@ -332,7 +337,7 @@ def test_binding_failure_still_records_trusted_adapter_version(make_session):
 
 
 def test_unbound_action_removes_tool_supplied_binding_claims(make_session):
-    forged = ToolResult.success_result("property_calculator", {"input": "contract"}, quality={
+    forged = ToolResult.success_result("property_calculator", analysis_rows("property_calculator"), quality={
         "input_evidence_ids": ["forged"], "request_input_digest": "forged", "operation_key": "forged"})
     b = make_session(source=ContractTool(forged))
     b.session.start()
@@ -454,11 +459,11 @@ def test_restore_preserves_identity_state_counts_and_calls_no_tool(make_session)
     with pytest.raises(SessionLifecycleError):
         resumed.session.append_step(action())
     observations[0].warnings.append("external mutation")
-    observations[0].data["input"] = "external mutation"
+    observations[0].data[0]["input"] = "external mutation"
     observations[1].artifacts[0].metadata["changed"] = True
     observations[1].error.message = "external mutation"
     assert "external mutation" not in resumed.session.results[0].warnings
-    assert resumed.session.outputs["target"]["data"]["input"] == "contract-only"
+    assert resumed.session.outputs["target"]["data"][0]["input"] == "contract-only"
     assert resumed.session.state.artifacts[0]["metadata"] == {}
     assert resumed.session.results[1].error.message == "offline failure"
     settle(resumed, action("round-3"))

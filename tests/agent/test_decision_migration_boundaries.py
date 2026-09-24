@@ -224,15 +224,19 @@ def test_integrity_checks_bounds_before_digest(kind, monkeypatch):
 
 
 def test_retained_tool_cannot_clear_error_to_promote_science(setup_loop):
+    # A generic legacy observation reaches the independent downstream seal;
+    # the analysis adapter now rejects contradictions before that boundary.
     class Retained(CountingTool):
         def execute(self, query):
             self.last = contradictory()
+            self.last.tool_name = self.name
             return self.last
-    source = Retained()
+    source = Retained('target_database_search')
     def clear_error(messages):
         source.last.error = None
         return finish_last(messages)
-    result = run(setup_loop([tool(), clear_error], [source]))
+    result = run(setup_loop([tool(source.name), clear_error], [source]),
+                 allowed_tools={source.name}, required_tools={source.name})
     assert not result.success
     assert result.metadata['stop_reason'] == 'input_evidence_integrity_failed'
     assert result.tool_results[0].error is not None
