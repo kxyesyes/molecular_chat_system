@@ -213,7 +213,24 @@ def test_terminal_persistence_cannot_mutate_sealed_observations(setup_loop, term
 
 def test_targetless_evidence_cannot_satisfy_later_target_obligation(setup_loop):
     from test_decision_loop import finish
-    activity = CountingTool('activity_predictor')
+    from src.agent.contracts import ToolResult
+
+    class SyntheticActivity(CountingTool):
+        def execute(self, query):
+            self.inputs.append(query)
+            # This test needs a valid targetless observation before resuming;
+            # property-shaped data cannot establish an activity observation.
+            return ToolResult.success_result(self.name, [{
+                'smiles': 'CCO', 'success': True, 'task_type': 'regression',
+                'endpoint': 'pIC50', 'units': 'pIC50', 'value': 5.1,
+                'model_provenance': {
+                    'model_id': 'synthetic-targetless', 'weights_sha256': 'a' * 64,
+                    'task_type': 'regression', 'endpoint': 'pIC50', 'units': 'pIC50',
+                    'demo_mode': False,
+                },
+            }])
+
+    activity = SyntheticActivity('activity_predictor')
     b = setup_loop([], [activity])
     options = dict(allowed_tools={'activity_predictor'}, required_tools={'activity_predictor'})
     first = start(b, [tool('activity_predictor'), clarify()], **options)

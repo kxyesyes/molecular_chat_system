@@ -374,9 +374,12 @@ def test_failed_lazy_invocation_does_not_poison_later_calls(monkeypatch):
         calls.append(1)
         if len(calls) == 1:
             raise RuntimeError("fixture-model-unavailable")
-        return SimpleNamespace(demo_mode=False, current_model_metadata={},
+        # Synthetic contract metadata only; no checkpoint is loaded or verified.
+        return SimpleNamespace(demo_mode=False, current_model_metadata={
+            "model_id": "synthetic-recovery", "weights_sha256": "a" * 64,
+            "task_type": "regression", "endpoint": "pIC50", "units": "pIC50"},
             predict=lambda smiles: [{"success": True, "smiles": smiles[0],
-                "task_type": "regression", "endpoint": "pIC50", "value": 5.1}])
+                "task_type": "regression", "endpoint": "pIC50", "units": "pIC50", "value": 5.1}])
     monkeypatch.setattr(tool, "_get_predictor", predictor)
     registry = build_tool_registry([tool])
     adapter = registry.resolve("activity_predictor")
