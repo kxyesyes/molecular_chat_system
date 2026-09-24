@@ -10,3 +10,17 @@ Use TDD and independent SPEC then QUALITY. Scope src/task_runtime/secure_io.py, 
 - [ ] Independent SPEC then QUALITY, scoped commit, integrate latest reviewed main, fresh CI8/8 and unresolved-review check before authorized merge. No server/model activation.
 
 No tests have been run for this new branch at plan creation. The source diagnostic is retained in the ignored planner worktree scratch/package5-docking-diagnostic.md; it is not a committed test or proof of a fix.
+
+## Execution evidence
+
+All commands use the documented isolated MedChat Python runner with only its worktree replaced; no live services or production assets. Baseline: tests/agent/test_docking_tool_contract.py plus tests/test_temporal_operator_scripts.py::test_bounded_asset_snapshot_rejects_same_size_replacement and ::test_windows_snapshot_allows_handle_path_ctime_difference:249 passed in4.28s, exit0.
+
+New tests/task_runtime/test_secure_snapshot_boundary.py on unchanged production:3 failed,7 passed,3 skipped in0.45s, exit1. Both sibling-only directory changes wrongly failed; an ancestor mode change wrongly succeeded. POSIX named-path cases skipped on Windows, not counted as passed.
+
+Minimal production change: directory identity/type/reparse/mode/uid/gid checks omit mutable child-driven timestamps/size; POSIX additionally verifies still-named components against pinned parent descriptors. File identity/version/size/hash and descriptor cleanup remain intact; atomic writer unchanged.
+
+Focused GREEN: new boundary + existing docking contract + whole tests/test_temporal_operator_scripts.py:506 passed,47 skipped in67.35s, exit0. Skips are POSIX-only semantics and unavailable Windows symlink privileges. Linux CI is still required. Full Agent and independent SPEC/QUALITY remain pending; this does not retroactively resolve every historical intermittent failure.
+
+Independent SPEC approved, separately ran boundary/docking/temporal acceptance/operator tests:552 passed49 skipped75.85s, exit0. Parent full Agent plus new snapshot boundary:5643 passed5 skipped7 existing warnings281.22s, exit0. Two existing Agent skips plus three native-POSIX skips on Windows. Two changed/new Python files memory-compiled; diff check passed. QUALITY and Linux exact-head CI remain required.
+
+Independent QUALITY approved with305 passed5 skipped7.24s and diff-check, no unresolved findings; confirmed O(path-depth) added POSIX checks and no atomic-write/config change. Its report was written before the parent's full run was collected; that full result is recorded above, not independently repeated. Native Linux CI remains the publication gate.
