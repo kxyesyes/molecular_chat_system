@@ -15,14 +15,10 @@ class FakeTool:
         }
 
 
-def build_agent_with_tools(tool_names):
-    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
-    agent.llm = None
-    agent.max_iterations = 5
-    agent.skill_router = None
-    agent._active_skill = None
-    agent.tools = {name: FakeTool(name) for name in tool_names}
-    return agent
+def build_agent_with_tools(monkeypatch, tool_names):
+    tools = [FakeTool(name) for name in tool_names]
+    monkeypatch.setattr("src.agent.tools.get_all_tools", lambda _llm: tools)
+    return ReActMolecularAgent()
 
 
 def test_comprehensive_policy_declares_permissions_not_plan_steps():
@@ -54,7 +50,7 @@ def test_hit_to_lead_policy_declares_permissions_not_plan_steps():
     assert not hasattr(policy, "workflow_steps")
 
 
-def test_react_agent_executes_workflow_policy_without_llm():
+def test_react_agent_executes_workflow_policy_without_llm(monkeypatch):
     policy = WorkflowCatalog().require("comprehensive_evaluation")
     planned_tool_names = [
         "property_calculator",
@@ -64,7 +60,7 @@ def test_react_agent_executes_workflow_policy_without_llm():
         "reverse_target_predictor",
         "target_database_search",
     ]
-    agent = build_agent_with_tools(planned_tool_names)
+    agent = build_agent_with_tools(monkeypatch, planned_tool_names)
 
     result = agent.execute("全面评估 CCO", active_skill=policy)
 
