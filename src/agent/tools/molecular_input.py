@@ -1,4 +1,4 @@
-"""Whole-structure parsing for migrated analysis tools (not molecule generation)."""
+"""Whole-structure parsing for migrated tools and optimization seeds."""
 import re
 
 
@@ -13,6 +13,10 @@ _PROSE_WORDS = frozenset({
 
 class MolecularInputUnavailable(ValueError):
     """Validation could not run; not a diagnosis of the supplied structure."""
+
+
+class MolecularInputMissing(ValueError):
+    """Nonempty supported text contains no molecular candidates."""
 
 
 def _is_prose_word(value, tool):
@@ -55,13 +59,15 @@ def parse_molecular_smiles(text, tool, *, prose_pattern=None):
                 values.extend(_bare_values(fields[1], tool, prose_pattern))
     else:
         values = _bare_values(text, tool, prose_pattern)
-    if not values or len(values) > 100:
+    if not values:
+        raise MolecularInputMissing(_INVALID)
+    if len(values) > 100:
         raise ValueError(_INVALID)
     # No heuristic fallback: these tools must have real structure validation.
     try:
         from rdkit import Chem, rdBase
     except ImportError:
-        raise ValueError('RDKit 不可用，无法验证 SMILES。') from None
+        raise MolecularInputUnavailable('RDKit 不可用，无法验证 SMILES。') from None
     try:
         params = Chem.SmilesParserParams()
         params.parseName = False

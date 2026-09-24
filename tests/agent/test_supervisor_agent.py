@@ -452,7 +452,9 @@ def test_supervisor_hit_to_lead_real_generator_reports_public_count(
     generator = LLMMolecularGenerator(llm_model=model)
     monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
     monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
-    monkeypatch.setattr(generator, "extract_smiles", lambda _query: [])
+    # This is a count-transport probe with a synthetic RDKit facade. Whole-input
+    # chemistry has separate real-RDKit tests; patch its new parser seam here.
+    monkeypatch.setattr(generator_module, "parse_molecular_smiles", lambda *_args: [])
     monkeypatch.setattr(generator_module, "RDKIT_AVAILABLE", False)
 
     class AcceptingChem:

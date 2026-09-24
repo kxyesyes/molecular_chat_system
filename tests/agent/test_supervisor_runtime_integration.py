@@ -5,6 +5,7 @@ from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.specialists import build_default_specialists
 from src.agent.supervisor import SupervisorAgent
 from src.agent.tooling import build_tool_registry
+from src.agent.tools.candidate_ranker import CandidateRanker
 from tests.agent.test_family_activity_tool import family_row
 from tests.agent.test_analysis_contract import analysis_rows
 
@@ -17,6 +18,9 @@ class FakeTool:
 
     def execute(self, query):
         self.calls.append(query)
+        if self.name == "candidate_ranker":
+            # Success-path fixture must exercise the real typed ranking shape.
+            return CandidateRanker().execute(query)
         return {
             "success": True,
             "message": "ok",
