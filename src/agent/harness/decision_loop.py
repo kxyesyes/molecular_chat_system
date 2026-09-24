@@ -7,7 +7,7 @@ import re
 import sqlite3
 import time
 from copy import deepcopy
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import Any, TypedDict
 from types import MappingProxyType
 from uuid import uuid4
@@ -30,9 +30,10 @@ from .decision_policy import (
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
 from .decision_inputs import (
     resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest, seal_observation,
+    effective_molecule, require_current_reference,
 )
 from .decision_clarification import scientific_clarification
-from .decision_bounds import validate_json
+from .decision_bounds import context_value, configuration_generation
 from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
@@ -82,7 +83,9 @@ class ModelDecisionLoop:
     """
 
     def __init__(self, model, registry, state_store, *, mode='native',
-                 max_model_requests=16, max_tool_attempts=12, timeout_seconds=300):
+                 max_model_requests=16, max_tool_attempts=12, timeout_seconds=300,
+                 config_generation=None):
+        self.config_generation = configuration_generation(config_generation)
         if mode not in {'native', 'json'}:
             raise ValueError('unsupported decision mode')
         for value, limit in ((max_model_requests, 16), (max_tool_attempts, 12)):
@@ -102,22 +105,26 @@ class ModelDecisionLoop:
         from langgraph.graph import END, StateGraph
 
         try:
-            validate_json({f.name: getattr(context, f.name) for f in fields(context)},
-                          max_bytes=64 * 1024, reason='invalid_context')
-            if type(context.query) is not str:
-                raise DecisionBoundaryError('invalid_context')
-            validate_json(context.query, max_bytes=16 * 1024, reason='invalid_context')
+            projected = context_value(context)
         except (DecisionBoundaryError, TypeError):
-            return AgentResult(context.trace_id, False, 'Input exceeds the plain JSON boundary',
+            return AgentResult('invalid-context', False, 'Input exceeds the plain JSON boundary',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Input is invalid or too large'),
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'invalid_context'})
         context = deepcopy(context)
-        if contains_secret_material({f.name: getattr(context, f.name) for f in fields(context)}):
+        if contains_secret_material(projected):
             return AgentResult(context.trace_id, False, 'Input contains credential material',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Remove credentials from the request'),
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'sensitive_input_rejected'})
+        context.resolved_molecule = effective_molecule(context)
+        try:
+            require_current_reference(context, self.store)
+        except DecisionBoundaryError:
+            return AgentResult(context.trace_id, False, 'Scientific reference unavailable',
+                error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Reselect a confirmed molecule'),
+                outcome=RunOutcome.REJECTED,
+                metadata={'backend': 'model_decision_loop', 'stop_reason': 'scientific_reference_unavailable'})
         if request_kind not in {'chat', 'scientific'}:
             raise ValueError('request_kind must be explicit')
         required_tools = frozenset(required_tools)
@@ -166,6 +173,13 @@ class ModelDecisionLoop:
                     outcome=RunOutcome.REJECTED,
                     metadata={'backend': 'model_decision_loop', 'stop_reason': 'continuation_rejected'})
             context.query = clarified_query
+            # Explicit replacement is sticky across later clarifications. The
+            # original fingerprint still identifies the owner-selected request.
+            from .decision_inputs import has_explicit_molecule
+            if context.resolved_molecule is not None and any(
+                    has_explicit_molecule(q) for q in restored['input_queries']):
+                context.resolved_molecule = None
+            context.resolved_molecule = effective_molecule(context)
             session.input_queries = list(restored['input_queries']) + [clarified_query]
         try:
             session.start(resume_claimed=restored is not None)
@@ -211,6 +225,7 @@ class ModelDecisionLoop:
                 context.trace_id + ':' + state.decision_id + ':' + event.value))
 
         async def decide(_):
+            require_current_reference(context, self.store)
             if state.model_requests >= self.max_model_requests:
                 raise DecisionBoundaryError('model_budget_exhausted')
             remaining = state.deadline - time.monotonic()
@@ -228,6 +243,7 @@ class ModelDecisionLoop:
             response = await asyncio.wait_for(self.model.decide(
                 messages, mode=self.mode, timeout_seconds=min(60, remaining)),
                 timeout=min(60, remaining))
+            require_current_reference(context, self.store)
             state.model_calls.append({**model_call_metadata(response),
                                       'decision_id': state.decision_id, 'round': state.model_requests})
             persist('decision_received')

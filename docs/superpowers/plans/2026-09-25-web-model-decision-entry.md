@@ -1,0 +1,433 @@
+# Web model decision entry — approved A1 TDD and phased roadmap
+
+> For agentic workers: use executing-plans/test-driven-development for the A1 tasks below. Parent approved A→B and the safety boundaries, but **only A1 is authorized on this branch**. A2/B need independent PRs. Do not execute deferred tasks.
+
+**Goal:** Add server-owned admission, trusted selected-molecule/direct-binding and nonsecret configuration-generation fingerprint support, with offline tests. This does not activate the normal Web entry and does not complete P7.
+
+**Architecture:** Existing ModelDecisionLoop / WorkflowRunSession / registry / validators / evidence / continuation remain authoritative. A1 adds bounded request preparation and minimal support to those existing boundaries. Later A2 connects the normal `/ws`; B extends evidence references for local target generation, candidate analysis and ranking.
+
+**Tech stack:** Existing Python 3.10, Pydantic, RDKit, SQLite, asyncio, pytest. No new dependencies or execution framework.
+
+**Design:** `docs/superpowers/specs/2026-09-25-web-model-decision-entry-design.md`.
+
+## Parent revision and local workflow
+
+- [x] Move this existing plan from root `plans/` into `docs/superpowers/plans/` using apply_patch, without a duplicate.
+- [x] Commit only the corrected spec/plan on `codex/web-model-decision-entry`: `cd1415e`.
+- [x] Merge reviewed main `1bba0256409a06317486530e5c1cfa6598b8e381` into this task branch, not into main: `2cf8e72`. Reinspected integrated analysis contracts.
+- [x] At the next green boundary, merge parent-requested main `16b9157` (4B typed target): `6681225`. Target string input remains non-projecting; no new target argument role or registry edit in A1.
+- [x] Execute only A1 RED→GREEN below; run focused offline tests. Parent coordinates full Agent/full suite.
+- [x] Freeze local changes for parent SPEC/QUALITY; no push/PR/publication. No live model, browser, server, environment-file or scientific asset access.
+
+Normal entry means existing `/ws`. **Do not add `/api/chat` or any HTTP surface.** Existing static workflow HTTP APIs retain all original semantics. New HTTP work is outside this package.
+
+## Exact A1 file scope
+
+Production files (only):
+
+1. `src/web/decision_request.py` — new, server-only bounded initial request admission and detached request specification; fixed rejection codes; initial four-tool ceiling.
+2. `src/agent/harness/decision_bounds.py` — exact AgentContext/ResolvedScientificMolecule projection, preserving strict generic JSON limits.
+3. `src/agent/harness/decision_inputs.py` — exact selected structure binding, explicit-input precedence, identity digest and source-revocation guard.
+4. `src/agent/harness/decision_loop.py` — consume context projection and optional server-injected config generation; existing loop/Session control unchanged.
+5. `src/agent/harness/decision_continuation.py` — consistent projected identity/fingerprint and reference checks before continuation claim/reuse.
+
+New focused tests:
+
+- `tests/agent/test_web_decision_admission.py`
+- `tests/agent/test_web_decision_references.py`
+- `tests/agent/test_web_decision_fingerprint.py`
+
+Read/reuse, do not redesign: AgentContext, ResolvedScientificMolecule, TaskRequirements, molecular/target/generation parsers, ScientificReferenceService, WorkflowRunSession, validators, typed adapters, existing fixtures.
+
+Do not edit app/chat handler/leases/routes/socket receiver/UI/default mode, decision transport, registry/catalog, generator/ranker algorithms, B argument schemas, runtime database schema, config files or assets. A1's config generation is merely an explicit nonsecret server input to fingerprinting; actual config epoch creation/switch hooks are A2.
+
+## A1.1 Request admission (RED, then minimal GREEN)
+
+**Files:** new `src/web/decision_request.py`, `tests/agent/test_web_decision_admission.py`.
+
+Proposed interface:
+
+```python
+# Server-only; no network or tool execution.
+# prepare_decision_request(payload, *, session_id, trace_id,
+#                          references=None, config_generation=None)
+# -> PreparedDecision
+# PreparedDecision exposes fresh/detached context, request_kind,
+# allowed_tools, required_tools, immutable requirements and config_generation.
+# DecisionAdmissionError.code is a fixed public reason, never raw input.
+```
+
+A1 supports the initial four tools only: property_calculator, drug_likeness_assessment, activity_predictor, target_database_search. No profile switch yet; no model/Planner call during admission. Effective execution authorization still belongs to existing authorized_catalog/registry; admission cannot make a missing or non-owned adapter executable.
+
+- [ ] RED: assert missing module/function as an explicit feature assertion, not unexplained import-error collection.
+- [ ] Admit ordinary chat with empty required/allowed tools; later A2 must genuinely call external model, not generate canned success in admission.
+- [ ] Admit explicit property/likeness requests with all original SMILES subjects, requested metrics and mandatory tools; preserve explicit false Lipinski results.
+- [ ] Missing structure stays scientific and retains mandatory tool obligations (clarification occurs in the later loop). Invalid explicit input rejects and cannot be rescued by selection.
+- [ ] Admit user-target activity and explicit target search using existing parsers; do not use candidate provenance/model inference to pick target.
+- [ ] Reject unsupported generation/ranking/ADMET/reverse/RAG/docking execution and compound requests requiring them; no property-only completion. Distinguish explanation of a topic from execution.
+- [ ] Ambiguous/unrecognized execution rejects with fixed clarification code, not chat finish. Explicit exclusions cannot be silently dropped.
+- [ ] Strict boolean flags/options; bool-as-count, NaN, invalid count and oversize input fail. Existing generation-only mol_count is validated (1–10, absent/null defaults to 5) but is not an analysis-subject count. Quantified analysis prose requires clarification in this bounded A1; it cannot silently override the complete subject list. Keep whole structure validation, no regex fragment rescue.
+- [ ] Browser identity/capabilities/tools/requirements/config generation/backend/resolved structure are forbidden. Existing timestamp/client_id are ignored for ownership; IDs supplied as function args are authoritative.
+- [ ] Call ScientificReferenceService.resolve only after bounded validation, with server session and tools flag; source/ACK/ordinal checks remain there. Result must be an exact trusted resolved type, not arbitrary objects.
+- [ ] Returned context mutations and original payload mutations cannot change immutable prepared obligations or selected molecule.
+- [ ] Run focused RED, implement smallest support module, run GREEN.
+
+Concrete first test shape:
+
+```python
+def test_admission_feature_is_present_before_authority_tests():
+    import importlib.util
+    assert importlib.util.find_spec("src.web.decision_request") is not None, (
+        "A1 server-only request admission is missing"
+    )
+```
+
+Required parameter table:
+
+| User request | Required admission result |
+|---|---|
+| 你好; tools/rag off | chat, no tools, exact query retained |
+| 解释 logP 是什么 | chat, not measurement |
+| 计算 logP 和分子量；SMILES: CCO | scientific/property, expected CCO and both metrics |
+| 计算性质及类药性；SMILES: CCO; CCN | both tools, both whole subjects |
+| 请计算分子性质 | scientific/property obligation, no invented subject |
+| 预测 BuChE 活性；SMILES: CCO | scientific/activity with user target preserved |
+| 查询 EGFR 的靶点结构 | scientific/target lookup |
+| 生成5个分子并排序前三个 | unsupported in A1 |
+| 计算 CCO 的 ADMET 和性质 | whole request unsupported |
+| 对接这个分子 | unsupported, no staged helper |
+| 科学计算; tools=false | tools disabled, not unrestricted chat |
+| invalid explicit structure + confirmed old selection | reject new invalid input, no old-structure dispatch |
+
+Command:
+`python -B -m pytest tests/agent/test_web_decision_admission.py -q -p no:cacheprovider`.
+
+## A1.2 Trusted context projection/direct binding (RED, then minimal GREEN)
+
+**Files:** `decision_bounds.py`, `decision_inputs.py`, `decision_loop.py`, `decision_continuation.py`; new `test_web_decision_references.py`.
+
+- [ ] RED: actual loop with server-confirmed selected molecule currently rejects non-JSON resolved dataclass. Use existing temporary-store `confirmed` and `setup_loop` fixtures. No loop/Session/resolver mocks.
+- [ ] Exact AgentContext and resolved dataclass shape projected before deepcopy/privacy/hash; reject subclasses, arbitrary nested objects, cycles, oversized fields and malformed/extra attributes without calling their hooks. Generic validate_json stays unchanged.
+- [ ] Keep original query separate from exact stored canonical SMILES. Properties/likeness receive the bound structure; activity receives structure plus original query and user target.
+- [ ] Preserve original/canonical candidate fields; no recanonicalization of the selected input at this boundary. Explicit input overrides any prior selection, including invalid explicit structure.
+- [ ] Digest includes effective selection pointer/compound ID/revision/exact structure and user target; plain non-reference contexts retain compatibility.
+- [ ] Source owner/revision/ACK checked before model dispatch, before each selected action and before duplicate-action reuse; existing Session dispatch guard stays in place.
+- [ ] Reject revoked source on waiting continuation before CAS; no model/tool execution and waiting record unchanged.
+- [ ] Candidate partial-source/new explicit selection semantics remain existing reference semantics; do not promote original generation or widen automated partial-batch reuse.
+- [ ] Run intended RED, implement only these boundary changes, run focused GREEN and existing scientific-reference/decision-input regressions.
+
+Concrete red regression (existing fixture signatures):
+
+```python
+import asyncio
+from test_decision_loop import setup_loop, tool, finish_last
+from test_scientific_reference_execution import confirmed
+
+def test_actual_loop_binds_confirmed_structure(tmp_path, setup_loop):
+    from src.agent.contracts import AgentContext
+    from src.agent.tools.property_calculator import PropertyCalculator
+    store, references, pointer = confirmed(tmp_path)
+    query = "计算刚才第二个分子的属性"
+    selected = references.resolve(query, pointer, None,
+                                  session_id="owner", enable_tools=True)
+    bundle = setup_loop([tool(), finish_last], [PropertyCalculator()])
+    bundle.loop.store = store
+    result = asyncio.run(bundle.loop.run(
+        AgentContext(query, "selected-decision", user_id="owner",
+                     session_id="owner", resolved_molecule=selected),
+        request_kind="scientific", allowed_tools={"property_calculator"},
+        required_tools={"property_calculator"},
+    ))
+    assert result.success, result.metadata
+    assert result.tool_results[0].data[0]["smiles"] == "CCN"
+```
+
+## A1.3 Config-generation fingerprint and continuation safety
+
+**Files:** `decision_loop.py`, `decision_continuation.py`; new `test_web_decision_fingerprint.py`.
+
+- [ ] RED: two otherwise identical server configurations with different nonsecret generation IDs must have different fingerprints; no key, credential digest or arbitrary model attributes are inspected.
+- [ ] Supply optional bounded `config_generation` to ModelDecisionLoop (keyword-only); admission returns it for later A2 assembly. Browser cannot supply it. No app epoch/switch wiring in A1.
+- [ ] Absent generation retains supported core caller behavior. Reject non-string/empty/oversize/sensitive generation without provider/store actions. All values are bounded before copy/hash.
+- [ ] Same-owner waiting continuation resumes under unchanged generation and original requirements; changed generation (including a credential-only change represented by server epoch) rejects before CAS/model/tool.
+- [ ] Invalid owner/ref/spec/requirements/nonce cannot consume waiting record; source revocation or explicit input replacement cannot reuse stale selected evidence.
+- [ ] Replayed history resolves inputs and digests using the same projected reference rules. Revise internal continuation protocol revision only as necessary for the new semantics; never execute incompatible historical snapshots.
+- [ ] Regression: model/tool budgets, one-use CAS, evidence seals, no uncertain replay, immutable activity target and exact source SMILES remain intact.
+
+Commands (focused only, no full Agent):
+```powershell
+python -B -m pytest tests/agent/test_web_decision_admission.py tests/agent/test_web_decision_references.py tests/agent/test_web_decision_fingerprint.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_decision_inputs.py tests/agent/test_decision_requirements.py tests/agent/test_decision_continuation.py tests/agent/test_decision_continuation_store.py tests/agent/test_decision_protocol_recovery.py tests/agent/test_decision_transport_boundaries.py tests/agent/test_scientific_reference_execution.py tests/agent/test_scientific_reference_resilience.py -q -p no:cacheprovider
+```
+
+Tests must run through the approved MedChat interpreter with isolated temp directories, disabled real network and no default app/config/data imports. Reuse the isolated-run procedure in `docs/superpowers/plans/2026-09-24-rag-service-extraction.md`; tests may use real local RDKit computations, not providers/assets. Do not treat environment/import errors as feature RED.
+
+## A1.4 Freeze for parent SPEC/QUALITY
+
+- [x] Review exact production diff against five-file allowlist, new tests, spec and plan; no receive/UI/default/HTTP/B changes.
+- [x] Compile relevant source (or compileall with isolated bytecode target); run git diff --check.
+- [x] Record RED reasons and focused GREEN results, interpreter/commands, remaining full-Agent queue and current branch/head. Do not claim CI/full suite/live science has passed.
+- [x] Local freeze with no push. Parent schedules SPEC/QUALITY and full Agent; findings may require a later local correction. A1 is support-only and not P7 completion.
+
+### Local A1 implementation / review notes (2026-09-25)
+
+The source diff is exactly the five approved files plus three new test files. No socket, UI, HTTP, model configuration, lease or default-activation edits. The two documentation files carry the scope and evidence updates. Implementation is frozen in a local commit based on `6681225` (exact freeze SHA in the parent handoff), not a released PR and not P7 completion.
+
+Concrete choices for SPEC/QUALITY:
+
+- Admission grants only the explicitly required subset of the initial four tools; registry ownership/capability checks remain authoritative. No planner, model routing, tool execution or canned chat answer is produced by admission.
+- Browser payload is plain bounded JSON (24 KiB); query is 16 KiB; identity is a server argument. Tools/RAG flags are strict bool; temperature 0–2; optional generation count 1–10; RAG display count 1–20, matching existing UI. Enabling RAG is not permission to execute the excluded RAG tool.
+- Exact subject count is derived from the full original SMILES list (up to existing parser limits), with no fragment salvage or canonical duplicate collapse. Quantified prose, exclusions, unknown execution clauses and mixed lookup/calculation need clarification. The parser accepts labeled fields terminated by newline/semicolon; trailing prose inside `SMILES:` is invalid, so the examples above place intent before the field.
+- Missing structure retains scientific requirements. Explicit unknown/conflicting activity targets and ambiguous target search reject. Confirmed selected input is resolved by the existing owner/ACK service only. Properties/likeness receive the exact stored canonical string; activity additionally receives original query/user target. This object does not contain the generator's original spelling: original CandidateRecord data is not rewritten or falsely reconstructed.
+- Context projection admits exact AgentContext/ResolvedScientificMolecule only, before copy/privacy/hash; arbitrary dataclasses, subclass/copy hooks, extra attributes, cycles and malformed known scalar shapes fail. Generic JSON validation remains strict. Invalid-context rejection uses a fixed trace marker instead of reading properties on a hostile object.
+- Reference revalidation occurs before model calls, after model response, at input resolution before action/reuse, at the existing Session dispatch guard and before continuation CAS. Explicit replacement disables the prior selection across later clarification turns; replay applies the identical transition. Historical selected-source checks remain conservative: a revoked source used in an earlier waiting history rejects that continuation; start a new request to use an independent explicit structure.
+- Optional server `config_generation` is a nonsecret opaque ID, not a key hash; absence supports existing direct callers. A2 must create/rotate it when runtime configuration changes. Waiting internal protocol revision is now 5 because reference binding/history semantics changed; revision-4 waiting snapshots are rejected, not migrated/re-executed. Public decision version and input_ref-only argument schema are unchanged.
+- New 4B adapter schemas participate in existing fingerprints. A1 passes original target text to TargetSearchInput/TargetToolAdapter; dictionary/batch target inputs in that adapter do not become model-authored arguments. A counted offline service verifies unavailable lookup status is retained. No live target lookup is claimed.
+
+TDD evidence before final integration verification:
+
+- Initial admission: **52 expected failures**, missing-feature assertion.
+- Initial reference/fingerprint: **20 failures**, including actual loop `invalid_context`, unresolved direct binding and missing generation support (one admission import also absent). After minimal core changes: **19 passed**, one still-missing admission module.
+- First integrated A1: **72 passed**. Added adversarial cases reproduced mixed explain/execute omissions, unknown second actions, explicit-selection resurrection across resumptions, hostile rejection hooks, option compatibility and sensitive reference projection. Corrections produced **86 passed**.
+- Known context scalar types: **6 RED**, then new A1 + existing migration boundary **172 passed**. Earlier focused existing regressions on the pre-4B integration: **668 passed**.
+- After merging 4B, a new test incorrectly expected the wrapper to extract `EGFR`; source inspection confirmed non-projecting original text is correct. Corrected the test expectation, not the target contract. Separate UI-limit RED reproduced rejection of valid `rag_count=20`; admission now retains the existing 1–20 range. Do not count this mistaken target assertion as a missing-feature RED.
+
+Final verification used the isolated runner from `2026-09-24-rag-service-extraction.md`, with this worktree and the existing MedChat Conda Python **3.10.20**, `-B`, temporary stores/config/cache roots, cleared inherited application/credential environment, no pytest cache and network-connect denial (only Python's internal Windows asyncio socketpair permitted). No env file, model provider, server, browser or scientific asset was opened. Full Agent/full suite and SPEC/QUALITY are parent-coordinated; current full slot is Planner → 4C.
+
+Final post-`16b9157` focused verification: **1061 passed in 100.98s**, no skips. This is a named 14-file focused suite, not full Agent or full repository:
+
+```powershell
+# Arguments to the isolated runner (which calls pytest.main with these files):
+python -B -m pytest tests/agent/test_web_decision_admission.py tests/agent/test_web_decision_references.py tests/agent/test_web_decision_fingerprint.py tests/agent/test_decision_inputs.py tests/agent/test_decision_requirements.py tests/agent/test_decision_continuation.py tests/agent/test_decision_continuation_store.py tests/agent/test_decision_protocol_recovery.py tests/agent/test_decision_transport_boundaries.py tests/agent/test_scientific_reference_execution.py tests/agent/test_scientific_reference_resilience.py tests/agent/test_decision_loop.py tests/agent/test_decision_migration_boundaries.py tests/agent/test_target_tool_contract.py -q -p no:cacheprovider --tb=short -rs
+git diff --check
+```
+
+Additionally compiled all five changed production files and three new tests with Python `compile(source, filename, 'exec')` in memory: **8 passed**, no bytecode written. Root `plans/2026-09-25-web-model-decision-entry.md` is absent; the corrected plan exists only here. Final diff scope is those 8 Python files plus this plan and the spec. No push, PR, CI run, full-suite run or live acceptance. Parent SPEC/QUALITY and publication are pending.
+
+### SPEC Galileo request-changes follow-up
+
+Review base: `aed3571e9e1a25f8c757dc937969ad04a424b98c`. Its 1061 passing focused tests are retained as history, not treated as coverage of the four newly reproduced gaps. Full Agent/full repository were never run by this worker; the parent retains the full queue after G2/ADMET/G1. A2 design in the separate `web-decision-runtime-plan` task is untouched.
+
+All RED probes call actual admission and, if accidentally admitted, run the actual ModelDecisionLoop/registry/Session with recorded real RDKit properties (plus the real likeness tool for positive controls). Only model decisions are scripted. The RED diagnostics report admitted kind/requirements, real completion and task acceptance. GREEN requires admission rejection and zero model/tool calls, not merely a later malformed tool result.
+
+| Group | Observed RED | Minimal correction / GREEN |
+|---|---|---|
+| Explanation followed by new execution | 11 failed / 8 passed, including LF, CR, CRLF and an unknown verb after semicolon | Every separate statement must be an independently admitted explanation; 19 passed at that checkpoint |
+| Unsupported parallel result | 8 failed / 3 known-positive controls passed; melting point and arbitrary other endpoints completed as MW-only | Full text coverage, not any recognized noun; 11 passed |
+| Explicit negative | 10 failed / 2 passed; 禁用/禁止/勿/不可/停用 and negative clauses dispatched RDKit | Negative/unknown text is not consumed by the positive admission surface; entire request clarifies; 12 passed |
+| Quantified request | 10 failed / 3 passed; 两/2 × 种/款/类/组/份 became exact count 1 | No prose counts/quantifier terminals; only whole subject-derived counts; 13 passed including real two-subject control |
+| Unknown chat/explanation fallback | Additional 10 failed / 31 passed, including unknown verbs without delimiters and after commas/connectors | Complete greetings/nominal topics only; uncertain free text clarifies, never inferred chat |
+
+Implementation choices for re-review:
+
+- The known tool/metric matches are only candidate obligations. No scientific request is admitted until all its text is covered by supported positive terminals; no result-name blacklist was expanded.
+- Structures are matched case-sensitively as complete values already validated by the existing parser. Target symbols use the existing shared identifier pattern, followed by existing target/activity validation. Coverage does not rewrite the dispatched query, bind fragments or alter scientific results.
+- Singular selected-reference ordinals remain permitted and still require the existing owner/ACK/range checks. Numeric/word counts with arbitrary units remain unconsumed and clarify; explicit validated batches still retain all subjects.
+- Negative requests reject wholly; a prepared request with an empty forbidden_tools list is never created for those rejected inputs. There is no known-subset execution.
+- A1's chat surface is now intentionally narrower: complete greetings or complete nominal explanations of bounded existing topics/metrics, up to eight coordinated topics. Multiple explanation statements each need an explicit explanation prefix. Unknown standalone actions and appended unknown imperatives do not default to chat. This may reject benign free-form requests; expanding it requires parent review and cannot be counted as already-complete P7 normal chat.
+- Source/test changes for this review are only `src/web/decision_request.py` and `tests/agent/test_web_decision_admission.py`. The original five-production/three-test A1 ceiling is unchanged. No changes to loop execution, permissions, public protocols, socket/UI/default activation, B, helpers, providers or assets.
+
+Intermediate A1 three-file focus: **171 passed in 11.70s**. Final named 14-file focused rerun and compile/diff-check evidence follow below; no full-suite authorization is inferred. Freeze for the original SPEC reviewer to re-check before QUALITY.
+
+Parent positive-control follow-up: the first closed nominal surface actually rejected `什么是药物分子设计`, `请解释 RAG 是什么`, `什么是药物设计` and `Explain RAG` (**4 RED**, 5 mixed-action controls already passed). With the parent's explicit authorization, added only the nominal project concepts 药物（分子）设计 and RAG. The resulting **9 passed** assert empty allowed/required tools, zero tool observations, one scripted model call for explanations and pre-model rejection for appended retrieval/design/unknown actions. It does not grant RAG retrieval or design execution and does not imply arbitrary explanations are admitted.
+
+The prior 14-file review focus reached **1138 passed in 97.88s**, before this nominal-topic expansion. The final A1 three-file focus after expansion and removing the now-unnecessary action-word fallback reached **180 passed**. These figures are separate checkpoints, not additive or full-suite results. The narrower behavior remains explicit: greetings and supported nominal project explanations work; other legitimate but uncovered free-form requests may clarify. Further coverage needs reviewed nominal/obligation support, not unsafe unknown-imperative fallback.
+
+Final post-correction/nominal-expansion verification: **1147 passed in 92.15s**, no skips, using the same isolated 14-file command listed above (not full Agent/full repository). All five A1 production files and three test files compiled in memory (**8 passed**, no bytecode); `git diff --check` passed. Relative to review base `aed3571`, the revision is limited to admission source, its existing test file, this plan and the spec. Local freeze only, no push or PR. Original SPEC re-review is pending, then independent QUALITY; no approval is claimed. A1 remains support-only, not P7 completion, and full testing stays in the parent's authorized queue.
+
+### SPEC recheck correction after `48d8356` — action/ordinal roles
+
+Exact revision scope remains `src/web/decision_request.py`, `tests/agent/test_web_decision_admission.py` and this plan/spec. No fourth test file, sixth production file or A2 work. The parent permitted conservative rejection of unsupported compounds; the implementation does not add a compound parser or executable grammar.
+
+TDD evidence and decisions:
+
+1. Before production edits, run the actual admission/ModelDecisionLoop/Session/RDKit helper with `-k action_must_have_its_own_bounded_obligation`: **12 failed, 1 passed**. Both SPEC original trailing-action probes completed property-only with satisfied acceptance; variants cover no separator, newline, carriage return, both semicolons, Chinese/English connectors, two actions before the noun, action after an earlier noun, and known/known compound actions. The English semicolon/lookup variant already rejected and is a regression control, not a claimed reproduction.
+2. Independently before the fix, run `-k 'ordinals_cannot_collapse_requested_subjects or single_action_multiple_obligations_still_execute or explicit_replacement_still_ignores_old_browser_reference'`: **11 failed, 3 passed**. Both SPEC ordinal originals reproduced single-subject success, as did the other explicit-structure ordinal variants. Two no-explicit-input ordinal-list variants were wrongly admitted but did **not** complete scientifically; do not report them as false-success reproductions. Three scientific positive controls already passed.
+3. Minimal fix: give existing action/obligation/ordinal terminals local roles. Scientific requests allow zero or one action, only before consumed obligations; reject every second action, including known/known compounds. Reject multiple ordinals or any ordinal plus explicit structures. Keep single-action metrics/likeness/batches, nominal explanations, exact structure spelling and browser-selection replacement. No new accepted syntax, parser dependency, tool permission or scientific acceptance relaxation.
+4. Rerun the two groups plus positives: **27 passed**. Add two confirmed singular-ordinal controls (Chinese and English), using the existing real temporary reference store/ACK service and real RDKit loop, asserting exact `CCN` binding and satisfied acceptance. The A1 three-file focus then reached **209 passed in 13.59s**.
+
+Compatibility tradeoff for reviewers: `计算 CCO 的分子量并计算 logP` now clarifies, while `计算分子量和 logP；SMILES: CCO` remains supported. Textual ordinal plus explicit SMILES clarifies even when the user may intend co-reference; plain explicit SMILES with stale browser hints still replaces those hints and runs. A1 does not claim arbitrary compound or general-chat coverage. All earlier unsupported/negative/quantified/explanation tests remain unchanged and required.
+
+Final named 14-file focused verification uses the exact isolated command above (environment/config/temporary stores isolated, network blocked except Python's internal Windows asyncio socketpair). No full suite, live model, server/browser, real asset or `.env` access. After verification, locally freeze for the **same SPEC reviewer**; do not push or self-approve. A1 is not P7 complete, A2/B remain separate, and full testing stays in the parent's queue.
+
+Final verification for this recheck correction: **1176 passed in 94.09s**, no skips, in that named 14-file focus. All eight A1 production/test files compiled in memory (no bytecode); `git diff --check` passed. The correction adds 29 admission tests without weakening or changing the earlier assertions. Diff base for the same SPEC review is `48d8356465c9e59cba1cc21fa26d6a0bcb11228a`; the local freeze commit is reported in the worker handoff. Only the four listed files changed. No full-suite result or reviewer approval is claimed.
+
+### Fresh QUALITY Peirce P1 after `7a239b5` — non-ordinal subject coverage
+
+Parent reports SPEC approved the prior freeze; QUALITY then reproduced loss of a referenced `CCN` subject alongside explicit `CCO`. Current correction base is `7a239b5a7201ec526d0ab3f6b57640e6e36a22ab`; **do not commit, amend, push or broaden scope**. Freeze the uncommitted diff for parent QUALITY recheck. Only `src/web/decision_request.py`, `tests/agent/test_web_decision_admission.py` and this plan/spec may change.
+
+TDD and bounded choices:
+
+1. New helper creates the real temporary candidate store, projects/confirms its manifest, selects ordinal 2 and verifies exact `CCN`. It calls real admission, ModelDecisionLoop, WorkflowRunSession and recording subclasses of real RDKit property/likeness tools. Only model decisions are scripted. Rejected requests must produce zero model messages and zero tool calls; leaked requests execute to expose their actual acceptance outcome.
+2. The first run exposed a test diagnostic typo (`TaskRequirements.to_dict` instead of Pydantic `model_dump`); it is **not** counted as valid RED evidence. After correcting only that diagnostic, `-k quality_` produced **49 failed, 22 passed in 24.03s** before any production change. Coverage includes all six existing non-ordinal modifiers, Chinese/English property/likeness, both subject orders, co-reference-looking explicit-SMILES forms, repeated/mixed ordinal/non-ordinal subjects, coordinated nouns and English plurals. Actual explicit-input leaks bound only `CCO`; plural/selected leaks bound only `CCN`. Positive single references and pure explicit replacement already passed.
+3. Give every supported referring modifier a reference role, not noise. One reference only, never mixed with explicit structures. Preserve the existing adjacent temporal+ordinal form. Give existing molecular nouns singleton/plural subject roles; plural needs an explicit batch rather than one selected reference. This local restriction reached **71 passed** for that initial quality group.
+4. Additional role-adjacency probes (`previous and molecule`, reverse order and Chinese equivalents) reproduced **4 failed, 44 passed** with the real selected-reference loop. Require the modifier to precede and attach to the noun without crossing a conjunction; retain existing adjacent compound nouns as single nominal phrases. Add positive compound-noun and explicit plural-batch controls. The A1 three-file focus then reached **294 passed in 27.36s**. Also retain the exact parent-reported whitespace spelling as a regression case.
+
+5. The intermediate named 14-file focus reached **1262 passed in 109.50s**, before the additional bare-noun coordination probes below. It is not proof that all referring/parallel subjects are covered.
+6. Checking the remaining existing nominal subject forms reproduced **6 failed, 21 passed** with `-k 'quality_multiple_referring_subjects or quality_nominal_explicit_input'`: `候选和 CCO`, `CCO 和候选`, `分子和 CCO`, `CCO 与化合物`, `candidate and CCO`, and `CCO and compound` still completed only the explicit molecule. These lack a deictic modifier and have only one nominal noun, so both current counters pass. Three positive controls verify that ordinary nominal explicit input and multiple metrics still work.
+
+**Current freeze is incomplete, with those six RED probes retained.** Do not approve/commit it as a completed QUALITY fix. The worker paused before adding another grammar rule. Recommended parent decision: permit an explicit bounded subject-coordination role for the already-supported connecting tokens, rejecting a nominal subject joined to an explicit structure in either order while keeping metric coordination and complete explicit batches. This would stay in the original source/test, add no vocabulary/dependency/executable grammar, but the distinction between subject and metric spans must be reviewed before implementation. Alternatively, parent may choose a more restrictive nominal-input surface and explicitly accept its positive-coverage losses. No such extension has been implemented in this freeze.
+
+The current diff adds 95 tests within the existing admission test file. Six deictic modifiers, three English ordinal words and the existing Chinese ordinal form are roles; no expanded dictionary or framework. Multi-metric requests and explicit input replacing an actual old confirmed reference remain positive controls. Co-reference-looking requests and unsupported compound nominal forms conservatively clarify where covered; the remaining bare-noun coordination gap is explicitly **not fixed**. Earlier assertions, real scientific tools, owner/ACK checks and result requirements are unchanged.
+
+Record the final three-file A1 focused rerun and in-memory compilation/diff check below. The earlier 14-file run is an intermediate checkpoint only. No full/real/network run, `.env`/asset access, commit or push. Freeze for parent direction and QUALITY review; A1 still does not complete P7 or authorize A2/B.
+
+Final uncommitted freeze verification: the isolated runner with `tests/agent/test_web_decision_admission.py tests/agent/test_web_decision_references.py tests/agent/test_web_decision_fingerprint.py -q -p no:cacheprovider --tb=short -rs` reports **6 failed, 298 passed in 29.86s**. All six failures are the retained bare-noun/explicit-subject coordination reproductions above; each still has actual successful scientific completion and satisfied acceptance. Earlier positive explanation/reference/replacement/metric controls passed. All eight A1 production/test files compiled in memory; `git diff --check` passed. HEAD remains `7a239b5a7201ec526d0ab3f6b57640e6e36a22ab`; only the four approved files are modified and nothing is staged or committed. This is a diagnostic/partial-fix handoff requesting direction, not a green QUALITY submission.
+
+### Approved option 1 execution — phrase reduction (before implementation)
+
+Parent approved option 1 after Peirce read-only design review. Replace the incomplete counter/nearest-token approach, not another regex deny rule. See the spec's complete-input-set invariant and five state/connection rules. Keep `7a239b5` unchanged and all existing uncommitted tests, especially the six RED probes. Only admission source/test and these two documents remain authorized.
+
+TDD steps:
+
+1. Retain actual confirmed-reference → admission → ModelDecisionLoop/Session → RDKit tests. Add both-order matrices for noun/reference/explicit subject coordination using all existing conjunctions and punctuation (including CR/LF/semicolon), article/modifier variants and obligations between subject mentions. Unknown/dangling connections reject wholly.
+2. Positive matrices preserve adjacent explicit/noun descriptors, whole compound nouns and obligations, generic SMILES-filled slots, confirmed single references, pure explicit replacement of browser hints, same-set multiple metrics and original-parser-accepted explicit batches. Invalid complete batches reject; missing bare-noun input stays scientific, and existing selection resolution remains authoritative.
+3. Observe RED against the current incomplete source, then implement a bounded role stream and complete phrase reduction. Every validated structure must participate in reduction; final consumed structures must equal the original parser's entire batch. Reduce connections by endpoint phrase type, with global input ownership across result/punctuation intervals.
+4. Run the focused admission/reference/fingerprint files, then the same named 14-file offline regression set, in-memory compilation and diff check. Do not run full/real/network tests. Record exact outcomes separately from historical checkpoints. Freeze uncommitted for original QUALITY; no new scope or option-2 fallback without parent approval.
+
+Option 1 execution evidence (supersedes the prior incomplete freeze above):
+
+- After updating spec/plan and before replacing production reduction, the existing six RED probes plus new phrase tests (`-k 'phrase_ or quality_multiple_referring_subjects'`) reported **46 failed, 104 passed in 27.22s**. No assertion was weakened. The matrix uses two directions × fifteen original word/punctuation connectors × three noun/reference forms, plus subjects separated by metrics, dangling articles/relations/connections, whole invalid input, exact original-parser batch comparison, explicit/noun apposition, generic declaration slots, reference and missing-input controls.
+- Replace the old local counters with three bounded stages in the same source: lexer emits all structures/whole obligations/compound nouns; `_reduce_input_phrases` builds generic/reference/explicit phrases and checks global input ownership; `_require_phrase_connections` validates typed edges between completed phrases. Matched structures must equal the original parser's entire ordered batch. Articles are checked in a linear pass and cannot hide dangling endpoints. SMILES fields fill only a prior single generic slot; neither result tokens nor punctuation erase that slot.
+- The first A1 three-file rerun reported **430 passed in 39.34s**, including all six prior failures and all earlier explanation/scientific/reference/replacement positives. Option 1 adds 126 tests on top of the prior 95 local QUALITY tests; all remain in the original admission test file. Explicit-batch matrix tests independently call the original parser: rejected batches must reject before model/tool work; accepted batches must remain exactly `OCC`, `CCN`, with actual RDKit rows and satisfied whole-set acceptance. No chemistry or test assertion was weakened.
+- No option-2 fallback, vocabulary expansion, transport/protocol, reference-service or scientific algorithm changes. Some otherwise benign unsupported phrasing still clarifies; this is bounded admission, not general NLP/chat completion. Freeze only after the final named focused rerun and compile/diff checks below, then return to original QUALITY without committing or publishing.
+
+Final option-1 freeze: the exact named 14-file isolated command above reports **1397 passed in 117.42s**, no skips. All eight A1 production/test files compiled in memory (no bytecode); `git diff --check` passed. The prior six-RED freeze is superseded by this verified option-1 diff; it is not concealed or reclassified as an earlier pass. HEAD remains `7a239b5a7201ec526d0ab3f6b57640e6e36a22ab` on `codex/web-model-decision-entry`. Only the approved source/test/spec/plan are modified, with no staged files, commit, push, full-suite or live-provider run. Return this uncommitted freeze to original QUALITY; no reviewer approval or P7 completion is claimed.
+
+### Peirce P2 correction — shared explicit scope (current authorization)
+
+Keep the independent finding visible: parent reports Peirce's 821 passes/300 bare-noun rejections, original P1 closed, and a new P2 where per-molecule obligations become both tools × both inputs. Historical 1397-pass evidence does not cover this probe. The same four-file uncommitted scope and unchanged `7a239b5` base remain; this round authorizes only the new group and three A1 focused files, **not** the earlier 14-file command.
+
+1. First record the shared-group invariant in the spec. Add three actual confirmed-reference/admission/loop/Session/RDKit RED probes using semicolon, newline and Chinese comma between `CCO` molecular weight and `CCN` likeness. Inspect actual requirements, rows and acceptance if admitted; after rejection assert zero model/tool work.
+2. Add positive controls for shared explicit batches, obligations preceding/following the one complete group, generic slots filled by a following SMILES declaration and single explicit input. Preserve all previous tests without weakening assertions.
+3. Retain ordered explicit members in reduced nodes. Combine only connected explicit batch phrases into position-identified groups, never across an obligation. Require all obligations to bind the same complete group matching the original parser's entire input set; otherwise clarify, not Cartesian expansion. Do not add independent scopes or new grammar.
+4. Run only the new scope group and `test_web_decision_admission.py`, `test_web_decision_references.py`, `test_web_decision_fingerprint.py`; compile/check diff and freeze uncommitted for Peirce. Stop for parent direction if this requires a larger grammar. No network, live model, 14-file/full testing, commit or push.
+
+P2 TDD evidence:
+
+- Before the source change, the isolated runner with `tests/agent/test_web_decision_admission.py -k scope_` reported **3 failed, 6 passed in 6.15s**. Each failing separator variant reached both real RDKit tools, each returning `CCO` and `CCN`; requirements expected the same two members for both tools and acceptance was satisfied. The six positive controls already worked. This confirms the independent P2, not a chemistry-tool or assertion failure.
+- Reduced explicit nodes now retain their ordered members instead of an empty value. A small shared-scope check groups connected explicit nodes by their start/end positions and members, ending a group at any obligation/other semantic phrase. It requires exactly one group equal to the full original parser input, with every obligation before or after that same group. It does not assign separate scopes, union local groups, add grammar/vocabulary, or change tools/requirements.
+- The same new group then reported **9 passed in 4.85s**. Positive controls cover a shared preceding batch, a shared following SMILES declaration, a filled generic slot, obligations on both sides of a single complete group and a single input. Both real tools retain exact rows/counts; previous tests are unchanged. The final three-file A1 rerun follows below; no 14-file/full rerun is authorized or claimed here.
+
+Final P2 freeze: the isolated runner with `tests/agent/test_web_decision_admission.py tests/agent/test_web_decision_references.py tests/agent/test_web_decision_fingerprint.py -q -p no:cacheprovider --tb=short -rs` reports **439 passed in 42.64s**, no skips. Eight A1 production/test files compiled in memory and `git diff --check` passed. This round ran only the new group and those three focused files; the prior 1397-pass/14-file result is historical, not a rerun of this revision. The independent P2 is preserved above for Peirce to recheck. Same four modified, unstaged files; HEAD remains `7a239b5a7201ec526d0ab3f6b57640e6e36a22ab`. No commit/push, network/live model, full test or P7-complete claim. Freeze for original QUALITY, not self-approval.
+
+### Final subject-scope dual review and authorized local commit
+
+Parent reports both independent reviewers approved the same production blob for `src/web/decision_request.py`: `9d1305e7d4f8cae6a593bdf3c2f4adb6b18ab918`. The worker verified that the local source still hashes to that exact blob before staging; no further production/test edits are authorized or made in this step.
+
+- Peirce QUALITY: APPROVE, scope group 9 plus 6 probes.
+- Galileo SPEC delta: APPROVE, 439 focused passes plus 12 rejection probes / 6 RDKit probes / 1 missing-input probe.
+
+These are parent-reported independent review results, not new worker executions, and are not summed into a new test total. Prior independent findings and RED evidence remain above. This authorization supersedes the earlier no-commit freeze for the four reviewed files only: explicitly stage those files and make a local commit; then rerun the original named 14-file isolated focused set, record its actual observed count, compile the eight A1 production/test files in memory and check the diff. After success, a second documentation-only local commit may record verification. No main merge, full test, push, live-provider or unrelated PR operation is authorized. Parent will separately release one latest-main alignment and the unique full run after its pending integration; do not duplicate heavy runs now. A1 is still not P7 completion.
+
+Authorized local source/test/docs commit: `674e8b0f90afb8cae08a1a816cb785f766e163ef` (`fix: preserve complete shared input scope in admission`). The original named 14-file isolated focused command was then rerun against this commit and actually reported **1406 passed in 118.41s**, no skips; this number is observed pytest output, not a preset expected count. All eight A1 production/test files compiled in memory without bytecode. `git diff --check` and `git show --format= --check HEAD` passed. The committed production blob remains `9d1305e7d4f8cae6a593bdf3c2f4adb6b18ab918`, identical to the independently reviewed blob. No production/test edits occurred after the reviewed freeze. This verification record is the only file change for the authorized second, documentation-only local commit. No latest-main integration, full run, push or live-model verification was performed; those remain pending separate parent release. Final documentation-commit hash and clean status are reported in the worker handoff.
+
+### Latest-main integration, failed local full, and fixture-only verification
+
+Parent authorized one latest-main integration and one local Agent full after PR77. Starting from clean `d509c6ad0d332e0b8e674d38742ff28a2e474834`, merged the already-fetched `origin/main` without another fetch or conflicts:
+
+- Main: `be0219ec205e9285ea30979d4a5ccacd95791be3`; main tree `60d666643c3cf074aa2c7dfd5693da6ca6a0dcf2`.
+- Locked merge HEAD: `734e13671f9d9a3528d69dcaaf8044391baf6a31`; tree `4b4955be196d27d8d43565388988e2d75b3ea0c0`.
+- Original named 14-file focus at this lock: **1406 passed in 118.71s**, no skips/warnings reported. Eight A1 Python files compiled in memory; diff checks passed.
+- All eight original A1 production/test files have identical Git blobs and raw SHA-256 bytes to the reviewed pre-merge freeze. In particular, admission remains blob `9d1305e7d4f8cae6a593bdf3c2f4adb6b18ab918`. No source/test edits occurred during or after integration/testing.
+
+**The one local full failed; it must never be reported as local-full-passed.** Command arguments were `tests/agent` to the old no-copy isolated wrapper below. Started `2026-09-24 23:25:22 UTC` (September 25, 07:25:22 Asia/Shanghai), session `7965`, exit 1: **7777 passed, 3 failed, 2 skipped, 7 warnings in 388.24s**. Completion was confirmed by the 23:34:07 UTC read-only check; that check time is not the exact pytest finish time. No edits, merge or commit occurred during the full.
+
+All three failures were `FileNotFoundError` from `src/agent/evaluation/runner.py:15`, reached by `tests/agent/test_evaluation_runner.py:429/444/465`: `real_agent_cases.jsonl`, `golden_scientific_cases.jsonl`, `diverse_scientific_cases.jsonl`. These tests load `data/agent_evals/...` relative to cwd. **Root cause: this worker's A1 wrapper omitted the three-fixture copy/SHA preparation already present in the approved RAG extraction runner**, while changing cwd to a temporary directory. This was not a missing tracked dataset or an A1/scientific assertion failure. The earlier statement that A1 used the RAG runner describes an adaptation, not a byte-identical reuse; the omitted preparation is material and is recorded here explicitly.
+
+The two skips were directory symlinks unavailable (`test_decision_chat_acceptance.py:149`) and performance test disabled (`test_harness_shadow.py:277`). Seven warnings were three SWIG type `__module__` deprecations and four FastAPI `on_event` deprecations. No assertions, skips, tool outputs or scientific gates were changed to handle them.
+
+Parent then authorized **fixture-only grouped verification, not another local full**. Git tracking and unchanged contents were checked for only the three named JSONL files before copying. Reused the complete existing runner in [RAG extraction plan, actual verification commands](2026-09-24-rag-service-extraction.md#实际验证命令与包装), replacing only its `repo` worktree path. Its three `shutil.copy2` operations and source/destination SHA-256 assertions succeeded before each pytest subprocess. This runner uses normal `python -B -m pytest`, not A1's in-process socket monkeypatch; inherited application/credential environment is cleared and real-acceptance flags remain off. The grouped tests are offline fixture/contract tests, not real-provider acceptance. No other assets, secrets or `.env` were read; no fixture content was printed, edited or committed.
+
+| Group, in execution order | Start UTC, 2026-09-24 | Actual result |
+|---|---|---|
+| Old no-copy wrapper, exactly three failing nodes | 23:36:13 | **3 failed in 2.28s**, exit 1; all three original `FileNotFoundError` reproduced |
+| Existing copy/SHA runner, same three nodes | 23:36:25 | **3 passed in 1.73s**, exit 0; all three copy hashes equal |
+| Existing copy/SHA runner, entire `test_evaluation_runner.py` | 23:36:37 | **32 passed in 3.56s**, exit 0; all three copy hashes equal |
+
+No skips or warnings were reported in these three groups. Counts are separate runs and are not added to, or substituted for, the failed full result. Afterward all eight A1 raw SHA-256 values still matched the reviewed freeze, eight files compiled in memory (no bytecode), and `git diff --check` passed.
+
+#### Exact grouped commands and wrapper provenance
+
+The old A1 wrapper used for both the failed full and the three-node RED is reproduced here for audit; **do not run another full with either wrapper**:
+
+```powershell
+$python = 'C:/Users/xkx52/.conda/envs/MedChat/python.exe'
+$noCopyRunner = @'
+import logging, os, sys, tempfile
+from pathlib import Path
+repo=Path(r"D:/MedChat/molecular_chat_system_worktrees/web-model-decision-entry")
+keep={k:os.environ[k] for k in ("SYSTEMROOT","WINDIR","PATH","TEMP","TMP","COMSPEC") if k in os.environ}
+os.environ.clear();os.environ.update(keep)
+with tempfile.TemporaryDirectory(prefix="medchat-p7a1-review-") as temp:
+ root=Path(temp)
+ os.environ.update({
+ "PYTHONDONTWRITEBYTECODE":"1","PYTHONIOENCODING":"utf-8","PYTHONPATH":str(repo),
+ "AGENT_HARNESS_MODE":"legacy","MOLECULAR_CHAT_CONFIG":str(root/"missing.yaml"),
+ "MEDCHAT_ENV_FILE":str(root/"not-loaded.env"),"MEDCHAT_USER_CONFIG_DIR":str(root/"user-config"),
+ "MEDCHAT_LLM_LOCK_DIR":str(root/"locks"),"MEDCHAT_AGENT_SESSION_DB":str(root/"sessions.sqlite"),
+ "AGENT_STATE_DB":str(root/"agent.sqlite"),"MEDCHAT_TASK_DB_PATH":str(root/"tasks.sqlite"),
+ "TARGET_DB_PATH":str(root/"targets.sqlite"),"TARGET_CACHE_DIR":str(root/"target-cache"),
+ "MEDCHAT_FRAGMENT_DB_PATH":str(root),"MEDCHAT_TASK_BACKEND":"local","MEDCHAT_TEMPORAL_CANARY_PERCENT":"0",
+ "AGENT_LANGGRAPH_CANARY_PERCENT":"0","MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE":"0",
+ "MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE":"0","MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK":"0","RUN_REAL_TARGET_SEARCH":"0"})
+ os.chdir(root);sys.path.insert(0,str(repo))
+ import socket,inspect
+ original_connect=socket.socket.connect
+ def offline_connect(sock,address):
+   if any(f.function=="_fallback_socketpair" and f.filename.endswith("socket.py") for f in inspect.stack()):
+     return original_connect(sock,address)
+   raise AssertionError("offline test attempted network")
+ socket.socket.connect=offline_connect
+ try:
+   import pytest
+   result=pytest.main([str(repo/p) if p.startswith("tests/") else p for p in sys.argv[1:]]
+      +["-q","-p","no:cacheprovider","--tb=short","-rs"])
+ finally:
+   logging.shutdown();os.chdir(repo)
+ print("P7A1_PYTEST_EXIT="+str(result));sys.exit(result)
+'@
+$fixtureChecks = @(
+    'tests/agent/test_evaluation_runner.py::test_real_agent_dataset_contains_all_docx_cases',
+    'tests/agent/test_evaluation_runner.py::test_golden_scientific_dataset_contains_12_traceable_cases',
+    'tests/agent/test_evaluation_runner.py::test_diverse_scientific_dataset_contains_20_traceable_cases'
+)
+$noCopyRunner | & $python -B -c "import sys; exec(sys.stdin.read())" @fixtureChecks
+
+# $runner is the complete existing RAG extraction plan runner, with only repo set
+# to this web-model-decision-entry worktree; retain its copy2 and SHA assertions.
+$runner | & $python -B -c "import sys; exec(sys.stdin.read())" @fixtureChecks
+$runner | & $python -B -c "import sys; exec(sys.stdin.read())" 'tests/agent/test_evaluation_runner.py'
+```
+
+The wrappers were executed in memory, not added as scripts. Only this plan and the design spec may be staged for the authorized local evidence commit; source/tests and fixtures remain unchanged. No push or PR is authorized. **Parent selected CI-only complete pre-merge verification: all Agent and root partitions must pass on the latest exact head**, including the documentation commit and any subsequent integration. This worker has not launched or verified those future CI results; they remain pending. Grouped recovery does not prove the entire suite passes with the corrected preparation. A1 remains support-only, not P7 completion; A2/B and genuine normal `/ws`/provider acceptance remain separate.
+
+## Deferred A2 — separate PR, not approved for this branch
+
+Normal `/ws` dispatch into WebDecisionEntry/ModelDecisionLoop; genuinely external normal chat; single reader lease and per-request current-model capture; app config epoch creation/replacement; cancel/drain before lease release; one socket receiver and active request; bounded events; owner-bound resume; existing candidate project/mount/ACK; safe per-socket conversational history and persistent status labels. Keep unsupported requests explicit. Preserve existing static workflow HTTP unchanged, add no HTTP route. No default activation until separately approved.
+
+A2 TDD must assert:
+- Actual normal handler calls decide, not static planner/legacy fallback; observation-dependent next action.
+- Model change cannot close leased client; no nested lease deadlock; generator remains local gmm-llama:latest.
+- Ping/cancel/disconnect during blocked model call work; repeated cancellation and uncertain worker settlement never replay.
+- Waiting/partial/failure/rejected/cancelled stay distinct; exactly one connected complete per accepted turn.
+- Candidate frames precede complete; ACK follows actual exact-key mount; no execution replay on restoration.
+- Foreign/stale/changed generation/requirement resumes do not mutate or dispatch.
+- Offline tests are not live model/browser acceptance.
+
+## Deferred B — separate reviewed increments
+
+Existing initial input_ref protocol is not generation/ranking complete. After reviewed typed boundaries, add closed target_ref/candidate-evidence/evidence_refs roles to the existing protocol/resolver, not arbitrary arguments/JSONPath/workflow DSL. Use existing semantic target-evidence/candidate validators and Session journals. Preserve full original/canonical structures and all lineage IDs.
+
+B TDD gates:
+- User count/target authoritative; generator remains local gmm-llama:latest, not main external model.
+- Target-conditioned generation consumes verified matching target evidence; missing/ambiguous evidence cannot become untargeted success.
+- CandidateSet validation/count/deduplication, whole-batch analysis, candidate alignment, ranking fixed-role joins and requested top-N accepted deterministically.
+- Cross-set/stale/foreign/partial/untrusted evidence rejected; optional absent evidence distinguished from mandatory missing evidence.
+- Requirements and continuation history updated/versioned together; repeated action reuses sealed evidence, not a new sample.
+- ADMET/reverse/RAG require individual input and authenticity gates before admission despite typed adapter existence; unknown remains unknown.
+- Dynamic docking side-effect/approval policy is not enabled; staged helpers never become model actions; no docking-complete claim.
+
+## Final P7 / package-8 boundary
+
+P7 core scope is existing normal `/ws`: genuine chat + four tools → target generation/candidate analysis/ranking. A1 is only its support foundation. A2/B need independent PRs, review and parent-coordinated CI/acceptance. Current repeated real external-model/local-generation/scientific-tool and normal-browser evidence belongs to package 8; isolated bridge/scripted/fake-generation reports cannot substitute. Missing providers/assets are blocked/partial, never scientific pass. Server deployment remains excluded.

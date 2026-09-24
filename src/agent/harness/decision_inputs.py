@@ -9,12 +9,42 @@ from src.agent.contracts import AgentErrorCode, AgentExecutionError, Observation
 from src.agent.planning.bindings import BindingResolver
 
 from .decision_policy import DecisionBoundaryError, usable
-from .decision_bounds import observation_value
+from .decision_bounds import observation_value, context_value
 
 
 MOLECULAR_INPUT_TOOLS = frozenset({
     'property_calculator', 'drug_likeness_assessment', 'activity_predictor',
 })
+
+
+def has_explicit_molecule(query):
+    """Presence, not validity: malformed new fields must also defeat selection.
+
+    Use the analysis parser's whole candidates, not legacy fragment extraction.
+    Target words are context, never substituted molecular structures.
+    """
+    from src.agent.tools.base_tool import BaseMolecularTool
+    from src.agent.tools.molecular_input import _MARKER, _FIELD_END, _bare_values
+    from src.agent.tools.activity_input import _molecular_context
+    if _MARKER.search(query):
+        return True
+    parser = BaseMolecularTool('input_boundary', '')
+    try:
+        text = ';'.join(_molecular_context(c, parser) for c in _FIELD_END.split(query))
+        return bool(_bare_values(text, parser))
+    except ValueError:
+        return True  # invalid explicit syntax cannot fall back to an old subject
+
+
+def effective_molecule(context):
+    selected = context.resolved_molecule
+    return selected if selected is not None and not has_explicit_molecule(context.query) else None
+
+
+def require_current_reference(context, store):
+    selected = effective_molecule(context)
+    if selected is not None and not selected.revalidate(store, context.session_id):
+        raise DecisionBoundaryError('scientific_reference_unavailable')
 
 
 def seal_observation(source, session):
@@ -128,16 +158,27 @@ def decision_input_digest(session, tool_name):
     payload = session.context.query
     if target is not None:
         payload = {'query': payload, 'target': target}
+    if effective_molecule(session.context) is not None:
+        payload = {'input': payload, 'resolved_molecule': context_value(session.context)['resolved_molecule']}
     return EvidenceLedger.output_digest(payload)
 
 
 def resolve_decision_input(decision, session):
+    require_current_reference(session.context, getattr(getattr(session, 'orchestrator', None), 'state_store', None))
     arguments = decision.arguments
     if set(arguments) != {'input_ref'} or type(arguments['input_ref']) is not str:
         raise DecisionBoundaryError('untrusted_tool_input')
     ref = arguments['input_ref']
     target = activity_input_target(session) if decision.tool_name == 'activity_predictor' else None
     if ref == 'user':
+        selected = effective_molecule(session.context)
+        if selected is not None and decision.tool_name in MOLECULAR_INPUT_TOOLS:
+            if decision.tool_name == 'activity_predictor':
+                payload = {'query': session.context.query, 'smiles': [selected.canonical_smiles]}
+                if target is not None:
+                    payload['target'] = target
+                return {'query': payload}, []
+            return {'query': selected.canonical_smiles}, []
         if target is not None:
             return {'query': {'query': session.context.query, 'target': target}}, []
         return {'query': session.context.query}, []
