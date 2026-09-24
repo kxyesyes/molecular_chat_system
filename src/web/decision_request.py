@@ -21,9 +21,6 @@ from src.agent.persistence.redaction import contains_secret_material
 
 _FIELDS = frozenset({'type', 'message', 'enable_tools', 'enable_rag', 'mol_count',
     'rag_count', 'temperature', 'timestamp', 'client_id', 'reference', 'selection'})
-_ACTION = re.compile(r'计算|预测|评估|分析|查询|搜索|查找|检索|生成|设计|优化|筛选|排序|对接|运行|执行|'
-    r'\b(?:calculate|compute|predict|assess|evaluate|analy[sz]e|find|search|retrieve|generate|design|'
-    r'optimi[sz]e|screen|rank|dock|run|execute)\b', re.I)
 _EXPLAIN = re.compile(r'^\s*(?:请)?(?:解释|介绍|什么是|讲解)|^\s*(?:please\s+)?'
     r'(?:explain|describe|define|what\s+(?:is|are))\b', re.I)
 _UNSUPPORTED = re.compile(r'生成|设计|优化|筛选|排序|反向|寻靶|对接|文献|知识库|溶解度|毒性|'
@@ -77,13 +74,25 @@ def _classify(query):
         raise DecisionAdmissionError('unsupported_scientific_request')
     explanation = _EXPLAIN.match(query)
     if explanation:
-        rest = query[explanation.end():]
-        # Topic nouns are not actions. Mixed explain+execute must not escape
-        # scientific admission through an explanation prefix.
-        if not (re.search(r'然后|再|同时|并|[,，;；。!?！？]|\b(?:then|and)\b', rest, re.I)
-                and _ACTION.search(rest)) and not re.search(
-                    r'\b(?:calculate|compute|predict|generate|run|execute)\b', rest, re.I):
+        clauses = [part.strip() for part in re.split(r'[\r\n;；。!?！？]+', query) if part.strip()]
+        if len(clauses) > 1:
+            # An explanation prefix has no authority over later statements,
+            # including verbs outside the known scientific-action vocabulary.
+            if all(_EXPLAIN.match(part) and _classify(part)[0] == 'chat' for part in clauses):
+                return 'chat', frozenset(), ()
+            raise DecisionAdmissionError('request_clarification_required')
+        part = clauses[0]
+        rest = part[_EXPLAIN.match(part).end():].strip()
+        # Closed nominal topics, not free text after an explanation prefix.
+        # Otherwise an unknown imperative needs no separator to bypass policy.
+        topics = '|'.join(_METRICS.values()) + (
+            r'|分子生成|分子对接|分子性质|分子属性|分子活性|类药性|靶点搜索'
+            r'|药物(?:分子)?设计|\bRAG\b'
+            r'|molecular\s+(?:generation|docking|properties|activity)|drug[ -]?likeness|target\s+search')
+        topic = r'(?:' + topics + r')(?:\s*(?:的(?:概念|原理)|是什么))?'
+        if re.fullmatch(topic + r'(?:\s*(?:和|及|、|\band\b)\s*' + topic + r'){0,7}', rest, re.I):
             return 'chat', frozenset(), ()
+        raise DecisionAdmissionError('request_clarification_required')
     if _UNSUPPORTED.search(query):
         raise DecisionAdmissionError('unsupported_scientific_request')
     metrics = tuple(name for name, pattern in _METRICS.items() if re.search(pattern, query, re.I))
@@ -96,30 +105,19 @@ def _classify(query):
         tools.add('activity_predictor')
     if re.search(r'靶点|\btarget\b', query, re.I) and re.search(r'查询|搜索|查找|\b(?:search|find|lookup)\b', query, re.I):
         tools.add('target_database_search')
-    if tools or _ACTION.search(query):
-        if not tools or _QUALIFIED.search(query):
-            raise DecisionAdmissionError('request_clarification_required')
-        # Every execution clause must name a supported obligation. A recognized
-        # first clause cannot hide an unknown second action. This is admission,
-        # not an ordered plan or a model/tool selector.
-        supported = r'性质|属性|理化|类药|成药|活性|靶点|\b(?:properties|property|activity|potency|target|lipinski|drug[ -]?likeness|pic50|ic50)\b'
-        actions = list(_ACTION.finditer(query))
-        for index, action in enumerate(actions):
-            tail = query[action.end():actions[index + 1].start() if index + 1 < len(actions) else len(query)]
-            if (action.group().casefold() in {'运行', '执行', 'run', 'execute'}
-                    or not re.search(supported + '|' + '|'.join(_METRICS.values()), tail, re.I)):
-                raise DecisionAdmissionError('request_clarification_required')
-        # A1 derives exact count from explicit subjects. Quantified prose needs
-        # a separate reviewed count grammar; do not silently discard its demand.
-        if re.search(r'(?<![第\d零一二两三四五六七八九十百])(?:\d+|[零一二两三四五六七八九十百]+)\s*个\s*(?:分子|化合物)|'
-                     r'\b(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+(?:molecules|compounds)\b', query, re.I):
+    if tools:
+        if _QUALIFIED.search(query):
             raise DecisionAdmissionError('request_clarification_required')
         # Target lookup with a molecular calculation needs B's typed bindings;
         # A1 cannot silently infer which target/molecule each action consumes.
         if 'target_database_search' in tools and len(tools) > 1:
             raise DecisionAdmissionError('request_clarification_required')
+        _require_complete_coverage(query, tools, metrics)
         return 'scientific', frozenset(tools), metrics
-    return 'chat', frozenset(), ()
+    if re.fullmatch(r'\s*(?:你好|您好|谢谢|再见|hi|hello|thanks|thank\s+you)[!！。.\s]*', query, re.I):
+        return 'chat', frozenset(), ()
+    # A1 has no reliable general intent classifier. Unknown does not mean chat.
+    raise DecisionAdmissionError('request_clarification_required')
 
 
 def _subjects(query, *, activity):
@@ -134,6 +132,56 @@ def _subjects(query, *, activity):
         return ()
     values = parse_activity_input(query, parser)[1] if activity else parse_molecular_smiles(query, parser)
     return tuple(values)  # Preserve spelling/order, not canonicalized fragments.
+
+
+def _require_complete_coverage(query, tools, metrics):
+    """Consume the whole supported request, not just recognized result nouns.
+
+    This is a closed, conservative surface for the existing four obligations,
+    not an NLP engine or an execution grammar. Any unconsumed text clarifies:
+    unknown endpoints, negatives and quantified prose need no deny vocabulary.
+    Only existing parsers may supply structure/target terminals. Nothing here
+    repairs, drops or changes the query sent to the real tools.
+    """
+    from src.agent.tools.molecular_input import _MARKER
+    from src.target_identifiers import TARGET_PATTERN
+
+    subjects = () if 'target_database_search' in tools else _subjects(
+        query, activity='activity_predictor' in tools)
+    # Case-sensitive, whole validated subjects; never match a chemical fragment
+    # inside a word or substitute a resolved molecule into the user's prose.
+    structure = re.compile(r'(?<![A-Za-z0-9_])(?:' + '|'.join(
+        re.escape(s) for s in sorted(set(subjects), key=len, reverse=True))
+        + r')(?![A-Za-z0-9_])') if subjects else None
+    obligations = {
+        'property_calculator': r'理化性质|性质|属性|\bpropert(?:y|ies)\b',
+        'drug_likeness_assessment': r'类药性|成药性|\b(?:lipinski|drug[ -]?likeness)\b',
+        'activity_predictor': r'活性|\b(?:activity|potency|pic50|ic50)\b',
+        'target_database_search': r'靶点结构|靶点|结构|\b(?:target|structures?)\b',
+    }
+    tokens = [*(_METRICS[m] for m in metrics), *(obligations[t] for t in sorted(tools)),
+        r'计算|预测|评估|分析|查询|搜索|查找|\b(?:calculate|compute|predict|assess|evaluate|analy[sz]e|search|find|lookup)\b',
+        # Only singular reference ordinals; exact range/ACK/owner checks remain
+        # in ScientificReferenceService. Counts/quantifiers are not terminals.
+        r'第(?:[一二三四五六七八九十]{1,3}|[1-9][0-9]?)个',
+        r'刚才|上一个|这个|该|分子|化合物|候选',
+        r'\b(?:previous|selected|first|second|third|molecules?|compounds?|candidates?)\b',
+        r'请|帮我|包含|然后|针对|的|和|及|与|并|对',
+        r'\b(?:please|molecular|the|of|for|and|then|with|including|against)\b',
+        r'\s+|[，,;；、。!?！？()（）\x22\x27`]',
+    ]
+    syntax = re.compile('|'.join('(?:' + token + ')' for token in tokens), re.I)
+    position = 0
+    while position < len(query):
+        match = structure.match(query, position) if structure is not None else None
+        if match is None and subjects:
+            match = _MARKER.match(query, position)
+        if match is None and tools & {'activity_predictor', 'target_database_search'}:
+            match = TARGET_PATTERN.match(query, position)
+        match = match or syntax.match(query, position)
+        if match is None:
+            raise DecisionAdmissionError('request_clarification_required')
+        position = match.end()
 
 
 def prepare_decision_request(payload, *, session_id, trace_id, references=None, config_generation=None):

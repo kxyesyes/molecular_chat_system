@@ -204,6 +204,37 @@ git diff --check
 
 Additionally compiled all five changed production files and three new tests with Python `compile(source, filename, 'exec')` in memory: **8 passed**, no bytecode written. Root `plans/2026-09-25-web-model-decision-entry.md` is absent; the corrected plan exists only here. Final diff scope is those 8 Python files plus this plan and the spec. No push, PR, CI run, full-suite run or live acceptance. Parent SPEC/QUALITY and publication are pending.
 
+### SPEC Galileo request-changes follow-up
+
+Review base: `aed3571e9e1a25f8c757dc937969ad04a424b98c`. Its 1061 passing focused tests are retained as history, not treated as coverage of the four newly reproduced gaps. Full Agent/full repository were never run by this worker; the parent retains the full queue after G2/ADMET/G1. A2 design in the separate `web-decision-runtime-plan` task is untouched.
+
+All RED probes call actual admission and, if accidentally admitted, run the actual ModelDecisionLoop/registry/Session with recorded real RDKit properties (plus the real likeness tool for positive controls). Only model decisions are scripted. The RED diagnostics report admitted kind/requirements, real completion and task acceptance. GREEN requires admission rejection and zero model/tool calls, not merely a later malformed tool result.
+
+| Group | Observed RED | Minimal correction / GREEN |
+|---|---|---|
+| Explanation followed by new execution | 11 failed / 8 passed, including LF, CR, CRLF and an unknown verb after semicolon | Every separate statement must be an independently admitted explanation; 19 passed at that checkpoint |
+| Unsupported parallel result | 8 failed / 3 known-positive controls passed; melting point and arbitrary other endpoints completed as MW-only | Full text coverage, not any recognized noun; 11 passed |
+| Explicit negative | 10 failed / 2 passed; 禁用/禁止/勿/不可/停用 and negative clauses dispatched RDKit | Negative/unknown text is not consumed by the positive admission surface; entire request clarifies; 12 passed |
+| Quantified request | 10 failed / 3 passed; 两/2 × 种/款/类/组/份 became exact count 1 | No prose counts/quantifier terminals; only whole subject-derived counts; 13 passed including real two-subject control |
+| Unknown chat/explanation fallback | Additional 10 failed / 31 passed, including unknown verbs without delimiters and after commas/connectors | Complete greetings/nominal topics only; uncertain free text clarifies, never inferred chat |
+
+Implementation choices for re-review:
+
+- The known tool/metric matches are only candidate obligations. No scientific request is admitted until all its text is covered by supported positive terminals; no result-name blacklist was expanded.
+- Structures are matched case-sensitively as complete values already validated by the existing parser. Target symbols use the existing shared identifier pattern, followed by existing target/activity validation. Coverage does not rewrite the dispatched query, bind fragments or alter scientific results.
+- Singular selected-reference ordinals remain permitted and still require the existing owner/ACK/range checks. Numeric/word counts with arbitrary units remain unconsumed and clarify; explicit validated batches still retain all subjects.
+- Negative requests reject wholly; a prepared request with an empty forbidden_tools list is never created for those rejected inputs. There is no known-subset execution.
+- A1's chat surface is now intentionally narrower: complete greetings or complete nominal explanations of bounded existing topics/metrics, up to eight coordinated topics. Multiple explanation statements each need an explicit explanation prefix. Unknown standalone actions and appended unknown imperatives do not default to chat. This may reject benign free-form requests; expanding it requires parent review and cannot be counted as already-complete P7 normal chat.
+- Source/test changes for this review are only `src/web/decision_request.py` and `tests/agent/test_web_decision_admission.py`. The original five-production/three-test A1 ceiling is unchanged. No changes to loop execution, permissions, public protocols, socket/UI/default activation, B, helpers, providers or assets.
+
+Intermediate A1 three-file focus: **171 passed in 11.70s**. Final named 14-file focused rerun and compile/diff-check evidence follow below; no full-suite authorization is inferred. Freeze for the original SPEC reviewer to re-check before QUALITY.
+
+Parent positive-control follow-up: the first closed nominal surface actually rejected `什么是药物分子设计`, `请解释 RAG 是什么`, `什么是药物设计` and `Explain RAG` (**4 RED**, 5 mixed-action controls already passed). With the parent's explicit authorization, added only the nominal project concepts 药物（分子）设计 and RAG. The resulting **9 passed** assert empty allowed/required tools, zero tool observations, one scripted model call for explanations and pre-model rejection for appended retrieval/design/unknown actions. It does not grant RAG retrieval or design execution and does not imply arbitrary explanations are admitted.
+
+The prior 14-file review focus reached **1138 passed in 97.88s**, before this nominal-topic expansion. The final A1 three-file focus after expansion and removing the now-unnecessary action-word fallback reached **180 passed**. These figures are separate checkpoints, not additive or full-suite results. The narrower behavior remains explicit: greetings and supported nominal project explanations work; other legitimate but uncovered free-form requests may clarify. Further coverage needs reviewed nominal/obligation support, not unsafe unknown-imperative fallback.
+
+Final post-correction/nominal-expansion verification: **1147 passed in 92.15s**, no skips, using the same isolated 14-file command listed above (not full Agent/full repository). All five A1 production files and three test files compiled in memory (**8 passed**, no bytecode); `git diff --check` passed. Relative to review base `aed3571`, the revision is limited to admission source, its existing test file, this plan and the spec. Local freeze only, no push or PR. Original SPEC re-review is pending, then independent QUALITY; no approval is claimed. A1 remains support-only, not P7 completion, and full testing stays in the parent's authorized queue.
+
 ## Deferred A2 — separate PR, not approved for this branch
 
 Normal `/ws` dispatch into WebDecisionEntry/ModelDecisionLoop; genuinely external normal chat; single reader lease and per-request current-model capture; app config epoch creation/replacement; cancel/drain before lease release; one socket receiver and active request; bounded events; owner-bound resume; existing candidate project/mount/ACK; safe per-socket conversational history and persistent status labels. Keep unsupported requests explicit. Preserve existing static workflow HTTP unchanged, add no HTTP route. No default activation until separately approved.
