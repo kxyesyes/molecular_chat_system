@@ -77,3 +77,13 @@ Focused command only, through the approved isolated test environment after check
 - Existing `EvaluationReport` has no top-level status member: aggregate verdict is `metrics.gate_status`, exit suggestion is `metrics.recommended_exit_code`. Per-case `EvaluationResult.status` is validation status, with raw input status retained in details. No `write_json()` invocation or live success certificate is produced.
 
 Execution/RED-GREEN ledger and exact focused node IDs are recorded in the P8 plan. Design gate is satisfied; next gate is parent-arranged dual review, not more implementation or full/live testing.
+
+## Parent follow-up: RDKit metric fallback risk
+
+Static source review after freeze `6ca2c5c` confirms `runner.py::chemistry_metrics` catches RDKit ImportError, sets `Chem=None`, and then counts nonempty strings as valid without parsing. Thus `valid_smiles_rate`, uniqueness/count metrics, or a passed label derived from them alone are **not real molecular-validity evidence**.
+
+P8-A does not call `chemistry_metrics`; it reuses only the scientific tool-order/provenance-completeness helpers. Its required truth checks and generic provenance checks validate report consistency, **not that RDKit was installed or executed**. A self-declared passed truth check wrapping fallback metrics must not be promoted to genuine RDKit proof. The immutable offline/live-verification/final-acceptance limitations remain unchanged.
+
+For the future authorized real collector, validity evidence must include the actual RDKit runtime version and successful parser/canonicalization/deduplication observations tied to the same candidate/input/output identities and execution trace, with fallback/unavailable status explicitly retained. Missing RDKit or absent execution observations blocks the real-validity gate; nonempty-string fallback is insufficient. This is a recorded acceptance requirement, not an implemented new assertion or an out-of-scope producer fix.
+
+No code/test changes or test runs for this follow-up; implementation freeze remains `6ca2c5c`. Parent-reported coordination context only (not independently queried): PR72/G2 open at `548baca`; 4C full running. Workers do not run full/live or inspect project assets, ambient environment values or user stores.
