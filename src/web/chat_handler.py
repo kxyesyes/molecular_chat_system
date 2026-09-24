@@ -11,10 +11,8 @@ from fastapi import WebSocket, WebSocketDisconnect
 
 from src.agent.persistence.redaction import (
     contains_secret_material,
-    contains_sensitive_text,
     redact_sensitive,
     sanitize_bounded,
-    sanitize_sensitive_text,
 )
 from src.agent.contracts import AgentResult, CandidateSet, ObservationStatus
 from src.agent.contracts.generation_request import (
@@ -26,7 +24,15 @@ from src.agent.contracts.generation_request import (
 from src.agent.routing.hybrid import SMILES_PATTERN
 from src.agent.utils.validators import InputValidator
 from src.web.prompt_budget import (
-    InputBudgetExceeded, STATUS_RESERVE, assemble, bounded_record, character_limit, validate_question,
+    InputBudgetExceeded, character_limit, validate_question,
+)
+from src.web import agent_result_presentation as result_presentation
+from src.web import chat_prompt_builder as prompt_builder
+from src.web.agent_result_presentation import (
+    _AGENT_FAILURE_FALLBACK,
+    _AGENT_FAILURE_CONTENT_MAX_CHARS,
+    _AGENT_FAILURE_WARNING_MAX_CHARS,
+    _AGENT_FAILURE_WARNING_LIMIT,
 )
 from src.web.models import generate_for_chat
 from src.web.model_lifecycle import model_request, finish_on_cancel
@@ -34,10 +40,6 @@ from src.web.rag_presentation import format_rag_context, rag_info_molecule
 
 logger = logging.getLogger(__name__)
 
-_AGENT_FAILURE_FALLBACK = "科学计算未成功完成，请检查输入或工具状态后重试。"
-_AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
-_AGENT_FAILURE_WARNING_MAX_CHARS = 256
-_AGENT_FAILURE_WARNING_LIMIT = 20
 _AGENT_EVENT_TEXT_MAX_CHARS = 512
 _AGENT_EVENT_KEY_MAX_CHARS = 128
 _AGENT_EVENT_MAX_DEPTH = 6
@@ -764,16 +766,7 @@ class ChatHandler:
 
     @staticmethod
     def _agent_failure_envelope() -> Dict[str, Any]:
-        return {
-            "success": False,
-            "status": "failed",
-            "final_answer": "",
-            "active_skill": "",
-            "trace_id": "",
-            "error": None,
-            "warnings": [],
-            "tool_result_sequence": [],
-        }
+        return result_presentation.failure_envelope()
 
     @staticmethod
     def _sanitize_agent_failure_text(
@@ -781,191 +774,25 @@ class ChatHandler:
         *,
         max_chars: int,
     ) -> tuple[str, bool]:
-        if not isinstance(value, str):
-            return "", False
-        value = value.strip()
-        if not value:
-            return "", False
-
-        redacted = redact_sensitive(value)
-        contains_sensitive = (
-            redacted != value or contains_sensitive_text(value)
-        )
-        sanitized, _ = sanitize_sensitive_text(value, max_chars=max_chars)
-        return sanitized, contains_sensitive
+        return result_presentation.sanitize_failure_text(value, max_chars=max_chars)
 
     @classmethod
     def _sanitize_agent_warnings(cls, raw_warnings: Any) -> list[str]:
-        warnings = []
-        if not isinstance(raw_warnings, list):
-            return warnings
-        for warning in raw_warnings[:_AGENT_FAILURE_WARNING_LIMIT]:
-            sanitized, sensitive = cls._sanitize_agent_failure_text(
-                warning,
-                max_chars=_AGENT_FAILURE_WARNING_MAX_CHARS,
-            )
-            if (
-                sensitive
-                or not sanitized
-                or sanitized.casefold() == "[redacted]"
-            ):
-                continue
-            warnings.append(sanitized)
-        return warnings
+        return result_presentation.sanitize_warnings(
+            raw_warnings, sanitize_text=cls._sanitize_agent_failure_text,
+        )
 
     @classmethod
     def _agent_presentation_status(cls, agent_result: Mapping[str, Any]) -> str:
-        """Normalize only the Web projection, never the execution result."""
-        status = agent_result.get("status")
-        if "status" in agent_result:
-            if not isinstance(status, str) or status not in {
-                "completed", "partial", "failed", "rejected", "cancelled",
-            }:
-                return "failed"
-            if status in {"failed", "rejected", "cancelled"}:
-                return status
-        if status == "partial" or agent_result.get("partial") is True:
-            return "partial"
-        return "completed" if agent_result.get("success") is True else "failed"
+        return result_presentation.presentation_status(agent_result)
 
     @classmethod
     def _partial_agent_projection(cls, agent_result: Mapping[str, Any]) -> Dict[str, Any]:
-        """Keep scientific prose intact; project only bounded, safe failure fields."""
-        truncated = False
-
-        def text(value: Any, limit: int = 128) -> str:
-            nonlocal truncated
-            if isinstance(value, str) and contains_secret_material(value):
-                return ""
-            if isinstance(value, str) and len(value.strip()) > limit:
-                truncated = True
-            safe, sensitive = cls._sanitize_agent_failure_text(value, max_chars=limit)
-            return "" if sensitive else safe
-
-        def error_fields(raw: Any) -> Dict[str, str] | None:
-            if isinstance(raw, Mapping):
-                return {
-                    "code": text(raw.get("code")),
-                    "message": text(raw.get("message"), _AGENT_FAILURE_CONTENT_MAX_CHARS),
-                }
-            if isinstance(raw, str):
-                return {"code": "", "message": text(raw, _AGENT_FAILURE_CONTENT_MAX_CHARS)}
-            return None
-
-        failed_steps = []
-
-        def add_step(raw: Any, *, tool_name: Any = "", skipped: bool = False) -> None:
-            nonlocal truncated
-            if not isinstance(raw, Mapping):
-                return
-            try:
-                # As with candidate cards, malformed observations must not
-                # discard independent scientific evidence from this run.
-                raw = dict(raw)
-            except Exception:
-                logger.warning("Skipped malformed partial step metadata")
-                return
-            status = raw.get("status")
-            allowed = {"failed", "rejected", "cancelled", "partial", "skipped", "skipped_precondition"}
-            if not isinstance(status, str) or status not in allowed:
-                if skipped:
-                    status = "skipped"
-                elif raw.get("success") is False:
-                    status = "failed"
-                else:
-                    return
-            if len(failed_steps) >= _AGENT_FAILURE_WARNING_LIMIT:
-                truncated = True
-                return
-            error = error_fields(raw.get("error")) or {}
-            step_message = (
-                text(raw.get("message"), _AGENT_FAILURE_CONTENT_MAX_CHARS)
-                or error.get("message")
-                or (text(raw.get("reason"), _AGENT_FAILURE_CONTENT_MAX_CHARS) if skipped else "")
-                or "未提供可安全展示的步骤说明。"
-            )
-            failed_steps.append({
-                "step_id": text(raw.get("step_id")),
-                "tool_name": text(raw.get("tool_name", tool_name)),
-                "status": status,
-                "message": step_message,
-                "error_code": error.get("code", ""),
-            })
-
-        sequence = agent_result.get("tool_result_sequence")
-        if isinstance(sequence, list):
-            for observation in sequence:
-                add_step(observation)
-        else:
-            tool_results = agent_result.get("tool_results")
-            if isinstance(tool_results, Mapping):
-                for tool_name, observation in tool_results.items():
-                    add_step(observation, tool_name=tool_name)
-        metadata = agent_result.get("metadata")
-        if not isinstance(metadata, Mapping):
-            # Supervisor's compatibility envelope retains the typed result,
-            # whose runtime metadata is not copied to the top level.
-            result = agent_result.get("agent_result")
-            if isinstance(result, AgentResult):
-                metadata = result.metadata
-        if isinstance(metadata, Mapping):
-            skipped_steps = metadata.get("skipped_steps")
-            if isinstance(skipped_steps, list):
-                for step in skipped_steps:
-                    add_step(step, skipped=True)
-
-        trace_id = text(agent_result.get("trace_id"))
-        active_skill = text(agent_result.get("active_skill"))
-        error = error_fields(agent_result.get("error"))
-        raw_warnings = agent_result.get("warnings")
-        # Guard original strings before the legacy sanitizer truncates them;
-        # its narrower credential grammar is retained for other consumers.
-        warnings = cls._sanitize_agent_warnings([
-            warning for warning in raw_warnings[:_AGENT_FAILURE_WARNING_LIMIT]
-            if isinstance(warning, str) and not contains_secret_material(warning)
-        ]) if isinstance(raw_warnings, list) else []
-        if isinstance(raw_warnings, list):
-            truncated |= len(raw_warnings) > _AGENT_FAILURE_WARNING_LIMIT or any(
-                isinstance(warning, str) and len(warning.strip()) > _AGENT_FAILURE_WARNING_MAX_CHARS
-                for warning in raw_warnings[:_AGENT_FAILURE_WARNING_LIMIT]
-            )
-
-        parts = ["部分完成，并非全部步骤成功。"]
-        body = agent_result.get("final_answer")
-        if isinstance(body, str) and body:
-            # Scan the original body, but never substitute numbers or truncate
-            # scientific evidence using the metadata text sanitizer.
-            if contains_secret_material(body):
-                parts.append("工具正文含敏感信息，出于安全原因未展示；请检查工具输出。")
-            else:
-                parts.append(body)
-        if failed_steps:
-            parts.append("未完成步骤（失败、部分完成或跳过）：")
-            for step in failed_steps:
-                label = step["step_id"] or "未命名步骤"
-                if step["tool_name"]:
-                    label += f" ({step['tool_name']})"
-                parts.append(f"- {label} [{step['status']}]：{step['message']}")
-        elif warnings or (error and any(error.values())):
-            parts.append("未提供未完成步骤明细。")
-        else:
-            parts.append("部分结果原因未提供；不能据此认为其余步骤已完成。")
-        if error and any(error.values()):
-            parts.append("错误说明：" + "：".join(value for value in error.values() if value))
-        if warnings:
-            parts.append("警告：\n" + "\n".join(f"- {warning}" for warning in warnings))
-        if truncated:
-            parts.append("摘要已截断，以上未列出全部元信息或未完成步骤。")
-        return {
-            "content": "\n\n".join(parts),
-            "status": "partial",
-            "partial": True,
-            "trace_id": trace_id,
-            "active_skill": active_skill,
-            "warnings": warnings,
-            "error": error,
-            "failed_steps": failed_steps,
-        }
+        return result_presentation.partial_projection(
+            agent_result, sanitize_text=cls._sanitize_agent_failure_text,
+            sanitize_warnings=cls._sanitize_agent_warnings,
+            on_malformed_step=lambda: logger.warning("Skipped malformed partial step metadata"),
+        )
 
     async def _send_partial_agent_result(
         self, websocket: WebSocket, agent_result: Mapping[str, Any],
@@ -981,47 +808,9 @@ class ChatHandler:
 
     @classmethod
     def _agent_failure_content(cls, agent_result: Dict[str, Any]) -> str:
-        """Select a safe, authoritative message for a failed Agent run."""
-
-        def safe_content(value: Any) -> tuple[str, bool]:
-            return cls._sanitize_agent_failure_text(
-                value,
-                max_chars=_AGENT_FAILURE_CONTENT_MAX_CHARS,
-            )
-
-        final_answer, sensitive = safe_content(agent_result.get("final_answer"))
-        if sensitive:
-            return _AGENT_FAILURE_FALLBACK
-        if final_answer and final_answer.casefold() not in {
-            "workflow failed", "no workflow steps were executed"
-        }:
-            return final_answer
-
-        error = agent_result.get("error")
-        if isinstance(error, Mapping):
-            error_message, sensitive = safe_content(error.get("message"))
-            if sensitive:
-                return _AGENT_FAILURE_FALLBACK
-            if error_message:
-                return error_message
-
-        sequence = agent_result.get("tool_result_sequence")
-        if isinstance(sequence, list):
-            for result in sequence:
-                if not isinstance(result, Mapping):
-                    continue
-                is_failed = result.get("success") is False or result.get(
-                    "status"
-                ) in {"failed", "rejected", "cancelled"}
-                if not is_failed:
-                    continue
-                result_message, sensitive = safe_content(result.get("message"))
-                if sensitive:
-                    return _AGENT_FAILURE_FALLBACK
-                if result_message:
-                    return result_message
-
-        return _AGENT_FAILURE_FALLBACK
+        return result_presentation.failure_content(
+            agent_result, sanitize_text=cls._sanitize_agent_failure_text,
+        )
 
     async def _finish_terminal_agent_failure(
         self,
@@ -1385,32 +1174,9 @@ class ChatHandler:
         )
     
     def _format_rag_context(self, molecules: List[Dict[str, Any]]) -> str:
-        """Budget complete records before applying the shared RAG presentation."""
-        if not molecules:
-            return ""
-        limit = character_limit(self.config, section="rag")
-        notice = "\n[RAG 记录因预算整条省略，不能推断其内容。]"
-        available = max(0, limit - len(notice))
-        included = []
-        result = ""
-        omitted = False
-        for mol in molecules:
-            record = bounded_record(mol, available - len(result))
-            if record is None:
-                omitted = True
-                continue
-            # Only bounded JSON-compatible values reach the display formatter;
-            # keep original retrieval records untouched for rag_info/provenance.
-            candidate = included + [json.loads(record)]
-            rendered = format_rag_context(candidate)
-            if len(rendered) > available:
-                omitted = True
-                continue
-            included = candidate
-            result = rendered
-        if omitted and len(notice) <= limit:
-            result += notice
-        return result
+        return prompt_builder.format_budgeted_rag_context(
+            molecules, config=self.config, formatter=format_rag_context,
+        )
 
     def _input_limit(self) -> int:
         return character_limit(self.config, bool(getattr(self.model, "provider_name", None)))
@@ -1419,20 +1185,10 @@ class ChatHandler:
                      retrieved_molecules: List[Dict[str, Any]],
                      conversation_history: List[Dict[str, Any]] | None = None) -> str:
         history = conversation_history if conversation_history is not None else self.conversation_history
-        history_cap = character_limit(self.config, section="history")
-        blocks = [("RAG 检索证据", rag_context, character_limit(self.config, section="rag"))]
-        # Most recent complete turns take priority. Never cut a SMILES/JSON value.
-        for entry in reversed(history[-2:]):
-            user, assistant = entry.get("user", ""), entry.get("assistant", "")
-            if len(user) + len(assistant) + 20 > history_cap:
-                notice = "历史记录因预算整轮省略"
-                blocks.append(("历史", notice, history_cap))
-                history_cap = max(0, history_cap - len(notice) - 6)
-                continue
-            text = "用户: " + user + "\n助手: " + assistant
-            blocks.append(("历史", text, history_cap))
-            history_cap -= len(text) + len("历史") + 4
-        return assemble(user_message, self._input_limit(), blocks, chronological_history=True)
+        return prompt_builder.build_chat_prompt(
+            user_message, rag_context, history=history, config=self.config,
+            input_limit=self._input_limit,
+        )
 
     def _model_max_tokens(self, model=None) -> int:
         """Select an output budget without leaking local GPU limits to remote APIs."""
@@ -1516,19 +1272,7 @@ class ChatHandler:
     def _build_prompt_with_agent(self, user_message: str, agent_response: str,
                                 rag_context: str, retrieved_molecules: List[Dict[str, Any]],
                                 agent_result: Mapping | None = None) -> str:
-        result = agent_result or {}
-        # Preserve actual limitations separately from the optional narrative.
-        keys = ("success", "partial", "status", "warnings", "error", "errors",
-                "provenance", "tool_provenance", "evidence", "quality", "artifacts",
-                "tool_results", "tool_result_sequence", "tool_results_by_step",
-                "tools_used", "trace_id")
-        metadata = bounded_record({key: result[key] for key in keys if key in result},
-                                  STATUS_RESERVE - 80)
-        if metadata is None:
-            raise InputBudgetExceeded("工具来源或错误信息超过解读预算")
-        state = "\n工具状态与来源（逐项核对，不可推断全部成功）：\n" + metadata + "\n"
-        blocks = [
-            ("工具证据（保留来源和错误）", agent_response, character_limit(self.config, section="tool")),
-            ("RAG 检索证据", rag_context, character_limit(self.config, section="rag")),
-        ]
-        return assemble(user_message, self._input_limit(), blocks, status=state)
+        return prompt_builder.build_agent_prompt(
+            user_message, agent_response, rag_context, config=self.config,
+            input_limit=self._input_limit, agent_result=agent_result,
+        )
