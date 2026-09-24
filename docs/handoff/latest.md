@@ -1,5 +1,12 @@
 # Latest handoff
 
+## T09：科研引用契约与存储第一增量（2026-09-24）
+
+已确认设计后按TDD实施，独立分支 `codex/scientific-reference-continuity`。
+固定24小时、展示顺序ACK、会话归属、来源版本、科学Validator与原子SQLite边界已实现；
+不新增表、不接入首页、不启用模型。失败尝试、准确测试和后续未完成范围见
+[本批交接](scientific-reference-storage.md)。完整T09仍需Web/工具输入接线和全链路验收。
+
 ## 英文候选筛选短语（2026-09-24，本地独立分支）
 
 `codex/target-selection-phrase-pr` 修复句尾 `and/逗号 select top N` 被误当未知靶点的问题。
