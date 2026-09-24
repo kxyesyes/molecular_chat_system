@@ -337,3 +337,55 @@ node --check src/web/static/js/home/main.js
 | Original whole-line Base extraction tests | Retain current whole-input regression suites in Task 7; global extractor/optimization-input implementation remains parent-owned G2, not a G1 code change. |
 
 No application code or tests were written/run in the design turn. The audit's former passing counts are not this plan's implementation evidence. Parent review is the next action.
+
+## Post-QUALITY root correction + PR76 integration — bounded GREEN
+
+Parent reports original QUALITY Descartes **APPROVE** for the one-root-test + two-doc correction (7 root + 5 Node, unchanged function/class ASTs, 16 original G1 files byte-equal). Parent committed that exact correction as **`48a5e316a8150fc149c451b875b3c326808f48fc`**, then merged main #76 **`5ad08ac5f2ad2dda33e8b310937fae35ddfb175a`**. This task began and tested on clean **`f1a3861664c6907c8c28496113804c5b353bc6a5`**, tree **`71319f7cc26e3607148a224c9610422f626e6a7f`**. No merge/code/test edits were performed in this verification turn.
+
+The first PR77 root CI failure remains recorded above: **run 36069659921 / job 107867398126**, and its local **1 failed / 6 passed** reproduction. The parent-approved literal correction does not erase that failure. Earlier Agent-only full never covered this root case. These new local results are not an assertion that remote CI reran/passed or that PR77 may merge.
+
+### Exact selected commands and actual results
+
+Use the existing sanitized RAG `$runner` extraction/repo replacement shown in the PR77 correction section above; same MedChat interpreter, temporary runtime cwd/config/state, normal conftest, real-service switches off and child options `-q -p no:cacheprovider --tb=short -rs`. The following are the exact complete selections, not 11-file/1316 or full reruns:
+
+```powershell
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" tests/test_static_placeholder_cleanup.py
+
+$aggregation = @(
+    'tests/agent/test_evaluation_aggregation.py',
+    'tests/agent/test_evaluation_runner.py::test_scientific_stability_summary_reports_latency_and_failure_types',
+    'tests/agent/test_evaluation_runner.py::test_replay_never_promotes_original_failure_to_passed',
+    'tests/agent/test_evaluation_runner.py::test_replay_fails_skill_tool_and_forbidden_tool_contract_violations',
+    'tests/agent/test_evaluation_runner.py::test_replay_reports_strict_status_rates_separately_from_completion_rate',
+    'tests/agent/test_evaluation_runner.py::test_workflow_score_penalizes_order_and_fabrication',
+    'tests/agent/test_real_acceptance_checks.py::test_structured_provenance_score_requires_input_hash_summaries_and_event_trace',
+    'tests/agent/test_real_acceptance_checks.py::test_tool_provenance_uses_persisted_execution_input_and_hash'
+)
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" @aggregation
+
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" tests/agent/test_evidence_report_contract.py tests/agent/test_evidence_report_frames.py tests/agent/test_evidence_report_snapshot.py
+
+node tests/home_agent_task_panel_test.js
+node tests/home_workflow_completion_behavior_test.js
+node tests/home_structured_molecule_render_test.js
+node tests/home_scientific_references_test.js
+node tests/home_evidence_report_test.js
+```
+
+| Actual selection | Result |
+|---|---|
+| Entire root static module, session 24189 first invocation | **7 passed, 17.14s**, exit 0 |
+| Preliminary aggregator-file-only invocation, same session | **313 passed, 2.63s**, exit 0 |
+| Correct original aggregation selection above: 313 aggregator + 7 existing pure evaluation nodes | **320 passed, 2.71s**, exit 0 |
+| Exactly the three named G1 contract/frame/snapshot files, session 24189 last invocation | **131 passed, 43.34s**, exit 0 |
+| Five unchanged Node scripts, including original homepage cache-token assertion | All exit 0 |
+
+No warnings, skips or failures in these selected runs. The preliminary 313 was not misreported as 320: inspection of the merged #76 plan established its original 320 command includes seven additional pure nodes, so the exact 320 selection was then executed. No additional complete evaluation module, full Agent, root full, prior 11-file/1316 batch or minimum-profile rerun. The G1 three-file selection includes the real local RDKit/SQLite→captured frames→actualMain DOM/ACK cases; aggregation uses synthetic in-memory evidence and does not establish live scientific execution.
+
+### Reviewed core equality before/after verification
+
+- Original **16 G1 non-doc files** exactly match reviewed `400beaf`; their byte aggregate remains **`2c48070b69bff63d1bbfcb252c2ffbc709e62e5a5131ae16d2f548584205d2c4`**.
+- The **17th**, `tests/test_static_placeholder_cleanup.py`, exactly matches approved `48a5e31`; its only difference from `400beaf` is the authorized `evidence_report.js` expected-list insertion. Byte SHA-256 **`c7acc50220995ea61a2a4ca700d85e864a400ec367b645275e11841ee4e0f0d4`**.
+- Sorted 17-path `path + " " + lowercase byte SHA-256 + LF` UTF-8 aggregate: **`8c2f8e55c1c5a45d5519ef2d01c95489fd90392eb9ddfb6740ea591e824ba0d0`**.
+- Both aggregation files match exact reviewed **`0d5ac1e4c79b51bbe76fbdd2e78f05ae1e818209`**; no diff in `src/agent/evaluation/aggregation.py` or `tests/agent/test_evaluation_aggregation.py`. That reviewed tree and main #76 both resolve to **`ea87b0d911f0e369eb8f2a5a584aee4bcfbc301d`**. Working-file byte hashes are respectively **`14ae0da3afccefb9857e38497a429b5664f79b016daf73d657ff37e3c2733fb6`** and **`828151e4040c80fe55b8c3ef0a8d6ae6b5a63dc24e844d7ab9fb6c1af3cd9a21`**.
+- HEAD/tree and clean state remained fixed through tests; equality was rechecked afterward. Only **this plan** is appended after verification, explicitly staged and locally committed under parent's authorization. No other doc/code/test changes, push/PR action, network/provider/model activation or original dirty-tree/asset access. The final documentation commit does not change the tested core; parent retains publication/merge control.
