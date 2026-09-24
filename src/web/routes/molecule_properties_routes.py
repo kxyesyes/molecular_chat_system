@@ -54,41 +54,15 @@ def setup_molecule_properties_routes(app, *, _support):
                     'admet': {}
                 }
                 
-                # 尝试使用ADMET预测工具
-                try:
-                    from src.agent.tools import ADMETPredictor
-                    admet_predictor = ADMETPredictor()
-                    
-                    # 直接调用内部方法，传入已验证的mol对象
-                    if hasattr(admet_predictor, '_predict_admet_properties'):
-                        admet_result = admet_predictor._predict_admet_properties(mol)
-                        if admet_result:
-                            properties['admet'] = {
-                                'bbb_penetration': admet_result.get('bbb_penetration', 'Unknown'),
-                                'cyp_inhibition': admet_result.get('cyp_inhibition', 'Unknown'),
-                                'hepatotoxicity': admet_result.get('hepatotoxicity', 'Unknown'),
-                                'solubility': admet_result.get('solubility', 'Unknown'),
-                                'bioavailability': admet_result.get('bioavailability', 'Unknown')
-                            }
-                    else:
-                        # 如果没有内部方法，使用简单的规则预测
-                        properties['admet'] = {
-                            'bbb_penetration': 'High' if properties['basic']['tpsa'] < 90 else 'Low',
-                            'cyp_inhibition': 'Low' if properties['basic']['molecular_weight'] < 400 else 'Moderate',
-                            'hepatotoxicity': 'Low',
-                            'solubility': 'Good' if properties['basic']['logp'] < 3 else 'Moderate',
-                            'bioavailability': 'High' if properties['basic']['qed'] > 0.5 else 'Moderate'
-                        }
-                except Exception as admet_error:
-                    _support.logger.warning(f"ADMET预测失败，使用简单规则: {admet_error}")
-                    # 使用简单的规则预测
-                    properties['admet'] = {
-                        'bbb_penetration': 'High' if properties['basic']['tpsa'] < 90 else 'Low',
-                        'cyp_inhibition': 'Low' if properties['basic']['molecular_weight'] < 400 else 'Moderate',
-                        'hepatotoxicity': 'Low',
-                        'solubility': 'Good' if properties['basic']['logp'] < 3 else 'Moderate',
-                        'bioavailability': 'High' if properties['basic']['qed'] > 0.5 else 'Moderate'
-                    }
+                # 本接口没有受支持的ADMET计算路径；基础性质不构成这些结论的证据。
+                properties['admet'] = dict.fromkeys((
+                    'bbb_penetration', 'cyp_inhibition', 'hepatotoxicity',
+                    'solubility', 'bioavailability'), 'Unknown')
+                properties['admet_metadata'] = {
+                    'availability': 'unavailable',
+                    'method': 'not_calculated',
+                    'warning': 'ADMET未计算；本接口仅计算基础理化性质，不能据此判断毒性、CNS安全性或体内表现。',
+                }
                 
                 _support.logger.info(f"属性计算完成: {len(properties['basic'])} 个基础属性, {len(properties['admet'])} 个ADMET属性")
                 

@@ -39,6 +39,83 @@ def analysis_rows(name, smiles=("CCO",)):
     return rows
 
 
+@pytest.mark.parametrize("leaf", ["pains", "brenk", "zinc"])
+@pytest.mark.parametrize("value", [None, False, True])
+@pytest.mark.parametrize("form", ["raw", "normalized", "snapshot"])
+@pytest.mark.parametrize("state", ["succeeded", "partial", "failed"])
+def test_admet_three_alerts_tristate_preserves_observation(leaf, value, form, state):
+    rows = analysis_rows("admet_predictor")
+    rows[0]["admet"]["medicinal"][leaf] = value
+    raw = {"success": state == "succeeded", "status": state, "data": rows}
+    if form == "normalized":
+        raw = ToolResult("admet_predictor", state == "succeeded", "fixture", data=rows, status=ObservationStatus(state))
+    elif form == "snapshot":
+        raw = ToolResult.error_result("admet_predictor", AgentErrorCode.INTERNAL_ERROR, "fixture", {"raw_result": raw})
+    tool = CountingTool("admet_predictor", raw)
+    expected = execute_tool_compat(CountingTool(tool.name, deepcopy(raw)), "CCO")
+    registry = build_tool_registry([tool])
+    try:
+        result = registry.resolve(tool.name).execute("CCO")
+        expected.elapsed_ms = result.elapsed_ms
+        assert result == expected
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize("leaf", ["pains", "brenk", "zinc"])
+@pytest.mark.parametrize("value", [0, 1, "false", [], {}, "missing"])
+def test_nullable_alerts_remain_required_and_strict(leaf, value):
+    rows = analysis_rows("admet_predictor")
+    if value == "missing":
+        del rows[0]["admet"]["medicinal"][leaf]
+    else:
+        rows[0]["admet"]["medicinal"][leaf] = value
+    tool = CountingTool("admet_predictor", {"success": True, "data": rows})
+    registry = build_tool_registry([tool])
+    try:
+        invalid(registry.resolve(tool.name).execute("CCO"))
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize("section,leaf", [
+    ("pharmacokinetics", "blood_brain_barrier_permeant"),
+    ("physicochemical", "num_heavy_atoms"), ("physicochemical", "molecular_weight"),
+    ("solubility", "log_s_esol"), ("medicinal", "synthetic_accessibility"),
+    ("druglikeness", "ghose"), ("medicinal", "leadlikeness"),
+])
+def test_other_admet_known_leaves_never_become_nullable(section, leaf):
+    rows = analysis_rows("admet_predictor")
+    rows[0]["admet"][section][leaf] = None
+    tool = CountingTool("admet_predictor", {"success": True, "data": rows})
+    registry = build_tool_registry([tool])
+    try:
+        invalid(registry.resolve(tool.name).execute("CCO"))
+    finally:
+        registry.close()
+
+
+@pytest.mark.parametrize("leaf", ["pains", "brenk", "zinc", "blood_brain_barrier_permeant"])
+@pytest.mark.parametrize("missing", [True, False])
+def test_adme_py_sparse_nulls_are_limited_to_uncomputed_alerts(leaf, missing):
+    props = {"prediction_method": "adme_py", "backend_version": "fixture"}
+    for section in ("physicochemical", "solubility", "lipophilicity", "pharmacokinetics", "druglikeness", "medicinal"):
+        props[section] = {}
+    if not missing:
+        props["pharmacokinetics" if leaf == "blood_brain_barrier_permeant" else "medicinal"][leaf] = None
+    raw = {"success": True, "data": [{"smiles": "CCO", "admet": props}]}
+    tool = CountingTool("admet_predictor", raw)
+    registry = build_tool_registry([tool])
+    try:
+        result = registry.resolve(tool.name).execute("CCO")
+        if leaf == "blood_brain_barrier_permeant" and not missing:
+            invalid(result)
+        else:
+            assert result.success and result.data == raw["data"]
+    finally:
+        registry.close()
+
+
 class CountingTool:
     def __init__(self, name, raw):
         self.name, self.raw = name, raw
