@@ -12,6 +12,8 @@ Work package 2 of the user-approved remaining work through step 8. The user sele
 
 Class-method helper override behavior is preserved by passing the current class sanitization hooks to shared functions where required, rather than calling ChatHandler from a new module. New modules must not import ChatHandler or app.py. Compatibility wrappers are not a second implementation.
 
+Read-only review found two additional compatibility hooks: `src.web.chat_handler.format_rag_context` is patched by an existing budget test, so the wrapper passes that current callable; effective input limit must be evaluated at its original point, not eagerly before section-budget/metadata checks. Accept a lazy limit callback at the pure assembly boundary to preserve exception ordering. Existing malformed-step warning is emitted by a caller-owned diagnostic callback at the same point; the pure module has no logger, network, database or model dependency. Direct callers may omit the diagnostic observer. No input mapping/history is mutated.
+
 ## Invariants
 
 - Exact status precedence for completed/partial/failed/rejected/cancelled, invalid statuses and legacy success/partial booleans stays unchanged.
