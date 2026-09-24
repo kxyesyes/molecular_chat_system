@@ -12,7 +12,21 @@
 
 ## Review state and baseline
 
+### Current authorized integration/full gate — GREEN at `fcb84bd`
+
+Parent reports Faraday SPEC **APPROVE (407 + 5 Node)** and Descartes QUALITY **APPROVE (413 + 5 Node + 3 SQLite/race probes)** for `a90581b`, 20 hashes unchanged. These are independent parent-supplied review results, not local retests. No G1 implementation/test changes after that approval.
+
+- [x] Verify clean branch and local exact PR73 main `0295e9960b15c850bb212e434da66824181ef546`; merge as `5086b86376282937e2c660ba05118cca4fffc77c`, no conflicts/20-path overlap. Original 20 focus + 13 collision files: **2421 passed, 7 warnings**; five Node passed.
+- [x] Before full started, verify parent-authorized PR75 `7b5611fed039aa7aebde62063f45e45e965cf23a` and tree `6f42e12156d80c88738ec2eba42caed94994d6cd`; merge as **`fcb84bd4bf207593078d8c4871f49539b3641e93`**, no conflicts or change to the 20 G1 files. Rerun 20 + 14 collision files including inventory: **2437 passed, 7 warnings**; five Node passed. ADMET74 not merged.
+- [x] Reuse retained lowest web profile, assert **Pydantic 2.5.0 / FastAPI 0.104.1**; six G1/boundary key files **634 passed, 10 warnings**, including actual capture→DOM/ACK and partial/unavailable cases. No install/network/model activation.
+- [x] Lock clean HEAD above/tree **`6c2ffb2ee666c1d99f9bec3df3c2abb60d1080aa`**; run exactly one isolated **`tests/agent`** full, session **62470**: **6914 passed, 2 skipped, 7 warnings, 333.83s, exit 0**. Skips: Windows directory symlinks unavailable (`test_decision_chat_acceptance.py:149`) and disabled performance test (`test_harness_shadow.py:277`). No root full or second Agent full.
+- [x] No merges/edits during full. Release heavy slot immediately on completion to parent P8/A1 scheduling. Recheck unchanged HEAD/tree/clean/20 byte hashes before doc writes; local main still exact PR75, zero new delta. Full is not relabelled onto a later revision.
+- [x] Record exact source hashes, commands, 20-path impact and attributed approvals in the [integration handoff](../../handoff/2026-09-25-g1-evidence-report-freeze.md#authorized-main-integration-and-one-full-agent-run--green). Only this plan and that G1 handoff are edited after full; explicit local doc commit is allowed. Source/test aggregate remains `2c48070b69bff63d1bbfcb252c2ffbc709e62e5a5131ae16d2f548584205d2c4`.
+- [ ] Parent's publication/final integration decision. No push/PR authorized; future main deltas need their own light checks. Static/live-only scope, G2/recovery and P7 ownership unchanged; historical sandbox exact cause remains unknown.
+
 ### Current SPEC2 freeze — revision base `bf4a2cf`
+
+Historical pre-integration revision record; later dual approval/full authorization and results above supersede its then-pending gates.
 
 Parent reports the original two P2 findings closed, then authorized minimal TDD fixes for two more approved-spec gaps and a local commit after focused freeze. No full Agent/network/push; parent retains SPEC/QUALITY approval and integration authority. Reviewer-reported 348 passes are not counted as a local run.
 

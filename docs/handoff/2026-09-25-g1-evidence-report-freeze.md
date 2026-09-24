@@ -1,6 +1,72 @@
 # G1 static evidence report — freeze for parent SPEC → QUALITY
 
-Date: 2026-09-25. Current status: **Parent reports SPEC2 closed the original two P2 findings; two further approved-spec gaps are now minimally fixed and locally verified, frozen for parent/SPEC review.** Revision base is `bf4a2cf55ffa34e96c3821d4e0c6ca5bdcf05422`; parent authorized a local freeze commit after focused verification, not publication. QUALITY, full Agent and integration remain pending. This is not closure of all package 6 features or packages 1–8, not a dynamic-entry release, and not true scientific/model acceptance.
+Date: 2026-09-25. Current status: **G1 `a90581b` dual-approved per parent; authorized local PR73 + PR75 main integration and the single isolated full Agent run are GREEN.** Full snapshot is `fcb84bd4bf207593078d8c4871f49539b3641e93`; heavy slot released. Parent retains final integration/publication authority. This is not closure of all package 6 features or packages 1–8, not a dynamic-entry release, and not true scientific/model acceptance. Earlier review-pending restrictions/results below are historical and superseded by the integration record immediately below.
+
+## Authorized main integration and one full Agent run — GREEN
+
+Parent reports **SPEC Faraday APPROVE (407 + 5 Node)** and **QUALITY Descartes APPROVE (413 + 5 Node + 3 SQLite/race probes)** for `a90581b90cbef9b7dad4be98a7a450f086d9b6e9`, with 20 hashes unchanged. These are attributed review results, not tests rerun by this task. The approved G1 source/test bytes remain unchanged through both integrations and the full run.
+
+### Exact integration lineage / scope
+
+- Starting branch `codex/historical-residual-disposition` was clean at `a90581b`.
+- Local `origin/main` exactly matched authorized PR73 commit `0295e9960b15c850bb212e434da66824181ef546`. Merged without conflicts as **`5086b86376282937e2c660ba05118cca4fffc77c`** (tree `488a719aa8e204576fca961b2f8ca899337ff9b1`). PR69–73 changed 34 files relative to G1's previous main `e173d43`; zero overlap with the 20 G1 paths.
+- While the first **focus**, not full, was running, parent authorized PR75 inventory test/docs delta `7b5611fed039aa7aebde62063f45e45e965cf23a`. Local ref, commit and tree **`6f42e12156d80c88738ec2eba42caed94994d6cd`** matched the supplied values. Waited for that focus to finish, then merged without conflicts as **`fcb84bd4bf207593078d8c4871f49539b3641e93`** (tree **`6c2ffb2ee666c1d99f9bec3df3c2abb60d1080aa`**).
+- PR75 added `docs/AGENT_TOOL_CONTRACTS.md`, its plan and `tests/agent/test_tool_contract_inventory.py`, and updated the parent's `remaining-through-step8.md`; these four upstream changes were merged, not edited here. Zero overlap with G1's 20 paths; inventory contributes 16 tests.
+- No production conflict, manual resolution, fixture relaxation or G1 implementation edit. After full and before documentation, HEAD/tree/clean state and all 20 byte fingerprints matched the pre-full lock. Local `origin/main` was still exact `7b5611f`, with **zero new main delta**; no fetch/network/extra merge needed. ADMET PR74 was not included. No original dirty-tree/asset access or edits, push, PR, deployment or model/server activation.
+
+### Actual integration verification
+
+| Stage / exact snapshot | Result |
+|---|---|
+| Original 20 focus + 13 collision files at `5086b86`, session 19387 | **2421 passed, 7 warnings, 98.48s**, exit 0 |
+| Rerun original 20 focus + 14 collision files (including PR75 inventory) at `fcb84bd`, session 73704 | **2437 passed, 7 warnings, 100.47s**, exit 0; no skips |
+| G1 key minimum web-dependency profile at `fcb84bd`, session 44932; version assertions **Pydantic 2.5.0 / FastAPI 0.104.1** | **634 passed, 10 warnings, 50.57s**, exit 0; no skips |
+| Five relevant Node scripts on both merged snapshots | All exit 0; task panel, completion, structured molecule, scientific references, evidence report |
+| **Only full `tests/agent` run**, host profile, `fcb84bd`, **session 62470** | **6914 passed, 2 skipped, 7 warnings, 333.83s**, exit 0; **zero failures** |
+
+Host warnings are existing SWIG/FastAPI deprecations. Minimum profile additionally emitted the existing Pydantic protected-namespace warning and two pytest AnyIO assertion-rewrite warnings from importing/verifying the profile before pytest. Nothing suppressed. No dependency installation or alteration.
+
+The 20 original focus paths are enumerated in the initial-freeze section below. Collision additions (all complete files under `tests/agent/`, no deselection): `test_generation_ranking_contract.py`, `test_generation_ranking_contract_integration.py`, `test_target_tool_contract.py`, `test_generator_optimization_input.py`, `test_planner_responsibilities.py`, `test_task_planner.py`, `test_planner_step_templates.py`, `test_planner_template_execution.py`, `test_supervisor_agent.py`, `test_supervisor_runtime_integration.py`, `test_tool_registry.py`, `test_workflow_resume.py`, `test_generation_temperature_transport.py`, `test_tool_contract_inventory.py`.
+
+Minimum-profile paths: the three `test_evidence_report_{contract,snapshot,frames}.py` files, `test_scientific_reference_web.py`, `test_analysis_contract.py`, `test_generation_ranking_contract_integration.py`. These include actual standard planner/typed registry → local RDKit/SQLite → capture → actualMain DOM → reference API, four-or-none metrics, Chinese sections/reasons/units, real partial rows, failed-step consistency and report-failure isolation. They are deterministic offline execution/transport evidence, not real molecular generation or efficacy acceptance.
+
+All Python invocations use the **existing RAG isolation runner verbatim with only its repo cwd replaced**; minimum profile prepends the already-retained CI web profile and asserts its versions as documented in the merged 4C plan. Runner clears inherited non-allowlisted environment, uses temporary cwd/config/runtime DB paths, disables real-service switches, copies/hash-checks only the three tracked evaluation JSONL fixtures, invokes normal child pytest and cleans up. This is the normal runner (not the earlier custom in-process/plugin-disabled G1 focus recipe). Full's **sole path argument was `tests/agent`**, with child options `-q -p no:cacheprovider --tb=short -rs`. No root full or second Agent full was run. JS syntax and whitespace checks passed.
+
+### Full lock / skips / slot release
+
+- Full started **2026-09-24 22:37:51 UTC / 2026-09-25 06:37:51 Asia/Shanghai**, session **62470**, clean HEAD/tree as above. No merges, edits or other heavy runs occurred while it ran. Slot was announced released immediately on its exit-0 result; it is available to parent for P8/A1, not retained for documentation.
+- Post-run lock verification completed **2026-09-24 22:43:38 UTC**, still clean and unchanged. Only G1 documentation is updated afterward.
+- Exact skips: `tests/agent/test_decision_chat_acceptance.py:149` — **directory symlinks unavailable**; `tests/agent/test_harness_shadow.py:277` — **performance test disabled**. No added skip or assertion weakening.
+- Full result is tied to **`fcb84bd`**, not future main/ADMET/P7 revisions. Historical natural `artifact_failed` exact cause remains unknown; full GREEN does not retroactively attribute that incident or turn the parent's deterministic broker probe into scientific acceptance.
+
+### Twenty-file impact / byte SHA-256 at full lock
+
+Paths are the exact `git diff --name-only 6b9e5c0..a90581b` set. Each file was unchanged from approved `a90581b` through both merges and before/after full. Aggregate recipe: concatenate sorted `path + " " + lowercase_sha256 + LF`, encode UTF-8 without BOM, then SHA-256. All-20 aggregate **`5037d3d7bbf8c28a42d5c3cea48649e26061a0617db286df986aa13bbe27ec91`**; 16 non-doc source/test files **`2c48070b69bff63d1bbfcb252c2ffbc709e62e5a5131ae16d2f548584205d2c4`**.
+
+| Path | Byte SHA-256 at tested freeze | Integration impact |
+|---|---|---|
+| `docs/handoff/2026-09-25-g1-evidence-report-freeze.md` | `eb55f013b945b35da7f3db853e32b175d19915a9734f53d62ccc196895fb1dc1` | unchanged / no conflict |
+| `docs/handoff/historical-residual-disposition.md` | `14852f20c3202e7c2a5db4293218b66784b83d04e0edf48db7a8611b3db9b5a5` | unchanged / no conflict |
+| `docs/superpowers/plans/2026-09-25-evidence-bound-report-cards.md` | `c06513a2a1e4293fdd0bd113fd7825ebe2caa1007013400e7a04aad921c79785` | unchanged / no conflict |
+| `docs/superpowers/specs/2026-09-25-evidence-bound-report-cards-design.md` | `94a070c6a273c11f404f818bab45eda4ffe12ff65d1a0c8ff936c2c974dce527` | unchanged / no conflict |
+| `src/agent/contracts/scientific_report.py` | `d1850c6d7f110ffe3a1794c654207b92f6f86da710fba274ab8d3ac3244d0ea8` | unchanged / no conflict |
+| `src/agent/persistence/scientific_references.py` | `e7df9cf139b0ccbd221df7ed42ef7f0fb66ea36c78c26ca604d0d89092fc17ca` | unchanged / no conflict |
+| `src/agent/persistence/sqlite_store.py` | `09396ed474ecc5c3ac31bc845813d1fcc6a9decb4c624e7605a11df98b67b024` | unchanged / no conflict |
+| `src/agent/presentation/__init__.py` | `84d0c14a388b7cd348725381fc2812f3be0364d5739f9a3d60fa1c0bceee6237` | unchanged / no conflict |
+| `src/agent/presentation/evidence_report.py` | `d07d536f6c9b5bb11f28278c49a03f734e185399eef801a39d34ea41ee959624` | unchanged / no conflict |
+| `src/web/chat_handler.py` | `7b8cb0956f52763d3fa31e0c64729be58caa4312d11a2e3be4cb39d86d2ada4a` | unchanged / no conflict |
+| `src/web/scientific_report.py` | `1c77af2c730d6d661a4fc92639f66242671eb1975debf12e68d5f5b3c1ae48bd` | unchanged / no conflict |
+| `src/web/static/js/home/evidence_report.js` | `62d3d463b3e886caef38dee27e390920987a75b17cf6b2a023df58291bd7a67b` | unchanged / no conflict |
+| `src/web/static/js/home/main.js` | `66564a79982c6a10e9e760a49d34d21df3bb1e1c39c67d22894ff2dfad46e25d` | unchanged / no conflict |
+| `src/web/templates/index.html` | `6c11b7cfab4bffff1bbf56c28fc4ea9b573cb50d612a9d797e475108f4bd0470` | unchanged / no conflict |
+| `tests/agent/evidence_report_fixture.py` | `9cf6019589cea426c14586a068600632cbbe5c843205dcb63cdc04da92a6986e` | unchanged / no conflict |
+| `tests/agent/test_evidence_report_contract.py` | `9e281164155e1846257a3af16d879af65bba85adeb741682b392e1cf11e350ec` | unchanged / no conflict |
+| `tests/agent/test_evidence_report_frames.py` | `d18c3fd0efadaf12eaf49bdfcdfe1217ba2b14d485bb045926dd88aed15af4a4` | unchanged / no conflict |
+| `tests/agent/test_evidence_report_snapshot.py` | `ac7cd136c98caaec26c028633604bc1dc0d71cf83990b659d9984461048b8e48` | unchanged / no conflict |
+| `tests/home_evidence_report_test.js` | `66eb699f531543ac4fa8d14febfea5f3db523bdb0d4100e2aa93fb7a1ff76270` | unchanged / no conflict |
+| `tests/home_workflow_completion_behavior_test.js` | `a40e25e8d6b68ac75d308defc4526527df5d2458029b9182c9b6de5f9b52b382` | unchanged / no conflict |
+
+The table records the **tested pre-documentation snapshot**, not a recursive hash of this updated document. Only this handoff and the G1 plan are edited/explicitly committed afterward; the 16 source/test aggregate remains unchanged. Parent owns subsequent publication/integration; no new code review or PR approval is inferred from full GREEN.
 
 ## SPEC2 revision — four-or-none descriptors and Chinese UI
 
@@ -164,6 +230,6 @@ Per parent's 2026-09-25 report, ignored recovery worktree `scratch/test_manifest
 
 ## Three remaining actions
 
-1. Parent performs **SPEC → QUALITY** review against exact local freeze diff from `6b9e5c0`; this self-check is not independent double review. Fix only approved findings and rerun affected focus/frame/Node tests before publication.
-2. When parent's queue reaches G1, run the isolated **full Agent** suite on the agreed integrated revision (including later main changes only when authorized); record exact count/skips/failures. Do not claim current focus verifies PR69 or other parallel batches.
-3. Parent integrates approved G1 with its functional batch and updates the package acceptance ledger. G2/recovery remain parent-owned; P7A1 admission/dynamic bindings require separate explicit design/implementation. No push/PR/deploy is authorized by this freeze.
+1. Parent consumes the dual-approved G1 plus exact PR73/75 integration/full evidence above and decides final functional-batch integration/publication. No new independent review or approval is invented for future changes.
+2. Heavy slot is released to parent for P8/A1. Any subsequently authorized main delta gets only its bounded light compatibility check; no second full is authorized here and the `fcb84bd` full result must not be relabelled.
+3. Parent updates the package acceptance ledger. G2/recovery remain separately owned; P7A1 admission/dynamic bindings require separate explicit design/implementation. No push/PR/deploy is authorized by this freeze.
