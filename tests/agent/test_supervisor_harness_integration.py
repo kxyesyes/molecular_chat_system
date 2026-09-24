@@ -16,6 +16,7 @@ from src.agent.supervisor import SupervisorAgent
 from src.agent.specialists import build_default_specialists
 from src.agent.tooling import build_tool_registry
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
+from tests.agent.test_analysis_contract import analysis_rows
 
 
 class OneStepPlanner:
@@ -43,7 +44,7 @@ class CountingTool:
         self.calls += 1
         return ToolResult.success_result(
             self.name,
-            data={"query": query, "molecular_weight": 46.07},
+            data=analysis_rows(self.name),
         )
 
 
