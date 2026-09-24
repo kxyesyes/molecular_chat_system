@@ -10,7 +10,7 @@ from src.agent.contracts import (
     AgentErrorCode, ObservationStatus, ToolProvenance, ToolResult, WorkflowArtifact,
 )
 from src.agent.tooling.adapters import LegacyPythonToolAdapter
-from src.agent.tooling.factory import build_tool_registry
+from src.agent.tooling.factory import build_tool_registry, LegacyQueryInput
 from src.agent.tools.rag_search_tool import RAGSearchTool
 
 
@@ -290,8 +290,12 @@ def test_validation_stays_inside_timeout_and_holds_slot_until_worker_finishes():
 
 def test_non_rag_factory_retains_legacy_schema_and_payload():
     tool = ResultTool({"success": True, "data": {"arbitrary": 1}})
-    tool.name = "candidate_ranker"  # Analysis tools now have their own contract.
-    adapter = build_tool_registry([tool]).resolve(tool.name, require_available=False)
+    tool.name = "candidate_ranker"
+    # Generic transport probe, not scientific ranking: retain the old numeric
+    # query acceptance without bypassing any production typed factory contract.
+    spec = build_tool_registry([tool]).resolve(tool.name, require_available=False).spec
+    adapter = LegacyPythonToolAdapter(
+        replace(spec, input_schema=LegacyQueryInput, output_schema=None), tool)
     assert type(adapter) is LegacyPythonToolAdapter
     assert adapter.spec.output_schema is None
     result = adapter.execute({"query": 123})
