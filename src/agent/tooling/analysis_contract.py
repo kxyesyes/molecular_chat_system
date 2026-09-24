@@ -42,6 +42,7 @@ _VIOLATIONS = TypeAdapter(Annotated[int, Field(ge=0, le=4)])
 _TEXT = TypeAdapter(str)
 _IDENTIFIER = TypeAdapter(Annotated[str, Field(min_length=1)])
 _BOOL = TypeAdapter(bool)
+_UNCOMPUTED_ALERT = TypeAdapter(bool | None)
 _DICT = TypeAdapter(dict[str, Any])
 _STRINGS = TypeAdapter(list[str])
 
@@ -107,7 +108,7 @@ _ADMET_SECTIONS = {
     "pharmacokinetics": dict(gastrointestinal_absorption=_TEXT,
                             blood_brain_barrier_permeant=_BOOL, skin_permeability_logkp=_NUMBER),
     "druglikeness": dict(lipinski=_TEXT, veber=_TEXT, ghose=_DICT),
-    "medicinal": dict(pains=_BOOL, brenk=_BOOL, zinc=_BOOL,
+    "medicinal": dict(pains=_UNCOMPUTED_ALERT, brenk=_UNCOMPUTED_ALERT, zinc=_UNCOMPUTED_ALERT,
                       synthetic_accessibility=_SA, leadlikeness=_DICT),
 }
 _METHOD = TypeAdapter(Literal["rdkit_rules", "adme_py"])
