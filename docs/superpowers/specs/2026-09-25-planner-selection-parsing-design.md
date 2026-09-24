@@ -1,0 +1,13 @@
+# Planner selection and parsing separation (package5)
+
+The five pure step templates are already extracted. This batch preserves deterministic fallback planning, not the future model-driven Web entry. TaskPlanner remains the public facade and owns WorkflowPlan assembly and resolved-molecule rebinding.
+
+Two approaches: move the entire planner into a service/class (merely relocating the monolith), or extract pure selection and parsing functions while retaining facade methods (chosen). No new planner framework, stateful builder, schema or workflow DSL. No router policy/scientific/step-template change.
+
+Add planning/workflow_selection.py: select_workflow(skill, query, *, looks_like_design) returns a closed dispatch key for the existing branches. Preserve precedence exactly: admet, both comprehensive spellings, explicit target design or target-search plus design intent, lead, molecular design, target search, docking, other atomic tools, unmatched. Invoke the supplied design predicate only for target-search, as today. Keep structured docking vs unauthorized request precedence in the facade; this is input handling, not workflow selection. Unknown skill returns no match and preserves its existing plan name/reason.
+
+Add planning/request_parsing.py for current target hint, unauthorized request, count, top-N and ADMET-intent functions, using the existing generation_request and target_request contracts. Preserve case handling, regex boundaries, clamping, defaults, target clarification and exceptions. Centralize only the identical metadata-requested_count precedence/validation expression, accepting the facade's count extractor callback so subclass/monkeypatch behavior remains observable. Target and molecular-design builders keep their current rejection-plan catches; lead still propagates GenerationRequestError.
+
+TaskPlanner private/public helper signatures and class count constants remain; helper wrappers call the new pure functions. WorkflowPlan remains defined in task_planner to preserve import/class identity. Existing step templates and compiler unchanged. Do not canonicalize inputs or erase per-workflow metadata. Resolved-scientific-reference binding, custom helper overrides and mutable output independence remain exactly as before.
+
+TDD: existing complete-plan characterization plus new selector precedence/predicate-call tests, metadata override/error behavior, wrapper delegation and override tests. Run new tests RED before extraction, then all existing planning/router/template/target/reference tests and full Agent suite. No real tool, model, secret or external service calls. Independent SPEC/QUALITY and exact-head CI gate before separate PR merge.
