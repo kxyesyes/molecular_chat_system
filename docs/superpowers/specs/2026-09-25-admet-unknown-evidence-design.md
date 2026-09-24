@@ -1,6 +1,6 @@
 # ADMET unknowns and evidence-preserving presentation
 
-Date: 2026-09-25. Status: **SPEC/QUALITY approved (parent-confirmed), exact nine-file commit 7ddac1b created; integrated old-base Agent full GREEN at d12908f only (6468 passed, two skipped). G2/main 27170d9 subsequently integrated with host/minimum light-delta GREEN, reviewed seven-file hash unchanged. Frozen for parent publication coordination; no second full, root full, push or PR**.
+Date: 2026-09-25. Status: **SPEC/QUALITY approved (parent-confirmed), exact nine-file commit 7ddac1b created; old-base Agent full GREEN at d12908f only (6468 passed, two skipped). G2 and PR73/main 0295e99 now integrated; latest host/minimum FOCUS including both new 4C contract files each 1428 passed. Reviewed seven-file hash unchanged. Ready for parent push/PR coordination; no second full, root full, push or PR by this worker**.
 
 ## 1. Scope, baseline, and authority
 
@@ -183,6 +183,14 @@ The reviewed nine-file implementation and review record were committed as `7ddac
 Afterward, G2/main `27170d95b17ccae224b95b493ec8a9276944f421` merged without conflicts or manual code changes. Host/minimum FOCUS plus G2 delta each passed **1285 cases and 162 subtests**, with one/three existing warnings respectively. Shared-parser cross-consumer regression each passed **221 cases**, with one/three existing warnings. The seven reviewed ADMET files remain byte-identical to aggregate `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`; upstream G2 changes are separate integrated history, not local scientific modifications. Exact command sets, timings and skip reasons are in the plan.
 
 Freeze after G2 light verification per latest parent direction. PR73/4C is only parent-reported imminent, not part of this snapshot. Parent decides publication or a later PR73 collision-focused integration. No second Agent full, root full, push, PR creation, published-production/provider/key/model changes. The later integration merge also records these verification results in the same two approved documents; no additional implementation paths are introduced.
+
+## 13. PR73/4C integration and publication-ready local snapshot
+
+Parent reports PR73 merged after 8/8 CI and zero unresolved review threads; those CI/review counts are parent-reported, not re-polled. Authorized merge of fetched origin/main `0295e9960b15c850bb212e434da66824181ef546` into local branch produced conflict-free merge **`a2268c902369b41a882f649608bcf272d25035e9`**, tree **`6cc683488117d8030259556a4a623de481e2d3e0`**, with first parent `504bdac18cce5d071dfbb5ae320cee506437cb97`. No manual collision resolutions or local code changes. Upstream shared-factory additions route generation/ranking to new contracts; the ADMET analysis branch remains unchanged.
+
+The exact twelve-file light set is the original ten-file FOCUS plus `tests/agent/test_generation_ranking_contract.py` and `tests/agent/test_generation_ranking_contract_integration.py`. On the merged snapshot, host **1428 passed, one existing warning, 17.73s**; minimum **1428 passed, three existing warnings, 17.49s**; both exit0 with no skips or retries. Existing isolated offline runner/network guard and dependency profiles only, no models/providers/assets or installation. Compileall and diff checks passed.
+
+All seven ADMET code/test files remain identical to reviewed commit `7ddac1b`, and their raw-byte aggregate is still `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`. Subsequent local documentation commit records this evidence only. Original single Agent-full result remains scoped to `d12908f`, not PR73; no second Agent full or root full was run. This snapshot is ready for parent-controlled push/PR; this worker has not pushed, created a PR or changed published production.
 
 ## Historical design-only handoff (before implementation authorization)
 

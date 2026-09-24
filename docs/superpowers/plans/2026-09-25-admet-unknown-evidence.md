@@ -637,3 +637,44 @@ tests/agent/test_drug_likeness_evidence.py
 No skips or retries in these light runs. Warning types remain the existing guard/profile warnings. `python -m compileall -q src scripts`, working-tree/index `git diff --check`, and the seven-file byte-equality check against approved implementation commit `7ddac1b` passed. Before completion, current fetched main still matched G2 `27170d9`; PR73/4C was not included. Completing the integration merge records this handoff with parents `d12908fdeabd51130df713aee9efd5f07c7ba486` and `27170d95b17ccae224b95b493ec8a9276944f421`; only these two approved documents were modified locally after the light runs.
 
 Parent confirms receipt of the old-base 6468-pass full evidence and released heavy slot. Latest direction permits freezing after G2 focus and returning for parent publication or later PR73 collision-focused integration. **Freeze now; no additional full, no root suite, no push or PR.** Full evidence remains tied to old-base `d12908f`; current G2 snapshot has only the explicitly listed light-delta evidence. Final merge SHA/tree are reported with the handoff; the scientific seven-file freeze is unchanged.
+
+### PR73/4C authorized merge, focused verification and documentation commit
+
+Parent subsequently reports PR73 merged after 8/8 CI, unresolved0, and explicitly authorizes local fetched-main integration, host/minimum FOCUS including both new 4C contract files, and a committed documentation record. Independent CI/review counts are parent-reported; this worker verifies local Git state and its own tests only. No second Agent full, root full, external models/assets, push or PR.
+
+Started from clean branch `codex/admet-unknown-evidence` at G2 integration `504bdac18cce5d071dfbb5ae320cee506437cb97`. Local origin/main was `0295e9960b15c850bb212e434da66824181ef546`. `git merge --no-edit origin/main` succeeded without conflicts, producing:
+
+```text
+Merge HEAD:  a2268c902369b41a882f649608bcf272d25035e9
+Merge tree:  6cc683488117d8030259556a4a623de481e2d3e0
+First parent: 504bdac18cce5d071dfbb5ae320cee506437cb97
+Main parent:  0295e9960b15c850bb212e434da66824181ef546
+```
+
+No manual collision resolution. Inspected factory delta: imports and schema/adapter branches for generation/ranking only; existing ADMET analysis dispatch remains unchanged. New tests use offline producer doubles/contracts, not model or provider calls. All seven reviewed ADMET files compare byte-identical to `7ddac1b561b412530b8e508ce30bbf96d969c917`. Recomputed raw SHA256s match the seven-file freeze recorded above, aggregate **`1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`**. Diff to main remains exactly the nine ADMET paths.
+
+Exact twelve-file arguments to the existing isolated runner/hard network guard (host and minimum alike):
+
+```text
+tests/test_molecule_properties_unknown.py
+tests/test_admet_unknown_evidence.py
+tests/test_admet_predictor_fallback.py
+tests/test_api_route_boundary.py
+tests/agent/test_admet_whole_input.py
+tests/agent/test_analysis_contract.py
+tests/agent/test_domain_result_validators.py
+tests/agent/test_scientific_contracts.py
+tests/agent/test_real_acceptance_checks.py
+tests/agent/test_candidate_ranker.py
+tests/agent/test_generation_ranking_contract.py
+tests/agent/test_generation_ranking_contract_integration.py
+```
+
+| PR73-integrated FOCUS | Actual result |
+|---|---|
+| Host (FastAPI 0.135.3 / Pydantic 2.12.5) | **1428 passed**, one existing warning, **17.73s**, exit0. |
+| Minimum (FastAPI 0.104.1 / Pydantic 2.5.0) | **1428 passed**, three existing warnings, **17.49s**, exit0. |
+
+No skips/failures/retries; counts are 1106 original focused cases plus 322 cases from the two added contract files. Existing AnyIO assertion-rewrite warning and minimum protected-namespace warning retained. No extra full run: single full result **6468 passed / two skipped / eight warnings / 287.49s** is still exclusively old-base `d12908f / c31e6729`, not this PR73 snapshot. `python -m compileall -q src scripts`, `git diff --check`, clean merged-worktree and reviewed-file equality checks passed.
+
+After tests, only these two approved ADMET documents are updated and explicitly staged for the authorized evidence commit. No source/test changes after validation. Final local commit is ready for parent-controlled push/PR; this worker does not push, open a PR or modify published production, keys, providers or scientific assets. Parent can identify the tested code using the exact merge SHA/tree above; the evidence commit changes documentation only.
