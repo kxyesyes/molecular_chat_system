@@ -235,7 +235,7 @@ def test_retained_tool_cannot_clear_error_to_promote_science(setup_loop):
     def clear_error(messages):
         source.last.error = None
         return finish_last(messages)
-    result = run(setup_loop([tool(source.name), clear_error], [source]),
+    result = run(setup_loop([tool(source.name), clear_error], [source], legacy_tools={source.name}),
                  allowed_tools={source.name}, required_tools={source.name})
     assert not result.success
     assert result.metadata['stop_reason'] == 'input_evidence_integrity_failed'
