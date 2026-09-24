@@ -181,24 +181,24 @@ def test_compat_preserves_rows_status_provenance_and_honest_format(boundary, sta
         assert "unavailable" in result.formatted
 
 
-def test_generated_candidates_keep_original_target_at_actual_invocation(boundary):
+def test_generated_candidates_keep_original_target_at_actual_invocation(boundary, monkeypatch):
     from src.agent.react_agent import ReActMolecularAgent
     from src.agent.workflows import WorkflowCatalog
     from tests.agent.test_target_driven_design_workflow import FakeTool
 
     tool, calls, _ = boundary
-    agent = ReActMolecularAgent.__new__(ReActMolecularAgent)
-    agent.llm = None
-    agent.max_iterations = 5
-    agent.skill_router = None
-    agent._active_skill = None
     names = ["target_database_search", "llm_molecular_generator", "property_calculator",
              "admet_predictor", "candidate_ranker"]
-    agent.tools = {name: FakeTool(name) for name in names}
-    agent.tools["activity_predictor"] = tool
-    agent.execute("基于 PDE5A 设计类药候选分子", active_skill=WorkflowCatalog().require("target_driven_design"))
+    tools = {name: FakeTool(name) for name in names}
+    tools["activity_predictor"] = tool
+    monkeypatch.setattr("src.agent.tools.get_all_tools", lambda _llm: list(tools.values()))
+    agent = ReActMolecularAgent()
+    result = agent.execute("基于 PDE5A 设计类药候选分子", active_skill=WorkflowCatalog().require("target_driven_design"))
     assert agent.tools["llm_molecular_generator"].inputs
     assert calls == [(["CCO"], "PDE5A")]
+    observation = result["tool_results"]["activity_predictor"]
+    assert observation["data"][0]["requested_target"] == "PDE5A"
+    assert observation["evidence"][0]["prediction"]["provenance"]["bundle_id"] == "synthetic-bundle"
 
 
 @pytest.mark.parametrize("damage", ["missing", "one_model", "demo", "fallback", "digest", "wrong_family"])
