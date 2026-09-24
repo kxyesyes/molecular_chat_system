@@ -204,7 +204,7 @@ def test_publication_retry_cannot_replace_original_full_seal(setup_loop, monkeyp
             return self.last
     # Generic legacy contradiction, deliberately downstream of typed analysis.
     source = Retained('target_database_search')
-    b = setup_loop([tool(source.name), finish_last], [source])
+    b = setup_loop([tool(source.name), finish_last], [source], legacy_tools={source.name})
     original, attempts, seals = b.store.record_tool_execution, [], []
     capture = loop.seal_observation
     def capture_once(result, session):
@@ -239,7 +239,8 @@ def test_full_seal_precedes_every_publication(setup_loop, monkeypatch, boundary,
             return self.last
 
     source, target = Retained('target_database_search'), CountingTool('drug_likeness_assessment')
-    b = setup_loop([tool(source.name), finish_last if action == 'finish' else downstream, finish_last], [source, target])
+    b = setup_loop([tool(source.name), finish_last if action == 'finish' else downstream, finish_last],
+                   [source, target], legacy_tools={source.name})
     changed = []
 
     def mutate():
@@ -312,7 +313,7 @@ def test_error_cannot_be_erased_before_first_observation_seal(setup_loop):
             return self.last
 
     source = Retained('target_database_search')
-    b = setup_loop([tool(source.name), finish_last], [source])
+    b = setup_loop([tool(source.name), finish_last], [source], legacy_tools={source.name})
     erased = []
 
     def callback(event):
