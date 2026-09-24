@@ -1,6 +1,7 @@
 "use strict";
 
 window.HomeConfig = {
+  scientificReferences: {baseUrl: "/api/agent/workflows/references"},
   themes: ["low", "medium", "high"],
   storageKeys: {
     theme: "medchat-theme-level",

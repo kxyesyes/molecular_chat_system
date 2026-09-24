@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Mapping
+from .resolved_molecule import ResolvedScientificMolecule
 
 
 @dataclass
@@ -23,6 +24,7 @@ class AgentContext:
     mol_count: int = 5
     memory: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    resolved_molecule: ResolvedScientificMolecule | None = None
 
     @property
     def capabilities(self) -> dict[str, bool]:
@@ -49,4 +51,5 @@ class AgentContext:
             mol_count=self.mol_count,
             memory=list(self.memory),
             metadata=dict(self.metadata),
+            resolved_molecule=self.resolved_molecule,
         )

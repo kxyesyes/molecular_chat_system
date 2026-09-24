@@ -19,6 +19,30 @@ class AgentStateStore(Protocol):
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None: ...
 
+    def get_scientific_sources(self, trace_id: str, *, session_id: str):
+        """Return bounded, validated latest candidate checkpoints for an owner."""
+        raise NotImplementedError
+
+    def publish_scientific_presentation(
+        self, trace_id: str, *, session_id: str,
+        selections: list[dict[str, str]], target: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Publish from stored checkpoints, not caller-supplied scientific data."""
+        ...
+
+    def confirm_scientific_presentation(
+        self, trace_id: str, *, session_id: str, presentation_id: str,
+        revision: str, ordered_keys: list[list[str]],
+    ) -> bool:
+        """Owner/version-bound exact display ACK; True only after commit."""
+        ...
+
+    def get_scientific_presentation(
+        self, trace_id: str, *, session_id: str, presentation_id: str, revision: str,
+    ) -> dict[str, Any] | None:
+        """Read only confirmed, unexpired, source-compatible presentations."""
+        ...
+
     def claim_workflow_run(
         self,
         run: dict[str, Any],

@@ -1,5 +1,49 @@
 # Latest handoff
 
+## T09 发布：Draft PR #60 与CI清单修正（2026-09-24）
+
+已发布T09分支至 [PR #60](https://github.com/kxyesyes/molecular_chat_system/pull/60)，未合并/部署。
+首轮CI五项成功，但root的首页精确脚本清单漏列本批新增引用模块；已实际复现后仅补清单，
+未改业务代码或弱化门禁。聚焦回归由1 failed/6 passed转为7 passed；首轮CI失败证据保留在
+[验收交接](scientific-reference-acceptance.md)。最新head/CI以PR为准，不把原始本地结果替代CI。
+
+## T09：故障恢复与浏览器验收第三增量（2026-09-24）
+
+独立分支 `codex/scientific-reference-continuity` 在 `212e454` 上补故障、取消、锁、
+重放与来源失效测试。实际离线浏览器发现并最小修复：恢复候选被挂在隐藏聊天区；
+同时更新静态脚本版本，避免缓存阻止修复生效。新增测试夹具的无期限接收问题也经TDD修复。
+
+刷新、空闲进程重启、选中第二个、清除及新标签页隔离已实际验证。候选为显式合成夹具，
+性质使用真实RDKit；未使用外部模型，不称已完成真实科研或运行中任意硬崩溃验收。
+独立SPEC/QUALITY通过，冻结7路径哈希不变，联合回归 **5609 passed、7 skipped、7 warnings**；
+五个Node、三个JS语法、编译与diff通过。失败记录、文件和限制见
+[第三增量交接](scientific-reference-acceptance.md)。
+
+仅本地提交，未推送/合并/部署；原始13项混杂改动不动。临时服务/标签页已停止，
+一个合成测试临时目录因删除策略拒绝仍保留，详情见交接。下一步应审查发布本分支；
+另批处理类药性工具将Lipinski规则过度解读为口服生物利用度的问题，不混入本批。
+T09本地三增量已完成，CI/发布与整个任务书其余职责拆分仍未完成。
+
+## T09：科研引用 Web/工具接线第二增量（2026-09-24）
+
+独立分支 `codex/scientific-reference-continuity` 已实现权威展示投影、真实挂载后确认、
+标签页指针恢复及选中 canonical SMILES 到实际工具输入；保留归属、24小时期限、
+partial/warnings/provenance 和原科学校验。来源在规划期间失效时阻止分发；
+多义/范围指代不默认取第一个，多个集合确认互不干扰。
+
+独立 SPEC/QUALITY 及增量复审通过；冻结20路径前后哈希一致，最终联合回归
+**5591 passed、7 skipped、7 warnings**；五个Node脚本、四个JS语法和编译检查通过。
+失败尝试、跳过原因、23路径职责与命令见[本批交接](scientific-reference-web-integration.md)。
+仅本地提交，未推送/合并/部署/启用模型，原始混杂工作树未动。
+第三增量故障/取消/重启/重放与真实浏览器恢复验收仍待，不称整个T09完成。
+
+## T09：科研引用契约与存储第一增量（2026-09-24）
+
+已确认设计后按TDD实施，独立分支 `codex/scientific-reference-continuity`。
+固定24小时、展示顺序ACK、会话归属、来源版本、科学Validator与原子SQLite边界已实现；
+不新增表、不接入首页、不启用模型。失败尝试、准确测试和后续未完成范围见
+[本批交接](scientific-reference-storage.md)。完整T09仍需Web/工具输入接线和全链路验收。
+
 ## 英文候选筛选短语（2026-09-24，本地独立分支）
 
 `codex/target-selection-phrase-pr` 修复句尾 `and/逗号 select top N` 被误当未知靶点的问题。

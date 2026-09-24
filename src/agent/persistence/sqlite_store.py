@@ -5,6 +5,7 @@ import math
 import sqlite3
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -15,6 +16,10 @@ from .redaction import contains_credential, contains_secret_material, redact_sen
 
 class _UnownedRun(dict):
     """Internal guard marker, never a client field or persisted metadata."""
+
+
+def _has_scientific_presentations(metadata: Any) -> bool:
+    return isinstance(metadata, Mapping) and "scientific_presentations" in metadata
 
 
 def _json_dump(value: Any) -> str:
@@ -238,6 +243,8 @@ class SQLiteAgentStateStore:
     def start_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None:
         if type(exclusive) is not bool:
             raise TypeError("exclusive must be a bool")
+        if _has_scientific_presentations(run.get("metadata")):
+            raise ValueError("scientific presentations require the dedicated boundary")
         data = redact_sensitive(run)
         now = time.time()
         conflict = "" if exclusive else """
@@ -255,6 +262,13 @@ class SQLiteAgentStateStore:
         if isinstance(run, _UnownedRun) and not exclusive:
             conflict += " WHERE agent_runs.session_id IS NULL AND agent_runs.user_id IS NULL"
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute(
+                "SELECT metadata_json FROM agent_runs WHERE trace_id=?", (data["trace_id"],)
+            ).fetchone()
+            if (not exclusive and prior is not None
+                    and _has_scientific_presentations(_json_load(prior[0], {}))):
+                raise RunOwnershipConflict("Cannot replace a scientific presentation source")
             cursor = connection.execute(
                 """
                 INSERT INTO agent_runs (
@@ -303,6 +317,8 @@ class SQLiteAgentStateStore:
         A changed state never permits a second execution. Completed traces may
         be explicitly retried to reuse compatible checkpoints.
         """
+        if _has_scientific_presentations(run.get("metadata")):
+            raise ValueError("scientific presentations require the dedicated boundary")
         data = redact_sensitive(run)
         now = time.time()
         with self._lock, self._connect() as connection:
@@ -353,6 +369,16 @@ class SQLiteAgentStateStore:
 
     def update_run_status(self, trace_id: str, status: str) -> None:
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, metadata_json FROM agent_runs WHERE trace_id=?", (trace_id,)
+            ).fetchone()
+            if row is not None and row["status"] != status:
+                metadata = _json_load(row["metadata_json"], {})
+                if isinstance(metadata, dict) and "scientific_presentations" in metadata:
+                    metadata.pop("scientific_presentations")
+                    connection.execute("UPDATE agent_runs SET metadata_json=? WHERE trace_id=?",
+                                       (json.dumps(metadata, ensure_ascii=False, sort_keys=True), trace_id))
             connection.execute(
                 "UPDATE agent_runs SET status = ?, updated_at = ? WHERE trace_id = ?",
                 (status, time.time(), trace_id),
@@ -366,6 +392,8 @@ class SQLiteAgentStateStore:
         """Merge ordinary metadata; continuation writes require the CAS boundary."""
         if "decision_continuation" in metadata:
             raise ValueError("use transition_decision_continuation for continuation writes")
+        if "scientific_presentations" in metadata:
+            raise ValueError("scientific presentations require the dedicated boundary")
         incoming = redact_sensitive(metadata)
         with self._lock, self._connect() as connection:
             # Serialize the read/merge/write with CAS and other store instances.
@@ -476,6 +504,9 @@ class SQLiteAgentStateStore:
                 if key != "decision_continuation"
             })
             metadata["decision_continuation"] = replacement
+            # A continuation changes execution state; old scientific views must
+            # not become usable again if this run later returns to partial.
+            metadata.pop("scientific_presentations", None)
             metadata_json = json.dumps(metadata, ensure_ascii=False, sort_keys=True)
             connection.execute(
                 "UPDATE agent_runs SET status=?, metadata_json=?, updated_at=? WHERE trace_id=?",
@@ -484,6 +515,31 @@ class SQLiteAgentStateStore:
             )
         # Do not report success until the connection context has committed.
         return True
+
+    def get_scientific_sources(self, trace_id: str, *, session_id: str):
+        from .scientific_references import sources
+        return sources(self, trace_id, session_id=session_id)
+
+    def publish_scientific_presentation(
+        self, trace_id: str, *, session_id: str,
+        selections: list[dict[str, str]], target: str | None = None,
+    ) -> dict[str, Any] | None:
+        from .scientific_references import publish
+        return publish(self, trace_id, session_id=session_id, selections=selections, target=target)
+
+    def confirm_scientific_presentation(
+        self, trace_id: str, *, session_id: str, presentation_id: str,
+        revision: str, ordered_keys: list[list[str]],
+    ) -> bool:
+        from .scientific_references import confirm
+        return confirm(self, trace_id, session_id=session_id, presentation_id=presentation_id,
+                       revision=revision, ordered_keys=ordered_keys)
+
+    def get_scientific_presentation(
+        self, trace_id: str, *, session_id: str, presentation_id: str, revision: str,
+    ) -> dict[str, Any] | None:
+        from .scientific_references import get
+        return get(self, trace_id, session_id=session_id, presentation_id=presentation_id, revision=revision)
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:

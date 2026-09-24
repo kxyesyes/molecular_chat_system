@@ -35,7 +35,7 @@ def _check_legacy_backup(client):
 
 PAGE_SCRIPTS = [
     ('index.html', 'home', ['config.js', 'state.js', 'theme.js', 'molecule_candidates.js',
-                          'formatters.js', 'molecule_renderer.js', 'chat_renderer.js',
+                          'scientific_references.js', 'formatters.js', 'molecule_renderer.js', 'chat_renderer.js',
                           'advanced_options.js', 'ws_client.js', 'main.js']),
     ('activity_prediction.html', 'activity_prediction', ['utils.js', 'model_manager.js',
                            'charts.js', 'results_renderer.js', 'preflight.js',

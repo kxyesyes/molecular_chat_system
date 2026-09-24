@@ -20,6 +20,7 @@ from src.agent.contracts.generation_request import (
     generation_request_error_details,
     preflight_generation_request,
 )
+from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
 from src.agent.capabilities.catalog import TOOL_ALIASES
 from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
@@ -139,8 +140,28 @@ class SupervisorAgent:
         capabilities: Mapping[str, bool] | None = None,
         *,
         session_id: str | None = None,
+        resolved_molecule: ResolvedScientificMolecule | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
+        routing_query = query
+        if resolved_molecule is not None:
+            from src.agent.utils.validators import InputValidator
+
+            # A new explicit structure (valid or invalid) supersedes an older
+            # selection even when called without ChatHandler's preflight. The
+            # normal router/validator remains responsible for the new input.
+            if InputValidator().analyze_molecular_input(query).potential_smiles:
+                resolved_molecule = None
+        if resolved_molecule is not None:
+            if (not isinstance(resolved_molecule, ResolvedScientificMolecule)
+                    or not resolved_molecule.revalidate(self.state_store, session_id)):
+                error = AgentExecutionError(code=AgentErrorCode.INVALID_INPUT,
+                    message="科研引用不可用，请重新选择候选。")
+                result = AgentResult(trace_id=f"agent-{uuid4().hex[:12]}", success=False,
+                                     message=error.message, final_answer=error.message, error=error)
+                return {**result.to_legacy_dict(), "trace_id": result.trace_id,
+                        "final_answer": error.message, "tools_used": []}
+            routing_query = resolved_molecule.routing_query(query)
         raw_requested_count: Any = (
             mol_count if mol_count is not _MOL_COUNT_UNSET else None
         )
@@ -209,7 +230,7 @@ class SupervisorAgent:
         if active_skill is None and callable(decide):
             # Consume the full decision once: route() intentionally returns only
             # a policy and cannot convey the input-confirmation boundary.
-            decision = decide(query, llm=self.llm)
+            decision = decide(routing_query, llm=self.llm)
             policy = (self.catalog.get(decision.selected_skill)
                       if decision.selected_skill else None)
             if policy is not None:
@@ -241,7 +262,7 @@ class SupervisorAgent:
         else:
             # Explicit workflows and route-only injected legacy routers keep
             # their existing contract; scientific validators still run.
-            policy = self._resolve_policy(query, active_skill)
+            policy = self._resolve_policy(routing_query, active_skill)
         if policy is None:
             return {
                 "success": False,
@@ -271,7 +292,24 @@ class SupervisorAgent:
             mol_count=requested_count,
             session_id=session_id,
             metadata=request_metadata,
+            resolved_molecule=resolved_molecule,
         )
+        idempotency_key = None
+        if resolved_molecule is not None:
+            fingerprint = hashlib.sha256(json.dumps({
+                "protocol": "scientific-reference-v1", "query": query,
+                "molecule": asdict(resolved_molecule), "skill": policy.name,
+                "capabilities": context.capabilities, "temperature": temperature,
+                "mol_count": requested_count, "metadata": request_metadata,
+            }, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+            idempotency_key = self._internal_idempotency_key(fingerprint, session_id=session_id)
+            try:
+                context = self.orchestrator._resolve_idempotent_context(
+                    context, idempotency_key, allow_trace_rebind=True)
+            except RunClaimConflict as exc:
+                failed = exc.to_result(context)
+                return {**failed.to_legacy_dict(), "trace_id": failed.trace_id,
+                        "final_answer": failed.message, "tools_used": []}
         request_tools = self._request_tools(context)
         execution = self._execute_with_harness(
             WorkflowExecutor(
@@ -282,6 +320,7 @@ class SupervisorAgent:
             policy=policy,
             all_tools=request_tools,
             event_callback=event_callback,
+            **({"idempotency_key": idempotency_key} if idempotency_key else {}),
         )
         capability_failure = self._capability_failure_result(
             context,
