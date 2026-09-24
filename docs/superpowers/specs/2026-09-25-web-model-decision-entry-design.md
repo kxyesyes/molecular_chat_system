@@ -1,0 +1,191 @@
+# Package 7: normal Web model-decision entry — proposed design
+
+Date: 2026-09-25. Status: **Parent approved A→B design with narrowed scope; only P7-A1 implementation authorized.**
+
+Inspected baseline: `3a682649c3392727f642f33f56bd3f94c7d77707`, branch `codex/web-model-decision-entry`. The requested worktree already existed, was clean, and pointed at that revision. This is the initial read-only inspection baseline. Parent now requires committing these corrected documents, merging reviewed main `1bba0256409a06317486530e5c1cfa6598b8e381` into this task branch, and offline A1 TDD. No push, provider, browser, server, environment-file or asset access is authorized.
+
+Authority: repository `AGENTS.md`, `docs/PROJECT_STANDARDS.md`, and the read-only `docs/handoff/remaining-through-step8.md` in the `analysis-tool-contracts` worktree. The ledger is an external planning input, not code present in this baseline. Packages 4A/4B/4C/4D and 5 have pending integration/review work; do not assume their local contracts are installed. Package 8 requires current real acceptance. Package 9/public server deployment is excluded. The original dirty checkout and the ledger are untouched.
+
+Companion plan: `docs/superpowers/plans/2026-09-25-web-model-decision-entry.md`. The initially misplaced root plan is moved, not duplicated.
+
+## 1. Decision and completion boundary
+
+Recommended: **phase the existing decision loop into normal Web entry; do not call the first four-tool phase full completion**.
+
+| Option | Benefit | Limitation / decision |
+|---|---|---|
+| A. Normal entry with the initial four tools only | Smallest safe integration; proves model control, ownership, leases, references and cancellation | Valid P7-A milestone, not the recommended package end state. Generation/ranking and candidate production remain unsupported. Parent could explicitly approve this narrower product scope, but must record excluded workflows in the ledger. |
+| B. A, then evidence-bound generation/ranking extensions | Reuses the same model protocol, loop, Session and scientific contracts; supports the parent goal's candidate/data-flow acceptance | **Recommended.** P7-B depends on reviewed generator/ranker and analysis/target contracts. Separate review gates; no blanket expansion of `INITIAL_TOOLS`. |
+| C. Immediately expose every registered tool / call static plans from the loop | Superficially broad coverage | Reject: registration is not permission; staged helpers, filesystem effects, target preconditions, candidate joins and acceptance cannot be obtained by renaming the entry point. A static plan is not dynamic model control. |
+
+Proposed P7 end state includes genuine model-driven ordinary chat and supported molecular analysis, target-aware local generation, validated candidate analysis/ranking, and normal candidate ACK/selection follow-up. Unsupported requests must remain explicit, with no fallback that secretly executes the old planner. ADMET, reverse-target and retrieval admission require their own approved bindings and acceptance predicates. Docking execution is **not** enabled by this design: keep its existing explicit domain/workflow interfaces and scientific gates. The capability catalog marks docking high-risk/approval-required; that metadata is not evidence of a complete normal-Web approval lifecycle. If the parent requires docking inside the dynamic normal-chat loop, P7 stays open until a separately reviewed side-effect/approval binding increment passes. Never label a generation/ranking-only result as a completed docking or comprehensive-evaluation request.
+
+Parent approved phased A→B with `/ws` as the normal entry. No new HTTP surface is in this package. A1 is independently reviewed and is not P7 completion; A2/B use separate PRs. Dynamic docking remains explicitly not enabled; no docking/comprehensive completion claim is permitted.
+
+## 2. Verified baseline and exact gaps
+
+Source paths below are relative to the inspected worktree; symbols identify the source of each finding.
+
+| Boundary | Existing behavior | Gap to close |
+|---|---|---|
+| `src/web/app.py::_setup_routes`; `src/web/chat_handler.py::handle_websocket/_process_message` | `/ws` refreshes config and invokes the normal handler. Handler resolves references, routes to `SupervisorAgent.execute`, or uses ordinary generation/RAG/prompt assembly. | Neither branch calls `ModelDecisionLoop`. `process_decision_message` is a separate server-only opt-in method. Changing a harness backend selector does not select this loop. |
+| `src/web/routes/agent_workflow_routes.py` | HTTP `/api/agent/workflows/plan` is static planning; `/run` submits a synchronous Supervisor job with server session ownership and a background model lease. | There is **no current `/api/chat` HTTP endpoint** in the inspected Python routes. Existing HTTP workflows are not evidence of normal dynamic chat. Preserve their contracts; do not silently reinterpret them. |
+| `src/web/decision_chat.py` | Bounded event buffer (128), deadline-aware sends, redacted `agent_event`, `agent_result`, and one `complete`; loop task is settled on transport failure. | No production assembly, normal receive/cancel loop, input admission, request lease, reference projection, candidate events, or normal-page continuation UX. The bridge alone is not P7. |
+| `src/agent/harness/decision_loop.py` | Calls `model.decide` every round; runtime observations determine the next action. Dynamic `WorkflowRunSession`, sealed evidence, deduped action keys, bounded retries and same-owner continuation already exist. | Caller must supply trusted request kind, allowed/required tools and requirements. No normal admission policy or production lifecycle wiring exists. |
+| `decision_policy.py::authorized_catalog` | Intersects with `INITIAL_TOOLS`: properties, drug-likeness, activity, target search. Only idempotent, no-side-effect adapters; owner resolution; `available=null` permits lazy execution. | `CAPABILITY_CATALOG` lists ten capabilities but does not authorize all of them here. Workflow allowlists also contain staged helpers; they cannot be copied wholesale. |
+| `contracts/decision.py`; `decision_inputs.py::resolve_decision_input` | Outer v1 `tool/clarify/finish` envelope has a generic JSON `arguments` dict. Execution accepts **exactly** one string `input_ref`. `user` binds the query; same-run molecular evidence can feed properties/likeness/activity. | Envelope schema permissiveness is not an executable input contract. No generator target binding, CandidateSet binding, ranking multi-evidence join, docking binding, or arbitrary tool kwargs. No reason to add a parallel DSL. |
+| `contracts/task_requirements.py`; `decision_requirements.py` | Immutable requirements for property/likeness batches: count, expected SMILES, seven allowed metrics, forbidden tools. Evaluates one observation, not joins across observations. | Required tool names alone cannot prove generated count, candidate lineage, target identity, rank completeness or top-N. Current rows must carry `smiles`; CandidateSet carries `original_smiles`/`canonical_smiles`. |
+| `contracts/context.py`; `contracts/resolved_molecule.py`; loop's first `validate_json` | Context may hold a server-created `ResolvedScientificMolecule`. Normal planner binds its canonical SMILES directly. | Loop validates raw dataclass fields as plain JSON; a non-null resolved object is rejected. Resolver also ignores this field and would pass a natural-language ordinal query. Appending SMILES to the query is not equivalent to trusted direct binding. |
+| `decision_continuation.py` | Protocol revision 4; fingerprint includes context, tool specs, adapter versions, model type/name/base URL and requirements; CAS consumes waiting nonce once; budgets survive waiting. | Normal Web has no trusted reconstruction of original context/requirements. New input roles and reference lineage require snapshot/history validation and protocol-revision changes, not just a resolver patch. Credential-only config replacement is not represented by existing public model fingerprint. |
+| `src/web/model_lifecycle.py`; app model switching | Gate drains readers before changing/closing model. Existing `@model_request` uses `finish_on_cancel`, which shields its child. | Wrapping the decision path unchanged can delay actual cancellation until the whole run finishes. Nesting two reader leases can deadlock behind a pending writer. One request owner must cancel the child, settle, then release. |
+| Normal WebSocket receive loop | Receives a frame, awaits the entire `_process_message`, then receives again. | Ping/cancel/disconnect cannot be consumed promptly during an idle model call. A request task and a single independent receiver are necessary. |
+| `scientific_references.py`; `run_session.py::_reject_unavailable_reference` | Owner-bound confirmed manifests, exact ordered keys, revision checks, explicit-input precedence, dispatch-time revalidation. | Decision path must reuse these; it must not accept SMILES, owner IDs, or evidence content from a browser pointer. Bridge currently does not emit projected candidate events. |
+| `src/web/static/js/home/main.js` | Buffers validated `molecule_candidates` until completion; scientific-reference controller ACKs mounted keys. `complete` renders content; `agent_result` mostly shows a message. | No decision continuation state; complete status is not consumed for waiting UX. Need permanent partial/failure/waiting labels, cancel, and trace-correlated frames without replacing the UI. |
+| `ChatHandler` connection history; loop message construction | Normal handler has per-socket history. New loop messages contain the system boundary and current query; `context.memory` is not consumed. | Preserve bounded conversational continuity deliberately; copying old scientific text must not create current-run evidence or tool permissions. |
+| Provider assembly | `OpenAICompatibleModel.decide` uses existing decision transport; ModelScope inherits it. Local Web `OllamaModel` has generation APIs, no `decide`. Separate generator model is already assembled. | Unsupported decision provider must fail closed, not turn ordinary `.generate` text into a decision. Main model changes must never replace local `gmm-llama:latest` generation. |
+
+Other critical reuse: `WorkflowRunSession` owns execution/checkpoint/evidence/terminal journals; `SingleAttemptTool` retains adapter schemas and disables hidden retries. `BindingResolver` has a closed selector/transform set. `WorkflowCompiler`, semantic validator and candidate-alignment validators enforce target/generation rules on static plans. Dynamic steps currently omit those richer declarations; extending dynamic actions must preserve equivalent existing checks, not bypass them.
+
+## 3. Architecture and responsibility split
+
+```text
+normal /ws (A2; not activated in A1)
+        -> WebDecisionEntry (A2 ownership, one model lease)
+        -> decision_request admission (A1, server-only)
+        -> ModelDecisionLoop -> model.decide -> validated proposal
+        -> authorized exact input binding -> WorkflowRunSession
+        -> registered adapter -> validators -> sealed evidence/store
+        -> next model round OR clarify/terminal -> normal UI
+```
+
+New small module `src/web/decision_entry.py` coordinates Web concerns; it is not an executor, planner, registry, second state store or Agent framework. A second small `decision_request.py` owns strict transport DTOs and admission into existing `AgentContext`/`TaskRequirements`. Domain parsing stays in existing generation/target/molecular parsers. Any pure parsing extracted by package 5 is reused after integration, not copied or imported from an unmerged worktree.
+
+App supplies its current model via a provider function, its existing tool pool/registry, state store, reference service and gate. Build a request-local loop **after acquiring the lease**. Do not persist a loop holding an obsolete model; do not rebuild/close the tool pool per turn. Registry availability checks must not eagerly load assets. App shutdown cancels/drains active decision requests before closing the registry, model or store.
+
+Proposed server configuration is `chat_execution.mode = legacy | model_decision` with a bounded profile `initial | candidates` and decision transport mode `native | json`. These are proposed keys, not existing settings. Start with legacy default while tests/review proceed; normal-entry acceptance explicitly enables model_decision, then an approved activation change makes it the normal default. That activation is required for completion; an unused flag is not completion. Rollback is an operator-selected mode change for **new** requests, not automatic per-request fallback. In-flight and waiting requests retain their profile/fingerprint or are explicitly rejected on mismatch.
+
+Existing legacy body is preserved under a private leased legacy method. The common `_process_message` dispatch is not itself doubly leased. Scientific/ordinary chat both reach the decision path in model_decision mode; no legacy router, static plan or `_build_prompt_with_agent` is called to decide/finish a supported run. Reuse intent parsing only for obligations and safety, never an ordered action sequence.
+
+## 4. Admission, permissions and obligations
+
+Accept only bounded user text, strict boolean tool/RAG preferences, bounded existing UI options, and the existing reference/selection hints. Ignore historical presentation-only `timestamp/client_id` for identity; reject attempted authoritative fields (`user_id`, `session_id`, capabilities, allowed/required tools, requirements, backend, raw resolved objects). Missing middleware identity means no model/tool dispatch. Use server session ID as the anonymous owner (`user_id=session_id`, `session_id=session_id`) unless an existing authenticated owner is actually provided server-side. Do not invent an account/authentication system.
+
+Admission produces a frozen request specification, not steps:
+
+- `request_kind`: conversational/knowledge explanation versus requested scientific execution. “Explain logP” is chat; “calculate logP of this molecule” is scientific. Tools disabled does not convert the latter into a free-text scientific answer. Ambiguous execution asks for clarification with no calculations, rather than downgrading to chat.
+- Tool ceiling: reviewed profile intersected with existing capability/workflow policy, registry owner and request restrictions. Browser switches can subtract, never add. Non-idempotent and filesystem tools stay excluded. Explicit negative requirements remain immutable.
+- Required results: parser-derived subjects/count/metrics and required tools, plus explicit unsupported obligations. “ADMET and properties” cannot silently become “properties”. “Generate five and rank top three” is not satisfied by one property observation.
+- Initial profile supports properties, drug-likeness, activity and target search. RAG is unavailable in this profile even when its checkbox is enabled; no hidden legacy RAG call. Requests requiring it return a fixed unsupported explanation. Unknown/compound intents not fully represented in the admission contract clarify/reject; no “empty requirements means everything succeeded”.
+- Initial unsupported generation/ranking/docking returns `rejected`, `success=false`, a fixed reason and missing capabilities; zero tools run. A permission/preflight rejection need not call a model. Supported ordinary chat **must** call the configured external model through `decide` even with both switches off; no canned answer counted as acceptance.
+
+Preserve existing input/generation-count budgets, plus loop limits (16 model requests, 12 reserved tool attempts, 300 seconds), 16 KiB query and bounded context. Transport may enforce a tighter whole-frame limit (proposed 32 KiB); it must not truncate user molecular input into validity. Reject booleans as counts, nonfinite values, conflicting counts and partial SMILES parsing. Credentials are rejected/redacted by existing boundaries; no raw provider errors go to clients/logs/reports.
+
+For ordinary WS conversation, retain the existing connection-owned history under its configured character budget. Pass a bounded, sanitized prior-turn projection in `context.memory` and teach the loop to include it as explicitly untrusted conversational context, never a system instruction, executable tool message, requirement or current evidence. Do not replay historical native tool-call IDs. Record the original user text and sanitized authoritative answer only after that turn settles. Scientific references and continuation remain the only authorized cross-turn scientific bindings; a request to reuse unreferenced scientific results clarifies rather than relying on old prose. Conversation/history wiring is deferred to A2.
+
+## 5. Molecular fidelity and trusted reference representation
+
+Keep three things separate: original user query, exact trusted bound structure, and canonical identity used for comparisons. `ResolvedScientificMolecule` currently contains the stored canonical SMILES only. Do not claim it contains the generator's original spelling; that spelling remains in `CandidateRecord.original_smiles` in the original observation. Preserve both original/canonical candidate fields unchanged in storage/display. A selected follow-up must feed the **exact stored resolved canonical string**, not regenerate it from a model reply or a natural-language routing string.
+
+Add a narrow context-to-plain-JSON projection in the existing decision boundary code. Validate the exact trusted resolved dataclass type and its fixed fields before projection, then run byte/node/depth limits; reject arbitrary objects/subclasses/cycles without calling their serialization hooks. Use the same projection for privacy checking, fingerprint and request snapshot. Do not make `validate_json` accept arbitrary dataclasses.
+
+For `input_ref=user`, keep explicit user input authoritative, including invalid explicit input (never rescue it with a prior selection). Otherwise, when a server-resolved molecule exists, bind direct structure input for properties/likeness and a structured `{query: original_query, smiles: exact_resolved_smiles, target: user_target_if_present}` for activity. Target search does not consume molecular evidence as a target. Keep target identity from user-authorized context, never from selected candidate provenance or model inference.
+
+Bind request digests to original query, trusted selection pointer/compound candidate key/revision, exact structure and user target where relevant. Revalidate the reference at admission, every dispatch, reuse and continuation. A revoked reference cannot reuse a cached decision merely because no adapter call is needed. Existing Session dispatch revalidation remains in place. Changed reference, target or explicit structure creates a new request or invalidates prior relevant evidence; never mixes old molecular text into a clarification reply.
+
+## 6. Lifecycle, continuation and transport
+
+### Request and model ownership
+
+Refresh external configuration **before** leasing. Acquire one reader lease, capture current external model/config generation, construct the loop, run/send, and cancel/settle before releasing. No nested gate acquisition and no model close from a request-local loop. `finish_on_cancel` remains useful for cleanup/uncancellable workers, not as a shield around the entire decision run. A cancel signal reaches the loop promptly; `settle_action` still drains a running synchronous tool and preserves uncertain-state semantics. Do not claim a timed-out external process has stopped, auto-retry it or release ownership while its owned worker remains active.
+
+Use a nonsecret application config-generation identifier in request fingerprinting to reject waiting continuations after any config replacement, including credential-only changes. It must not be a hash of credentials. A process-start generation may intentionally invalidate waiting continuations on restart; document this narrower Web behavior while retaining core loop/store continuation tests. Do not read or persist credentials to make restart continuation work.
+
+### WebSocket
+
+Keep one receiver per socket and one active request per socket. While a request task runs, the receiver handles ping and explicit `cancel` and notices disconnect. A second chat/resume receives a nonterminal busy control response; it must not terminate the active request's candidate lifecycle. Serialize sends through one bounded writer. No detached run survives socket close; join request cleanup, including repeated cancellation.
+
+Add a trace-bearing start acknowledgement and explicit `resume` payload (`trace_id`, `continuation_id`, `message` plus unchanged user restrictions). Server validates ownership and reloads the original trusted request specification from the existing run metadata; it never trusts a client-restated original query, requirements or profile. The loop remains the sole CAS continuation claimant. On waiting, release the lease after durable publication and transport delivery; no model is held during human input. Resume consumes remaining execution/model/tool budgets. Changed restrictions cannot broaden authority or weaken obligations; incompatible changes reject and ask for a new request. Concurrent, replayed, expired or cross-owner continuation requests perform no dispatch or waiting-state mutation.
+
+UI waiting metadata is not a new `RunOutcome`: retain loop underlying partial/rejected outcome, show `status=waiting_for_input` as interaction state, and preserve evidence. The existing bridge can expose a waiting response before its terminal-looking Session event; final waiting result must win in the UI.
+
+### HTTP: unchanged and out of scope
+
+Do not add `/api/chat`, `chat_routes.py`, an HTTP DTO, an HTTP disconnect watcher or a new HTTP acceptance path. This project's normal chat entry is `/ws`. Existing `/api/agent/workflows/plan`, `/run`, `/api/tasks/*`, ownership, cancellation and background leases retain their original static-workflow contracts. New HTTP transports require another explicit task and are not part of A1, A2 or B.
+
+### Results and candidates
+
+Reuse `decision_chat` bounded event delivery and `_result_frame` sanitization as shared pure projections; no raw scientific model-text rewrite. Deliver `agent_event*`, authoritative `agent_result`, projected `molecule_candidates*`, then exactly one `complete` per accepted connected WS turn. Projection runs against the original validated result/store, not a truncated display copy, and uses `ScientificReferenceService.project(session_id=...)`. A display/storage-reference failure cannot manufacture an ACKable manifest or change scientific success; show an explicit warning and leave the source observation intact.
+
+Preserve status, warnings, provenance, evidence IDs, tool-result sequence, artifacts and `task_acceptance`; partial/failure/waiting/cancelled remain distinct. Scientific finish text is reconstructed from verified observations; model-authored scientific finish prose stays non-rendered. Ordinary chat text follows existing safe renderer/redaction. UI retains outcome labels after transient banners disappear, shows missing requirements, and never interprets `complete` as scientific completion. Candidate ACK follows successful normalized mount with exact ordered keys; never ACK merely on receipt. Reconnect does not auto-replay execution or continuation. Restoring an owner-confirmed candidate presentation remains separate from resuming a decision run.
+
+## 7. P7-B: minimum necessary generation/ranking extensions
+
+These changes are a required separately reviewed increment for the recommended broader end state, not available functionality at `3a68264`.
+
+### Closed input roles, not model-authored workflow code
+
+Keep outer `AgentDecision` v1 and `agent_decision` function. Its existing generic arguments allow a server-validated extension without inventing new actions, but advertise the precise per-tool argument schema and bump internal continuation protocol revision. Revalidate old snapshots or reject incompatible ones; do not run old history under new semantics.
+
+| Tool purpose | Proposed model arguments | Server-only assembly |
+|---|---|---|
+| Existing analysis / target search | `{input_ref: "user"}` or an allowed observed molecular ID | Existing rules, plus trusted selected molecule binding. |
+| Untargeted generation | `{input_ref: "user"}` | `build_generation_request` from original user intent and validated requested count, bound to the local generator. |
+| Target-conditioned generation | `{input_ref: "user", target_ref: "evidence-ID"}` | Exact trusted `TargetStructureSet`, request target match, existing target-evidence validation/trust envelope and semantic precondition. Missing/ambiguous target evidence cannot become untargeted generation. |
+| Candidate batch analysis | `{input_ref: "candidate-evidence-ID"}` | Verified CandidateSet, preserved candidate IDs and exact structures, validated molecular batch, and server-set candidate-source/alignment metadata. No model SMILES/list/index overrides. |
+| Ranking | `{input_ref: "candidate-evidence-ID", evidence_refs: {properties: "evidence-ID", admet?: "evidence-ID", activity?: "evidence-ID"}}` | Fixed role map to existing ranker `outputs` (`molecules/properties/admet/activity`) and server-owned `metadata.docking_top_n`. No arbitrary outputs, selectors, metrics or weights. |
+
+Ranker requires validated candidates and real properties; optional inputs absent by contract are distinguishable from failed or untrusted provided evidence. Supplied invalid/stale/foreign/mismatched evidence rejects the action, not silently omitted to obtain a better score. Server checks candidate lineage, target identity, completeness and observation seals before `BindingResolver` builds the existing workflow-shaped ranker input. Record **all** parent evidence IDs in the operation key and provenance. Reuse complete validated observations; do not join unrelated rows to fabricate a complete result.
+
+CandidateSet validation/deduplication remains the existing RDKit/candidate pipeline. Canonical identity joins do not overwrite original SMILES or positional/compound identity. A partial CandidateSet does not become `usable()` merely to continue: default fail closed for automated downstream batch execution until an explicit validated-subset contract is reviewed. It may be displayed with existing partial/source warnings, not treated as full generation acceptance. This is distinct from an explicitly selected, confirmed individual candidate in a new user request: that already-supported reference workflow may proceed after its existing source/candidate validation, without promoting the original generation run to success.
+
+Generate dynamic steps with server-set capability, output contract, semantic preconditions and candidate-source metadata. Reuse/factor existing compiler checks into a per-action validation boundary if necessary; do not execute a full static plan or copy its ordered sequence. `WorkflowRunSession.append_step/execute_step`, semantic validation, result validation and ledger remain the execution path. Generation has no automatic fresh-sample retry disguised as idempotent replay: repeated identical action reuses the sealed result; explicitly bounded new attempts need their own approved semantics.
+
+### Task acceptance extensions
+
+Extend existing `TaskRequirements` with immutable generation/ranking result requirements, rather than using tool presence as success. Version this schema and its snapshot interpretation compatibly; retain existing v1 property/likeness behavior. Required checks:
+
+- Requested valid unique candidate count, maximum existing generator count (10), target-evidence identity, local generator provenance (`gmm-llama:latest`, not main external model), invalid/duplicate/partial counts retained.
+- Every required downstream assessment belongs to the same accepted candidate set and complete requested subject set; original and canonical identities preserved.
+- Ranking top-N bounded by requested/available candidate count, unique IDs, deterministic ranker output, properties for each ranked candidate, missing optional evidence explicitly reported. A prioritization score is not binding affinity or experimental efficacy.
+- Missing requested ADMET/activity is an unsatisfied mandatory obligation if the user required it; it is optional only when admitted as optional before execution. Family disagreement remains `partial`/review and cannot be promoted to success.
+- No newly generated or ranked data may satisfy a different user request via stale query-only digests. Binding/acceptance evaluation and continuation-history replay must share the same lineage rules.
+
+Admission of RAG/ADMET/reverse-target, when required by approved use cases, reuses their reviewed typed adapters and adds closed input roles and result-specific acceptance. RAG evidence is retrieval, not measured chemistry. Unknown ADMET fields stay unknown. Reverse-target inference is not a confirmed target or docking result. Keep them unadvertised until these checks exist. The four staged docking helpers (`prepare_receptor`, `prepare_ligand`, `run_docking`, `get_docking_result`) stay non-executable from the model even if their registry health says available.
+
+## 8. Phases and gates
+
+1. **P7-A1 admission/fidelity core**: strict server admission, normal request ownership, trusted context projection, resolved-input binding, request fingerprints. Fail-closed unsupported responses. No default activation.
+2. **P7-A2 normal transports/lifecycle/UI**: genuine existing `/ws` integration; cancellation/leases/config switching; continuation; authoritative statuses; reference projection and ACK compatibility. Offline normal-path tests, not only isolated bridge tests. Four-tool scope remains visible.
+3. **P7-B contracts/lineage**: after relevant package 4 integration, extend closed argument roles, compiler/semantic reuse, candidate bindings and requirements; target-aware local generation and ranking through the same loop. Review this increment before coding it. Gate auxiliary tools individually; docking remains explicitly excluded pending separate design.
+4. **P7-C activation/acceptance handoff**: parent reviews normal default activation and exact supported-workflow matrix. Normal-page browser evidence and genuine external-model normal-entry evidence are required later. Package 8 supplies current repeated scientific acceptance on the final integrated revision; historical isolated reports do not close this gate.
+
+Tests are specified in the companion plan. Each phase keeps a non-ambiguous unsupported response; no hidden legacy fallback, no broadened permissions, no fake completeness. CI is necessary but insufficient. Parent retains review/CI-gated publication authority; this design task performs none of it.
+
+## 9. Evidence requirements and risks
+
+Read existing tests for decision protocol/transport/loop/requirements/continuation, dynamic Session/ownership, scientific-reference execution/store/Web, browser candidate ACK, main-model lifecycle/config and current acceptances. Existing isolated CLI has four cases and directly calls the opt-in bridge. Family real-weight acceptance labels decision control as `scripted`; the scientific-reference browser fixture explicitly uses synthetic generation. `run_agent_acceptance.py` can return zero for partial and its external-main-model probe is not mandatory for overall real status. None prove new normal-entry completion.
+
+Later reports must distinguish: offline protocol test; real external decision model; real local generation; real scientific tools; UI/ACK evidence; expected rejection safety pass; actual scientific partial/failure. Include exact integrated revision, actual entry, trace IDs, tool/evidence lineage, sanitized provider-call metadata, requested versus returned count, retries/budgets and repeated-case outcomes. Missing assets/providers are skipped/blocked/partial, never passed science. No raw prompts from real users, credentials, response bodies or secret-bearing endpoints in reports.
+
+Primary risks: misclassification lets scientific requests finish as chat; model switches close a leased client; blanket shielding hides cancellation; nested leases deadlock; reference serialization loses identity; query-only caching crosses candidate sets; tuple/static workflow assumptions leak into dynamic bindings; missing optional evidence is confused with scientific success; display truncation corrupts ACK; and HTTP task status is mistaken for Agent outcome. Each has a named TDD gate in the plan.
+
+Self-review: design separates existing facts from proposals, keeps `input_ref` limitations explicit, defines four-tool versus candidate completion, preserves original/resolved structure semantics, and never exposes staged helpers. Parent approved only the A1 implementation boundary below; A2/B execution and future real verification remain outstanding.
+
+## 10. Approved A1 exact implementation fence
+
+A1 adds support code only. It does not route normal chat into the loop yet.
+
+| Files allowed in A1 | Exact purpose |
+|---|---|
+| `src/web/decision_request.py` (new) | Server-only bounded initial-chat admission; fixed safe rejection codes; detached immutable request specification with initial four-tool ceiling, requirements and trusted resolved structure. No transport dispatch or model calls. |
+| `src/agent/harness/decision_bounds.py` | Exact-type context projection; bounded trusted resolved-molecule fields; shared before copying/privacy/fingerprinting. Generic plain-JSON validator stays strict. |
+| `src/agent/harness/decision_inputs.py` | Direct selected-structure binding, explicit-input precedence, request/target/reference digests and revocation checks before reuse. No new argument roles. |
+| `src/agent/harness/decision_loop.py` | Consume projected context; expose optional server-injected config-generation fingerprint input; reject invalid/revoked selected references before model/tool work. Existing run/safety/finish budgets remain. |
+| `src/agent/harness/decision_continuation.py` | Same trusted projection/fingerprint, config-generation compatibility and selected-reference validation before CAS; revision change only if required by A1 semantics. No browser resume API. |
+| `tests/agent/test_web_decision_admission.py`, `test_web_decision_references.py`, `test_web_decision_fingerprint.py` | Focused offline admission, real-loop/temporary-store reference and same-owner continuation/fingerprint regressions. Reuse existing fixtures, no real providers/assets. |
+
+A1 configuration generation is a bounded nonsecret value supplied through an explicit server-only argument, not a browser field and not a credential digest. App epoch generation, switch hooks and leases are A2: no changes to `app.py`, `model_lifecycle.py` or client configuration files in this PR. Core callers that omit the optional generation retain supported behavior; supplied generation participates in waiting fingerprint equality.
+
+Admission uses existing request parsers, not the static planner/LLM router, and fails closed for ambiguous unsupported compound execution. Missing scientific input retains a scientific requirement so the model can clarify after A2 wiring; it must not turn into ordinary chat. Client fields never provide identity, tools, requirements or resolved content. Explicit input overrides a prior selected molecule; direct selected binding keeps the original user query separate from the exact stored resolved SMILES.
+
+Forbidden in A1: `decision_entry.py`, `chat_handler.py`, `app.py`, routes, WebSocket receiver/control frames, UI/history, default activation, registry widening, B argument/requirements schemas, scientific algorithms, new runtime stores or acceptance runners. Keep A2/B as future independently reviewed work. No full-Agent/full-suite run without parent scheduling; focused offline tests and source compilation may run. Freeze the local branch for parent SPEC/QUALITY after focused verification; do not push.
