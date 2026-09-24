@@ -8,6 +8,7 @@ from src.agent.capabilities import capability_for_tool
 from src.agent.capabilities.catalog import TOOL_ALIASES
 
 from .adapters import LegacyPythonToolAdapter
+from .rag_contract import RAGSearchInput, RAGSearchOutput, RAGToolAdapter
 from .registry import ToolRegistry
 from .spec import RetryPolicy, ToolSpec
 
@@ -68,8 +69,8 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             name=name,
             version=str(getattr(tool, "version", "1")),
             description=str(getattr(tool, "description", name)),
-            input_schema=LegacyQueryInput,
-            output_schema=None,
+            input_schema=RAGSearchInput if name == "rag_search" else LegacyQueryInput,
+            output_schema=RAGSearchOutput if name == "rag_search" else None,
             capabilities=capabilities,
             timeout_seconds=float(getattr(tool, "timeout_seconds", 180.0)),
             retry_policy=RetryPolicy(
@@ -92,5 +93,6 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             owner_agents={owner},
             aliases=aliases,
         )
-        registry.register(LegacyPythonToolAdapter(spec, tool, readiness_unknown=name in LAZY_RUNTIME_TOOLS))
+        adapter_class = RAGToolAdapter if name == "rag_search" else LegacyPythonToolAdapter
+        registry.register(adapter_class(spec, tool, readiness_unknown=name in LAZY_RUNTIME_TOOLS))
     return registry

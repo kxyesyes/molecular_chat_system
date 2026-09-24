@@ -1,5 +1,22 @@
 # Latest handoff
 
+## T10-A：RAG 工具类型契约（2026-09-24）
+
+本批分支 `codex/rag-typed-contract-pr`，基于 main `3974f96`，只迁移注册表中的
+`rag_search` / `rag_database_search`。输入明确为文本；成功、partial、失败的记录和来源结构
+均验证，畸形原始失败数据在规范化丢弃前被拒绝。保留来源、扩展字段、warnings、artifacts、
+旧别名、默认 k=3、超时/并发和错误语义，不用 schema 投影覆盖科学数据。
+
+实际复现并封住了非文本输入、畸形记录/metadata 和构造型 Pydantic 对象绕过；
+两个旧测试仅补合规合成检索数据，保留原行为断言。
+独立 SPEC / QUALITY 通过，新增 RAG 契约 **308 passed**，联合 Agent/Web/RAG
+**4539 passed、8 skipped**，离线 contract **34/34**。跳过不是成功，
+具体原因、全部失败尝试、文件/命令与来源见
+[本批实施记录](../superpowers/plans/2026-09-24-rag-typed-contract.md)。
+
+尚未合并或部署；PR/CI 以发布记录和远端状态为准。未调用真实外部模型、未读取生产索引，
+未修改原始混杂工作树。仅完成 RAG 子批，不代表整个 T10 或任务书完成。
+
 ## 主模型默认值与本机持久化（2026-09-20）
 
 本批 `codex/persistent-user-llm-config` 将首页默认配置改为 DeepSeek 官方接口与空 Key，
