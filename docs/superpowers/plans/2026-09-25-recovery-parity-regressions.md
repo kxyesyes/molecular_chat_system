@@ -152,3 +152,9 @@ Independent review is for the parent; implementer self-checks are not independen
 ## Parent review checkpoint
 
 Independent SPEC approved with its own3 passing cases1.61s; independent QUALITY approved with3 passing cases1.82s. Both verified frozen hashes, unchanged pre-existing test ASTs, direct SQLite version checks, both entrypaths and nested-object independence. No production changes or weakened assertions. The interrupted full run is retained; full integrated Agent verification will be supplied by required exact-head CI, not counted as a local completed run. Latest reviewed main must be integrated and focused tests repeated before publication. Historical sandbox artifact_failed remains a separate unresolved record.
+
+## Integrated publication checkpoint
+
+The reviewed test-only implementation was committed as `23bdaf9`. Main through snapshot PR #68 (`e173d43`) was integrated without conflicts: the two modified recovery test files passed all 56 cases in 7.01 seconds. Main through target-contract PR #69 (`16b91575229be987b0c5cf3d8d9039135d8ade29`) was subsequently integrated without conflicts; the same two files passed all 56 cases in 6.48 seconds, exit 0. No implementation or test assertions changed during integration.
+
+Command: the repository's isolated offline runner from `2026-09-24-rag-service-extraction.md`, with only its repository path replaced, invoked `tests/agent/test_delegated_session_lifecycle.py tests/agent/test_workflow_resume.py`. No production model, network service, or user asset was activated. Required exact-head CI remains the publication gate for full Agent regression; the interrupted local full run above is not reclassified as passed.
