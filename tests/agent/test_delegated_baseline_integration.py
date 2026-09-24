@@ -18,7 +18,14 @@ def test_default_rag_owner_keeps_outcome_and_evidence_across_entrypoints(
 ):
     observation = ToolResult(
         'rag_search', True, 'synthetic retrieval',
-        data=[{'SMILES': 'CCO', 'source': 'synthetic-only'}],
+        data=[{'SMILES': 'CCO', 'source': 'synthetic-only',
+               'source_index': 0, 'similarity_score': 0.75,
+               'provenance': {
+                   'source_path': 'synthetic.csv', 'source_sha256': 'a' * 64,
+                   'index_sha256': 'b' * 64, 'embedding_model': 'offline-test',
+                   'manifest_schema_version': 2, 'builder_version': '1',
+                   'vector_label': 0,
+               }}],
         status=ObservationStatus.PARTIAL if partial else ObservationStatus.SUCCEEDED,
         warnings=['incomplete coverage'] if partial else [],
         evidence=[{'source': 'synthetic-only'}],

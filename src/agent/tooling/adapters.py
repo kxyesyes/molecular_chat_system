@@ -55,12 +55,7 @@ class ToolAdapter(ABC):
         try:
             payload = self._validate_input(input_data)
         except ValidationError as exc:
-            return ToolResult.error_result(
-                self.spec.name,
-                AgentErrorCode.INVALID_INPUT,
-                "Tool input validation failed",
-                {"errors": exc.errors(include_url=False)},
-            )
+            return self._input_validation_error(exc)
 
         policy = self.spec.retry_policy
         max_attempts = policy.max_attempts if allow_retry else 1
@@ -70,6 +65,7 @@ class ToolAdapter(ABC):
                            self._execute_once(payload, raw_validator=raw_validator))
             if last_result.success:
                 return self._validate_output(last_result)
+            last_result = self._validate_output(last_result)
             error_code = last_result.error.code.value if last_result.error else ""
             explicitly_retryable = last_result.quality.get("retryable")
             if (
@@ -84,6 +80,14 @@ class ToolAdapter(ABC):
             self.spec.name,
             AgentErrorCode.INTERNAL_ERROR,
             "Tool execution produced no result",
+        )
+
+    def _input_validation_error(self, exc: ValidationError) -> ToolResult:
+        return ToolResult.error_result(
+            self.spec.name,
+            AgentErrorCode.INVALID_INPUT,
+            "Tool input validation failed",
+            {"errors": exc.errors(include_url=False)},
         )
 
     def _validate_input(self, input_data: Any) -> Any:

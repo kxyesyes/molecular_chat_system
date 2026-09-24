@@ -183,14 +183,36 @@ def test_unknown_factory_tool_is_not_silently_filtered():
 def test_default_rag_owner_accepts_canonical_and_alias(name):
     from src.agent.specialists import AgentTask
     from src.agent.tooling import RetryPolicy
-    registry = build_tool_registry([Tool("rag_search", ["rag_database_search"])])
+    # Keep the ownership test on the actual RAG tool/adapter boundary. These
+    # source fields are synthetic contract fixtures, not scientific evidence.
+    rows = [{"source_index": 0, "similarity_score": 0.75,
+             "source": "synthetic-db", "SMILES": "CCO",
+             "provenance": {
+                 "source_path": "synthetic.csv", "source_sha256": "a" * 64,
+                 "index_sha256": "b" * 64, "embedding_model": "offline-test",
+                 "manifest_schema_version": 2, "builder_version": "1",
+                 "vector_label": 0,
+             }}]
+    calls = []
+
+    class Service:
+        is_initialized = True
+        vector_index = object()
+        embedding_model_name = "offline-test"
+
+        def search_similar_molecules_sync(self, query, k=3):
+            calls.append((query, k))
+            return rows
+
+    registry = build_tool_registry([RAGSearchTool(Service())])
     specialist = build_default_specialists()["rag"]
     task = AgentTask(task_id="rag-1", trace_id="trace-1", agent_name="rag", objective="retrieve", inputs={"query": "CCO"},
         allowed_tools=[name], dependencies=[], retry_policy=RetryPolicy(),
         timeout_seconds=5, idempotency_key="rag-1", metadata={})
     result = specialist.execute_task(task, registry)
     assert result.status == "succeeded"
-    assert result.tool_results[0].data == {"query": "CCO"}
+    assert result.tool_results[0].data == rows
+    assert calls == [("CCO", 3)]
 
 
 @pytest.mark.parametrize("capability", CAPABILITY_CATALOG, ids=lambda item: item.name)
