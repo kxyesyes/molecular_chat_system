@@ -312,7 +312,7 @@ def test_bound_generation_keeps_canonical_payload_instead_of_template_text():
     assert generator.calls == [
         {
             "query": "Design molecules for EGFR",
-            "metadata": {"requested_count": 7},
+            "metadata": {"requested_count": 7, "temperature": 0.7},
             "outputs": {"target": {"input": "EGFR"}},
         }
     ]
@@ -354,7 +354,7 @@ def test_legacy_input_from_generation_keeps_selected_upstream_data_typed():
     assert generator.calls == [
         {
             "query": "Design molecules for PDE5A",
-            "metadata": {"requested_count": 7},
+            "metadata": {"requested_count": 7, "temperature": 0.7},
             "outputs": {"target": {"input": "PDE5A"}},
         }
     ]

@@ -442,6 +442,9 @@ class WorkflowOrchestrator:
             ),
             trust_envelope=template,
         )
+        # Request-local setting travels through adapters/dispatch and participates
+        # in the input digest. Never mutate the shared generator or plan template.
+        canonical["metadata"]["temperature"] = context.temperature
         selector = BindingResolver.derive_selector(
             step.input_binding,
             step.input_from,

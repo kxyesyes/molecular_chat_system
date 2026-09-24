@@ -218,7 +218,7 @@ def test_supervisor_atomic_generation_receives_canonical_public_count():
     assert generator.calls == [
         {
             "query": "Generate candidates",
-            "metadata": {"requested_count": 7},
+            "metadata": {"requested_count": 7, "temperature": 0.7},
             "outputs": {},
         }
     ]
@@ -441,7 +441,7 @@ def test_supervisor_public_mol_count_is_authoritative_for_target_workflow():
     assert result["success"] is True
     assert result["workflow_plan"]["metadata"]["requested_count"] == 7
     assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
-        "requested_count": 7
+        "requested_count": 7, "temperature": 0.7
     }
 
 
@@ -747,7 +747,7 @@ def test_supervisor_run_executes_the_single_prechecked_plan():
     assert generator.calls == [
         {
             "query": "generate one molecule",
-            "metadata": {"requested_count": 1},
+            "metadata": {"requested_count": 1, "temperature": 0.7},
             "outputs": {},
         }
     ]

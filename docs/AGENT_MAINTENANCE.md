@@ -1,6 +1,6 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-24。源码范围：main 基线 `75d6a3abc6f6d79e96bf38a019ce2980576c100e`（含 RAG、活性和对接工具类型契约）及本次五类 Planner 纯步骤模板提取。
+核对日期：2026-09-24。源码范围：main 基线 `5f56053bb457187ea71d22671265ff63a466aeba`（含三个优先工具类型契约和五类 Planner 纯步骤模板）及本批 MolecularAgent 兼容适配。
 本文记录随代码交付的维护入口，不表示已合并、生产部署或通过真实科研验收；后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
@@ -69,7 +69,8 @@ ChatHandler / 工作流 API
 | 保留项 | 原因与删除门槛 |
 |---|---|
 | 已删除的旧 Skill 对象层与保留名称 | `src/agent/skills/`、`BaseSkill`、`SkillRegistry` 已移除，声明信息由 [WorkflowCatalog/WorkflowPolicy](../src/agent/workflows/catalog.py) 承接；[删除守卫测试](../tests/agent/test_no_legacy_skill_layer.py) 防止旧 import 回流。`SkillRouter`、`selected_skill`、`active_skill`、`skill_name` 是保留的兼容名称，不代表旧 Skill 对象仍存在，也不代表工作流已删除。 |
-| [react_agent.py](../src/agent/react_agent.py)、[agent_executor.py](../src/agent/agent_executor.py) | 旧接口仍有导出或测试支持，不是正式聊天工厂。先核对调用者并迁移科学断言，不能仅因名称旧就删除。 |
+| [agent_executor.py](../src/agent/agent_executor.py) | MolecularAgent 保留公开接口，仅适配参数和返回形状；委托 Supervisor/Session，不再逐工具 should_use 或直接执行。partial 为 success=false，拒绝/取消状态和失败观察保留。不是正式聊天工厂。 |
+| [react_agent.py](../src/agent/react_agent.py) | ReAct 旧接口仍有导出和科学测试，多步与单工具/回退路径尚需另批收缩。本批不改它，不能把 MolecularAgent 迁移当作所有旧入口已统一。 |
 | [routes/page_routes.py](../src/web/routes/page_routes.py)、[routes/websocket_routes.py](../src/web/routes/websocket_routes.py) | `routes/__init__.py` 仍公开导出。页面兼容层已委托 `register_main_routes()`；WebSocket 兼容注册直接委托 ChatHandler。不得在正式应用重复注册 `/ws`。 |
 | 已删除的 app.py 旧私有聊天/提示函数、静态备份 | `_handle_websocket` 及仅服务它的三个提示 helper、旧应用级历史已删除，正式 `/ws` 仍唯一委托 ChatHandler。无引用的 `activity_prediction_v2.legacy.backup.js` 已删除；公共占位 `script.js`、`activity_prediction_v2.js` 保留，真实页面与静态路由测试检查加载次序、200/404 和清理。 |
 | 工具输入/输出 schema | RAG、活性、对接已接入上表专用类型边界；其他工具仍为通用兼容边界。逐工具迁移，不将“已迁移三个工具”说成所有工具都已类型化，也不另造工作流 DSL。 |

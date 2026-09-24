@@ -277,13 +277,9 @@ class TaskPlanner:
     ) -> WorkflowPlan:
         request_metadata = request_metadata or {}
         requested_count = validate_generation_count(
-            request_metadata.get(
-                "requested_count",
-                self._extract_requested_count(
-                    query,
-                    default=self.DEFAULT_GENERATION_COUNT,
-                ),
-            )
+            request_metadata["requested_count"]
+            if "requested_count" in request_metadata
+            else self._extract_requested_count(query, default=self.DEFAULT_GENERATION_COUNT)
         )
         return WorkflowPlan(
             workflow_name="hit_to_lead_optimization",

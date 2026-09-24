@@ -1,14 +1,12 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-优化版Agent执行器 - 快速高效的分子属性预测
-"""
-
-from typing import List, Dict, Any, Optional
+"""Legacy MolecularAgent API backed by the canonical scientific execution path."""
+from threading import RLock
+from typing import Any, Dict, List, Optional
 import logging
-from .contracts import AgentErrorCode, ToolResult
-from .tools import get_core_tools, get_optional_tool, OPTIONAL_TOOLS
-from .tools.base_tool import execute_tool_compat
+from uuid import uuid4
+
+from .capabilities.catalog import TOOL_ALIASES
+from .contracts import AgentErrorCode, AgentExecutionError, AgentResult, ToolResult
+from .contracts.scientific import RunOutcome
 from .contracts.generation_request import (
     GenerationRequestError,
     build_generation_request,
@@ -16,236 +14,148 @@ from .contracts.generation_request import (
     has_generation_intent,
     preflight_generation_request,
 )
+from .supervisor import SupervisorAgent
+from .tools import get_core_tools, get_optional_tool
 
 logger = logging.getLogger(__name__)
 
+# Constructor names are the existing optional-tool factory API, not routing rules.
+_OPTIONAL_FACTORIES = {
+    "molecular_docking": "MolecularDocking",
+    "reverse_target_predictor": "ReverseTargetTool",
+    "target_database_search": "TargetDatabaseTool",
+    "activity_predictor": "ActivityPredictorTool",
+    "rag_search": "RAGSearchTool",
+}
+
 
 class MolecularAgent:
-    """优化的分子Agent系统 - 专注核心功能，快速执行"""
+    """Compatibility shape only; selection and execution belong to Supervisor."""
 
     def __init__(self, llm=None):
         self.llm = llm
         self.core_tools = []
-        self.optional_tools = {}  # 延迟加载
+        self.optional_tools = {}
+        self._optional_lock = RLock()
         self._initialize_core_tools()
-        logger.info(f"MolecularAgent initialized with {len(self.core_tools)} core tools")
 
     def _initialize_core_tools(self):
-        """初始化核心工具"""
-        try:
-            self.core_tools = get_core_tools()
-            for tool in self.core_tools:
-                logger.info(f"Initialized core tool: {tool.name}")
-        except Exception as e:
-            logger.error(f"Core tools initialization failed: {e}")
-            raise
+        self.core_tools = get_core_tools()
 
     def _get_optional_tool(self, tool_name: str):
-        """按需加载可选工具"""
-        if tool_name not in self.optional_tools:
-            try:
-                self.optional_tools[tool_name] = get_optional_tool(tool_name)
-                logger.info(f"Loaded optional tool: {tool_name}")
-            except Exception as e:
-                logger.error(f"Failed to load optional tool {tool_name}: {e}")
-                return None
-        return self.optional_tools[tool_name]
+        with self._optional_lock:
+            if tool_name not in self.optional_tools:
+                try:
+                    self.optional_tools[tool_name] = get_optional_tool(tool_name)
+                except Exception:
+                    # Missing tool is left absent for the canonical executor to reject.
+                    logger.warning("Optional tool unavailable: %s", tool_name)
+                    return None
+            return self.optional_tools[tool_name]
 
     def get_all_tools(self) -> List:
-        """获取所有可用工具（核心 + 已加载的可选工具）"""
-        all_tools = self.core_tools.copy()
-        all_tools.extend(self.optional_tools.values())
-        return all_tools
+        return [*self.core_tools, *self.optional_tools.copy().values()]
+
+    def _supervisor(self):
+        # Supplying a map, including an empty map, avoids eager default tool loading.
+        tools = {tool.name: tool for tool in self.get_all_tools()}
+        for alias, canonical in TOOL_ALIASES.items():
+            if alias in tools:
+                tools.setdefault(canonical, tools[alias])
+        return SupervisorAgent(tools=tools, llm=self.llm)
 
     def should_use_tools(self, query: str, *, preflight: bool = True) -> bool:
-        """快速判断是否需要使用工具"""
         if preflight:
             preflight_generation_request(query)
-        # 首先检查核心工具
-        for tool in self.core_tools:
-            if hasattr(tool, 'should_use') and tool.should_use(query):
-                return True
-
-        # 检查是否需要可选工具
-        query_lower = query.lower()
-        for tool_name in OPTIONAL_TOOLS:
-            if self._should_load_optional_tool(query_lower, tool_name):
-                tool = self._get_optional_tool(tool_name)
-                if tool and hasattr(tool, 'should_use') and tool.should_use(query):
-                    return True
-
-        return False
-
-    def _should_load_optional_tool(self, query_lower: str, tool_name: str) -> bool:
-        """判断是否需要加载特定的可选工具"""
-        if tool_name == 'RXNChemistryAgent':
-            return any(keyword in query_lower for keyword in [
-                'reaction', 'synthesis', 'retrosynthesis', 'rxn', '反应', '合成', '逆合成'
-            ])
-        elif tool_name == 'MolecularDocking':
-            return any(keyword in query_lower for keyword in [
-                'docking', 'binding', 'dock', '对接', '结合', '分子对接'
-            ])
-        return False
-
-    def execute_tools(
-        self,
-        query: str,
-        temperature: float = 0.7,
-        mol_count: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """执行工具预测"""
-        try:
-            preflight_generation_request(
-                query,
-                mol_count,
-                count_supplied=mol_count is not None,
-                field="mol_count",
-                active_molecular_skill=True,
-            )
-        except GenerationRequestError as exc:
-            tool_result = self._invalid_generation_tool_result(exc)
-            return {
-                'success': False,
-                'results': [tool_result],
-                'used_tools': [],
-                'error': tool_result['error'],
-                'message': tool_result['error']['message'],
-            }
-
-        results = []
-        used_tools = []
-        first_error = None
-
-        # 执行核心工具
-        for tool in self.core_tools:
-            try:
-                if hasattr(tool, 'should_use') and tool.should_use(query):
-                    logger.info(f"Executing core tool: {tool.name}")
-                    # 如果是分子生成工具，传递temperature和mol_count参数
-                    if tool.name == 'llm_molecular_generator':
-                        generation_kwargs = {"temperature": temperature}
-                        if mol_count is not None:
-                            generation_kwargs["mol_count"] = mol_count
-                        tool_result = execute_tool_compat(
-                            tool, query, **generation_kwargs
-                        )
-                        result = tool_result.to_legacy_dict()
-                    else:
-                        result = tool.execute(query)
-                    if result.get('success'):
-                        results.append(result)
-                        used_tools.append(tool.name)
-                    elif tool.name == 'llm_molecular_generator':
-                        results.append(result)
-                        first_error = first_error or result.get("error")
-            except Exception as e:
-                logger.error(f"Core tool {tool.name} execution failed: {e}")
-
-        # 按需执行可选工具
-        query_lower = query.lower()
-        for tool_name in OPTIONAL_TOOLS:
-            if self._should_load_optional_tool(query_lower, tool_name):
-                tool = self._get_optional_tool(tool_name)
-                if tool:
-                    try:
-                        if hasattr(tool, 'should_use') and tool.should_use(query):
-                            logger.info(f"Executing optional tool: {tool_name}")
-                            result = tool.execute(query)
-                            if result.get('success'):
-                                results.append(result)
-                                used_tools.append(tool_name)
-                    except Exception as e:
-                        logger.error(f"Optional tool {tool_name} execution failed: {e}")
-
-        return {
-            'success': len(used_tools) > 0,
-            'results': results,
-            'used_tools': used_tools,
-            'error': first_error,
-            'message': f"Successfully executed {len(used_tools)} tools" if used_tools else "No tools were triggered"
-        }
+        supervisor = self._supervisor()
+        decision = supervisor.skill_router.decide(query, llm=self.llm)
+        return bool(decision.selected_skill and not decision.requires_confirmation)
 
     def get_tool_descriptions(self) -> Dict[str, str]:
-        """获取工具描述信息"""
-        descriptions = {}
-
-        # 核心工具描述
-        for tool in self.core_tools:
-            descriptions[tool.name] = getattr(tool, 'description', 'No description available')
-
-        # 可选工具描述（不加载实例）
-        descriptions['RXNChemistryAgent'] = "Chemical reaction prediction and synthesis planning"
-        descriptions['MolecularDocking'] = "Molecular docking and binding analysis"
-
+        descriptions = {
+            tool.name: getattr(tool, "description", "No description available")
+            for tool in self.core_tools
+        }
+        descriptions["RXNChemistryAgent"] = "Chemical reaction prediction and synthesis planning"
+        descriptions["MolecularDocking"] = "Molecular docking and binding analysis"
         return descriptions
 
-    def execute(
-        self,
-        query: str,
-        temperature: float = 0.7,
-        mol_count: Optional[int] = None,
+    def execute_tools(
+        self, query: str, temperature: float = 0.7, mol_count: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """执行agent任务 - 简化版本，直接使用工具"""
+        result = self.execute(query, temperature, mol_count)
+        result["results"] = result.pop("tool_results")
+        return result
+
+    def execute(
+        self, query: str, temperature: float = 0.7, mol_count: Optional[int] = None,
+    ) -> Dict[str, Any]:
         try:
             requested_count = preflight_generation_request(
-                query,
-                mol_count,
-                count_supplied=mol_count is not None,
-                field="mol_count",
-                active_molecular_skill=True,
+                query, mol_count, count_supplied=mol_count is not None,
+                field="mol_count", active_molecular_skill=True,
             )
+            if has_generation_intent(query):
+                build_generation_request(query, requested_count)
         except GenerationRequestError as exc:
             return self._invalid_generation_response(exc)
 
-        logger.info(f"Executing query: {query[:100]}... (temperature={temperature})")
-
-        if has_generation_intent(query):
-            try:
-                build_generation_request(query, requested_count)
-            except GenerationRequestError as exc:
-                return self._invalid_generation_response(exc)
-
-        # 快速判断是否需要工具
-        if not self.should_use_tools(query, preflight=False):
-            return {
-                'success': False,
-                'message': 'No relevant tools found for this query',
-                'response': '抱歉，我无法处理这个查询。请提供分子结构(SMILES)或相关的药物化学问题。'
-            }
-
-        # 执行工具，传递temperature和mol_count参数
-        tool_results = self.execute_tools(query, temperature, mol_count)
-
-        if tool_results['success']:
-            # 格式化工具结果
-            formatted_responses = []
-            for result in tool_results['results']:
-                if result.get('formatted'):
-                    formatted_responses.append(result['formatted'])
-
-            return {
-                'success': True,
-                'message': tool_results['message'],
-                'response': '\n\n'.join(formatted_responses),
-                'used_tools': tool_results['used_tools'],
-                'tool_results': tool_results['results']
-            }
-        else:
-            failure = {
-                'success': False,
-                'message': (
-                    tool_results['error']['message']
-                    if tool_results.get('error')
-                    else 'Tool execution failed'
+        supervisor = self._supervisor()
+        decision = supervisor.skill_router.decide(query, llm=self.llm)
+        if decision.requires_confirmation:
+            message = "Input clarification required: " + "; ".join(decision.reasons)
+            result = AgentResult(
+                trace_id=f"agent-{uuid4().hex[:12]}", success=False,
+                message=(message if decision.selected_skill else "No relevant tools found for this query"),
+                final_answer=message, skill_name=decision.selected_skill,
+                outcome=RunOutcome.REJECTED,
+                error=AgentExecutionError(
+                    code=AgentErrorCode.INVALID_INPUT, message=message,
+                    details={"reason": "routing_confirmation_required", "reasons": decision.reasons},
                 ),
-                'response': '工具执行失败，请检查输入格式或稍后重试。',
-                'used_tools': tool_results['used_tools'],
-                'tool_results': tool_results['results'],
+            )
+            return self._legacy_response(result, [], {"steps": []})
+        policy = supervisor.catalog.get(decision.selected_skill) if decision.selected_skill else None
+        if policy is None:
+            return {
+                "success": False, "partial": False, "status": "failed",
+                "message": "No relevant tools found for this query",
+                "response": "抱歉，我无法处理这个查询。请提供分子结构(SMILES)或相关的药物化学问题。",
+                "tool_results": [], "used_tools": [], "error": None,
+                "trace_id": f"agent-{uuid4().hex[:12]}", "agent_events": [],
+                "warnings": [], "evidence": [], "artifacts": [],
             }
-            if tool_results.get('error'):
-                failure['error'] = tool_results['error']
-            return failure
+
+        count_kwargs = {} if mol_count is None else {"mol_count": mol_count}
+        plan = supervisor.plan(query, skill_name=policy.name, **count_kwargs)
+        # Only load tools named by the canonical plan, never all optional tools.
+        request_tools = dict(supervisor.tools)
+        for step in plan["steps"]:
+            name = step["tool_name"]
+            factory = _OPTIONAL_FACTORIES.get(name)
+            if name not in request_tools and factory is not None:
+                tool = self._get_optional_tool(factory)
+                if tool is not None:
+                    request_tools[name] = tool
+        supervisor.tools = request_tools
+        raw = supervisor.execute(
+            query, temperature=temperature, active_skill=policy, **count_kwargs,
+        )
+        return self._legacy_response(raw["agent_result"], raw["agent_events"], raw.get("workflow_plan", plan))
+
+    @staticmethod
+    def _legacy_response(result, events, plan):
+        canonical = result.to_legacy_dict()
+        sequence = canonical["tool_result_sequence"]
+        return {
+            **canonical,
+            "response": canonical["final_answer"] or canonical["message"],
+            "used_tools": [event["tool"] for event in events if event.get("event") == "tool_started"],
+            "tool_results": sequence,
+            "trace_id": result.trace_id,
+            "agent_events": events,
+            "workflow_plan": plan,
+        }
 
     @staticmethod
     def _invalid_generation_tool_result(exc: GenerationRequestError) -> Dict[str, Any]:
@@ -258,15 +168,14 @@ class MolecularAgent:
         ).to_legacy_dict()
 
     @classmethod
-    def _invalid_generation_response(
-        cls, exc: GenerationRequestError
-    ) -> Dict[str, Any]:
+    def _invalid_generation_response(cls, exc: GenerationRequestError) -> Dict[str, Any]:
         tool_result = cls._invalid_generation_tool_result(exc)
         return {
-            "success": False,
+            "success": False, "partial": False, "status": "failed",
             "message": tool_result["error"]["message"],
             "response": "工具执行失败，请检查输入格式或稍后重试。",
-            "used_tools": [],
-            "tool_results": [tool_result],
+            "used_tools": [], "tool_results": [tool_result],
             "error": tool_result["error"],
+            "trace_id": f"agent-{uuid4().hex[:12]}", "agent_events": [],
+            "warnings": [], "evidence": [], "artifacts": [],
         }

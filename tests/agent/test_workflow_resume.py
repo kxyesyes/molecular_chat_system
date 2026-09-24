@@ -274,7 +274,7 @@ def test_generator_candidate_set_survives_checkpoint_reuse(tmp_path):
     assert generator.calls == [
         {
             "query": "generate",
-            "metadata": {"requested_count": 3},
+            "metadata": {"requested_count": 3, "temperature": 0.7},
             "outputs": {},
         }
     ]
@@ -377,7 +377,7 @@ def test_validated_checkpoint_trusts_invalid_candidate_metadata_rejection(
     assert generator.calls == [
         {
             "query": "generate",
-            "metadata": {"requested_count": 1},
+            "metadata": {"requested_count": 1, "temperature": 0.7},
             "outputs": {},
         }
     ]
@@ -452,7 +452,7 @@ def test_corrupted_candidate_set_checkpoint_reexecutes_generator(tmp_path):
     orchestrator = WorkflowOrchestrator(state_store=store)
     canonical_request = {
         "query": "generate",
-        "metadata": {"requested_count": 3},
+        "metadata": {"requested_count": 3, "temperature": 0.7},
         "outputs": {},
     }
     store.save_checkpoint(
