@@ -9,6 +9,7 @@ import hashlib
 from typing import Dict, Any, Mapping
 import logging
 from .base_tool import BaseMolecularTool
+from .molecular_input import MolecularInputUnavailable, parse_molecular_smiles
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,10 @@ class ReverseTargetTool(BaseMolecularTool):
         ]
         # 需要同时包含 SMILES 和靶点关键词
         has_keyword = any(kw in query_lower for kw in keywords)
-        has_smiles = bool(self.extract_smiles(query))
+        try:
+            has_smiles = bool(parse_molecular_smiles(query, self))
+        except ValueError:
+            return False
         return has_keyword and has_smiles
 
     @staticmethod
@@ -93,10 +97,15 @@ class ReverseTargetTool(BaseMolecularTool):
         if not self._check_rdkit(result):
             return result
 
-        # 提取 SMILES
-        smiles_list = self.extract_smiles(query)
-        if not smiles_list:
-            result['message'] = "未在查询中检测到有效的 SMILES 结构。请提供分子的 SMILES 字符串。"
+        try:
+            smiles_list = parse_molecular_smiles(query, self)
+        except MolecularInputUnavailable:
+            result['message'] = "SMILES 校验暂不可用，未执行反向寻靶。"
+            result['error'] = {'code': 'tool_unavailable', 'message': result['message']}
+            return result
+        except ValueError:
+            result['message'] = "SMILES 无效或缺失；请提供完整结构，未提取有效片段替代。"
+            result['error'] = {'code': 'validation_error', 'message': result['message']}
             return result
 
         smiles = smiles_list[0]

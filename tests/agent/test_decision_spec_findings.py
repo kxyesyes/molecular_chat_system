@@ -142,17 +142,17 @@ def test_semantic_replay_accepts_references_reuse_and_multiple_input_turns(setup
 
 
 def test_raw_gate_is_request_local_and_keeps_default_adapter_compatibility(setup_loop):
-    from src.agent.contracts import ToolResult
     class LargeTool(CountingTool):
         def execute(self, query):
-            self.inputs.append(query)
-            return ToolResult.success_result(self.name, {'smiles': 'CCO', 'large': 'x' * 65537})
+            result = super().execute(query)
+            result.data[0]['large'] = 'x' * 65537
+            return result
     b = setup_loop([tool(), finish_last], [LargeTool()])
     adapter = b.registry.resolve('property_calculator')
     original_spec, original_invoke = adapter.spec, adapter.invoke
     assert not run(b).success
     result = adapter.execute({'query': 'CCO'})
-    assert result.success and len(result.data['large']) == 65537
+    assert result.success and len(result.data[0]['large']) == 65537
     assert adapter.spec is original_spec and adapter.invoke == original_invoke
     assert len(b.tools[0].inputs) == 2
 
@@ -202,8 +202,9 @@ def test_publication_retry_cannot_replace_original_full_seal(setup_loop, monkeyp
             self.last = super().execute(query)
             self.last.error = AgentExecutionError(AgentErrorCode.PROVIDER_ERROR, 'original failure')
             return self.last
-    source = Retained()
-    b = setup_loop([tool(), finish_last], [source])
+    # Generic legacy contradiction, deliberately downstream of typed analysis.
+    source = Retained('target_database_search')
+    b = setup_loop([tool(source.name), finish_last], [source])
     original, attempts, seals = b.store.record_tool_execution, [], []
     capture = loop.seal_observation
     def capture_once(result, session):
@@ -219,7 +220,7 @@ def test_publication_retry_cannot_replace_original_full_seal(setup_loop, monkeyp
             source.last.error = None
             raise sqlite3.OperationalError('synthetic commit then error')
     monkeypatch.setattr(b.store, 'record_tool_execution', write)
-    result = run(b)
+    result = run(b, allowed_tools={source.name}, required_tools={source.name})
     assert not result.success and len(source.inputs) == 1 and len(seals) == 1
     assert result.tool_results[0].error.code == AgentErrorCode.PROVIDER_ERROR
     assert 'provider_error' in next(iter(seals[0].values()))
@@ -237,8 +238,8 @@ def test_full_seal_precedes_every_publication(setup_loop, monkeypatch, boundary,
             self.last.error = AgentExecutionError(AgentErrorCode.PROVIDER_ERROR, 'original failure')
             return self.last
 
-    source, target = Retained(), CountingTool('drug_likeness_assessment')
-    b = setup_loop([tool(), finish_last if action == 'finish' else downstream, finish_last], [source, target])
+    source, target = Retained('target_database_search'), CountingTool('drug_likeness_assessment')
+    b = setup_loop([tool(source.name), finish_last if action == 'finish' else downstream, finish_last], [source, target])
     changed = []
 
     def mutate():
@@ -258,7 +259,7 @@ def test_full_seal_precedes_every_publication(setup_loop, monkeypatch, boundary,
             if event.event.value == ('validation_warning' if boundary == 'warning' else 'tool_failed'):
                 mutate()
         b.bus.on_event = callback
-    result = run(b)
+    result = run(b, allowed_tools={source.name, target.name}, required_tools={source.name})
     assert changed and not result.success and not target.inputs
     assert result.tool_results[0].error.code == AgentErrorCode.PROVIDER_ERROR
     assert '46.069' not in result.final_answer
@@ -302,14 +303,16 @@ def test_legacy_raw_dict_bounded_before_compat_conversion(setup_loop, monkeypatc
 
 
 def test_error_cannot_be_erased_before_first_observation_seal(setup_loop):
+    # This probe targets the downstream seal of a generic legacy observation;
+    # typed analysis adapters reject the contradiction before that seal.
     class Retained(CountingTool):
         def execute(self, query):
             self.last = super().execute(query)
             self.last.error = AgentExecutionError(AgentErrorCode.PROVIDER_ERROR, 'synthetic contradiction')
             return self.last
 
-    source = Retained()
-    b = setup_loop([tool(), finish_last], [source])
+    source = Retained('target_database_search')
+    b = setup_loop([tool(source.name), finish_last], [source])
     erased = []
 
     def callback(event):
@@ -319,7 +322,7 @@ def test_error_cannot_be_erased_before_first_observation_seal(setup_loop):
             erased.append(True)
 
     b.bus.on_event = callback
-    result = run(b)
+    result = run(b, allowed_tools={source.name}, required_tools={source.name})
     assert erased
     stored_error = b.store.get_tool_executions('trace-test')[0]['output']['error']
     assert stored_error['code'] == 'provider_error'
@@ -348,7 +351,7 @@ def test_full_history_mismatch_rejected_before_cas(setup_loop, monkeypatch, mode
     if change == 'observation':
         index = 3
         observation = json.loads(messages[index]['content'])
-        observation['data']['molecular_weight'] = 999999
+        observation['data'][0]['properties']['molecular_weight'] = 999999
         messages[index]['content'] = json.dumps(observation)
     elif change == 'action':
         action = json.loads(messages[2]['tool_calls'][0]['function']['arguments'])
