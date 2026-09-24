@@ -9,6 +9,7 @@ from src.agent.capabilities.catalog import TOOL_ALIASES
 
 from .adapters import LegacyPythonToolAdapter
 from .activity_contract import ActivityPredictInput, ActivityPredictOutput, ActivityToolAdapter
+from .docking_contract import DockingInput, DockingOutput, DockingToolAdapter
 from .rag_contract import RAGSearchInput, RAGSearchOutput, RAGToolAdapter
 from .registry import ToolRegistry
 from .spec import RetryPolicy, ToolSpec
@@ -71,8 +72,10 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             version=str(getattr(tool, "version", "1")),
             description=str(getattr(tool, "description", name)),
             input_schema=(RAGSearchInput if name == "rag_search" else
+                          DockingInput if name == "molecular_docking" else
                           ActivityPredictInput if name == "activity_predictor" else LegacyQueryInput),
             output_schema=(RAGSearchOutput if name == "rag_search" else
+                           DockingOutput if name == "molecular_docking" else
                            ActivityPredictOutput if name == "activity_predictor" else None),
             capabilities=capabilities,
             timeout_seconds=float(getattr(tool, "timeout_seconds", 180.0)),
@@ -97,6 +100,7 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             aliases=aliases,
         )
         adapter_class = (RAGToolAdapter if name == "rag_search" else
+                         DockingToolAdapter if name == "molecular_docking" else
                          ActivityToolAdapter if name == "activity_predictor" else LegacyPythonToolAdapter)
         registry.register(adapter_class(spec, tool, readiness_unknown=name in LAZY_RUNTIME_TOOLS))
     return registry
