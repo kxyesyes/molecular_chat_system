@@ -168,13 +168,17 @@ def test_invalid_count_return_vs_raise_is_preserved(skill, query, count, reason)
         assert plan.metadata["reason"] == reason
 
 
-def test_lead_metadata_does_not_short_circuit_existing_parser_evaluation():
+def test_lead_explicit_metadata_short_circuits_text_count_parser():
     class RecordingPlanner(TaskPlanner):
         def _extract_requested_count(self, query, default):
             raise GenerationRequestError("malformed_requested_count", value="probe")
 
+    plan = RecordingPlanner().plan(_context("hit_to_lead_optimization", LEAD_QUERY, {"requested_count": 2}))
+    assert plan.metadata["requested_count"] == 2
+    generator = next(step for step in plan.steps if step.tool_name == "llm_molecular_generator")
+    assert generator.input_data["metadata"]["requested_count"] == 2
     with pytest.raises(GenerationRequestError):
-        RecordingPlanner().plan(_context("hit_to_lead_optimization", LEAD_QUERY, {"requested_count": 2}))
+        RecordingPlanner().plan(_context("hit_to_lead_optimization", LEAD_QUERY))
 
 
 def test_helper_overrides_remain_effective():

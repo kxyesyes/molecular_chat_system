@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from typing import Dict, List, Optional, Any
 import asyncio
 import logging
+import math
 import re
 
 try:
@@ -124,6 +125,18 @@ class LLMMolecularGenerator(BaseMolecularTool):
             query_text, explicit_count, target_evidence = self._normalize_request(
                 query
             )
+            metadata = query.get("metadata") if isinstance(query, Mapping) else None
+            if isinstance(metadata, Mapping) and "temperature" in metadata:
+                temperature = metadata["temperature"]
+                try:
+                    valid_temperature = type(temperature) in (int, float) and math.isfinite(temperature)
+                except OverflowError:
+                    valid_temperature = False
+                if not valid_temperature:
+                    raise GenerationRequestError(
+                        "generation temperature must be a finite number",
+                        reason="invalid_temperature",
+                    )
             validated_mol_count = (
                 validate_generation_count(mol_count, field="mol_count")
                 if mol_count is not None

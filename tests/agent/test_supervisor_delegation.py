@@ -288,7 +288,7 @@ def test_delegated_atomic_generation_receives_canonical_count_and_rejects_invali
     assert tools["llm_molecular_generator"].calls == [
         {
             "query": "Generate 7.5 molecules",
-            "metadata": {"requested_count": 5},
+            "metadata": {"requested_count": 5, "temperature": 0.7},
             "outputs": {},
         }
     ]
@@ -368,7 +368,7 @@ def test_delegated_supervisor_uses_prepared_authoritative_count_metadata():
         "requested_count": 5
     }
     assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
-        "requested_count": 5
+        "requested_count": 5, "temperature": 0.7
     }
 
 
@@ -391,7 +391,7 @@ def test_delegated_public_mol_count_is_authoritative():
     assert result["result"]["tool_results"]["property_calculator"]["success"] is False
     assert result["plan"]["metadata"]["requested_count"] == 7
     assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
-        "requested_count": 7
+        "requested_count": 7, "temperature": 0.7
     }
 
 
@@ -449,7 +449,7 @@ def test_delegated_plan_count_overrides_conflicting_context_metadata():
         "requested_count": 5
     }
     assert tools["llm_molecular_generator"].calls[0]["metadata"] == {
-        "requested_count": 5
+        "requested_count": 5, "temperature": 0.7
     }
 
 

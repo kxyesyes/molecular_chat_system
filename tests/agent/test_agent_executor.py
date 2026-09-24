@@ -182,8 +182,10 @@ def test_valid_mol_count_does_not_force_generation_for_non_generation_query(
 
     result = agent.execute("Analyze CCO", mol_count=3)
 
-    assert result["success"] is True
-    assert other_tool.calls == ["Analyze CCO"]
+    # The canonical Router abstains on this underspecified English request;
+    # a legacy tool's always-true predicate must not force calculation.
+    assert result["success"] is False
+    assert other_tool.calls == []
     assert model.prompts == []
 
 
@@ -203,7 +205,7 @@ def test_agent_executor_prevalidates_invalid_mixed_generation_before_all_tools(
     assert model.prompts == []
 
 
-def test_agent_executor_valid_mixed_generation_behavior_is_unchanged(monkeypatch):
+def test_agent_executor_valid_mixed_generation_uses_canonical_selection(monkeypatch):
     agent, model = _build_agent(monkeypatch)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
@@ -211,7 +213,8 @@ def test_agent_executor_valid_mixed_generation_behavior_is_unchanged(monkeypatch
     result = agent.execute("Analyze CCO and Generate 3 molecules")
 
     assert result["success"] is True
-    assert other_tool.calls == ["Analyze CCO and Generate 3 molecules"]
+    assert other_tool.calls == []
+    assert other_tool.should_use_calls == []
     assert "Task: provide 3 valid" in model.prompts[0]
 
 
@@ -232,8 +235,9 @@ def test_agent_executor_does_not_generate_within_explanation_scope(
 
     result = agent.execute(query)
 
-    assert result["success"] is True
-    assert other_tool.calls == [query]
+    assert result["success"] is False
+    assert other_tool.calls == []
+    assert other_tool.should_use_calls == []
     assert model.prompts == []
 
 

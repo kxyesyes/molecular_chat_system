@@ -20,8 +20,8 @@ Approved design: [thin adapter](../specs/2026-09-24-molecular-agent-thin-adapter
 
 ## Task 1 — Record baseline and RED
 
-- [ ] Run existing `tests/agent/test_agent_executor.py` and `tests/test_agent_llm_wiring.py` through isolated runner below.
-- [ ] Add public execute/execute_tools tests with canonical and dictionary failed/partial results. Preserve errors, warnings, evidence, artifacts, repeated observations and cancelled/rejected outcomes. Shape expectation:
+- [x] Run existing `tests/agent/test_agent_executor.py` and `tests/test_agent_llm_wiring.py` through isolated runner below: 61 passed.
+- [x] Add public execute/execute_tools tests with canonical and dictionary failed/partial results. Preserve errors, warnings, evidence, artifacts, repeated observations and cancelled/rejected outcomes. Shape expectation:
 
 ```python
 assert result['success'] is False
@@ -31,14 +31,14 @@ assert [item['tool_name'] for item in result['tool_results']] == ['property_calc
 assert result['tool_results'][1]['error']['code'] == 'external_tool_unavailable'
 ```
 
-- [ ] Run new tests before production changes. Distinguish fixture/setup errors from real missing delegation/state behavior.
+- [x] Run new tests before production changes. Distinguish fixture/setup errors from real missing delegation/state behavior.
 
 ## Task 2 — Minimal delegation and mapping
 
-- [ ] Retain preflight helpers for exact invalid-count error details; None means omission. Preserve temperature and explicit valid mol_count. Do not call should_use_tools again inside execute (it would reparse authoritative count).
-- [ ] Construct request-local Supervisor from core + cached optional tool mapping, passing llm only to its main-model slot. Resolve policy once; no match returns old non-success message, no tool calls.
-- [ ] Use the same Supervisor's public plan with resolved skill/count to determine optional requirements. Resolve existing optional factory class names, cache safely, snapshot into the request-local tool map; unknown/missing tools remain canonical failure. Never call a tool to discover its name or suitability.
-- [ ] Execute exactly once with resolved active_skill and optional count:
+- [x] Retain preflight helpers for exact invalid-count error details; None means omission. Preserve temperature and explicit valid mol_count. Do not call should_use_tools again inside execute (it would reparse authoritative count).
+- [x] Construct request-local Supervisor from core + cached optional tool mapping, passing llm only to its main-model slot. Use full Router.decide once (route drops requires_confirmation); preserve clarification before loading tools, then resolve its policy. No match retains old non-success message, no tool calls.
+- [x] Use the same Supervisor's public plan with resolved skill/count to determine optional requirements. Resolve existing optional factory class names, cache safely, snapshot into the request-local tool map; unknown/missing tools remain canonical failure. Never call a tool to discover its name or suitability.
+- [x] Execute exactly once with resolved active_skill and optional count:
 
 ```python
 kwargs = {'temperature': temperature, 'active_skill': policy}
@@ -47,35 +47,63 @@ if mol_count is not None:
 response = supervisor.execute(query, **kwargs)
 ```
 
-- [ ] For AgentResult-backed responses derive fields from its existing serializer, never from the legacy success-or-partial boolean:
+- [x] For AgentResult-backed responses derive fields from its existing serializer, never from the legacy success-or-partial boolean:
 
 ```python
 payload = response['agent_result'].to_legacy_dict()
 sequence = payload['tool_result_sequence']
 payload.update(response=payload['final_answer'] or payload['message'],
-               used_tools=[item['tool_name'] for item in sequence],
+               used_tools=[event['tool'] for event in response['agent_events']
+                           if event.get('event') == 'tool_started'],
                tool_results=sequence,
                trace_id=response['trace_id'],
                agent_events=response['agent_events'])
 ```
 
-- [ ] execute_tools delegates to this same implementation once and renames tool_results to results. Keep old invalid-input shape, add truthful status/partial metadata; no scientific execution indicated for preflight errors.
-- [ ] Remove old should_use loops, _should_load_optional_tool keyword dispatch, direct tool.execute and duplicated success-only filtering. Preserve getters and lazy-load helper where still needed.
-- [ ] Run mapping + old count tests; repair implementation failures. Update tests only for approved routing changes, preserving count and no-model assertions. Never disable validators to obtain green.
+- [x] execute_tools delegates to this same implementation once and renames tool_results to results. Keep old invalid-input shape, add truthful status/partial metadata; no scientific execution indicated for preflight errors.
+- [x] Remove old should_use loops, _should_load_optional_tool keyword dispatch, direct tool.execute and duplicated success-only filtering. Preserve getters and lazy-load helper where still needed.
+- [x] Run mapping + old count tests; repair implementation failures. Update tests only for approved routing changes, preserving count and no-model assertions. Never disable validators to obtain green.
 
 ## Task 3 — Scientific and lifecycle regression
 
-- [ ] Actual public entry → Supervisor → Session must reject invalid SMILES, demo activity, incomplete docking, absent target evidence; ordinary chat/explanation must not calculate.
-- [ ] Optional factories run only for requested canonical plan tools; no heavy tools for greetings or rejected generation count. Exceptions retain canonical failure; KeyboardInterrupt/cancellation propagation is not swallowed.
-- [ ] Valid generated candidates keep count/identity validation and downstream input binding. Test temperature/count forwarding without using actual model.
-- [ ] Ensure no closing borrowed tools, no second store/session runtime, no registration mutation during request execution; run existing Session cleanup tests as shared-runtime evidence.
-- [ ] Commit precisely scoped code/tests after GREEN; do not stage unrelated files or publish.
+- [x] Actual public entry → Supervisor → Session must reject invalid SMILES, demo activity, incomplete docking, absent target evidence; ordinary chat/explanation must not calculate.
+- [x] Optional factories run only for requested canonical plan tools; no heavy tools for greetings or rejected generation count. Exceptions retain canonical failure; KeyboardInterrupt/cancellation propagation is not swallowed.
+- [x] Valid generated candidates keep count/identity validation and downstream input binding. Test temperature/count forwarding without using actual model.
+- [x] Ensure no closing borrowed tools, no second store/session runtime, no registration mutation during request execution; run existing Session cleanup tests as shared-runtime evidence.
+- [x] Commit precisely scoped code/tests after GREEN; do not stage unrelated files or publish.
 
 ## Task 4 — Review and delivery
 
-- [ ] Independent SPEC then QUALITY review; new findings require regression before fixing.
-- [ ] Run full Agent plus existing related Web/Session/scientific regression, offline contract with socket blocked, memory compile src/scripts, diff check and scoped secret-candidate scan.
-- [ ] Report actual failures, skips, warnings, branches, commits and compatibility changes. No new PR merge, models, assets or deployment.
+Previous checkpoint: SPEC NEEDS CHANGES. Latest four-file regression: 114 passed,
+4 failed (temperature transport and explicit lead count, both public methods).
+Binding-failure observations no longer imply attempted tools. Shared Planner and
+generation transport changes received user confirmation on 2026-09-24.
+The earlier 5298-passed joint run predates these cases; it is not final verification.
+
+### Approved minimal shared fix
+
+- Planner: explicit requested_count is validated without evaluating the text-count
+  default expression; absence still uses the existing parser. No count limits change.
+- Transport: the canonical generation payload carries request-local temperature in
+  metadata, which the existing generator consumes. No new executor, global tool
+  mutation, dispatch signature change, or direct-tool bypass. Including the value
+  in input makes provenance/checkpoint hashes reflect generation settings.
+- Structured temperature must be a finite number (not bool/string/None); invalid
+  settings return invalid_input before model execution. No new sampling range is
+  imposed; legacy string-input defaults/signatures remain unchanged.
+- RED tests use the real generator with a recording synthetic model, not only a
+  mock Supervisor keyword assertion. Cover both legacy methods, Supervisor,
+  direct/threaded/registered dispatch, unchanged defaults and invalid settings.
+- Replace the old extraction-only lead parser characterization with explicit-count
+  priority and preserve the no-explicit-count error case; retain all range/type tests.
+
+- [x] Independent SPEC then QUALITY review; new findings require regression before fixing.
+- [x] Run full Agent plus existing related Web/Session/scientific regression, offline contract with socket blocked, memory compile src/scripts, diff check and scoped secret-candidate scan.
+- [x] Report actual failures, skips, warnings, branches, commits and compatibility changes. No new PR merge, models, assets or deployment.
+
+Final verification: 5317 passed, 9 skipped, 7 warnings, 9 subtests passed in
+219.57s; SPEC and QUALITY approved. Offline contract 34/34; 306 source/script
+files compile in memory. See handoff for RED history, exact command paths and skips.
 
 ## Isolated commands
 

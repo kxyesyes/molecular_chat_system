@@ -157,7 +157,7 @@ def test_react_public_mol_count_is_authoritative_for_target_workflow():
     assert result["success"] is True
     assert result["workflow_plan"]["metadata"]["requested_count"] == 7
     assert agent.tools["llm_molecular_generator"].inputs[0]["metadata"] == {
-        "requested_count": 7
+        "requested_count": 7, "temperature": 0.7
     }
 
 

@@ -166,7 +166,7 @@ def test_target_design_passes_evidence_and_validated_candidates_to_ranking(optio
     inputs = dict(calls)
     assert inputs["target_database_search"] == "PDE5A"
     assert inputs["llm_molecular_generator"] == {
-        "query": TARGET_QUERY, "metadata": {"requested_count": 2},
+        "query": TARGET_QUERY, "metadata": {"requested_count": 2, "temperature": 0.7},
         "outputs": {"target": TARGET},
     }
     assert inputs["property_calculator"] == "CCO\nCCN"
@@ -219,7 +219,7 @@ def test_hit_to_lead_generation_consumes_typed_baseline_then_properties_consume_
                     "activity_predictor", "llm_molecular_generator", "property_calculator"],
                     "task_completed")
     assert [payload for _, payload in calls[:3]] == [query] * 3
-    assert calls[3][1] == {"query": query, "metadata": {"requested_count": 2},
+    assert calls[3][1] == {"query": query, "metadata": {"requested_count": 2, "temperature": 0.7},
                            "outputs": {"baseline": baseline}}
     assert calls[4][1] == "CCO\nCCN"
     assert execution.compiled_dependencies["molecule_generation"] == ("baseline_properties",)
