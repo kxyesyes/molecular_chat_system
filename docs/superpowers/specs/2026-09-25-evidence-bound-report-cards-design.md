@@ -1,6 +1,6 @@
 # Evidence-bound Chinese report and independent property cards — design
 
-Status: **DESIGN FOR PARENT REVIEW; NOT IMPLEMENTED / NOT APPROVED FOR IMPLEMENTATION.**
+Status (updated 2026-09-25): **Parent approved static-only TDD implementation. Local implementation is frozen for SPEC → QUALITY review; full Agent and parent integration remain pending.** See [freeze handoff](../../handoff/2026-09-25-g1-evidence-report-freeze.md). The original design-stage baseline/status statements below are historical, not current merge status: approved docs were committed as `72c1ad4`, then requested main `e173d43` (66/67/68) was merged as `6b9e5c0`. Later parent-reported main `16b9157`/PR69 has not been merged here. No dynamic/P7 completion is claimed.
 
 Date: 2026-09-25. Scope: historical residual **G1 only**. Companion: [implementation plan](../plans/2026-09-25-evidence-bound-report-cards.md). The accepted [residual audit](../../handoff/historical-residual-disposition.md) remains a historical snapshot, not a claim that G1 is complete.
 

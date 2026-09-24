@@ -98,7 +98,7 @@ Separate `src/agent/utils/smiles_extractor.py::SMILESExtractor.extract_smiles:24
 |---|---|---|
 | Hard-coded Supervisor run version versus custom orchestrator version | Current `runtime/run_session.py:261,285,966` writes `self.orchestrator.workflow_version`; `runtime/delegated_executor.py::prepare:158` binds that version and `SpecialistDispatch.claim_run:53` writes it. `orchestrators/workflow.py::_compatible_checkpoint:230` compares tool, workflow, input, tool/adapter/model versions. | migrated source behavior. Existing `test_delegated_session_lifecycle.py` version/authorization-change and registered-version tests plus `test_workflow_resume.py` pass. These do **not** specifically assert custom workflow-version parity in both run and checkpoint rows; retain a small permanent regression follow-up rather than inventing exact test coverage. |
 | Restored artifacts alias nested checkpoint metadata | `contracts/domain.py::WorkflowArtifact.from_dict:18–28` deep-copies the mapping; `orchestrators/workflow.py::_result_from_checkpoint:260` validates the artifacts list and calls `from_dict` for each. | migrated implementation. Existing restore/result/state/evidence and malformed-artifact tests pass. Additional read-only in-memory double-restore/mutate probe passed here. A permanent exact nested-mutation regression is still pending, as the historical handoff noted. Do not generalize this to all `to_dict`/other fields being deep-copied. |
-| Historical sandbox timing / `artifact_failed` finding | `docs/handoff/agent-recovery-audit-integration.md:34` explicitly keeps the prior artifact failure under investigation. | intentionally retained unresolved historical evidence; no sandbox suite, soak or service run in this audit. Neither the Node/425-test result nor a different PR's timing change proves it resolved. |
+| Historical sandbox timing / `artifact_failed` finding | `docs/handoff/agent-recovery-audit-integration.md:34` retains the prior artifact failure. Parent's later diagnostic is recorded in the dated addendum below. | Historical exact cause remains unknown. Parent demonstrated that PR68 fixes the same-class ancestor-mtime false-rejection trigger on the actual broker path; this is no longer a separately reproduced business-code fix. No diagnostic rerun or scientific acceptance is claimed here. |
 
 ## 6. Linked safe gaps and minimal follow-up design
 
@@ -118,9 +118,17 @@ Integrate reviewed PR #66 only after the parent's exact-head CI/review gate; rec
 
 ### G3. P2 Regression closure and parent acceptance ledger
 
-Add permanent custom-workflow-version parity and double-restore nested-artifact isolation regressions in a later authorized code/test batch, without changing correct recovery behavior to fit obsolete patches. Keep the historical sandbox failure open until specifically reproduced/diagnosed or independently shown resolved at an exact revision. Parent must integrate G1/G2 outcomes and reconcile the current packages 1–8 ledger; package 6's **audit** can be recorded complete, its linked **features pending**. Packages 7/8 and real scientific acceptance cannot be inferred from this offline audit. Server deployment remains excluded.
+Add permanent custom-workflow-version parity and double-restore nested-artifact isolation regressions in a later authorized code/test batch, without changing correct recovery behavior to fit obsolete patches. Preserve the historical sandbox exact-cause-unknown record; the parent diagnostic below removes the same-class mtime trigger from separately pending business fixes. Parent must integrate G1/G2 outcomes and reconcile the current packages 1–8 ledger; package 6's **audit** can be recorded complete, its linked **features pending**. Packages 7/8 and real scientific acceptance cannot be inferred from this offline audit. Server deployment remains excluded.
 
 ## 7. Actual verification in this audit
+
+### Later parent diagnostic — 2026-09-25 (reported, not rerun here)
+
+Parent supplied evidence from ignored `recovery-parity-regressions/scratch/test_manifest_snapshot_probe.py`: it calls the actual `test_manifest_survives_service_reopen_and_tamper_and_cross_job_fail_closed` unchanged, using real broker/SQLite and its original FakeSDK. Only the artifact module's `read_file_snapshot` is injected. The matrix is committed old secure_io `1bba025` versus current PR68, each with deterministic sibling modification disabled/enabled: **4 passed in 3.16s**, per parent.
+
+Old/no perturbation succeeds. Old/sibling write changes ancestor mtime, triggers `unsafe file snapshot`, then the original manifest `KeyError`; PR68 succeeds in both cases and executes the original cross-job/tamper rejection assertions. Target file identity/hash remain unchanged during every snapshot. This demonstrates PR68 fixes that same-class false-rejection trigger on the broker consumer path. It **does not uniquely attribute the historical natural `artifact_failed`**, whose low-level logs were not captured. Keep `historical exact cause unknown`; do not treat it as a separately reproduced business bug needing another code change. Probe remains ignored scratch, not submitted. No real Vina/QEMU/model execution or true scientific acceptance; G1 did not repeat the probe.
+
+### Original audit verification (unchanged historical results)
 
 All results below are newly executed on `ecd6cca`, not copied historical pass counts. Original tests/dirty code and PR #66/#67 branches were not executed.
 

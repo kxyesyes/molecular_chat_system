@@ -972,6 +972,16 @@ class ChatHandler:
             session_id=getattr(websocket, "scope", {}).get("agent_session_id"))
         for event in events:
             await websocket.send_text(json.dumps(event, ensure_ascii=False))
+        # Additive live-only presentation; never republish candidates or change ACK.
+        try:
+            from .scientific_report import prepare_report_event
+            report = await prepare_report_event(self.scientific_references.store, agent_result,
+                events, session_id=getattr(websocket, "scope", {}).get("agent_session_id"))
+            if report is not None:
+                await websocket.send_text(json.dumps(report, ensure_ascii=False))
+        except Exception:
+            pass  # Optional sidecar failure must not turn the run into failure.
+        return events
 
     @classmethod
     async def _send_molecule_candidate_events(

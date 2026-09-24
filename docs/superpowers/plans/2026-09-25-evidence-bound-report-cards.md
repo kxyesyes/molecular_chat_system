@@ -12,6 +12,8 @@
 
 ## Review state and baseline
 
+**2026-09-25 execution update:** Parent approved the design and static-only implementation with local commits, no push before double review. Approved docs were committed in `72c1ad4` before merging requested main `e173d43` as `6b9e5c0`. The [freeze handoff](../../handoff/2026-09-25-g1-evidence-report-freeze.md) is the current implementation/verification record. The original planning text and unchecked checklist below are retained as review requirements, not an assertion that implementation is still unauthorized or that every checklist case is complete. Full Agent is queued by parent after Planner → 4C → G2 → ADMET; SPEC → QUALITY must precede publication. Static only; P7A1 reference admission/dynamic binding is not implemented.
+
 **PLAN ONLY, not implementation authorization.** [Design](../specs/2026-09-25-evidence-bound-report-cards-design.md) is the normative exact v1 schema/algorithm. Both docs share `e0d73d1` (audit `1581f3e` + requested main `3a68264`). PR #66 is now on that base; PR #67 candidate `9f3ce84` is CI-pending per parent, not merged here. Do not cherry-pick it opportunistically. Parent controls approved dependency head and functional-batch PR.
 
 No boxes below are complete: they describe future work. G2 optimization/recovery tests and package 7 activation are separate. Do not run, edit, stage or migrate files from the original dirty checkout; retain all 13 original paths. No real model/secret/env/log/production DB/index/weight access or deployment.
