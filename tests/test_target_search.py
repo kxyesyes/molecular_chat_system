@@ -6,6 +6,8 @@ import tempfile
 import threading
 from unittest.mock import patch
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -13,11 +15,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 class TargetSearchDemoTest(unittest.TestCase):
     def setUp(self):
+        environment = pytest.MonkeyPatch()
+        self.addCleanup(environment.undo)
+        environment.delenv("TARGET_DB_PATH", raising=False)
+        environment.delenv("TARGET_CACHE_DIR", raising=False)
         self.temp_dir = tempfile.TemporaryDirectory(prefix="target_search_test_")
+        self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
 
     def _seeded_service(self):
         from src.target_search.seed import seed_database
@@ -353,7 +357,12 @@ class TargetSearchDemoTest(unittest.TestCase):
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         cached_path.write_text("data_demo\n", encoding="utf-8")
 
-        prepared = service.prepare_structure_file(structure["id"], requested_format="cif")
+        with patch(
+            "src.target_search.downloader.requests.get",
+            side_effect=AssertionError("cache hit must not access HTTP"),
+        ) as request:
+            prepared = service.prepare_structure_file(structure["id"], requested_format="cif")
+        request.assert_not_called()
 
         self.assertTrue(prepared["success"])
         self.assertEqual(Path(prepared["file_path"]).read_text(encoding="utf-8"), "data_demo\n")
@@ -573,7 +582,12 @@ class TargetSearchDemoTest(unittest.TestCase):
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         cached_path.write_text("data_demo\n", encoding="utf-8")
 
-        payload = service.send_to_docking(structure["id"])
+        with patch(
+            "src.target_search.downloader.requests.get",
+            side_effect=AssertionError("cache hit must not access HTTP"),
+        ) as request:
+            payload = service.send_to_docking(structure["id"])
+        request.assert_not_called()
 
         self.assertEqual(payload["status"], "success")
         self.assertEqual(payload["message"], "结构文件已准备好，后续可接入分子对接模块")
