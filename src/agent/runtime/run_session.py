@@ -848,6 +848,7 @@ class WorkflowRunSession:
                 )
             journal.checkpoint_checked = True
         if journal.result is not None:
+            self._reject_unavailable_reference(step, journal)
             return
         if tool is None:
             journal.result = ToolResult.error_result(
@@ -865,6 +866,12 @@ class WorkflowRunSession:
                 checkpoint_phase="running",
             )
             journal.running_checkpoint_saved = True
+        # Routing, compilation, event callbacks and persistence can take time.
+        # Check again at dispatch (and before checkpoint reuse above), not only
+        # at the chat entry. Never hold the source SQLite transaction while a
+        # potentially long-running scientific tool executes.
+        if self._reject_unavailable_reference(step, journal):
+            return
         self._tool_attempt_count += 1
         journal.tool_attempted = True
         journal.result = self.orchestrator._execute_step(
@@ -872,6 +879,20 @@ class WorkflowRunSession:
             journal.input_data,
             step,
         )
+
+    def _reject_unavailable_reference(self, step, journal) -> bool:
+        reference = self.context.resolved_molecule
+        if reference is None or reference.revalidate(
+            self.orchestrator.state_store, self.context.session_id
+        ):
+            return False
+        journal.result = ToolResult.error_result(
+            tool_name=step.tool_name, code=AgentErrorCode.INVALID_INPUT,
+            message="科研引用已过期或来源不可用，请重新选择候选。",
+            details={"step": step.name, "reason": "scientific_reference_unavailable"},
+        )
+        journal.checkpoint_reused = False
+        return True
 
     def _persist_step_result(
         self,

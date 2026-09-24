@@ -19,6 +19,10 @@ class AgentStateStore(Protocol):
 
     def get_run(self, trace_id: str) -> dict[str, Any] | None: ...
 
+    def get_scientific_sources(self, trace_id: str, *, session_id: str):
+        """Return bounded, validated latest candidate checkpoints for an owner."""
+        raise NotImplementedError
+
     def publish_scientific_presentation(
         self, trace_id: str, *, session_id: str,
         selections: list[dict[str, str]], target: str | None = None,

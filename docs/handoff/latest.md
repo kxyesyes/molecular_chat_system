@@ -1,5 +1,18 @@
 # Latest handoff
 
+## T09：科研引用 Web/工具接线第二增量（2026-09-24）
+
+独立分支 `codex/scientific-reference-continuity` 已实现权威展示投影、真实挂载后确认、
+标签页指针恢复及选中 canonical SMILES 到实际工具输入；保留归属、24小时期限、
+partial/warnings/provenance 和原科学校验。来源在规划期间失效时阻止分发；
+多义/范围指代不默认取第一个，多个集合确认互不干扰。
+
+独立 SPEC/QUALITY 及增量复审通过；冻结20路径前后哈希一致，最终联合回归
+**5591 passed、7 skipped、7 warnings**；五个Node脚本、四个JS语法和编译检查通过。
+失败尝试、跳过原因、23路径职责与命令见[本批交接](scientific-reference-web-integration.md)。
+仅本地提交，未推送/合并/部署/启用模型，原始混杂工作树未动。
+第三增量故障/取消/重启/重放与真实浏览器恢复验收仍待，不称整个T09完成。
+
 ## T09：科研引用契约与存储第一增量（2026-09-24）
 
 已确认设计后按TDD实施，独立分支 `codex/scientific-reference-continuity`。

@@ -455,10 +455,39 @@
     return normalized;
   }
 
+  function normalizePointer(value) {
+    if (!hasExactFields(value, ["trace_id", "presentation_id", "revision"]) ||
+        !isSafeString(ownValue(value, "trace_id"), 128, false) ||
+        !isSafeString(ownValue(value, "presentation_id"), 36, false) ||
+        !isSafeString(ownValue(value, "revision"), 64, false) ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(ownValue(value, "presentation_id")) ||
+        !/^[0-9a-f]{64}$/.test(ownValue(value, "revision"))) return null;
+    return {trace_id: ownValue(value, "trace_id"), presentation_id: ownValue(value, "presentation_id"), revision: ownValue(value, "revision")};
+  }
+
+  function normalizeReference(value, traceId, candidates) {
+    if (!hasExactFields(value, ["trace_id", "presentation_id", "revision", "ordered_keys"])) return null;
+    const pointer = normalizePointer({trace_id: ownValue(value, "trace_id"), presentation_id: ownValue(value, "presentation_id"), revision: ownValue(value, "revision")});
+    const raw = ownValue(value, "ordered_keys");
+    const length = arrayLength(raw);
+    if (!pointer || pointer.trace_id !== traceId || length < 1 || length > 32) return null;
+    const keys = [];
+    let previous = -1;
+    for (let i = 0; i < length; i++) {
+      const key = arrayValue(raw, i);
+      if (arrayLength(key) !== 2 || !isSafeString(arrayValue(key, 0), 128, false) || !isSafeString(arrayValue(key, 1), 128, false)) return null;
+      const index = candidates.findIndex(c => c.candidate_id === arrayValue(key, 1));
+      if (index <= previous || (keys.length && keys[0][0] !== arrayValue(key, 0))) return null;
+      previous = index;
+      keys.push([arrayValue(key, 0), arrayValue(key, 1)]);
+    }
+    return {...pointer, ordered_keys: keys};
+  }
+
   function normalize(payload) {
     try {
       if (
-        !hasExactFields(payload, eventFields) ||
+        (!hasExactFields(payload, eventFields) && !hasExactFields(payload, eventFields.concat("reference"))) ||
         ownValue(payload, "type") !== "molecule_candidates"
       ) {
         return null;
@@ -605,12 +634,17 @@
         normalizedWarnings.push(warning);
       }
 
+      const rawReference = ownValue(payload, "reference");
+      const hasReference = ownKeys(payload).includes("reference");
+      const reference = hasReference ? normalizeReference(rawReference, traceId, candidates) : null;
+      if (hasReference && !reference) return null;
       return {
         traceId,
         source: { tool, model, status: sourceStatus },
         candidates,
         counts,
         warnings: normalizedWarnings,
+        ...(reference ? {reference} : {}),
       };
     } catch (_) {
       return null;
@@ -705,6 +739,9 @@
         candidates: freshCandidates,
         counts: payload.counts,
         warnings: payload.warnings,
+        ...(payload.reference && payload.reference.ordered_keys.length === freshCandidates.length &&
+          payload.reference.ordered_keys.every((key, i) => key[1] === freshCandidates[i].candidate_id)
+          ? {reference: payload.reference} : {}),
       });
       return true;
     }
@@ -737,4 +774,5 @@
   }
 
   root.HomeMoleculeCandidates = { createLifecycle, normalize };
+  root.HomeMoleculeCandidates.normalizePointer = normalizePointer;
 })(window);

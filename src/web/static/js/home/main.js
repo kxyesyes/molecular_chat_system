@@ -26,6 +26,37 @@
       maxEventsPerRun: 8,
       maxCandidates: 32,
     });
+  let referenceStatusElement = null;
+  let tabStorage;
+  try { tabStorage = window.sessionStorage; } catch (_) { tabStorage = null; }
+  const scientificReferences = window.HomeScientificReferences?.createController({
+    storage: tabStorage,
+    request: async (action, body) => {
+      const response = await fetch(`${window.HomeConfig?.scientificReferences?.baseUrl || "/api/agent/workflows/references"}/${action}`, {
+        method: "POST", credentials: "same-origin", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body),
+      });
+      const envelope = await response.json();
+      if (!response.ok || envelope.success !== true) throw new Error("Reference unavailable");
+      return envelope.data;
+    },
+    onStatus: message => {
+      if (referenceStatusElement) referenceStatusElement.textContent = message;
+      HomeChatRenderer.showNotification(message, "warning");
+    },
+    onChange: hint => {
+      if (referenceStatusElement) referenceStatusElement.textContent = hint.selection
+        ? `已选候选：${hint.selection.candidate_id}`
+        : hint.reference ? "候选集合已确认，可按显示序号继续计算。" : "未选择科研引用";
+    },
+  });
+
+  function displayCandidateCollections(element, payloads) {
+    if (scientificReferences) {
+      void scientificReferences.present(payloads, payload => renderMoleculeCandidates(element, payload));
+    } else {
+      payloads.forEach(payload => renderMoleculeCandidates(element, payload));
+    }
+  }
 
   // DOM元素缓存
   const elements = {
@@ -101,6 +132,20 @@
 
     // 创建聊天容器（初始隐藏）
     createChatContainer();
+    if (scientificReferences && elements.input?.parentNode) {
+      const controls = document.createElement("div");
+      controls.className = "scientific-reference-controls";
+      referenceStatusElement = document.createElement("span");
+      referenceStatusElement.setAttribute("role", "status");
+      referenceStatusElement.textContent = "未选择科研引用";
+      const clearReference = document.createElement("button");
+      clearReference.type = "button";
+      clearReference.textContent = "清除科研选择";
+      clearReference.addEventListener("click", () => scientificReferences.clear());
+      controls.appendChild(referenceStatusElement);
+      controls.appendChild(clearReference);
+      elements.input.parentNode.appendChild(controls);
+    }
     HomeTheme.init();
 
     // 设置初始连接状态
@@ -369,6 +414,12 @@
           console.log("✅ 收到连接就绪消息:", message);
           HomeChatRenderer.updateConnectionStatus("connected");
           HomeChatRenderer.showNotification("模型已就绪", "success");
+          if (!moleculeCandidateLifecycle.isRequestInFlight()) {
+            void scientificReferences?.restore(payload => {
+              const box = addAssistantMessage("已恢复此前确认的候选集合；这不是新的计算结果。");
+              return renderMoleculeCandidates(box, payload);
+            });
+          }
           break;
 
         case "pong":
@@ -458,9 +509,7 @@
               const messageBox = addAssistantMessage(message.message);
               messageBox.classList.add("complete");
               messageBox.setAttribute("data-content", message.message);
-              candidatePayloads.forEach((payload) => {
-                renderMoleculeCandidates(messageBox, payload);
-              });
+              displayCandidateCollections(messageBox, candidatePayloads);
             } else {
               console.warn("⚠️ message消息缺少message字段");
             }
@@ -1264,6 +1313,7 @@
         mol_count: advancedConfig.molCount, // 分子生成数量
         timestamp: Date.now(),
         client_id: "web_client",
+        ...(scientificReferences?.outgoing() || {}),
       };
 
       const payloadStr = JSON.stringify(payload);
@@ -1277,6 +1327,7 @@
 
       // 发送到服务器
       ws.send(payloadStr);
+      scientificReferences?.startRequest();
       moleculeCandidateLifecycle.startRequest();
 
       // 清空输入框
@@ -1747,9 +1798,7 @@
       HomeState.currentMessages = currentMessages.slice();
       updateToolbarControlStates();
 
-      candidatePayloads.forEach((payload) => {
-        renderMoleculeCandidates(lastMessage, payload);
-      });
+      displayCandidateCollections(lastMessage, candidatePayloads);
     } finally {
       moleculeCandidateLifecycle.clear();
     }
@@ -3529,7 +3578,7 @@
 
   // 渲染后端已验证并规范化的候选分子。
   function renderMoleculeCandidates(messageElement, payload) {
-    if (!messageElement || !payload || payload.candidates.length === 0) return;
+    if (!messageElement || !payload || payload.candidates.length === 0) return {mounted: false};
     const moleculesArray = payload.candidates.slice(0, 32);
     const moleculeCount = moleculesArray.length;
 
@@ -3631,6 +3680,7 @@
       pageMolecules.forEach((candidate) => {
         const smiles = candidate.canonical_smiles;
         const molCard = document.createElement("div");
+        molCard.setAttribute("data-candidate-id", candidate.candidate_id);
         molCard.className = "molecule-card";
         molCard.style.cssText = `
         flex: 0 0 ${minCardWidth};
@@ -3805,6 +3855,16 @@
           }
         });
         actionsSection.appendChild(copyBtn);
+        if (payload.reference && scientificReferences) {
+          const selectBtn = document.createElement("button");
+          selectBtn.type = "button";
+          selectBtn.textContent = "选择此分子";
+          selectBtn.addEventListener("click", () => {
+            const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);
+            scientificReferences.select(payload.reference.presentation_id, compoundKey);
+          });
+          actionsSection.appendChild(selectBtn);
+        }
 
         molCard.appendChild(actionsSection);
         grid.appendChild(molCard);
@@ -3970,8 +4030,15 @@
       const messageBox = messageWrapper.querySelector(".message-box");
       if (messageBox) {
         messageBox.appendChild(moleculeContainer);
+        if (messageBox.isConnected === true && messageBox.contains(moleculeContainer)) {
+          const displayed = Array.from(grid.children).map(card => card.getAttribute("data-candidate-id"));
+          const keys = payload.reference?.ordered_keys || [];
+          if (keys.length && (keys.length !== displayed.length || keys.some((key, i) => key[1] !== displayed[i]))) return {mounted: false};
+          return {mounted: true, ordered_keys: keys.map(key => key.slice())};
+        }
       }
     }
+    return {mounted: false};
   }
 
   window.HomeMain = {

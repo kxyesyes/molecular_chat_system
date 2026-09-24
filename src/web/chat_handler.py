@@ -53,13 +53,15 @@ _AGENT_FAILURE_EVENT_TYPES = frozenset({
 class ChatHandler:
     """聊天消息处理器"""
     
-    def __init__(self, model, rag_service, agent_system, config, refresh_model_config=None):
+    def __init__(self, model, rag_service, agent_system, config, refresh_model_config=None,
+                 scientific_references=None):
         self.model = model
         self.rag_service = rag_service
         self.agent_system = agent_system
         self.config = config
         self.conversation_history = []
         self.refresh_model_config = refresh_model_config
+        self.scientific_references = scientific_references
 
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
@@ -138,6 +140,8 @@ class ChatHandler:
                     mol_count,
                     conversation_history=conversation_history,
                     session_id=websocket.scope.get("agent_session_id"),
+                    reference=message_data.get("reference"),
+                    selection=message_data.get("selection"),
                 )
                     
         except WebSocketDisconnect:
@@ -162,7 +166,8 @@ class ChatHandler:
                               rag_count: int = 5, temperature: float = 0.7,
                               mol_count: int | None = None,
                               conversation_history: List[Dict[str, Any]] | None = None,
-                              session_id: str | None = None):
+                              session_id: str | None = None,
+                              reference=None, selection=None):
         """处理用户消息 - 性能优化版"""
         # Hold one client for generation, retries and completion metadata.
         request_model = self.model
@@ -222,7 +227,20 @@ class ChatHandler:
         # Agent 处理（使用temperature参数）
         matched_skill = None
         route_decision = None
-        molecular_input = InputValidator().analyze_molecular_input(message)
+        resolved_molecule = None
+        routing_message = message
+        if self.scientific_references is not None:
+            try:
+                resolved_molecule = await asyncio.to_thread(
+                    self.scientific_references.resolve, message, reference, selection,
+                    session_id=session_id, enable_tools=enable_tools)
+            except ValueError:
+                from .scientific_references import REFERENCE_CLARIFICATION
+                await websocket.send_text(json.dumps({"type": "complete", "content": REFERENCE_CLARIFICATION}, ensure_ascii=False))
+                return
+            if resolved_molecule is not None:
+                routing_message = resolved_molecule.routing_query(message)
+        molecular_input = InputValidator().analyze_molecular_input(routing_message)
         clarification = self._molecular_input_clarification(molecular_input)
         skill_router = getattr(self.agent_system, "skill_router", None)
         if (
@@ -233,7 +251,7 @@ class ChatHandler:
         ):
             route_decision = await asyncio.to_thread(
                 skill_router.decide,
-                message,
+                routing_message,
                 getattr(self.agent_system, "llm", None),
             )
             clarification = self._route_clarification(route_decision)
@@ -257,7 +275,7 @@ class ChatHandler:
         ) if route_decision is not None else bool(
             enable_tools
             and self.agent_system
-            and self.agent_system.should_use_tools(message)
+            and self.agent_system.should_use_tools(routing_message)
         )
         if enable_tools and self.agent_system and should_use_agent:
             logger.info(f"检测到需要使用 Agent 工具 (temperature={temperature})")
@@ -270,7 +288,7 @@ class ChatHandler:
                     )
                 else:
                     matched_skill = skill_router.route(
-                        message,
+                        routing_message,
                         llm=self.agent_system.llm,
                     )
                 
@@ -323,6 +341,7 @@ class ChatHandler:
                     enable_rag=enable_rag,
                     enable_tools=enable_tools,
                     session_id=session_id,
+                    **({"resolved_molecule": resolved_molecule} if resolved_molecule is not None else {}),
                 )
             )
         
@@ -372,7 +391,7 @@ class ChatHandler:
                         else:
                             await self._send_status(websocket, "⚠️ " + " ".join(rag_warnings))
                 if presentation_status == "partial":
-                    await self._send_molecule_candidate_events(websocket, agent_result)
+                    await self._send_reference_candidate_events(websocket, agent_result)
                     agent_response = await self._send_partial_agent_result(
                         websocket, agent_result,
                     )
@@ -396,7 +415,7 @@ class ChatHandler:
 
                     skill_info = f" (当前技能: {active_skill})" if active_skill else ""
 
-                    await self._send_molecule_candidate_events(
+                    await self._send_reference_candidate_events(
                         websocket,
                         agent_result,
                     )
@@ -685,6 +704,7 @@ class ChatHandler:
         enable_rag: bool = True,
         enable_tools: bool = True,
         session_id: str | None = None,
+        resolved_molecule=None,
     ):
         """在线程池中执行 Agent，并转发执行事件。"""
         try:
@@ -708,6 +728,8 @@ class ChatHandler:
             }
             if session_id is not None:
                 execute_kwargs["session_id"] = session_id
+            if resolved_molecule is not None:
+                execute_kwargs["resolved_molecule"] = resolved_molecule
             if mol_count is not None:
                 execute_kwargs["mol_count"] = mol_count
             if "event_callback" in execute_parameters:
@@ -1153,6 +1175,14 @@ class ChatHandler:
             "candidate_set": candidate_set.to_dict(),
             "warnings": cls._sanitize_agent_warnings(raw_warnings),
         }
+
+    async def _send_reference_candidate_events(self, websocket, agent_result):
+        if self.scientific_references is None:
+            return await self._send_molecule_candidate_events(websocket, agent_result)
+        events = await asyncio.to_thread(self.scientific_references.project, agent_result,
+            session_id=getattr(websocket, "scope", {}).get("agent_session_id"))
+        for event in events:
+            await websocket.send_text(json.dumps(event, ensure_ascii=False))
 
     @classmethod
     async def _send_molecule_candidate_events(

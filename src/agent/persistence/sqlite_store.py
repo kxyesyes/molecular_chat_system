@@ -516,6 +516,10 @@ class SQLiteAgentStateStore:
         # Do not report success until the connection context has committed.
         return True
 
+    def get_scientific_sources(self, trace_id: str, *, session_id: str):
+        from .scientific_references import sources
+        return sources(self, trace_id, session_id=session_id)
+
     def publish_scientific_presentation(
         self, trace_id: str, *, session_id: str,
         selections: list[dict[str, str]], target: str | None = None,

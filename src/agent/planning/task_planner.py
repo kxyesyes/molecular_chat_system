@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from src.agent.contracts import AgentContext
@@ -37,6 +37,23 @@ class TaskPlanner:
     DEFAULT_GENERATION_COUNT = DEFAULT_GENERATION_COUNT
 
     def plan(self, context: AgentContext) -> WorkflowPlan:
+        molecule = context.resolved_molecule
+        if molecule is None:
+            return self._plan(context)
+        bound_query = molecule.routing_query(context.query)
+        plan = self._plan(replace(context, query=bound_query))
+        structure_tools = {"property_calculator", "drug_likeness_assessment",
+                           "admet_predictor", "reverse_target_predictor"}
+        for index, step in enumerate(plan.steps):
+            # Preserve compiled upstream bindings and all generation semantics.
+            if step.input_data == bound_query and not step.input_binding:
+                if step.tool_name in structure_tools:
+                    plan.steps[index] = replace(step, input_data=molecule.canonical_smiles)
+                elif step.tool_name == "activity_predictor":
+                    plan.steps[index] = replace(step, input_data={"smiles": molecule.canonical_smiles, "query": context.query})
+        return plan
+
+    def _plan(self, context: AgentContext) -> WorkflowPlan:
         skill = context.active_skill or ""
         query = context.query
 

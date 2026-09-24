@@ -140,6 +140,36 @@ def _candidates(checkpoint, trace_id):
     return candidates, result, expected_evidence
 
 
+def sources(store, trace_id, *, session_id):
+    """Owned consistent snapshot; never expose get_run to the browser."""
+    if not _identity(trace_id, session_id):
+        return None
+    with closing(store._connect()) as connection, connection:
+        connection.execute("BEGIN")
+        try:
+            row, _, _, latest, version = _source(connection, trace_id, session_id)
+            output = []
+            for checkpoint in latest.values():
+                if checkpoint["tool_name"] != "llm_molecular_generator":
+                    continue
+                try:
+                    if checkpoint["workflow_version"] != row["workflow_version"]:
+                        continue
+                    _candidates(checkpoint, trace_id)
+                except (ValueError, TypeError, KeyError, RecursionError):
+                    # A failed independent branch is not evidence for that
+                    # branch, but must not erase another accepted observation.
+                    continue
+                output.append({"observation_id": checkpoint["id"],
+                               "source_version": version,
+                               "step_id": checkpoint["step_id"],
+                               "observation": {**json.loads(checkpoint["output_json"]),
+                                               "tool_name": checkpoint["tool_name"]}})
+            return output
+        except (ValueError, TypeError, KeyError, RecursionError):
+            return None
+
+
 def publish(store, trace_id, *, session_id, selections, target=None):
     if not _identity(trace_id, session_id):
         return None

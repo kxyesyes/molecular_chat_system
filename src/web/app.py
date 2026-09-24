@@ -155,6 +155,7 @@ class MolecularChatApp:
                 agent_system=self.agent_system,
                 config=self.config,
                 refresh_model_config=self._refresh_llm_config_from_env,
+                scientific_references=self._get_scientific_references(),
             )
             logger.info("✅ ChatHandler初始化成功")
             self.chat_handler.model_request_gate = self.model_request_gate
@@ -183,6 +184,12 @@ class MolecularChatApp:
             molecular_generator_llm=self.molecular_generator_model,
             state_store=self._get_agent_state_store(),
         )
+
+    def _get_scientific_references(self):
+        from .scientific_references import ScientificReferenceService
+        if getattr(self, "scientific_references", None) is None:
+            self.scientific_references = ScientificReferenceService(self._get_agent_state_store())
+        return self.scientific_references
 
     def _get_agent_state_store(self):
         from src.agent.persistence import SQLiteAgentStateStore
@@ -508,6 +515,8 @@ class MolecularChatApp:
         # Register additional page routes
         from .routes.main_routes import register_main_routes
         register_main_routes(self.app, templates)
+        from .routes.scientific_reference_routes import setup_scientific_reference_routes
+        setup_scientific_reference_routes(self.app, self._get_scientific_references())
 
         # Register API routes
         docking_config = self.config.get("docking", {})
