@@ -594,3 +594,46 @@ Explicit new authority: commit exactly the seven reviewed code/test files plus t
 **Full Agent/full repository must not run now** (parent 4C/Russell heavy run active). Integrated light verification is pending; completion means ready for the parent's full slot, not full-suite success. Exact nine-path allowlist is the seven-file freeze above plus `docs/superpowers/specs/2026-09-25-admet-unknown-evidence-design.md` and `docs/superpowers/plans/2026-09-25-admet-unknown-evidence.md`. Stage each explicit path, verify the index allowlist and diff checks, then create the local reviewed implementation commit.
 
 Subsequent resource authorization, before commit: parent reports 4C full completed (6676 passed, two skipped, 300.25s; independent parent evidence) and assigns this worker the heavy slot. After integrated host/minimum FOCUS is GREEN, record the exact snapshot and run **one `tests/agent` full collection** in the existing isolated offline runner. No root full suite, push or PR. G2/PR72 is still pending according to parent and may merge during the run: **no merging or editing mid-run**; any fetched-main delta is considered only afterward with light verification. This supersedes the immediately preceding heavy-slot prohibition only for that one Agent run, which has not yet started.
+
+### Authorized commit, first integration and single Agent-full evidence
+
+- Exact nine-file implementation/review-record commit: `7ddac1b561b412530b8e508ce30bbf96d969c917` (`fix: preserve unknown ADMET evidence and diagnostic sources`). Explicit path staging and index allowlist verification passed; no unrelated files included.
+- Clean `git merge --no-edit origin/main` integrated `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`, producing `d12908fdeabd51130df713aee9efd5f07c7ba486`, tree `c31e67292a9a5370c4e5f2da4abfec0360a1d51c`. No conflicts or manual collision resolutions. Seven ADMET code/test files were identical to reviewed commit `7ddac1b`; aggregate remained `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`. Diff to integrated main was exactly the nine ADMET paths.
+- Integrated ten-file FOCUS in the same isolated/network-blocked runner: host **1106 passed, one warning, 14.39s, exit0**; existing minimum profile **1106 passed, three warnings, 14.73s, exit0**. No skips. `git diff --check` and `python -m compileall -q src scripts` passed. Working tree was clean before starting Agent full.
+- Parent reported G2/PR72 merged while minimum FOCUS was finishing; local origin/main advanced to `27170d95b17ccae224b95b493ec8a9276944f421`. Per parent's explicit sequencing, the full run remained pinned to **old-base HEAD d12908f / tree c31e6729**, not G2. No merges, edits or retries during the run. This evidence must not be relabelled as full coverage of latest main.
+
+Exactly one host `tests/agent` run used the identical isolated runner/network guard above, replacing FOCUS path arguments with the sole path `tests/agent` (pytest `-q -p no:cacheprovider --tb=short -rs`): **6468 passed, two skipped, eight warnings, 287.49s, exit0**. Interpreter profile was FastAPI 0.135.3 / Pydantic 2.12.5. After completion, HEAD/tree and tracked worktree were unchanged. No provider/key/model/server/asset access, package installation or second Agent full; root full was not run.
+
+The two skips were `test_decision_chat_acceptance.py:149` (directory symlinks unavailable) and `test_harness_shadow.py:277` (performance test disabled). Eight warnings: one AnyIO pytest assertion-rewrite warning from the guard bootstrap, three SWIG type deprecations, and four existing FastAPI on_event deprecations. These were retained, not suppressed. No failure or resource-timeout retry. Heavy run is complete/released; later G2 integration receives only light delta verification and no new full-suite claim.
+
+### G2 light delta and frozen publication handoff
+
+After the full run exited and its exact old-base evidence was recorded, merged fetched main `27170d95b17ccae224b95b493ec8a9276944f421` (PR72/G2) with `git merge --no-commit --no-ff origin/main`. Automatic merge succeeded without conflicts. Seven upstream paths changed; only two local documentation records were added to the integration merge. There were no manual changes to G2 code, the shared parser, or any of the reviewed ADMET code/tests. The review aggregate stays `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`.
+
+Inspected the G2 delta: generator optimization now uses whole-input parsing, with explicit missing/unavailable exception subclasses in shared `molecular_input.py`. Hence light verification covers both direct G2 behavior and shared-parser ADMET/property/drug-likeness consumers. It does not rerun Agent full or imply complete latest-main coverage.
+
+Same isolated offline runner/hard network guard; no new dependencies. Exact main light set: the ten FOCUS paths already listed above **plus**:
+
+```text
+tests/agent/test_generator_optimization_input.py
+tests/agent/test_supervisor_agent.py
+tests/test_llm_molecular_generator.py
+```
+
+Additional shared-parser cross-consumer set:
+
+```text
+tests/agent/test_explicit_molecular_input.py
+tests/agent/test_drug_likeness_evidence.py
+```
+
+| G2-integrated light run | Actual result |
+|---|---|
+| Host FOCUS + three G2 files | **1285 passed, 162 subtests passed**, one warning, 16.73s, exit0. |
+| Minimum FOCUS + three G2 files | **1285 passed, 162 subtests passed**, three warnings, 15.18s, exit0. |
+| Host shared-parser consumers | **221 passed**, one warning, 1.66s, exit0. |
+| Minimum shared-parser consumers | **221 passed**, three warnings, 1.98s, exit0. |
+
+No skips or retries in these light runs. Warning types remain the existing guard/profile warnings. `python -m compileall -q src scripts`, working-tree/index `git diff --check`, and the seven-file byte-equality check against approved implementation commit `7ddac1b` passed. Before completion, current fetched main still matched G2 `27170d9`; PR73/4C was not included. Completing the integration merge records this handoff with parents `d12908fdeabd51130df713aee9efd5f07c7ba486` and `27170d95b17ccae224b95b493ec8a9276944f421`; only these two approved documents were modified locally after the light runs.
+
+Parent confirms receipt of the old-base 6468-pass full evidence and released heavy slot. Latest direction permits freezing after G2 focus and returning for parent publication or later PR73 collision-focused integration. **Freeze now; no additional full, no root suite, no push or PR.** Full evidence remains tied to old-base `d12908f`; current G2 snapshot has only the explicitly listed light-delta evidence. Final merge SHA/tree are reported with the handoff; the scientific seven-file freeze is unchanged.

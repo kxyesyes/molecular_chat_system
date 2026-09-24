@@ -1,6 +1,6 @@
 # ADMET unknowns and evidence-preserving presentation
 
-Date: 2026-09-25. Status: **parent confirms prior SPEC approval of scientific semantics/source preservation and Feynman QUALITY approval of snapshot 1ef2e89d… including the final four-line path guard; exact nine-file local commit and fetched-main integration authorized. Integrated host/minimum FOCUS pending, followed by one now-authorized isolated tests/agent run. Full repository prohibited; no push/PR**.
+Date: 2026-09-25. Status: **SPEC/QUALITY approved (parent-confirmed), exact nine-file commit 7ddac1b created; integrated old-base Agent full GREEN at d12908f only (6468 passed, two skipped). G2/main 27170d9 subsequently integrated with host/minimum light-delta GREEN, reviewed seven-file hash unchanged. Frozen for parent publication coordination; no second full, root full, push or PR**.
 
 ## 1. Scope, baseline, and authority
 
@@ -175,6 +175,14 @@ New regressions cover eight embedded path forms across all twelve entry/status/n
 Parent reports Feynman QUALITY approved aggregate `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`, with independent **1184 passed, one existing warning and boundary probes**. Prior SPEC review approved scientific semantics and source URL preservation; Feynman's final review closes the four-line embedded-path guard. These are parent-reported independent review results, not additional tests run by this worker. The seven local code/test hashes were rechecked against that exact aggregate before committing; no further code changes are authorized as part of recording approval.
 
 The latest authorization supersedes prior no-commit/merge restrictions only for recording these reviews, committing the exact seven code/test files plus this spec and its plan, and merging the latest locally fetched origin/main into this branch. Current observed fetched main is `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`; a later G2/PR72 update is possible, not assumed merged. Then run this worker's integrated host/minimum FOCUS and any collision-specific checks. No push, PR, full suite, published-production changes, keys, models or providers. Parent 4C heavy verification is active; report ready for full only after light integration verification.
+
+## 12. Verified integration handoff
+
+The reviewed nine-file implementation and review record were committed as `7ddac1b561b412530b8e508ce30bbf96d969c917`. First main integration was conflict-free at `d12908fdeabd51130df713aee9efd5f07c7ba486` (main `5db56b0`, tree `c31e67292a9a5370c4e5f2da4abfec0360a1d51c`). Host/minimum FOCUS each passed 1106 cases before the single authorized Agent full: **6468 passed, two skipped, eight warnings, 287.49s**. No edits/merges/retries occurred during that run; it does not cover G2 or later main. Root full was not run.
+
+Afterward, G2/main `27170d95b17ccae224b95b493ec8a9276944f421` merged without conflicts or manual code changes. Host/minimum FOCUS plus G2 delta each passed **1285 cases and 162 subtests**, with one/three existing warnings respectively. Shared-parser cross-consumer regression each passed **221 cases**, with one/three existing warnings. The seven reviewed ADMET files remain byte-identical to aggregate `1ef2e89d200c77b04db03d956666c3b93eea542138f4d2af3f53c06ad9f0c744`; upstream G2 changes are separate integrated history, not local scientific modifications. Exact command sets, timings and skip reasons are in the plan.
+
+Freeze after G2 light verification per latest parent direction. PR73/4C is only parent-reported imminent, not part of this snapshot. Parent decides publication or a later PR73 collision-focused integration. No second Agent full, root full, push, PR creation, published-production/provider/key/model changes. The later integration merge also records these verification results in the same two approved documents; no additional implementation paths are introduced.
 
 ## Historical design-only handoff (before implementation authorization)
 
