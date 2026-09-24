@@ -365,3 +365,36 @@ tests/agent/test_real_acceptance_checks.py::test_candidate_identity_truth_check_
 Append the unchanged pytest options `--noconftest -c <worktree>/pytest.ini -q -p no:cacheprovider --tb=short`. These 83 focused cases are not a full-suite result or a substitute for live science. Local two-doc evidence commit is authorized; no further code edits were needed. Freeze awaiting parent's full-slot or CI-only decision. No full/live/push/PR; PR74 status is parent-reported, not an independently queried or merged dependency. Package8 remains incomplete.
 
 Parent release decision: publish this four-file, pure in-memory aggregation increment with the existing exact-head eight-check CI gate, including full Agent and the other repository partitions; do not duplicate a local full run while G1 owns that slot. This new module is not wired to the launcher or normal Web entry. Local evidence remains 320 + 83 focused cases, not a local full result. SPEC Euclid and final QUALITY Socrates approvals remain attributed separately; the latter additionally ran 37 identity checks and 1168 malformed-field probes without editing the frozen code. No CI result is claimed before completion, and no offline result completes package8/live acceptance.
+
+## PR74 ADMET baseline integration — local freeze, parent owns publication
+
+Parent reports draft PR76 published at `e2e4bd752b8bf4893b43ba0bca5c6e723d3f4666`, with the exact-head eight-check CI gate covering full repository partitions instead of a local full run; G1 retains the local heavy slot. This worker did not query CI or infer a green result. Parent authorized the next local merge only if already-fetched `origin/main` exactly matched `c3195f96c4a80aac40ac958d351ecea6b12f3c31` (PR74 ADMET); local read-only Git verification confirmed that exact match and a clean worktree.
+
+Merged the exact revision as `1b009f9e6f503253440de5dda329b5a164083dd0`, automatically with no conflicts or manual source changes. Incoming changes were limited to the ADMET producer/analysis contract/molecule-properties route, their tests and ADMET docs. Reviewed P8 core hashes remain unchanged: aggregator `14ae0da3afccefb9857e38497a429b5664f79b016daf73d657ff37e3c2733fb6`; aggregation tests `828151e4040c80fe55b8c3ef0a8d6ae6b5a63dc24e844d7ab9fb6c1af3cd9a21`.
+
+Actual post-merge focused results, all exit 0 with no failures/skips:
+
+| Selection | Result | Pytest time |
+|---|---|---|
+| Original isolated aggregation + seven pure evaluation nodes, exact command above | 320 passed | 2.27 s |
+| Previous exact generation/inventory/evaluation collision selection above | 83 passed | 2.14 s |
+| ADMET status/unknown-evidence selected nodes below | 121 passed | 2.02 s |
+
+All three runs passed two-file in-memory compilation. Reused the same cleared-child-env/private-cwd/120-second/network+project-asset guard wrapper with `--noconftest -c <worktree>/pytest.ini -q -p no:cacheprovider --tb=short`; changed only pytest node selections. New ADMET tests, their helper bodies and producer imports were inspected before execution. Selected tests use literal molecules/in-memory rows, deterministic RDKit descriptors or monkeypatched ADME backends. They cover true/false/unknown alert transport across success/partial/failure, malformed flag rejection, sparse observations, retained failure diagnostics, missing assessment, incomplete rule conclusions, backend unavailability and scientific evaluator version provenance. No real backend invocation, keys/env/assets/userstores/report reads or `run_real`; no Web/server test was selected. Private synthetic directories remain retained, not claimed cleaned.
+
+Exact additional ADMET selection:
+
+```text
+tests/agent/test_analysis_contract.py::test_admet_three_alerts_tristate_preserves_observation
+tests/agent/test_analysis_contract.py::test_nullable_alerts_remain_required_and_strict
+tests/agent/test_analysis_contract.py::test_adme_py_sparse_nulls_are_limited_to_uncomputed_alerts
+tests/agent/test_analysis_contract.py::test_admet_domain_gate_reused_including_failure_rows
+tests/test_admet_unknown_evidence.py::test_partial_backend_retains_actual_leaf_without_imputing_missing
+tests/test_admet_unknown_evidence.py::test_metadata_only_failure_retains_diagnostics_without_inventing_row
+tests/test_admet_unknown_evidence.py::test_empty_backend_without_diagnostics_does_not_invent_source_or_error
+tests/test_admet_unknown_evidence.py::test_actual_partial_rule_details_are_not_a_completed_pass
+tests/test_admet_unknown_evidence.py::test_backend_exception_and_unavailable_do_not_become_success
+tests/agent/test_real_acceptance_checks.py::test_admet_truth_check_requires_adme_py_package_version
+```
+
+Only the two original P8 docs are edited after merge; a local evidence commit is authorized. No local full, push or PR operation by this worker. PR76's first CI at the published prior head may be superseded by the parent's next push; neither that CI nor the new local HEAD is declared green. Parent must evaluate all required checks at the eventual exact published HEAD. Local 320 + 83 + 121 evidence does not stand in for full CI or live science. P8 remains incomplete; `live_execution_verified=false` and `final_acceptance=false` remain unchanged. Freeze for parent publication/CI coordination.

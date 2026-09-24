@@ -166,3 +166,13 @@ Local execution result: exact four-path commit `ba7dc505e116fdac6c803bdc8c8d7d41
 Post-merge actual verification: original isolated selection **320 passed** (2.41 s), pre-inspected collision selection **83 passed** (2.27 s), both exit 0 with no failures/skips; two-file in-memory compilation passed in both runs. Collision selection covers PR75 inventory, generation/ranking adapter integration and 20 evaluation truth/data-flow/status nodes. The exact node list and exclusions are in the plan. No actual model/service/asset execution, external key use or `run_real` invocation occurred. Tests use synthetic records, patched generation calls, RDKit on literal test molecules and non-service registry fixtures; these are not real scientific acceptance evidence.
 
 The worker is locally frozen after a documentation-only evidence commit. Full remains unrun pending the parent's full slot or CI-only decision; no push or PR was created. Package8 is **not** declared complete, and ordinary WS/live collector/P7 dependencies remain outside this batch. Immutable live/final flags stay false.
+
+## Latest baseline: PR74 integrated; exact-head CI remains parent-owned
+
+Parent subsequently published draft PR76 at `e2e4bd752b8bf4893b43ba0bca5c6e723d3f4666` and selected the repository's exact-head eight-check CI gate, including all full partitions, instead of local full while G1 owns the heavy slot. This publication/CI choice is parent-reported; this worker did not push or query CI and does not claim it passed.
+
+After verifying local `origin/main` exactly matched the newly authorized `c3195f96c4a80aac40ac958d351ecea6b12f3c31` (PR74 ADMET), the worker merged it without conflicts as `1b009f9e6f503253440de5dda329b5a164083dd0`. Core aggregator/test hashes remain exactly the approved ownership freeze (`14ae0da3...` / `828151e4...`). No manual source or test edits were needed.
+
+Actual merged-tree verification: original **320 passed** (2.27 s), prior collision **83 passed** (2.14 s), additional pre-inspected ADMET status/unknown-evidence focus **121 passed** (2.02 s). All exit 0 without failures/skips; two-file in-memory compilation passed in every run. The plan records exact selections, isolation and evidence boundaries. ADMET cases use in-memory records and patched backends; no real environment, assets, reports, services or live launcher are accessed.
+
+This iteration permits only local merge and original two-doc evidence commits. Parent owns the next push and PR76 CI reconciliation: the first published head's CI cannot be claimed as success for a later head. No local full was run, no CI green status asserted, and Package8 is not complete. All offline/live/final limitations remain unchanged.
