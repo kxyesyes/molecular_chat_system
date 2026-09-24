@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -12,14 +11,11 @@ from src.agent.contracts.generation_request import (
     MAX_GENERATION_COUNT,
     MIN_GENERATION_COUNT,
     build_generation_request,
-    has_generation_intent,
     generation_request_error_details,
-    parse_generation_count,
-    validate_generation_count,
 )
 from src.agent.orchestrators.base import WorkflowStep
 
-from . import step_templates
+from . import request_parsing, step_templates, workflow_selection
 
 
 @dataclass
@@ -56,31 +52,30 @@ class TaskPlanner:
     def _plan(self, context: AgentContext) -> WorkflowPlan:
         skill = context.active_skill or ""
         query = context.query
+        selected = workflow_selection.select_workflow(skill, query, looks_like_design=self._looks_like_design)
 
-        if skill == "admet_assessment":
+        if selected == "admet_assessment":
             return self._admet_plan(query)
 
-        if skill in {"comprehensive_evaluation", "comprehensive_evaluation_skill"}:
+        if selected == "comprehensive_evaluation":
             return self._comprehensive_plan(query)
 
-        if skill == "target_driven_design" or (
-            skill == "target_database_search" and self._looks_like_design(query)
-        ):
+        if selected == "target_driven_design":
             return self._target_driven_design_plan(query, context.metadata)
 
-        if skill == "hit_to_lead_optimization":
+        if selected == "hit_to_lead_optimization":
             request = analyze_target_request(query)
             if (request.explicit or request.targets) and request.needs_clarification:
                 return self._target_clarification_plan(skill, request.targets)
             return self._lead_optimization_plan(query, context.metadata)
 
-        if skill == "molecular_design":
+        if selected == "molecular_design":
             request = analyze_target_request(query)
             if (request.explicit or request.targets) and request.needs_clarification:
                 return self._target_clarification_plan(skill, request.targets)
             return self._molecular_design_plan(query, context.metadata)
 
-        if skill == "target_database_search":
+        if selected == "target_database_search":
             target_request = analyze_target_request(query)
             search_input = self._extract_target_hint(query)
             if (
@@ -108,7 +103,7 @@ class TaskPlanner:
                 metadata={"input_type": "target_hint", "atomic": True},
             )
 
-        if skill == "docking_simulation" and isinstance(
+        if selected == "docking_simulation" and isinstance(
             context.metadata.get("docking_input"), dict
         ):
             return WorkflowPlan(
@@ -124,7 +119,7 @@ class TaskPlanner:
                 metadata={"input_type": "structured_docking", "atomic": True},
             )
 
-        if skill == "docking_simulation" and self._looks_like_unauthorized_tool_request(query):
+        if selected == "docking_simulation" and self._looks_like_unauthorized_tool_request(query):
             return WorkflowPlan(
                 workflow_name="docking_simulation",
                 steps=[],
@@ -140,13 +135,13 @@ class TaskPlanner:
             "docking_simulation": "molecular_docking",
             "rag_search": "rag_search",
         }
-        if skill in atomic_tools:
+        if selected in atomic_tools:
             return WorkflowPlan(
                 workflow_name=skill,
                 steps=[
                     WorkflowStep(
                         name=skill,
-                        tool_name=atomic_tools[skill],
+                        tool_name=atomic_tools[selected],
                         input_data=query,
                         output_key="result",
                     )
@@ -186,15 +181,10 @@ class TaskPlanner:
         request_metadata = request_metadata or {}
         requested_count: Any = None
         try:
-            requested_count = (
-                request_metadata["requested_count"]
-                if "requested_count" in request_metadata
-                else self._extract_requested_count(
-                    query,
-                    default=self.DEFAULT_GENERATION_COUNT,
-                )
+            requested_count = request_parsing.requested_count(
+                query, request_metadata, default=self.DEFAULT_GENERATION_COUNT,
+                extract_count=self._extract_requested_count,
             )
-            requested_count = validate_generation_count(requested_count)
         except GenerationRequestError as exc:
             rejected_value = (
                 exc.value if exc.value is not None else requested_count
@@ -227,15 +217,10 @@ class TaskPlanner:
         request_metadata = request_metadata or {}
         requested_count: Any = None
         try:
-            requested_count = (
-                request_metadata["requested_count"]
-                if "requested_count" in request_metadata
-                else self._extract_requested_count(
-                    query,
-                    default=self.DEFAULT_GENERATION_COUNT,
-                )
+            requested_count = request_parsing.requested_count(
+                query, request_metadata, default=self.DEFAULT_GENERATION_COUNT,
+                extract_count=self._extract_requested_count,
             )
-            requested_count = validate_generation_count(requested_count)
         except GenerationRequestError as exc:
             rejected_value = (
                 exc.value if exc.value is not None else requested_count
@@ -293,10 +278,9 @@ class TaskPlanner:
         request_metadata: dict[str, Any] | None = None,
     ) -> WorkflowPlan:
         request_metadata = request_metadata or {}
-        requested_count = validate_generation_count(
-            request_metadata["requested_count"]
-            if "requested_count" in request_metadata
-            else self._extract_requested_count(query, default=self.DEFAULT_GENERATION_COUNT)
+        requested_count = request_parsing.requested_count(
+            query, request_metadata, default=self.DEFAULT_GENERATION_COUNT,
+            extract_count=self._extract_requested_count,
         )
         return WorkflowPlan(
             workflow_name="hit_to_lead_optimization",
@@ -323,45 +307,24 @@ class TaskPlanner:
 
     @staticmethod
     def _looks_like_design(query: str) -> bool:
-        return has_generation_intent(query)
+        return request_parsing.looks_like_design(query)
 
     @staticmethod
     def _extract_target_hint(query: str) -> str:
-        request = analyze_target_request(query)
-        return request.targets[0] if not request.needs_clarification else query.strip()
+        return request_parsing.extract_target_hint(query)
 
     @staticmethod
     def _looks_like_unauthorized_tool_request(query: str) -> bool:
-        lowered = query.lower()
-        return (
-            "run_docking" in lowered
-            and any(marker in lowered for marker in ("未授权", "忽略系统限制", "unauthorized", "ignore system"))
-        )
+        return request_parsing.looks_like_unauthorized_tool_request(query)
 
     @classmethod
     def _extract_requested_count(cls, query: str, default: int) -> int:
-        return parse_generation_count(query, default=default)
+        return request_parsing.extract_requested_count(query, default=default)
 
     @staticmethod
     def _extract_top_n(query: str, default: int) -> int:
-        match = re.search(r"(?:前\s*|top\s*)(\d+)", query, re.I)
-        if not match:
-            return default
-        return max(1, min(100, int(match.group(1))))
+        return request_parsing.extract_top_n(query, default=default)
 
     @staticmethod
     def _wants_admet(query: str) -> bool:
-        lowered = query.lower()
-        return any(
-            token in lowered
-            for token in (
-                "admet",
-                "adme",
-                "吸收",
-                "分布",
-                "代谢",
-                "排泄",
-                "毒性",
-                "风险",
-            )
-        )
+        return request_parsing.wants_admet(query)
