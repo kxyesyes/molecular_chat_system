@@ -1,0 +1,147 @@
+# Package 8 Current Real Acceptance — Design and Inventory Plan
+
+> **For agentic workers:** After parent approval only, use subagent-driven-development or executing-plans for separately authorized implementation. This document is a design proposal, not permission to execute it.
+
+**Goal:** Establish honest, repeatable real end-to-end evidence on the latest integrated packages 1–8 revision; exclude package 9/server deployment.
+
+**Architecture:** Keep contract, replay, isolated real tools, isolated real decisions, and normal Web integrated acceptance as distinct evidence layers. Reuse existing tools, ModelDecisionLoop, Session/ownership, scientific references and validators; a bounded test process must exercise ordinary HTTP/session → `/ws` → decisions → real scientific tools → frontend/artifacts.
+
+**Tech stack:** Existing FastAPI/Jinja/native JS, pytest/Node, SQLite, RDKit, PyTorch/PyG RG-MPNN, Ollama generation, configured decision provider, Vina/preparation tools.
+
+## 1. Scope and revision gate
+
+- Inventory base: `e173d432f767fe76e1c1f101d9cd8824ffee612d`, branch `codex/current-real-acceptance`; initial worktree clean. Latest local commits: #68 snapshot sibling-write fix, #67 analysis contracts, #66 reverse-target whole-input validation.
+- Read repository `AGENTS.md`, `docs/PROJECT_STANDARDS.md`, `docs/handoff/remaining-through-step8.md`, relevant source/tests and registry metadata. No imports, tests, service/network probes, environment inspection, actual datasets/weights/structures, credentials, runtime user store, or historical report/log contents were read/run.
+- Only this document is written. No implementation, test/case file, separate manifest, commit, push, model start, production configuration change or deployment.
+- Handoff ledger is historical context, not a fresh PR/CI audit. Packages 4B/4C/4D, planner integration, residual/G1/ADMET work and package 7 need final integration confirmation. G1/A1 labels are parent-supplied; do not invent their absent test filenames or infer completion from related older tests. **A1 is not full acceptance. Package 7 is still implementation work.**
+- Final acceptance must freeze the *then-current integrated code and tree*, not reuse this baseline as final proof. Record package→reviewed revision→integrated revision→test evidence. Later relevant changes invalidate affected evidence; final required matrix must refer to one revision and asset identity set.
+
+## 2. Actual existing entry points and limitations
+
+| Existing entry/source | What it proves | What it does not prove |
+|---|---|---|
+| `scripts/run_agent_acceptance.py --mode contract` | Router/planner/schema/failure contracts; includes fake ContractTool/ProbeTool | Real generation, provider decisions, real Vina or Web integration; contract mode is not guaranteed side-effect-free |
+| Same script `--mode replay --replay-input ...` | Rechecks stored structured truth/provenance assertions | Current live execution; old artifacts/provider availability; fresh revision compatibility |
+| Same script `--mode real --case-set all-real --repeat 3` | Real tool probes plus golden/diverse ScientificAcceptanceRunner workflows | Normal HTTP/WS entry or model-driven decisions; external main-model probe is optional in its required gate |
+| `scripts/run_decision_chat_acceptance.py --mode native\|json` | Real configured provider + RDKit through isolated ChatHandler/ModelDecisionLoop: chat, two molecules, clarification, invalid input | Ordinary Web app/session, family/generation/Vina/RAG, browser UI. Four cases, no repeat flag; max 4 model requests/2 tool attempts, 90-second loop |
+| `scripts/run_decision_browser_lab.py --port 6012 --mode native\|json` | Explicit loopback lab, real provider/RDKit, `/decision-lab/` and `/decision-lab/ws` | Ordinary homepage `/ws`, full scientific matrix, automatic pass report or externally bounded lifetime |
+| `tests/test_activity_family_real_acceptance.py::test_trained_family_acceptance` | Opt-in real trained PDE/BuChE bundles, CPU baseline→API→tool→decision→isolated WS→Node DOM; source digests and cleanup | External decisions: `decision_model_kind=scripted`; `/isolated-family` is not normal `/ws`; Node DOM is not full browser integration |
+| `tests/scientific_reference_browser_lab.py` | Homepage/session + ordinary route setup `/ws`, candidate confirmation/restore, real RDKit | Generator and chat model are offline fixtures; not real generation or real decision-provider evidence |
+| `tests/agent/test_main_integration_acceptance.py` | Bounded offline HTTP/session→WS, actual RDKit, partial/error/numeric presentation | Full MolecularChatApp or live provider; built on offline reference lab |
+
+Family helpers actually live in `tests/family_real_acceptance_support.py`, `tests/family_acceptance_chain_support.py`, `tests/family_acceptance_process_support.py`; there is no family-weight CLI to invent. The opt-in pytest item writes a unique `outputs/agent_evaluation/family_acceptance_*.json`. Its parent runs each family in an owned child (120-second maximum), separately verifies process release/cleanup, snapshots only selected bundles, and never activates the source production selection. Preserve these boundaries.
+
+### Evaluation inventory (filenames only; dataset contents not read)
+
+`data/agent_evals/` contains `routing_cases.jsonl`, `workflow_cases.jsonl`, `failure_recovery_cases.jsonl`, `real_agent_cases.jsonl`, `golden_scientific_cases.jsonl`, `diverse_scientific_cases.jsonl`, `chemistry_quality_cases.jsonl`, `architecture_review_cases.jsonl`.
+
+Source `src/agent/evaluation/{models,runner,scientific}.py` defines `EvaluationCase`, `load_cases`, router scoring, ScientificAcceptanceRunner and replay. `run_contract()` uses routing/workflow/failure/real_agent sets; `all-real` selects golden + diverse. Existing tests *expect* 16 REAL cases, 12 golden and 20 diverse, with no mocks in golden/diverse. These are test assertions, not a freshly validated dataset inventory/count. Other two sets are not automatically included in this CLI's final matrix. Revalidate approved case contents/IDs/hashes after asset-read authorization.
+
+### Normal Web path on this base
+
+`src/web/app.py` registers `/ws` → `ChatHandler.handle_websocket` → `_process_message` → routing/Supervisor execution. `src/web/routes/websocket_routes.py` separately delegates `/ws` to the same handler. `ChatHandler.process_decision_message` is an explicit bridge, not evidence that the ordinary path selects it. Changing `AGENT_HARNESS_MODE` alone cannot establish package 7.
+
+Ordinary HTTP/session ownership, `/api/agent/workflows/references/confirm` and `/restore`, model lifecycle and `/ws` must be exercised together after package 7 lands. Do not invent `/api/chat`. `src/web/app.py` normally reads YAML, checkout env and the user LLM store, initializes scientific services, and starts background work; unguarded `main.py`/ASGI import is not the proposed isolation mechanism.
+
+## 3. Recommended approach and missing instrumentation
+
+Options: (1) reuse existing runners alone—smallest effort but insufficient; (2) extend layered evidence with a bounded ordinary-entry harness—**recommended**; (3) run against the existing port-6001 instance—unacceptable user-state/configuration risk and out of scope.
+
+Needed after approval, not implemented here:
+
+1. **Integrated safe launch seam:** package-7-approved ordinary app/session/router initialization with injected in-memory provider settings, isolated writable paths and real tool adapters. No production config read/write, no replacement scientific framework, no fake decision shortcut. Prove ordinary wiring parity; a second dedicated lab is not package-7 completion. No verified existing command currently supplies all these guarantees.
+2. **Strict manifest/report aggregator:** separate assertion status, scientific result status and evidence class; inspect every case and every iteration. `run_agent_acceptance.py` returns 0 for `partial`, omits the external probe from required checks, and scientific `run()` derives top status from the last iteration. Stability `success_rate`/completion includes partial. None of these is the final pass predicate. `--mode all` is contract+real, not replay.
+3. **Dependency/service injection:** ScientificAcceptanceRunner creates `RAGSearchTool()` without an injected RAG service; current tool returns unavailable without it. Its activity probe uses legacy `ActivityPredictor`, not both selected family bundles. Real-provider decision chat registers only PropertyCalculator. Reuse/inject approved services; do not hide these gaps through case deletion, demo models or fixtures.
+4. **Stronger truth evidence:** current Vina probes check energy/pose existence but do not alone establish finite numeric value, real executable provenance and pose hashes. Some RDKit checks only verify tool success. Strengthen independent numeric/artifact checks; false values, NaN/Inf and stale artifacts must fail. Existing input-failure checks can pass on absence of successful tools: also prove expected validation reason, healthy control, zero unauthorized work, not an unrelated provider outage.
+5. **Normal browser recorder:** bounded real browser driver on homepage/ordinary WS; capture sanitized event IDs/statuses, rendered values and artifact identifiers, not provider messages/session cookies/raw user text. Check candidate ACK/restore, owner isolation, continuation, cancellation, switching and partial terminal labels. Existing Node DOM assertions remain supplemental.
+6. **Retention/isolation audit:** existing redaction is not proof that arbitrary exception strings/raw prompts are absent. Use closed public projection before persistence; no unrestricted stdout/stderr dump. Run compile/tests only in future isolated execution; record first failures/timeouts rather than replacing them with rerun successes.
+
+## 4. Real dependencies and safe runtime inputs (all availability unverified)
+
+Only `data/REGISTRY.md` metadata was inspected. Listed filenames/default paths do **not** imply presence, compatibility, licensing, readiness or successful execution.
+
+| Dependency | Required safe configuration / evidence after approval |
+|---|---|
+| Main decision provider | Explicit `OPENAI_COMPATIBLE_API_KEY`, `OPENAI_COMPATIBLE_BASE_URL`, `OPENAI_COMPATIBLE_MODEL` in child environment/memory; endpoint allowlist, no credential URL/query, no redirects. Report only API-key-presence boolean, public provider alias and mode; never values/raw response. Native required; JSON separately tested if supported/advertised |
+| Local generation | Operator-approved Ollama endpoint (`OLLAMA_BASE_URL`), loaded `gmm-llama:latest`; `MOLECULAR_GENERATOR_MODEL` used by CLI probe and `OLLAMA_MODEL` by scientific runner must both pin generation to that model. Neither is a main-chat-model switch. Record runtime model identity/digest, valid canonical candidates and dedup; no automatic model download/start |
+| RDKit/ADMET | Approved Python scientific environment, actual installed versions; RDKit properties independently recomputed. Identify `adme_py` versus `rdkit_rules` and endpoint support per field. Unsupported ADMET/toxicity labels remain unavailable; rule descriptors are not validated pharmacokinetic/clinical predictions |
+| Both family RG-MPNN bundles | `MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE=1`, `MEDCHAT_FAMILY_ACCEPTANCE_MODELS_DIR`, `MEDCHAT_FAMILY_ACCEPTANCE_PDE_BUNDLE_ID`, `MEDCHAT_FAMILY_ACCEPTANCE_BUCHE_BUNDLE_ID`; approved trusted source, sealed classification+regression cards/weights for each family, hashes/schema/units/thresholds. `ACTIVITY_MODEL_DIR` points only at private snapshots; no training or production activation |
+| Target/reverse-target | Authorized copied target DB/cache (`TARGET_DB_PATH`, `TARGET_CACHE_DIR`), reverse dataset/fingerprints (`REVERSE_TARGET_DATA_DIR`, optional `CHEMBL_DB_PATH`); source/version/record identities. SQLite WAL/locks and structure downloads confined to private copy; no implicit seed/download against source |
+| RAG | Authorized source/index/manifest and compatible embedding model/runtime. Registry mentions `RAG_INDEX_PATH`; actual RAG service injection/config mapping must be verified, not assumed from that name. Pin source/index/embedding hashes; unavailable index is not an explicit no-hit |
+| Vina | Approved Vina, ADFR receptor preparation, Meeko ligand preparation (OpenBabel only if required by actual selected path); `MOLECULAR_DOCKING_VINA`, `MOLECULAR_DOCKING_ADFR_BIN` or `MOLECULAR_DOCKING_PREPARE_RECEPTOR`, `MOLECULAR_DOCKING_PREPARE_LIGAND`, optional `MOLECULAR_DOCKING_ROOT`, finite `MOLECULAR_DOCKING_VINA_TIMEOUT_SECONDS` |
+| Scientific sample | Registry declares `data/samples/MAGL_5zun.pdb` + `data/samples/5.sdf`. CLI uses center `[5.99,3.01,17.345]`, box `[20,20,20]`, exhaustiveness 4, num_modes 3. Verify authorized input hashes/preparation and new true pose/energy output, not filenames or a hard-coded expected affinity |
+| Runtime/browser | Python scientific dependencies, Node for current DOM/static tests, real browser for integrated evidence. Versions/readiness only checked later. No dependency installation/service startup is authorized now |
+
+Use fresh child-only `HOME/USERPROFILE/APPDATA/LOCALAPPDATA/TEMP/TMP` and `MEDCHAT_USER_CONFIG_DIR`, `MEDCHAT_LLM_LOCK_DIR`, `MEDCHAT_AGENT_SESSION_DB`, `AGENT_STATE_DB`, `MEDCHAT_TASK_DB_PATH`. Existing offline isolation uses `MOLECULAR_CHAT_CONFIG`/`MEDCHAT_ENV_FILE` paths to nonexistent private files; this alone does not configure a safe *real* ordinary app. New safe launch must avoid persisting credentials even into temporary `.env`/LLM config. Never enumerate ambient environment; pass an explicit OS/runtime allowlist plus only approved dependency inputs. Keep task backend local, Temporal canary 0 and sandbox opt-ins off. No production model-setting HTTP writes.
+
+## 5. Proposed final matrix (new IDs, not existing cases)
+
+All required integrated rows run **three times**, against the same revision/assets. Component checks do not substitute for ordinary-entry coverage.
+
+| Proposed row | Path and independently checked outcome |
+|---|---|
+| E01 Chat + authorization | Homepage HTTP/session → ordinary `/ws` → real decision provider; chat calls no scientific tool; tool-disabled/forbidden request cannot execute one; trace/one terminal per turn |
+| E02 RDKit / clarification | Exact molecule count/order and independently recomputed descriptors/units; missing input asks, owned continuation resumes; cross-owner/reused continuation denied |
+| E03 Whole invalid input | Invalid/mixed complete SMILES rejected without silently extracting valid fragments; expected diagnostic, no invented metrics/artifacts; unrelated dependency failure is not a pass |
+| E04 ADMET truth | Real supported endpoints with backend/version and method label; unsupported outputs explicitly absent/unavailable; partial visible in API/events/UI. Pending ADMET fixes required before judging final scope |
+| E05 PDE + BuChE | Both families, each classification/regression real RG-MPNN (`demo_mode=false`, `fallback_used=false`), approved bundle identities; direct CPU baseline vs API/tool/real-decision/WS/rendered numbers (initial tolerance 1e-6 absolute/relative). Unknown target fails closed; no source activation |
+| E06 Generation + consumption | Real `gmm-llama:latest`, exact requested count of valid canonical-unique candidates; stable candidate ID↔SMILES mapping. Actual downstream property/activity/ADMET/ranker inputs consume versioned generated output with hashes, not merely matching plan order |
+| E07 Target + reverse + RAG | Real source-backed target records/structures, reverse-target IDs consumed by lookup and subsequent design; no target evidence blocks generation. RAG cites verified retrieved source or explicit genuine no-hit; unavailable backend stays unavailable |
+| E08 Vina positive | Approved MAGL sample inputs/preparation → actual Vina run → finite kcal/mol value parsed independently from new output, valid nonempty pose with SHA-256, consistent API/WS/artifact/UI values. Docking score is computational, not experimental affinity |
+| E09 Docking negatives | Missing receptor/ligand/grid and deliberately absent executable in private test configuration: correct rejection/unavailable reason, no fabricated energy/pose, no uncontrolled fallback; do not remove or change real binaries |
+| E10 Multi-step + references | Target-driven design / hit-to-lead and generated candidate selection: runtime upstream→downstream input/output digests and identities; ACK/confirm/restore/reconnect preserve owner/version. Tamper/stale/cross-owner refs reject; no regeneration substituted for selected candidate |
+| E11 Lifecycle + partial | Bounded cancellation/disconnect, controlled provider timeout/malformed reply, bounded recovery, model switch via approved in-memory test seam, no stale model or duplicate costly calls; partial/not-completed remains visible with preserved numerical evidence |
+| E12 Stability + cleanup | 3/3 required repetitions with fixed scope, per-case latency and request/tool counts, every failure retained, fresh trace/job IDs; owned children/clients/DB/ports drained and private state removed or explicitly retained on uncertain ownership |
+
+E11 injected faults are **fault-injection evidence**, not real provider availability proof; pair with healthy real control. Scripted family checks and offline reference lab retain their own evidence class. Expected-negative assertions may pass while the scientific result remains invalid/unavailable. A legitimate positive scientific partial can pass a *preservation* assertion but cannot be relabeled full scientific success (including family classification/regression inconsistency).
+
+## 6. Manifest proposal (embedded only; no manifest/cases created)
+
+Recommended future private output: `outputs/agent_evaluation/current-real/<run-id>/manifest.json`, plus closed-schema per-iteration summaries and approved scientific artifacts. This path/schema is **proposed**, not an existing runner interface. Raw requests, model responses, user text, credentials and absolute source paths are excluded.
+
+| Proposed fields | Required meaning |
+|---|---|
+| `schema_version`, `run_id`, `inventory_base`, `integrated_commit`, `tree_sha`, `package_revisions`, `scope_excludes` | Pin latest integrated packages 1–8; explicitly exclude 9; record code/runner hash and dirty-scope status |
+| `case_manifest_sha256`, `cases[].id`, `required`, `expected_outcome`, `entry_path`, `evidence_class`, `decision_source`, `tool_sources` | Keep contract/replay/real-tool/scripted/real-decision/fault-injection distinct; exact expected count prevents empty/skipped suite pass |
+| `dependencies[]` | Logical asset/provider ID, version, trusted origin/license, approved-use scope, input/card/weights/index hashes, validation status; no availability inference from name |
+| `iterations[]` | Exactly 1,2,3; per-case validation status, unmodified scientific status, public failure code, latency, invocation counts, trace/decision/tool IDs, mode, main/generator identity separation |
+| `truth_checks[]`, `consumption_edges[]` | Independent oracle/version/tolerance, finite/unit/identity checks; producer output-version/digest → consumer actual input-digest with subset/order assertion and evidence ID |
+| `artifacts[]` | Safe run-relative path, media type, size, SHA-256, producer trace/tool/version, input digests, demo/fallback flags, validated pose/content status; verify existence/content/hash before cleanup |
+| `api_key_present`, `privacy_check`, `source_unchanged`, `cleanup`, `overall_status` | Presence boolean only; pre-persistence projection verification; source selection unchanged without reading production user stores; process ownership, released port/state or retained reason; strict final aggregation |
+
+Pass gate: complete expected case set × 3; required positive scientific results fully successful and all truth/provenance/consumption checks true; required negative/lifecycle assertions true; real provider actually decides in ordinary entry; both real families and real generation/Vina covered; no stubs in required real rows; privacy/cleanup gates passed. Any false assertion/fabrication is failed; any missing/pending/skipped/unavailable/positive-partial evidence blocks complete acceptance. Report failed/partial honestly, with a nonzero final gate; never use existing exit 0, average score, completion rate or LLM self-judgment as authority. Report all rounds, not only the best/latest. Provider stochasticity does not require identical generated molecules; canonical validity/count/identity/consumption contracts must hold each round.
+
+## 7. Existing commands for later use — NOT executed or safe-launch recipes
+
+Run only after parent authorizes implementation/execution and the bounded child isolation is verified. Relative paths below are existing repository entry points; `$RunRoot` denotes a fresh approved private output directory in that future launcher, not an existing variable/asset. Do not paste these into an ambient production-configured shell.
+
+```powershell
+python -B -m pytest tests/agent/test_real_acceptance_checks.py tests/agent/test_evaluation_runner.py tests/agent/test_decision_chat_acceptance.py tests/agent/test_main_integration_acceptance.py -q
+python -B -m pytest tests/agent/test_analysis_contract.py tests/agent/test_admet_whole_input.py tests/test_admet_predictor_fallback.py -q
+python -B -m pytest tests/test_activity_family_acceptance_support.py tests/test_activity_family_acceptance_process.py tests/test_activity_family_acceptance_chain.py -q
+python scripts/run_agent_acceptance.py --mode contract --output "$RunRoot/contract.json"
+python scripts/run_agent_acceptance.py --mode real --case-set all-real --repeat 3 --output "$RunRoot/scientific-real.json"
+python scripts/run_agent_acceptance.py --mode replay --replay-input "$RunRoot/scientific-real.json" --output "$RunRoot/replay.json"
+python scripts/run_decision_chat_acceptance.py --mode native --output "$RunRoot/decision-native-1.json"
+python scripts/run_decision_chat_acceptance.py --mode json --output "$RunRoot/decision-json-1.json"
+python -B -m pytest tests/test_activity_family_real_acceptance.py::test_trained_family_acceptance -q
+python scripts/run_decision_browser_lab.py --port 6012 --mode native
+python -B -m tests.scientific_reference_browser_lab --state-dir "$RunRoot/reference-lab" --port 6017
+node tests/activity_family_results_test.js
+node tests/home_scientific_references_test.js
+node tests/decision_lab_ui_test.js
+```
+
+Decision scripts/family item have no `--repeat`: the approved orchestrator must run three independently bounded invocations with unique outputs. The family helper invokes `activity_family_acceptance_dom.js --input` with its actual private API-summary file; no such input was read/created here. Browser labs need an external lifetime deadline and browser assertions, not merely a listening port. Final ordinary-entry real command is pending package 7 and approved harness; none is claimed above. General regression/compileall/health checks from repository guidance remain future checks after isolation review, not evidence obtained here.
+
+## 8. Bounded execution and parent approval sequence
+
+- [ ] **Parent approves design and scope.** Freeze final required rows, native/JSON support and explicit real asset/provider access. This approval does not authorize production activation/deployment. Recommended choices above need no additional design brainstorming.
+- [ ] **Re-inventory integrated dependencies.** Read final handoffs/diff for 4B/4C/4D/G1/ADMET/P7 and planner/residual work. Discover actual added test names with `rg --files`; attach their exact commands/results. Existing 4A/ADMET whole-input tests do not prove pending work complete.
+- [ ] **Authorize bounded implementation separately.** Candidate new runner `scripts/run_current_real_acceptance.py` and focused tests `tests/agent/test_current_real_acceptance.py` are proposed, absent/unimplemented here. Keep scientific truth checks reusable in existing evaluation module; reuse family process ownership helpers where compatible. Establish failing regressions for exit-0 partial, first-round failure hidden by last-round success, scripted-as-real, missing consumption, malformed numeric/pose evidence and cleanup uncertainty before changes.
+- [ ] **Prove safe launch offline first.** Fresh process/cwd/private stores; loopback unused non-6001 port (recommend 6018 for ordinary entry, 6012/6017 only for separate labs), one scientific case at a time. Disable autoreload/watchers not needed by test, external preloads/downloads and unrelated backends. No existing listener is stopped. Docking currently writes `cwd/temp_docking`, so private cwd is mandatory, not an assumed output env override.
+- [ ] **Pin budgets before real run.** Recommend 90 s decision loop, <=4 model requests and <=2 tool attempts where fitting the row; explicit case-specific bounded limits for approved multi-step workflows. Keep family child <=120 s; Vina <=300 s and docking case <=420 s. Whole run <=60 min, graceful shutdown <=5 s followed by <=10 s owned-tree cleanup; budget exhaustion is retained failure/partial, not auto-extension. If assets/workload need larger limits, parent revises manifest before execution. Use Windows owned Job/process-tree containment (or POSIX owned process group); hiding a Start-Process window alone is not containment.
+- [ ] **Authorized preflight then three real rounds.** Verify trusted asset snapshots/hashes, real tool versions/readiness and provider configuration in child only. No source model activation, no dataset training, no service/model auto-start. Run supplemental contract/replay/isolated suites with honest labels; run complete ordinary-entry matrix on final revision. Stage-scoped failures block dependent claims without fabricating completion.
+- [ ] **Verify, clean, hand off.** Retain only approved sanitized summaries/scientific outputs needed for review; close sockets/clients/SQLite and terminate only owned descendants. Before deletion, verify absolute paths stay under owned root, no links/reparse traversal and ownership released. Uncertainty retains private state with cleanup failure; never broad delete caches/assets or kill by process name. Parent receives matrix of passes/failures/partials/pending dependencies, all 3 rounds and exact revision, not a deployment claim.
+
+**Current result:** Design/inventory complete only. All real availability, actual latest integrated execution, package-7 ordinary-entry coverage and final scientific acceptance remain unverified/pending. No test/compile/health command was run; no commit or PR was created.
