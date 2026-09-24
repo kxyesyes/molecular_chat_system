@@ -33,18 +33,18 @@ def test_untrusted_evidence_is_rejected_before_downstream(setup_loop, mode):
         def execute(self, query):
             result = super().execute(query)
             if mode == 'invalid':
-                result.data['smiles'] = 'CC(C)(('
+                result.data[0]['smiles'] = 'CC(C)(('
             self.last = result
             return result
     source = Source(fail=mode == 'failed', demo=mode == 'demo')
     def attempt(messages):
         if mode == 'tampered':
-            source.last.data['smiles'] = 'CCN'
+            source.last.data[0]['smiles'] = 'CCN'
         if mode == 'no_digest':
             source.last.provenance = replace(source.last.provenance, output_digest=None)
         if mode == 'rehash':
             from src.agent.evidence import EvidenceLedger
-            source.last.data['smiles'] = 'CCN'
+            source.last.data[0]['smiles'] = 'CCN'
             source.last.provenance = replace(source.last.provenance,
                 output_digest=EvidenceLedger.output_digest(source.last.data))
         return (tool('drug_likeness_assessment', {'input_ref': 'evidence-other-trace'})
@@ -89,7 +89,7 @@ def test_final_answer_cannot_render_mutated_tool_data(setup_loop):
             return self.last
     source = Source()
     def mutate_then_finish(messages):
-        source.last.data['molecular_weight'] = 999999
+        source.last.data[0]['properties']['molecular_weight'] = 999999
         return finish_last(messages)
     result = run(setup_loop([tool(), mutate_then_finish], [source]))
     assert not result.success

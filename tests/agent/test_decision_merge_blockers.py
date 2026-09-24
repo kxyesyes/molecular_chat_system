@@ -133,11 +133,11 @@ def test_mutated_registered_sources_cannot_be_consumed_or_exposed(setup_loop, fi
         elif field == 'artifact_metadata':
             source.last.artifacts[0].metadata['origin'] = 'synthetic-unregistered'
         elif field == 'data':
-            source.last.data['source'] = 'synthetic-unregistered'
+            source.last.data[0]['source'] = 'synthetic-unregistered'
         elif field == 'artifact_dict':
             source.last.artifacts.append({'path': 'synthetic-unregistered'})
         elif field == 'nan':
-            source.last.data['molecular_weight'] = float('nan')
+            source.last.data[0]['properties']['molecular_weight'] = float('nan')
         else:
             source.last.evidence.append({'citation': 'synthetic-unregistered'})
         if next_action == 'finish':
@@ -203,7 +203,7 @@ def test_terminal_persistence_cannot_mutate_sealed_observations(setup_loop, term
     def mutate_at_terminal(trace_id, metadata):
         if metadata.get('decision_loop', {}).get('phase') in ('terminal', 'waiting_for_input'):
             source.last.artifacts[0].metadata['origin'] = 'synthetic-unregistered'
-            source.last.data['source'] = 'synthetic-unregistered'
+            source.last.data[0]['source'] = 'synthetic-unregistered'
         return update(trace_id, metadata)
     b.store.update_run_metadata = mutate_at_terminal
     result = invoke(b)

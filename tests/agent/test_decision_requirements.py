@@ -2,12 +2,36 @@
 import asyncio
 import json
 from copy import deepcopy
+from dataclasses import replace
 
 import pytest
 
-from test_decision_loop import setup_loop, CountingTool, tool, finish_last, clarify, run
+from test_decision_loop import setup_loop as registry_loop, CountingTool, tool, finish_last, clarify, run
 from test_decision_continuation import start, invoke, fresh
 from src.agent.contracts import ToolResult, RunOutcome
+from src.agent.tooling import LegacyPythonToolAdapter, ToolRegistry
+
+
+@pytest.fixture
+def setup_loop(registry_loop, monkeypatch):
+    """Keep the downstream gate independently tested on legacy observations.
+
+    RowsTool deliberately emits incomplete/invalid metrics, which the new
+    upstream analysis contract rejects before this gate. Only that test double
+    uses the generic adapter; real producers retain the factory's typed views.
+    """
+    import test_decision_loop as loop_module
+    factory = loop_module.build_tool_registry
+    def legacy_rows(tools):
+        registry = ToolRegistry()
+        for adapter in factory(tools).as_mapping().values():
+            if isinstance(adapter.tool, RowsTool):
+                adapter = LegacyPythonToolAdapter(
+                    replace(adapter.spec, output_schema=None), adapter.tool)
+            registry.register(adapter)
+        return registry
+    monkeypatch.setattr(loop_module, 'build_tool_registry', legacy_rows)
+    return registry_loop
 
 
 def requirements(count=1, metrics=('qed',), **kw):
