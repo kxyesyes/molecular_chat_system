@@ -19,6 +19,11 @@ from .molecular_input import parse_molecular_smiles
 
 logger = logging.getLogger(__name__)
 
+_EVIDENCE_BOUNDARY = (
+    '本结果来自RDKit描述符计算与启发式规则判断；综合评分为既有加权规则评分，'
+    '不是成药成功概率，不能确定口服生物利用度或疗效。'
+)
+
 
 class DrugLikenessAssessment(BaseMolecularTool):
     """类药评估工具"""
@@ -96,7 +101,10 @@ class DrugLikenessAssessment(BaseMolecularTool):
                 result['reasoning'] = f"我成功评估了 {smiles} 的类药性质。{self._generate_brief_reasoning(assessment)}"
                 result['formatted'] += "\n\n" + self._generate_interpretation(smiles, assessment)
             else:
-                result['reasoning'] = f"我评估了 {len(calculated_results)} 个分子结构的类药性质，为每个提供了全面的药物相似性分析。"
+                result['reasoning'] = (
+                    f"我评估了 {len(calculated_results)} 个分子结构的类药性质。"
+                    + _EVIDENCE_BOUNDARY
+                )
 
             result['message'] = f"成功评估了 {len(calculated_results)} 个分子的类药性质"
 
@@ -141,7 +149,10 @@ class DrugLikenessAssessment(BaseMolecularTool):
 
             # 综合评估
             overall_assessment = self._calculate_overall_assessment(
-                qed_score, len(lipinski_violations), veber_compliance, lead_likeness
+                qed_score,
+                lipinski_violations['violation_count'],
+                veber_compliance['overall_compliance'],
+                lead_likeness['overall_compliance'],
             )
 
             assessment = {
@@ -311,7 +322,7 @@ SMILES: `{smiles}`
 • 芳香环数: {props['aromatic_rings']}
 • 杂原子数: {props['heteroatoms']}"""
 
-        return output
+        return output + "\n\n" + _EVIDENCE_BOUNDARY
 
     def _generate_interpretation(self, smiles: str, assessment: Dict) -> str:
         """生成类药评估解释"""
@@ -332,12 +343,11 @@ SMILES: `{smiles}`
             interpretations.append("QED评分较低，药物相似性有限")
 
         # Lipinski违反分析
-        if lipinski['violation_count'] == 0:
-            interpretations.append("完全符合Lipinski五规则，预测具有良好的口服生物利用度")
-        elif lipinski['violation_count'] == 1:
-            interpretations.append("仅违反1条Lipinski规则，通常仍可接受")
-        else:
-            interpretations.append("违反多条Lipinski规则，可能影响药代动力学性质")
+        count = lipinski['violation_count']
+        interpretations.append(
+            "未违反所检查的Lipinski阈值" if count == 0
+            else f"违反{count}项所检查的Lipinski阈值，仅作为规则筛选提示"
+        )
 
         return "📋 专业评估: " + "；".join(interpretations) + "。"
 
@@ -358,4 +368,4 @@ SMILES: `{smiles}`
         else:
             reasoning_parts.append("QED评分需要提升")
 
-        return "，".join(reasoning_parts) + "。"
+        return "，".join(reasoning_parts) + "。" + _EVIDENCE_BOUNDARY

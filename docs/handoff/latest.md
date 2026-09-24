@@ -1,5 +1,17 @@
 # Latest handoff
 
+## 类药性解释与评分输入修复（2026-09-25，本地）
+
+分支 `codex/drug-likeness-evidence-fix`，基于main `4ff483d`。用户批准B及书面设计后按TDD完成：
+综合评分改为消费真实违反数量和规则布尔值；去除未经支持的口服生物利用度结论，
+单分子/批量报告和推理明确RDKit、启发式规则与证据边界。公式、权重、阈值、接口、失败状态未变。
+新评分可能与旧记录不同；不重写历史run/checkpoint，也未启用模型。
+
+独立SPEC/QUALITY均APPROVED；聚焦313 passed，冻结2路径联合回归
+**5741 passed、7 skipped、7 warnings，405.22s**；编译/diff通过。
+首次RED、评分前后对照、准确命令和限制见[本批交接](drug-likeness-evidence.md)。
+仅本地提交，尚未推送/PR/合并/部署；原始工作树未动。下一步为发布审查与CI，不直接改main。
+
 ## T09 发布：Draft PR #60 与CI清单修正（2026-09-24）
 
 已发布T09分支至 [PR #60](https://github.com/kxyesyes/molecular_chat_system/pull/60)，未合并/部署。
