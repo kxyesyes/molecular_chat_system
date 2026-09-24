@@ -735,3 +735,9 @@ Ready and frozen: code/tests are committed at the exact full HEAD; only this
 new results record is uncommitted. No push or PR created. Dual review applies to
 unchanged 4C code/tests, and current integration/full evidence is recorded here;
 publication and subsequent G2 integration remain parent-owned.
+
+### Parent G2 integration and publication checkpoint
+
+PR #72 passed exact-head CI 8/8, no unresolved reviews, and was squash merged as `27170d95b17ccae224b95b493ec8a9276944f421`; reviewed and merged tree both `789bb5fc17ba6db3db6b9e09596e09cd2ef37a50`. After committing the preceding full-run record as `54d0f43`, the parent merged that main into this branch without conflicts as `e8586e7`. No 4C implementation/test file was changed by the merge.
+
+Eight-file joint regression, through the same isolated MedChat runner: `test_generation_ranking_contract.py`, `test_generation_ranking_contract_integration.py`, `test_supervisor_runtime_integration.py`, `test_delegated_baseline_integration.py`, `test_generator_optimization_input.py`, `test_supervisor_agent.py`, `test_generation_temperature_transport.py` (all under `tests/agent`), and `tests/test_llm_molecular_generator.py`: **525 passed and 162 subtests passed in 6.72s**, exit 0. This is the current G2 integration evidence; the post-P2 full **6676 passed, 2 skipped** remains tied to its earlier exact HEAD, not relabelled as this merged revision. Exact-head PR CI remains a publication gate. No model activation, credentials, production service or asset changes.
