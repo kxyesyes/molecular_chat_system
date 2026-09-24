@@ -166,3 +166,19 @@ PR55仍是本批依赖；发布时应先核对依赖合并状态，避免把父�
 后续建议：按门禁单独发布ReAct批次；再为既有candidate_ranker失败覆盖缺口补专项测试。
 T09、其他领域职责拆分、正式模型决策入口切换均不是本批完成项。未知外部调用者若依赖
 已删除的私有方法或旧自由推理steps内容，需要迁移到保留的公开接口/结构化观察。
+
+## 已合并基线上的发布复核（2026-09-24）
+
+用户授权PR54/55合并及ReAct draft发布；两依赖已依次squash到main，当前基线ee007a1。
+在独立codex/react-agent-thin-adapter-pr工作树只cherry-pick四个ReAct提交，生产/测试树
+HEAD07de589；没有混入父批历史，原ReAct工作树和原始混杂工作树均保留。
+独立集成审查APPROVED：14任务文件blob与fce2cd2一致，四提交range-diff等价；
+PR54解析与Supervisor单次decide/澄清门禁交互没有发现新回归。
+
+最新23路径隔离联合回归：**5566 passed、9 skipped、7 warnings、9 subtests passed，
+329.81s**。数量增加来自合并PR54后的新基线，不能将前批5393当作此次结果。
+九项跳过原因与上文一致。断网contract结构化报告passed；306源文件内存compile、
+git diff --check、14任务文件凭据候选扫描（零命中）通过。没有真实模型或浏览器验收。
+
+本批将创建draft PR，不在本次授权内合并。既有Web partial展示缺口另分支设计/TDD，
+不计入本PR已修复范围；T09、其他职责拆分、生产入口切换仍未完成。
