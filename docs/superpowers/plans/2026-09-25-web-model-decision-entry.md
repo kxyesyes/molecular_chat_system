@@ -12,11 +12,12 @@
 
 ## Parent revision and local workflow
 
-- [ ] Move this existing plan from root `plans/` into `docs/superpowers/plans/` using apply_patch, without a duplicate.
-- [ ] Commit only the corrected spec/plan on `codex/web-model-decision-entry`.
-- [ ] Merge reviewed main `1bba0256409a06317486530e5c1cfa6598b8e381` into this task branch, not into main. Reinspect integrated analysis contracts.
-- [ ] Execute only A1 RED→GREEN below; run focused offline tests. Parent coordinates full Agent/full suite.
-- [ ] Freeze local changes for parent SPEC/QUALITY; no push/PR/publication. No live model, browser, server, environment-file or scientific asset access.
+- [x] Move this existing plan from root `plans/` into `docs/superpowers/plans/` using apply_patch, without a duplicate.
+- [x] Commit only the corrected spec/plan on `codex/web-model-decision-entry`: `cd1415e`.
+- [x] Merge reviewed main `1bba0256409a06317486530e5c1cfa6598b8e381` into this task branch, not into main: `2cf8e72`. Reinspected integrated analysis contracts.
+- [x] At the next green boundary, merge parent-requested main `16b9157` (4B typed target): `6681225`. Target string input remains non-projecting; no new target argument role or registry edit in A1.
+- [x] Execute only A1 RED→GREEN below; run focused offline tests. Parent coordinates full Agent/full suite.
+- [x] Freeze local changes for parent SPEC/QUALITY; no push/PR/publication. No live model, browser, server, environment-file or scientific asset access.
 
 Normal entry means existing `/ws`. **Do not add `/api/chat` or any HTTP surface.** Existing static workflow HTTP APIs retain all original semantics. New HTTP work is outside this package.
 
@@ -65,7 +66,7 @@ A1 supports the initial four tools only: property_calculator, drug_likeness_asse
 - [ ] Admit user-target activity and explicit target search using existing parsers; do not use candidate provenance/model inference to pick target.
 - [ ] Reject unsupported generation/ranking/ADMET/reverse/RAG/docking execution and compound requests requiring them; no property-only completion. Distinguish explanation of a topic from execution.
 - [ ] Ambiguous/unrecognized execution rejects with fixed clarification code, not chat finish. Explicit exclusions cannot be silently dropped.
-- [ ] Strict boolean flags/options; bool-as-count, NaN, invalid count, oversize input, conflicting mol_count fail. Keep whole structure validation, no regex fragment rescue.
+- [ ] Strict boolean flags/options; bool-as-count, NaN, invalid count and oversize input fail. Existing generation-only mol_count is validated (1–10, absent/null defaults to 5) but is not an analysis-subject count. Quantified analysis prose requires clarification in this bounded A1; it cannot silently override the complete subject list. Keep whole structure validation, no regex fragment rescue.
 - [ ] Browser identity/capabilities/tools/requirements/config generation/backend/resolved structure are forbidden. Existing timestamp/client_id are ignored for ownership; IDs supplied as function args are authoritative.
 - [ ] Call ScientificReferenceService.resolve only after bounded validation, with server session and tools flag; source/ACK/ordinal checks remain there. Result must be an exact trusted resolved type, not arbitrary objects.
 - [ ] Returned context mutations and original payload mutations cannot change immutable prepared obligations or selected molecule.
@@ -87,10 +88,10 @@ Required parameter table:
 |---|---|
 | 你好; tools/rag off | chat, no tools, exact query retained |
 | 解释 logP 是什么 | chat, not measurement |
-| 计算 SMILES: CCO 的 logP 和分子量 | scientific/property, expected CCO and both metrics |
-| 计算 SMILES: CCO; CCN 的性质及类药性 | both tools, both whole subjects |
+| 计算 logP 和分子量；SMILES: CCO | scientific/property, expected CCO and both metrics |
+| 计算性质及类药性；SMILES: CCO; CCN | both tools, both whole subjects |
 | 请计算分子性质 | scientific/property obligation, no invented subject |
-| 预测 SMILES: CCO 对 BuChE 的活性 | scientific/activity with user target preserved |
+| 预测 BuChE 活性；SMILES: CCO | scientific/activity with user target preserved |
 | 查询 EGFR 的靶点结构 | scientific/target lookup |
 | 生成5个分子并排序前三个 | unsupported in A1 |
 | 计算 CCO 的 ADMET 和性质 | whole request unsupported |
@@ -163,10 +164,45 @@ Tests must run through the approved MedChat interpreter with isolated temp direc
 
 ## A1.4 Freeze for parent SPEC/QUALITY
 
-- [ ] Review exact production diff against five-file allowlist, new tests, spec and plan; no receive/UI/default/HTTP/B changes.
-- [ ] Compile relevant source (or compileall with isolated bytecode target); run git diff --check.
-- [ ] Record RED reasons and focused GREEN results, interpreter/commands, remaining full-Agent queue and current branch/head. Do not claim CI/full suite/live science has passed.
-- [ ] Local freeze with no push. Parent schedules SPEC/QUALITY and full Agent; findings may require a later local correction. A1 is support-only and not P7 completion.
+- [x] Review exact production diff against five-file allowlist, new tests, spec and plan; no receive/UI/default/HTTP/B changes.
+- [x] Compile relevant source (or compileall with isolated bytecode target); run git diff --check.
+- [x] Record RED reasons and focused GREEN results, interpreter/commands, remaining full-Agent queue and current branch/head. Do not claim CI/full suite/live science has passed.
+- [x] Local freeze with no push. Parent schedules SPEC/QUALITY and full Agent; findings may require a later local correction. A1 is support-only and not P7 completion.
+
+### Local A1 implementation / review notes (2026-09-25)
+
+The source diff is exactly the five approved files plus three new test files. No socket, UI, HTTP, model configuration, lease or default-activation edits. The two documentation files carry the scope and evidence updates. Implementation is frozen in a local commit based on `6681225` (exact freeze SHA in the parent handoff), not a released PR and not P7 completion.
+
+Concrete choices for SPEC/QUALITY:
+
+- Admission grants only the explicitly required subset of the initial four tools; registry ownership/capability checks remain authoritative. No planner, model routing, tool execution or canned chat answer is produced by admission.
+- Browser payload is plain bounded JSON (24 KiB); query is 16 KiB; identity is a server argument. Tools/RAG flags are strict bool; temperature 0–2; optional generation count 1–10; RAG display count 1–20, matching existing UI. Enabling RAG is not permission to execute the excluded RAG tool.
+- Exact subject count is derived from the full original SMILES list (up to existing parser limits), with no fragment salvage or canonical duplicate collapse. Quantified prose, exclusions, unknown execution clauses and mixed lookup/calculation need clarification. The parser accepts labeled fields terminated by newline/semicolon; trailing prose inside `SMILES:` is invalid, so the examples above place intent before the field.
+- Missing structure retains scientific requirements. Explicit unknown/conflicting activity targets and ambiguous target search reject. Confirmed selected input is resolved by the existing owner/ACK service only. Properties/likeness receive the exact stored canonical string; activity additionally receives original query/user target. This object does not contain the generator's original spelling: original CandidateRecord data is not rewritten or falsely reconstructed.
+- Context projection admits exact AgentContext/ResolvedScientificMolecule only, before copy/privacy/hash; arbitrary dataclasses, subclass/copy hooks, extra attributes, cycles and malformed known scalar shapes fail. Generic JSON validation remains strict. Invalid-context rejection uses a fixed trace marker instead of reading properties on a hostile object.
+- Reference revalidation occurs before model calls, after model response, at input resolution before action/reuse, at the existing Session dispatch guard and before continuation CAS. Explicit replacement disables the prior selection across later clarification turns; replay applies the identical transition. Historical selected-source checks remain conservative: a revoked source used in an earlier waiting history rejects that continuation; start a new request to use an independent explicit structure.
+- Optional server `config_generation` is a nonsecret opaque ID, not a key hash; absence supports existing direct callers. A2 must create/rotate it when runtime configuration changes. Waiting internal protocol revision is now 5 because reference binding/history semantics changed; revision-4 waiting snapshots are rejected, not migrated/re-executed. Public decision version and input_ref-only argument schema are unchanged.
+- New 4B adapter schemas participate in existing fingerprints. A1 passes original target text to TargetSearchInput/TargetToolAdapter; dictionary/batch target inputs in that adapter do not become model-authored arguments. A counted offline service verifies unavailable lookup status is retained. No live target lookup is claimed.
+
+TDD evidence before final integration verification:
+
+- Initial admission: **52 expected failures**, missing-feature assertion.
+- Initial reference/fingerprint: **20 failures**, including actual loop `invalid_context`, unresolved direct binding and missing generation support (one admission import also absent). After minimal core changes: **19 passed**, one still-missing admission module.
+- First integrated A1: **72 passed**. Added adversarial cases reproduced mixed explain/execute omissions, unknown second actions, explicit-selection resurrection across resumptions, hostile rejection hooks, option compatibility and sensitive reference projection. Corrections produced **86 passed**.
+- Known context scalar types: **6 RED**, then new A1 + existing migration boundary **172 passed**. Earlier focused existing regressions on the pre-4B integration: **668 passed**.
+- After merging 4B, a new test incorrectly expected the wrapper to extract `EGFR`; source inspection confirmed non-projecting original text is correct. Corrected the test expectation, not the target contract. Separate UI-limit RED reproduced rejection of valid `rag_count=20`; admission now retains the existing 1–20 range. Do not count this mistaken target assertion as a missing-feature RED.
+
+Final verification used the isolated runner from `2026-09-24-rag-service-extraction.md`, with this worktree and the existing MedChat Conda Python **3.10.20**, `-B`, temporary stores/config/cache roots, cleared inherited application/credential environment, no pytest cache and network-connect denial (only Python's internal Windows asyncio socketpair permitted). No env file, model provider, server, browser or scientific asset was opened. Full Agent/full suite and SPEC/QUALITY are parent-coordinated; current full slot is Planner → 4C.
+
+Final post-`16b9157` focused verification: **1061 passed in 100.98s**, no skips. This is a named 14-file focused suite, not full Agent or full repository:
+
+```powershell
+# Arguments to the isolated runner (which calls pytest.main with these files):
+python -B -m pytest tests/agent/test_web_decision_admission.py tests/agent/test_web_decision_references.py tests/agent/test_web_decision_fingerprint.py tests/agent/test_decision_inputs.py tests/agent/test_decision_requirements.py tests/agent/test_decision_continuation.py tests/agent/test_decision_continuation_store.py tests/agent/test_decision_protocol_recovery.py tests/agent/test_decision_transport_boundaries.py tests/agent/test_scientific_reference_execution.py tests/agent/test_scientific_reference_resilience.py tests/agent/test_decision_loop.py tests/agent/test_decision_migration_boundaries.py tests/agent/test_target_tool_contract.py -q -p no:cacheprovider --tb=short -rs
+git diff --check
+```
+
+Additionally compiled all five changed production files and three new tests with Python `compile(source, filename, 'exec')` in memory: **8 passed**, no bytecode written. Root `plans/2026-09-25-web-model-decision-entry.md` is absent; the corrected plan exists only here. Final diff scope is those 8 Python files plus this plan and the spec. No push, PR, CI run, full-suite run or live acceptance. Parent SPEC/QUALITY and publication are pending.
 
 ## Deferred A2 — separate PR, not approved for this branch
 

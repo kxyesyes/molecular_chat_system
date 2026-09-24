@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from dataclasses import asdict, fields, replace
+from dataclasses import fields, replace
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -19,10 +19,10 @@ from src.agent.contracts import (
 from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.redaction import contains_secret_material
 from .decision_policy import DecisionBoundaryError
-from .decision_bounds import validate_json
+from .decision_bounds import validate_json, context_value, configuration_generation
 
 
-PROTOCOL_REVISION = 4
+PROTOCOL_REVISION = 5
 
 
 def configuration_digest(loop, context, request_kind, allowed, required, specs, adapters, *, requirements=None):
@@ -36,8 +36,9 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
         return value
     # Never inspect model.__dict__ or credentials, even for a fingerprint.
     model = loop.model
+    generation = configuration_generation(getattr(loop, 'config_generation', None))
     return EvidenceLedger.output_digest({
-        'schema': 1, 'decision_protocol_revision': PROTOCOL_REVISION, 'request': asdict(context), 'kind': request_kind,
+        'schema': 1, 'decision_protocol_revision': PROTOCOL_REVISION, 'request': context_value(context), 'kind': request_kind,
         'allowed': sorted(allowed), 'required': sorted(required),
         'mode': loop.mode, 'limits': [loop.max_model_requests, loop.max_tool_attempts, loop.timeout_seconds],
         'specs': {n: spec_value(s) for n, s in specs.items()},
@@ -45,6 +46,7 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
         'model_type': type(model).__module__ + '.' + type(model).__qualname__,
         'model': {n: getattr(model, n, None) for n in ('provider', 'model_name', 'base_url')},
         **({'task_requirements': requirements} if requirements else {}),
+        **({'config_generation': generation} if generation is not None else {}),
     })
 
 
@@ -159,10 +161,11 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
         validate_history(snapshot, loop, results, specs, session=session,
                          system_message=system_message, requirements=requirements,
                          required_tools=required_tools)
-        from .decision_inputs import seal_observation
+        from .decision_inputs import seal_observation, require_current_reference
         for result in results:
             seal_observation(result, session)
         claimed = {**payload, 'claimed_by': uuid4().hex}
+        require_current_reference(context, loop.store)
         if not loop.store.transition_decision_continuation(context.trace_id,
                 user_id=context.user_id, session_id=context.session_id,
                 expected=payload, replacement=claimed, claim=True):
@@ -226,7 +229,7 @@ def validate_history(snapshot, loop, results, specs, *, session,
     # checksum does not make a substituted proposal/observation valid history.
     from src.agent.contracts.decision import ToolDecision, ClarifyDecision, parse_decision_json, decode_protocol_json
     from src.agent.orchestrators.workflow import WorkflowOrchestrator
-    from .decision_inputs import resolve_decision_input, decision_input_digest, active_results
+    from .decision_inputs import resolve_decision_input, decision_input_digest, active_results, effective_molecule
     from .decision_requirements import evaluate_requirements
     from .decision_policy import encode_observation
 
@@ -236,7 +239,8 @@ def validate_history(snapshot, loop, results, specs, *, session,
             or messages[0] != system_message):
         raise ValueError('invalid proposal history')
     replay = SimpleNamespace(context=replace(session.context, query=queries[0]),
-        input_queries=queries[:1], results=[], ledger=EvidenceLedger(session.context.trace_id), outputs={})
+        input_queries=queries[:1], results=[], ledger=EvidenceLedger(session.context.trace_id), outputs={},
+        orchestrator=session.orchestrator)
     position, turn, next_result, reused = 2, 1, 0, 0
     native_ids, observed = set(), {}
 
@@ -271,6 +275,7 @@ def validate_history(snapshot, loop, results, specs, *, session,
             position += 2
             turn += 1
             replay.context.query = queries[turn - 1]
+            replay.context.resolved_molecule = effective_molecule(replay.context)
             replay.input_queries = queries[:turn]
             observed = {r.quality['operation_key']: r for r in active_results(replay)}
             continue

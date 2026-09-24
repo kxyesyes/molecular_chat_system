@@ -4,6 +4,58 @@ Walk iteratively, cap depth/work, and count the UTF-8 JSON representation withou
 serializing it. Repeated aliases count each time (as on the wire); cycles fail.
 """
 import math
+import re
+
+
+def context_value(context):
+    """Project only the two known server contracts, before copy/hash/privacy.
+
+    This is not a browser deserializer. All other nested values remain plain
+    bounded JSON; accepting arbitrary dataclasses would allow conversion hooks.
+    """
+    from dataclasses import fields
+    from src.agent.contracts import AgentContext
+    from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
+    from .decision_policy import DecisionBoundaryError
+
+    def shallow(value, cls):
+        names = {f.name for f in fields(cls)}
+        if type(value) is not cls or set(vars(value)) != names:
+            raise DecisionBoundaryError('invalid_context')
+        return {name: getattr(value, name) for name in names}
+
+    value = shallow(context, AgentContext)
+    selected = value['resolved_molecule']
+    if selected is not None:
+        selected = shallow(selected, ResolvedScientificMolecule)
+        if any(type(v) is not str or not v.strip() or len(v) > (
+                8192 if k == 'canonical_smiles' else 128) for k, v in selected.items()):
+            raise DecisionBoundaryError('invalid_context')
+        if (not re.fullmatch(r'[a-f0-9]{64}', selected['revision'])
+                or any(c.isspace() for c in selected['canonical_smiles'])):
+            raise DecisionBoundaryError('invalid_context')
+        value['resolved_molecule'] = selected
+    validate_json(value, max_bytes=64 * 1024, reason='invalid_context')
+    if (type(context.query) is not str or type(context.metadata) is not dict
+            or type(context.memory) is not list or type(context.trace_id) is not str
+            or not context.trace_id.strip() or len(context.trace_id) > 128
+            or any(v is not None and (type(v) is not str or len(v) > 128) for v in (
+                context.user_id, context.session_id, context.active_skill, context.workflow_name, context.model_name))
+            or type(context.stream) is not bool or type(context.temperature) not in (int, float)
+            or type(context.mol_count) is not int):
+        raise DecisionBoundaryError('invalid_context')
+    validate_json(context.query, max_bytes=16 * 1024, reason='invalid_context')
+    return value
+
+
+def configuration_generation(value):
+    """Opaque, nonsecret epoch from the server; never a credential digest."""
+    from src.agent.persistence.redaction import contains_secret_material
+    if value is not None and (type(value) is not str
+            or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value)
+            or contains_secret_material(value)):
+        raise ValueError('invalid_config_generation')
+    return value
 
 
 def observation_value(result):
