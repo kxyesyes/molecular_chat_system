@@ -154,57 +154,201 @@ def _require_complete_coverage(query, tools, metrics):
         re.escape(s) for s in sorted(set(subjects), key=len, reverse=True))
         + r')(?![A-Za-z0-9_])') if subjects else None
     obligations = {
-        'property_calculator': r'理化性质|性质|属性|\bpropert(?:y|ies)\b',
+        'property_calculator': r'分子性质|分子属性|理化性质|性质|属性|\bpropert(?:y|ies)\b',
         'drug_likeness_assessment': r'类药性|成药性|\b(?:lipinski|drug[ -]?likeness)\b',
-        'activity_predictor': r'活性|\b(?:activity|potency|pic50|ic50)\b',
+        'activity_predictor': r'分子活性|活性|\b(?:activity|potency|pic50|ic50)\b',
         'target_database_search': r'靶点结构|靶点|结构|\b(?:target|structures?)\b',
     }
     result_tokens = [*(_METRICS[m] for m in metrics), *(obligations[t] for t in sorted(tools))]
+    ordinal = r'第(?:[一二三四五六七八九十]{1,3}|[1-9][0-9]?)个'
     tokens = [
         '(?P<obligation>' + '|'.join(result_tokens) + ')',
         r'(?P<action>计算|预测|评估|分析|查询|搜索|查找|\b(?:calculate|compute|predict|assess|evaluate|analy[sz]e|search|find|lookup)\b)',
-        # One ordinal-only reference surface; range/ACK/owner checks still
-        # belong to ScientificReferenceService. Never erase another subject.
-        r'(?P<ordinal>第(?:[一二三四五六七八九十]{1,3}|[1-9][0-9]?)个|\b(?:first|second|third)\b)',
-        r'刚才|上一个|这个|该|分子|化合物|候选',
-        r'\b(?:previous|selected|molecules?|compounds?|candidates?)\b',
-        r'请|帮我|包含|然后|针对|的|和|及|与|并|对',
-        r'\b(?:please|molecular|the|of|for|and|then|with|including|against)\b',
-        r'\s+|[，,;；、。!?！？()（）\x22\x27`]',
+        # All already-supported referring modifiers have a subject role.
+        # Preserve the existing adjacent temporal+ordinal single reference;
+        # range/ACK/owner checks still belong to ScientificReferenceService.
+        r'(?P<reference>刚才(?:\s*' + ordinal + r')?|' + ordinal
+        + r'|上一个|这个|该|\b(?:first|second|third|previous|selected)\b)',
+        r'(?P<subject>候选(?:分子|化合物)?|分子|化合物|\b(?:candidate(?:\s+(?:molecule|compound))?|molecule|compound)\b)',
+        r'(?P<plural>\b(?:molecules|compounds|candidates)\b)',
+        r'(?P<join>然后|和|及|与|并|\b(?:and|then)\b)',
+        r'(?P<include>包含|\bincluding\b)',
+        r'(?P<relation>针对|的|对|\b(?:of|for|with|against)\b)',
+        r'(?P<article>\b(?:molecular|the)\b)',
+        r'(?P<polite>请|帮我|\bplease\b)',
+        r'(?P<separator>[，,;；、\r\n]+)',
+        r'(?P<end>[。!?！？])',
+        r'(?P<space>[^\S\r\n]+|[()（）\x22\x27`])',
     ]
     syntax = re.compile('|'.join('(?:' + token + ')' for token in tokens), re.I)
     position = 0
     seen_action = seen_obligation = False
-    ordinal_count = 0
+    stream, consumed_structures = [], []
     while position < len(query):
         match = structure.match(query, position) if structure is not None else None
+        role = 'explicit' if match else None
+        if match:
+            consumed_structures.append(match.group())
         if match is None and subjects:
             match = _MARKER.match(query, position)
+            role = 'field' if match else None
         if match is None and tools & {'activity_predictor', 'target_database_search'}:
             match = TARGET_PATTERN.match(query, position)
+            role = 'target' if match else None
         if match is None:
             match = syntax.match(query, position)
             role = match.lastgroup if match else None
-            if role == 'action':
-                # A1 supports at most one action, preceding its obligations.
-                # Do not borrow an earlier noun for a trailing verb or infer
-                # bindings for compound actions, even known/known compounds.
-                if seen_action or seen_obligation:
-                    raise DecisionAdmissionError('request_clarification_required')
-                seen_action = True
-            elif role == 'obligation':
-                seen_obligation = True
-            elif role == 'ordinal':
-                ordinal_count += 1
-                # Browser selection replacement is separate: plain explicit
-                # SMILES still wins over old hints. Textual ordinal + SMILES
-                # is ambiguous co-reference/addition, so do not guess.
-                if ordinal_count > 1 or subjects:
-                    raise DecisionAdmissionError('request_clarification_required')
         if match is None:
             raise DecisionAdmissionError('request_clarification_required')
+        if role == 'action':
+            if seen_action or seen_obligation:
+                raise DecisionAdmissionError('request_clarification_required')
+            seen_action = True
+        elif role == 'polite':
+            if stream:
+                raise DecisionAdmissionError('request_clarification_required')
+        elif role != 'space':
+            seen_obligation |= role == 'obligation'
+            stream.append((role, match.group()))
         position = match.end()
-    if not seen_obligation:
+    if not seen_obligation or tuple(consumed_structures) != subjects:
+        raise DecisionAdmissionError('request_clarification_required')
+    _reduce_input_phrases(stream, subjects)
+
+
+def _reduce_input_phrases(stream, subjects):
+    """Reduce the complete request to one input set; never reset at a metric.
+
+    Three subject states: generic slot, confirmed-reference phrase, explicit
+    set. Connections and declarations remain in the stream until ownership is
+    checked globally. This validates admission only; it cannot execute a plan.
+    """
+    nominal = {'subject', 'plural'}
+    subject_atoms = nominal | {'reference', 'explicit'}
+    atoms = subject_atoms | {'obligation', 'target'}
+    # Articles must introduce a real atom, not hide a dangling connection.
+    tokens, following = [], None
+    for token in reversed(stream):
+        if token[0] == 'article':
+            if following not in atoms:
+                raise DecisionAdmissionError('request_clarification_required')
+        else:
+            tokens.append(token)
+            following = token[0]
+    tokens.reverse()
+    nodes, index, first_field = [], 0, None
+    while index < len(tokens):
+        role, value = tokens[index]
+        if role == 'field':
+            if index + 1 == len(tokens) or tokens[index + 1][0] != 'explicit':
+                raise DecisionAdmissionError('request_clarification_required')
+            first_field = len(nodes) if first_field is None else first_field
+            index += 1
+            continue
+        if role not in subject_atoms:
+            nodes.append((role, value))
+            index += 1
+            continue
+        state, described, members = None, False, []
+        while index < len(tokens):
+            role, value = tokens[index]
+            if (state == 'reference' and not described and value == '的'
+                    and index + 1 < len(tokens) and tokens[index + 1][0] in nominal):
+                index += 1
+                continue
+            if role not in subject_atoms:
+                break
+            if role in nominal:
+                if described or (role == 'plural' and len(subjects) < 2):
+                    raise DecisionAdmissionError('request_clarification_required')
+                described = True
+                state = state or 'generic'
+            elif role == 'reference':
+                if state is not None or subjects:
+                    raise DecisionAdmissionError('request_clarification_required')
+                state = 'reference'
+            else:
+                if state == 'reference':
+                    raise DecisionAdmissionError('request_clarification_required')
+                state = 'explicit'
+                members.append(value)
+            index += 1
+        nodes.append((state, tuple(members) if state == 'explicit' else ''))
+    inputs = [(i, kind) for i, (kind, _) in enumerate(nodes)
+              if kind in {'generic', 'reference', 'explicit'}]
+    generic = [i for i, kind in inputs if kind == 'generic']
+    if any(kind == 'reference' for _, kind in inputs):
+        if len(inputs) != 1:
+            raise DecisionAdmissionError('request_clarification_required')
+    elif subjects and generic:
+        # Only a declaration can fill a separated generic slot. A later
+        # explicit phrase across metrics/punctuation is not implicit binding.
+        if (len(generic) != 1 or first_field is None or generic[0] >= first_field
+                or any(i < first_field for i, kind in inputs if kind == 'explicit')):
+            raise DecisionAdmissionError('request_clarification_required')
+    elif len(generic) > 1:
+        raise DecisionAdmissionError('request_clarification_required')
+    _require_phrase_connections(nodes)
+    _require_shared_explicit_scope(nodes, subjects)
+
+
+def _require_shared_explicit_scope(nodes, subjects):
+    """Bind every obligation to one whole position-identified explicit group.
+
+    Mere union coverage is insufficient: an obligation between explicit groups
+    is a local/ambiguous scope, not permission to apply all tools to their union.
+    """
+    if not subjects:
+        return  # Existing reference/generic-slot validation stays authoritative.
+    groups, current = [], None
+    for index, (kind, members) in enumerate(nodes):
+        if kind == 'explicit':
+            if current is None:
+                current = [index, index, members]
+                groups.append(current)
+            else:
+                current[1] = index
+                current[2] += members
+        elif kind not in {'join', 'separator', 'end'}:
+            current = None  # In particular, never merge across an obligation.
+    if len(groups) != 1 or groups[0][2] != subjects:
+        raise DecisionAdmissionError('request_clarification_required')
+    start, end, _ = groups[0]
+    # Obligations on either side share this exact group, never a nearest subset.
+    if any(start <= i <= end for i, (kind, _) in enumerate(nodes) if kind == 'obligation'):
+        raise DecisionAdmissionError('request_clarification_required')
+
+
+def _require_phrase_connections(nodes):
+    """Connections relate complete phrases, not the nearest lexical token."""
+    atoms = {'generic', 'reference', 'explicit', 'obligation', 'target'}
+    previous, links = None, []
+    for kind, value in nodes:
+        if kind not in atoms:
+            links.append((kind, value))
+            continue
+        words = [(role, word) for role, word in links if role not in {'separator', 'end'}]
+        pair = (previous, kind)
+        if previous is None:
+            if words and not (words in [[('relation', '对')], [('relation', '针对')]]
+                              and kind in atoms - {'obligation'}):
+                raise DecisionAdmissionError('request_clarification_required')
+        elif words:
+            if len(words) != 1:
+                raise DecisionAdmissionError('request_clarification_required')
+            role, _ = words[0]
+            if role in {'join', 'include'}:
+                valid = pair == ('obligation', 'obligation') or (
+                    role == 'join' and pair == ('explicit', 'explicit'))
+            else:
+                valid = role == 'relation' and (
+                    (previous == 'obligation' and kind != 'obligation')
+                    or (kind == 'obligation' and previous != 'obligation'))
+            if not valid:
+                raise DecisionAdmissionError('request_clarification_required')
+        previous, links = kind, []
+    if any(kind != 'end' and not (kind == 'separator' and value.isspace())
+           for kind, value in links):
         raise DecisionAdmissionError('request_clarification_required')
 
 

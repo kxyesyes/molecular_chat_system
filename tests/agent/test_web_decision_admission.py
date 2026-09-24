@@ -422,3 +422,273 @@ def test_review_single_confirmed_ordinal_still_binds_through_admission(tmp_path,
         requirements=request.requirements))
     assert result.success and result.metadata['task_acceptance']['satisfied']
     assert [row['smiles'] for row in result.tool_results[0].data] == ['CCN']
+
+
+def exercise_confirmed_reference_loop(tmp_path, setup_loop, query):
+    """A real ACKed store/selected CCN, real admission/Session/scientific tools."""
+    import asyncio
+    from test_scientific_reference_execution import confirmed
+    from src.agent.tools.property_calculator import PropertyCalculator
+    from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
+    store, references, pointer = confirmed(tmp_path)
+    selection = {'ordinal': 2}
+    selected = references.resolve('计算属性', pointer, selection,
+        session_id='owner', enable_tools=True)
+    assert selected.canonical_smiles == 'CCN'
+    calls = []
+    class RecordedProperty(PropertyCalculator):
+        def execute(self, query):
+            calls.append((self.name, query))
+            return super().execute(query)
+    class RecordedLikeness(DrugLikenessAssessment):
+        def execute(self, query):
+            calls.append((self.name, query))
+            return super().execute(query)
+    bundle = setup_loop([], [RecordedProperty(), RecordedLikeness()])
+    bundle.loop.store = store
+    try:
+        request = api().prepare_decision_request(
+            {'message': query, 'reference': pointer, 'selection': selection},
+            session_id='owner', trace_id='quality-reference', references=references)
+    except api().DecisionAdmissionError as exc:
+        assert not bundle.model.messages and not calls
+        return None, None, bundle, calls, exc.code
+    bundle.model.decisions = iter([tool(name) for name in sorted(request.required_tools)] + [finish_last])
+    result = asyncio.run(bundle.loop.run(request.context, request_kind=request.request_kind,
+        allowed_tools=request.allowed_tools, required_tools=request.required_tools,
+        requirements=request.requirements))
+    return request, result, bundle, calls, None
+
+
+# Every non-ordinal referring modifier already present in the admission surface.
+_QUALITY_REFERENTS = ['刚才', '上一个', '这个', '该', 'previous', 'selected']
+
+
+@pytest.mark.parametrize('referent', _QUALITY_REFERENTS)
+@pytest.mark.parametrize('endpoint', ['property', 'likeness'])
+@pytest.mark.parametrize('placement', ['before', 'after', 'co_reference'])
+def test_quality_referring_subject_and_explicit_input_reject_whole_request(
+        tmp_path, setup_loop, referent, endpoint, placement):
+    english = referent in {'previous', 'selected'}
+    subject = f'the {referent} molecule' if english else f'{referent}分子'
+    metric = ('molecular weight' if endpoint == 'property' else 'drug-likeness') if english else (
+        '分子量' if endpoint == 'property' else '类药性')
+    if placement == 'co_reference':
+        query = (f'Calculate {metric} for {subject}; SMILES: CCO' if english else
+                 f'计算{subject}的{metric}；SMILES: CCO')
+    else:
+        subjects = [subject, 'CCO'] if placement == 'before' else ['CCO', subject]
+        query = (f'Calculate {metric} for ' + ' and '.join(subjects) if english else
+                 '计算' + '和 '.join(subjects) + f'的{metric}')
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert request is None, {'required': request.requirements.model_dump(),
+        'success': result.success, 'acceptance': result.metadata.get('task_acceptance'), 'calls': calls}
+    assert code == 'request_clarification_required'
+    assert not calls and not bundle.model.messages
+
+
+@pytest.mark.parametrize('query', [
+    '计算上一个分子和 CCO 的分子量',
+    '计算上一个分子和这个分子的分子量', '计算刚才分子和该分子的性质',
+    '计算这个分子和第二个分子的性质', '计算第二个分子和上一个分子的性质',
+    '计算该分子和该分子的类药性',
+    'Calculate molecular weight for the previous molecule and selected molecule',
+    'Calculate drug-likeness for the previous and selected molecule',
+    'Calculate molecular weight for the second molecule and previous molecule',
+    '计算上一个分子和化合物的性质',
+    'Calculate molecular weight for the selected molecule and compound',
+    'Calculate molecular weight for the selected molecules',
+    'Calculate drug-likeness for previous compounds',
+    'Calculate molecular weight for selected candidates',
+    '计算上一个和分子的分子量', '计算分子和上一个的分子量',
+    'Calculate molecular weight for previous and molecule',
+    'Calculate molecular weight for molecule and previous',
+    '计算候选和 CCO 的分子量', '计算 CCO 和候选的分子量',
+    '计算分子和 CCO 的类药性', '计算 CCO 与化合物的性质',
+    'Calculate molecular weight for candidate and CCO',
+    'Calculate drug-likeness for CCO and compound',
+])
+def test_quality_multiple_referring_subjects_cannot_collapse_to_selection(tmp_path, setup_loop, query):
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert request is None, {'success': result.success,
+        'acceptance': result.metadata.get('task_acceptance'), 'calls': calls}
+    assert code == 'request_clarification_required'
+    assert not calls and not bundle.model.messages
+
+
+@pytest.mark.parametrize('referent', _QUALITY_REFERENTS + ['刚才第二个'])
+@pytest.mark.parametrize('noun', ['molecule', 'compound', 'candidate', 'candidate molecule'])
+def test_quality_single_reference_preserves_exact_selected_subject(tmp_path, setup_loop, referent, noun):
+    query = (f'Calculate molecular weight and logP for the {referent} {noun}'
+             if referent in {'previous', 'selected'} else
+             '计算' + referent + {'molecule': '分子', 'compound': '化合物', 'candidate': '候选',
+                                'candidate molecule': '候选分子'}[noun]
+             + '的分子量和 logP')
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.context.query == query
+    assert request.context.resolved_molecule.canonical_smiles == 'CCN'
+    requirement = request.requirements.molecular_results[0]
+    assert requirement.expected_smiles == ('CCN',) and requirement.exact_molecule_count == 1
+    assert set(requirement.required_metrics) == {'molecular_weight', 'logp'}
+    assert result.metadata['task_acceptance']['satisfied']
+    assert calls == [('property_calculator', 'CCN')]
+    assert [row['smiles'] for row in result.tool_results[0].data] == ['CCN']
+
+
+def test_quality_explicit_input_still_replaces_real_confirmed_selection(tmp_path, setup_loop):
+    query = '计算分子量和 logP；SMILES: OCC'
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.context.resolved_molecule is None and request.context.query == query
+    assert request.requirements.molecular_results[0].expected_smiles == ('OCC',)
+    assert result.metadata['task_acceptance']['satisfied'] and len(calls) == 1
+    assert [row['smiles'] for row in result.tool_results[0].data] == ['OCC']
+
+
+@pytest.mark.parametrize('noun', ['molecules', 'compounds', 'candidates'])
+def test_quality_explicit_batch_keeps_plural_subjects(tmp_path, setup_loop, noun):
+    query = f'Calculate molecular weight for {noun}; SMILES: OCC; CCN'
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.context.resolved_molecule is None
+    requirement = request.requirements.molecular_results[0]
+    assert requirement.expected_smiles == ('OCC', 'CCN') and requirement.exact_molecule_count == 2
+    assert result.metadata['task_acceptance']['satisfied'] and len(calls) == 1
+    assert [row['smiles'] for row in result.tool_results[0].data] == ['OCC', 'CCN']
+
+
+@pytest.mark.parametrize('query', [
+    '计算分子的分子量和 logP；SMILES: OCC',
+    '计算 OCC 分子的分子量和 logP',
+    'Calculate molecular weight and logP for molecule OCC',
+])
+def test_quality_nominal_explicit_input_and_metric_coordination_still_work(tmp_path, setup_loop, query):
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.context.resolved_molecule is None
+    requirement = request.requirements.molecular_results[0]
+    assert requirement.expected_smiles == ('OCC',) and requirement.exact_molecule_count == 1
+    assert set(requirement.required_metrics) == {'molecular_weight', 'logp'}
+    assert result.metadata['task_acceptance']['satisfied'] and len(calls) == 1
+
+
+_PHRASE_LINKS = ['和', '及', '与', '并', '然后', ' and ', ' then ',
+                 '，', ',', '、', ';', '；', '\n', '\r', '\r\n']
+
+
+@pytest.mark.parametrize('link', _PHRASE_LINKS)
+@pytest.mark.parametrize('other', ['候选', '上一个分子', 'the selected candidate molecule'])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_phrase_mixed_subject_connection_matrix(tmp_path, setup_loop, link, other, reverse):
+    left, right = ('CCO', other) if reverse else (other, 'CCO')
+    query = f'计算 {left}{link}{right} 的分子量'
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert request is None, {'success': result.success,
+        'acceptance': result.metadata.get('task_acceptance'), 'calls': calls}
+    assert code == 'request_clarification_required' and not calls and not bundle.model.messages
+
+
+@pytest.mark.parametrize('query', [
+    '计算候选的分子量和 CCO 的 logP',
+    '计算 CCO 的分子量和候选的 logP',
+    '计算候选的分子量；CCO 的 logP',
+    '计算 CCO 的分子量\n候选的 logP',
+    'Calculate molecular weight of the candidate and logP for CCO',
+    'Calculate molecular weight of CCO and logP for the candidate',
+    '计算分子量和；SMILES: CCO', '计算分子量；SMILES: CCO\n和',
+    'Calculate molecular weight for CCO and the',
+    'Calculate molecular weight for CCO with',
+    '计算分子量；SMILES: CCO\n包含',
+    '计算分子量；SMILES: CCO\n候选',
+    '计算分子量；SMILES: CCO\nCCN junk',
+    '计算分子量；SMILES: CCO; OCC',
+])
+def test_phrase_global_subjects_and_dangling_connections(tmp_path, setup_loop, query):
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert request is None, {'success': result.success,
+        'acceptance': result.metadata.get('task_acceptance'), 'calls': calls}
+    assert code == 'request_clarification_required' and not calls and not bundle.model.messages
+
+
+@pytest.mark.parametrize('query', [
+    '计算 OCC分子的分子量和 logP',
+    '计算分子的分子量和 logP；SMILES: OCC',
+    'Calculate the molecular weight and logP of the molecule OCC',
+    'Calculate molecular weight and logP for the candidate molecule; SMILES: OCC',
+    '计算分子量，包含 logP；SMILES: OCC',
+])
+def test_phrase_complete_explicit_input_set_controls(tmp_path, setup_loop, query):
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.context.query == query and request.context.resolved_molecule is None
+    requirement = request.requirements.molecular_results[0]
+    assert requirement.expected_smiles == ('OCC',) and requirement.exact_molecule_count == 1
+    assert set(requirement.required_metrics) == {'molecular_weight', 'logp'}
+    assert result.metadata['task_acceptance']['satisfied'] and len(calls) == 1
+
+
+@pytest.mark.parametrize('link', _PHRASE_LINKS)
+def test_phrase_explicit_batch_is_exactly_original_parser_input(tmp_path, setup_loop, link):
+    from src.agent.tools.base_tool import BaseMolecularTool
+    from src.agent.tools.molecular_input import parse_molecular_smiles
+    query = f'计算 OCC{link}CCN 的分子量和 logP'
+    try:
+        original = parse_molecular_smiles(query, BaseMolecularTool('parser-control', ''))
+    except ValueError:
+        original = None
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    if original is None:
+        assert request is None and not calls and not bundle.model.messages
+    else:
+        assert original == ['OCC', 'CCN']
+        assert code is None and result.success, code or result.metadata
+        requirement = request.requirements.molecular_results[0]
+        assert requirement.expected_smiles == tuple(original) and requirement.exact_molecule_count == 2
+        assert result.metadata['task_acceptance']['satisfied'] and len(calls) == 1
+        assert [row['smiles'] for row in result.tool_results[0].data] == original
+
+
+@pytest.mark.parametrize('query', ['计算候选的分子量和 logP',
+                                 'Calculate molecular weight and logP for the molecule'])
+def test_phrase_bare_noun_keeps_existing_selection_or_missing_requirement(tmp_path, setup_loop, query):
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success and request.context.resolved_molecule.canonical_smiles == 'CCN'
+    assert calls == [('property_calculator', 'CCN')] and result.metadata['task_acceptance']['satisfied']
+    missing = prepare(query)
+    assert missing.request_kind == 'scientific' and missing.required_tools == {'property_calculator'}
+    assert not missing.requirements.molecular_results[0].expected_smiles
+    assert missing.requirements.molecular_results[0].exact_molecule_count is None
+
+
+@pytest.mark.parametrize('separator', ['；', '\n', '，'])
+def test_scope_local_obligations_cannot_expand_to_cartesian_product(tmp_path, setup_loop, separator):
+    query = f'计算 CCO 的分子量{separator}CCN 的类药性'
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert request is None, {'requirements': request.requirements.model_dump(),
+        'success': result.success, 'acceptance': result.metadata.get('task_acceptance'),
+        'rows': [[row['smiles'] for row in observation.data] for observation in result.tool_results],
+        'calls': calls}
+    assert code == 'request_clarification_required' and not calls and not bundle.model.messages
+
+
+@pytest.mark.parametrize('query,expected', [
+    ('计算 CCO 和 CCN 的分子量和类药性', ('CCO', 'CCN')),
+    ('计算 CCO; CCN 的分子量和类药性', ('CCO', 'CCN')),
+    ('计算分子量和类药性；SMILES: CCO; CCN', ('CCO', 'CCN')),
+    ('计算分子的分子量和类药性；SMILES: CCO; CCN', ('CCO', 'CCN')),
+    ('计算分子量；SMILES: CCO; CCN\n类药性', ('CCO', 'CCN')),
+    ('计算 CCO 的分子量和类药性', ('CCO',)),
+])
+def test_scope_all_obligations_share_one_complete_input_group(tmp_path, setup_loop, query, expected):
+    request, result, bundle, calls, code = exercise_confirmed_reference_loop(tmp_path, setup_loop, query)
+    assert code is None and result.success, code or result.metadata
+    assert request.required_tools == {'property_calculator', 'drug_likeness_assessment'}
+    assert request.context.query == query and request.context.resolved_molecule is None
+    assert len(request.requirements.molecular_results) == 2
+    for requirement in request.requirements.molecular_results:
+        assert requirement.expected_smiles == expected and requirement.exact_molecule_count == len(expected)
+    assert result.metadata['task_acceptance']['satisfied'] and len(calls) == 2
+    assert len(result.tool_results) == 2
+    for observation in result.tool_results:
+        assert tuple(row['smiles'] for row in observation.data) == expected
