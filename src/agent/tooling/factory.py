@@ -12,6 +12,10 @@ from .activity_contract import ActivityPredictInput, ActivityPredictOutput, Acti
 from .analysis_contract import ANALYSIS_OUTPUT_SCHEMAS, AnalysisInput, AnalysisToolAdapter
 from .docking_contract import DockingInput, DockingOutput, DockingToolAdapter
 from .rag_contract import RAGSearchInput, RAGSearchOutput, RAGToolAdapter
+from .generation_ranking_contract import (
+    GenerationInput, GenerationOutput, GenerationToolAdapter,
+    RankingInput, RankingOutput, RankingToolAdapter,
+)
 from .target_contract import (
     TargetSearchInput, TargetSearchOutput, ReverseTargetInput, ReverseTargetOutput, TargetToolAdapter,
 )
@@ -76,12 +80,16 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             version=str(getattr(tool, "version", "1")),
             description=str(getattr(tool, "description", name)),
             input_schema=(RAGSearchInput if name == "rag_search" else
+                          GenerationInput if name == "llm_molecular_generator" else
+                          RankingInput if name == "candidate_ranker" else
                           TargetSearchInput if name == "target_database_search" else
                           ReverseTargetInput if name == "reverse_target_predictor" else
                           DockingInput if name == "molecular_docking" else
                           ActivityPredictInput if name == "activity_predictor" else
                           AnalysisInput if name in ANALYSIS_OUTPUT_SCHEMAS else LegacyQueryInput),
             output_schema=(RAGSearchOutput if name == "rag_search" else
+                           GenerationOutput if name == "llm_molecular_generator" else
+                           RankingOutput if name == "candidate_ranker" else
                            TargetSearchOutput if name == "target_database_search" else
                            ReverseTargetOutput if name == "reverse_target_predictor" else
                            DockingOutput if name == "molecular_docking" else
@@ -110,6 +118,8 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             aliases=aliases,
         )
         adapter_class = (RAGToolAdapter if name == "rag_search" else
+                         GenerationToolAdapter if name == "llm_molecular_generator" else
+                         RankingToolAdapter if name == "candidate_ranker" else
                          TargetToolAdapter if name in {"target_database_search", "reverse_target_predictor"} else
                          DockingToolAdapter if name == "molecular_docking" else
                          ActivityToolAdapter if name == "activity_predictor" else

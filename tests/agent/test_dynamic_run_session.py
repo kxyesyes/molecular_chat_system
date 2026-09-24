@@ -21,7 +21,8 @@ from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.run_session import SessionLifecycleError, WorkflowRunSession
 from src.agent.runtime.task_state import TaskEventType
-from src.agent.tooling.factory import build_tool_registry
+from src.agent.tooling import LegacyPythonToolAdapter, ToolRegistry
+from src.agent.tooling.factory import build_tool_registry, LegacyQueryInput
 from src.agent.validators import AgentResultValidator
 from src.agent.validators.molecule_candidates import sanitize_generated_candidates
 from tests.agent.test_analysis_contract import analysis_rows
@@ -60,12 +61,19 @@ def action(name="round-1", *, required=False, **kwargs):
 def make_session(tmp_path):
     registries = []
 
-    def build(*, source=None, dynamic=True, steps=None, store=None, trace="trace",
+    def build(*, source=None, dynamic=True, steps=None, store=None, trace="trace", generic_legacy=False,
               **kwargs):
         assert "dynamic" in inspect.signature(WorkflowRunSession).parameters, (
             "Task5 opt-in dynamic session API is missing")
         source = source or ContractTool()
         registry = build_tool_registry([source])
+        if generic_legacy:
+            # Explicit opt-in for the contradictory session-guard probe only.
+            # Every other fixture invocation retains the factory's typed adapter.
+            spec = registry.resolve(source.name).spec
+            registry = ToolRegistry()
+            registry.register(LegacyPythonToolAdapter(
+                replace(spec, input_schema=LegacyQueryInput, output_schema=None), source))
         registries.append(registry)
         store = store or SQLiteAgentStateStore(tmp_path / f"run-{len(registries)}.sqlite")
         bus = AgentEventBus(state_store=store)
@@ -101,7 +109,7 @@ def test_dynamic_completion_rejects_preserved_structured_error(make_session, out
     observed.error = AgentExecutionError(AgentErrorCode.MODEL_UNAVAILABLE, "offline failure")
     source = ContractTool(observed)
     source.name = "candidate_ranker"
-    bundle = make_session(source=source)
+    bundle = make_session(source=source, generic_legacy=True)
     bundle.session.start()
     settle(bundle, action(tool_name=source.name))
     assert bundle.session.results[0].error == observed.error
