@@ -129,7 +129,27 @@ async function run() {
   assert(noStorage.outgoing().reference, "disabled storage permits current-connection selection");
   assert(notices.length);
   rendererTest(payloads[0]);
+  await restoredVisibilityTest(payloads[0]);
   console.log("scientific reference schema/controller/actual mount tests passed");
+}
+
+async function restoredVisibilityTest(payload) {
+  const source = fs.readFileSync(path.join(root, "src/web/static/js/home/main.js"), "utf8");
+  const ready = source.slice(source.indexOf('case "connection_ready":'), source.indexOf('case "pong":'));
+  let renderRestore, chatVisible = false;
+  const handle = new Function("HomeChatRenderer", "moleculeCandidateLifecycle", "scientificReferences",
+    "addAssistantMessage", "renderMoleculeCandidates", "enterChatMode", "message", "console",
+    `let chatMode = false; switch(message.type) {${ready}}`);
+  handle({updateConnectionStatus() {}, showNotification() {}}, {isRequestInFlight: () => false},
+    {restore: callback => {renderRestore = callback;}}, () => ({}), () => {
+      assert(chatVisible, "restored cards must be visible, not mounted in the hidden welcome-page chat container");
+      return mounted(payload);
+    }, () => {chatVisible = true;}, {type: "connection_ready"}, {log() {}});
+  assert.equal(chatVisible, false, "a connection without a valid restored view must keep the welcome screen");
+  renderRestore(payload);
+  const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
+  assert(template.includes('/static/js/home/main.js?v=20260924-reference-visible-v1'),
+    "restoration visibility fix must invalidate the previous cached main script");
 }
 
 function rendererTest(payload) {

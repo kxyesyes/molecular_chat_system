@@ -26,7 +26,7 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '/static/js/home/main.js?v=20260904-partial-terminal-v2'
+    '/static/js/home/main.js?v=20260924-reference-visible-v1'
   ),
   "homepage must cache-bust the partial terminal styling fix"
 );

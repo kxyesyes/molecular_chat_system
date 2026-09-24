@@ -416,6 +416,7 @@
           HomeChatRenderer.showNotification("模型已就绪", "success");
           if (!moleculeCandidateLifecycle.isRequestInFlight()) {
             void scientificReferences?.restore(payload => {
+              if (!chatMode) enterChatMode();
               const box = addAssistantMessage("已恢复此前确认的候选集合；这不是新的计算结果。");
               return renderMoleculeCandidates(box, payload);
             });

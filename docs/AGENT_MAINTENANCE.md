@@ -1,6 +1,6 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-24。源码范围：main 基线 `5f56053bb457187ea71d22671265ff63a466aeba`（含三个优先工具类型契约和五类 Planner 纯步骤模板）、MolecularAgent 兼容适配及本批 ReAct 兼容适配。未合并批次不代表生产已更新。
+核对日期：2026-09-24。本页原维护基线包含 main `5f56053`、MolecularAgent/ReAct 兼容适配；科研续接段落现按独立分支 `codex/scientific-reference-continuity`（基于 `9f065b3`，含 `632af8b`、`212e454` 及本批验收修复）更新。未合并批次不代表生产已更新。
 本文记录随代码交付的维护入口，不表示已合并、生产部署或通过真实科研验收；后续调用关系变化也应同步更新本页。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
@@ -62,7 +62,7 @@ ChatHandler / 工作流 API
 - **RAG**：唯一 `RAGSystem` 在 [rag/service.py](../src/rag/service.py)，索引/manifest、不可变快照与原子写入在 [rag/index.py](../src/rag/index.py)，同步/异步检索共用 [rag/retrieval.py](../src/rag/retrieval.py) 的行映射与来源校验。工具 [rag_search_tool.py](../src/agent/tools/rag_search_tool.py) 接受应用显式注入的同一服务，不读取全局 Web 单例或另起 embedding 配置。`app.py.RAGSystem` 和 [web/rag_index.py](../src/web/rag_index.py) 保留同一对象兼容导出；测试注入点使用规范领域模块。未初始化或来源/索引不兼容时，同步服务抛出异常，工具适配器返回失败；异步兼容接口记录 warning 并返回空列表，不能仅凭空列表区分检索不可用与无命中。任何路径都不能把 FAISS 标签直接当原始行号。Web 展示投影另在 [rag_presentation.py](../src/web/rag_presentation.py)，保留 source_index/provenance。
 - **执行证据**：[event_bus.py](../src/agent/runtime/event_bus.py) 与 [SQLiteAgentStateStore](../src/agent/persistence/sqlite_store.py) 记录运行、事件、检查点及续接；[redaction.py](../src/agent/persistence/redaction.py) 负责敏感内容处理。排障用 trace_id 对齐实际步骤、工具结果和 artifact，不能只看最终文本。
 - **后台工作**：[TaskManager](../src/task_runtime/manager.py) 是工作流 API 使用的提交入口；[TaskRuntime](../src/task_runtime/runtime.py) 是带 staging、幂等、后端选择和收尾的异步科学任务门面，两者不是同一个类。Temporal/OpenSandbox 等边界见 [task_runtime](../src/task_runtime)；不要因都是“任务”就机械合并或删除资源清理。
-- **聊天与续接**：[agent_session_config.py](../src/web/agent_session_config.py) 组装服务端匿名会话，正式 WebSocket/工作流从 scope 取身份，任务访问按服务端归属过滤；它不是实名登录授权。聊天历史仍按连接创建，六处终态共用 `_append_history` 原位保留末 20 条；不是断线历史持久化或科研对象续接。隔离决策续接已有独立保护，但首页“第 3 个分子”还需要实际展示顺序、版本、归属和失效检查，不能从历史文本猜 SMILES。
+- **聊天与续接**：[agent_session_config.py](../src/web/agent_session_config.py) 组装服务端匿名会话，正式 WebSocket/工作流从 scope 取身份，任务访问按服务端归属过滤；它不是实名登录授权。聊天历史仍按连接创建，六处终态共用 `_append_history` 原位保留末20条，不是完整断线历史持久化。隔离决策续接与本分支首页科研引用各自保留保护；首页“第3个分子”通过实际展示ACK、版本、归属和失效校验解析，不从历史文本猜SMILES。详见下方科研续接定位。
 
 ## 4. 兼容代码与迁移状态
 
@@ -79,9 +79,19 @@ ChatHandler / 工作流 API
 
 本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
 
-仍未完成：T09 科研对象跨轮引用；T11 其他领域路由、聊天提示/展示职责拆分和旧 Agent 支持面收缩。其他工具类型化仍须按实际契约逐项评估。其设计与实现需分别验证，不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
+T09 科研对象跨轮引用已在上述独立分支实现及离线验收，具体边界见下节；发布、CI和具体合并授权仍是独立门禁。仍未完成：T11 其他领域路由、聊天提示/展示职责拆分和旧 Agent 支持面收缩。其他工具类型化仍须按实际契约逐项评估。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
+
+### 科研对象续接（独立分支已实现，非生产发布声明）
+
+- 权威对象：[scientific_references.py](../src/agent/contracts/scientific_references.py)；专用原子存储：[persistence/scientific_references.py](../src/agent/persistence/scientific_references.py)。确认的展示顺序、来源观察、修订和归属共同定位候选，固定24小时，不随恢复/重放续期。
+- Web投影及解析：[web/scientific_references.py](../src/web/scientific_references.py)；确认/恢复路由：[scientific_reference_routes.py](../src/web/routes/scientific_reference_routes.py)。来源版本变化、失效、跨会话、协议损坏失败关闭，不从客户端SMILES或聊天历史重建事实。
+- 首页：[scientific_references.js](../src/web/static/js/home/scientific_references.js) 只在标签页保存不透明指针；实际挂载与严格顺序ACK之后才可引用。刷新恢复有效数据时需先进入可见聊天模式，多集合需明确选择，清除选择不删除科研历史。
+- 实际输入：[resolved_molecule.py](../src/agent/contracts/resolved_molecule.py) → Supervisor/AgentContext/Planner → Session。新SMILES优先，改靶点只继承结构、不继承旧分数；工具分发和checkpoint复用前再次复核来源，不跨长工具持有SQLite锁。
+- 验收入口：`tests/agent/test_scientific_reference_*.py`、`tests/home_scientific_references_test.js`；显式离线浏览器夹具 `python -B -m tests.scientific_reference_browser_lab --state-dir <本任务临时目录> --port 6017`。夹具不是生产启动方式，不读取用户模型配置；生成是合成候选，性质调用真实RDKit。
+
+取消等待方会先排空已开始的科学worker，再释放请求租约；这不是强制停止外部计算进程的保证。浏览器服务进程重启验证针对空闲时中断与持久化恢复，不等于运行中任意点硬崩溃后恰好执行一次。完整证据和保留限制见[第三增量交接](handoff/scientific-reference-acceptance.md)。
 
 ## 5. 验证入口与常见误判
 
