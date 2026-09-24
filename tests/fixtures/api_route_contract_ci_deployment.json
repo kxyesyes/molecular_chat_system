@@ -1,0 +1,1964 @@
+{
+  "operations": [
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/docking/tasks",
+      "name": "submit_durable_docking_task",
+      "status_code": 202,
+      "parameters": "protein_file: UploadFile=File(...), ligand_file: UploadFile=File(None), smiles: str=Form(None), center_x: float=Form(0.0), center_y: float=Form(0.0), center_z: float=Form(0.0), size_x: float=Form(20.0), size_y: float=Form(20.0), size_z: float=Form(20.0), exhaustiveness: int=Form(8), num_modes: int=Form(10), energy_range: float=Form(3.0), manual_center: bool=Form(False), idempotency_key: str | None=Header(default=None, alias='Idempotency-Key')"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/docking/submit",
+      "name": "submit_docking_job",
+      "status_code": null,
+      "parameters": "protein_file: UploadFile=File(...), ligand_file: UploadFile=File(None), smiles: str=Form(None), center_x: float=Form(0.0), center_y: float=Form(0.0), center_z: float=Form(0.0), size_x: float=Form(20.0), size_y: float=Form(20.0), size_z: float=Form(20.0), exhaustiveness: int=Form(8), num_modes: int=Form(10), energy_range: float=Form(3.0), manual_center: bool=Form(False)"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/docking/env_check",
+      "name": "docking_env_check",
+      "status_code": null,
+      "parameters": ""
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/docking/batch_submit",
+      "name": "submit_batch_docking_job",
+      "status_code": null,
+      "parameters": "protein_file: UploadFile=File(...), ligand_files: Optional[List[UploadFile]]=File(None), batch_smiles: str=Form(''), center_x: float=Form(0.0), center_y: float=Form(0.0), center_z: float=Form(0.0), size_x: float=Form(20.0), size_y: float=Form(20.0), size_z: float=Form(20.0), exhaustiveness: int=Form(8), num_modes: int=Form(10), energy_range: float=Form(3.0), manual_center: bool=Form(False)"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/docking/status",
+      "name": "get_docking_status",
+      "status_code": null,
+      "parameters": ""
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/docking/result/{job_id}",
+      "name": "get_docking_result",
+      "status_code": null,
+      "parameters": "job_id: str"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/docking/pose_sdf/{job_id}",
+      "name": "get_docking_pose_sdf",
+      "status_code": null,
+      "parameters": "job_id: str, pose: int=1"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/docking/history",
+      "name": "get_docking_history",
+      "status_code": null,
+      "parameters": "page: int=1, limit: int=50"
+    },
+    {
+      "methods": [
+        "DELETE"
+      ],
+      "path": "/api/docking/history",
+      "name": "clear_docking_history",
+      "status_code": null,
+      "parameters": ""
+    },
+    {
+      "methods": [
+        "DELETE"
+      ],
+      "path": "/api/docking/history/{job_id}",
+      "name": "delete_docking_job",
+      "status_code": null,
+      "parameters": "job_id: str"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/docking/smiles_to_3d",
+      "name": "smiles_to_3d",
+      "status_code": null,
+      "parameters": "payload: Dict[str, Any]=Body(...)"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/utils/smiles_to_image",
+      "name": "smiles_to_image",
+      "status_code": null,
+      "parameters": "smiles: str, width: int=Query(300, ge=64, le=2048), height: int=Query(200, ge=64, le=2048)"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/utils/mcs",
+      "name": "get_mcs",
+      "status_code": null,
+      "parameters": "smiles1: str, smiles2: str, width: int=Query(360, ge=64, le=2048), height: int=Query(260, ge=64, le=2048), timeout: int=Query(3, ge=1, le=30)"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/docking/report/{job_id}",
+      "name": "get_docking_report",
+      "status_code": null,
+      "parameters": "job_id: str, payload: Dict[str, Any]=Body(None)"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/reverse_target/predict",
+      "name": "reverse_target_predict",
+      "status_code": null,
+      "parameters": "smiles: str=Form(...), threshold: float=Form(0.6), top_k: int=Form(10), organism_filter: str=Form('')"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/reverse_target/batch_predict",
+      "name": "reverse_target_batch_predict",
+      "status_code": null,
+      "parameters": "file: UploadFile=File(...), threshold: float=Form(0.6), top_k: int=Form(10), organism_filter: str=Form('')"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/reverse_target/stats",
+      "name": "get_reverse_target_stats",
+      "status_code": null,
+      "parameters": ""
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/reverse_target/health",
+      "name": "get_reverse_target_health",
+      "status_code": null,
+      "parameters": ""
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/reverse_target/similar_molecules",
+      "name": "get_similar_molecules",
+      "status_code": null,
+      "parameters": "smiles: str, target_name: str, threshold: float=0.6, limit: int=50, organism_filter: str=''"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/reverse_target/predict_3d",
+      "name": "reverse_target_predict_3d",
+      "status_code": null,
+      "parameters": "smiles: str=Form(...), threshold: float=Form(0.5), top_k: int=Form(10), max_refine: int=Form(50), alpha_2d: float=Form(0.4), alpha_3d: float=Form(0.6), organism_filter: str=Form('')"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/reverse_target/pharmacophore",
+      "name": "get_pharmacophore",
+      "status_code": null,
+      "parameters": "smiles: str=Form(...)"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/activity/predict",
+      "name": "activity_predict",
+      "status_code": null,
+      "parameters": "smiles: str=Form(...), target: Optional[str]=Form(None)"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/activity/batch_predict",
+      "name": "activity_batch_predict",
+      "status_code": null,
+      "parameters": "file: UploadFile=File(...), target: Optional[str]=Form(None)"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/activity/train",
+      "name": "start_activity_training",
+      "status_code": null,
+      "parameters": "file: UploadFile=File(...), target_column: str=Form(...), task_type: str=Form('regression'), epochs: int=Form(50, ge=1, le=1000), learning_rate: float=Form(0.001, gt=0, le=1), batch_size: int=Form(32, ge=1, le=4096), dropout: float=Form(0.2, ge=0, le=0.9), num_layers: int=Form(5, ge=1, le=32), hidden_size: int=Form(256, ge=8, le=4096), weight_decay: float=Form(0.0001, ge=0, le=1), patience: int=Form(12, ge=1, le=1000), loss_metric: str=Form('MSE'), lr_scheduler: str=Form('Cosine'), split_strategy: str=Form('scaffold'), random_seed: int=Form(42, ge=0, le=2147483647)"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/activity/train/status/{job_id}",
+      "name": "get_training_status",
+      "status_code": null,
+      "parameters": "job_id: str"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/activity/models",
+      "name": "list_activity_models",
+      "status_code": null,
+      "parameters": ""
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/activity/models/switch",
+      "name": "switch_activity_model",
+      "status_code": null,
+      "parameters": "data: Dict[str, Any]=Body(...)"
+    },
+    {
+      "methods": [
+        "DELETE"
+      ],
+      "path": "/api/activity/models/{model_id}",
+      "name": "remove_activity_model",
+      "status_code": null,
+      "parameters": "model_id: str"
+    },
+    {
+      "methods": [
+        "POST"
+      ],
+      "path": "/api/molecule/properties",
+      "name": "calculate_molecule_properties",
+      "status_code": null,
+      "parameters": "data: Dict[str, Any]=Body(...)"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
+      "path": "/api/agent/metrics",
+      "name": "get_agent_metrics",
+      "status_code": null,
+      "parameters": ""
+    }
+  ],
+  "openapi": {
+    "openapi": "3.1.0",
+    "info": {
+      "title": "FastAPI",
+      "version": "0.1.0"
+    },
+    "paths": {
+      "/api/docking/tasks": {
+        "post": {
+          "summary": "Submit Durable Docking Task",
+          "operationId": "submit_durable_docking_task_api_docking_tasks_post",
+          "parameters": [
+            {
+              "name": "Idempotency-Key",
+              "in": "header",
+              "required": false,
+              "schema": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Idempotency-Key"
+              }
+            }
+          ],
+          "requestBody": {
+            "required": true,
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_submit_durable_docking_task_api_docking_tasks_post"
+                }
+              }
+            }
+          },
+          "responses": {
+            "202": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/submit": {
+        "post": {
+          "summary": "Submit Docking Job",
+          "description": "提交分子对接任务",
+          "operationId": "submit_docking_job_api_docking_submit_post",
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_submit_docking_job_api_docking_submit_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/env_check": {
+        "get": {
+          "summary": "Docking Env Check",
+          "description": "返回分子对接环境详细诊断",
+          "operationId": "docking_env_check_api_docking_env_check_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/batch_submit": {
+        "post": {
+          "summary": "Submit Batch Docking Job",
+          "description": "Submit one receptor against multiple ligand files and/or SMILES rows.",
+          "operationId": "submit_batch_docking_job_api_docking_batch_submit_post",
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_submit_batch_docking_job_api_docking_batch_submit_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/status": {
+        "get": {
+          "summary": "Get Docking Status",
+          "description": "获取分子对接服务状态",
+          "operationId": "get_docking_status_api_docking_status_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/result/{job_id}": {
+        "get": {
+          "summary": "Get Docking Result",
+          "description": "获取分子对接结果文件",
+          "operationId": "get_docking_result_api_docking_result__job_id__get",
+          "parameters": [
+            {
+              "name": "job_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Job Id"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/pose_sdf/{job_id}": {
+        "get": {
+          "summary": "Get Docking Pose Sdf",
+          "description": "将指定 pose 重建为标准 SDF，保留原始化学拓扑并应用对接坐标",
+          "operationId": "get_docking_pose_sdf_api_docking_pose_sdf__job_id__get",
+          "parameters": [
+            {
+              "name": "job_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Job Id"
+              }
+            },
+            {
+              "name": "pose",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "default": 1,
+                "title": "Pose"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/history": {
+        "get": {
+          "summary": "Get Docking History",
+          "description": "获取对接历史记录列表",
+          "operationId": "get_docking_history_api_docking_history_get",
+          "parameters": [
+            {
+              "name": "page",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "default": 1,
+                "title": "Page"
+              }
+            },
+            {
+              "name": "limit",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "default": 50,
+                "title": "Limit"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "delete": {
+          "summary": "Clear Docking History",
+          "description": "清除所有对接历史记录",
+          "operationId": "clear_docking_history_api_docking_history_delete",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/history/{job_id}": {
+        "delete": {
+          "summary": "Delete Docking Job",
+          "description": "删除指定的对接历史记录",
+          "operationId": "delete_docking_job_api_docking_history__job_id__delete",
+          "parameters": [
+            {
+              "name": "job_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Job Id"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/smiles_to_3d": {
+        "post": {
+          "summary": "Smiles To 3D",
+          "description": "将SMILES转换为3D结构用于预览",
+          "operationId": "smiles_to_3d_api_docking_smiles_to_3d_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Payload"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/utils/smiles_to_image": {
+        "get": {
+          "summary": "Smiles To Image",
+          "description": "生成分子2D图片",
+          "operationId": "smiles_to_image_api_utils_smiles_to_image_get",
+          "parameters": [
+            {
+              "name": "smiles",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Smiles"
+              }
+            },
+            {
+              "name": "width",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "maximum": 2048,
+                "minimum": 64,
+                "default": 300,
+                "title": "Width"
+              }
+            },
+            {
+              "name": "height",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "maximum": 2048,
+                "minimum": 64,
+                "default": 200,
+                "title": "Height"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/utils/mcs": {
+        "get": {
+          "summary": "Get Mcs",
+          "description": "计算两分子的最大公共子结构(MCS)，返回SMARTS与高亮SVG",
+          "operationId": "get_mcs_api_utils_mcs_get",
+          "parameters": [
+            {
+              "name": "smiles1",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Smiles1"
+              }
+            },
+            {
+              "name": "smiles2",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Smiles2"
+              }
+            },
+            {
+              "name": "width",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "maximum": 2048,
+                "minimum": 64,
+                "default": 360,
+                "title": "Width"
+              }
+            },
+            {
+              "name": "height",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "maximum": 2048,
+                "minimum": 64,
+                "default": 260,
+                "title": "Height"
+              }
+            },
+            {
+              "name": "timeout",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "maximum": 30,
+                "minimum": 1,
+                "default": 3,
+                "title": "Timeout"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/report/{job_id}": {
+        "post": {
+          "summary": "Get Docking Report",
+          "description": "生成并返回对接报告",
+          "operationId": "get_docking_report_api_docking_report__job_id__post",
+          "parameters": [
+            {
+              "name": "job_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Job Id"
+              }
+            }
+          ],
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Payload"
+                }
+              }
+            }
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/predict": {
+        "post": {
+          "summary": "Reverse Target Predict",
+          "description": "反向寻靶预测API",
+          "operationId": "reverse_target_predict_api_reverse_target_predict_post",
+          "requestBody": {
+            "content": {
+              "application/x-www-form-urlencoded": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_reverse_target_predict_api_reverse_target_predict_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/batch_predict": {
+        "post": {
+          "summary": "Reverse Target Batch Predict",
+          "description": "反向寻靶批量预测API",
+          "operationId": "reverse_target_batch_predict_api_reverse_target_batch_predict_post",
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_reverse_target_batch_predict_api_reverse_target_batch_predict_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/stats": {
+        "get": {
+          "summary": "Get Reverse Target Stats",
+          "description": "获取反向寻靶数据库统计信息",
+          "operationId": "get_reverse_target_stats_api_reverse_target_stats_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/health": {
+        "get": {
+          "summary": "Get Reverse Target Health",
+          "description": "轻量检查反向寻靶本地数据库状态，不加载大型指纹矩阵。",
+          "operationId": "get_reverse_target_health_api_reverse_target_health_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/similar_molecules": {
+        "get": {
+          "summary": "Get Similar Molecules",
+          "description": "获取特定靶点的相似分子列表",
+          "operationId": "get_similar_molecules_api_reverse_target_similar_molecules_get",
+          "parameters": [
+            {
+              "name": "smiles",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Smiles"
+              }
+            },
+            {
+              "name": "target_name",
+              "in": "query",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Target Name"
+              }
+            },
+            {
+              "name": "threshold",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "number",
+                "default": 0.6,
+                "title": "Threshold"
+              }
+            },
+            {
+              "name": "limit",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "default": 50,
+                "title": "Limit"
+              }
+            },
+            {
+              "name": "organism_filter",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "string",
+                "default": "",
+                "title": "Organism Filter"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/predict_3d": {
+        "post": {
+          "summary": "Reverse Target Predict 3D",
+          "description": "2D+3D 级联药效团反向寻靶\n\n流程:\n1. 用 2D Morgan 指纹粗筛 top_k * 10 个候选分子\n2. 对候选分子进行 3D 构象生成 + 药效团打分\n3. 融合 2D+3D 分数进行重新排序，返回最终 top_k 靶点",
+          "operationId": "reverse_target_predict_3d_api_reverse_target_predict_3d_post",
+          "requestBody": {
+            "content": {
+              "application/x-www-form-urlencoded": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_reverse_target_predict_3d_api_reverse_target_predict_3d_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/reverse_target/pharmacophore": {
+        "post": {
+          "summary": "Get Pharmacophore",
+          "description": "单分子 3D 药效团特征提取 API\n\n返回:\n    features      : 药效团特征列表（含坐标、类型、颜色）\n    feature_counts: 各类特征数量统计\n    mol_block     : MolBlock (供 3Dmol.js 可视化)\n    properties    : 理化性质 (MW, LogP, TPSA, HBD, HBA, RotBonds)",
+          "operationId": "get_pharmacophore_api_reverse_target_pharmacophore_post",
+          "requestBody": {
+            "content": {
+              "application/x-www-form-urlencoded": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_get_pharmacophore_api_reverse_target_pharmacophore_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/predict": {
+        "post": {
+          "summary": "Activity Predict",
+          "description": "活性预测 API",
+          "operationId": "activity_predict_api_activity_predict_post",
+          "requestBody": {
+            "content": {
+              "application/x-www-form-urlencoded": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_activity_predict_api_activity_predict_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/batch_predict": {
+        "post": {
+          "summary": "Activity Batch Predict",
+          "description": "活性批量预测 API",
+          "operationId": "activity_batch_predict_api_activity_batch_predict_post",
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_activity_batch_predict_api_activity_batch_predict_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/train": {
+        "post": {
+          "summary": "Start Activity Training",
+          "description": "提交活性预测模型训练任务",
+          "operationId": "start_activity_training_api_activity_train_post",
+          "requestBody": {
+            "content": {
+              "multipart/form-data": {
+                "schema": {
+                  "$ref": "#/components/schemas/Body_start_activity_training_api_activity_train_post"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/train/status/{job_id}": {
+        "get": {
+          "summary": "Get Training Status",
+          "description": "查询训练状态和指标",
+          "operationId": "get_training_status_api_activity_train_status__job_id__get",
+          "parameters": [
+            {
+              "name": "job_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Job Id"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/models": {
+        "get": {
+          "summary": "List Activity Models",
+          "description": "列出所有已训练的活性模型",
+          "operationId": "list_activity_models_api_activity_models_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/models/switch": {
+        "post": {
+          "summary": "Switch Activity Model",
+          "description": "切换当前使用的活性预测模型权重",
+          "operationId": "switch_activity_model_api_activity_models_switch_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Data"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/activity/models/{model_id}": {
+        "delete": {
+          "summary": "Remove Activity Model",
+          "description": "物理删除一个活性预测模型",
+          "operationId": "remove_activity_model_api_activity_models__model_id__delete",
+          "parameters": [
+            {
+              "name": "model_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Model Id"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/molecule/properties": {
+        "post": {
+          "summary": "Calculate Molecule Properties",
+          "description": "计算分子的基础属性和ADMET属性",
+          "operationId": "calculate_molecule_properties_api_molecule_properties_post",
+          "requestBody": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "title": "Data"
+                }
+              }
+            },
+            "required": true
+          },
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/agent/metrics": {
+        "get": {
+          "summary": "Get Agent Metrics",
+          "description": "获取 Agent 技能性能统计报表",
+          "operationId": "get_agent_metrics_api_agent_metrics_get",
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "components": {
+      "schemas": {
+        "Body_activity_batch_predict_api_activity_batch_predict_post": {
+          "properties": {
+            "file": {
+              "type": "string",
+              "format": "binary",
+              "title": "File"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target"
+            }
+          },
+          "type": "object",
+          "required": [
+            "file"
+          ],
+          "title": "Body_activity_batch_predict_api_activity_batch_predict_post"
+        },
+        "Body_activity_predict_api_activity_predict_post": {
+          "properties": {
+            "smiles": {
+              "type": "string",
+              "title": "Smiles"
+            },
+            "target": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Target"
+            }
+          },
+          "type": "object",
+          "required": [
+            "smiles"
+          ],
+          "title": "Body_activity_predict_api_activity_predict_post"
+        },
+        "Body_get_pharmacophore_api_reverse_target_pharmacophore_post": {
+          "properties": {
+            "smiles": {
+              "type": "string",
+              "title": "Smiles"
+            }
+          },
+          "type": "object",
+          "required": [
+            "smiles"
+          ],
+          "title": "Body_get_pharmacophore_api_reverse_target_pharmacophore_post"
+        },
+        "Body_reverse_target_batch_predict_api_reverse_target_batch_predict_post": {
+          "properties": {
+            "file": {
+              "type": "string",
+              "format": "binary",
+              "title": "File"
+            },
+            "threshold": {
+              "type": "number",
+              "title": "Threshold",
+              "default": 0.6
+            },
+            "top_k": {
+              "type": "integer",
+              "title": "Top K",
+              "default": 10
+            },
+            "organism_filter": {
+              "type": "string",
+              "title": "Organism Filter",
+              "default": ""
+            }
+          },
+          "type": "object",
+          "required": [
+            "file"
+          ],
+          "title": "Body_reverse_target_batch_predict_api_reverse_target_batch_predict_post"
+        },
+        "Body_reverse_target_predict_3d_api_reverse_target_predict_3d_post": {
+          "properties": {
+            "smiles": {
+              "type": "string",
+              "title": "Smiles"
+            },
+            "threshold": {
+              "type": "number",
+              "title": "Threshold",
+              "default": 0.5
+            },
+            "top_k": {
+              "type": "integer",
+              "title": "Top K",
+              "default": 10
+            },
+            "max_refine": {
+              "type": "integer",
+              "title": "Max Refine",
+              "default": 50
+            },
+            "alpha_2d": {
+              "type": "number",
+              "title": "Alpha 2D",
+              "default": 0.4
+            },
+            "alpha_3d": {
+              "type": "number",
+              "title": "Alpha 3D",
+              "default": 0.6
+            },
+            "organism_filter": {
+              "type": "string",
+              "title": "Organism Filter",
+              "default": ""
+            }
+          },
+          "type": "object",
+          "required": [
+            "smiles"
+          ],
+          "title": "Body_reverse_target_predict_3d_api_reverse_target_predict_3d_post"
+        },
+        "Body_reverse_target_predict_api_reverse_target_predict_post": {
+          "properties": {
+            "smiles": {
+              "type": "string",
+              "title": "Smiles"
+            },
+            "threshold": {
+              "type": "number",
+              "title": "Threshold",
+              "default": 0.6
+            },
+            "top_k": {
+              "type": "integer",
+              "title": "Top K",
+              "default": 10
+            },
+            "organism_filter": {
+              "type": "string",
+              "title": "Organism Filter",
+              "default": ""
+            }
+          },
+          "type": "object",
+          "required": [
+            "smiles"
+          ],
+          "title": "Body_reverse_target_predict_api_reverse_target_predict_post"
+        },
+        "Body_start_activity_training_api_activity_train_post": {
+          "properties": {
+            "file": {
+              "type": "string",
+              "format": "binary",
+              "title": "File"
+            },
+            "target_column": {
+              "type": "string",
+              "title": "Target Column"
+            },
+            "task_type": {
+              "type": "string",
+              "title": "Task Type",
+              "default": "regression"
+            },
+            "epochs": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Epochs",
+              "default": 50
+            },
+            "learning_rate": {
+              "type": "number",
+              "maximum": 1,
+              "exclusiveMinimum": 0,
+              "title": "Learning Rate",
+              "default": 0.001
+            },
+            "batch_size": {
+              "type": "integer",
+              "maximum": 4096,
+              "minimum": 1,
+              "title": "Batch Size",
+              "default": 32
+            },
+            "dropout": {
+              "type": "number",
+              "maximum": 0.9,
+              "minimum": 0,
+              "title": "Dropout",
+              "default": 0.2
+            },
+            "num_layers": {
+              "type": "integer",
+              "maximum": 32,
+              "minimum": 1,
+              "title": "Num Layers",
+              "default": 5
+            },
+            "hidden_size": {
+              "type": "integer",
+              "maximum": 4096,
+              "minimum": 8,
+              "title": "Hidden Size",
+              "default": 256
+            },
+            "weight_decay": {
+              "type": "number",
+              "maximum": 1,
+              "minimum": 0,
+              "title": "Weight Decay",
+              "default": 0.0001
+            },
+            "patience": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Patience",
+              "default": 12
+            },
+            "loss_metric": {
+              "type": "string",
+              "title": "Loss Metric",
+              "default": "MSE"
+            },
+            "lr_scheduler": {
+              "type": "string",
+              "title": "Lr Scheduler",
+              "default": "Cosine"
+            },
+            "split_strategy": {
+              "type": "string",
+              "title": "Split Strategy",
+              "default": "scaffold"
+            },
+            "random_seed": {
+              "type": "integer",
+              "maximum": 2147483647,
+              "minimum": 0,
+              "title": "Random Seed",
+              "default": 42
+            }
+          },
+          "type": "object",
+          "required": [
+            "file",
+            "target_column"
+          ],
+          "title": "Body_start_activity_training_api_activity_train_post"
+        },
+        "Body_submit_batch_docking_job_api_docking_batch_submit_post": {
+          "properties": {
+            "protein_file": {
+              "type": "string",
+              "format": "binary",
+              "title": "Protein File"
+            },
+            "ligand_files": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ligand Files"
+            },
+            "batch_smiles": {
+              "type": "string",
+              "title": "Batch Smiles",
+              "default": ""
+            },
+            "center_x": {
+              "type": "number",
+              "title": "Center X",
+              "default": 0
+            },
+            "center_y": {
+              "type": "number",
+              "title": "Center Y",
+              "default": 0
+            },
+            "center_z": {
+              "type": "number",
+              "title": "Center Z",
+              "default": 0
+            },
+            "size_x": {
+              "type": "number",
+              "title": "Size X",
+              "default": 20
+            },
+            "size_y": {
+              "type": "number",
+              "title": "Size Y",
+              "default": 20
+            },
+            "size_z": {
+              "type": "number",
+              "title": "Size Z",
+              "default": 20
+            },
+            "exhaustiveness": {
+              "type": "integer",
+              "title": "Exhaustiveness",
+              "default": 8
+            },
+            "num_modes": {
+              "type": "integer",
+              "title": "Num Modes",
+              "default": 10
+            },
+            "energy_range": {
+              "type": "number",
+              "title": "Energy Range",
+              "default": 3
+            },
+            "manual_center": {
+              "type": "boolean",
+              "title": "Manual Center",
+              "default": false
+            }
+          },
+          "type": "object",
+          "required": [
+            "protein_file"
+          ],
+          "title": "Body_submit_batch_docking_job_api_docking_batch_submit_post"
+        },
+        "Body_submit_docking_job_api_docking_submit_post": {
+          "properties": {
+            "protein_file": {
+              "type": "string",
+              "format": "binary",
+              "title": "Protein File"
+            },
+            "ligand_file": {
+              "type": "string",
+              "format": "binary",
+              "title": "Ligand File"
+            },
+            "smiles": {
+              "type": "string",
+              "title": "Smiles"
+            },
+            "center_x": {
+              "type": "number",
+              "title": "Center X",
+              "default": 0
+            },
+            "center_y": {
+              "type": "number",
+              "title": "Center Y",
+              "default": 0
+            },
+            "center_z": {
+              "type": "number",
+              "title": "Center Z",
+              "default": 0
+            },
+            "size_x": {
+              "type": "number",
+              "title": "Size X",
+              "default": 20
+            },
+            "size_y": {
+              "type": "number",
+              "title": "Size Y",
+              "default": 20
+            },
+            "size_z": {
+              "type": "number",
+              "title": "Size Z",
+              "default": 20
+            },
+            "exhaustiveness": {
+              "type": "integer",
+              "title": "Exhaustiveness",
+              "default": 8
+            },
+            "num_modes": {
+              "type": "integer",
+              "title": "Num Modes",
+              "default": 10
+            },
+            "energy_range": {
+              "type": "number",
+              "title": "Energy Range",
+              "default": 3
+            },
+            "manual_center": {
+              "type": "boolean",
+              "title": "Manual Center",
+              "default": false
+            }
+          },
+          "type": "object",
+          "required": [
+            "protein_file"
+          ],
+          "title": "Body_submit_docking_job_api_docking_submit_post"
+        },
+        "Body_submit_durable_docking_task_api_docking_tasks_post": {
+          "properties": {
+            "protein_file": {
+              "type": "string",
+              "format": "binary",
+              "title": "Protein File"
+            },
+            "ligand_file": {
+              "type": "string",
+              "format": "binary",
+              "title": "Ligand File"
+            },
+            "smiles": {
+              "type": "string",
+              "title": "Smiles"
+            },
+            "center_x": {
+              "type": "number",
+              "title": "Center X",
+              "default": 0
+            },
+            "center_y": {
+              "type": "number",
+              "title": "Center Y",
+              "default": 0
+            },
+            "center_z": {
+              "type": "number",
+              "title": "Center Z",
+              "default": 0
+            },
+            "size_x": {
+              "type": "number",
+              "title": "Size X",
+              "default": 20
+            },
+            "size_y": {
+              "type": "number",
+              "title": "Size Y",
+              "default": 20
+            },
+            "size_z": {
+              "type": "number",
+              "title": "Size Z",
+              "default": 20
+            },
+            "exhaustiveness": {
+              "type": "integer",
+              "title": "Exhaustiveness",
+              "default": 8
+            },
+            "num_modes": {
+              "type": "integer",
+              "title": "Num Modes",
+              "default": 10
+            },
+            "energy_range": {
+              "type": "number",
+              "title": "Energy Range",
+              "default": 3
+            },
+            "manual_center": {
+              "type": "boolean",
+              "title": "Manual Center",
+              "default": false
+            }
+          },
+          "type": "object",
+          "required": [
+            "protein_file"
+          ],
+          "title": "Body_submit_durable_docking_task_api_docking_tasks_post"
+        },
+        "HTTPValidationError": {
+          "properties": {
+            "detail": {
+              "items": {
+                "$ref": "#/components/schemas/ValidationError"
+              },
+              "type": "array",
+              "title": "Detail"
+            }
+          },
+          "type": "object",
+          "title": "HTTPValidationError"
+        },
+        "ValidationError": {
+          "properties": {
+            "loc": {
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "integer"
+                  }
+                ]
+              },
+              "type": "array",
+              "title": "Location"
+            },
+            "msg": {
+              "type": "string",
+              "title": "Message"
+            },
+            "type": {
+              "type": "string",
+              "title": "Error Type"
+            }
+          },
+          "type": "object",
+          "required": [
+            "loc",
+            "msg",
+            "type"
+          ],
+          "title": "ValidationError"
+        }
+      }
+    }
+  }
+}
