@@ -322,6 +322,86 @@ These are parent-reported independent review results, not new worker executions,
 
 Authorized local source/test/docs commit: `674e8b0f90afb8cae08a1a816cb785f766e163ef` (`fix: preserve complete shared input scope in admission`). The original named 14-file isolated focused command was then rerun against this commit and actually reported **1406 passed in 118.41s**, no skips; this number is observed pytest output, not a preset expected count. All eight A1 production/test files compiled in memory without bytecode. `git diff --check` and `git show --format= --check HEAD` passed. The committed production blob remains `9d1305e7d4f8cae6a593bdf3c2f4adb6b18ab918`, identical to the independently reviewed blob. No production/test edits occurred after the reviewed freeze. This verification record is the only file change for the authorized second, documentation-only local commit. No latest-main integration, full run, push or live-model verification was performed; those remain pending separate parent release. Final documentation-commit hash and clean status are reported in the worker handoff.
 
+### Latest-main integration, failed local full, and fixture-only verification
+
+Parent authorized one latest-main integration and one local Agent full after PR77. Starting from clean `d509c6ad0d332e0b8e674d38742ff28a2e474834`, merged the already-fetched `origin/main` without another fetch or conflicts:
+
+- Main: `be0219ec205e9285ea30979d4a5ccacd95791be3`; main tree `60d666643c3cf074aa2c7dfd5693da6ca6a0dcf2`.
+- Locked merge HEAD: `734e13671f9d9a3528d69dcaaf8044391baf6a31`; tree `4b4955be196d27d8d43565388988e2d75b3ea0c0`.
+- Original named 14-file focus at this lock: **1406 passed in 118.71s**, no skips/warnings reported. Eight A1 Python files compiled in memory; diff checks passed.
+- All eight original A1 production/test files have identical Git blobs and raw SHA-256 bytes to the reviewed pre-merge freeze. In particular, admission remains blob `9d1305e7d4f8cae6a593bdf3c2f4adb6b18ab918`. No source/test edits occurred during or after integration/testing.
+
+**The one local full failed; it must never be reported as local-full-passed.** Command arguments were `tests/agent` to the old no-copy isolated wrapper below. Started `2026-09-24 23:25:22 UTC` (September 25, 07:25:22 Asia/Shanghai), session `7965`, exit 1: **7777 passed, 3 failed, 2 skipped, 7 warnings in 388.24s**. Completion was confirmed by the 23:34:07 UTC read-only check; that check time is not the exact pytest finish time. No edits, merge or commit occurred during the full.
+
+All three failures were `FileNotFoundError` from `src/agent/evaluation/runner.py:15`, reached by `tests/agent/test_evaluation_runner.py:429/444/465`: `real_agent_cases.jsonl`, `golden_scientific_cases.jsonl`, `diverse_scientific_cases.jsonl`. These tests load `data/agent_evals/...` relative to cwd. **Root cause: this worker's A1 wrapper omitted the three-fixture copy/SHA preparation already present in the approved RAG extraction runner**, while changing cwd to a temporary directory. This was not a missing tracked dataset or an A1/scientific assertion failure. The earlier statement that A1 used the RAG runner describes an adaptation, not a byte-identical reuse; the omitted preparation is material and is recorded here explicitly.
+
+The two skips were directory symlinks unavailable (`test_decision_chat_acceptance.py:149`) and performance test disabled (`test_harness_shadow.py:277`). Seven warnings were three SWIG type `__module__` deprecations and four FastAPI `on_event` deprecations. No assertions, skips, tool outputs or scientific gates were changed to handle them.
+
+Parent then authorized **fixture-only grouped verification, not another local full**. Git tracking and unchanged contents were checked for only the three named JSONL files before copying. Reused the complete existing runner in [RAG extraction plan, actual verification commands](2026-09-24-rag-service-extraction.md#实际验证命令与包装), replacing only its `repo` worktree path. Its three `shutil.copy2` operations and source/destination SHA-256 assertions succeeded before each pytest subprocess. This runner uses normal `python -B -m pytest`, not A1's in-process socket monkeypatch; inherited application/credential environment is cleared and real-acceptance flags remain off. The grouped tests are offline fixture/contract tests, not real-provider acceptance. No other assets, secrets or `.env` were read; no fixture content was printed, edited or committed.
+
+| Group, in execution order | Start UTC, 2026-09-24 | Actual result |
+|---|---|---|
+| Old no-copy wrapper, exactly three failing nodes | 23:36:13 | **3 failed in 2.28s**, exit 1; all three original `FileNotFoundError` reproduced |
+| Existing copy/SHA runner, same three nodes | 23:36:25 | **3 passed in 1.73s**, exit 0; all three copy hashes equal |
+| Existing copy/SHA runner, entire `test_evaluation_runner.py` | 23:36:37 | **32 passed in 3.56s**, exit 0; all three copy hashes equal |
+
+No skips or warnings were reported in these three groups. Counts are separate runs and are not added to, or substituted for, the failed full result. Afterward all eight A1 raw SHA-256 values still matched the reviewed freeze, eight files compiled in memory (no bytecode), and `git diff --check` passed.
+
+#### Exact grouped commands and wrapper provenance
+
+The old A1 wrapper used for both the failed full and the three-node RED is reproduced here for audit; **do not run another full with either wrapper**:
+
+```powershell
+$python = 'C:/Users/xkx52/.conda/envs/MedChat/python.exe'
+$noCopyRunner = @'
+import logging, os, sys, tempfile
+from pathlib import Path
+repo=Path(r"D:/MedChat/molecular_chat_system_worktrees/web-model-decision-entry")
+keep={k:os.environ[k] for k in ("SYSTEMROOT","WINDIR","PATH","TEMP","TMP","COMSPEC") if k in os.environ}
+os.environ.clear();os.environ.update(keep)
+with tempfile.TemporaryDirectory(prefix="medchat-p7a1-review-") as temp:
+ root=Path(temp)
+ os.environ.update({
+ "PYTHONDONTWRITEBYTECODE":"1","PYTHONIOENCODING":"utf-8","PYTHONPATH":str(repo),
+ "AGENT_HARNESS_MODE":"legacy","MOLECULAR_CHAT_CONFIG":str(root/"missing.yaml"),
+ "MEDCHAT_ENV_FILE":str(root/"not-loaded.env"),"MEDCHAT_USER_CONFIG_DIR":str(root/"user-config"),
+ "MEDCHAT_LLM_LOCK_DIR":str(root/"locks"),"MEDCHAT_AGENT_SESSION_DB":str(root/"sessions.sqlite"),
+ "AGENT_STATE_DB":str(root/"agent.sqlite"),"MEDCHAT_TASK_DB_PATH":str(root/"tasks.sqlite"),
+ "TARGET_DB_PATH":str(root/"targets.sqlite"),"TARGET_CACHE_DIR":str(root/"target-cache"),
+ "MEDCHAT_FRAGMENT_DB_PATH":str(root),"MEDCHAT_TASK_BACKEND":"local","MEDCHAT_TEMPORAL_CANARY_PERCENT":"0",
+ "AGENT_LANGGRAPH_CANARY_PERCENT":"0","MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE":"0",
+ "MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE":"0","MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK":"0","RUN_REAL_TARGET_SEARCH":"0"})
+ os.chdir(root);sys.path.insert(0,str(repo))
+ import socket,inspect
+ original_connect=socket.socket.connect
+ def offline_connect(sock,address):
+   if any(f.function=="_fallback_socketpair" and f.filename.endswith("socket.py") for f in inspect.stack()):
+     return original_connect(sock,address)
+   raise AssertionError("offline test attempted network")
+ socket.socket.connect=offline_connect
+ try:
+   import pytest
+   result=pytest.main([str(repo/p) if p.startswith("tests/") else p for p in sys.argv[1:]]
+      +["-q","-p","no:cacheprovider","--tb=short","-rs"])
+ finally:
+   logging.shutdown();os.chdir(repo)
+ print("P7A1_PYTEST_EXIT="+str(result));sys.exit(result)
+'@
+$fixtureChecks = @(
+    'tests/agent/test_evaluation_runner.py::test_real_agent_dataset_contains_all_docx_cases',
+    'tests/agent/test_evaluation_runner.py::test_golden_scientific_dataset_contains_12_traceable_cases',
+    'tests/agent/test_evaluation_runner.py::test_diverse_scientific_dataset_contains_20_traceable_cases'
+)
+$noCopyRunner | & $python -B -c "import sys; exec(sys.stdin.read())" @fixtureChecks
+
+# $runner is the complete existing RAG extraction plan runner, with only repo set
+# to this web-model-decision-entry worktree; retain its copy2 and SHA assertions.
+$runner | & $python -B -c "import sys; exec(sys.stdin.read())" @fixtureChecks
+$runner | & $python -B -c "import sys; exec(sys.stdin.read())" 'tests/agent/test_evaluation_runner.py'
+```
+
+The wrappers were executed in memory, not added as scripts. Only this plan and the design spec may be staged for the authorized local evidence commit; source/tests and fixtures remain unchanged. No push or PR is authorized. **Parent selected CI-only complete pre-merge verification: all Agent and root partitions must pass on the latest exact head**, including the documentation commit and any subsequent integration. This worker has not launched or verified those future CI results; they remain pending. Grouped recovery does not prove the entire suite passes with the corrected preparation. A1 remains support-only, not P7 completion; A2/B and genuine normal `/ws`/provider acceptance remain separate.
+
 ## Deferred A2 — separate PR, not approved for this branch
 
 Normal `/ws` dispatch into WebDecisionEntry/ModelDecisionLoop; genuinely external normal chat; single reader lease and per-request current-model capture; app config epoch creation/replacement; cancel/drain before lease release; one socket receiver and active request; bounded events; owner-bound resume; existing candidate project/mount/ACK; safe per-socket conversational history and persistent status labels. Keep unsupported requests explicit. Preserve existing static workflow HTTP unchanged, add no HTTP route. No default activation until separately approved.
