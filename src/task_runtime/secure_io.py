@@ -36,6 +36,17 @@ def _is_reparse(metadata: os.stat_result) -> bool:
     return bool(getattr(metadata, "st_file_attributes", 0) & 0x400)
 
 
+def _directory_identity(metadata: os.stat_result) -> tuple[object, ...]:
+    """Pin the directory boundary, not timestamps changed by unrelated children."""
+
+    if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
+        raise ValueError("unsafe file snapshot")
+    return (
+        _stat_identity(metadata), metadata.st_mode,
+        getattr(metadata, "st_uid", None), getattr(metadata, "st_gid", None),
+    )
+
+
 def _bounded_read(descriptor: int, maximum_bytes: int) -> bytes:
     chunks: list[bytes] = []
     total = 0
@@ -70,7 +81,7 @@ def read_file_snapshot(path: Path | str, maximum_bytes: int) -> FileSnapshot:
                 raise ValueError("unsafe file snapshot")
             current = os.open(source.anchor, directory_flags)
             descriptors.append(current)
-            directory_identities = [_identity(os.fstat(current))]
+            directory_identities = [_directory_identity(os.fstat(current))]
             parts = source.parts[1:]
             if not parts:
                 raise ValueError("unsafe file snapshot")
@@ -78,9 +89,7 @@ def read_file_snapshot(path: Path | str, maximum_bytes: int) -> FileSnapshot:
                 current = os.open(component, directory_flags, dir_fd=current)
                 descriptors.append(current)
                 metadata = os.fstat(current)
-                if not stat.S_ISDIR(metadata.st_mode):
-                    raise ValueError("unsafe file snapshot")
-                directory_identities.append(_identity(metadata))
+                directory_identities.append(_directory_identity(metadata))
             flags = (
                 os.O_RDONLY
                 | os.O_NONBLOCK
@@ -106,8 +115,21 @@ def read_file_snapshot(path: Path | str, maximum_bytes: int) -> FileSnapshot:
                 len(content) != before.st_size
                 or _identity(before) != _identity(after)
                 or _identity(before) != _identity(named_after)
-                or directory_identities != [_identity(os.fstat(fd)) for fd in descriptors[:-1]]
+                or directory_identities != [
+                    _directory_identity(os.fstat(fd)) for fd in descriptors[:-1]
+                ]
             ):
+                raise ValueError("unsafe file snapshot")
+            # A held descriptor survives rename. Verify each still-named component
+            # against its pinned parent, without following a replacement symlink.
+            named_directories = [
+                _directory_identity(os.stat(source.anchor, follow_symlinks=False))
+            ]
+            for parent_fd, component in zip(descriptors[:-2], parts[:-1]):
+                named_directories.append(_directory_identity(
+                    os.stat(component, dir_fd=parent_fd, follow_symlinks=False)
+                ))
+            if directory_identities != named_directories:
                 raise ValueError("unsafe file snapshot")
         else:
             components: list[Path] = []
@@ -118,7 +140,7 @@ def read_file_snapshot(path: Path | str, maximum_bytes: int) -> FileSnapshot:
                 if not stat.S_ISDIR(metadata.st_mode) or _is_reparse(metadata):
                     raise ValueError("unsafe file snapshot")
                 components.append(current_path)
-            parent_versions = [_identity(item.lstat()) for item in components]
+            parent_identities = [_directory_identity(item.lstat()) for item in components]
             flags = (
                 os.O_RDONLY
                 | getattr(os, "O_BINARY", 0)
@@ -142,7 +164,9 @@ def read_file_snapshot(path: Path | str, maximum_bytes: int) -> FileSnapshot:
                 len(content) != before.st_size
                 or _identity(before) != _identity(after)
                 or _identity(before) != _identity(named_after)
-                or parent_versions != [_identity(item.lstat()) for item in components]
+                or parent_identities != [
+                    _directory_identity(item.lstat()) for item in components
+                ]
             ):
                 raise ValueError("unsafe file snapshot")
         identity = _identity(before)
