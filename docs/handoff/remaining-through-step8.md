@@ -78,7 +78,27 @@ no-write missing-cache policy, and strict acquisition (get_predictor currently
 eagerly calls legacy load, which can write caches). Do not silently add a receipt
 around existing post-call public fields or claim that it verifies affinity.
 This audit read source only: no model/data assets, imports, tests or network.
-It authorizes no reverse implementation; RAG R3 remains the active code batch.
+It authorizes no reverse implementation; the then-active R3 batch is now committed
+as2d9fbdc. The R4 follow-up below supersedes that active-batch status.
+
+R4 current loaded-source eligibility is implemented locally with independent
+SOURCE SPEC and QUALITY approval. The actual tool now captures a per-call source
+snapshot before retrieval and checks it after formatting, before publishing.
+Closed, changed or reinitialized sources reject stale receipts without scientific
+recomputation or revoking a healthy newer generation. Loaded private index identity
+remains authoritative; disk replacement alone is not silently adopted. Malformed
+post-format proof is invalid_output; source failure is tool_unavailable, with no
+data/evidence leakage. This closes the reproduced old success-after-close bug.
+
+Worker and independent eleven-module regressions each1163 passed,0 failed,
+0 skipped,7 deprecation warnings (149.17s and158.86s). The initial behavioral RED,
+fixture corrections and independent SPEC classification finding/2-test RED remain
+recorded in the 2026-09-26 rag-current-eligibility plan; no failed run is erased.
+Five-file in-memory compile and git diff --check passed; original dirty checkout
+preserved. No external model, production asset lookup or deployment was used.
+This API does not authenticate forged receipts, nor wire dynamic-loop reuse,
+resume CAS or final evidence consumption. Those actual B integration paths,
+reverse-source ownership, B2/C and P8 real/UI acceptance remain pending.
 
 | Package | Required end state / evidence | Current state |
 |---|---|---|

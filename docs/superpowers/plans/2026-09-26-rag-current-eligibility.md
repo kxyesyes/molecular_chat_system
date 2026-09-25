@@ -128,3 +128,69 @@ Cicero independently approved the written design/plan on2026-09-26 at2d9fbdc,
 after two P2 amendments: isolated receipt-to-current mismatch coverage, and
 safe exception classification/catch ordering. No implementation or tests were
 performed during that review. Parent releases this five-file TDD scope only.
+
+## Implementation/review chronology
+
+Initial five-file worker freeze againste184f8f implemented Tasks1–3. All tests
+used the exact approved runner prefix and serial terminal processes; no skips
+or timeouts. These are retained intermediate results, not final approval:
+
+| Order | Scope | Passed | Failed | Seconds |
+|---|---|---:|---:|---:|
+| 1 | Initial close-after-producer node | 0 | 1 | 2.68 |
+| 2 | New module before production edits | 6 | 64 | 7.14 |
+| 3 | Initial node after implementation | 1 | 0 | 2.92 |
+| 4 | New module | 61 | 9 | 9.77 |
+| 5 | New module after fixture corrections | 70 | 0 | 7.74 |
+| 6 | Expanded lifecycle/Session module | 87 | 0 | 9.06 |
+| 7 | Eleven-module union above | 1155 | 0 | 143.08 |
+| 8 | Constructor-bypassed/custom snapshot tests RED | 1 | 1 | 2.86 |
+| 9 | Same snapshot tests GREEN | 2 | 0 | 2.68 |
+| 10 | New module | 93 | 0 | 15.33 |
+| 11 | Eleven-module union | 1161 | 0 | 157.24 |
+| 12 | Actual formatting mutation, direct and adapter RED | 0 | 2 | 3.01 |
+| 13 | Formatting mutation, error classification and cancellation GREEN | 23 | 0 | 3.80 |
+| 14 | Eleven-module union after SPEC correction | 1163 | 0 | 149.17 |
+| 15 | Independent QUALITY eleven-module union | 1163 | 0 | 158.86 |
+
+Initial behavioral RED was actual tool success=True after real strict producer
+returned its intact receipt and closed the source, with successful initialization
+and a baseline tool call before mutation. Expanded RED includes missing APIs and
+a serialization-fixture error; it does not replace the behavioral RED. Run4's
+nine failures used an incorrect ToolResult serialization method, corrected to
+existing to_legacy_dict(). Run8 found AttributeError on an uninitialized snapshot;
+it now produces the specified fixed safe ValueError. Failed commands exit1,
+passing commands exit0. New module has3 SWIG deprecation warnings; union has7
+SWIG/FastAPI deprecation warnings.
+
+Initial independent SOURCE SPEC found one P2 despite green tests: final tool
+postflight mapped every exception to unavailable. Formatting receives records
+aliased by the envelope, so actual post-format record mutation makes pure proof
+validation raise ValueError while source remains healthy. That must classify as
+invalid_output, with RAGIndexCompatibilityError caught first and unexpected
+ordinary failures still unavailable. Parent released actual-service/direct and
+adapter REDs plus minimal catch ordering correction, not a spec relaxation.
+Run12 reproduced this classification error through the actual service and both
+direct/adapter paths: tool_unavailable instead of invalid_output. The minimal
+ordered catches fixed it; run13 and run14 passed with no assertion relaxation.
+Independent SOURCE SPEC rereview APPROVED the final five-file freeze, with no
+remaining findings. Independent QUALITY also APPROVED with no actionable findings
+and repeated the exact eleven-module union in run15: exit0, zero skipped,
+7 warnings (3 SWIG and4 FastAPI on_event deprecations). Reviewer verified all five
+source/test hashes and the isolated-runner hash before and after its run; no edits.
+Both reviews cover offline current-source eligibility only. Tasks1–3 are complete;
+the earlier checkbox lists retain the implementation sequence, not pending gates.
+
+Parent compiled both the initial and corrected five-file freezes in memory with
+Python -I -S -B, no imports/bytecode; git diff --check passed. Corrected freeze:
+
+| File | SHA256 |
+|---|---|
+| src/rag/service.py | 2AD99CE60678231C55E563BEB8EAFF47FA6391ACE06FBE0959EB7B3C7503EDBD |
+| src/agent/tools/rag_search_tool.py | 4E96B0BC5BC9BD48CFC021DAA3D1F2907996B84B25ED96665FFCBD57664C37F0 |
+| tests/agent/test_rag_current_eligibility.py | 17F80F38237DA4B9E46DB5DAFA9AF2506417C89F371A52FBC19235F18F7953D2 |
+| tests/agent/test_rag_receipt_consumption.py | F23B3155C3C98AF4877291D32BA125EE57EF2EAAD05B4B12C0B24A6993693ADD |
+| tests/agent/test_rag_tool_contract.py | 6E6573520080CBC34DA4B4F49C3C9F105A40B7F2AC260C313981C523C54474C5 |
+
+No full repository or real-model
+acceptance is claimed by these offline runs.
