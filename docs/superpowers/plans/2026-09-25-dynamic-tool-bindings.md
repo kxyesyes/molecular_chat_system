@@ -888,3 +888,78 @@ reached terminal with no retry. Both gates now allow a local checkpoint of the
 three source/test files, this plan and the completion ledger. No full Agent suite,
 B CI, real tool/model or browser acceptance is claimed. This component does not
 close B1, B2, C or package8.
+
+## 16. R1 shared retrieval outcome TDD
+
+**Pin:** fd5031801efc6c53d0b38828c7d463a30f1bf7a5.
+**Specification:** companion spec§14. Parent chooses this sequence under delegated
+user authority; code release follows independent written review. Only
+src/rag/retrieval.py and new tests/test_rag_retrieval_outcome.py may change.
+
+- [ ] Build synthetic temporary CSV with rows CCO, CCN, CCC, a real FAISS IndexFlatIP
+  of dimension2 and two vectors mapped to source rows[0,2]. Use existing manifest
+  helpers and real current core, not copied mapping logic. No importorskip.
+- [ ] Add characterization test using counted controlled search returning valid
+  label1 plus invalid label-1; assert the old API returns only row2. Add mismatched
+  score/label lengths; show the old API silently returns the zipped subset.
+  This proves information loss, not successful strict behavior.
+- [ ] First desired RED node must assert callable outcome API in module body:
+
+```python
+def test_outcome_preserves_invalid_hit_diagnostics(synthetic_index, monkeypatch):
+    from src.rag import retrieval
+    assert callable(getattr(retrieval, 'search_molecular_index_outcome', None))
+    # synthetic_index supplies the same real manifest/mapping/query kwargs as
+    # the characterization; counted search returns scores[[1,1]], labels[[1,-1]].
+    result = retrieval.search_molecular_index_outcome(**synthetic_index)
+    assert result['diagnostics']['status'] == 'invalid_discard'
+    assert result['diagnostics']['accepted_count'] == 1
+    assert result['diagnostics']['discarded_count'] == 1
+    assert result['records'][0]['source_index'] == 2
+```
+
+- [ ] Run characterization nodes and first RED only through the reviewed launcher;
+  failure must be missing callable API, not unavailable FAISS/import/fixture.
+- [ ] Expand module tests: actual real-FAISS mapping and score parity; k>ntotal;
+  validated zero index/no search; wrong type/rank/row count/mismatched/empty/extra
+  result shapes and honest nullable counts; invalid and duplicate labels/source
+  rows; NaN/Infinity/complex/bool scores; mixed/all invalid counts/reason order.
+- [ ] Cover invalid query dimensions/zero/nonfinite; manifest schema/source/hash/
+  mapping/builder mismatch; invalid k; backend exception and projection failure.
+  None can return valid_empty. Test new outcome is detached after mutation of
+  nested dataframe cells, returned rows and source mapping, without claiming
+  coherent loaded generation. Verify each API does exactly one search per call.
+- [ ] Run full new module RED. Retain initial outcomes. Then factor current common
+  validation/search and row projection into local helpers; use them from both APIs.
+  Do not duplicate FAISS algorithm or change old list filtering/truncation/errors.
+  New strict shape/label/score/duplicate accounting follows spec§14, not heuristics.
+- [ ] New module GREEN, then unchanged old RAG regression modules below. Diagnose
+  a failing node before repeating; no relaxed timeouts/scientific assertions.
+- [ ] Freeze exact two-file hashes/diff and RED/GREEN results; no stage/commit/push.
+  Independent SPEC then QUALITY are required before the parent checkpoint.
+
+Commands from this worktree, one session at a time, using unchanged reviewed
+launcher F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/test_rag_retrieval_outcome.py::test_legacy_filters_invalid_hits tests/test_rag_retrieval_outcome.py::test_legacy_truncates_mismatched_rows tests/test_rag_retrieval_outcome.py::test_outcome_preserves_invalid_hit_diagnostics
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/test_rag_retrieval_outcome.py
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/test_rag_retrieval_outcome.py tests/test_rag_index_manifest.py tests/test_rag_service_boundary.py tests/agent/test_rag_tool_contract.py
+```
+
+Runner's three tracked JSONL fixtures and existing isolated synthetic app/service
+fixtures are allowed. No host config/keys/assets, external model/network, default
+entry changes or ad-hoc app imports. This release does not cover strict service
+receipt consumption or stable source publication. R2 must still reproduce and
+close CSV/embedding generation races, then propagate same-call receipt through
+the real tool/Session without upgrading legacy unverified lists to success.
+
+### 16.1 Written review and R1 release
+
+Independent written SPEC/PLAN review approved at fd50318 with no P1/P2. Parent
+adopts the selected two-layer approach and releases exactly R1's two-file
+implementation after this documentation checkpoint. No additional user decision
+is needed under delegated recommended choices. Use a fresh TDD worker and the
+unchanged reviewed offline runner; preserve all failures and stop at a frozen
+two-file result for independent SPEC then QUALITY. No R2 source ownership or
+service/tool wiring is authorized by this narrower code release.

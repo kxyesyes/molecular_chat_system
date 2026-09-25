@@ -720,3 +720,92 @@ observation seals, role producer/schema, source receipts, whole-candidate closur
 and immutable v2 obligations. Target-required generation cannot be established by
 optional target_ref alone; reverse still needs exactly one subject; role IDs
 are untrusted until resolved. These are mandatory later tests, not passed here.
+
+## 14. RAG retrieval outcome core (R1)
+
+### 14.1 Root cause and selected sequencing
+
+At fd5031801efc6c53d0b38828c7d463a30f1bf7a5, retrieval.py uses zip(scores[0],
+labels[0]) then silently skips invalid labels/nonfinite scores. The list API
+erases truncation/discard facts; the tool treats any list, including empty, as
+success. Separate source audit also found generation switching and CSV/load
+identity gaps (plan§14.2), which cannot be repaired by attaching metadata later.
+
+Keep the end state of §6/plan§4b: actual stable loaded generation and same-call
+receipt through service/tool/Session. R1 first adds truthful core diagnostics;
+R2 must bind loaded source ownership and embedding identity before the strict
+service/tool path uses them. This is preferable to duplicating the FAISS search
+or presenting a manifest alone as loaded-data proof. The alternative of changing
+legacy lists to fail on every discarded hit would break an explicit old contract
+without resolving the missing source identity.
+
+### 14.2 API and semantics
+
+Add `search_molecular_index_outcome` in existing retrieval.py with exactly the
+same keyword-only parameters as search_molecular_index. Both APIs share manifest,
+source path, k and embedding validation, normalization and one index.search.
+No rebuild, second retrieval, global last_receipt, new store or source asset read
+beyond current manifest validation. Existing search_molecular_index list behavior
+and field values remain unchanged, including legacy filtering/truncation.
+
+New API returns a plain detached dictionary with exactly `records` and
+`diagnostics`. It is NOT a source receipt. Do not add generation/model-weight
+claims or mark loaded-source validation complete. The new diagnostics has:
+
+| Field | Exact meaning |
+|---|---|
+| version | literal '1' |
+| status | valid_hits, valid_empty or invalid_discard |
+| requested_k / effective_k | actual validated positive request; min(k, index.ntotal) |
+| index_search_executed | actual search dispatched; false only for validated zero index |
+| score_count / label_count | first-row length only if actual array shape is (1,n); otherwise null |
+| accepted_count | len(records), never expected k |
+| discarded_count | actual skipped pair count for valid (1,effective_k) shapes; null when shape prevents trustworthy pairing |
+| reason_codes | ordered unique closed codes below, empty on valid results |
+
+Manifest/path/k/query-vector validation errors and backend/projection exceptions
+continue to propagate. No exception is converted into valid_empty. A zero index
+is validated first (including query embedding), then returns records=[], zero
+counts, effective_k=0, index_search_executed=false, status=valid_empty.
+
+Strict search output must contain two NumPy ndarrays of exactly shape
+(1,effective_k). Other shapes/types, mismatched/truncated rows or zero rows when
+effective_k>0 return records=[], status=invalid_discard,
+discarded_count=null, reason_codes=['invalid_result_shape']; observed counts
+follow the table. Do not zip malformed shapes or invent missing counts.
+
+For valid shapes, visit pairs once. Label must be Integral but not bool and be
+in manifest.row_mapping bounds. Score must be a finite Real number, not bool;
+NumPy real/integer scalar types remain valid. Duplicate accepted vector labels
+or projected source rows are invalid for this strict result. On an invalid pair,
+increment discarded_count exactly once and add the first applicable reason in
+this priority: invalid_label, invalid_score, duplicate_hit. Do not project it.
+Successful projection uses the same helper/values/provenance as the old API.
+Mixed good/bad results retain the real accepted rows for diagnosis, but status
+is invalid_discard; all-bad is not valid_empty. Code order is first occurrence.
+Any return with no anomaly and positive effective_k is valid_hits.
+
+Returned nested dictionaries/lists must not alias caller dataframe object cells
+or manifest mutable state; detach the new outcome's records, not the legacy list.
+This protects return values from later source mutation, but is explicitly not
+proof that a mutable source was coherent during retrieval. R2 must solve that.
+
+### 14.3 Scope and evidence
+
+Code allowlist: only src/rag/retrieval.py and new
+tests/test_rag_retrieval_outcome.py. Use real FAISS plus synthetic temporary CSV,
+manifest and index; no real service/model/host assets. New module must import
+FAISS normally so missing dependency fails visibly, not silently importorskip.
+Controlled malformed index.search results are labeled doubles, not scientific
+results. No change to service.py, index.py, tool, typed adapter, old tests or
+runtime at R1; downstream must not consume this as a verified source receipt.
+
+Before implementation, demonstrate the anomaly on the actual existing list
+API with a synthetic index (valid row + invalid label, and truncated lengths),
+recording that anomalies produce a shortened list. Then RED asserts missing new
+outcome API rather than an import/fixture failure. Green must prove actual mapped
+rows with nonidentity mapping, shape/count correctness, one dispatch, valid empty
+without dispatch, query/manifest/backend failures not successful no-hit, detached
+nested values, and unchanged old API behavior. R2 generation-race reproduction,
+source snapshots, service/tool receipt propagation and actual-loop integration
+remain required and unimplemented by R1.
