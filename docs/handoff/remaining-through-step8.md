@@ -25,6 +25,16 @@ RED failures, hashes and scope are in dynamic-tool-bindings plan§13. B1 executi
 same-invocation source receipts, B8/root accounting, B2 generation/ranking,
 C integration and P8 real/UI acceptance remain incomplete; no production switch.
 
+The next reference-argument component also passed independent SPEC/QUALITY:
+new closed frozen argument contracts, with existing B constants re-exported from
+the Web builder. TDD64 failures for missing implementation became64 passes;
+joint315 passed with7 warnings, independently repeated315 passed/7 warnings.
+Plan§§14–15 retain exact commands, initial failures and hashes. The parser does
+not resolve evidence or grant B execution; v1 requirements remain unchanged.
+Source-only RAG audit§14.2 found loaded-generation and discarded-hit provenance
+gaps requiring reproduction and same-invocation receipt work. They are pending,
+not fixed by a syntactically valid reference or claimed as live results.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |

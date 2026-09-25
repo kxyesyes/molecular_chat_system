@@ -6,6 +6,9 @@ No audited readiness publisher exists here; all current readiness is unknown.
 """
 from types import MappingProxyType
 
+from src.agent.contracts.decision_bindings import (
+    B1_PROFILE_REVISION, B2_PROFILE_REVISION, TOOL_FEATURE_PAIRS, B1_TOOLS, B2_TOOLS,
+)
 from src.agent.contracts.ordinary_admission import (
     CAPABILITY_ERROR, CapabilityFeature, CapabilitySnapshot, ProviderDescriptor,
     bounded_view,
@@ -29,24 +32,9 @@ PRODUCT_CATALOG = (
     ("rag_retrieval", "RAG requires B1 actual retrieval and a source receipt."),
     ("molecular_docking", "Docking requires C structured inputs, consent and physical execution."),
 )
-B1_PROFILE_REVISION = "ordinary-semantic-b1-v1"
-B2_PROFILE_REVISION = "ordinary-semantic-b2-v1"
 B_CATALOG_REVISION = "ordinary-product-b-v1"
-TOOL_FEATURE_PAIRS = (
-    ("property_calculator", "property_calculator"),
-    ("drug_likeness_assessment", "drug_likeness_assessment"),
-    ("activity_predictor", "activity_predictor"),
-    ("target_database_search", "target_database_search"),
-    ("admet_predictor", "admet_prediction"),
-    ("reverse_target_predictor", "reverse_target"),
-    ("rag_search", "rag_retrieval"),
-    ("llm_molecular_generator", "molecule_generation"),
-    ("candidate_ranker", "molecule_ranking"),
-)
 _TOOL_TO_FEATURE = MappingProxyType(dict(TOOL_FEATURE_PAIRS))
 _FEATURE_TO_TOOL = MappingProxyType({feature: tool for tool, feature in TOOL_FEATURE_PAIRS})
-B1_TOOLS = frozenset(tool for tool, _ in TOOL_FEATURE_PAIRS[:7])
-B2_TOOLS = frozenset(_TOOL_TO_FEATURE)
 B_PRODUCT_CATALOG = tuple(
     (name, "Separate local gmm molecular generation requires approved B2 controls; readiness is unknown."
      if name == "molecule_generation" else

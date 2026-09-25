@@ -818,3 +818,73 @@ and releases exactly the three-file slice after this two-document checkpoint.
 Use a fresh worker, the unchanged reviewed launcher and serialized test slot;
 freeze for independent SPEC then QUALITY before source commit. No broader B
 execution, model activation or publication is released by this checkpoint.
+
+### 14.2 Read-only RAG source-ownership audit for the next integration
+
+A separate source audit at78675e4 traced adapter → RAGSearchTool.execute →
+service.search_similar_molecules_sync → embedding → retrieval.search_molecular_index.
+No assets were opened and no runtime reproduction was performed. It identifies
+these concrete proof gaps, not verified fixes or passing scientific evidence:
+
+- service.initialize parses CSV before later manifest path hashing; dataframe
+  rows can therefore differ from the later path identity despite equal count.
+  Index creation similarly awaits embeddings before hashing the final CSV path.
+  A same-byte private load snapshot and coherent generation publication are
+  required; a receipt assembled afterward cannot establish loaded identity.
+- Retrieval rereads service fields after embedding; index/dataframe/manifest
+  publication and the mutable row_mapping list lack a coherent generation owner.
+  Existing index snapshot tests bind index hash/read only, not the dataframe,
+  row mapping and embedding request. Private ownership plus captured invocation
+  identity and change checks are needed; object-id equality alone is insufficient.
+- retrieval.py zips scores/labels and drops invalid hits; old list projection
+  loses malformed/discard facts. rag_search_tool.py treats the resulting list as
+  successful and reads model identity afterward. Strict same-call receipts must
+  distinguish valid_hits, validated zero-index valid_empty, invalid_discard and
+  unavailable without changing legacy list semantics or reexecuting retrieval.
+- Endpoint/model-name capture proves the local embedding request configuration,
+  not immutable remote model weights. Do not relabel configured names as weight
+  identity or backfill old index provenance. Any stronger identity interface or
+  wider load/index change must have a narrow reviewed amendment before release.
+
+Next source tests must reproduce CSV replacement after parse, equal-length
+dataframe replacement/in-place mutation, row_mapping mutation, generation change
+during embedding, post-return mutation, truncated responses, and all/mixed
+invalid hits. Existing manifest test importorskip(faiss) must not turn missing
+core validation into a passing truth claim. Review evidence is source-only;
+runtime reproductions and fixes remain pending outside the three-file contract.
+
+## 15. Reference-argument implementation evidence
+
+At base78675e4, the implementer added the128-line closed contract and425-line
+test module, and moved only B constants out of the Web builder (3 added/15 removed
+lines). Existing tests/runtime/v1 parser are unchanged. Syntax handles are not
+scientific inputs or proof; no B runtime calls this parser yet. Parent's §14.2
+source audit is separate from the worker's three-file changes.
+
+Commands are the exact isolated node/module/five-module commands in §14. Every
+session reached terminal and no timeout or prior assertion was modified:
+
+| Stage | Result | Exit | Duration |
+|---|---|---|---|
+| First node RED | 1 failed, missing-module assertion | 1 | 0.88s |
+| Whole new module RED | 64 failed, same missing-module assertion | 1 | 2.70s |
+| Whole new module GREEN | 64 passed, no warnings | 0 | 1.24s |
+| Five-module joint regression | 315 passed, 7 warnings | 0 | 21.80s |
+
+Joint warnings are3 SWIG and4 FastAPI deprecations. Independent SOURCE/SPEC
+approved with no P1/P2 and verified the frozen SHA256 values before/after:
+
+- contracts/decision_bindings.py:
+  `3D9ECFB5BDB3A18D22E9DBFDA0D3EF7C15B7A82F22FAF6A60F3E3088ABD6B77A`.
+- web/ordinary_capabilities.py:
+  `949599399B54D716DD910337FF91A2947D23CB621BB0BAFFE5B9388632F9B05E`.
+- tests/agent/test_decision_binding_arguments.py:
+  `07FD2E0129C465065D83E8F6D9D2C89AD8A88082B0FB7B8FFCC88FF87DE74B40`.
+
+Parent source review and diff-check agree. Independent QUALITY approved with no
+P1/P2 and ran the same five-module command exactly once:315 passed,7 warnings,
+22.53s, exit0. Source/test/runner hashes remained unchanged; its session56642
+reached terminal with no retry. Both gates now allow a local checkpoint of the
+three source/test files, this plan and the completion ledger. No full Agent suite,
+B CI, real tool/model or browser acceptance is claimed. This component does not
+close B1, B2, C or package8.
