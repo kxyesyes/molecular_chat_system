@@ -179,3 +179,79 @@ status matrix, security normalization, fixture ownership) and two Session test
 clarifications (empty-index execution counts, positive integrity/persistence
 controls) were resolved in writing before code release. This is design approval,
 not an implementation or live acceptance result.
+
+## Implementation evidence (2026-09-26)
+
+Worker freeze against836c59a implements all four tasks above. Independent source
+SPEC and QUALITY reviews approved this eight-file freeze. Independent QUALITY
+reran the complete ten-module union below; all1,068 tests passed,0 failed,0
+skipped,7 deprecation warnings in133.91s, ORDINARY_PYTEST_EXIT=0/process exit0.
+No Session runtime or generic receipt-free ResultTool contract was changed.
+The actual empty vector-index result preserves proof; malformed retrieval is
+unsuccessful partial; receipt changes across normalization fail invalid_output.
+The actual temporary Session/FAISS tests check terminal events and SQLite readback,
+intact observation seals before mutation, and independent receipt/record attacks.
+No real model or production source was used.
+
+All worker commands used the exact approved prefix shown above; target sets:
+
+- A: the two exact actual-tool RED nodes in the first verification command.
+- B: tests/agent/test_rag_receipt_consumption.py.
+- C: B plus tests/test_rag_owned_generation.py and tests/test_rag_retrieval_outcome.py.
+- D: B plus tests/test_rag_index_manifest.py, tests/agent/test_rag_tool_contract.py,
+  tests/agent/test_registration_consistency.py.
+- E: the complete seven-module command above.
+- F: tests/agent/test_rag_receipt_consumption.py::test_direct_tool_cannot_treat_invalid_k_as_unspecified.
+- G: the three dynamic Session/decision modules in the third command above.
+
+| Order | Targets | Passed | Failed | Seconds | Exit |
+|---|---|---:|---:|---:|---:|
+| 1 | A | 0 | 2 | 3.56 | 1 |
+| 2 | B | 0 | 143 | 21.21 | 1 |
+| 3 | C | 477 | 3 | 37.62 | 1 |
+| 4 | D | 535 | 19 | 35.70 | 1 |
+| 5 | E | 902 | 0 | 75.56 | 0 |
+| 6 | F | 5 | 1 | 2.39 | 1 |
+| 7 | E | 912 | 1 | 70.99 | 1 |
+| 8 | E | 914 | 0 | 74.89 | 0 |
+| 9 | G | 154 | 0 | 76.72 | 0 |
+| 10 | A | 2 | 0 | 2.83 | 0 |
+
+Initial actual-tool RED was the old list-only success=true and missing actual
+empty-index retrieval_receipt. Expanded RED included the missing pure module;
+it is not substituted for the two behavioral REDs. First implementation exposed
+three fixture issues (Pydantic base construction and two non-triggering redaction
+inputs). Compatibility migration retained legacy boundary checks and fixed an
+accidental interception of caller-validator exceptions. Self-review found
+explicit k=None could bypass optional-k validation; its new RED is retained.
+The last intermediate failure was nested fixture clients passing transport
+twice, fixed using HTTP transport-level substitution rather than weakened checks.
+Final E has7 SWIG/FastAPI deprecation warnings, G none, no skips. All sessions
+reached terminal before the next command (no overlapping heavy tests).
+
+Parent git diff --check passed. Parent syntax compiled all8 changed Python files
+in memory with Python -I -S -B and compile(bytes,path,'exec'), no imports/bytecode;
+this is not a full repository compileall or real-model acceptance claim.
+
+| Frozen file | SHA256 |
+|---|---|
+| src/rag/receipt.py | B139DF03F10DB742F2F67C13EF95C099B9FCD9A05C7B6DA8AF892A60F7EAA252 |
+| src/rag/service.py | 3B63ADE67AEF35892603725597A6769E12FB55FDB7C7452D251E78B0DD6904E3 |
+| src/agent/tools/rag_search_tool.py | 9FA02424E8CDCC9E49EF57AAFB292DDB4A4B3808CE1A0690A4C60283ADD74FFE |
+| src/agent/tooling/rag_contract.py | 59000A7ADFAB3CA013A0B76599D97CA647F7DD11F7A28B0B7775FD712121C14C |
+| tests/agent/test_rag_receipt_consumption.py | 3F1CF53DE7D6A3B8DEEE068BF7ABCA587C2B03599B273036865BF0C9A0B4D7EF |
+| tests/test_rag_index_manifest.py | 104F354B0A782AE0568BF71C624694951AAF217C821477B7543A46E56CD01817 |
+| tests/agent/test_registration_consistency.py | 8CCE0A4A24017EA6A59C4B8AF60B02A3F9C233E26A6725D318EABC88D3C7060F |
+| tests/agent/test_rag_tool_contract.py | F877984C1AEADA20EAD240124B1F927D763EFE82542172810B10CFD8FEE8F174 |
+
+Independent verification command (same approved worktree/runner):
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_rag_receipt_consumption.py tests/test_rag_owned_generation.py tests/test_rag_retrieval_outcome.py tests/test_rag_index_manifest.py tests/test_rag_service_boundary.py tests/agent/test_rag_tool_contract.py tests/agent/test_registration_consistency.py tests/agent/test_dynamic_run_session.py tests/agent/test_decision_inputs.py tests/agent/test_decision_spec_findings.py
+```
+
+Quality reviewer confirmed hashes before/after, no source edits or additional
+reproduction tests. All test processes terminal. This local checkpoint closes
+R3 only: actual-source current eligibility, B admission/dispatch/reuse, reverse
+producer ownership, B2/C and P8 remain pending. No push/merge/deployment or real
+scientific-model success is claimed.

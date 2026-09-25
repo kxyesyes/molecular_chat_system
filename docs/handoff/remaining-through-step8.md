@@ -59,6 +59,27 @@ This is NOT strict Agent RAG integration: tool/adapter receipt consumption,
 current-source eligibility, Session ledger/seal binding, B1/B2 execution, C and
 P8 real/UI acceptance remain pending. No actual embedding model was invoked.
 
+R3 written spec/plan is independently approved and committed836c59a; scoped
+tool/adapter implementation now passed independent SPEC and QUALITY. Worker
+regressions914+154 passed; independent ten-module union1,068 passed,0 failed,
+0 skipped,7 deprecation warnings in133.91s. Actual initialized temporary FAISS
+receipts survive the existing Session ledger/seal/events/SQLite and reject later
+mutation. Two original behavioral REDs and intermediate failures remain in the
+R3 plan. This is offline integration, not B admission/reuse or P8 live acceptance.
+Eight-file in-memory syntax check passed; original dirty checkout preserved.
+A parallel source-only
+reverse-target audit at the same baseline found a separate pending source-proof
+boundary: load publishes mutable TSV/fingerprint/popcount fields, cached popcounts
+are accepted on row count alone, effective weights are resolved during scoring,
+and the existing writer does not supply a digest-bound atomic row-alignment
+manifest. Equal counts/hashes alone cannot prove TSV-to-fingerprint alignment.
+Next reverse producer slice must pin stable ownership and ordered alignment,
+no-write missing-cache policy, and strict acquisition (get_predictor currently
+eagerly calls legacy load, which can write caches). Do not silently add a receipt
+around existing post-call public fields or claim that it verifies affinity.
+This audit read source only: no model/data assets, imports, tests or network.
+It authorizes no reverse implementation; RAG R3 remains the active code batch.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |
