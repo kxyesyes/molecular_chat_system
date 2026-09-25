@@ -35,6 +35,16 @@ Source-only RAG audit§14.2 found loaded-generation and discarded-hit provenance
 gaps requiring reproduction and same-invocation receipt work. They are pending,
 not fixed by a syntactically valid reference or claimed as live results.
 
+R1 retrieval-core diagnostics now pass independent SPEC and QUALITY. The old
+list API's silent invalid-hit filtering and zip truncation were characterized;
+the new detached outcome distinguishes those anomalies from validated empty
+results while preserving legacy behavior. Worker four-module regression:
+573 passed/7 warnings/17.73s; independent repeat:573 passed/7 warnings/18.62s.
+Exact RED/GREEN commands and unchanged source hashes are in dynamic bindings
+plan§§16–17. This is only core accounting: loaded-source generation ownership,
+strict service/tool receipt integration and actual B execution remain pending.
+No external model, production assets or deployment was used.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |

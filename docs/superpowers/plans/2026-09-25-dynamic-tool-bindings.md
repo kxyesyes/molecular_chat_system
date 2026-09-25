@@ -963,3 +963,77 @@ is needed under delegated recommended choices. Use a fresh TDD worker and the
 unchanged reviewed offline runner; preserve all failures and stop at a frozen
 two-file result for independent SPEC then QUALITY. No R2 source ownership or
 service/tool wiring is authorized by this narrower code release.
+
+### 16.2 R2 source-only feasibility (not implementation release)
+
+Independent source inspection at44e9723 confirms a service-local solution can
+retain index.validate_manifest unchanged: parse and hash the same private CSV
+snapshot, then additionally require that loaded-source digest equals manifest
+source digest. Existing path hashing remains an extra freshness gate rather
+than proof of dataframe identity. Create/load candidates must use the captured
+data and embedding request identity, with atomic private-generation publication;
+public mutable dataframe/index/row-mapping aliases need separate copies.
+
+Capture generation/epoch and actual model/endpoint before embedding, recheck
+after embedding and before receipt return, using short thread-safe sections
+instead of holding a thread lock across await. Invalidating load/close/config
+changes must prevent stale operations from publishing. Normal stable sources
+must still succeed; rejecting every RAG action is not completion. Configuration
+identity must not be described as remote weight identity or backfilled into old
+manifest history.
+
+For minimal cleanup scope, the recommended next design uses operation-owned
+async clients for builds/queries and keeps sync context-managed clients; explicit
+injected clients are borrowed. This avoids creating a persistent-client retire
+manager or importing Web lifecycle helpers. Preserving persistent clients would
+instead require a narrow app.py shutdown amendment because the old synchronous
+assembly branch lacks that cleanup. Neither option is implemented/released yet.
+The final R2 design must pin cancellation, close/reload races, owned/borrowed
+cleanup and actual load/create positive tests before code changes. The audit
+performed no import, tests, network or runtime asset reads.
+
+## 17. R1 implementation evidence
+
+At base44e9723, the worker changed only retrieval.py (+108/-23) and new
+tests/test_rag_retrieval_outcome.py (548 lines). A shared validation/search and
+projection core retains old list semantics; the new detached outcome reports
+malformed shapes, per-pair discards and duplicate hits without falsely declaring
+valid_empty. No service/tool/source-ownership change is implemented in R1.
+
+Exact commands are in §16, all through the unchanged approved launcher. Actual
+FAISS imports succeeded; all assets were synthetic temporary test inputs.
+Controlled malformed search outputs are non-scientific doubles.
+
+| Stage | Passed | Failed | Warnings | Duration | Exit |
+|---|---:|---:|---:|---:|---:|
+| Existing-list characterization and first RED | 2 | 1 | 3 | 0.94s | 1 |
+| New module RED | 61 | 140 | 3 | 10.71s | 1 |
+| New module GREEN | 201 | 0 | 3 | 6.73s | 0 |
+| New module plus three existing RAG modules | 573 | 0 | 7 | 17.73s | 0 |
+
+RED failures were assertions for the missing new API, not fixture/import errors;
+passing characterization cases retain the old information-loss evidence.
+Warnings are SWIG/FastAPI deprecations, not suppressed. All worker sessions ended;
+no test timeout or old assertion was changed. Frozen SHA256:
+
+- retrieval.py: `31CC044A078E8A5CB0703958045844AE6724C5321678380F1F44830EF5C48928`.
+- test_rag_retrieval_outcome.py:
+  `8784D3EF66A2CF02CD97C62BE6348E8BB41168F33D30E37E77B5F9B37A1C10D7`.
+
+Independent SOURCE/SPEC (Schrodinger) and QUALITY (Descartes) both approve,
+with no actionable findings. QUALITY independently repeated the four-module
+command above: **573 passed, 7 warnings, 18.62s, exit 0**. Both frozen source/test
+hashes and the ignored launcher hash remained identical before and after review.
+No old test, scientific assertion or timeout was relaxed. The seven warnings
+are three SWIG and four FastAPI on_event deprecations.
+
+Parent separately rechecked PR81 through GitHub: closed/merged, exact reviewed
+head684e4a117fbf94859a539c182f611afd7ee825fa, squash
+a1258d978450a70a55e71156060b4d8d88a8db29. Local Git confirms the same tree
+4619c55bb7ea5338979c1dce644f2ba764c0dbeb for both. No repeated merge, deployment
+or model activation was performed.
+
+Core diagnostics are not stable loaded source proof and do not mean the Agent
+tool's no-hit handling has been fixed.
+R2 load/embedding races and service/tool receipts, then Session/requirements/B8
+integration remain mandatory. No full Agent/CI/live acceptance is claimed here.
