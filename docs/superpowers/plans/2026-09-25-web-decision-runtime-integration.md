@@ -339,3 +339,65 @@ Earlier RED/GREEN groups used the same runner with the exact test-file/node name
 | `tests/agent/test_decision_loop.py` | `6f1e7ee8f6c6943dbf6509e9861cc39f0fee3d3a` |
 
 Parent authorizes explicit staging of exactly these seven files plus this plan for one conventional local commit, after unchanged-blob, diff and filename-only secret checks. Final commit SHA/status/hash manifest is reported outside this document. Stop after that commit for parent confirmation: history/Web remain unstarted; no push/PR, spec/ledger edit, or completion claim for A2/P7.
+
+## 12. Pure history execution and independent review closure
+
+Section 11 remains an unchanged historical record. After parent released reviewed ownership commit `78d0a32e2bbb752c8af71eb33aedbc1546e6b4d2`, this same branch implemented only Task 6's **pure history subtask**: the four source/test files below. All other ownership source/tests retain their reviewed blobs; only the shared loop has the approved history delta. This plan is the sole newly authorized evidence edit; no spec/ledger changes.
+
+Completed: closed detached `{user, assistant}` string pairs, 20-pair/16-KiB serialized bounds, explicit retention eligibility and omission markers, oldest-whole-pair eviction, exact system/history/current-query prefix, scientific requests without remembered text, and revision **6** with exact frozen-prefix validation before CAS and decision-suffix-only counting/replay. Pair validation checks exact dict type and length before key-set construction, then plain key/value types before object hooks. Original context/requirements remain unchanged; revision-5 or substituted-prefix snapshots reject without dispatch/CAS. Both wire modes cover two clarification cycles and capture the first actual adapter/loop answer for the already-admitted concept pair. Provider transport is in-memory: this is neither live inference nor actual socket retention/isolation evidence.
+
+Twenty bounded pairs and two clarification cycles pass. With further clarification, the unchanged transport input limit accepts 64 messages (65 on the wire after its own protocol-system prefix); the next loop request with 66 input messages fails explicitly before provider dispatch. No history/current-query truncation, transport guard increase, or promise that all 16 model rounds simultaneously fit other budgets. Scientific missing-input behavior remains clarification with zero calculation; no fixed scientific test response is real missing-input evidence.
+
+### Worker RED/GREEN and failure history (separate runs, not summed)
+
+| Run | Actual evidence |
+|---|---|
+| Initial history tests | **16 failed / 4.54s**. Included missing history transmission and invalid-memory acceptance. Two revision-5 tests also had fixture interference: fake CAS returned true without real status transition, causing `RunClaimConflict`. The spy was changed to record and fail immediately if invalid history reached CAS; assertions were not weakened. |
+| Expanded helper/revision group | **12 failed, 2 errors / 2.71s**. Oversize parameter auto-ID contained 6,000 Chinese characters; setup/teardown errors and output truncation prevented confirmation of the complete exception cause. Only explicit short IDs `oversize`/`sensitive` replaced auto-IDs. |
+| Clean intended RED | **27 failed / 4.53s**; behavioral failures and explicit missing-helper assertions, without the above fixture errors. |
+| Initial implementation GREEN | **27 passed / 3.34s**, exit 0, no warnings/skips. |
+| Parent source-check regression RED | `test_wide_pair_rejected_before_materializing_keys` and `test_pair_keys_rejected_before_equality_hooks`: **2 failed / 1.62s**, proving premature key-set materialization and non-plain key equality invocation. Minimal shape/type guards corrected both. |
+| Final history module | **68 passed / 11.17s**, exit 0, no warnings/skips. |
+| Final 13-file focused run | **832 passed / 72.63s**, exit 0, no warnings/skips; session `39129` completed. |
+
+The first in-memory compile command passed the helper, then failed on the loop with `UnicodeEncodeError: 'utf-8' codec can't encode character '\udc80' in position 12185: surrogates not allowed`. This was the PowerShell-to-Python stdin encoding pipeline, not a source change: explicit Python `-X utf8` made all four `compile(source, filename, 'exec')` checks pass, without bytecode. Final tracked/new-file whitespace checks passed. Earlier read-only path lookups also hit a nonexistent `test_decision_transport.py` and a PowerShell literal wildcard path; these were corrected to existing explicit paths, not counted as test executions. No failures were hidden by a full-suite rerun.
+
+### Independent SPEC and QUALITY (parent-reported, same four blobs)
+
+- **Galileo SPEC APPROVE:** five Task-6 files **511 passed / 61.78s**; independently repeated 13-file focus **832 passed / 73.36s**. Initial scratch review **74 passed, 2 failed / 13.49s** used two fixed-CCO response fixtures that did not prove missing-input behavior; the failed file remains. Diagnostic tests plus real RDKit missing-input controls, together with the 68 history tests, were **74 passed / 12.66s**, confirming zero calculation without scientific input. No production fix was required for those fixture findings.
+- **Peirce QUALITY APPROVE:** five files **511 passed / 62.37s**, plus verified scratch/SPEC diagnostic **18 passed / 6.50s**, no warnings/skips; four-file compile and diff checks passed. Initial scratch **2 failed, 14 passed / 6.03s** omitted the existing temporary system feedback on the protocol-correction round. The original failing file remains; corrected exact-layout tests and empty-history controls passed, with no production modification.
+- Scratch evidence paths: `scratch/spec_p7a2_history_review.py`, `scratch/spec_p7a2_history_diagnostic.py`, `scratch/quality_p7a2_history_review.py`, `scratch/quality_p7a2_history_verified.py`; associated `scratch/quality_p7a2_history_runner.py` is also ignored. These review artifacts are not staged, rewritten, or presented as worker reruns. The distinct initial failures and later diagnostic results above remain part of the record.
+
+### Exact worker command and reviewed snapshot
+
+Reuse the full approved `$runner` from the RAG extraction plan as described in section 11, changing only its repository directory to this worktree. It uses the pre-import OS-variable whitelist, temporary cwd/config/DB/cache, zero live flags, normal conftest, and only the three tracked `real_agent_cases.jsonl`, `golden_scientific_cases.jsonl`, `diverse_scientific_cases.jsonl` copies with SHA-256 equality checks. Test arguments are paths/node IDs only; the runner itself supplies `-q -p no:cacheprovider --tb=short -rs`. No extra assets, host secrets/configuration, installs, live services, or full suite were used.
+
+```powershell
+$historyFocus = @(
+    'tests/agent/test_worker_ownership.py',
+    'tests/agent/test_decision_loop.py',
+    'tests/agent/test_decision_adapter_retry.py',
+    'tests/agent/test_tool_adapters.py',
+    'tests/agent/test_tool_adapter_compat.py',
+    'tests/agent/test_workflow_orchestrator.py',
+    'tests/agent/test_workflow_run_session.py',
+    'tests/agent/test_decision_history.py',
+    'tests/agent/test_decision_continuation.py',
+    'tests/agent/test_decision_continuation_store.py',
+    'tests/agent/test_decision_protocol_recovery.py',
+    'tests/agent/test_decision_transport_boundaries.py',
+    'tests/agent/test_decision_migration_boundaries.py'
+)
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" @historyFocus
+```
+
+History-only runs used the same invocation with `tests/agent/test_decision_history.py`; the two parent-check RED nodes used that filename followed by `::test_wide_pair_rejected_before_materializing_keys` and `::test_pair_keys_rejected_before_equality_hooks` respectively. No tests are rerun merely for this evidence/local-commit step.
+
+| Approved path | Frozen Git blob |
+|---|---|
+| `src/agent/harness/decision_history.py` | `ed331ee6d23859ca7dea08ae1dff268d30f7c183` |
+| `tests/agent/test_decision_history.py` | `550dced7bbe1e1da24ced5abbc52ce68ab0dea6f` |
+| `src/agent/harness/decision_loop.py` | `e7ebe3d5d9a609318d7047982daa0348e9796049` |
+| `src/agent/harness/decision_continuation.py` | `8807180b330fb19ff4f8f8d19c9a7afcb3880e73` |
+
+Parent authorizes exactly these four unchanged reviewed files plus this plan for a conventional **local** commit after diff, scope and filename-only secret checks. Commit/tree/status and all five blobs are reported outside this document. Pure history is completed, **not Web integration, A2 or P7 completion**. Batch 2 is next under the released plan and needs no renewed start confirmation; this evidence/commit step does not implement it. No push/PR/full/live/default activation, and no changes to the original checkout.

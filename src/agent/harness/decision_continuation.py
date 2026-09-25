@@ -20,9 +20,10 @@ from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.redaction import contains_secret_material
 from .decision_policy import DecisionBoundaryError
 from .decision_bounds import validate_json, context_value, configuration_generation
+from .decision_history import history_prefix
 
 
-PROTOCOL_REVISION = 5
+PROTOCOL_REVISION = 6
 
 
 def configuration_digest(loop, context, request_kind, allowed, required, specs, adapters, *, requirements=None):
@@ -108,7 +109,7 @@ def decode_results(snapshot, session, specs):
 
 
 def claim_continuation(loop, session, fingerprint, continuation_id, clarified_query, *,
-                       system_message=None, requirements=None, required_tools=()):
+                       system_message=None, requirements=None, required_tools=(), request_kind='scientific'):
     """Validate without writes, then atomically consume the waiting nonce once."""
     context = session.context
     try:
@@ -160,7 +161,7 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
             raise ValueError('invalid settled attempt count')
         validate_history(snapshot, loop, results, specs, session=session,
                          system_message=system_message, requirements=requirements,
-                         required_tools=required_tools)
+                         required_tools=required_tools, request_kind=request_kind)
         from .decision_inputs import seal_observation, require_current_reference
         for result in results:
             seal_observation(result, session)
@@ -176,7 +177,7 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
 
 
 def validate_history(snapshot, loop, results, specs, *, session,
-                     system_message, requirements, required_tools):
+                     system_message, requirements, required_tools, request_kind='scientific'):
     """Check complete bounded history/counter relations before the CAS claim."""
     from src.agent.decision_transport import _snapshot_messages
 
@@ -208,10 +209,13 @@ def validate_history(snapshot, loop, results, specs, *, session,
     if not seen <= set(call_ids) or messages[0].get('role') != 'system':
         raise ValueError('invalid message history')
     queries = snapshot['input_queries']
-    if len(messages) < 2 or messages[1] != {'role': 'user', 'content': queries[0]}:
+    prefix = history_prefix(system_message, session.context.query, session.context.memory,
+                            request_kind=request_kind)
+    if messages[:len(prefix)] != prefix:
         raise ValueError('invalid original input history')
-    actions = (len(seen) if loop.mode == 'native' else
-               sum(m['role'] == 'assistant' and m.get('content', '').startswith('{') for m in messages))
+    suffix = messages[len(prefix):]
+    actions = (sum(len(m.get('tool_calls', [])) for m in suffix) if loop.mode == 'native' else
+               sum(m['role'] == 'assistant' and m.get('content', '').startswith('{') for m in suffix))
     if (actions != len(results) + snapshot['reused_decisions']
             or len(calls) != actions + len(queries) + snapshot['protocol_repairs']
             or snapshot['tool_budget_reserved'] != sum(specs[r.tool_name].retry_policy.max_attempts for r in results)):
@@ -241,7 +245,7 @@ def validate_history(snapshot, loop, results, specs, *, session,
     replay = SimpleNamespace(context=replace(session.context, query=queries[0]),
         input_queries=queries[:1], results=[], ledger=EvidenceLedger(session.context.trace_id), outputs={},
         orchestrator=session.orchestrator)
-    position, turn, next_result, reused = 2, 1, 0, 0
+    position, turn, next_result, reused = len(prefix), 1, 0, 0
     native_ids, observed = set(), {}
 
     def equal(left, right):

@@ -34,6 +34,7 @@ from .decision_inputs import (
 )
 from .decision_clarification import scientific_clarification
 from .decision_bounds import context_value, configuration_generation
+from .decision_history import history_pairs, history_prefix
 from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
@@ -116,6 +117,7 @@ class ModelDecisionLoop:
 
         try:
             projected = context_value(context)
+            history_pairs(context.memory)
         except (DecisionBoundaryError, TypeError):
             return AgentResult('invalid-context', False, 'Input exceeds the plain JSON boundary',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Input is invalid or too large'),
@@ -172,11 +174,13 @@ class ModelDecisionLoop:
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
         system_message = decision_system_message(request_kind, required_tools, catalog, requirement_payload)
+        prefix = history_prefix(system_message, context.query, context.memory, request_kind=request_kind)
         if continuation_id is not None or clarified_query is not None:
             try:
                 restored, previous_results, prior_payload = claim_continuation(
                     self, session, fingerprint, continuation_id, clarified_query,
-                    system_message=system_message, requirements=requirements, required_tools=required_tools)
+                    system_message=system_message, requirements=requirements, required_tools=required_tools,
+                    request_kind=request_kind)
             except DecisionBoundaryError:
                 return AgentResult(context.trace_id, False, 'Continuation request rejected',
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Continuation request rejected'),
@@ -199,10 +203,7 @@ class ModelDecisionLoop:
                                                          'Existing trace cannot be replayed'),
                                outcome=RunOutcome.REJECTED,
                                metadata={'backend': 'model_decision_loop', 'stop_reason': 'trace_exists'})
-        state = _Run([
-            system_message,
-            {'role': 'user', 'content': context.query},
-        ], time.monotonic() + self.timeout_seconds)
+        state = _Run(prefix, time.monotonic() + self.timeout_seconds)
         if restored is not None:
             session.restore_observations(previous_results, restored['tool_attempt_count'])
             # claim_continuation validated the decoded observations and their
