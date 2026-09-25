@@ -1034,3 +1034,23 @@ Focused commands use MedChat Python `-B -X utf8`, `scratch/p7a2_owned_metrics_ru
 For one complete task-runtime confirmation, add a separate ignored `scratch/p7a2_task_runtime_confirmation.py` driver rather than editing the reviewed helpers. It accepts no caller-selected test path/options, verifies the frozen runner hash, and substitutes only its exact-target argument admission with the fixed absolute `tests/task_runtime` directory. All runtime gate/plugin/isolation source and original test assertions remain unchanged: the HTTP exception still activates for exactly one original node, never other collected tests. Independently inspect this small driver delta before using it. This broadens test collection, not network authority. Managed-child five-second and credential-guard ten-second deadlines remain unchanged.
 
 Next gates are static/Node, full affected root/task-runtime confirmation, and one complete Agent confirmation. Do not retry until green or count focused passes as full success. The unknown historical timing causes and environment differences remain explicit. Publication/CI and the later ordinary-chat/B/C/P8 work are still pending; this checkpoint does not authorize deployment or production activation.
+
+## 25. Static and complete task-runtime confirmation
+
+At clean `5ad17c823c32ef82677a7d20b3ae704e215a0f94` (tree `a3b8d20e2f0be2fd807f9643f5673ca1ffdbc5cb`), static checks and then the complete task-runtime partition ran serially, once each. No production/test assertion/deadline was changed.
+
+Static command `& ./scratch/p7a2_static_gate.ps1` exited 0 in 6.604s. Ignored helper SHA256 is `fb3f93b37dee8a260e6329eb010355f488f01f4c1a631aa131a3c630b48b96a4`. It passes only OS-whitelisted variables to owned subprocesses, uses an owned temporary cwd/TEMP/TMP, and never loads actual user configuration. Every process exited and the temporary directory was removed.
+
+- All 14 root `tests/*_test.js` files plus `tests/activity_family_acceptance_dom.js` passed: **15/15 entrypoints**, not an invented aggregate assertion count.
+- `node --check` passed for the four changed JS files: `src/web/static/js/home/main.js`, `tests/home_decision_runtime_test.js`, `tests/home_structured_molecule_render_test.js`, `tests/home_workflow_completion_behavior_test.js`.
+- MedChat Python 3.10.20 ran `-I -S -X pycache_prefix=<owned-temp>/pycache -m compileall -q <repo>/src <repo>/scripts`, exit 0. Tracked and on-disk Python inventories agree at 335 files, with no reparse links; compile caches remain outside the checkout.
+- The exact CI filename-only credential regex scan returned 1 with no filename matches (expected clean scan), not a failed command and not disclosure of matching content.
+- Local Node is 24.15.0; CI uses Node 20. This is local static evidence, not CI equivalence.
+
+The separate whole-task-runtime driver received independent source/static approval before execution; its SHA256 is `45cd28d5ccfc7bcac94f59c01e254320097e7dd8da7a5658049c5c89d62f516a`. Memory compilation and a reversible single-source-replacement check passed; no network scope change was found. The three frozen helpers remain unchanged.
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -B -X utf8 scratch/p7a2_task_runtime_confirmation.py
+```
+
+Complete result: **1549 passed / 0 failed / 25 skipped / 1 warning / 122.75s**, exit 0, session 94497 ended. Skips retain platform/permission and opt-in performance conditions; warning is the known plugin pre-import warning. Actual metrics cleanup reports two closed handles, stopped threads, empty permissions, restored offline bans and zero anomalies. No Python/pythonw processes remain. This run preserves the original managed-child five-second deadline; its success does not establish the historical timeout cause or erase the earlier failure. Complete root/Agent confirmation and CI are still pending.

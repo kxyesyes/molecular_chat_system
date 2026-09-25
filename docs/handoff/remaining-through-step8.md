@@ -63,6 +63,14 @@ This inventory is not implementation or test evidence. Reconfirm each boundary i
 
 ## Current verification
 
+### A2 local verification follow-up (2026-09-25)
+
+A2 is implemented locally on `codex/web-decision-runtime-integration`; it has not been published or merged. Production source is unchanged since `2769e1e`. The later user-config fixture correction is independently reviewed; the ignored offline harness now permits only its one test-owned metrics endpoint, not general networking. Detailed original failures, scoped fixes and commands are retained in sections 21–25 of the A2 implementation plan.
+
+At `5ad17c8`, local static checks passed (15 Node entrypoints, four changed-JS syntax checks, 335 Python files compiled, no credential-scan filename matches), followed by a single complete task-runtime run: **1549 passed, 25 skipped, one warning, zero failures, 122.75s**. Resource cleanup succeeded. Local Node 24 differs from CI Node 20. Earlier guard/startup timeout causes remain UNKNOWN; no timeout or scientific assertion was relaxed.
+
+Remaining A2 gates: complete affected root and Agent confirmation, final snapshot review and all CI gates before the unique PR can merge. P7 ordinary-chat, B/C integrations and P8 live acceptance remain pending; this follow-up does not redefine them as complete. The historical verification below is preserved rather than presented as current full success.
+
 PR #62 merge was rechecked through GitHub API and local fetch; merge tree matched the reviewed head. New step-2 branch is based on origin/main 6af7292.
 Six baseline files: test_chat_handler_partial_results, test_chat_handler_agent_events, test_chat_input_budget, test_agent_audit_regressions, test_chat_local_cleanup, test_scientific_reference_web (all under tests/agent).
 Executed with MedChat Python and the existing isolated runner documented in docs/superpowers/plans/2026-09-24-rag-service-extraction.md, replacing only the worktree path. No model API or production assets used.
