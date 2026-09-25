@@ -1,6 +1,6 @@
 # P7-B Dynamic Tool Bindings Implementation Plan
 
-> **For agentic workers:** G0 / B-D0, the receipt amendment and §11's written decisions are recorded approvals, not a code release. Only after separate parent release, use `subagent-driven-development` or `executing-plans` with TDD. Current task is DOCS ONLY in `dynamic-bindings-b1`: update this plan and its companion spec, inspect the diff and stop. No staging, commit, implementation, tests, imports, compile, network, environment/asset inspection, merge or push. Older local-commit instructions below are historical. Stable source ownership remains an actual proof gate.
+> **For agentic workers:** G0 / B-D0, the receipt amendment and §11's written decisions are design approvals, not blanket code release. The current bounded release is §12.5: only the two-file pure capability-profile slice, using the independently reviewed offline launcher in §12.6. That implementation is frozen for independent review; see §13 for actual evidence. Other source changes require a separately scoped release. No real model, host asset/config discovery, deployment or B execution is authorized by this slice. Older docs-only instructions below describe historical checkpoints.
 
 **Goal:** Expand the existing initial-four-tool model decision path through bounded, evidence-bound molecular/RAG/reverse actions and real generation/ranking dataflow, without model-authored inputs/numbers or a static workflow substitute.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Existing FastAPI/native JS, Python/Pydantic/asyncio, LangGraph decision loop, SQLite Session journals, RDKit and current typed adapters. No new framework, DSL, dependency upgrade or datastore.
 
-**Current status/base:** §12 re-pins to reviewed684e4a1 source in `codex/dynamic-bindings-b1`, initial HEAD `d672497a8c7b812378dddad91e195de3d04bbb65`. PR81 is not confirmed merged; do not call it landed. Historical two-doc freeze: `codex/dynamic-tool-bindings-plan`, following `74739aa72c36af27e1561a21359e87521860897b`, original source base `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`. Companion spec: `docs/superpowers/specs/2026-09-25-dynamic-tool-bindings-design.md`. Implementation release remains closed; unchecked steps are future work, not execution evidence.
+**Current status/base:** PR81 landed as `a1258d978450a70a55e71156060b4d8d88a8db29`, tree-identical to reviewed684e4a1. This branch integrated it at9f2e7a6; the first code slice starts from6bc6dfc. Companion spec: `docs/superpowers/specs/2026-09-25-dynamic-tool-bindings-design.md`. Only §12's pure profile-view slice is implemented and under review. B1 execution, B2, C and final real acceptance remain incomplete. Unchecked broader steps are future work, not execution evidence.
 
 **2026-09-26 history/current amendment:** §11 was drafted against ordinary `1da64f2694203de0ef3f3c875ceb775e4be0dee4`; its approval is recorded in §11.8. §12 supersedes its assembly-only/source-status descriptions, not the scientific positives or separate code-release gate. Only these two docs may change now; **no commit, tests, implementation or publication**.
 
@@ -686,3 +686,39 @@ REPO, now this dynamic-bindings-b1 worktree. Isolation, fixture hashing, normal
 conftest, child flags and cleanup remain unchanged. No imports/tests were run
 for the review. The §12.5 two-file TDD release can now use this launcher; all
 broader B app/admission/root/receipts/B8 and B2/C/P8 gates remain pending.
+
+## 13. Pure profile-view implementation evidence
+
+The only production change is `src/web/ordinary_capabilities.py`; the only new
+test is `tests/agent/test_decision_binding_profiles.py`. Existing tests, DTOs,
+app assembly, admission, root budgets and execution are unchanged. Original
+profile serialization is pinned independently; B1/B2 canonical mapping and
+explicit wiring do not authorize execution. The original admission guard still
+rejects B carries, with an original-profile positive control.
+
+All implementation commands used MedChat Python with `-I -S -B` and the
+§12.6 launcher in this worktree. Exact commands are in §12.4; evidence is:
+
+| Run | Result | Exit | Duration |
+|---|---|---|---|
+| First new RAG-permission node, before implementation | 1 failed: required API kwargs absent | 1 | 0.98s |
+| New profile module, before implementation | 33 failed, 1 passed: missing API assertions, not collection failures | 1 | 1.64s |
+| New profile module, after implementation | 34 passed | 0 | 1.77s |
+| New module plus unchanged capabilities/app assembly | 194 passed, 7 warnings | 0 | 14.77s |
+
+Warnings are three SWIG and four FastAPI warnings. No skipped tests or fixture
+failures. The implementation test session ended; no live scientific result is
+claimed. No full Agent suite or CI has been run for this B slice.
+
+Independent SOURCE/SPEC approved at HEAD6bc6dfc with no P1/P2. Frozen SHA256:
+
+- Source: `BDEB4A6E0848940B8AED1D382B981D6C4D6DD198AD1EC686806EC0DDDDC540F4`.
+- Test: `1DF3190F3353BDE61BC9C2D6CCCC809A4747E69B95C97E9D5DB6998C3BAF3A3A`.
+
+Independent QUALITY also approved with no P1/P2, then ran the same three-module
+command once: **194 passed, 7 warnings, 15.32s, exit0**. Its session reached
+terminal; source/test/launcher hashes were unchanged. Parent verified
+`git diff --check` and the two source/test hashes again. Both review gates now
+permit a local checkpoint of these two files plus this plan and the ledger.
+No B branch publication, execution activation or next implementation slice is
+implied. This is a component milestone, not B1 normal-route or package8 acceptance.

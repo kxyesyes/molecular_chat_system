@@ -14,6 +14,17 @@ incomplete for B scientific bindings, C consent/finite terminal cleanup and
 final real ordinary-chat/multi-turn quality. B starts from the verified landed
 ordinary source; package8 live scientific/UI acceptance is still pending.
 
+Latest B component update: `codex/dynamic-bindings-b1` implements only the pure
+B1/B2 capability-profile builder and its new regression module. Independent
+SPEC and QUALITY approve; implementation and independent three-module runs each
+passed194 with7 warnings (14.77s and15.32s respectively). Original profile
+serialization remains exact; registered tools do not automatically gain wiring
+or permission; RAG permission is independent; readiness remains unknown. B carries
+are still rejected by the unchanged execution admission guard. Full commands,
+RED failures, hashes and scope are in dynamic-tool-bindings plan§13. B1 execution,
+same-invocation source receipts, B8/root accounting, B2 generation/ranking,
+C integration and P8 real/UI acceptance remain incomplete; no production switch.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |
