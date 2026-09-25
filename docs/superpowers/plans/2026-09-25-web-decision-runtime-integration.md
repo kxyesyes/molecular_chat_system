@@ -401,3 +401,84 @@ History-only runs used the same invocation with `tests/agent/test_decision_histo
 | `src/agent/harness/decision_continuation.py` | `8807180b330fb19ff4f8f8d19c9a7afcb3880e73` |
 
 Parent authorizes exactly these four unchanged reviewed files plus this plan for a conventional **local** commit after diff, scope and filename-only secret checks. Commit/tree/status and all five blobs are reported outside this document. Pure history is completed, **not Web integration, A2 or P7 completion**. Batch 2 is next under the released plan and needs no renewed start confirmation; this evidence/commit step does not implement it. No push/PR/full/live/default activation, and no changes to the original checkout.
+
+## 13. Web foundation checkpoint: actual-route evidence and review closure
+
+Parent released the foundation implementation on `codex/web-decision-runtime-integration`, starting at clean HEAD `3faec3547cc09d3b5d665d4485ac1fd52c4786e0`, tree `50e1ba250a6c6f580d0ae022f72d0065cd1e015b`. Dependencies are reviewed ownership `78d0a32e2bbb752c8af71eb33aedbc1546e6b4d2` and the history commit at that HEAD. Both remain read-only. This checkpoint contains exactly the seven reviewed source/test blobs below plus this evidence-only plan append. No spec or handoff-ledger changes, publication, default activation, or further feature work are authorized in this commit step.
+
+Implemented foundation: constructor-only `normal_chat_mode='legacy'` default and explicit `decision_a2` with closed `native`/`json` modes; early delegation on the actual mounted `/ws`; existing session/origin middleware and protected reference-restore HTTP used to obtain the cookie; shared registry/store/reference ownership without Supervisor execution; real A1 admission, OpenAI-compatible adapter, ModelDecisionLoop, Session and RDKit tools with an in-memory HTTP transport. Runtime adds one responsive receiver, serialized deadline-aware sending, server turn IDs, a reader lease around dispatch/physical settlement, opaque model-generation UUIDs, basic cancel/ping/next-turn handling, and a shutdown drain entry. Strict candidate/report envelopes are not extended with turn IDs. Candidate/report projection and UI consumption are not yet implemented by this checkpoint.
+
+The actual-route regression matrix covers admitted greetings/concepts, requested-RAG versus `retrieval_performed=false`, whole-request unsupported/disabled rejection (including all four reported SPEC4 cases), selected raw-frame/authority boundaries, real property calculation, and a two-subject property/likeness sequence whose next protocol proposal depends on the previous observation. Scientific output still comes from the existing formatter; no model-number rewrite or synthetic scientific result is introduced. MockTransport proves protocol/lifecycle contracts, **not live external inference**, real model understanding, generation, trained activity prediction, or normal-browser acceptance.
+
+### Worker runs: RED, fixture failures, and GREEN (not additive totals)
+
+Every test run below used the same approved isolated runner described after the table. Unless otherwise stated, each had **7 warnings** (existing SWIG type/FastAPI `on_event` deprecations), no skips; failing runs exited 1 and GREEN runs exited 0. Fixture failures and diagnostic reruns are retained, not relabeled as behavioral RED or hidden by subsequent passes.
+
+| Actual run | Result and cause |
+|---|---|
+| Initial actual-route module | **10 failed, 1 passed / 3.69s**: default legacy behavior passed; enabled/auth/mode cases failed because the constructor lacked `normal_chat_mode`. |
+| First real-owner bridge probe | **1 failed / 2.82s**: injected fixture omitted three required registry tools (`admet_predictor`, `candidate_ranker`, `llm_molecular_generator`). Reused real core-tool construction instead; registration rules were not changed. |
+| Corrected bridge RED | **1 failed / 2.88s**: missing `worker_owner` bridge parameter. |
+| Bridge GREEN and existing transport regressions | **19 passed / 5.11s** after optional ownership forwarding and preserving WorkerCleanupError instead of fabricating failed result/complete. |
+| Initial actual-route lifecycle group | **2 failed / 2.44s**: missing constructor wiring. |
+| First runtime/transport combination | **4 failed, 28 passed / 11.87s**: complete-send bookkeeping raced disconnect and next-turn acceptance, propagating cancellation or rejecting the next turn. |
+| Corrected first combination | **32 passed / 7.85s**. Delivery completion is recorded after the actual send; physical settlement precedes the final complete, and delivery tasks remain retained. |
+| Expanded actual-route request matrix | **6 failed, 38 passed, 2 errors / 12.76s**: overbroad capabilities, non-boolean flag handling, and science-fixture errors. The oversized raw-string auto-ID also caused fixture setup/teardown errors; output truncation prevented retention of the complete exception cause. Explicit short IDs replaced auto-IDs; no size expectation was weakened. |
+| Science fixture diagnostic 1 | **2 failed / 4.85s** with `model_decision_unavailable`; unique protocol call IDs alone did not resolve the failures. |
+| Science fixture diagnostic 2 | **2 failed / 4.98s**: captured MockTransport errors identified a fixture `KeyError('tool_name')` on the observation shape. The fixture now consumes the real observation evidence ID; no loop/adapter/schema change. |
+| Request matrix recheck | **1 failed, 44 passed / 12.60s**: the text assertion `999999` matched a genuine float tail in likeness output. A unique model-prose marker replaced the substring assertion; actual scientific numbers were not rewritten. |
+| Parent source-boundary migrations | **3 failed / 3.33s**: waiting for the sender lock escaped the total deadline; failed request-accepted send left a registered owner with no task; task creation failure propagated and lost its coroutine. |
+| Foundation combination after fixes | **107 passed / 17.41s**. Lock acquisition and send share one deadline; registration follows successful scheduling; failed creation closes the coroutine and does not leave an owner. |
+| First frozen foundation combination | **106 passed / 17.68s**, session `74162` completed. The one-count reduction removed the obsolete source-string no-dispatch assertion, replaced by the actual default-off route test; no behavioral test was skipped. |
+| Formal SPEC-finding migration RED | **9 failed, 4 passed / 6.85s**: run/watcher creation rollback failures in owned/no-owner paths and four oversize-frame cases. Exact 24-KiB ping/chat and no-watcher compatibility were positive controls; the RuntimeError deadline-creation control already closed its coroutine in Python 3.10. |
+| Extended creation-failure RED | **4 failed, 1 passed / 4.40s**: actual-route run/watcher failures plus deadline creation under ValueError/CancelledError left unsubmitted coroutines open. The preserved watcher diagnostic observed terminal followed by a still-live real provider (`provider_entered=true`, `provider_exited=false`, `child_done=false`, reader count 0). |
+| Two-finding targeted GREEN | **15 passed / 5.55s**. Correct early cancellation may prevent provider dispatch entirely; assertions require every created child settled, unscheduled coroutines closed, and provider exit if it started. No unconditional `provider.entered` wait is required for GREEN. |
+| Final five-file foundation combination | **121 passed / 20.67s**, session `78499` completed, exit 0. No sessions remained active; no restart/termination of this run. |
+
+The earlier combined runtime session `91589`, expanded-matrix session `85943`, matrix recheck session `40391`, and 107-test session `60318` also completed normally with their recorded exit statuses. The other worker test calls returned completion directly. The first shell HEAD/tree lookup used an unquoted PowerShell `HEAD^{tree}` argument and failed parsing; the correctly quoted retry verified the exact supplied HEAD/tree. It was not a test failure or a repository-state change. No complete-suite, live, Node, browser, or new source-compilation run was performed merely to create this evidence commit.
+
+### Independent SPEC and QUALITY on the same seven final blobs
+
+These are parent-reported independent runs, not worker reruns or totals to add together:
+
+- Initial foundation SPEC focus: **106 passed, 7 warnings / 17.20s**. Initial scratch probe **3 failed, 1 passed / 4.53s** and exact probe **4 failed, 3 passed / 5.30s** identified two real findings. P1: watcher creation was outside the bridge's cleanup guard, permitting result/complete and reader/owner release while a loop/provider child survived. P2: the decoder inherited the 32-KiB protocol default instead of the specified **24-KiB raw Web frame** limit; 24,577-byte and 25,000-leading-space ping/chat frames were accepted, with one admission/provider call for chat.
+- Both findings were migrated into formal tests before minimal production changes. Run and watcher creation now share the outer `try/finally`; unsuccessful scheduling closes its coroutine, and all successfully scheduled children are cancelled/drained before returning an error. Deadline scheduling closes its unsubmitted coroutine for all creation exceptions, including cancellation. Runtime calls `decode_protocol_json(raw, max_bytes=24 * 1024)`; A1 and scientific bounds are unchanged. Exact 24,576-byte ping/chat remain positive controls; oversized frames produce `invalid_frame` with zero admission/provider calls. The original `scratch/spec_p7a2_web_foundation_review.py` was preserved (SHA-256 `a4039c588ecf21288ff3a78a30c5eda69ba54c89c1a8fe219042f204770e2005`). No production await was added to force provider startup for a test.
+- **SPEC re-review APPROVE, same seven blobs:** **121 passed, 7 warnings / 19.52s**, plus **11 independent probes / 5.17s**; seven-file in-memory compile and diff checks passed.
+- **Peirce QUALITY APPROVE, same seven blobs:** **121 passed, 7 warnings / 20.04s**. Initial independent probe **9 passed, 2 failed, 7 warnings / 8.69s** repeated the `999999`-substring collision with genuine floating-point output. Independent unique-prose-marker diagnostics were **2 passed, 7 warnings / 5.20s**; the original scratch evidence remains. No production change was made for this fixture issue. Parent also reports seven-file compile/diff checks and all three evaluation-JSONL SHA checks passed, with no active sessions.
+
+### Exact five-file command and reviewed Git blobs
+
+Extract the complete fenced `$runner` from [RAG extraction plan](2026-09-24-rag-service-extraction.md), substituting only its repository directory with this integration worktree. As in sections 11–12, it retains only OS environment variables before imports; uses temporary cwd/config/DB/cache, zero live flags, normal conftest and MedChat Python `-B`; and copies only the three tracked evaluation JSONLs with SHA equality assertions. Runner argv are paths/node IDs, not pytest flags; it supplies `-q -p no:cacheprovider --tb=short -rs` internally. No credentials, provider services, real model/structure assets, dependency installs, or full heavy suite are part of these commands.
+
+```powershell
+$foundationFocus = @(
+    'tests/agent/test_web_decision_runtime.py',
+    'tests/agent/test_web_decision_runtime_lifecycle.py',
+    'tests/agent/test_decision_chat_transport.py',
+    'tests/test_model_request_lifecycle.py',
+    'tests/test_web_app_lifecycle.py'
+)
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" @foundationFocus
+```
+
+The two-finding targeted invocation used the same runner with these four exact nodes (15 parameterized cases at final freeze): `tests/agent/test_web_decision_runtime.py::test_exact_raw_frame_boundary_through_actual_route`, `tests/agent/test_web_decision_runtime_lifecycle.py::test_watcher_creation_failure_cannot_release_running_provider`, `tests/agent/test_decision_chat_transport.py::test_no_owner_bridge_scheduling_rollback`, and `tests/agent/test_decision_chat_transport.py::test_deadline_scheduling_failure_closes_unsubmitted_coroutine`. The extended RED used the second and fourth nodes only. Prior groups used the corresponding module or named node documented above. No tests are rerun in this append/stage/local-commit step.
+
+| Reviewed path | Frozen Git blob |
+|---|---|
+| `src/web/app.py` | `ca41c9adf3e8b5bf834890aba21ac0be9c75a93d` |
+| `src/web/chat_handler.py` | `969bd0ee50aebc64e596adb10b3f0ed1334b20a3` |
+| `src/web/decision_chat.py` | `5357cffad8db3b9c04c63c6ae7cb59327774935b` |
+| `src/web/decision_runtime.py` | `81dfd706afce6c78fe2bd5cd6285ced4db51ef3f` |
+| `tests/agent/test_decision_chat_transport.py` | `1c5059ca0f1b97cad64924540b62a55d7c347d49` |
+| `tests/agent/test_web_decision_runtime.py` | `202d80311a0ccb08464d3e2e8b2ff28126c732d1` |
+| `tests/agent/test_web_decision_runtime_lifecycle.py` | `3d3cd369086464f1ff24738bc89278b206044f9b` |
+
+### Remaining gates and next parent release
+
+**Tasks 2–5 are still incomplete.** Task 2 lacks the missing-server-scope regression and full static HTTP contract verification (route presence alone is not that acceptance). Task 3 still needs the complete reference/invalid-explicit and resume matrices. Task 4 still needs credential-only epoch rotation, replacement/refresh failures, full reader/writer concurrency and generator/background-consumer isolation coverage. Task 5 still needs actual-route nested timeout orders, worker/future/join barriers, repeated cancellation, disconnect/overflow/serialization/finish races, and active/waiting shutdown verification. Basic foundation tests and supplementary bridge tests do not substitute for these gates.
+
+**Web Tasks 6–8 are unstarted:** socket history retention, nonce-safe multi-turn resume and constraint validation, candidate/report projection and actual protected reference/ACK boundaries, and home UI controls/persistent status. The already committed pure history dependency in section 12 is not Web Task-6 completion. Full A2 and P7 remain pending; original package-8 ordinary-chat/capability and multi-turn acceptance remains mandatory, not rewritten as expected rejection. P7-B, C integration and live model/science/browser acceptance are not completed or newly authorized.
+
+WorkerCleanupError remains unresolved ownership, not a normal failure result: runtime retains owner/task/reader and does not emit terminal or close still-used resources. There is no automatic join retry, tool replay, successful-settlement fabrication, or finite shutdown guarantee. **Actual failed-join route verification is still pending.** Parent approved its later isolated-child strategy: use the real route in an independently created offline child with OS-only environment, temporary root, no live services/secrets, and hidden Windows process; use controlled synchronization/state snapshots to prove active owner/reader retention, `modelclose=0`, no terminal and shutdown pending. Terminate only that confirmed-owned child; timeout/failure paths also terminate/wait/drain output in `finally`. Forced isolation-test termination is explicitly **not graceful cleanup**. No production escape/test flag may be added. Ordinary blocked-worker tests instead release their barriers in `finally` and verify real physical cleanup. The A2 versus C finite-UI-terminal/retained-cleanup difference stays unresolved.
+
+Both reviewers approved only the implemented foundation on the seven blobs above. Parent authorizes this plan-only append and exact local commit of those seven files plus the plan after same-blob, diff/scope and filename-only secret checks. Commit/tree/clean status and all eight blobs are reported outside the document. Then stop: parent will release lifecycle-core completion (Tasks 4/5 and the approved failed-join child) before history/resume/references/UI, without another user confirmation merely to start that released batch. This sequence neither expands nor reduces the final requirements; no push, PR, merge, full/live run, or further implementation belongs to the current commit step.

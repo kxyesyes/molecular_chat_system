@@ -1,6 +1,7 @@
 """Transport pressure/cancellation tests; model substitutes are explicitly local."""
 import asyncio
 import json
+import inspect
 from threading import Thread
 from types import SimpleNamespace
 
@@ -10,6 +11,130 @@ from src.agent.contracts import AgentContext, AgentResult, RunOutcome
 from src.agent.runtime.task_state import TaskEventType
 from src.web.chat_handler import ChatHandler
 from test_decision_loop import setup_loop, tool, finish_last
+from test_web_decision_runtime import actual_app
+
+
+@pytest.mark.parametrize('failure', ['run', 'watch_cancel'])
+@pytest.mark.parametrize('with_cancel', [False, True])
+def test_no_owner_bridge_scheduling_rollback(actual_app, monkeypatch, failure, with_cancel):
+    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.web.decision_request import prepare_decision_request
+    async def scenario():
+        async with actual_app() as b:
+            loop = ModelDecisionLoop(b.model, b.app._get_agent_tool_registry(), b.app.agent_state_store)
+            prepared = prepare_decision_request({'message': '你好'}, session_id='owner', trace_id='no-owner-create')
+            original = asyncio.create_task
+            children, unscheduled = [], []
+            def inject(coro, *args, **kwargs):
+                is_run = kwargs.get('name') == 'isolated-decision-chat'
+                is_watch = getattr(getattr(coro, 'cr_code', None), 'co_name', None) == 'watch_cancel'
+                if (failure == 'run' and is_run) or (failure == 'watch_cancel' and is_watch):
+                    unscheduled.append(coro)
+                    raise RuntimeError('synthetic scheduling failure')
+                task = original(coro, *args, **kwargs)
+                if is_run:
+                    children.append(task)
+                return task
+            monkeypatch.setattr(asyncio, 'create_task', inject)
+            socket = Socket()
+            try:
+                call = b.app.chat_handler.process_decision_message(socket, context=prepared.context,
+                    decision_loop=loop, request_kind=prepared.request_kind,
+                    allowed_tools=prepared.allowed_tools, required_tools=prepared.required_tools,
+                    requirements=prepared.requirements,
+                    cancel_event=asyncio.Event() if with_cancel else None)
+                if failure == 'watch_cancel' and not with_cancel:
+                    assert (await call).success
+                    assert len(b.calls) == 1 and not unscheduled
+                else:
+                    with pytest.raises(RuntimeError, match='^synthetic scheduling failure$'):
+                        await call
+                    assert unscheduled and all(inspect.getcoroutinestate(c) == inspect.CORO_CLOSED
+                                               for c in unscheduled)
+                    assert all(t.done() for t in children)
+                    assert not socket.messages
+            finally:
+                for coro in unscheduled:
+                    coro.close()
+                for task in children:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.wait_for(asyncio.gather(*children, return_exceptions=True), 5)
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize('error', [RuntimeError, ValueError, asyncio.CancelledError])
+def test_deadline_scheduling_failure_closes_unsubmitted_coroutine(monkeypatch, error):
+    from src.web.decision_chat import await_with_deadline
+    async def scenario():
+        invoked = []
+        async def operation():
+            invoked.append(True)
+        coro = operation()
+        loop = asyncio.get_running_loop()
+        original = loop.create_task
+        def fail_create(operation, *args, **kwargs):
+            if operation is coro:
+                raise error('synthetic scheduling failure')
+            return original(operation, *args, **kwargs)
+        monkeypatch.setattr(loop, 'create_task', fail_create)
+        try:
+            with pytest.raises(error, match='^synthetic scheduling failure$'):
+                await await_with_deadline(coro, timeout=1)
+            assert inspect.getcoroutinestate(coro) == inspect.CORO_CLOSED
+            assert not invoked
+        finally:
+            coro.close()
+    asyncio.run(scenario())
+
+
+def test_real_owned_bridge_preserves_unresolved_cleanup(actual_app, monkeypatch):
+    """Supplementary bridge test, NOT actual-route A2 lifecycle acceptance."""
+    from concurrent.futures import ThreadPoolExecutor
+    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError
+    from src.web.decision_request import prepare_decision_request
+    created = []
+
+    class FailedJoin(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+        def shutdown(self, wait=True, **kwargs):
+            if wait:
+                raise RuntimeError('synthetic private join diagnostic')
+            return super().shutdown(wait=wait, **kwargs)
+
+    monkeypatch.setattr('src.agent.tooling.adapters.ThreadPoolExecutor', FailedJoin)
+
+    async def respond(payload):
+        return tool().model_dump()
+
+    async def run():
+        async with actual_app(respond=respond) as b:
+            b.app._create_supervisor_agent()  # Existing registry assembly only.
+            loop = ModelDecisionLoop(b.model, b.app.agent_tool_registry, b.app.agent_state_store)
+            prepared = prepare_decision_request({'message': '计算性质；SMILES: CCO'},
+                session_id='synthetic-owner', trace_id='bridge-unresolved')
+            owner, socket = WorkerOwner(), Socket()
+            try:
+                with pytest.raises(WorkerCleanupError, match='^Owned worker cleanup remains unresolved$'):
+                    await b.app.chat_handler.process_decision_message(socket,
+                        context=prepared.context, decision_loop=loop,
+                        request_kind=prepared.request_kind, allowed_tools=prepared.allowed_tools,
+                        required_tools=prepared.required_tools, requirements=prepared.requirements,
+                        worker_owner=owner)
+                assert owner.status == 'unresolved' and owner.pending_roots == 1
+                assert not [f for f in socket.messages if f['type'] in {'agent_result', 'complete'}]
+                assert len(b.calls) == 1
+                assert b.app.agent_state_store.get_run('bridge-unresolved')['status'] == 'running'
+            finally:
+                # Physical TEST resource cleanup; deliberately does not claim
+                # the failed production ledger recovered or its lease released.
+                for executor in created:
+                    await asyncio.to_thread(ThreadPoolExecutor.shutdown, executor, wait=True)
+    asyncio.run(run())
 
 
 class Socket:
@@ -219,11 +344,8 @@ def test_invalid_display_still_produces_failed_terminal(broken):
     assert len(json.dumps(socket.messages)) < 10000
 
 
-def test_production_websocket_does_not_dispatch_isolated_entry():
-    import inspect
-    assert 'process_decision_message' not in inspect.getsource(ChatHandler.handle_websocket)
-
-
+# Default-off dispatch is covered behaviorally through the actual application
+# in test_web_decision_runtime.py, not by a handler source-string assertion.
 def test_real_fastapi_websocket_transports_rdkit_result(setup_loop):
     from fastapi import FastAPI, WebSocket
     from fastapi.testclient import TestClient

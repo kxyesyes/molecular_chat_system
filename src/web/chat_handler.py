@@ -64,20 +64,27 @@ class ChatHandler:
         self.conversation_history = []
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
+        self.decision_runtime = None
 
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
-                                       requirements=None, continuation_id=None, clarified_query=None):
+                                       requirements=None, continuation_id=None, clarified_query=None,
+                                       worker_owner=None, cancel_event=None):
         """Server-only opt-in bridge; never dispatch browser kwargs into this API."""
         from .decision_chat import process_decision_message
         return await process_decision_message(
             self, websocket, context=context, decision_loop=decision_loop,
             request_kind=request_kind, allowed_tools=allowed_tools, required_tools=required_tools,
             requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
+            worker_owner=worker_owner,
+            cancel_event=cancel_event,
         )
     
     async def handle_websocket(self, websocket: WebSocket):
         """处理 WebSocket 连接"""
+        if self.decision_runtime is not None:
+            await self.decision_runtime.handle_websocket(handler=self, websocket=websocket)
+            return
         await websocket.accept()
         conversation_history: List[Dict[str, Any]] = []
         
