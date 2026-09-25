@@ -972,7 +972,7 @@ class ChatHandler:
             "warnings": cls._sanitize_agent_warnings(raw_warnings),
         }
 
-    async def _send_reference_candidate_events(self, websocket, agent_result):
+    async def _send_reference_candidate_events(self, websocket, agent_result, *, strict_transport=False):
         if self.scientific_references is None:
             return await self._send_molecule_candidate_events(websocket, agent_result)
         events = await asyncio.to_thread(self.scientific_references.project, agent_result,
@@ -984,10 +984,16 @@ class ChatHandler:
             from .scientific_report import prepare_report_event
             report = await prepare_report_event(self.scientific_references.store, agent_result,
                 events, session_id=getattr(websocket, "scope", {}).get("agent_session_id"))
-            if report is not None:
-                await websocket.send_text(json.dumps(report, ensure_ascii=False))
         except Exception:
-            pass  # Optional sidecar failure must not turn the run into failure.
+            report = None  # Optional computation failure does not change the run.
+        if report is not None:
+            if strict_transport:
+                await websocket.send_text(json.dumps(report, ensure_ascii=False))
+            else:
+                try:
+                    await websocket.send_text(json.dumps(report, ensure_ascii=False))
+                except Exception:
+                    pass  # Preserve the established legacy sidecar send behavior.
         return events
 
     @classmethod

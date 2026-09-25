@@ -619,3 +619,74 @@ Both SPEC and QUALITY approve only Task 6 on the same final blobs, with both rep
 | `tests/agent/test_web_decision_runtime_lifecycle.py` | `886f44042ccea79f172ea878d67aa9cb010f3fc7` |
 
 Parent authorizes the local four-file checkpoint commit after same-blob and scoped-stage checks. Next is Task 7's single existing candidate/report projection and actual protected reference/mount-ACK matrix, then Task 8's frontend controls/status. Projection cancellation must retain its actual offloaded store work, and report transport errors must not masquerade as optional sidecar success. These are future integration checks, not fixes claimed here. No push, PR or merge occurs at this checkpoint. Full A2/P7, original ordinary-chat/RAG/repeated scientific requirements, C lifecycle/topology and package-8 real/browser evidence remain pending.
+
+## 16. Task 7 reference projection and delivery checkpoint
+
+Base: `a01c46f6d4df786057f112c0c86ac5b4861819a0`. This checkpoint changes the bridge, existing helper's opt-in transport behavior, runtime delivery failure handling, existing transport tests and new actual-route reference tests. Scientific reference service/controller/normalizer, shared loop/ownership and scientific tools are unchanged. No UI, generator admission, model configuration, live provider or deployment is activated.
+
+Actual mounted `/ws` tests use the real middleware identity, protected reference HTTP routes, temporary SQLite, A1/loop/Session and RDKit. Historical CandidateSets are explicitly synthetic fixtures, not real generation evidence. Confirmed selection survives ordinary chat and dispatches the exact trusted canonical structure to properties. Foreign owner, incorrect revision/order/compound key, unconfirmed view, revoked source and invalid explicit replacement cannot authorize calculation. Successful selected-candidate analysis does not change the original partial source or its warnings.
+
+The bridge invokes the existing helper once with the full settled legacy result, not the display envelope. Frame order remains result, candidates, optional report, complete, after tool events. Candidate/report schemas gain no `turn_id`; report contents/digest and legacy default helper behavior remain unchanged. Optional report computation failure remains optional; opt-in report transport failure is fatal to delivery. Projection has its own retained, uncancelled task after the tool worker ledger is sealed. Cancellation stops further presentation and waits for actual offloaded reference/report work, without shutting down the shared executor or treating wrapper cancellation as thread completion.
+
+### Reproduced findings and approved narrow fixes
+
+- Initial route did not project results; disconnect could release the owner before reference work exited; report send errors/timeouts could be swallowed and followed by complete. Actual-route and transport REDs preceded the fixes.
+- Independent SPEC reproduced post-result projection-task scheduling failure: `RuntimeError` left a writable, ping-responsive socket without complete; `CancelledError` published completed then cancelled results. Task ownership is now established before publishing the first result. Failure before publication receives one failed/cancelled result and matching complete; persisted successful computation is not rewritten.
+- Additional service-error injection reproduced a related post-publication hang. Parent approved a bounded fail-closed extension: after real drain, an unrecoverable projection exception or cancellation after result publication attempts one fixed `1011 / Decision result delivery failed` close under the existing send lock and shared send deadline. It emits neither a contradictory second result nor a fake complete, clears socket-local authority, and never claims failed close delivery succeeded. Service exceptions sharing transport exception classes are distinguished by the sender's actual writable state. The receiver stops only after its turn has finished and is not cancelled again after peer-disconnect cleanup starts. These are fault-injection robustness results, not proof of a naturally occurring storage incident.
+
+### Actual verification, including failed runs
+
+All Python runs used the approved pre-import OS-whitelist runner, temporary config/database/cwd, live flags off and three tracked JSONL copies with matching SHA. Normal conftest and original deadlines remained enabled. The planned eight-file command is in Task 7 above; the six-file Web group is section 14's five files plus `tests/agent/test_web_decision_runtime_references.py`. Compilation below was in-memory; no source import, model call or asset loading was used for that check.
+
+| Run | Actual result |
+|---|---|
+| Initial fixture correction | 8 failed / 12.95s; fixture incorrectly supplied noncanonical `OCC` as canonical |
+| Actual route projection RED | 1 failed / 7 passed / 10.37s |
+| Bridge projection RED | 3 failed / 4.09s; delivery helper absent |
+| Actual disconnect/drain RED | 1 failed / 6.20s; owner removed before thread exit |
+| Report transport RED | 2 failed / 2 passed / 9.25s; failure swallowed and complete sent |
+| First six Web files | 253 passed / 7 warnings / 181.42s |
+| Planned eight-file Python subset | 244 passed / 10 deselected / 7 warnings / 98.43s; not the full planned command |
+| Full eight files, including ten existing Node DOM tests | 254 passed / 7 warnings / 121.84s |
+| Independent SPEC first probes/control | 3 failed / 11 passed / 7 warnings / 17.60s; one scratch assertion confused stored `succeeded` with public `completed` |
+| SPEC after that fixture-only correction | 2 failed / 10 passed / 7 warnings / 13.91s; genuine scheduling P2 reproduced |
+| Migrated actual-route scheduling RED | 2 failed / 1 passed / 7 warnings / 7.39s |
+| Scheduling fix, two files | 49 passed / 7 warnings / 34.26s |
+| Scheduling fix, eight / six files | 257 passed / 7 warnings / 73.98s; 256 passed / 7 warnings / 179.14s |
+| Additional service RuntimeError diagnostic | 1 failed / 7 warnings / 4.70s; post-result open-socket hang, not yet fixed at that point |
+| Service-close RED | 2 failed / 7 warnings / 10.67s |
+| Expanded close matrix RED | 7 failed / 7 warnings / 10.63s; close method absent |
+| Post-result actual-thread cancellation RED | 1 failed / 7 warnings / 7.00s; duplicate cancelled result |
+| Service ConnectionError/TimeoutError RED | 2 failed / 7 warnings / 6.99s; mistaken for actual transport failure |
+| Peer-disconnect race RED | 1 failed / 7 warnings / 7.24s; receiver cancelled again while cleaning up |
+| Intermediate fixes | 20 passed / 7 warnings / 17.38s; 63 passed / 7 warnings / 32.67s |
+| Intermediate eight / six files | 271 passed / 7 warnings / 126.78s; 270 passed / 7 warnings / 179.41s |
+| Receiver race fix focused group | 30 passed / 7 warnings / 21.12s |
+| Final eight files, ten Node DOM tests included, no deselection | **275 passed / 7 warnings / 112.80s** |
+| Final six Web files | **273 passed / 1 failed / 7 warnings / 143.87s**; normal scheduling control's original three-second `entered.wait()` timed out |
+| Exact-node diagnostic, unchanged deadline | 1 passed / 7 warnings / 4.29s; not a fix or full rerun |
+| Final independent SPEC new probes/phase diagnostic | 4 passed / 7 warnings / 5.29s |
+| SPEC first second-group launch | 1 collection error / 1.32s / exit 4; old scratch could not import a test helper; no tests executed |
+| SPEC with only explicit isolated test-helper import path corrected | 71 passed / 7 warnings / 31.38s |
+| Independent QUALITY formal/lifecycle group | 72 passed / 7 warnings / 28.07s |
+| QUALITY independent native/json shutdown and legacy/report controls | 9 passed / 7 warnings / 7.06s |
+
+There were no skips in these Task 7 runs. Seven-warning groups retain SWIG/FastAPI deprecations. Existing Node tests were initially deselected because the implementer interpreted “no Task 8 UI tests yet” too broadly; parent explicitly confirmed the ten pre-existing Python-driven DOM tests were already in Task 7's approved scope. Final eight-file runs include them without changes or dependency installation.
+
+**Three historical warmup timeouts remain UNKNOWN**, including sections 14/15 and the final six-file failure above. Independent safe phase sampling observed approximately 1.45 seconds from send to projection scheduling; a one-second stack sample was in `observe_call`/`deepcopy`, before the provider mock. It did not reproduce the timeout or establish its cause. No deadline was weakened, no environment diagnosis is claimed, and a passing single-node rerun does not erase a failed group. Keep these failures visible through the final full/CI gates; this checkpoint is not a claim that all tests were green.
+
+Independent review used `scratch/spec_p7a2_task7_review.py` (original evidence retained), `scratch/spec_p7a2_task7_final_review.py` and `scratch/quality_p7a2_task7_review.py`; none is staged. Final SPEC ran the new scratch, the two changed test files, the old normal-only control and selected lifecycle controls. QUALITY ran the two changed files plus resumed-cancel/history-commit/shutdown controls, then new scratch plus existing report-frame legacy/snapshot/send-failure/source-race controls. Both used the approved isolated runner; the SPEC helper-path correction changed only runner setup, not the old scratch or production code. All reported test sessions exited, and no Python test process remained at the freezes. Five-file compilation, diff-check and filename-only credential-pattern checks passed.
+
+### Reviewed snapshot and next work
+
+SPEC and QUALITY approve **Task 7 only** on these same blobs, with reproduced P2 findings closed and the UNKNOWN timeouts explicitly retained:
+
+| File | Reviewed blob |
+|---|---|
+| `src/web/decision_runtime.py` | `2fd1152a7942f998f2a2ec3f14639475620592af` |
+| `src/web/decision_chat.py` | `71d67d2f03b7588ca13a70ec7781b441d309356e` |
+| `src/web/chat_handler.py` | `d18be7e7dcc45a500b86afef2c9d81aa6d88f5fe` |
+| `tests/agent/test_decision_chat_transport.py` | `c7a4deda64866dd5b90125393c2bad19d28aaa7f` |
+| `tests/agent/test_web_decision_runtime_references.py` | `053af24437dcb10e80096fa09183e1739dffa468` |
+
+Parent authorizes only a local six-file checkpoint after same-blob and explicit-stage checks. No push, PR, merge or deployment occurs here. Task 8 UI controls/persistent status/actual DOM ACK remain next, followed by full A2 review and verification. Original final ordinary-chat/capability/semantic follow-up, B tool bindings, C consent/topology/lifecycle integration and package-8 real-model/scientific/browser acceptance remain incomplete. These offline fixtures must not be reported as real molecular generation or browser acceptance.

@@ -101,6 +101,8 @@ class _Sender:
         self.writable = True
         self.memory = []
         self.waiting = None
+        self.close_attempted = False
+        self.close_delivered = False
 
     async def send_text(self, text, *, on_sent=None):
         async def deliver():
@@ -119,6 +121,25 @@ class _Sender:
 
     async def send(self, payload):
         await self.send_text(json.dumps(payload, ensure_ascii=False, allow_nan=False))
+
+    async def close_failed_delivery(self):
+        """One bounded close after physical turn drain; never invent delivery."""
+        if self.close_attempted:
+            return
+        self.close_attempted = True
+        self.writable = False
+        self.memory = []
+        self.waiting = None
+
+        async def close():
+            async with self.lock:
+                await self.websocket.close(code=1011, reason='Decision result delivery failed')
+                self.close_delivered = True
+        try:
+            # The existing lock and physical close share one send budget.
+            await await_with_deadline(close(), timeout=SEND_TIMEOUT_SECONDS)
+        except (Exception, asyncio.CancelledError):
+            pass  # No retry or claim that an unsuccessful close was delivered.
 
 
 class _TurnSender:
@@ -290,12 +311,23 @@ class WebDecisionRuntime:
                 await self._terminal(handler, sender, turn, RunOutcome.REJECTED, exc.code)
         except asyncio.CancelledError:
             if sender.writable:
-                await self._terminal(handler, sender, turn, RunOutcome.CANCELLED, 'cancelled')
+                if turn.displayed_answer is not None:
+                    await sender.close_failed_delivery()
+                else:
+                    await self._terminal(handler, sender, turn, RunOutcome.CANCELLED, 'cancelled')
         except (ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
-            sender.writable = False
+            # Reference/store failures can share transport exception classes.
+            # Actual send failure already marks the sender unwritable.
+            if sender.writable and turn.displayed_answer is not None:
+                await sender.close_failed_delivery()
+            else:
+                sender.writable = False
         except Exception:
-            if sender.writable and not turn.finishing:
-                await self._terminal(handler, sender, turn, RunOutcome.FAILED, 'decision_request_failed')
+            if sender.writable:
+                if turn.displayed_answer is not None:
+                    await sender.close_failed_delivery()
+                elif not turn.finishing:
+                    await self._terminal(handler, sender, turn, RunOutcome.FAILED, 'decision_request_failed')
         finally:
             # Also seals owners cancelled during refresh or queued admission.
             await turn.worker_owner.settle()
@@ -328,6 +360,16 @@ class WebDecisionRuntime:
         await websocket.accept()
         sender, turn = _Sender(websocket), None
         self.sockets.add(sender)
+        receiver = asyncio.current_task()
+
+        def finished(task):
+            self.tasks.discard(task)
+            if sender.close_attempted and sender in self.sockets and not receiver.done():
+                # End a blocked receiver only AFTER its turn finishes. Its
+                # finally must not cancel a still-draining projection owner,
+                # or be interrupted again after peer disconnect began cleanup.
+                receiver.cancel()
+
         try:
             await sender.send({'type': 'connection_ready', 'normal_chat_mode': 'decision_a2',
                 'capabilities': {'cancel': True, 'rag_retrieval': False,
@@ -336,6 +378,8 @@ class WebDecisionRuntime:
                                      'activity_predictor', 'target_database_search'})}})
             while not self.closing:
                 raw = await websocket.receive_text()
+                if not sender.writable:
+                    break
                 try:
                     payload = decode_protocol_json(raw, max_bytes=24 * 1024)
                     if type(payload) is not dict:
@@ -410,9 +454,12 @@ class WebDecisionRuntime:
                     continue
                 self.active_owners.add(turn)
                 self.tasks.add(turn.task)
-                turn.task.add_done_callback(self.tasks.discard)
+                turn.task.add_done_callback(finished)
         except (WebSocketDisconnect, ConnectionError, asyncio.TimeoutError):
             pass
+        except asyncio.CancelledError:
+            if not sender.close_attempted:
+                raise
         finally:
             sender.writable = False
             sender.waiting = None

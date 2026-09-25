@@ -145,6 +145,191 @@ class Socket:
         self.messages.append(json.loads(text))
 
 
+@pytest.mark.parametrize('report_mode', ['present', 'absent', 'compute-error'])
+def test_settled_candidate_fixture_uses_one_projection_before_complete(tmp_path, monkeypatch, report_mode):
+    """Supplementary delivery contract, NOT normal-route generation acceptance.
+
+    Stored synthetic generation fixture; existing Session/RDKit/ranking/store
+    produce the settled legacy execution. No loop or admission is substituted.
+    """
+    from copy import deepcopy
+    from evidence_report_fixture import execute
+    from src.web import decision_chat, scientific_report
+    from src.web.scientific_references import ScientificReferenceService
+    from src.agent.contracts.scientific_report import validate_report
+    async def run():
+        store, execution, events = execute(tmp_path, partial=True)
+        result = execution.pop('agent_result')
+        legacy = deepcopy(execution)
+        handler = ChatHandler(None, None, None, {}, scientific_references=ScientificReferenceService(store))
+        expected = await scientific_report.prepare_report_event(store, legacy, events, session_id='owner')
+        assert expected is not None
+        validate_report(expected)
+        if report_mode == 'absent':
+            legacy.pop('workflow_plan')  # Real eligibility rejection; do not fabricate a plan.
+        if report_mode == 'compute-error':
+            def fail_snapshot(*args, **kwargs):
+                raise RuntimeError('synthetic optional snapshot unavailable')
+            monkeypatch.setattr(store, 'get_scientific_report_snapshot', fail_snapshot)
+        projection_calls, report_calls = [], []
+        project, prepare = handler.scientific_references.project, scientific_report.prepare_report_event
+        def observe_project(value, **kwargs):
+            assert value == legacy and 'type' not in value
+            projection_calls.append(True)
+            return project(value, **kwargs)
+        async def observe_report(*args, **kwargs):
+            report_calls.append(True)
+            return await prepare(*args, **kwargs)
+        monkeypatch.setattr(handler.scientific_references, 'project', observe_project)
+        monkeypatch.setattr(scientific_report, 'prepare_report_event', observe_report)
+        before = deepcopy(store.get_tool_executions(result.trace_id))
+        socket = Socket()
+        socket.scope = {'agent_session_id': 'owner'}
+        frames = decision_chat._result_frame(handler, result, False)
+        from src.web.decision_runtime import _Sender, _Turn, _TurnSender
+        turn = _Turn({})
+        await decision_chat._deliver_result(handler, _TurnSender(_Sender(socket), turn), frames, legacy)
+        # Exercise the actual strict-frame wrapper. This supplementary fixture
+        # has no request lease; normal-route release is tested independently.
+        assert turn.pending_complete is not None
+        await socket.send_text(turn.pending_complete)
+        assert socket.messages[0]['turn_id'] == turn.turn_id
+        kinds = [frame['type'] for frame in socket.messages]
+        assert kinds == ['agent_result', 'molecule_candidates', *(['scientific_report'] if report_mode == 'present' else []), 'complete']
+        assert len(projection_calls) == len(report_calls) == 1
+        for frame in socket.messages:
+            if frame['type'] in {'molecule_candidates', 'scientific_report'}:
+                assert 'turn_id' not in frame
+        if report_mode == 'present':
+            assert next(f for f in socket.messages if f['type'] == 'scientific_report') == expected
+        assert socket.messages[-1]['status'] == 'partial'
+        assert store.get_tool_executions(result.trace_id) == before
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('frame_type', ['molecule_candidates', 'scientific_report'])
+@pytest.mark.parametrize('fault', ['disconnect', 'timeout'])
+def test_projection_transport_failure_never_delivers_complete(tmp_path, monkeypatch, frame_type, fault):
+    from evidence_report_fixture import execute
+    from src.web import decision_chat
+    from src.web.scientific_references import ScientificReferenceService
+    async def run():
+        store, execution, _ = execute(tmp_path)
+        result = execution.pop('agent_result')
+        before = store.get_tool_executions(result.trace_id)
+        handler = ChatHandler(None, None, None, {}, scientific_references=ScientificReferenceService(store))
+        socket = Socket()
+        socket.scope = {'agent_session_id': 'owner'}
+        attempted, cancelled = [], []
+        original = socket.send_text
+        async def broken(text):
+            if json.loads(text)['type'] == frame_type:
+                attempted.append(True)
+                if fault == 'disconnect':
+                    raise ConnectionError('synthetic projection transport disconnect')
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(True)
+            await original(text)
+        socket.send_text = broken
+        monkeypatch.setattr(decision_chat, 'SEND_TIMEOUT_SECONDS', 0.05)
+        with pytest.raises(ConnectionError if fault == 'disconnect' else asyncio.TimeoutError):
+            await decision_chat._deliver_result(handler, socket,
+                decision_chat._result_frame(handler, result, False), execution)
+        assert len(attempted) == 1
+        assert bool(cancelled) == (fault == 'timeout')
+        assert 'complete' not in [f['type'] for f in socket.messages]
+        assert store.get_tool_executions(result.trace_id) == before
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('blocked_stage', ['project', 'report-store'])
+def test_projection_cancellation_drains_actual_reference_and_report_threads(tmp_path, monkeypatch, blocked_stage):
+    from copy import deepcopy
+    import threading
+    from evidence_report_fixture import execute
+    from src.web import decision_chat
+    from src.web.scientific_references import ScientificReferenceService
+    async def run():
+        store, execution, _ = execute(tmp_path)
+        result = execution.pop('agent_result')
+        handler = ChatHandler(None, None, None, {}, scientific_references=ScientificReferenceService(store))
+        entered, release, exited = asyncio.Event(), threading.Event(), threading.Event()
+        loop = asyncio.get_running_loop()
+        owner = handler.scientific_references if blocked_stage == 'project' else store
+        method = 'project' if blocked_stage == 'project' else 'get_scientific_report_snapshot'
+        original = getattr(owner, method)
+        calls = []
+        def blocked(*args, **kwargs):
+            calls.append(True)
+            if len(calls) == 1:
+                loop.call_soon_threadsafe(entered.set)
+                try:
+                    release.wait()
+                    return original(*args, **kwargs)
+                finally:
+                    exited.set()
+            return original(*args, **kwargs)
+        monkeypatch.setattr(owner, method, blocked)
+        socket = Socket()
+        socket.scope = {'agent_session_id': 'owner'}
+        before = deepcopy(store.get_tool_executions(result.trace_id))
+        delivery = asyncio.create_task(decision_chat._deliver_result(handler, socket,
+            decision_chat._result_frame(handler, result, False), execution))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            for _ in range(2):
+                delivery.cancel()
+                checkpoint = asyncio.Event()
+                loop.call_soon(checkpoint.set)
+                await checkpoint.wait()
+                assert not delivery.done() and not exited.is_set()
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(delivery, 3)
+            assert exited.is_set()
+            kinds = [f['type'] for f in socket.messages]
+            assert 'scientific_report' not in kinds and 'complete' not in kinds
+            assert ('molecule_candidates' in kinds) == (blocked_stage == 'report-store')
+            assert store.get_tool_executions(result.trace_id) == before
+        finally:
+            release.set()
+            await asyncio.wait_for(asyncio.gather(delivery, return_exceptions=True), 5)
+            assert await asyncio.to_thread(exited.wait, 3)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('error', [RuntimeError, ValueError, asyncio.CancelledError])
+def test_projection_task_creation_failure_closes_coroutine_without_dispatch(actual_app, monkeypatch, error):
+    from src.web import decision_chat
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            unscheduled, projected = [], []
+            create = asyncio.create_task
+            def fail(coro, *args, **kwargs):
+                if kwargs.get('name') == 'decision-reference-projection':
+                    unscheduled.append(coro)
+                    raise error('synthetic projection scheduling failure')
+                return create(coro, *args, **kwargs)
+            original_project = b.app.decision_runtime.references.project
+            def observe(*args, **kwargs):
+                projected.append(True)
+                return original_project(*args, **kwargs)
+            monkeypatch.setattr(asyncio, 'create_task', fail)
+            monkeypatch.setattr(b.app.decision_runtime.references, 'project', observe)
+            socket, result = Socket(), done()
+            socket.scope = {'agent_session_id': 'owner'}
+            with pytest.raises(error, match='^synthetic projection scheduling failure$'):
+                await decision_chat._deliver_result(b.app.chat_handler, socket,
+                    decision_chat._result_frame(b.app.chat_handler, result, False),
+                    {**result.to_legacy_dict(), 'trace_id': result.trace_id})
+            assert len(unscheduled) == 1 and inspect.getcoroutinestate(unscheduled[0]) == inspect.CORO_CLOSED
+            assert not projected and not b.calls
+            assert socket.messages == []  # No result is published before ownership transfer.
+    asyncio.run(run())
+
+
 def entry():
     handler = ChatHandler(None, None, None, {})
     assert hasattr(handler, 'process_decision_message'), 'server bridge is not integrated'

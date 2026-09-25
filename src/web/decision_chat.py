@@ -11,6 +11,7 @@ from src.agent.harness.decision_bounds import validate_json
 from src.agent.persistence.redaction import redact_sensitive, sanitize_bounded
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.worker_ownership import WorkerCleanupError
+from .model_lifecycle import finish_on_cancel
 
 
 MAX_PENDING_EVENTS = 128
@@ -182,6 +183,45 @@ def _create_owned_task(coroutine, **kwargs):
         raise
 
 
+class _ProjectionSender:
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.scope = getattr(websocket, 'scope', {})
+        self.stopped = False
+
+    async def send_text(self, text):
+        if self.stopped:
+            raise ConnectionError('Decision projection delivery stopped')
+        await await_with_deadline(self.websocket.send_text(text), timeout=SEND_TIMEOUT_SECONDS)
+
+
+async def _deliver_result(handler, websocket, frames, execution):
+    """Deliver validated display frames around one full settled legacy projection."""
+    sender = _ProjectionSender(websocket)
+
+    async def project_after_result():
+        # Establish task ownership before publishing a result. Scheduling
+        # failure can then be finalized once by the runtime, without replacing
+        # an already displayed outcome. Projection still follows result delivery.
+        await sender.send_text(frames[0])
+        await handler._send_reference_candidate_events(sender, execution, strict_transport=True)
+
+    # The loop's worker ledger is already sealed. Retain this separate async
+    # child without cancelling it: cancellation of a to_thread wrapper is not
+    # proof that its reference/store worker exited. Never close the shared pool.
+    projection = _create_owned_task(project_after_result(), name='decision-reference-projection')
+    try:
+        await asyncio.shield(projection)
+    except asyncio.CancelledError:
+        sender.stopped = True
+        try:
+            await finish_on_cancel(projection)
+        except (Exception, asyncio.CancelledError):
+            pass  # Child is settled; original caller cancellation stays authoritative.
+        raise
+    await sender.send_text(frames[1])
+
+
 async def process_decision_message(handler, websocket, *, context, decision_loop,
                                    request_kind, allowed_tools, required_tools,
                                    requirements=None, continuation_id=None, clarified_query=None,
@@ -259,6 +299,6 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
     except Exception:
         result = _failure(context, 'result_display_invalid')
         frames = _result_frame(handler, result, True)
-    for frame in frames:
-        await send(frame)
+    await _deliver_result(handler, websocket, frames,
+                          {**result.to_legacy_dict(), 'trace_id': result.trace_id})
     return result
