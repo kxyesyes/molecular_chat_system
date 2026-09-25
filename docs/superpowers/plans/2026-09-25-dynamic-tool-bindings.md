@@ -668,3 +668,21 @@ and obtains independent source review/hash confirmation. That reviewed launcher
 and the serialized test slot are mandatory. Stop after the focused RED/GREEN,
 unchanged regression modules and frozen code/test report; independent SPEC then
 QUALITY must approve before a local source checkpoint or another code slice.
+
+### 12.6 Landed ordinary dependency and launcher gate
+
+The user explicitly authorized PR81 squash after its exact-head CI8/8 and
+unresolved-review count0. Parent merged it as
+`a1258d978450a70a55e71156060b4d8d88a8db29` and fetched origin/main.
+Reviewed684e4a1 and merged a1258d9 trees both equal
+`4619c55bb7ea5338979c1dce644f2ba764c0dbeb`. The B branch integrates that landed
+baseline without changing source/tests. This supersedes the earlier pending-merge
+status; no original worktree changes were staged and no deployment occurred.
+
+Independent source review approved the new-path ignored launcher:
+SHA256 `F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183`.
+Normalized source differs from the reviewed ordinary launcher only in literal
+REPO, now this dynamic-bindings-b1 worktree. Isolation, fixture hashing, normal
+conftest, child flags and cleanup remain unchanged. No imports/tests were run
+for the review. The §12.5 two-file TDD release can now use this launcher; all
+broader B app/admission/root/receipts/B8 and B2/C/P8 gates remain pending.

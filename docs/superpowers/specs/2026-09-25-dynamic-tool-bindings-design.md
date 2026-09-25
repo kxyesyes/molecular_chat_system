@@ -521,6 +521,13 @@ ancestors `4C=0295e996`, `G2=27170d95`, `G1=be0219e`, `A1=782cd131`,
 These are local source facts, not new network/landing evidence: **PR81 remains
 unconfirmed merged; no B push or automatic code release/commit.**
 
+Subsequent parent verification: PR81 was explicitly authorized and squash-merged
+as `a1258d978450a70a55e71156060b4d8d88a8db29` after exact-head CI8/8 and zero
+unresolved reviews. Its tree equals reviewed684e4a1. The dependent B branch
+integrates this baseline; plan§12.6 records the checked launcher and limited
+code release. The paragraph above is preserved source-review chronology, not
+the current landing status.
+
 §11's assembly-only status describes historical1da64f2. At the current pin the
 semantic Web route is fully wired through one reader, captured base/history,
 carry/exchange, segment supervision and post-send waiting debit. Default policy

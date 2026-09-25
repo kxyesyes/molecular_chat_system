@@ -4,6 +4,16 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest package7 update: ordinary semantic Web PR81 is now merged as `a1258d9`,
+after explicit user squash authorization. Reviewed head684e4a1, CI run36167669649
+all8 success, unresolved reviews0; reviewed/merged trees equal
+`4619c55bb7ea5338979c1dce644f2ba764c0dbeb`. Linux Agent9345 passed/1 skipped,
+396.55s; first CI Pydantic schema-test failure is retained in ordinary plan§30.
+The older ordinary publication states below are historical. Package7 remains
+incomplete for B scientific bindings, C consent/finite terminal cleanup and
+final real ordinary-chat/multi-turn quality. B starts from the verified landed
+ordinary source; package8 live scientific/UI acceptance is still pending.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |
