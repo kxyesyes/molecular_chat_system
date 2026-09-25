@@ -824,3 +824,48 @@ if mode == 'decision_a2':
 - [ ] Independently SPEC then QUALITY review the unchanged final test blob. Compile the changed test in memory, diff-check and explicitly stage only the approved test plus evidence; parent owns any local checkpoint. No full suite or publication in this worker.
 
 Direct targets above use `python -B -m pytest <absolute-targets> -q -p no:cacheprovider --tb=short -rs` inside the approved isolated child, not an unisolated shell. The original scratch node is `scratch/quality_p7a2_task8_frames.py::test_pre_ready_legacy_payload_really_completes_on_a2`; the four matrix parameters are `pre-full-on`, `post-full-on`, `pre-minimal-on`, `post-minimal-on` in `scratch/causal_p7a2_task8_matrix.py::test_matrix`. Scratch execution must explicitly load the existing conftest as above. Parent authorizes this small written plan under the delegated-choice instruction; implementation remains a separate TDD action after this documentation checkpoint. Overall A2 full verification/CI, broader P7 and package-8 real acceptance remain open.
+
+## 19. Isolated failed-join test: distinguish bootstrap from ownership
+
+### Evidence and limits
+
+The section-18 fixture increment is frozen at blob `dc7adcf075694f65cbb72aed0b56d3504339502f` (+70 lines, not yet committed). Readiness-order RED was 1F/1P/20.50s; six new controls passed in 31.15s, unchanged original scratch passed in 20.34s, and four independent observer-on matrix controls each passed (20.75/20.43/20.91/20.27s). These do not replace the two-module regression: **174P/1F/646.18s**, then **174P/1F/575.26s**. Only the second failure was safely identified as `test_permanent_failed_join_retains_route_owner_in_isolated_child`, `snapshots.get(timeout=20)` raising `queue.Empty`; the first failure identity was not retained.
+
+Further exact-target diagnostics: 1F/29.70s; delegated phase probe: 1F/29.34s. The phase probe received zero ownership snapshots and was awaiting `retained`. Relative to child bootstrap, lifecycle import completed at 6.938s, helper import at 11.563s, fixture factory at 16.984s, graph preparation at 19.000s; no build-ready/request/model/adapter/retain stage was observed before timeout. The original checkpoint deadline includes process startup and imports. The uninstrumented exact failure has no phase measurements; do not copy the probe's times into it.
+
+A separate 45-second bootstrap observation control passed in 10.95s, but bootstrap itself was faster (ready 6.437s, retain 7.344s). This is **not** a causal proof that splitting deadlines fixes slow runs, and 45 seconds was diagnostic only. Startup variability's underlying cause remains unknown. Sessions 18248/6277/29067 exited; owned diagnostic children were force-terminated/reaped by the original finally and readers reached zero, not graceful settlement. Ignored probes `p7a2_child_phase_probe.py` and `p7a2_child_bootstrap_control.py` are retained unchanged.
+
+### Selected design (test contract change, not production optimization)
+
+Under the user's delegated-choice authority, select a bounded startup handshake rather than a larger undifferentiated ownership timeout or reverting dependency readiness. This explicitly adds a **60-second bootstrap budget**; it is not a claim that the original total wall-clock budget is unchanged. The three ownership checkpoints each retain their existing **20-second** budget, and the actual socket receive/close and retain waits remain 3/5/5 seconds. Startup deadline failure remains a failure and is not retried or skipped. Production cold-start latency and the three older UNKNOWN cases remain open.
+
+Scope: only `tests/agent/test_web_decision_runtime_lifecycle.py`, in addition to the frozen section-18 test change; evidence appended here. No production source, timeout/configuration, science assertion, dependency or real asset change.
+
+Child emits `P7A2_CHILD` JSON with only `stage='bootstrap-ready'` and its PID after the real fixture, cookie/socket opening and `socket.ready()` complete, **before** sending the scientific test request. It then requires the parent command `begin`. Parent verifies the bootstrap stage, owned PID and live Popen handle, then writes/flushed `begin`; only then does the unchanged ownership sequence run. The existing reader/prefix, stdin protocol, original three ownership assertions and forced-finally cleanup are reused. EOF, unexpected stage, foreign PID or exited child must fail, including during bootstrap. Bootstrap is not a scientific-success snapshot.
+
+One small test-local helper centralizes the existing stage/PID/liveness checks and distinct budgets, not the scientific assertions:
+
+```python
+def _wait_failed_join_checkpoint(snapshots, child, owned_pid, stage):
+    facts = snapshots.get(timeout=60 if stage == 'bootstrap-ready' else 20)
+    assert facts['stage'] == stage, 'isolated child did not reach controlled checkpoint'
+    assert facts['pid'] == owned_pid and child.poll() is None
+    return facts
+```
+
+No production lifecycle abstraction or test framework is introduced. In the parent `try`, call this helper for bootstrap, send `begin`, then call it instead of the existing get/stage/PID statements in the unchanged three-stage loop. Inside the child immediately after `await socket.ready()`:
+
+```python
+print('P7A2_CHILD ' + json.dumps({'stage': 'bootstrap-ready', 'pid': os.getpid()}), flush=True)
+assert (await asyncio.to_thread(sys.stdin.readline)).strip() == 'begin'
+```
+
+### TDD and verification
+
+- [ ] Add deterministic policy tests before the helper exists, then observe RED. A scripted queue records `get(timeout=...)` and returns stage/PID facts; a small child double exposes only `poll`. Assert exact budgets `[60, 20, 20, 20]`, unchanged facts, rejection of wrong stage/EOF/foreign PID/exited child, and propagation of `queue.Empty` in bootstrap and ownership. These are timeout-policy tests, not real-process performance evidence; never label doubles as ownership proof.
+- [ ] Implement only the helper and bootstrap/begin additions shown above. Keep every original ownership/science assertion and finally cleanup statement. Do not edit the frozen readiness test.
+- [ ] Run those policy nodes GREEN in the approved isolated runner with normal conftest. Then run the unchanged real isolated-child test node to validate actual bootstrap, three ownership checkpoints and forced cleanup. A passing result is current integration evidence only, not erasure of recorded failures.
+- [ ] Run both whole runtime/lifecycle modules once using the same isolation and safe failure-node reporter; record every failure. Do not retry until green, skip nodes, increase deadlines further or fake thread settlement.
+- [ ] Independent SPEC then QUALITY review both exact test blobs; allow independent focused execution sequentially. Memory-compile, `git diff --check`, preserve original probes/hashes, record exact counts and cleanup. Parent owns explicit staging/local checkpoint only after review. Full A2 offline/CI/PR gates remain separate.
+
+Commands inside the approved OS-whitelisted/temp-cwd/config/DB/cache child with tracked JSONL copies and normal conftest: `python -B -m pytest <absolute-lifecycle-path> -k failed_join_checkpoint -q -p no:cacheprovider --tb=short -rs` for policy tests; exact `.../test_web_decision_runtime_lifecycle.py::test_permanent_failed_join_retains_route_owner_in_isolated_child` for real ownership; both absolute module paths for the full pair. No external model, credential, user database, network call or deployment is authorized in this sub-batch. This written follow-up is locally checkpointed before implementation.
