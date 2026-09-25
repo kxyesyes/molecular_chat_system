@@ -1058,3 +1058,42 @@ offline regression gate on the integrated test revision. It does not establish
 unique causality of historical failures, production performance or actual
 ordinary-chat enforcement. Task5 **pure portion** is approved for a local
 checkpoint; actual loop/replay gating and Task6–9 remain mandatory.
+
+## 22. Task6 implementation release — actual loop and continuation
+
+Task5 pure policy is locally checkpointed as `d96eec5d440f2cd49e624c9d3b2dbc4aadbd27d1`
+after both independent source reviews, independent 510-policy passes and the
+parent's integrated 638-pass regression. PR #80 is landed as documented above.
+Release Task6A and Task6B together with Task5's remaining real-loop/replay gates.
+Do not substitute pure arithmetic tests for those real integration obligations.
+
+Allowed production files: `src/agent/contracts/ordinary_admission.py`,
+`src/agent/harness/decision_loop.py`, and
+`src/agent/harness/decision_continuation.py`. Add the two planned test files
+`tests/agent/test_ordinary_admission_budget.py` and
+`tests/agent/test_ordinary_continuation.py`; place actual loop/non-exposure
+regressions there. Existing test files, policy, protocol schema, scientific
+validators, model transport and Web production files remain frozen unless a
+concrete cross-file need is raised to the parent first. Parent owns this plan
+and the completion ledger. No production model/config/asset discovery or
+activation, network, push, merge or deployment in this implementation batch.
+
+The implementation must follow Task6's complete requirements above and the
+section-21 source re-pin: no-carry revision6 stays byte-compatible; semantic
+revision7 is selected by validated server carry, not a stored field; original
+limits16/12/300 remain unchanged; intent contributes to the shared total without
+fabricating decision call records; unsafe finish/clarify cannot enter proposals,
+answers, persistent history or waiting publication; all semantic stored clarify
+proposals are revalidated before CAS. Use the same sampled monotonic time for
+snapshot credit and private checkpoint, and publish the set-once exchange only
+after actual continuation publication. Preserve physical worker ownership and
+existing scientific evidence/requirements/replay behavior.
+
+Use TDD with the existing section-2 isolated launcher and serialize heavy tests.
+Record RED, targeted GREEN and the required continuation/history/clarification
+regressions with actual counts, elapsed times and exit codes. Tests of module-
+local clock aliases must not modify asyncio's global clock. Failures remain
+visible; no changed timeout, counter or scientific assertion to gain a pass.
+Freeze for independent SPEC then QUALITY review without committing; parent
+reviews and checkpoints only after the stated gates. Web profile/epoch/lease
+ownership and same-socket tests remain Task7/8, not implied by this release.
