@@ -965,3 +965,19 @@ No scientific tool or model response is implemented by this stub. The actual app
 - [ ] Independent SPEC then QUALITY review the exact final test blob and execute the affected module serially. Memory-compile and diff-check; parent explicitly stages only this test and evidence after review, not old scratch probes. Remaining offline/CI/full confirmation gates and broader P7/P8 stay pending.
 
 Commands use MedChat Python `-B`, ignored `scratch/p7a2_repository_offline_runner.py`, absolute selected test paths, and its unchanged pytest `-q -p no:cacheprovider --tb=short -rs` options inside the approved isolated child. This section is documentation-checkpointed before code changes. No push, PR, merge or deployment is performed by this sub-batch.
+
+## 22. Configuration-fixture execution and review closure
+
+Section 21 was checkpointed at `7c832812b8f29a8f665e4d023ebad755bc29adf5`. The only code increment is `tests/test_user_llm_routes.py`, +26/-1, approved blob `6c8612ab29178881f06754048cb844c101a6cb4e` (SHA256 `79efc157a35b28b7355a5ddc73dc742ed8881ac84c40bc98dda6248b20151729`). Its original nine tests are unchanged. The local explicit configuration stub and one additional real-config-binding test implement the bounded plan; production app/config/handler code is untouched.
+
+| Execution, each once | Actual result |
+|---|---|
+| New test RED with original factory | 1 failed / 7 warnings / 11.03s, initial `tools == {}` assertion |
+| Whole user-config module GREEN | 10 passed / 7 warnings / 0 skipped / 9.91s |
+| Model-request and Web-app lifecycle modules | 38 passed / 7 warnings / 0 skipped / 5.73s |
+| Independent SPEC, whole user-config module | 10 passed / 7 warnings / 0 skipped / 7.89s, session 63816 exit 0 |
+| Independent QUALITY, same module | 10 passed / 7 warnings / 0 skipped / 8.76s, session 69764 exit 0 |
+
+Both reviews approve only this fixture correction and verify the same before/after blob. All implementation and review sessions exited; memory compilation, diff checks and three tracked JSONL SHA checks pass. Execution uses the same approved isolated repository runner with absolute test paths, normal conftest and network denial; synthetic configuration only, no external model request or real key read. No passing rerun erased the section-21 original 4F/5P or passive-probe 1F evidence.
+
+Parent authorizes an explicit local checkpoint of this reviewed test and this evidence only. Full root was not rerun by either reviewer. Full Agent's five 10-second guard failures, the managed-child five-second startup failure, test-owned metrics HTTP harness correction, Node/static, final complete confirmation and CI remain pending. This is not overall A2 merge approval; no push, merge, default activation or deployment occurs here.
