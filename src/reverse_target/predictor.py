@@ -13,8 +13,15 @@ from rdkit import DataStructs
 from rdkit.Chem import AllChem, MACCSkeys
 import pickle
 import threading
+import uuid
 
 from src.reverse_target.config import get_reverse_target_data_dir
+from src.reverse_target.owned_source import (
+    INPUT_ERROR, PROOF_ERROR, REVISION, WEIGHT_REVISION, ReverseSourceSnapshot,
+    ReverseSourceUnavailable, clear_failure_frames, configuration_sha256, json_sha256,
+    load_owned_source, operation_check, resolve_weights, validate_controls,
+    validate_envelope, validate_popcount_rows,
+)
 
 
 def _bitvect_to_numpy_array(bitvect) -> np.ndarray:
@@ -60,6 +67,190 @@ class ReverseTargetPredictor:
         self.metadata = None
         self._loaded = False
         self._load_lock = threading.Lock()
+        self._strict_lock = threading.RLock()
+        self._strict_epoch = 0
+        self._strict_loading = False
+        self._strict_active = 0
+        self._strict_source = None
+
+    def _resolved_source_paths(self):
+        return {key: str(Path(value).resolve()) for key, value in (
+            ("tsv", self.training_data_path), ("morgan", self.morgan_fp_path),
+            ("maccs", self.maccs_fp_path), ("morgan_popcounts", self.morgan_popcount_path),
+            ("maccs_popcounts", self.maccs_popcount_path))}
+
+    def initialize_strict(self, *, max_snapshot_bytes=512 * 1024**2,
+                          timeout_seconds=120, cancelled=None):
+        if type(max_snapshot_bytes) is not int or max_snapshot_bytes <= 0:
+            raise ValueError(INPUT_ERROR)
+        check = operation_check(timeout_seconds, cancelled)
+        with self._strict_lock:
+            if self._strict_loading or self._strict_active:
+                raise ReverseSourceUnavailable()
+            self._strict_epoch += 1
+            epoch = self._strict_epoch
+            self._strict_source = None
+            self._strict_loading = True
+        # Only the admitted owner enters this finally, including path failures.
+        try:
+            check()
+            try:
+                paths = self._resolved_source_paths()
+            except Exception:
+                raise ReverseSourceUnavailable() from None
+            check()
+            candidate = load_owned_source(paths, max_snapshot_bytes, check,
+                                          self.compute_query_fingerprints)
+            with self._strict_lock:
+                check()
+                try:
+                    current_paths = self._resolved_source_paths()
+                except Exception:
+                    raise ReverseSourceUnavailable() from None
+                check()
+                # A callback can close or change configuration. Check again after
+                # it, then only read the clock before publication.
+                try:
+                    current_paths_after_check = self._resolved_source_paths()
+                except Exception:
+                    raise ReverseSourceUnavailable() from None
+                check.deadline()
+                if (self._strict_epoch != epoch or current_paths != paths
+                        or current_paths_after_check != paths):
+                    raise ReverseSourceUnavailable()
+                self._strict_source = candidate
+        except BaseException as error:
+            clear_failure_frames(error)
+            raise
+        finally:
+            candidate = check = cancelled = None
+            with self._strict_lock:
+                self._strict_loading = False
+
+    def close_strict(self):
+        with self._strict_lock:
+            self._strict_epoch += 1
+            self._strict_source = None
+
+    def _eligible_source(self):
+        """Called with strict lock held; only actual path drift revokes current."""
+        source = self._strict_source
+        if source is None:
+            raise ReverseSourceUnavailable()
+        try:
+            same_paths = self._resolved_source_paths() == source.paths
+        except Exception:
+            same_paths = False
+        if not same_paths:
+            self._strict_epoch += 1
+            self._strict_source = None
+            raise ReverseSourceUnavailable()
+        return source
+
+    @staticmethod
+    def _resolved_weights():
+        return resolve_weights(os.getenv("REVERSE_TARGET_MORGAN_WEIGHT"))
+
+    @staticmethod
+    def _source_snapshot(source, weights, resolution):
+        return ReverseSourceSnapshot(
+            source.descriptor["generation_id"], source.source_sha256,
+            configuration_sha256(source.paths, weights, resolution))
+
+    def capture_prediction_source(self):
+        try:
+            with self._strict_lock:
+                source = self._eligible_source()
+                weights, resolution = self._resolved_weights()
+                return self._source_snapshot(source, weights, resolution)
+        except BaseException as error:
+            clear_failure_frames(error)
+            raise
+        finally:
+            source = None
+
+    def predict_with_receipt(self, smiles, threshold=0.6, top_k=10,
+                             combine_by_target=True, organism_filter="", *,
+                             timeout_seconds=300, cancelled=None):
+        controls = validate_controls(smiles, threshold, top_k, combine_by_target, organism_filter)
+        check = operation_check(timeout_seconds, cancelled)
+        owns_active = False
+        try:
+            # Admission can revoke a drifted generation and fail before this
+            # invocation owns a slot. Its traceback needs the same cleanup.
+            with self._strict_lock:
+                source = self._eligible_source()
+                weights, resolution = self._resolved_weights()
+                snapshot = self._source_snapshot(source, weights, resolution)
+                self._strict_active += 1
+                owns_active = True
+            check()
+            records, score_dtype = self._predict_core(
+                smiles, threshold, top_k, combine_by_target, organism_filter,
+                frame=source.frame, morgan_fps=source.morgan, maccs_fps=source.maccs,
+                morgan_popcounts=source.morgan_popcounts, maccs_popcounts=source.maccs_popcounts,
+                weights=weights, check=check)
+            check()
+            envelope = dict(records=records, receipt=dict(
+                schema_version="1", validation_revision=REVISION, invocation_id=uuid.uuid4().hex,
+                source=source.descriptor, source_sha256=snapshot.source_sha256,
+                input_sha256=json_sha256(dict(smiles=smiles, controls=controls)),
+                configuration_sha256=snapshot.configuration_sha256, controls=controls,
+                weights=weights, weight_resolution_revision=WEIGHT_REVISION,
+                weight_resolution=resolution, score_dtype=score_dtype,
+                result_sha256=json_sha256(records), status="verified_hits" if records else "verified_empty",
+                record_count=len(records)))
+            # Check the closed output contract too (e.g. generated link lengths).
+            # This is bounded JSON validation, never another scientific scoring.
+            result = validate_envelope(envelope, smiles=smiles, controls=controls, expected=snapshot)
+            with self._strict_lock:
+                check()
+                if self._eligible_source() is not source:
+                    raise ReverseSourceUnavailable()
+                check()
+                if self._eligible_source() is not source:
+                    raise ReverseSourceUnavailable()
+                check.deadline()
+            return result
+        except BaseException as error:
+            clear_failure_frames(error)
+            raise
+        finally:
+            # Release operation-owned RAM before allowing a new acquisition,
+            # even when a caller/Future retains the failed exception traceback.
+            source = records = envelope = result = check = cancelled = None
+            if owns_active:
+                with self._strict_lock:
+                    self._strict_active -= 1
+
+    def validate_prediction_source(self, envelope, *, smiles, threshold=0.6, top_k=10,
+                                   combine_by_target=True, organism_filter="", expected):
+        controls = validate_controls(smiles, threshold, top_k, combine_by_target, organism_filter)
+        result = validate_envelope(envelope, smiles=smiles, controls=controls, expected=expected)
+        try:
+            with self._strict_lock:
+                source = self._eligible_source()
+                weights, resolution = self._resolved_weights()
+                current = self._source_snapshot(source, weights, resolution)
+                receipt = result["receipt"]
+                if (expected != current or receipt["source"]["generation_id"] != current.generation_id
+                        or receipt["source_sha256"] != current.source_sha256):
+                    raise ReverseSourceUnavailable()
+                # Python numeric equality hides int/float and signed-zero changes.
+                # Bind the digest to the receipt's actual native JSON values, using
+                # only the matching current source's private resolved paths.
+                receipt_configuration = configuration_sha256(
+                    source.paths, receipt["weights"], receipt["weight_resolution"])
+                if receipt["configuration_sha256"] != receipt_configuration:
+                    raise ValueError(PROOF_ERROR)
+                if receipt_configuration != current.configuration_sha256:
+                    raise ReverseSourceUnavailable()
+            return result
+        except BaseException as error:
+            clear_failure_frames(error)
+            raise
+        finally:
+            source = None
 
     def _resolve_training_data_path(self) -> Path:
         aligned_path = self.data_dir / "chembl_data_with_fps.tsv"
@@ -138,7 +329,6 @@ class ReverseTargetPredictor:
             raise ValueError(fingerprint_error)
 
         n_samples = int(fingerprints.shape[0])
-        width = int(fingerprints.shape[1])
         try:
             chunk_size = int(os.getenv("REVERSE_TARGET_POPCOUNT_CHUNK_SIZE", "50000"))
         except ValueError:
@@ -168,29 +358,10 @@ class ReverseTargetPredictor:
                     # np.load can also open an archive, which is not a count vector.
                     loaded.close()
         else:
-            popcounts = np.zeros(n_samples, dtype=np.uint16)
-
-        for start in range(0, n_samples, chunk_size):
-            end = min(start + chunk_size, n_samples)
-            chunk = fingerprints[start:end]
-            if np.any((chunk != 0) & (chunk != 1)):
-                raise ValueError(fingerprint_error)
-            expected = np.sum(chunk, axis=1, dtype=np.uint32)
-            if cached:
-                counts = popcounts[start:end]
-                if (
-                    np.any(counts < 0)
-                    or np.any(counts > width)
-                    or not np.array_equal(counts, expected)
-                ):
-                    raise ValueError(cache_error)
-            else:
-                popcounts[start:end] = expected
-
+            popcounts = None
+        popcounts = validate_popcount_rows(fingerprints, popcounts, chunk_size=chunk_size)
         if cached:
-            # Normalize only after validating original values; narrow cache dtypes
-            # can overflow count addition in the 166/2048-bit scorer.
-            return popcounts.astype(np.uint16, copy=False)
+            return popcounts
         try:
             np.save(popcount_path, popcounts)
         except OSError:
@@ -198,12 +369,8 @@ class ReverseTargetPredictor:
         return popcounts
 
     def _combine_similarity_scores(self, morgan_sims: np.ndarray, maccs_sims: np.ndarray) -> np.ndarray:
-        try:
-            morgan_weight = float(os.getenv("REVERSE_TARGET_MORGAN_WEIGHT", "0.7"))
-        except ValueError:
-            morgan_weight = 0.7
-        morgan_weight = min(1.0, max(0.0, morgan_weight))
-        return (morgan_sims * morgan_weight) + (maccs_sims * (1.0 - morgan_weight))
+        weights, _ = self._resolved_weights()
+        return (morgan_sims * weights["morgan"]) + (maccs_sims * weights["maccs"])
     
     def compute_query_fingerprints(self, smiles: str) -> Tuple[np.ndarray, np.ndarray]:
         """计算查询分子的指纹"""
@@ -230,7 +397,7 @@ class ReverseTargetPredictor:
             return 0.0
         return float(intersection) / float(union)
     
-    def batch_tanimoto_similarity(self, query_fp: np.ndarray, database_fps: np.ndarray, db_popcounts: np.ndarray = None) -> np.ndarray:
+    def batch_tanimoto_similarity(self, query_fp: np.ndarray, database_fps: np.ndarray, db_popcounts: np.ndarray = None, *, check=None) -> np.ndarray:
         """
         批量计算 Tanimoto 相似度 (优化版)
         
@@ -270,6 +437,8 @@ class ReverseTargetPredictor:
         chunk_size = 50000
         
         for i in range(0, n_samples, chunk_size):
+            if check:
+                check()
             end = min(i + chunk_size, n_samples)
             
             # 关键优化：只对 Query 为 1 的列求和
@@ -282,6 +451,8 @@ class ReverseTargetPredictor:
             # 避免除零
             mask = chunk_union > 0
             similarities[i:end][mask] = chunk_intersection[mask] / chunk_union[mask]
+            if check:
+                check()
             
         return similarities
     
@@ -301,34 +472,54 @@ class ReverseTargetPredictor:
         """
         if not self._loaded:
             self.load()
-        
+        weights, _ = self._resolved_weights()
+        records, _ = self._predict_core(
+            smiles, threshold, top_k, combine_by_target, organism_filter,
+            frame=self.df, morgan_fps=self.morgan_fps, maccs_fps=self.maccs_fps,
+            morgan_popcounts=self.morgan_popcounts, maccs_popcounts=self.maccs_popcounts,
+            weights=weights)
+        return records
+
+    def _predict_core(self, smiles, threshold, top_k, combine_by_target, organism_filter, *,
+                      frame, morgan_fps, maccs_fps, morgan_popcounts, maccs_popcounts,
+                      weights, check=None):
+        if check:
+            check()
         # 计算查询指纹
-        query_morgan, query_maccs = self.compute_query_fingerprints(smiles)
-        
+        try:
+            query_morgan, query_maccs = self.compute_query_fingerprints(smiles)
+        except ValueError:
+            if check:
+                raise ValueError(INPUT_ERROR) from None
+            raise
+        if check:
+            check()
         # 批量计算相似度 (传入预计算的 popcounts)
-        morgan_sims = self.batch_tanimoto_similarity(query_morgan, self.morgan_fps, self.morgan_popcounts)
-        maccs_sims = self.batch_tanimoto_similarity(query_maccs, self.maccs_fps, self.maccs_popcounts)
-        
-        final_sims = self._combine_similarity_scores(morgan_sims, maccs_sims)
+        hooks = {"check": check} if check else {}
+        morgan_sims = self.batch_tanimoto_similarity(query_morgan, morgan_fps, morgan_popcounts, **hooks)
+        maccs_sims = self.batch_tanimoto_similarity(query_maccs, maccs_fps, maccs_popcounts, **hooks)
+        final_sims = (morgan_sims * weights["morgan"]) + (maccs_sims * weights["maccs"])
         
         # 过滤低于阈值的结果
         mask = final_sims >= threshold
-        mask = self._apply_organism_filter(mask, organism_filter)
+        mask = self._filter_frame_organism(frame, mask, organism_filter)
         
         if not np.any(mask):
-            return []
+            return [], final_sims.dtype.name
         
         # 构建结果
         results = []
         for idx in np.where(mask)[0]:
-            target_name = self.df.iloc[idx]['target_name']
+            if check:
+                check()
+            target_name = frame.iloc[idx]['target_name']
             results.append({
                 'target_name': target_name,
-                'organism': self.df.iloc[idx]['organism'],
-                'canonical_smiles': self.df.iloc[idx]['canonical_smiles'],
-                'molecule_chembl_id': self.df.iloc[idx]['molecule_chembl_id'],
-                'standard_type': self.df.iloc[idx]['standard_type'],
-                'standard_value': float(self.df.iloc[idx]['standard_value']),
+                'organism': frame.iloc[idx]['organism'],
+                'canonical_smiles': frame.iloc[idx]['canonical_smiles'],
+                'molecule_chembl_id': frame.iloc[idx]['molecule_chembl_id'],
+                'standard_type': frame.iloc[idx]['standard_type'],
+                'standard_value': float(frame.iloc[idx]['standard_value']),
                 'morgan_similarity': float(morgan_sims[idx]),
                 'maccs_similarity': float(maccs_sims[idx]),
                 'final_similarity': float(final_sims[idx]),
@@ -347,6 +538,8 @@ class ReverseTargetPredictor:
             target_counts = {}  # 统计每个靶点的相似分子数量
             
             for r in results:
+                if check:
+                    check()
                 target = r['target_name']
                 if target not in target_counts:
                     target_counts[target] = 0
@@ -357,6 +550,8 @@ class ReverseTargetPredictor:
             
             # 添加相似分子数量
             for target, result in target_map.items():
+                if check:
+                    check()
                 result['similar_count'] = target_counts[target]
             
             results = list(target_map.values())
@@ -364,10 +559,14 @@ class ReverseTargetPredictor:
         else:
             # 如果不合并，每个结果的相似分子数量为1
             for r in results:
+                if check:
+                    check()
                 r['similar_count'] = 1
         
         # 返回前K个
-        return results[:top_k]
+        if check:
+            check()
+        return results[:top_k], final_sims.dtype.name
 
     def predict_batch(self, smiles_list: List[str], threshold: float = 0.6, top_k: int = 10,
                       combine_by_target: bool = True, organism_filter: str = "") -> List[Dict]:
@@ -573,12 +772,16 @@ class ReverseTargetPredictor:
         return np.array(selected, dtype=int)
 
     def _apply_organism_filter(self, mask: np.ndarray, organism_filter: str = "") -> np.ndarray:
+        return self._filter_frame_organism(self.df, mask, organism_filter)
+
+    @staticmethod
+    def _filter_frame_organism(frame, mask, organism_filter=""):
         organism_filter = (organism_filter or "").strip()
         if not organism_filter:
             return mask
-        if self.df is None or "organism" not in self.df.columns:
+        if frame is None or "organism" not in frame.columns:
             return mask
-        organism_values = self.df["organism"].fillna("").astype(str).str.lower()
+        organism_values = frame["organism"].fillna("").astype(str).str.lower()
         filter_value = organism_filter.lower()
         if filter_value in {"human", "homo sapiens"}:
             organism_mask = organism_values.isin({"human", "homo sapiens"})

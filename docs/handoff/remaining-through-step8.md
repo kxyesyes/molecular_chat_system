@@ -117,18 +117,36 @@ and hashes are in the 2026-09-26 reverse-popcount-validation plan. Two-file
 in-memory compile and diff checks passed; original dirty checkout unchanged.
 This does not prove TSV-to-fingerprint alignment or stable fingerprint ownership.
 
-Next reverse producer design must pin owned generation and resource limits before
-receipts: no trusted row-alignment manifest currently exists. A read-only audit
-recommends exact per-row RDKit correspondence and private owned arrays, then a
-shared scoring core with once-captured effective weights and detached receipts.
-Owned uint8 fingerprints plus uint16 counts retain2218 bytes/row (~2.07GiB per
-million), excluding TSV/dataframe/scores/temporary allocations; real acquisition
-time/memory remain unmeasured. Memory/deadline/cancellation limits, source refresh
-policy, invalid/missing TSV fields and safe strict lazy acquisition require a
-written bounded decision. Do not invoke eager legacy get_predictor/load or use
-the cache fix alone as B scientific authority. Actual seven-tool/v2 bindings,
-proof-aware operation keys/sealing, dispatch/reuse/resume-before-CAS/finish
-freshness checks, B8/ordinary entry and all B2/C/P8 end states remain pending.
+The reverse owned producer is now implemented locally and independently
+SPEC/QUALITY approved. A real temporary writer/RDKit baseline reproduced the
+old mismatch: swapping only TSV rows attached CCO's similarity1.0 to CCC /
+Synthetic B. The new explicit strict initialization rejects this mismatch and
+owns detached arrays after exact per-row query/writer fingerprint correspondence.
+Legacy list loading is compatibility-only, not silently certified or switched.
+
+Strict predictions share the old scientific core and return same-call source,
+input, effective-weight/configuration and result digests. Current-source checks
+reject close/reload/path drift and stale weights without rescoring. Loaded RAM is
+authoritative until explicit initialization; disk replacement is not auto-adopted.
+Missing counts compute privately without cache writes or pickle. Defaults are a
+512MiB logical snapshot budget,120s cooperative acquisition and300s per-prediction
+limit. Bounded NPY preflight uses the same read-only fd through mapping. Failure
+cleanup includes retained Future/exception frames, with nonowner counter safety.
+These are not hard RSS guarantees or proof that actual ChEMBL assets fit; real
+acquisition time/memory remain unmeasured. Hashes are not authentication tokens.
+
+All32 test runs, including original failures and reviewer corrections, are in
+the 2026-09-26 reverse-owned-producer plan. Worker union593 passed/2 subtests in
+34.21s; independent QUALITY union593 passed/2 subtests in36.72s, both exit0 with
+no skips or pytest warnings reported. RDKit diagnostics in earlier RED captures
+remain recorded. Parent compiled3 changed Python files in memory and checked the
+diff; no actual external model, host scientific assets or deployment was used.
+
+Next: actual strict reverse tool/adapter receipt consumption and normalization
+binding, then seven-tool/v2 execution, proof-aware operation keys/sealing,
+dispatch/reuse/resume-before-CAS/finish freshness, B8/ordinary entry and B2/C/P8.
+The existing reverse tool still calls legacy get_predictor/predict; do not count
+the producer slice alone as B scientific authority or final live acceptance.
 
 | Package | Required end state / evidence | Current state |
 |---|---|---|
