@@ -8,6 +8,12 @@ from test_web_decision_runtime import (
 )
 
 
+CAPABILITY_CASES = (
+    ('REAL-010', '你好，我想了解一下这个系统能做什么？'),
+    ('DIVERSE-015', '你好，我只是想了解这个系统能做什么。请不要调用任何科研计算工具。'),
+)
+
+
 def intent_http_response(kind='capability', *, wire='native', history_relation='none', unresolved=False):
     """Task2's strict envelope over the real adapter's MockTransport seam."""
     raw = json.dumps({'intent': {'version': '1', 'kind': kind,

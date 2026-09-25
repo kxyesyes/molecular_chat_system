@@ -269,15 +269,10 @@ class MolecularChatApp:
         if ordinary_chat_policy == 'semantic_v1':
             self.ordinary_capability_base = self._build_ordinary_capability_base(
                 self.active_llm_config, self.model, self.model_generation, self.capability_generation)
-            # Task7A publishes assembly facts only. Until the semantic admission,
-            # carry-in and display gate are wired together, NONE of this app's
-            # request entries may fall through to the closed-profile executor.
-            # Keep the real runtime/handler for assembly and lifecycle checks;
-            # these instance bindings do not change a1_closed or standalone use.
-            self.chat_handler.handle_websocket = self._reject_unassembled_ordinary_websocket
-            self.decision_runtime.handle_websocket = self._reject_unassembled_ordinary_websocket
+            # Web requests now enter the supervised semantic runtime. The legacy
+            # direct API cannot supply that admission and remains closed; the
+            # decision bridge itself requires server-owned carry and exchange.
             self.chat_handler._process_message = self._reject_unassembled_ordinary_dispatch
-            self.chat_handler.process_decision_message = self._reject_unassembled_ordinary_dispatch
 
         # Create FastAPI app
         self.app = FastAPI(title="Molecular Chat System")

@@ -69,15 +69,22 @@ class ChatHandler:
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
                                        requirements=None, continuation_id=None, clarified_query=None,
-                                       worker_owner=None, cancel_event=None):
+                                       worker_owner=None, cancel_event=None,
+                                       admission_carry=None, admission_exchange=None):
         """Server-only opt-in bridge; never dispatch browser kwargs into this API."""
         from .decision_chat import process_decision_message
+        if (self.decision_runtime is not None and self.decision_runtime.semantic
+                and (admission_carry is None or admission_exchange is None)):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=503, detail='ordinary_semantic_not_assembled')
         return await process_decision_message(
             self, websocket, context=context, decision_loop=decision_loop,
             request_kind=request_kind, allowed_tools=allowed_tools, required_tools=required_tools,
             requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
             worker_owner=worker_owner,
             cancel_event=cancel_event,
+            **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
+               if admission_carry is not None else {}),
         )
     
     async def handle_websocket(self, websocket: WebSocket):

@@ -558,8 +558,8 @@ def test_fixture_accepts_concrete_transport_response(actual_app, wire):
 
 
 @pytest.mark.parametrize('wire', ['native', 'json'])
-def test_unassembled_semantic_route_rejects_before_provider(actual_app, wire):
-    """Real Session middleware and mounted /ws, not semantic-flow acceptance."""
+def test_assembled_semantic_route_rejects_unsafe_display(actual_app, wire):
+    """The complete runtime replaces the temporary assembly-only closure."""
     claim = '我已运行分子对接并生成了新姿势。'
     async def run():
         async def respond(payload):
@@ -577,11 +577,14 @@ def test_unassembled_semantic_route_rejects_before_provider(actual_app, wire):
                     if frame['type'] in {'complete', 'websocket.close'}:
                         break
                 assert socket.scope['agent_session_id'] == app.app.state.agent_session_store.resolve(cookie)
-                assert not bundle.calls, 'unassembled semantic entry reached the provider'
+                assert len(bundle.calls) == 1
                 assert claim not in json.dumps(frames, ensure_ascii=False)
-                assert [frame['type'] for frame in frames] == ['websocket.accept', 'error', 'websocket.close']
-                assert frames[1]['code'] == 'ordinary_semantic_not_assembled'
-                assert frames[-1]['code'] == 1013
+                assert frames[1]['type'] == 'connection_ready'
+                result = result_of(frames)
+                assert result['status'] == 'failed'
+                assert result['metadata']['stop_reason'] == 'chat_claim_not_grounded'
+                assert result['metadata']['ordinary_admission']['intent_requests'] == 0
+                assert app.agent_state_store.get_tool_executions(result['trace_id']) == []
                 assert not bundle.admission_calls and not bundle.claims
             assert not app.decision_runtime.active_owners
             assert not app.decision_runtime.tasks and not app.decision_runtime.sockets
@@ -605,7 +608,7 @@ def test_closed_profile_route_still_serves_admitted_chat(actual_app, policy):
 
 
 @pytest.mark.parametrize('entry', ['handler', 'runtime'])
-def test_unassembled_semantic_direct_websocket_entry_rejects(actual_app, entry):
+def test_assembled_semantic_direct_websocket_entry_uses_gate(actual_app, entry):
     from starlette.websockets import WebSocket
     async def run():
         async with actual_app(mode='decision_a2', ordinary_policy='semantic_v1') as bundle:
@@ -627,10 +630,12 @@ def test_unassembled_semantic_direct_websocket_entry_rejects(actual_app, entry):
                     frames.append(frame)
                     if frame['type'] in {'complete', 'websocket.close'}:
                         break
-                assert not bundle.calls
-                assert [frame['type'] for frame in frames] == ['websocket.accept', 'error', 'websocket.close']
-                assert frames[1]['code'] == 'ordinary_semantic_not_assembled'
-                assert frames[-1]['code'] == 1013
+                assert len(bundle.calls) == 1
+                assert frames[1]['type'] == 'connection_ready'
+                result = result_of(frames)
+                assert result['status'] == 'completed'
+                assert result['metadata']['ordinary_admission']['intent_requests'] == 0
+                assert 'Frozen ordinary capabilities: ' in str(bundle.calls[0]['messages'])
             finally:
                 await socket.incoming.put({'type': 'websocket.disconnect', 'code': 1000})
                 await asyncio.wait_for(task, 5)

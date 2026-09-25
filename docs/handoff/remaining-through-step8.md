@@ -17,6 +17,28 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 The final audit must check all eight rows against current code, PR state and real reports. Passing offline CI is not proof of model quality, real Vina operation or server readiness. A missing dependency does not become a scientific pass.
 
+### Package7 ordinary Web checkpoint update (supersedes the row's staging status)
+
+Task7B/C and Task8B/C now have a reviewed local implementation on top of
+`1da64f2`: the real Web request path shares intent/decision credit, immutable
+capability/model capture, bounded history, continuation authority and safe
+presentation through the existing loop/Session. The temporary semantic
+WebSocket blocker is removed only for this complete path; legacy direct
+dispatch remains closed and default A2 behavior is unchanged.
+
+Independent SPEC and QUALITY approve the eight-file freeze. Evidence:
+implementer focused246 and existing A2 216 passed; parent joint **2717 passed**;
+independent QUALITY **160 passed**; compileall **339 files**; **15 Node
+entrypoints** passed (local Node24, not CI20). Full commands, timings, warnings
+and all intermediate failures are retained in ordinary plan sections27–28.
+
+This supersedes the table's "Task7B/C pending" local implementation status,
+not package7 completion. Full Agent and remaining CI partitions/publication
+are still pending at this checkpoint. Conservative-language false positives,
+indefinite cleanup for unresolved owners, B scientific bindings/C integration
+and package8 real-model/UI acceptance remain pending. B's separately reviewed
+design amendment is `0487d79`; it is not B implementation or live execution.
+
 Historical 2026-09-25 checkpoint (superseded status, retained chronology): package7 A1 was in independent finding closure; A2 design awaited landed A1; package8-A offline aggregator was under review. Those dependency/publication states are updated below, not evidence that the historical failures never occurred. No production-entry switch, external provider activation or deployment occurred in those batches.
 
 ## A2 G1 release and documentation freeze — 2026-09-25

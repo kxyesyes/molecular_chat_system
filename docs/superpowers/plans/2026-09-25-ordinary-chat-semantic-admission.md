@@ -1412,3 +1412,198 @@ semantic mode may execute through the old no-carry chat path. Keep default
 a1_closed behavior unchanged. Use a fresh implementer and repeat SPEC then
 QUALITY before claiming Web integration complete. B/C scientific integration
 and package8 final live acceptance are still separate pending work.
+
+## 27. Task7B/C actual-route RED and fixture compatibility boundary
+
+The Task7A checkpoint is `1da64f2694203de0ef3f3c875ceb775e4be0dee4`.
+A fresh Task7B/C implementer first added the two exact original capability
+prompts in both wire modes. The first isolated run of
+`tests/agent/test_ordinary_web_runtime.py` gave **6 failed, 2 passed, seven
+warnings, 5.60s, exit1** (command wall time7.918s), no active session.
+Four route failures were the still-intact assembly-only error before ready;
+they did not yet exercise intent/answer. Two separate dependency probes found
+the plan's illustrative synthetic answer rejected by the frozen display policy:
+`本系统支持分子性质等功能；当前科研依赖是否可用尚不能确认。`.
+Its second clause lacks a recognized feature subject and does not match the
+current narrowly recognized uncertainty forms (`chat_capability_conflict`).
+Two explicit-subject controls passed; that is not actual-route acceptance.
+
+Parent permits only the scripted response to become
+`本系统支持分子性质等功能；分子性质可用性未知。`.
+Original REAL-010/DIVERSE-015 questions, successful outcomes, actual two-call
+sequence, unchanged input and zero-tool/source assertions remain mandatory.
+This isolates Web plumbing from a policy-language change; the illustrative
+reply is not immutable user input. Do not add an expected-reject test that
+permanently blesses the former phrase's rejection. Keep this as a known
+conservative language false-positive/limitation, not a fixed production bug.
+Current scope does not edit the frozen display policy. Final real relevance
+and normal multi-turn acceptance must still evaluate such false positives;
+scripted explicit-subject success cannot substitute for that gate.
+
+Parallel planning-only progress: the independent B worktree committed reviewed
+profile/RAG mapping and inclusive root-budget/B8 amendments as
+`0487d798cf7789064c3d56ec1d421151ffad90b6`. Its non-blocking adapter citation was
+corrected against committed source. This is not a B implementation release or
+evidence of a token bound, real generation, current Web integration or final
+acceptance. Task7B/C source/tests remain actively owned by their implementer;
+do not checkpoint those unfinished edits as reviewed work.
+
+## 28. Task7B/C and Task8B/C implementation freeze — review pending
+
+The fresh implementer completed a candidate on unchanged HEAD `1da64f2` and
+froze eight files for independent SPEC then QUALITY: `src/web/app.py`,
+`chat_handler.py`, `decision_chat.py`, `decision_runtime.py`, and
+`tests/agent/ordinary_chat_fixtures.py`, `test_ordinary_app_assembly.py`, new
+`test_ordinary_web_runtime.py`, new `test_ordinary_web_lifecycle.py`.
+Parent owns this plan delta. Nothing was staged, committed or published by the
+implementer; core Task6/contracts/transport/display policy and all three original
+A2 runtime test modules remain unchanged. No live models or assets were used.
+
+The candidate shares one pre-refresh active segment and captured lease/view,
+performs bounded intent admission where needed, threads carry/exchange through
+the existing handler/bridge/loop, exposes only a bounded admission projection,
+and publishes waiting credit only after physical complete delivery. Scientific
+requests use the same carry without intent. Legacy direct dispatch remains
+closed. This describes the candidate, not an independent approval or live pass.
+
+Both exact final commands used the unchanged isolated runner:
+
+```powershell
+C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_web_runtime.py tests/agent/test_ordinary_web_lifecycle.py tests/agent/test_ordinary_admission_budget.py tests/agent/test_ordinary_continuation.py tests/agent/test_ordinary_app_assembly.py
+C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_web_decision_runtime.py tests/agent/test_web_decision_runtime_lifecycle.py tests/agent/test_web_decision_runtime_references.py
+```
+
+Results: **246 passed, seven warnings, 184.32s, exit0** (session10053), then
+**216 passed, seven warnings, 190.59s, exit0** (session3551). Both sessions ended;
+the second was the single authorized broader run, not repeated until green.
+Warnings were SWIG/FastAPI deprecations. Parent separately verified all eight
+frozen hashes, no diff in original A2 test modules, `git diff --check`, and
+in-memory compilation of those eight files. No full Agent run or compileall
+is claimed here.
+
+### Preserved intermediate results and evidence limits
+
+All runs used the same runner. R/L denote the new runtime/lifecycle modules;
+F is the exact final five-module command above. P/F/E denote passed/failed/errors.
+The implementer's compacted history retained scopes/results but not every
+intermediate multi-node selector verbatim; those selectors are not reconstructed
+as supposedly executed commands. Each run reported seven warnings.
+
+| Run | Scope | Actual result | Seconds | Exit |
+|---|---|---|---|---|
+| 1 | R including temporary policy diagnostic | 6F / 2P | 5.60 | 1 |
+| 2 | R + L | 29F | 13.75 | 1 |
+| 3 | R + L | 29P | 27.48 | 0 |
+| 4 | L + CHAT-SUP-01 | 30P | 62.65 | 0 |
+| 5 | Failed-complete, view-change, owner deadline, complete-debit | 2F / 5P | 17.11 | 1 |
+| 6 | Failed-complete and owner deadline | 4P | 10.49 | 0 |
+| 7 | Added runtime/lifecycle/assembly nodes; exact selectors unavailable | 6F / 26P / 2E | 49.60 | 1 |
+| 8 | Retry-authority and unrelated-payload projection | 4F | 10.61 | 1 |
+| 9 | Retry/projection/history/malformed-frame/unauthorized-tool | 12P | 40.39 | 0 |
+| 10 | Persistence failure | 1F / 1P | 6.78 | 1 |
+| 11 | Persistence failure | 2P | 5.90 | 0 |
+| 12 | F, before strengthened coverage | 240P | 174.11 | 0 |
+| 13 | Strengthened retained-owner deadline | 1F / 1P | 7.23 | 1 |
+| 14 | Deadline/persistence/intent-failure/intent-cancellation | 7P | 9.77 | 0 |
+| 15 | F | 246P | 184.32 | 0 |
+| 16 | Three original A2 modules above | 216P | 190.59 | 0 |
+
+Run1 was four staging-guard failures plus two policy compatibility failures as
+§27 explains, not six implementation defects. Run2 still met the old entry guard.
+Run5 found a real resumed-complete waiting-authority leak plus one missing-purpose
+fixture error. Run7 included two real retry-authority failures, four fixture/
+assertion compatibility errors and two Windows setup/teardown errors caused by
+an oversized autogenerated test node ID. Run8 reproduced retry credit/authority
+and an overbroad presentation projection. Run10 showed checkpoint failure losing
+already committed model-call facts; run13 showed deadline terminal metadata
+omitting an actual dispatch. Fixture mistakes are not production-bug REDs.
+The subsequent passes do not erase this chronology.
+
+All named lifecycle matrix rows are represented, subject to independent coverage
+review. Responses are scripted transport fixtures, not model-understanding proof.
+The conservative language limitation in §27, unresolved-worker indefinite drain,
+B/C integration and final package8 live/UI acceptance remain explicit limitations.
+
+### Independent source reviews and parent joint verification
+
+Independent SOURCE/SPEC and SOURCE/QUALITY approved the same eight-file freeze
+on `1da64f2`, with no unresolved P1/P2 findings. Both were read-only reviews;
+QUALITY's independently executed focused check remains pending at this record.
+The parent then completed the following single serialized 30-module run:
+
+```powershell
+$focus = @(
+  'tests/agent/test_ordinary_intent_protocol.py',
+  'tests/agent/test_ordinary_intent_transport.py',
+  'tests/agent/test_ordinary_capabilities.py',
+  'tests/agent/test_ordinary_semantic_admission.py',
+  'tests/agent/test_ordinary_chat_policy.py',
+  'tests/agent/test_ordinary_admission_budget.py',
+  'tests/agent/test_ordinary_continuation.py',
+  'tests/agent/test_ordinary_web_runtime.py',
+  'tests/agent/test_ordinary_web_lifecycle.py',
+  'tests/agent/test_decision_contract.py',
+  'tests/agent/test_decision_transport_boundaries.py',
+  'tests/agent/test_decision_protocol_recovery.py',
+  'tests/agent/test_decision_requirements.py',
+  'tests/agent/test_task_requirements.py',
+  'tests/agent/test_decision_loop.py',
+  'tests/agent/test_decision_history.py',
+  'tests/agent/test_decision_continuation.py',
+  'tests/agent/test_decision_continuation_store.py',
+  'tests/agent/test_decision_clarification.py',
+  'tests/agent/test_web_decision_admission.py',
+  'tests/agent/test_web_decision_fingerprint.py',
+  'tests/agent/test_decision_chat.py',
+  'tests/agent/test_decision_chat_transport.py',
+  'tests/agent/test_web_decision_runtime.py',
+  'tests/agent/test_web_decision_runtime_lifecycle.py',
+  'tests/agent/test_web_decision_runtime_references.py',
+  'tests/test_openai_compatible_model.py',
+  'tests/test_model_request_lifecycle.py',
+  'tests/test_web_app_lifecycle.py',
+  'tests/test_user_llm_routes.py')
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py @focus
+```
+
+Actual result: **2717 passed, seven warnings, 556.44s, exit0** (session28474).
+No failures or skips were reported. This is the named joint scope, not full
+Agent, CI, real-model or browser acceptance. The unchanged runner blocks its
+test-process sockets and supplies synthetic configuration; it is not a claim
+that every descendant process has a universal network sandbox.
+
+Parent static checks on the unchanged source freeze also passed:
+
+- Stdlib-only MedChat Python `-I -S -B -c`, whitelisted OS environment,
+  `compileall.compile_dir(..., quiet=1, force=True)` for `src` and `scripts`,
+  with `sys.pycache_prefix` pointing to an automatically cleaned temporary
+  directory: **339 Python files, success, exit0**. No project import, live
+  configuration access or cache writes into source directories.
+- In a whitelisted child environment, `node <path>` for every original
+  sorted `tests/*_test.js` and `tests/activity_family_acceptance_dom.js`:
+  **15 entrypoints passed, exit0**. Local Node was **v24.15.0**, not CI20.
+  The evidence-report standalone test identifies itself as hostile preflight;
+  its Python-driven positive same-frame suite is not implied by this command.
+- `git diff --check` passed and all eight reviewed source/test SHA256 values
+  remained unchanged. The original checkout still had its same nine modified
+  and four untracked paths; none were staged, reset or incorporated here.
+
+### Independent QUALITY execution and checkpoint release
+
+Independent QUALITY ran this command once on the same eight-file freeze:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_web_runtime.py tests/agent/test_ordinary_web_lifecycle.py tests/agent/test_decision_chat.py tests/agent/test_decision_chat_transport.py
+```
+
+Result: **160 passed, seven warnings, 164.05s, exit0**, no failures, skips or
+deselections. Session34787 ended; the reviewer observed zero remaining Python
+processes. HEAD, all eight hashes and runner hash remained unchanged, and
+`git diff --check` passed. Final QUALITY APPROVE follows the prior SPEC approval;
+neither found a new P1/P2. The known limitations above remain, not silently fixed.
+
+Parent releases an explicit local checkpoint of the eight source/test files,
+this plan and the package ledger. After checkpointing, run complete Agent once
+using the same isolated runner and serialized heavy-test slot. Do not replace
+that result with the 2717-case joint run or this independent 160-case run.
+No push, merge, live model call, production activation or deployment is implied.
