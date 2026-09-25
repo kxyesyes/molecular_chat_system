@@ -203,3 +203,48 @@ Future command: `python -B -m pytest tests/agent/test_dynamic_evidence_report.py
 - [ ] Parent decides releases and whether supported partial scientific scope is acceptable; user goal remains packages 1–8, no deployment. B1, B2, C and package-8 final proof are tracked separately; this sidecar completes none of them.
 
 Design handoff: **parent-approved amendment, local commit of exactly two docs following `74739aa`**; return hash and clean status, then stop. B2 remains one logical invocation/at-most-five internal rounds with unchanged budgets/non-replay/drain and no new model strategy. Exact dependency pins, actual stable mmap/source proof and separate implementation release remain required; do not infer a safe snapshot from design approval. No code/tests/assets/environment/network/push/merge here; P7-B, P7-C and package-8 real normal-route proof remain pending.
+
+## 10. Source re-pin audit after ordinary Task6 — implementation still closed
+
+The earlier dependency statuses are historical. Parent and independent readonly
+audit inspected **committed** ordinary source `dc1295e258c3996837bba6435eefd217c4d066ad`,
+not the active Task7A app/fixture changes. Local Git confirms landed 4C `0295e996`,
+G1 `be0219e`, A1 `782cd13` and A2 `ed284b7` are its ancestors. This is local source
+identity evidence, not a fresh remote CI/merge check. Ordinary semantic Web work
+is still unmerged/incomplete, so its runtime entry is not yet a frozen B API.
+
+Two concrete additions are required before a B implementation release:
+
+1. **Explicit profile/capability mapping.** Current `src/web/ordinary_capabilities.py`
+   wires only the original four tools and has no independent RAG permission
+   projection. `src/agent/contracts/ordinary_admission.py` accepts only
+   `ordinary-semantic-original-four-v1`. The B1/B2 design must define its closed
+   server profiles, canonical tool-to-capability mapping, separate RAG permission
+   and immutable generation/view. Add only those necessary files to the later
+   reviewed allowlist; do not silently broaden the original profile or derive
+   permission/readiness from registration or model intent. Await the final Web
+   factory/publication interface rather than preserving the old constructor-only
+   assumption.
+2. **Compose with the shared budget/continuation contract.** Existing loop calls
+   now accept `admission_carry`/`admission_exchange`; semantic snapshots use
+   revision7, while no-carry remains revision6. `total_model_requests` specifically
+   means intent plus decision requests. B must preserve that meaning and add
+   separately named generator counts/root reservations, with an explicit ceiling
+   relationship in the next written amendment. Reuse active-segment credit,
+   pre-CAS checks, post-delivery downward clamp and per-invocation dispatch guard;
+   do not recreate old A2 accounting. The outer guard is not sufficient for the
+   generator's up-to-five internal backend requests.
+
+Minimal subsequent sequence remains: written amendment and source/allowlist
+approval; B1 closed v2 bindings and same-invocation RAG/reverse receipts with real
+loop/Session/seal/replay tests; B1 normal-route wiring once ordinary Web freezes;
+B2 actual bounded generation, whole-CandidateSet analyses and real Ranker joins;
+then dynamic report/DOM mount/protected ACK/selected follow-up on that route.
+B1 core can be developed independently after release, but its component pass
+does not close B1 actual-route acceptance. Keep original positive RAG, generation,
+ADMET, reverse and ranking cases; missing mandatory scoring fields are not zero.
+
+This audit changed documentation only. No implementation, tests, imports,
+configuration/credential/assets inspection, network, publication or live run.
+Stable source ownership, generator budget bounds, B integration, C and final
+package8 acceptance remain pending; the audit is not a new passing test.
