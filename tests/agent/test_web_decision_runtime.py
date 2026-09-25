@@ -51,7 +51,8 @@ def actual_app(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'OllamaModel', Mock(return_value=generator))
 
     @asynccontextmanager
-    async def build(*, mode=None, wire='native', respond=None, optional_tools=False):
+    async def build(*, mode=None, wire='native', respond=None, optional_tools=False,
+                    ordinary_policy=None):
         if mode == 'decision_a2':
             importlib.import_module('langgraph.graph')
         if optional_tools:
@@ -90,6 +91,8 @@ def actual_app(tmp_path, monkeypatch):
             except Exception as exc:
                 protocol_errors.append(exc)
                 raise
+            if isinstance(decision, httpx.Response):
+                return decision
             return protocol_response(decision, wire, call_id=f'protocol-call-{len(calls)}')
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
@@ -98,7 +101,12 @@ def actual_app(tmp_path, monkeypatch):
             monkeypatch.setattr(module.MolecularChatApp, '_create_model_from_llm_config',
                                 lambda self, config: model)
             kwargs = {} if mode is None else dict(normal_chat_mode=mode, decision_wire_mode=wire)
-            application = module.MolecularChatApp(str(tmp_path / 'missing.yaml'), **kwargs)
+            if ordinary_policy is not None:
+                kwargs['ordinary_chat_policy'] = ordinary_policy
+            if ordinary_policy == 'semantic_v1':
+                application = await module.MolecularChatApp.create_async(str(tmp_path / 'missing.yaml'), **kwargs)
+            else:
+                application = module.MolecularChatApp(str(tmp_path / 'missing.yaml'), **kwargs)
             assert application.chat_handler is not None
             assert application.agent_system is not None
             assert application.chat_handler.scientific_references.store is application.agent_state_store

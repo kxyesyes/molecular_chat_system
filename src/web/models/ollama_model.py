@@ -45,9 +45,16 @@ class OllamaModel:
         self.base_url = base_url
         self.model_name = model_name
         # 增加超时时间到150秒
-        self.client = httpx.AsyncClient(timeout=150.0)
         # 创建同步客户端用于同步调用
         self.sync_client = httpx.Client(timeout=150.0)
+        try:
+            self.client = httpx.AsyncClient(timeout=150.0)
+        except BaseException:
+            try:
+                self.sync_client.close()
+            except BaseException:
+                logger.warning('Ollama partial client cleanup failed; exception details omitted')
+            raise
 
     def generate(self, prompt: str, temperature: float = 0.7, 
                  max_tokens: int = 1500) -> str:

@@ -1291,3 +1291,124 @@ actual route fixture changes only the optional semantic factory and concrete
 HTTP-response transport seam. No existing assertions or socket deadlines may
 be removed/relaxed. SPEC then QUALITY and focused regressions are still required
 for this next increment.
+
+## 26. Task7A/8A assembly candidate — frozen for independent review
+
+Task6 checkpoint is `dc1295e258c3996837bba6435eefd217c4d066ad`. A fresh worker
+implemented only `src/web/app.py`, `src/web/models/ollama_model.py`, the narrow
+fixture delta in `tests/agent/test_web_decision_runtime.py`, and new
+`tests/agent/test_ordinary_app_assembly.py` / `ordinary_chat_fixtures.py`.
+No runtime, bridge, handler, Task6 or real-settings changes. This is not the
+Task7B/C semantic Web execution flow and cannot count as its acceptance.
+
+The candidate exposes `MolecularChatApp.create_async` for semantic assembly,
+`ordinary_capability_base`/`capability_generation`, and
+`project_ordinary_capabilities(base, scientific_tools=..., permitted_names=...)`.
+The projection takes an already captured immutable base rather than rereading
+app/model/registry. Independent replacement uses the existing writer and the
+same-generation validation. These interfaces remain subject to SPEC/QUALITY;
+do not wire the next increment to an unapproved snapshot.
+
+All implementer runs used the isolated runner. A denotes the new assembly test
+module; R denotes `test_web_decision_runtime.py`, `tests/test_web_app_lifecycle.py`,
+`tests/test_model_request_lifecycle.py`, `tests/test_design_model_switch.py`.
+B denotes the new writer-atomicity and async-closed-profile-shutdown functions.
+
+| Stage | Actual passed / failed | Seconds |
+|---|---|---|
+| Fixture RED, A | 0 / 2 | 3.61 |
+| Before correcting a new test's return-type assertion, A | 0 / 2 | 4.56 |
+| Fixture GREEN, A | 2 / 0 | 4.16 |
+| Assembly/cleanup RED, A | 2 / 28 | 8.13 |
+| Before correcting a new cancellation-exception identity assertion, A | 29 / 1 | 5.80 |
+| Assembly GREEN, A | 30 / 0 | 5.29 |
+| Capability/writer RED, A | 30 / 11 | 9.49 |
+| Capability/writer GREEN, A | 41 / 0 | 8.42 |
+| Intent helper RED, A | 49 / 2 | 8.65 |
+| Helper GREEN, A | 51 / 0 | 8.83 |
+| Existing regressions, R | 110 / 0 | 47.56 |
+| Handler partial-update/closed-shutdown RED, B | 6 / 2 | 5.86 |
+| Those boundaries GREEN, B | 8 / 0 | 4.94 |
+| Final combined A + R | 166 / 0 | 56.57 |
+
+Failed runs exited1; GREEN runs exited0. Final run had seven existing SWIG/
+FastAPI deprecation warnings. The two corrected test assumptions are retained
+as test errors, not misrepresented as production-bug RED evidence. Original
+fixture assertions, profile observer chaining and 3s/5s socket deadlines stayed
+unchanged. Sessions14619/16846/19501/45776/28111/99723/4908 ended; no active test
+session remained. Worker did not commit, run compileall or access real models.
+Parent is rechecking source and scheduling independent SPEC then QUALITY.
+
+Parent independently reran the assembly module with the same isolated runner:
+`C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_app_assembly.py`.
+Result: **56 passed, seven warnings, 10.15s, exit0**; session81335 ended.
+This is an offline assembly/lifecycle check, not real-model or semantic-route
+acceptance. `git diff --check` also passed; the five-file review freeze remains
+unchanged.
+
+Separate readonly B dependency audit is recorded in its plan checkpoint
+`a3ceb1880b61ad58000b8ad5b667a15f03411ef4` on `codex/dynamic-tool-bindings-plan`.
+It identifies profile/RAG-permission mapping and shared budget/revision7 drift;
+it does not implement B, alter its positive cases or release its code. Complete
+ordinary Web integration, B/C and final real acceptance remain pending.
+
+### Task7A SPEC finding before approval
+
+Independent SPEC review did not approve the initial five-file candidate. One
+P2 remained: the semantic factory bound the existing WebDecisionRuntime and
+mounted `/ws`, but that runtime still used closed-profile preparation without
+the new carry. Consequently an explicitly constructed semantic instance could
+serve chat through the old path, bypassing the ordinary display gate. This is
+a reachable partial-assembly downgrade, not a requirement to implement Task7B/C
+in the assembly batch. Prior passing assembly checks did not cover it.
+
+The same implementer is assigned an actual-route RED and minimal fail-closed
+entry fix, proving zero provider dispatch while semantic execution is not yet
+wired. Existing default/A2 operation must remain unchanged. No approval,
+publication or live acceptance is inferred until that fix and re-review finish.
+
+The implementer's new real-route/direct-entry negatives reproduced the gap:
+four focused functions (`test_unassembled_semantic_route_rejects_before_provider`,
+`test_closed_profile_route_still_serves_admitted_chat`,
+`test_unassembled_semantic_direct_websocket_entry_rejects`,
+`test_unassembled_semantic_direct_dispatch_rejects`) gave **6 failed, 2 passed,
+9.31s, exit1**, then **8 passed, 9.38s, exit0** after a semantic-instance-only
+fail-closed binding. The factory remains usable for assembly checks; until the
+next increment wires the full path, WebSocket entry sends a fixed error and
+1013 close, and direct handler dispatch raises503. Neither invokes a provider
+or fabricates a Session. Default and a1_closed still execute their existing path.
+
+The same final A+R five-module command now gives **174 passed, 73.08s, exit0**.
+Each run retained seven existing deprecation warnings; sessions25849/27778/27485
+ended. `git diff --check` passed; no deadline or old assertion was relaxed.
+The app/tests repair is frozen for SPEC re-review, followed by QUALITY. These
+offline negative checks do not claim semantic Web execution is implemented.
+
+Independent SOURCE/SPEC re-review approved the repaired five-file freeze and
+closed P2; no new blocking finding. That review was read-only, not another test
+run. Parent verified the five SHA256 values and compiled those five Python
+files in memory using `python -I -S -B -c` with stdlib `compile`; all passed.
+This was not a repository-wide compileall. Independent QUALITY is next.
+
+### Task7A/8A review closure and bounded next release
+
+Independent QUALITY approved the same five-file freeze with no P1/P2 and ran
+the final A+R command once: **174 passed, seven warnings, 54.92s, exit0**;
+zero failed/skipped/deselected. Session71929 ended, no live Python process
+remained, source and isolated-runner hashes were unchanged. The reviewer
+confirmed rollback/ownership, coherent writer publication and the temporary
+four-entry fail-closed boundary. This is separate from the implementer's
+174-pass run and remains offline evidence.
+
+Parent authorizes an explicit local checkpoint of these five files plus this
+plan and the package ledger. No push, merge, deployment or model activation.
+After that checkpoint, release Task7B/C plus Task8B/C using the full reviewed
+plan above and the now-frozen assembly interfaces. Preserve all original A2
+assertions. The new assembly-only rejection tests are intentionally transitional:
+replace their temporary entry-block expectation only when the full semantic
+request/carry/display path is wired and actual-route positives and safety
+negatives pass, not merely by removing the guard. No intermediate working
+semantic mode may execute through the old no-carry chat path. Keep default
+a1_closed behavior unchanged. Use a fresh implementer and repeat SPEC then
+QUALITY before claiming Web integration complete. B/C scientific integration
+and package8 final live acceptance are still separate pending work.
