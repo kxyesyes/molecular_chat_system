@@ -39,6 +39,14 @@ indefinite cleanup for unresolved owners, B scientific bindings/C integration
 and package8 real-model/UI acceptance remain pending. B's separately reviewed
 design amendment is `0487d79`; it is not B implementation or live execution.
 
+Follow-up on code checkpoint `67ad078`: the complete Agent suite passed
+**9338 tests, 2 skipped, 7 warnings in 1045.48s**, exit0. Skips are unavailable
+directory symlinks and the disabled performance test. Whole-branch independent
+source SPEC and QUALITY checks approve the same code tree. The ordinary plan
+section29 records reviewer availability and exact evidence boundaries. Local
+duration exceeds CI's 600-second Agent command budget; remote CI remains a
+separate gate. No full repository/real scientific success is claimed.
+
 Historical 2026-09-25 checkpoint (superseded status, retained chronology): package7 A1 was in independent finding closure; A2 design awaited landed A1; package8-A offline aggregator was under review. Those dependency/publication states are updated below, not evidence that the historical failures never occurred. No production-entry switch, external provider activation or deployment occurred in those batches.
 
 ## A2 G1 release and documentation freeze — 2026-09-25

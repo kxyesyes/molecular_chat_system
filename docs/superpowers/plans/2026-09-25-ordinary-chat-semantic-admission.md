@@ -1607,3 +1607,42 @@ this plan and the package ledger. After checkpointing, run complete Agent once
 using the same isolated runner and serialized heavy-test slot. Do not replace
 that result with the 2717-case joint run or this independent 160-case run.
 No push, merge, live model call, production activation or deployment is implied.
+
+## 29. Complete Agent and final source reviews on 67ad078
+
+The reviewed local Web checkpoint is
+`67ad0781d4d28ca00dd58a5c9d222ae940cfb22a`, tree
+`908ca5c83f8243e00f9dcd76dab35d22d512ca87` (32 changed files against
+`origin/main` at `30a2353`). The worktree was clean before and after review.
+
+Parent ran the complete Agent suite once:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent
+```
+
+Actual result: **9338 passed, 2 skipped, seven warnings, 1045.48s, exit0**
+(session94025, fully ended after cleanup). Skips:
+
+- `test_decision_chat_acceptance.py:149`: directory symlinks unavailable.
+- `test_harness_shadow.py:277`: performance test disabled.
+
+Warnings remain SWIG/FastAPI deprecations. This local duration exceeds the
+Linux CI Agent command's 600-second limit; no CI equivalence or timeout fix is
+claimed and no timeout was raised. Other full-repository partitions still need
+their real CI results. No live external/local model was activated.
+
+Galileo completed whole-branch SOURCE/SPEC approval with no new P1/P2, then
+separately inspected cross-layer quality and returned SOURCE/QUALITY approval
+on the exact same tree. Both were read-only. Peirce's earlier eight-file quality
+review and independent160-pass execution remain valid; its attempted additional
+whole-branch review hit a platform usage limit and is **not** recorded as a
+completed review. Galileo is independent of the implementer; its separate
+quality conclusion supplies the final source check, not a fabricated Peirce
+verdict or another executed test.
+
+All known language false-positive, retained-owner, B/C and package8 live/UI
+limitations remain. Parent may now publish a draft PR for the reviewed code
+and truthful evidence documents. Publication is not merge approval or proof
+that the remaining eight remote checks have passed. Recheck exact head, remote
+main, all checks and unresolved reviews before any later authorized merge.
