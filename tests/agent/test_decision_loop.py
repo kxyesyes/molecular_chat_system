@@ -76,6 +76,168 @@ def last_observation(messages):
     return json.loads(messages[-1]['content'])
 
 
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_owned_loop_has_no_terminal_until_nested_workers_join(setup_loop, monkeypatch, cancelled):
+    import inspect
+    import threading
+    from tests.agent.test_worker_ownership import (
+        owner_if_available, instrument_executors, signalled, pending,
+    )
+    entered, release, exited, allow_join = (threading.Event() for _ in range(4))
+    records = instrument_executors(monkeypatch, allow_join)
+
+    class Blocked(CountingTool):
+        timeout_seconds = 0.03
+
+        def execute(self, query):
+            entered.set()
+            try:
+                assert release.wait(5)
+                return super().execute(query)
+            finally:
+                exited.set()
+
+    b = setup_loop([tool(), finish_last], [Blocked()])
+    owner = owner_if_available()
+
+    async def exercise():
+        options = ({'worker_owner': owner} if 'worker_owner' in inspect.signature(b.loop.run).parameters
+                   else {})  # RED exercises actual pre-owner loop behavior.
+        task = asyncio.create_task(b.loop.run(AgentContext('CCO', 'owned-loop'),
+            request_kind='scientific', allowed_tools={'property_calculator'},
+            required_tools={'property_calculator'}, event_bus=b.bus, **options))
+        try:
+            await signalled(entered)
+            await signalled(records[0].future_done)
+            await pending(task)
+            assert b.store.get_run('owned-loop')['status'] == 'running'
+            if cancelled:
+                for _ in range(3):
+                    task.cancel()
+                    await pending(task)
+            release.set()
+            await signalled(exited)
+            await pending(task)
+            assert len(b.model.messages) == 1
+            allow_join.set()
+            result = await task
+            assert all(e.joined.is_set() for e in records)
+            assert not result.success
+            assert result.outcome == (RunOutcome.CANCELLED if cancelled else RunOutcome.FAILED)
+            assert result.tool_results[0].error.code == AgentErrorCode.TOOL_TIMEOUT
+            assert len(b.model.messages) == 1 and len(b.tools[0].inputs) == 1
+            assert owner.status == 'settled' and owner.pending_roots == 0
+        finally:
+            release.set()
+            allow_join.set()
+            await asyncio.gather(task, return_exceptions=True)
+            for executor in records:
+                await asyncio.to_thread(executor.shutdown, wait=True)
+
+    asyncio.run(exercise())
+
+
+def test_owned_loop_failed_join_retains_owner_without_terminal(setup_loop, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError
+    created = []
+
+    class FailedJoin(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            created.append(self)
+
+        def shutdown(self, wait=True, **kwargs):
+            if wait:
+                raise RuntimeError('private join diagnostic')
+            return super().shutdown(wait=wait, **kwargs)
+
+    monkeypatch.setattr('src.agent.tooling.adapters.ThreadPoolExecutor', FailedJoin)
+    b = setup_loop([tool(), finish_last])
+    owner = WorkerOwner()
+
+    async def exercise():
+        try:
+            with pytest.raises(WorkerCleanupError, match='^Owned worker cleanup remains unresolved$'):
+                await b.loop.run(AgentContext('CCO', 'join-failed'), request_kind='scientific',
+                    allowed_tools={'property_calculator'}, required_tools={'property_calculator'},
+                    event_bus=b.bus, worker_owner=owner)
+            assert owner.status == 'unresolved' and owner.pending_roots == 1
+            assert b.store.get_run('join-failed')['status'] == 'running'
+            terminal = {'task_completed', 'task_failed', 'task_cancelled', 'task_rejected'}
+            assert not terminal.intersection(e.event.value for e in b.bus.events)
+            assert len(b.model.messages) == 1 and len(b.tools[0].inputs) == 1
+        finally:
+            for executor in created:
+                await asyncio.to_thread(ThreadPoolExecutor.shutdown, executor, wait=True)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('owned', [False, True])
+@pytest.mark.parametrize('failure', ['submit', 'task_creation'])
+def test_outer_session_dispatch_failure_closes_only_unstarted_root(setup_loop, monkeypatch, owned, failure):
+    """Migrated SPEC repro: real loop, zero execution, settled failure journal."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from src.agent.runtime.worker_ownership import WorkerOwner
+    failed = threading.Event()
+
+    def is_outer(call):
+        name = getattr(call, '__qualname__', '')
+        return name.endswith('_ActionRoot.run') or name.endswith('settle_action.<locals>.advance')
+
+    class DefaultExecutor(ThreadPoolExecutor):
+        def submit(self, fn, *args, **kwargs):
+            call = getattr(fn, 'args', (None,))[0]
+            if failure == 'submit' and not failed.is_set() and is_outer(call):
+                failed.set()
+                raise RuntimeError('synthetic outer submit failure')
+            return super().submit(fn, *args, **kwargs)
+
+    original_create_task = asyncio.create_task
+
+    def create_task(coro, **kwargs):
+        frame = getattr(coro, 'cr_frame', None)
+        if (failure == 'task_creation' and not failed.is_set() and frame is not None
+                and is_outer(frame.f_locals.get('func'))):
+            failed.set()
+            # Caller, not the failing task factory, owns closing this coroutine.
+            raise RuntimeError('synthetic outer task creation failure')
+        return original_create_task(coro, **kwargs)
+
+    monkeypatch.setattr(asyncio, 'create_task', create_task)
+    b = setup_loop([tool(), finish_last])
+    owner = WorkerOwner() if owned else None
+
+    async def exercise():
+        asyncio.get_running_loop().set_default_executor(DefaultExecutor(max_workers=4))
+        task = asyncio.create_task(b.loop.run(AgentContext('CCO', 'outer-dispatch-failed'),
+            request_kind='scientific', allowed_tools={'property_calculator'},
+            required_tools={'property_calculator'}, event_bus=b.bus, worker_owner=owner))
+        try:
+            assert await asyncio.to_thread(failed.wait, 3)
+            done, _ = await asyncio.wait({task}, timeout=0.2)
+            assert not b.tools[0].inputs and len(b.model.messages) == 1
+            assert done, 'never-started outer dispatch left an open action root'
+            result = await task
+            assert not result.success
+            assert b.store.get_run('outer-dispatch-failed')['status'] == 'failed'
+            assert [e.event.value for e in b.bus.events].count('task_failed') == 1
+            if owned:
+                assert owner.status == 'settled' and owner.pending_roots == 0
+        finally:
+            # RED-only teardown: close the proven empty, never-dispatched root
+            # AFTER the failure assertion, so no permanently blocked test helper.
+            if owner:
+                for root in tuple(owner._roots):
+                    if not root.finished and not root.records:
+                        root.run(lambda: None)
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(exercise())
+
+
 def finish_last(messages):
     return finish([last_observation(messages)['quality']['evidence_id']])
 

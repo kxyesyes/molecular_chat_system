@@ -11,12 +11,37 @@ from src.web.user_llm_config import default_user_llm_config, load_user_llm_confi
 
 @pytest.fixture
 def factory(monkeypatch, tmp_path):
-    monkeypatch.setattr(MolecularChatApp, "_create_chat_agent", lambda self: Mock())
+    class ConfigurationAgent:
+        def __init__(self, model):
+            self.tools = {}
+            self.llm = model
+
+        def set_llm(self, model):
+            self.llm = model
+
+    monkeypatch.setattr(MolecularChatApp, "_create_chat_agent",
+                        lambda self: ConfigurationAgent(self.model))
     monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent.sqlite"))
     def build():
         app = MolecularChatApp(str(tmp_path / "missing.yaml"))
         return app, TestClient(app.app, base_url="http://localhost")
     return build
+
+
+def test_factory_agent_rebinds_model_on_config_save(factory):
+    app, client = factory()
+    agent = app.agent_system
+    original_model = app.model
+    assert agent.tools == {}
+    assert agent.llm is original_model
+    response = client.post(
+        "/api/llm/config",
+        json=dict(default_user_llm_config(), model_name="synthetic-rebound-model"),
+    )
+    assert response.status_code == 200 and response.json()["success"]
+    assert app.model is not original_model
+    assert agent.llm is app.model
+    assert app.chat_handler.model is app.model
 
 
 def test_first_start_ignores_legacy_env_and_runtime_cache(factory, monkeypatch, tmp_path):

@@ -26,6 +26,7 @@ from src.agent.persistence.base import AgentStateStore
 from src.agent.planning.bindings import BindingResolver
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
+from src.agent.runtime.worker_ownership import reserve_worker
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.validators import (
     AgentResultValidator,
@@ -146,8 +147,21 @@ class WorkflowOrchestrator:
         if not step.timeout_seconds:
             return execute_tool_compat(tool, input_data)
 
-        executor = ThreadPoolExecutor(max_workers=1)
-        future = executor.submit(execute_tool_compat, tool, input_data)
+        reservation = reserve_worker()
+        executor = None
+        try:
+            executor = ThreadPoolExecutor(max_workers=1)
+            future = (executor.submit(execute_tool_compat, tool, input_data)
+                      if reservation is None else
+                      executor.submit(reservation.run, execute_tool_compat, tool, input_data))
+        except BaseException:
+            if reservation is not None:
+                reservation.rollback(executor)
+                if executor is not None:
+                    executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        if reservation is not None:
+            reservation.attach(executor, future)
         try:
             return future.result(timeout=step.timeout_seconds)
         except FutureTimeoutError:

@@ -1,5 +1,6 @@
 """Opt-in server transport; no routes, model fallback or production activation."""
 import asyncio
+import inspect
 import json
 from collections import deque
 from contextlib import suppress
@@ -9,6 +10,8 @@ from src.agent.contracts import AgentResult, AgentExecutionError, AgentErrorCode
 from src.agent.harness.decision_bounds import validate_json
 from src.agent.persistence.redaction import redact_sensitive, sanitize_bounded
 from src.agent.runtime.event_bus import AgentEventBus
+from src.agent.runtime.worker_ownership import WorkerCleanupError
+from .model_lifecycle import finish_on_cancel
 
 
 MAX_PENDING_EVENTS = 128
@@ -156,7 +159,12 @@ async def await_with_deadline(operation, *, timeout):
     Explicit wait avoids the wait_for completed-child/caller-cancel race on our
     Python 3.10 runtime. Every exit retains ownership until the operation settles.
     """
-    pending = asyncio.ensure_future(operation)
+    try:
+        pending = asyncio.ensure_future(operation)
+    except BaseException:
+        if inspect.iscoroutine(operation):
+            operation.close()
+        raise
     try:
         completed, _ = await asyncio.wait({pending}, timeout=timeout)
         if not completed:
@@ -166,9 +174,58 @@ async def await_with_deadline(operation, *, timeout):
         await _settle(pending)
 
 
+def _create_owned_task(coroutine, **kwargs):
+    """Transfer coroutine ownership only when scheduling succeeds."""
+    try:
+        return asyncio.create_task(coroutine, **kwargs)
+    except BaseException:
+        coroutine.close()
+        raise
+
+
+class _ProjectionSender:
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.scope = getattr(websocket, 'scope', {})
+        self.stopped = False
+
+    async def send_text(self, text):
+        if self.stopped:
+            raise ConnectionError('Decision projection delivery stopped')
+        await await_with_deadline(self.websocket.send_text(text), timeout=SEND_TIMEOUT_SECONDS)
+
+
+async def _deliver_result(handler, websocket, frames, execution):
+    """Deliver validated display frames around one full settled legacy projection."""
+    sender = _ProjectionSender(websocket)
+
+    async def project_after_result():
+        # Establish task ownership before publishing a result. Scheduling
+        # failure can then be finalized once by the runtime, without replacing
+        # an already displayed outcome. Projection still follows result delivery.
+        await sender.send_text(frames[0])
+        await handler._send_reference_candidate_events(sender, execution, strict_transport=True)
+
+    # The loop's worker ledger is already sealed. Retain this separate async
+    # child without cancelling it: cancellation of a to_thread wrapper is not
+    # proof that its reference/store worker exited. Never close the shared pool.
+    projection = _create_owned_task(project_after_result(), name='decision-reference-projection')
+    try:
+        await asyncio.shield(projection)
+    except asyncio.CancelledError:
+        sender.stopped = True
+        try:
+            await finish_on_cancel(projection)
+        except (Exception, asyncio.CancelledError):
+            pass  # Child is settled; original caller cancellation stays authoritative.
+        raise
+    await sender.send_text(frames[1])
+
+
 async def process_decision_message(handler, websocket, *, context, decision_loop,
                                    request_kind, allowed_tools, required_tools,
-                                   requirements=None, continuation_id=None, clarified_query=None):
+                                   requirements=None, continuation_id=None, clarified_query=None,
+                                   worker_owner=None, cancel_event=None):
     """Server binds identity/permissions; scientific text comes only from harness.
 
     Disconnect/send timeout propagates to the caller after cancellation settles.
@@ -188,7 +245,12 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
                 allowed_tools=allowed_tools, required_tools=required_tools,
                 requirements=requirements, continuation_id=continuation_id,
                 clarified_query=clarified_query,
-                event_bus=AgentEventBus(on_event=on_event, state_store=decision_loop.store))
+                event_bus=AgentEventBus(on_event=on_event, state_store=decision_loop.store),
+                **({'worker_owner': worker_owner} if worker_owner is not None else {}))
+        except WorkerCleanupError:
+            # A failed join is not a terminal result. The runtime must retain
+            # this owner and its lease; never display completion here.
+            raise
         except Exception:
             return _failure(context, 'decision_execution_failed')
         finally:
@@ -197,9 +259,18 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
     async def send(text):
         await await_with_deadline(websocket.send_text(text), timeout=SEND_TIMEOUT_SECONDS)
 
-    task = asyncio.create_task(run(), name='isolated-decision-chat')
+    task = watcher = None
+
+    async def watch_cancel():
+        await cancel_event.wait()
+        if not task.done():
+            task.cancel()
+
     display_changed = False
     try:
+        task = _create_owned_task(run(), name='isolated-decision-chat')
+        if cancel_event is not None:
+            watcher = _create_owned_task(watch_cancel())
         try:
             while True:
                 frame = await buffer.get()
@@ -216,13 +287,18 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
             display_changed = True
     finally:
         buffer.close()
-        await _settle(task)
+        try:
+            if task is not None:
+                await _settle(task)
+        finally:
+            if watcher is not None:
+                await _settle(watcher)
 
     try:
         frames = _result_frame(handler, result, display_changed)
     except Exception:
         result = _failure(context, 'result_display_invalid')
         frames = _result_frame(handler, result, True)
-    for frame in frames:
-        await send(frame)
+    await _deliver_result(handler, websocket, frames,
+                          {**result.to_legacy_dict(), 'trace_id': result.trace_id})
     return result

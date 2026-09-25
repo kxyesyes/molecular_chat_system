@@ -11,6 +11,7 @@ from fastapi import FastAPI, WebSocket, Request, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
+from uuid import uuid4
 import uvicorn
 
 from .llm_runtime_config import (
@@ -107,7 +108,13 @@ def env_bool(name: str, default: bool = False) -> bool:
 class MolecularChatApp:
     """Main application class"""
     
-    def __init__(self, config_path: str = "config/ollama_config.yaml"):
+    def __init__(self, config_path: str = "config/ollama_config.yaml", *,
+                 normal_chat_mode='legacy', decision_wire_mode='native'):
+        if normal_chat_mode not in {'legacy', 'decision_a2'} or decision_wire_mode not in {'native', 'json'}:
+            raise ValueError('Invalid normal chat or decision wire mode')
+        self.normal_chat_mode = normal_chat_mode
+        self.decision_wire_mode = decision_wire_mode
+        self.decision_runtime = None
         self.config = self._load_config(config_path)
         
         # 检测配置类型并初始化对应的模型
@@ -126,6 +133,7 @@ class MolecularChatApp:
         self.active_llm_config = self._load_active_llm_config()
         self.config.setdefault("inference", {})["stream"] = self.active_llm_config["stream"]
         self.model = self._create_model_from_llm_config(self.active_llm_config)
+        self.model_generation = uuid4().hex
         self._llm_watch_task = None
         logger.info(
             "Active LLM provider: %s / %s",
@@ -163,6 +171,13 @@ class MolecularChatApp:
             logger.error(f"❌ ChatHandler初始化失败: {e}")
             self.chat_handler = None
         
+        if normal_chat_mode == 'decision_a2':
+            from .decision_runtime import WebDecisionRuntime
+            if self.chat_handler is None:
+                raise ValueError('Decision mode requires a chat handler')
+            self.decision_runtime = WebDecisionRuntime(self, wire_mode=decision_wire_mode)
+            self.chat_handler.decision_runtime = self.decision_runtime
+
         # Create FastAPI app
         self.app = FastAPI(title="Molecular Chat System")
         from .agent_session_config import setup_agent_sessions
@@ -206,13 +221,11 @@ class MolecularChatApp:
             self.agent_state_store = SQLiteAgentStateStore(state_path)
         return self.agent_state_store
 
-    def _create_supervisor_agent(self):
+    def _get_agent_tool_registry(self):
         from src.agent.specialists import build_default_specialists
-        from src.agent.supervisor import SupervisorAgent
         from src.agent.tooling import build_tool_registry
         from src.agent.tooling.registration import audit_registration
 
-        state_store = self._get_agent_state_store()
         if self.agent_tool_registry is None:
             tools = (
                 self.agent_system.tools.values()
@@ -224,11 +237,17 @@ class MolecularChatApp:
         self.agent_registration_report = audit_registration(self.agent_tool_registry, specialists)
         if self.agent_registration_report["errors"]:
             raise ValueError("Agent registration invalid: " + "; ".join(self.agent_registration_report["errors"]))
+        return self.agent_tool_registry
+
+    def _create_supervisor_agent(self):
+        from src.agent.specialists import build_default_specialists
+        from src.agent.supervisor import SupervisorAgent
+        registry = self._get_agent_tool_registry()
         return SupervisorAgent(
             tools={},  # Registry owns these tools; do not construct a second pool.
-            tool_registry=self.agent_tool_registry,
-            specialists=specialists,
-            state_store=state_store,
+            tool_registry=registry,
+            specialists=build_default_specialists(),
+            state_store=self._get_agent_state_store(),
         )
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
@@ -321,24 +340,50 @@ class MolecularChatApp:
 
     async def _apply_and_close_llm(self, config):
         old_model = getattr(self, 'model', None)
-        result = self._apply_llm_config(config)
+        config = normalize_llm_config(config)
+        model = self._create_model_from_llm_config(config)
+        try:
+            result = self._publish_llm_config(config, model)
+        except BaseException:
+            if model is not old_model:
+                await finish_on_cancel(close_owned_model(model))
+            raise
         if old_model is not getattr(self, 'model', None):
             await finish_on_cancel(close_owned_model(old_model))
         return result
 
     def _apply_llm_config(self, llm_config: Dict[str, Any]) -> Dict[str, Any]:
         config = normalize_llm_config(llm_config)
-        self.model = self._create_model_from_llm_config(config)
+        return self._publish_llm_config(config, self._create_model_from_llm_config(config))
+
+    def _publish_llm_config(self, config, model):
+        # The writer holds admission closed. Stage the real consumer bindings
+        # first; their setter may fail after updating only part of the graph.
+        # Roll back known main-model consumers directly, without invoking the
+        # failed setter again. The separately owned generator is never touched.
+        agent = self.agent_system
+        bindings = []
+        if agent:
+            consumers = [agent] + [tool for name, tool in agent.tools.items()
+                                   if name != 'llm_molecular_generator']
+            bindings = [(consumer, consumer.llm) for consumer in consumers
+                        if hasattr(consumer, 'llm')]
+            try:
+                if hasattr(agent, 'set_llm'):
+                    agent.set_llm(model)
+                else:
+                    agent.llm = model
+            except BaseException:
+                for consumer, previous in bindings:
+                    consumer.llm = previous
+                raise
+        self.model = model
+        self.model_generation = uuid4().hex
         self.active_llm_config = config
         self.config.setdefault("inference", {})["stream"] = config.get("stream", True)
         if self.chat_handler:
             self.chat_handler.model = self.model
             self.chat_handler.config = self.config
-        if self.agent_system:
-            if hasattr(self.agent_system, "set_llm"):
-                self.agent_system.set_llm(self.model)
-            else:
-                self.agent_system.llm = self.model
         return config
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -413,6 +458,9 @@ class MolecularChatApp:
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket endpoint for chat - 使用ChatHandler"""
+            if self.decision_runtime is not None:
+                await self.chat_handler.handle_websocket(websocket)
+                return
             try:
                 await self._refresh_llm_config_from_env()
             except HTTPException:
@@ -639,6 +687,9 @@ class MolecularChatApp:
 
     async def _shutdown(self):
         """Stop application-owned background tasks."""
+        runtime = getattr(self, 'decision_runtime', None)
+        if runtime is not None:
+            await runtime.shutdown()
         if self._llm_watch_task is not None:
             self._llm_watch_task.cancel()
             try:

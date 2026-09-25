@@ -64,20 +64,27 @@ class ChatHandler:
         self.conversation_history = []
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
+        self.decision_runtime = None
 
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
-                                       requirements=None, continuation_id=None, clarified_query=None):
+                                       requirements=None, continuation_id=None, clarified_query=None,
+                                       worker_owner=None, cancel_event=None):
         """Server-only opt-in bridge; never dispatch browser kwargs into this API."""
         from .decision_chat import process_decision_message
         return await process_decision_message(
             self, websocket, context=context, decision_loop=decision_loop,
             request_kind=request_kind, allowed_tools=allowed_tools, required_tools=required_tools,
             requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
+            worker_owner=worker_owner,
+            cancel_event=cancel_event,
         )
     
     async def handle_websocket(self, websocket: WebSocket):
         """处理 WebSocket 连接"""
+        if self.decision_runtime is not None:
+            await self.decision_runtime.handle_websocket(handler=self, websocket=websocket)
+            return
         await websocket.accept()
         conversation_history: List[Dict[str, Any]] = []
         
@@ -965,7 +972,7 @@ class ChatHandler:
             "warnings": cls._sanitize_agent_warnings(raw_warnings),
         }
 
-    async def _send_reference_candidate_events(self, websocket, agent_result):
+    async def _send_reference_candidate_events(self, websocket, agent_result, *, strict_transport=False):
         if self.scientific_references is None:
             return await self._send_molecule_candidate_events(websocket, agent_result)
         events = await asyncio.to_thread(self.scientific_references.project, agent_result,
@@ -977,10 +984,16 @@ class ChatHandler:
             from .scientific_report import prepare_report_event
             report = await prepare_report_event(self.scientific_references.store, agent_result,
                 events, session_id=getattr(websocket, "scope", {}).get("agent_session_id"))
-            if report is not None:
-                await websocket.send_text(json.dumps(report, ensure_ascii=False))
         except Exception:
-            pass  # Optional sidecar failure must not turn the run into failure.
+            report = None  # Optional computation failure does not change the run.
+        if report is not None:
+            if strict_transport:
+                await websocket.send_text(json.dumps(report, ensure_ascii=False))
+            else:
+                try:
+                    await websocket.send_text(json.dumps(report, ensure_ascii=False))
+                except Exception:
+                    pass  # Preserve the established legacy sidecar send behavior.
         return events
 
     @classmethod

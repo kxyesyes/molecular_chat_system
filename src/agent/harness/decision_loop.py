@@ -34,6 +34,7 @@ from .decision_inputs import (
 )
 from .decision_clarification import scientific_clarification
 from .decision_bounds import context_value, configuration_generation
+from .decision_history import history_pairs, history_prefix
 from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
@@ -101,11 +102,22 @@ class ModelDecisionLoop:
         self.max_tool_attempts, self.timeout_seconds = max_tool_attempts, timeout_seconds
 
     async def run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
-                  continuation_id=None, clarified_query=None, requirements=None):
+                  continuation_id=None, clarified_query=None, requirements=None, worker_owner=None):
+        try:
+            return await self._run(context, request_kind=request_kind, allowed_tools=allowed_tools,
+                required_tools=required_tools, event_bus=event_bus, continuation_id=continuation_id,
+                clarified_query=clarified_query, requirements=requirements, worker_owner=worker_owner)
+        finally:
+            if worker_owner is not None:
+                await worker_owner.settle()
+
+    async def _run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
+                   continuation_id=None, clarified_query=None, requirements=None, worker_owner=None):
         from langgraph.graph import END, StateGraph
 
         try:
             projected = context_value(context)
+            history_pairs(context.memory)
         except (DecisionBoundaryError, TypeError):
             return AgentResult('invalid-context', False, 'Input exceeds the plain JSON boundary',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Input is invalid or too large'),
@@ -162,11 +174,13 @@ class ModelDecisionLoop:
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
         system_message = decision_system_message(request_kind, required_tools, catalog, requirement_payload)
+        prefix = history_prefix(system_message, context.query, context.memory, request_kind=request_kind)
         if continuation_id is not None or clarified_query is not None:
             try:
                 restored, previous_results, prior_payload = claim_continuation(
                     self, session, fingerprint, continuation_id, clarified_query,
-                    system_message=system_message, requirements=requirements, required_tools=required_tools)
+                    system_message=system_message, requirements=requirements, required_tools=required_tools,
+                    request_kind=request_kind)
             except DecisionBoundaryError:
                 return AgentResult(context.trace_id, False, 'Continuation request rejected',
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Continuation request rejected'),
@@ -189,10 +203,7 @@ class ModelDecisionLoop:
                                                          'Existing trace cannot be replayed'),
                                outcome=RunOutcome.REJECTED,
                                metadata={'backend': 'model_decision_loop', 'stop_reason': 'trace_exists'})
-        state = _Run([
-            system_message,
-            {'role': 'user', 'content': context.query},
-        ], time.monotonic() + self.timeout_seconds)
+        state = _Run(prefix, time.monotonic() + self.timeout_seconds)
         if restored is not None:
             session.restore_observations(previous_results, restored['tool_attempt_count'])
             # claim_continuation validated the decoded observations and their
@@ -340,7 +351,7 @@ class ModelDecisionLoop:
                               'model_version': str(getattr(getattr(getattr(adapter, 'tool', None),
                                                                    'llm_model', None), 'model_name', ''))},
                 ))
-                await settle_action(session)
+                await settle_action(session, worker_owner=worker_owner)
                 observed = session.results[-1]
                 verify_observation_integrity(observed, session)
                 state.observed[key] = observed
@@ -395,6 +406,12 @@ class ModelDecisionLoop:
                 if any(map(family_review_observation, active_results(session))):
                     state.outcome = RunOutcome.PARTIAL
                 state.answer = scientific_answer(active_results(session)) + '\n\n任务要求尚未全部满足，请查看结构化验收差项。'
+        if worker_owner is not None:
+            try:
+                await worker_owner.settle()
+            except asyncio.CancelledError:
+                state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
+                error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
         # Seal the settled results before callbacks/persistence can run again.
         # Tools may retain their own mutable result objects, never these copies.
         for observed in session.results:

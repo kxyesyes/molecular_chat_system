@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.persistence import redact_sensitive
+from src.agent.runtime.worker_ownership import reserve_worker
 
 from .spec import ToolSpec
 
@@ -111,9 +112,13 @@ class ToolAdapter(ABC):
                 quality={"retryable": False, "capacity_exhausted": True},
             )
         start = time.perf_counter()
+        reservation = None
         try:
+            reservation = reserve_worker()
             executor = ThreadPoolExecutor(max_workers=1)
         except BaseException as exc:
+            if reservation is not None:
+                reservation.rollback()
             self._invocation_slots.release()
             if not isinstance(exc, Exception):
                 raise
@@ -124,12 +129,18 @@ class ToolAdapter(ABC):
                 quality={"retryable": False},
             )
         try:
-            future = (executor.submit(self.invoke, payload) if raw_validator is None else
-                      executor.submit(self._invoke_guarded, payload, raw_validator))
+            call = self.invoke if raw_validator is None else self._invoke_guarded
+            args = (payload,) if raw_validator is None else (payload, raw_validator)
+            future = (executor.submit(call, *args) if reservation is None else
+                      executor.submit(reservation.run, call, *args))
         except BaseException:
+            if reservation is not None:
+                reservation.rollback(executor)
             self._invocation_slots.release()
             executor.shutdown(wait=False, cancel_futures=True)
             raise
+        if reservation is not None:
+            reservation.attach(executor, future)
         future.add_done_callback(lambda _: self._invocation_slots.release())
         try:
             raw = future.result(timeout=self.spec.timeout_seconds)
