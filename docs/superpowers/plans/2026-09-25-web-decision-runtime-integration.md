@@ -1008,3 +1008,29 @@ The new runner captures native `create_connection`/`connect` before installing t
 - [ ] Independently review the helper hashes/source and repeat focused policy + actual original-node verification serially. Record actual counts, allowed owned endpoints as counts/IDs only, cleanup, sessions and hashes. No full suite, scientific/live provider call, production modification or publication by the helper worker.
 
 Commands inside the new approved-isolation wrapper are MedChat Python `-B` with absolute policy-file or exact original-test node arguments, retaining `-q -p no:cacheprovider --tb=short -rs`. This written scoped exception is documentation-checkpointed before implementation. It corrects an offline harness mismatch, not production authentication or scientific behavior. Full confirmation and CI gates remain pending.
+
+## 24. Owned-metrics review closure and remaining confirmation
+
+Section 23 was checkpointed at `fcf8a487e7924a320b80d2f1c441421ed93e1bb9`, tree `ce51544d2587de13b44001a684d018f89b3ba7ec`. The implementation changes only three ignored scratch helpers; no production or original test file changed.
+
+| Frozen helper | SHA256 |
+|---|---|
+| `scratch/p7a2_owned_metrics_gate.py` | `04413e69ea32c1cc13e6115cee21bab76444069339fd52b00f1944557bc5ec7b` |
+| `scratch/p7a2_owned_metrics_gate_test.py` | `30b1ef27e2484e3fdd55c973b3b19a34fa6fc9109ebeea1ab1d5bd313aaa3caf` |
+| `scratch/p7a2_owned_metrics_runner.py` | `c9c2ff63619791a36eb9d3cebf3b166fcb1a01c59e1e9fabeec3d78ade6b01c5` |
+
+| Execution, each once | Result |
+|---|---|
+| Policy RED, before gate implementation | 28 failed / 0.98s / exit 1 |
+| Implementation policy GREEN | 28 passed / 1 warning / 0.21s / exit 0 |
+| Implementation original real HTTP node | 1 passed / 1 warning / 1.32s / exit 0 |
+| Independent SPEC policy / original node | 28 passed / 0.17s; 1 passed / 1.48s; each 1 warning, exit 0 |
+| Independent QUALITY policy / original node | 28 passed / 1.34s; 1 passed / 3.31s; each 1 warning, exit 0 |
+
+All green runs have zero skips. The warning is the explicitly pre-imported plugin's `PytestAssertRewriteWarning`; it is retained. Both reviews approve the exact three helper hashes, not full A2. Each actual HTTP run reports two real owned handles, two registrations/revocations, one create/connect, one expected bind conflict and three shutdown calls. Permissions are empty, previous offline bans restored, all owned sockets closed and threads exited; cleanup anomalies are zero. Review sessions ended (QUALITY session 82737 exit 0), with no remaining Python/pythonw processes. Original blanket-ban failure remains recorded in section 21.
+
+Focused commands use MedChat Python `-B -X utf8`, `scratch/p7a2_owned_metrics_runner.py`, and respectively the absolute policy-file path and absolute unchanged metrics lifecycle node from section 23. No external service, real model, credential or scientific asset is accessed. Helpers remain ignored and must not be staged.
+
+For one complete task-runtime confirmation, add a separate ignored `scratch/p7a2_task_runtime_confirmation.py` driver rather than editing the reviewed helpers. It accepts no caller-selected test path/options, verifies the frozen runner hash, and substitutes only its exact-target argument admission with the fixed absolute `tests/task_runtime` directory. All runtime gate/plugin/isolation source and original test assertions remain unchanged: the HTTP exception still activates for exactly one original node, never other collected tests. Independently inspect this small driver delta before using it. This broadens test collection, not network authority. Managed-child five-second and credential-guard ten-second deadlines remain unchanged.
+
+Next gates are static/Node, full affected root/task-runtime confirmation, and one complete Agent confirmation. Do not retry until green or count focused passes as full success. The unknown historical timing causes and environment differences remain explicit. Publication/CI and the later ordinary-chat/B/C/P8 work are still pending; this checkpoint does not authorize deployment or production activation.
