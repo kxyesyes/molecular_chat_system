@@ -1037,3 +1037,37 @@ Core diagnostics are not stable loaded source proof and do not mean the Agent
 tool's no-hit handling has been fixed.
 R2 load/embedding races and service/tool receipts, then Session/requirements/B8
 integration remain mandatory. No full Agent/CI/live acceptance is claimed here.
+
+### 17.1 Post-checkpoint R2 recommendation (not code release)
+
+R1 is locally committed as25c6a51 with a clean worktree. Parent also compiled
+the two changed Python files in memory with MedChat Python -I -S -B: both passed,
+without imports or bytecode writes. This is a two-file syntax check, not a full
+compileall or suite. Original checkout's13 dirty paths remain untouched.
+
+The source-only R2 reviewer recommends strict certification only through actual
+owned initialize: parse/hash the same private CSV bytes, preserve the existing
+immutable index snapshot, and atomically publish a privately owned generation.
+Public frame/index/manifest/mapping must be independent compatibility copies.
+Use one service-local candidate builder with explicit frame/source/embedding
+callback inputs; owned initialize and legacy helpers share it. A legacy helper
+may keep its old injected dataframe/get_embedding behavior but must revoke any
+strict generation and cannot certify its candidate. Manually setting readiness
+or public fields must not enable strict retrieval. Public in-place mutation must
+not contaminate an already private generation.
+
+Capture generation/epoch and model/endpoint before embedding; use those values
+for transport and recheck after embedding and before receipt return. Reload,
+effective configuration change and close invalidate old operations; late or
+cancelled initialization cannot overwrite a newer generation. Operation-owned
+clients close on success/error/cancellation; borrowed injected clients remain
+owned by their injector. Repeated cancellation cleanup and retained ownership
+need explicit tests rather than a generic new resource manager.
+
+Next written design must specify receipt fields and digests, failure semantics
+and positive real initialize/load/shared-build/zero-index tests with only HTTP
+transport replaced. Model/endpoint identity is request configuration, not remote
+weight identity; old index endpoint history remains unknown. All embeddings
+failing is unavailable, not valid_empty. No index schema/builder strategy change,
+tool/Session activation, host asset inspection or real model call is released by
+this recommendation. R2 exact design review and TDD precede implementation.
