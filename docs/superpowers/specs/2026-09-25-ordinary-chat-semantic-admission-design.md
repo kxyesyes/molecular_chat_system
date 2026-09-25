@@ -1,0 +1,255 @@
+# P7 ordinary chat: bounded semantic admission and evidence-limited answers
+
+Date: 2026-09-25. Status: **Design approved by parent and independent specification review; implementation is not released.** Parent selected option 3 under the user's delegated recommended-choice authority. A2 must land before an independent implementation PR. P7 final ordinary-chat and P8 real acceptance remain open.
+
+## 1. Authority and evidence boundary
+
+Only this new document may be written in `ordinary-chat-semantic-admission-plan`, branch `codex/ordinary-chat-semantic-admission-plan`, base `782cd13129cb4c2328c398a3930f61172ea3ec62`. The original drafting/review pass authorized no plan, code, test, compile/import, environment, credentials, assets, model, network, installation, stage, commit or push; parent subsequently authorizes only the local single-document checkpoint recorded in section 12. No production activation or new UI is proposed. The source inspection used Git snapshots, not active A2 files or diff.
+
+Authority is `AGENTS.md` plus the narrower parent instruction. References below use **A = `a01c46f6d4df786057f112c0c86ac5b4861819a0`**, the parent-specified A2 code freeze, and **M = `782cd13129cb4c2328c398a3930f61172ea3ec62`**, this worktree's base. A's presence in Git is not a landing/review claim. Re-pin the actually merged A2 before implementation. B/C design references are dependency contracts, not permission to implement their tools here.
+
+The objective is full ordinary capability questions and semantic same-socket multi-turn through actual normal `/ws`, real main-model decisions and the existing harness. It is not a larger greeting whitelist, unknown-to-chat fallback, static workflow dressed as an Agent, fixed greeting or second model loop. Main provider and local `gmm-llama:latest` stay independent. Model text is never certification that a scientific tool ran or that a numerical scientific claim is true.
+
+## 2. Source observations and exact gap
+
+Line references are repository-relative `revision:path:line`; all are static observations, not tests run for this draft.
+
+| Source anchor | Actual fact / consequence |
+|---|---|
+| A:`src/web/decision_request.py:22,45,63,72–120,355–416` | Closed browser fields; server-created immutable `PreparedDecision`; whole-request scientific checks; closed nominal explanations and complete greetings. Unknown text raises `request_clarification_required`. `prepare` is synchronous; no semantic intent API exists. Context capabilities currently carry user tool/RAG flags, not a product capability inventory. |
+| A:`src/web/decision_runtime.py:169–202,228–276,301–336` | One owner/lease, captured model generation; prepare occurs before memory injection at 245. Actual loop/bridge and safe-history retention exist; memory commits after terminal send. Resume validates original kind/tools/metrics/targets/subjects before dispatch. Connection-ready's four registered tools and `rag_retrieval=false` are not runtime health proof. |
+| A:`src/agent/harness/decision_history.py:35–51,62–88` | Bounded closed user/assistant pairs; chat receives history, science does not; only completed safely displayed chat without tool content is retained. Reuse this, not a new memory service. |
+| A:`src/agent/contracts/decision.py:60–96`; `src/agent/decision_transport.py:23,48,64,140,246–298` | `agent_decision` v1 is strictly tool/clarify/finish. No intent fields or alternate schema selector exist. Transport already bounds native/JSON messages and responses, creates actual `request_id` before validation, starts `request_attempts=0`, sets 1 before `_post`, and returns metadata. |
+| A:`src/agent/openai_compatible_model.py:262–271` | `decide` delegates to `request_decision`; a separate intent method is a planned narrow addition, not an existing adapter capability. Never call `generate_for_chat` as fallback. |
+| A:`src/agent/harness/decision_policy.py:24–39,66–93,127,195–216` | Chat catalog is empty. System message forbids fabrication, but `verify_finish(chat)` only rejects scientific obligations/results. It does not semantically validate prose. `available=null` explicitly means unverified readiness, not scientific success. |
+| A:`src/agent/harness/decision_loop.py:48–75,86–112,166–177,238–265,295–315` | Existing Session, fixed budgets (<=16 model requests, <=12 tool attempts, <=300 seconds), real `decide`, model-call metadata, clarification and finish. Chat `decision.question`/`decision.text` is currently displayed directly after protocol/finish checks; both need the new profile's display gate. |
+| A:`src/agent/harness/decision_continuation.py:26,42–64,139–157,184–185` | Internal waiting revision is 6; fingerprint includes context/limits; counters and exact `model_calls` length are checked. Admission calls cannot simply be inserted as fake decision rounds. |
+| A:`src/web/app.py:136,203–224,381`; `src/agent/tooling/adapters.py:245–259` | App owns model generation, shared references/store/registry. Legacy adapter health may return unknown and may include previous execution state; a new capability snapshot must use a reviewed safe projection, not copy raw health or call arbitrary hooks. |
+| A:`tests/agent/test_web_decision_runtime.py:126,183–208`; `tests/agent/test_web_decision_admission.py:63,235–335` | Actual mounted-route fixtures and exact admitted history pair already exist. Mixed clauses, unknown scientific actions, forbidden tools and count/metric coverage have regressions that must not be weakened. These are offline fixtures, not live understanding proof. |
+| A:`docs/superpowers/specs/2026-09-25-web-decision-runtime-integration-design.md:149–171,239`; plan `2026-09-25-web-decision-runtime-integration.md:202–209`; ledger `docs/handoff/remaining-through-step8.md:42` | A2 pair transmission is incremental only; full capability/normal multi-turn remains mandatory. Admission rejection is not a waiting nonce. A2/C termination versus settlement remains a separate integration gate. |
+| M:`data/agent_evals/real_agent_cases.jsonl:10`; `diverse_scientific_cases.jsonl:15–17,19–20`; `golden_scientific_cases.jsonl:11–12` | Original capability positives, actual-RAG obligations, repeated scientific workflows and explicit negative scientific cases remain unchanged. Repeated workflows are not conversational-memory tests. |
+
+## 3. Options and four selected design choices
+
+| Option | Trade-off | Disposition |
+|---|---|---|
+| 1. Add more exact phrases/keywords to `_classify` | Lowest code cost; brittle paraphrase/follow-up handling and no final ordinary-chat argument. | Not the final design. Existing deterministic scientific guards remain useful. |
+| 2. All unknown input becomes chat, protected by a prompt/disclaimer | Broad surface with little implementation, but mixed scientific obligations can disappear and free prose can invent pIC50/energy or execution. | Reject. An empty tool catalog alone does not prevent false claims. |
+| 3. Server scientific boundary first, one bounded intent proposal, ordinary answer through existing loop with a display gate | Small new typed contract, transport profile, budget carry-in and guard integration. Opens semantic conversation without model-controlled tool authority. Residual semantic errors remain explicit. | **Parent-selected direction; recommended detail below.** |
+
+The four choices are fixed for this draft, not generic TODOs:
+
+1. **Intent protocol:** separate namespaced `ordinary_intent` version `1`, one proposal call, no automatic repair/retry; retain `agent_decision` v1 unchanged for answers/science. Closed internal protocol selection, not user-supplied schemas.
+2. **Capability facts:** reviewed static product catalog plus immutable per-turn runtime view, separate opaque capability generation and sanitized view digest, captured with the existing model lease. No probes or copied private config.
+3. **Admission ownership:** Web/server admission remains sole owner of kind, tools and typed requirements. B extends that one boundary later. An intent proposal can request routing consideration but cannot authorize science, downgrade a blocked request or remove a clause.
+4. **Answer protection:** one deterministic display gate for both chat finish and chat clarify before result exposure/history, with specified claim patterns and fail-closed outcomes. Do not pretend it proves arbitrary prose true; preserve the same evidence-only scientific formatter and validators.
+
+## 4. Proposed intent protocol and actual request records
+
+### 4.1 Closed, non-executable proposal
+
+Proposed `src/agent/contracts/ordinary_intent.py` defines strict frozen records, all fields required, unknown keys rejected, no type coercion and no free-form rationale, confidence score, tool list, code or input rewrite:
+
+```json
+{"intent":{"version":"1","kind":"capability","history_relation":"none","unresolved":false}}
+```
+
+- `kind`: `capability | general_knowledge | conversation | follow_up | scientific_execution | retrieval | mixed | uncertain`.
+- `history_relation`: `none | prior_ordinary_turn`. `follow_up` requires `prior_ordinary_turn`; that value requires nonempty eligible server history. A proposal requiring absent/omitted context is not silently accepted.
+- `unresolved`: strict boolean. True or kind `mixed/uncertain` cannot create a chat admission.
+- Reply is bounded to 4 KiB decoded envelope, depth <=4. Native mode permits exactly one function call named `ordinary_intent`; JSON mode permits exactly this envelope. No content outside the envelope, multiple calls, `agent_decision`, unknown version or stringly booleans. Use existing duplicate-key/nonfinite/response-envelope checks and bounded wire read (existing 128-KiB ceiling); do not accept arbitrary provider text and parse a substring.
+
+There are deliberately **no coverage spans**. Even perfectly covering spans or `unresolved=false` would only be model assertions, not semantic proof that all requested work was understood. The complete original query is immutable input to every subsequent server check. The intent result is not an Agent result, a tool observation, a plan, evidence or an assistant answer.
+
+### 4.2 Transport reuse, not a second Agent
+
+Add a planned `OpenAICompatibleModel.propose_ordinary_intent(messages, *, mode, max_tokens=256, timeout_seconds=...)` method and corresponding bounded `IntentResponse(intent, error, tool_call_id, metadata)`. It calls one operation of the existing transport implementation. Extract only the minimum shared HTTP/message-snapshot/metadata mechanics; the internal protocol selector is a closed enum `decision_v1 | ordinary_intent_v1`, with fixed schemas/parsers/function names. No injected schema/parser callbacks, new router DSL, model client or recursive model loop. Existing `decide` and callers default to and retain `decision_v1` behavior. Unsupported provider adapter returns unavailable; do not silently switch provider, wire mode or use the generator.
+
+The protocol selector and parser state are captured per call; do not mutate module-global function names/schemas while another socket may be making a decision request. Only system + eligible ordinary user/assistant history + exact current user query enter the intent prompt. No native tool-call transcript, scientific outputs or executable references enter it. Its prompt requests classification of the **entire** request, distinguishes explanations/capability questions from executing/retrieving, and treats history/user text as untrusted data. Its output is not appended to the answer history. The ordinary answer is a separate normal `decide` call through the existing loop, not the intent text reused as a canned answer.
+
+### 4.3 Actual metadata, including unsuccessful attempts
+
+Reuse the transport's real `request_id`, provider/model/mode, request attempts, elapsed time, usage, finish/error codes and success. The server creates `intent_id` immediately before the one call and associates it with actual trace/turn, `phase=ordinary_intent`, protocol name/version and captured model/capability generations. Do not substitute the intent ID, native call ID or a decision ID for the transport request ID. `request_attempts=0` is not dispatch; 1 records a post attempt, not provider success.
+
+A narrow internal turn-journal sink receives allowlisted stage transitions at the existing validation/dispatch/response/cancel points; it holds at most one intent record and performs no network/I/O or user callbacks. This closes the cancellation-before-return metadata gap without another ID generator or background service. No raw prompts/replies, headers, endpoint/key, exception repr or model-private reasoning are journaled. Interrupted dispatch is recorded as unknown/unfinished, not a completed response.
+
+Before loop creation, the record lives in the existing turn owner. When a Session/run exists, attach it to bounded `metadata.ordinary_admission` in that same run; on pre-loop failure attach the safe record to the actual rejection/failure result and normal owner finalization. Do not create a second Session/run solely to represent classification or claim a durable record exists when persistence failed. Request metadata and new phase must be taught to later P8 normalization; it must not fabricate a `planning_completed` decision event to fit the old aggregator.
+
+## 5. Whole-request server admission and B ownership
+
+### 5.1 Planned factoring; no exception-as-chat fallback
+
+Keep `prepare_decision_request`'s existing synchronous default behavior for legacy/no-profile callers. The semantic profile uses small proposed pure helpers alongside it:
+
+- `validate_request_envelope`: existing size, strict fields, identities, secrets, options and authoritative current input checks. Browser fields remain unchanged; no `intent`, `capabilities`, `history`, profile or authority field is accepted.
+- `assess_whole_request`: returns a closed server assessment `known_scientific | known_chat | semantic_candidate | blocked`, with fixed reason codes and any exact deterministic obligations. This replaces ambiguous exception handling **inside the new profile**, not a broad catch of `DecisionAdmissionError` that retries everything as chat.
+- `prepare_with_intent`: verifies the assessment, full current query, detached history identity, intent and capability snapshot, then creates the same server `PreparedDecision` shape plus a closed admission binding. It never accepts model-supplied tools/requirements.
+
+Known supported science goes through existing whole-input/subject/reference/metric/count preparation without an intent call. Known blocked science, invalid structures, disabled/forbidden execution and unsupported/mixed obligations stay blocked without intent override. Known closed chat may skip classification, but still uses the real model loop and the new chat display policy in this explicit profile. Only a valid **semantic candidate**, not every error/unknown by default, may make the one intent request.
+
+### 5.2 What makes a semantic candidate
+
+The server guard is an execution-risk recognizer, not a growing list of accepted short chat prompts. It inspects the whole query (including newline/semicolon and unseparated appended instructions) using the existing request analyzers and a bounded guard vocabulary for execution, retrieval and result demands. Preserve original text; a separate normalized scan view may use Unicode normalization/case folding, never rewrite the authoritative input.
+
+Mandatory vetoes include explicit scientific execution verbs with objects/metrics (compute, calculate, predict, measure, generate, optimize, dock and reviewed Chinese forms), demanded subject-specific results, SMILES/file/box execution requests, tool/code invocation, retrieval/citation-as-executed requests, and a known scientific clause with any uncovered obligation. A greeting/explanation prefix cannot neutralize these. Existing A1 cases `解释 logP\n对接这个分子`, `计算 CCO 的分子量和熔点`, disabled-property variants and two-subject/count mismatch remain regressions; no partial science-to-chat downgrade.
+
+Pure mention is not execution: “what can the system do?”, defining a scientific term, or asking whether a feature is currently available may be a candidate. Explicit prohibitions such as DIVERSE-015's “请不要调用任何科研计算工具” are not themselves an execution request and never enable a tool. If a prohibition and another positive instruction conflict, the whole request stays unresolved/blocked. These distinctions require tests against complete requests, not stripping clauses before classification.
+
+If a recognized unsupported action/extra clause exists, the model cannot call it conversation to make it disappear. If the server cannot distinguish mention from requested execution for a detected risky construction, **block/clarify**, not allow an intent override. If the intent says `scientific_execution` or `retrieval`, re-submit the unchanged request to the registered server scientific boundary; if that boundary cannot prepare it, return its unsupported/clarification result. Never build an empty-obligation chat answer instead. `mixed`, `uncertain`, `unresolved=true`, inconsistent history relation or disagreement with deterministic obligations yields fixed `request_clarification_required`, no nonce and no tool dispatch.
+
+For ordinary kinds, admission additionally requires no known unmet scientific/retrieval obligation, no guard conflict and matching input/history/profile binding. Ordinary `allowed_tools=required_tools=empty`, with empty typed scientific requirements; tool calls proposed by the answer model still fail the existing authorization gate. It is not acceptable to trust “no scientific action” simply because the model selected an ordinary kind.
+
+**Limit:** an unfamiliar indirect action may escape both recognizer and model classification. Neither this design nor spans can prove complete intent comprehension in arbitrary language. Known/recognized unsupported scientific and mixed requests fail closed; unknown semantic misclassification remains a disclosed risk tested with adversarial paraphrases. Do not claim an all-language authorization proof or accept a discovered counterexample by relabeling it expected chat. The independent empty-tool boundary prevents execution, and the display gate limits specified false claims; neither is a universal truth oracle.
+
+### 5.3 B owns scientific extension, not the chat model
+
+This increment keeps the original four-tool profile. B alone extends server preparation, typed requirements, permissions, input binding and evidence acceptance for ADMET, reverse, generation/ranking and actual RAG. Coordinate changes in `decision_request` through one owner/integration boundary; no competing fallback classifiers and no legacy planner invocation.
+
+Freeze the pure assessment/Prepared/admission-binding contracts before B integrates. B may supply a versioned supported-science assessment for the unchanged request; ordinary admission cannot create B obligations or override B's blocked status. DIVERSE-016 (hinge binder with retrieval/common-knowledge/inference distinction) and DIVERSE-017 (local Vina documentation retrieval) remain B1 **actual retrieval + producer receipt/source** obligations. In this profile, recognize their source/retrieval requirement and report unavailable/unsupported rather than satisfy them as ungrounded general knowledge. Explanation of what RAG means remains different from doing RAG. No source scans/probes or tool enablement are introduced here.
+
+## 6. Trusted capability snapshot and publication generation
+
+### 6.1 Two fact layers, no asset discovery
+
+Proposed `src/web/ordinary_capabilities.py` builds a closed snapshot from:
+
+1. A small reviewed server product catalog: stable feature ID, bounded human description, evidence limitations and entry/profile support. It describes product functions, not a promise that all are wired to this normal entry. Future B/C features are explicitly not integrated here. Do not copy arbitrary registry descriptions, browser labels or model-generated inventory.
+2. Actual current assembly state: selected normal profile, reviewed registry presence, server permissions, adapter type/protocol support and already-known readiness. Registration implies only registration. Project only audited in-memory availability facts; do not invoke arbitrary `health`/registration hooks, load weights, read env/files, probe provider/Ollama/RAG, open a DB or trigger science just to answer a capability question.
+
+Snapshot v1 is bounded to 16 KiB/32 reviewed features. Fields: `version`, `catalog_revision`, `profile_revision`, `capability_generation`, `model_generation`, `provider_descriptor` (safe provider/model identity and supported wire mode, no URL/key), and feature entries with `id`, `product_description`, `wired`, `permitted`, `readiness` (`ready|unavailable|unknown`), and closed `reason`. Optional readiness observation age/source kind describes only an actual existing fact, never invented timestamps. Missing/expired/unaudited readiness is `unknown`; disabled permission is explicit even if underlying service might be ready. `ready` is scoped readiness, never “has computed successfully for this user/input.” Previous tool `_last_execution` is not copied as present availability or evidence.
+
+The snapshot may explain external main-model decisions versus the separate local generator without revealing configuration secrets. A successful chat response proves that response's provider interaction, not generator, family model, RAG or docking readiness. Main-model metadata cannot certify a scientific dependency.
+
+### 6.2 Epoch and immutable per-turn view
+
+Add an app-owned opaque `capability_generation` published atomically with reviewed catalog/profile/permission/readiness-base changes under the existing model-gate writer boundary. It is distinct from `model_generation`; do not overload a credential digest or mutate a snapshot held by a reader. Model replacement still rotates its existing generation. Runtime readiness cannot mutate the published base invisibly; unversioned freshness becomes unknown. No new watcher/poller is added. Future B readiness publication must use this same boundary or invalidate its fact.
+
+At turn preparation, capture both generations and an immutable snapshot within the one reader lease. Derive request-specific `permitted` facts from validated options; compute a digest of this sanitized canonical view, not of credentials. The admission binding and system message use the same digest/view. A capability update never attempts writer acquisition while holding this turn's reader; publication occurs through existing external assembly/config lifecycle after readers settle. No second lease is acquired by the intent or answer phase.
+
+The model's capability explanation is generated from this server view. Display checks reject recognized contradictions and invented execution claims. Registry membership alone must never produce “the activity model is available” or “docking succeeded.” Knowledge prose remains a model explanation, not an availability attestation. Prior chat may contain an older view; the current trusted snapshot takes precedence and the answer must not treat past statements as current readiness. No new UI widget or settings toggle is required; use existing answer/status presentation.
+
+## 7. One owner, one lease, one total budget and bounded history
+
+### 7.1 Control flow
+
+After A2's accepted-turn ownership and basic frame validation:
+
+1. Start each active segment before refresh/reader acquisition. Initially its execution allowance is the configured limit (at most 300 seconds); on resume it is only the previously retained remainder. Set `segment_deadline = segment_start + allowance`. Human waiting pauses execution-budget accounting; its separate 15-minute authorization TTL still runs. Cancel/deadline while acquiring resources makes zero model calls. Existing shorter limits still apply.
+2. Under the one lease, capture model, model/capability generation, frozen eligible ordinary history and current snapshot. Validate/assess the complete current request. History capture moves before semantic assessment, not into client payload or a shared-user memory store.
+3. For a semantic candidate only, reserve one request from the existing total model limit and make the single intent call with timeout `min(30 seconds, remaining segment allowance)`. No automatic intent repair/fallback or repeated intent on resume. Require capacity for a subsequent answer call before starting classification; otherwise report budget exhausted.
+4. Prepare chat or the supported server scientific request without dropping original obligations. Create the usual `ModelDecisionLoop` and Session once. It uses the same actual model/mode, owner and active-segment deadline cap. No separate intent Agent, workflow, Session or tool executor.
+5. Validate answer/clarification before rendering; settle owned work, deliver the existing terminal once if writable, and retain only actually displayed eligible ordinary pairs through the existing helper.
+
+### 7.2 Budget and metadata carry-in
+
+Proposed internal `AdmissionCarryIn` is an immutable plain record containing at most one intent-call record, `intent_requests` (0 or 1), this active segment's start/remaining allowance/deadline cap, admission binding and snapshot. It is server-only, not browser/model input or a resource manager. Add an optional carry-in parameter to existing loop/bridge entry; old no-carry callers retain current behavior. Validate every field; a caller cannot increase the retained allowance, move its cap forward or mark an attempt free. Absolute monotonic values are process-local controls for the current active segment only, never persisted as proof of a clock spanning human waiting or restart.
+
+For segment `i`, let `s_i` be its start and `B_i` its admitted remaining execution allowance; `D_i = s_i + B_i`. Refresh, reader acquisition, validation/CAS preparation, intent and loop work share this cap: no phase receives a fresh timer. Debit active elapsed time as `max(0, now - s_i)` against `B_i`, flooring the remainder at zero. At a successfully delivered, actually settled waiting boundary `p_i`, the next retained allowance is at most `max(0, B_i - (p_i - s_i))`, further clamped by the loop snapshot as specified below. The human interval after `p_i` and before the next accepted resume segment is not charged. Multiple clarifications can only reduce the remainder; a resume never restores 300 seconds or resets request/tool counters.
+
+Preserve the meaning of existing `state.model_requests`/`model_calls` as **decision** rounds for continuation replay. Add explicit `intent_requests` and `total_model_requests = intent_requests + model_requests`; the dispatch condition is total < configured limit (maximum 16) **and** current time before the active-segment cap. Intent consumes one even if schema-invalid or transport fails; request attempts remains a separate factual transport count. Existing decision schema repair, when eligible, consumes the same total budget. Tool maximum remains 12 and ordinary chat gets zero tools. Never reset to a fresh 300 seconds or 16 calls after classification or waiting.
+
+This is a **dispatch/execution allowance**, not a bound on all active wall-clock time. Exhaustion stops new model/tool dispatch and signals cancellation; physical operations, terminal handling and retained-resource cleanup can outlive the cap under A2's existing ownership rules. Such overrun yields zero future allowance, not negative time or a refund. Do not claim cumulative observed active wall time, worker death or graceful shutdown is guaranteed within 300 seconds; a never-settling worker can still prevent shutdown. Cleanup keeps real ownership and does not authorize additional model/tool work.
+
+No raw intent response is added to decision messages. Carry-in metadata is allowlisted into result/run state; snapshot/admission policy revision is fingerprinted. Existing model-call metadata continues to contain actual request IDs and decision IDs, while `ordinary_admission` holds the separate intent ID/request ID. Aggregate counters expose both phases rather than pretending classification was a scientific tool or a decision action.
+
+### 7.3 History and continuation boundary
+
+Reuse 20-pair/16-KiB closed history, whole-pair eviction, sensitive/oversize omission and socket isolation. Current query is never shortened for packing. The intent and answer see the same frozen eligible history; only successfully displayed, completed chat pairs enter future memory. Rejected/failed/guard-blocked/waiting/cancelled text and scientific output never become ordinary memory or evidence. No persistent general memory or client-supplied history.
+
+Ordinary semantic follow-up is a **new chat turn**, not a scientific continuation. It may use prior ordinary conversation but cannot silently bind a molecule or a previous scientific number. Scientific anaphora still requires confirmed references/A1/B validation.
+
+Keep A2's narrow resume semantics: validate owner/socket/nonce/epoch and the complete clarified request deterministically before CAS or model calls; preserve original kind/tools/metrics/targets/subjects. **Do not add semantic reclassification to `_validate_resume` in this increment.** A genuinely accepted chat `clarify` may create the existing waiting record after its display gate, but only A2's deterministically supported complete clarification can resume it; broader free-form replies must start a new full chat request. Admission uncertainty itself never fabricates waiting or a nonce. This limitation is explicit, not a claim of arbitrary conversational continuation support.
+
+New semantic-profile waiting records bind the original admission/view digest and remaining total budget. Update fingerprint, snapshot validation and replay coherently; select internal waiting revision **7** relative to A's current 6, or the next unused revision if merged dependencies have advanced it. Reject incompatible historical waiting records without replay; new-call API compatibility is not a promise to resume old waiting snapshots across this revision. Separate intent records must not violate the existing `len(model_calls)==model_requests` invariant. Resume restores already-spent intent budget without rerunning intent; changed model/capability generation or view invalidates the handle before dispatch. Plain retained history is data, not authority, and may persist across turns while the new trusted snapshot supersedes older availability claims.
+
+**Parent-selected pause semantics and the existing restore seam.** A:`decision_continuation.py:64` stores `remaining_seconds = max(0, deadline - now)`; A:`decision_loop.py:217` currently restores `now + remaining_seconds`; A:`decision_runtime.py:266–267` separately creates a 15-minute waiting TTL. Preserve paused human-wait semantics, not the old absence of Web-phase accounting. The TTL is authorization only: keep A2's existing creation/expiry point, do not restart it after slow delivery or convert it into execution credit. Expired handles cannot resume even when execution credit remains. No reconnect/restart restoration is added.
+
+**Debit after the loop's early snapshot.** The loop may persist a waiting snapshot before Web postprocessing/drain/delivery completes. Proposed narrow seam: return its validated remaining-budget checkpoint, bound to the actual continuation/trace, to the existing turn owner; retain a downward-only `remaining_seconds_cap` in the socket-trusted waiting metadata. Only after actual settlement and successful waiting terminal delivery at `p_i` may the owner publish the usable handle, with `R_i = max(0, min(snapshot_remaining, B_i - (p_i - s_i)))`. Failed delivery/disconnect creates no usable socket waiting authority. If `R_i=0` or the TTL has expired, do not publish a resumable handle; the next resume is rejected before CAS/dispatch. This charges post-snapshot processing rather than giving that time back to a later model call. Do not rewrite the already-saved store snapshot, invent a second store CAS, or trust a browser-supplied remaining value. Missing trusted cap means resume unavailable, not recovery from the larger durable remainder alone.
+
+**Resume clamp interface.** At an accepted resume's active start, set `B_next` from the retained socket cap and `D_next = s_next + B_next` before refresh/lease. During existing continuation validation, validate the stored remainder and bind it to the same continuation; reduce the effective cap to `min(D_next, s_next + validated_snapshot_remaining)`. Recheck TTL, positive allowance, total request budget and this deadline immediately before the real claim CAS; if expired/exhausted, make no CAS or dispatch. Carry that effective cap into the loop. Its existing restoration assignment becomes, for this profile, `state.deadline = min(now + restored_remaining, effective_segment_cap)`; it must not overwrite the earlier Web cap with a later `now + remaining` timer. Recheck before each dispatch as well, since time can expire after a successful CAS; do not pretend to undo a real claim. Preserve the original intent record/counters without another intent call. Only finite nonnegative remaining durations/counters and existing versioned bindings are durable; neither waiting nor restart relies on a serialized absolute monotonic clock. These are planned carry-in/socket-metadata/claim-validation seams, not APIs already implemented in A.
+
+## 8. Chat finish and clarify display gate
+
+### 8.1 Location and action
+
+Proposed `src/agent/harness/ordinary_chat_policy.py` checks every `FinishDecision.text` **and** `ClarifyDecision.question` for the explicit ordinary semantic profile before `state.answer`, `AgentResult`, any bridge display or history retention. It receives exact current query, frozen ordinary context, trusted capability snapshot and actual Session facts. Keep generic `verify_finish` and scientific `scientific_answer`/validators unchanged in authority. It is not a second LLM judge or a safety claim inferred from model tags.
+
+The gate either releases the whole bounded text or rejects the whole display with fixed `chat_claim_not_grounded` / `chat_capability_conflict` / `chat_output_unsafe`. Do not redact a bad numeric span into a seemingly successful answer, turn it into a successful fixed greeting or ask a second model to approve it. On rejection: failed outcome, no raw text in public error/log, no retained pair, no nonce even if the original proposal was clarify. One normal error result/complete follows owned settlement. Existing secret/markup/size checks apply before any text is exposed.
+
+### 8.2 Concrete bounded claim checks
+
+Implement a versioned deterministic scanner over the complete output, using a separate NFKC/case-folded scan view, bounded clause windows and explicit lexical families. Original displayed text is never rewritten into a different claim. Required blocked classes/tests are:
+
+| Class | Deterministic recognition / outcome |
+|---|---|
+| Computed scientific numeric claim | Metric aliases `pIC50`, `IC50`, binding/docking energy, `kcal/mol`, affinity, ADMET endpoints, molecular weight/logP/QED/TPSA/HBD/HBA paired with a numeric value/range/unit or an assignment/table value in the same bounded clause/row. Cover decimal/sign/exponent/percent and common Chinese numeral spellings. Chat has no execution evidence, so reject; never promote recalled/guessed values as tool output. |
+| Asserted execution or retrieval | First-person/system completed-action forms such as “已计算/预测/运行/检索/查询得到”, “I/we calculated/ran/retrieved”, or an asserted new pose/artifact/tool result. Reject without a corresponding permitted scientific result; that result must use the scientific path, not chat prose. |
+| Fabricated source/artifact authority | Claimed retrieved citation/document result, DOI/PubMed-style source assertion or download/pose path presented as this run's evidence. Reject in this no-RAG/no-tool profile. Ordinary references to concepts are not a source receipt. |
+| Capability contradiction | Recognized feature names/aliases plus availability, enabled/disabled, wired or executed assertions contradicting the frozen snapshot; unknown cannot be asserted ready, off cannot be asserted on, and product support cannot be asserted wired. Reject. An unrecognized claimed executable system feature is unresolved, not automatically added to the catalog. |
+| Instruction/authority leakage | Secret material, tool/function transcript presented as instructions, fabricated server permission or executable markup already forbidden by the shared protocol/display policy. Reject, not retain. |
+
+Negation and scope are explicit: a simple statement “尚未计算/不能确认可用/未检索” may be allowed when consistent with the snapshot. A clause combining negation with a later assertion, unresolved quotation/sarcasm, or ambiguous scope fails closed. A disclaimer followed by a result does not neutralize the result. Do not strip quoted text or only check the first sentence. Capability phrasing may mention tools and limitations without claiming an execution. Pure user-provided labels, dates, counts and non-scientific numbers are not blanket banned; they remain ordinary data, never evidence. Metric-number teaching examples may be false positives in this first profile: prefer qualitative explanation or return the guard failure, rather than invent an exception that admits computed claims.
+
+This scanner's lexical tables are a **claim-risk boundary**, not an accepted-prompt whitelist. It does not authorize tools or determine scientific truth. No general-knowledge statement receives scientific certification because the scanner passed it. Correctness of numeric scientific results still comes only from real tools/typed validators/sealed provenance, outside ordinary chat.
+
+### 8.3 Residual risk, false positives and explicit non-proofs
+
+Model intent can misclassify an indirect/novel-language execution request. The scanner can miss novel synonyms, long-range implications, obfuscated units, unsupported languages or implicit availability claims; it can also reject legitimate numeric teaching examples, quotations or descriptions of historical work. General factual knowledge can be wrong even when no numeric/execution pattern appears. Neither schema validity, `unresolved=false`, exact history transmission, a disclaimer, a regex pass nor a second LLM review proves absence of hallucination.
+
+Fail closed for detected risky ambiguity, missing trusted capability view, malformed/contradictory intent, missing required history, guard conflict, unknown version, budget exhaustion and any known unmet scientific obligation. Do not claim detection of every unknown obligation. A discovered scientific-execution-to-chat or false-claim counterexample is a blocking regression for the reviewed scope; add a deterministic regression and adjust the bounded guard or declare the exact unsupported region before release. Do not relabel it expected success/rejection merely to improve scores. No infinite perfection gate is claimed: review explicitly evaluates this bounded surface plus residual risk and the original mandatory real cases.
+
+## 9. Errors, cancellation, ownership and compatibility
+
+Intent unavailable, protocol-invalid, timeout, uncertainty, deterministic veto, output rejection and persistence failure have distinct fixed public reasons. None dispatches an unapproved tool, manufactures scientific completion or retains a bad pair. Semantic refusal is not proof that a positive original case passed. Accepted turns use existing result/complete terminal ownership; malformed/unaccepted controls retain existing control-error behavior.
+
+Cancellation/deadline/config change stops scheduling; the same owner signals and drains the in-flight intent or answer transport and any actual owned workers. No new model/tool request, repair or capability probe after active-segment execution-budget expiry. Keep the single lease until physical child work/descendants/executor joins settle under A2, even past that expiry; permitted terminal/resource-cleanup handling remains ownership work, not renewed execution credit. An asyncio task being cancelled is not settlement; a never-exiting worker may prevent graceful shutdown. Do not add a finite-terminal/300-second wall-clock promise or detach cleanup to solve this; C's separate finite-UI/retained-owner integration remains outside this increment.
+
+Intent is one non-tool model call; no new background thread/executor/store/client is created. A failed intent call cannot trigger a legacy workflow fallback. Provider replacement remains writer-owned and old-client close waits for readers/owners. Secrets never enter snapshot digests, public metadata or failure repr.
+
+Enable the feature only via a closed server constructor/profile setting proposed as `ordinary_chat_policy='a1_closed'|'semantic_v1'`, default `a1_closed`; it has no browser/env/UI toggle. Keep normal production activation unchanged. `semantic_v1` requires a capable approved external adapter, matching snapshot/profile and the entire gate/budget/persistence revision together; fail assembly if only half is installed. The four scientific tools and gmm separation are unchanged. Existing no-profile `prepare`, `decide`, loop callers and legacy entry behavior remain compatible.
+
+## 10. Acceptance and future TDD seams — none run here
+
+### Original final requirements
+
+- **REAL-010** (M `real_agent_cases.jsonl:10`): `你好，我想了解一下这个系统能做什么？` — full actual capability answer; no shortening to “你好”, fixed runtime greeting or expected rejection. P8 records its separately named normal-UI positive in all three outer rounds.
+- **DIVERSE-015** (M `diverse_scientific_cases.jsonl:15`): `你好，我只是想了解这个系统能做什么。请不要调用任何科研计算工具。` — answer the full question; no scientific/RAG calls. It is not the same case as REAL-010.
+- **DIVERSE-016/017** remain B1 real RAG/source gates, not plain chat substitutes. GOLD/DIVERSE invalid-SMILES, missing docking parameters, unauthorized-tool and mixed-obligation expectations remain unchanged.
+- Preserve the 32 GOLD/DIVERSE × three outer rounds = 96 core P8 slots and the separate legacy contract/UI accounting. DIVERSE-019/020 internal scientific repeats do not prove normal conversational memory. This design does not enlarge P8's mandatory dataset denominator.
+
+### Clearly named new supplements
+
+Use `CHAT-SUP-01` as a **new**, separately labeled semantic supplement: after each original capability answer, ask `你刚才提到的这些能力，哪些当前可用，哪些还不能确认？` on the same socket. Check the actual prior answer and trusted current snapshot; not merely presence of two independent history messages. Add qualitative paraphrases and a general-knowledge follow-up to establish behavior is not exact-prompt matching. These names are proposed supplements, not original dataset IDs. Label-recall is not mandatory original scope and is not added here.
+
+User or Codex reviewer independent of the tested provider may assess open-ended answer relevance/context/capability consistency against the actual facts. The tested model cannot grade itself, and independent model judgment cannot replace scientific numeric/provenance checks. Offline scripted provider responses prove mechanics only. Final actual normal UI and real external model evidence remains P8 work after integration; route-only/unit success does not close P7 final semantics.
+
+### Focused future tests and seams
+
+| Boundary | Required offline proof, then separate final live proof |
+|---|---|
+| Intent schema/transport | Native and JSON; cross-protocol/version rejection, extras/coercion/duplicate keys/oversize, no free text or hidden JSON in finish; attempts 0 versus real `_post` attempt; provider failure and cancel-before-return record. No intent repair/fallback. Existing decision v1 tests unchanged. |
+| Whole-request admission | Original full capability prompts and paraphrases admitted with empty tools; original A1 scientific/negative/count/disabled regressions preserved; appended/unseparated/newline unknown actions not ignored; malicious intent labeling known science as chat cannot override server veto; uncertainty has no nonce. B/RAG requests stay outside plain chat. |
+| Capability snapshot | Product support versus wiring/permission/readiness unknown; registry presence not readiness; no hook/I/O/env calls during projection; contradictory/unknown feature claim rejected; same snapshot for intent/answer; generation/view change invalidates waiting without calls/CAS. No credential/path data. |
+| One budget/owner | Delayed refresh/lease consumes the active segment's retained allowance; intent reduces decision allowance; repair shares the ceiling. Human waiting does not debit execution credit, but TTL expires independently. Two or more clarify/resume cycles never grow remaining time or reset 16-call/tool counters, and never repeat intent. Slow post-snapshot postprocessing/delivery lowers the socket cap without rewriting store/CAS; restore's `now + remaining` cannot exceed the earlier segment cap. Budget expiry stops new dispatch while a controlled worker/join barrier remains owned past the cap; release it only for test cleanup, without claiming finite shutdown. One receiver/lease, no premature close or extra terminal. |
+| Display and history | Inject each forbidden claim into both finish and clarify; block before first visible text/result and before retention; include negation+assertion, quoted claim, table/unit/Chinese numeral cases and benign dates/labels/qualitative explanation. Secret/oversize omission preserved; no raw rejected text in logs. |
+| Actual route/continuation | Reuse `tests/agent/test_web_decision_runtime.py` mounted app/session fixture, not a copied route. Exact prompt→intent→real adapter/loop answer→retained pair; same-cookie other socket isolated; malformed client authority rejected. Deterministic resume obligations and revision7 carry-in replay/counts; broader semantic reply is a new chat, not an invented resume privilege. TTL expiry, zero retained credit, depleted request budget and expiry during pre-CAS validation cause zero CAS/dispatch; expiry after an actual claim causes no dispatch and is not reported as an unconsumed nonce. Missing socket cap/restart cannot reuse a durable remainder as new authority. |
+| Final semantic acceptance | Real main-provider complete original prompts, actual normal UI and contextual follow-up, no forbidden tool dispatch or unsupported numeric claim, explicit current unknowns; independent reviewer evidence. No scripted answer/intent or fake fixture counted as live. |
+
+Proposed small future modules are the intent contract, ordinary capability projection and ordinary chat display policy; orchestration stays in `decision_runtime`, transport reuse in `decision_transport`/approved adapter, science preparation in `decision_request`, and execution/persistence in existing loop/Session/continuation. This is a design seam map, not an implementation task plan. Relevant test families already exist for admission, protocol, loop, history, continuation, model gate and actual runtime lifecycle; add focused tests for the new boundaries rather than a new acceptance framework.
+
+## 11. Release sequence and explicit remaining gates
+
+1. Parent and independent specification review of this text, including the bounded residual-risk statement and resume limitation. No plan/code is released by selecting option 3.
+2. A2 reviewed/merged interfaces re-pinned; implement this increment in its own later PR with the coherent intent/capability/display/budget/continuation boundary. If A2 changes the quoted interfaces, adapt in that review, not by copying active patches.
+3. B may progress independently but shares the single server-admission contract. Its real retrieval/source and scientific binding obligations must integrate without chat fallback. C's consent, topology and terminal/cleanup differences stay separate.
+4. P8 normal-entry real/UI/semantic evidence on the merged tree closes the original capability/multi-turn cases only when actually demonstrated. Missing provider/browser/reviewer/tool dependencies remain honest partial; no production activation, new secrets, model assets, deployment or package 9 work.
+
+Self-review focus: protocol namespaces are distinct; intent is non-authoritative and not a hidden answer; scientific actions remain server-owned; existing decision counters are not forged with classification events; capability facts never come from probes; both output paths are guarded before history; unknown semantics and false positives are disclosed; every new acceptance supplement is labeled new. Parent's pause choice is explicit: human waiting pauses execution debit, TTL is separate, active segments share a downward-only allowance/cap, post-snapshot Web time is not refunded, and pre-CAS exhaustion rejects without a fabricated claim. Absolute monotonic deadlines are not durable cross-wait/restart proof; execution-budget expiry is not physical drain or a finite shutdown guarantee. The sole artifact is this design document. It does not alter prior implementation approvals or declare any final gate passed.
+
+## 12. Independent review and local documentation checkpoint
+
+The initial 237-line draft, SHA-256 `1e34fc660ea8ba50d16e99aed5e7141cfab5f84ac327c1efa5b3b95184252bc6`, received one independent P2 design finding: active absolute deadlines and restored remaining time did not define human-wait accounting. There were no other blocking findings. This was a source-supported design ambiguity, not a reproduced implementation defect.
+
+Parent selected the existing paused-wait semantics with independent authorization TTL. The revised 247-line design, SHA-256 `bb00cd2e913e88b10a745b117d47a0771746807fb229602037019bec817f06b3`, explicitly specifies active-segment accounting, post-snapshot downward clamping, pre-CAS/pre-dispatch checks and retained cleanup beyond exhausted dispatch allowance. Independent SPEC approved that exact revision and closed the P2. Parent independently inspected the same budget sections and accepts the revised design under the user's delegated choices. The status/evidence-only edits in this checkpoint do not change those reviewed technical requirements.
+
+Parent authorizes an explicit single-file local documentation commit only. No tests, model/tool execution, source changes, push, PR, merge or deployment were performed for this design. A2 integration must be re-pinned after landing before a separate implementation plan and code release; B/C and P8 obligations remain open. Document approval is not implementation or live-acceptance evidence.
