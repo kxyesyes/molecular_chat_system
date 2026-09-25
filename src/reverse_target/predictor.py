@@ -126,21 +126,71 @@ class ReverseTargetPredictor:
             )
 
     def _load_or_compute_popcounts(self, fingerprints: np.ndarray, popcount_path: Path) -> np.ndarray:
-        if popcount_path.exists():
-            popcounts = np.load(popcount_path, mmap_mode='r')
-            if popcounts.shape[0] == fingerprints.shape[0]:
-                return popcounts
+        """Validate row counts without copying the caller's fingerprint matrix."""
+        fingerprint_error = "Invalid reverse-target fingerprints."
+        cache_error = "Invalid reverse-target popcount cache."
+        if (
+            not isinstance(fingerprints, np.ndarray)
+            or fingerprints.ndim != 2
+            or fingerprints.dtype.kind not in "biu"
+            or not 1 <= fingerprints.shape[1] <= np.iinfo(np.uint16).max
+        ):
+            raise ValueError(fingerprint_error)
 
         n_samples = int(fingerprints.shape[0])
-        popcounts = np.zeros(n_samples, dtype=np.uint16)
+        width = int(fingerprints.shape[1])
         try:
             chunk_size = int(os.getenv("REVERSE_TARGET_POPCOUNT_CHUNK_SIZE", "50000"))
         except ValueError:
             chunk_size = 50000
         chunk_size = max(1, chunk_size)
+
+        cached = popcount_path.exists()
+        if cached:
+            loaded = None
+            try:
+                loaded = np.load(popcount_path, mmap_mode='r', allow_pickle=False)
+                if (
+                    not isinstance(loaded, np.ndarray)
+                    or loaded.ndim != 1
+                    or loaded.shape[0] != n_samples
+                    or loaded.dtype.kind not in "iu"
+                ):
+                    raise ValueError(cache_error)
+                # Only O(rows) counts are detached; the large fingerprints stay mapped.
+                popcounts = np.array(loaded, copy=True)
+            except Exception:
+                raise ValueError(cache_error) from None
+            finally:
+                if isinstance(loaded, np.memmap):
+                    loaded._mmap.close()
+                elif hasattr(loaded, "close"):
+                    # np.load can also open an archive, which is not a count vector.
+                    loaded.close()
+        else:
+            popcounts = np.zeros(n_samples, dtype=np.uint16)
+
         for start in range(0, n_samples, chunk_size):
             end = min(start + chunk_size, n_samples)
-            popcounts[start:end] = np.sum(fingerprints[start:end], axis=1, dtype=np.uint32)
+            chunk = fingerprints[start:end]
+            if np.any((chunk != 0) & (chunk != 1)):
+                raise ValueError(fingerprint_error)
+            expected = np.sum(chunk, axis=1, dtype=np.uint32)
+            if cached:
+                counts = popcounts[start:end]
+                if (
+                    np.any(counts < 0)
+                    or np.any(counts > width)
+                    or not np.array_equal(counts, expected)
+                ):
+                    raise ValueError(cache_error)
+            else:
+                popcounts[start:end] = expected
+
+        if cached:
+            # Normalize only after validating original values; narrow cache dtypes
+            # can overflow count addition in the 166/2048-bit scorer.
+            return popcounts.astype(np.uint16, copy=False)
         try:
             np.save(popcount_path, popcounts)
         except OSError:

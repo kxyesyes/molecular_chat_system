@@ -69,6 +69,8 @@ def test_actual_load_rejects_same_length_wrong_cache(tmp_path):
 # For each bounded fingerprint row chunk, reject nonbinary values; sum axis=1
 # using uint32. Compare cached values exactly (including range), or fill the
 # original uint16 missing-cache output. No scientific query/scoring call here.
+# Convert fully validated cached counts to detached uint16, matching missing
+# counts, before returning. Do not cast prior to exact/range validation.
 # Bad existing cache raises; do not silently rebuild. Missing valid counts use
 # the original best-effort np.save block. Return detached validated counts.
 ```
@@ -109,3 +111,59 @@ Independent read-only review found a Windows fixture hazard: the successful
 baseline retains mapped cache handles. The first RED now explicitly closes
 fixture-owned mappings before cache corruption and on exceptional exits. No
 production loader ownership or method is stubbed to obtain the RED.
+
+## Source-review refinement
+
+Parent source review and independent SPEC identified a downstream arithmetic
+issue: preserving valid int8/uint8 cached storage can overflow the denominator's
+addition in batch_tanimoto_similarity before later subtraction. The original spec
+did not require cached dtype preservation. Amend it to canonical uint16 only
+after full original-value validation, matching existing missing-cache counts.
+This is safe for the actual166/2048-bit predictor; no arbitrary-width scoring
+promise or formula expansion is introduced. First reproduce with actual helper
+and batch scorer (100/int8,128/uint8), then replace the test-only dtype-preservation
+expectation with canonical dtype/value and cached/missing/no-cache score parity.
+No implementation correction is released until the behavioral score RED is known.
+
+## TDD evidence and source-review correction
+
+All commands below used the exact approved runner prefix and the current worktree,
+one terminal process at a time. No skipped tests or modified timeouts.
+
+| Order | Scope | Passed | Failed | Subtests passed | Seconds | Exit |
+|---|---|---:|---:|---:|---:|---:|
+| 1 | Actual-load first RED | 0 | 1 | 0 | 2.31 | 1 |
+| 2 | New module RED | 56 | 65 | 0 | 4.77 | 1 |
+| 3 | Actual-load GREEN | 1 | 0 | 0 | 0.90 | 0 |
+| 4 | Module GREEN | 121 | 0 | 0 | 2.42 | 0 |
+| 5 | Four-module union | 390 | 0 | 2 | 15.29 | 0 |
+| 6 | Actual score overflow RED,2 dtypes x2 widths | 0 | 4 | 0 | 2.29 | 1 |
+| 7 | Canonical cached dtype RED | 1 | 7 | 0 | 1.56 | 1 |
+| 8 | Original node plus score/dtype GREEN | 13 | 0 | 0 | 1.44 | 0 |
+| 9 | Corrected module | 125 | 0 | 0 | 2.99 | 0 |
+| 10 | Corrected four-module union | 394 | 0 | 2 | 15.18 | 0 |
+| 11 | Independent QUALITY four-module union | 394 | 0 | 2 | 15.69 | 0 |
+
+Run1 failed DID NOT RAISE ValueError after the actual baseline load/predict passed;
+not a fixture/import failure. Run2 also exposed unsafe error messages and borrowed
+cache ownership/detachment gaps. Initial RED output included RDKit deprecation
+notices and run2 one ComplexWarning; GREEN commands reported no warnings.
+Run6 directly confirmed narrow integer overflow: int8 self-score0.0 and uint8
+self-score2.9802322e-08 versus missing-cache/no-popcount baselines1.0. This justified
+the spec refinement, not weakening a scientific assertion. Canonical uint16 is
+applied only after every original value passes validation; scoring code unchanged.
+
+Corrected frozen SHA256:
+
+| File | SHA256 |
+|---|---|
+| src/reverse_target/predictor.py | C35C3C0E5C6B61836FFA47DDF2965C73521F74ACD051F08B5F0A5A90991E3347 |
+| tests/test_reverse_target_popcounts.py | D7E9C9504BD69233C4FB827B5FD97C8F2D47278C60B65E7F35618B324C9BD9F0 |
+
+Parent compiled both Python files in memory (-I -S -B, no imports or bytecode),
+and git diff --check passed. Independent SPEC rereview APPROVED after the P2
+overflow correction; independent QUALITY APPROVED and repeated the exact union
+in run11 with zero skips/warnings. Both source/test hashes and approved-runner
+hash matched before/after the independent run. No unresolved review findings.
+Tasks1–3 are complete; earlier checkboxes preserve the sequence, not open gates.
+This is not a full-repository, live-model or stable-source ownership test.

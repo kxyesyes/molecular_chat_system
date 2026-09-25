@@ -38,6 +38,12 @@ tests/test_reverse_target_popcounts.py. No other production/test edits.
 - Validate cached counts against bounded row chunks using uint32 accumulation,
   preserving the existing chunk-size configuration/default/clamping behavior.
   Never allocate another full fingerprint matrix or recompute query fingerprints.
+  After validating original cached values, return detached canonical uint16
+  counts, matching missing-cache computation. Do not preserve int8/uint8 storage
+  dtypes: downstream count-plus-query-count can overflow before subtraction for
+  the actual166/2048-bit predictors. Never narrow before validation, which could
+  hide corrupt negative/oversized values. This does not extend the scientific
+  predictor to arbitrary65535-bit vectors; that bound is only helper count storage.
   A detached O(number-of-rows) cached count vector is allowed so returned counts
   cannot change when the cache file is subsequently edited. Close only mmap
   handles newly owned by this helper, including exceptional exits; never close
@@ -69,6 +75,9 @@ with unchanged total, corrupt bytes, binary input validation in later chunks,
 zero rows, both fingerprint widths, missing-cache computation/write failure,
 unchanged cache bytes after rejection, detached returned counts and mmap cleanup.
 Keep real-score positive cached/missing parity via predict, not just np.sum tests.
+Add synthetic actual batch-score controls with100 set bits/int8 cache and128 set
+bits/uint8 cache at widths166/2048. Self-similarity must be1 and equal missing-cache
+and no-popcount calculations; preserve these as arithmetic, not biological tests.
 
 Only approved isolated runner, temporary synthetic assets and controlled test
 environment; no real data/model/API/network/config/credentials. Run unchanged

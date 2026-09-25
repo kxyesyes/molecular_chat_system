@@ -100,6 +100,36 @@ This API does not authenticate forged receipts, nor wire dynamic-loop reuse,
 resume CAS or final evidence consumption. Those actual B integration paths,
 reverse-source ownership, B2/C and P8 real/UI acceptance remain pending.
 
+Reverse popcount prerequisite is now locally implemented and independently
+SPEC/QUALITY approved. Actual legacy load formerly accepted a same-length cache
+with a wrong value (behavioral RED: DID NOT RAISE). Every cached row is now checked
+against binary fingerprint sums in bounded chunks; corrupt files are rejected,
+not repaired. A second reproduced arithmetic bug affected valid narrow integer
+caches: identical-vector scores were0.0/int8 and2.9802322e-08/uint8 instead of1.0.
+Fully validated cached counts now become detached uint16, matching uncached
+counts for actual166/2048-bit scoring; formula/weights/thresholds remain unchanged.
+Only helper-owned cache mappings are closed. Missing-cache legacy save behavior
+is preserved, not claimed to be the future strict no-write path.
+
+Worker and independent four-module regressions:394 passed,2 subtests passed,
+0 failed/skipped, no warnings reported,15.18s/15.69s. Full RED/GREEN chronology
+and hashes are in the 2026-09-26 reverse-popcount-validation plan. Two-file
+in-memory compile and diff checks passed; original dirty checkout unchanged.
+This does not prove TSV-to-fingerprint alignment or stable fingerprint ownership.
+
+Next reverse producer design must pin owned generation and resource limits before
+receipts: no trusted row-alignment manifest currently exists. A read-only audit
+recommends exact per-row RDKit correspondence and private owned arrays, then a
+shared scoring core with once-captured effective weights and detached receipts.
+Owned uint8 fingerprints plus uint16 counts retain2218 bytes/row (~2.07GiB per
+million), excluding TSV/dataframe/scores/temporary allocations; real acquisition
+time/memory remain unmeasured. Memory/deadline/cancellation limits, source refresh
+policy, invalid/missing TSV fields and safe strict lazy acquisition require a
+written bounded decision. Do not invoke eager legacy get_predictor/load or use
+the cache fix alone as B scientific authority. Actual seven-tool/v2 bindings,
+proof-aware operation keys/sealing, dispatch/reuse/resume-before-CAS/finish
+freshness checks, B8/ordinary entry and all B2/C/P8 end states remain pending.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |
