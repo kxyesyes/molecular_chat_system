@@ -752,3 +752,75 @@ The diagnostic observed ready at 1.438s, accepted at 1.454s and timeout raised a
 | `tests/home_structured_molecule_render_test.js` | `c86e168034ccbc0b5462cd400a31e723d287a2a7` |
 
 The five Task 7 backend/test files remain byte-identical to `cf28246`. Diff and filename-only credential-pattern checks passed. Parent authorizes a local checkpoint of these five files plus this evidence section after explicit staging; no push, PR, merge, activation or deployment. A2 overall review, unresolved route diagnostics, full offline gates, final ordinary-chat behavior, B/C integration and package-8 real provider/scientific/browser acceptance remain unfinished. Completing this Task 8 subtask does not complete work package 8 or P7.
+
+## 18. Causal diagnostic and bounded fixture-readiness follow-up
+
+Task 8 checkpoint is `2769e1eca86220c5c3be3a749392148133979d53`, tree `370989c7bf890028f25865f1883ec7e6877fa347`. Overall source/SPEC inspection of its 26-file A2 increment found no new P1/P2, but is not full runtime approval. The accompanying spec's busy-code spelling is corrected from `request_in_progress` to the existing backend/frontend `turn_in_progress`; no protocol changes.
+
+### Evidence changes the next action, not the previous results
+
+Euler's isolated controls locate a repeatable mechanism: `decision_loop._run()` synchronously imports `langgraph.graph` on the event-loop thread; the actual-app fixture's current-thread `sys.setprofile(observe_call)` amplifies this import. Loop entry through the following `context_value()` was approximately 8.17s with the observer and 2.59s without; subsequent context/catalog work was not comparable, and Session.start was approximately 0.11–0.14s. Four failing handshake/payload controls had admission=1, provider MockTransport calls=0 and event-loop lag 8.67–9.06s. This is not provider-response latency in those reproductions.
+
+| Separate isolated run, original deadlines | Result (each 7 warnings, no skips) |
+|---|---|
+| Original runner and unchanged exact probe | 1P / 5.77s; unexplained initial pass, not failure erasure |
+| Before/after ready, full payload, observer on | 1F / 27.90s; 1F / 28.80s |
+| Before/after ready, minimal payload, observer on | 1F / 27.43s; 1F / 28.03s |
+| Before ready/full payload, observer off | 1P / 20.13s; not admission/CAS observer evidence |
+| Prelude measurement, observer on/off | 1F / 28.67s; 1P / 19.86s |
+| Unchanged exact probe, cold import/original observer | 1F / 27.82s |
+| Same exact probe and observer, only dependency pre-imported | 1P / 21.39s; pre-import 2.156s; original provider/admission assertions retained |
+
+**Runner correction:** ignored scratch files lie outside `tests/`. The prior scratch runner did not explicitly load `tests/conftest.py`; earlier descriptions of scratch runs as automatically using all normal conftest hooks were too broad. The new `scratch/causal_p7a2_task8_runner.py` explicitly loads that existing conftest as a plugin; all new causal controls share this setup and assert its configuration marker. Both wrappers retain pre-import OS-whitelist/temporary config/cwd/DB/cache isolation. The new wrapper also retains network blocking, tracked three-JSONL copy/SHA checks and original pytest options; `-rP` only exposes safe phase/count output. No credentials or real assets were read. Original runners/probes are preserved, not silently repaired.
+
+Diagnostics are ignored files `causal_p7a2_task8_matrix.py`, `causal_p7a2_task8_prelude.py`, and `causal_p7a2_task8_import_control.py`, invoked one parameter at a time through that wrapper. The import control calls the unchanged original exact probe with all assertions. It does not mock graph, Session, store, admission or returned result. All sessions exited and sampled active owners settled to zero. No tracked code changed during diagnosis.
+
+### Approved design and implementation sequence
+
+The user delegates recommended choices. Parent selects **fixture readiness before observation**, not increased receive timeouts or removal of the observer. Moving production dependency loading is a different lifecycle change and is not smuggled into this test correction. Uninstrumented production cold-start latency remains a documented risk for final real acceptance; a warmed protocol test is not proof of a sub-three-second cold start. The three separate earlier warmup UNKNOWN cases are not automatically attributed to this mechanism.
+
+Only `tests/agent/test_web_decision_runtime.py` may change in the next TDD sub-batch, followed by evidence in this plan. Keep every existing scientific assertion, profiler observation, original timeout, actual middleware/model adapter/Session/store and cleanup path. No source, dependency, fixture-data, UI or production configuration change. Legacy fixture construction does not gain a mandatory graph preload.
+
+- [ ] Add a RED readiness-order test. Wrap `importlib.import_module` only to delegate to the real import and record its successful return. Wrap `sys.setprofile` only to delegate to the original and check that the fixture's `observe_call` is installed after graph preparation in decision mode; retain actual admission/provider assertions. Do not delete `sys.modules` or replace graph classes. The order assertion must fail on the current fixture even if other tests have already loaded the dependency.
+
+```python
+@pytest.mark.parametrize('mode', ['decision_a2', 'legacy'])
+def test_fixture_dependency_readiness_precedes_observer(actual_app, monkeypatch, mode):
+    marks = []
+    original_import, original_profile = importlib.import_module, sys.setprofile
+
+    def observed_import(name, *args, **kwargs):
+        module = original_import(name, *args, **kwargs)
+        if name == 'langgraph.graph':
+            marks.append('graph_ready')
+        return module
+
+    def observed_profile(callback):
+        if getattr(callback, '__name__', '') == 'observe_call':
+            marks.append('observer')
+        return original_profile(callback)
+
+    monkeypatch.setattr(importlib, 'import_module', observed_import)
+    monkeypatch.setattr(sys, 'setprofile', observed_profile)
+
+    async def run():
+        async with actual_app(mode=mode):
+            expected = ['graph_ready', 'observer'] if mode == 'decision_a2' else ['observer']
+            assert marks == expected
+    asyncio.run(run())
+```
+
+- [ ] Add actual-route first-request controls for before/after ready and minimal/full legacy-compatible payload, using the existing `ActualSocket` and `result_of`. Assert one accepted/completed result, one provider call, one observed admission and no scientific tool execution. Keep the original three-second receive and five-second close limits.
+- [ ] Run the new order regression to observe RED, preserving its actual output. The diagnosed cold original probe already supplies separate behavioral RED evidence; it is not replaced by the deterministic ordering test.
+- [ ] At the start of the fixture's existing async `build()` (before new application/client resources and before its observer), add only this preparation:
+
+```python
+if mode == 'decision_a2':
+    importlib.import_module('langgraph.graph')
+```
+
+- [ ] Re-run the order/first-request controls, original exact scratch through the corrected conftest-loading runner, and the four observer-on handshake/payload matrix nodes separately. Confirm admission/provider counts and the retained observer. A post-fix matrix with a prepared fixture is not a fresh production-cold measurement; preserve pre-fix cold records separately.
+- [ ] Run the whole `tests/agent/test_web_decision_runtime.py` and `tests/agent/test_web_decision_runtime_lifecycle.py` modules through the approved isolated runner with normal conftest and original assertions; include actual nonce/CAS positive and rejected controls. Any failure remains visible and receives diagnosis, not timeout relaxation or a selective-pass replacement.
+- [ ] Independently SPEC then QUALITY review the unchanged final test blob. Compile the changed test in memory, diff-check and explicitly stage only the approved test plus evidence; parent owns any local checkpoint. No full suite or publication in this worker.
+
+Direct targets above use `python -B -m pytest <absolute-targets> -q -p no:cacheprovider --tb=short -rs` inside the approved isolated child, not an unisolated shell. The original scratch node is `scratch/quality_p7a2_task8_frames.py::test_pre_ready_legacy_payload_really_completes_on_a2`; the four matrix parameters are `pre-full-on`, `post-full-on`, `pre-minimal-on`, `post-minimal-on` in `scratch/causal_p7a2_task8_matrix.py::test_matrix`. Scratch execution must explicitly load the existing conftest as above. Parent authorizes this small written plan under the delegated-choice instruction; implementation remains a separate TDD action after this documentation checkpoint. Overall A2 full verification/CI, broader P7 and package-8 real acceptance remain open.
