@@ -722,3 +722,99 @@ terminal; source/test/launcher hashes were unchanged. Parent verified
 permit a local checkpoint of these two files plus this plan and the ledger.
 No B branch publication, execution activation or next implementation slice is
 implied. This is a component milestone, not B1 normal-route or package8 acceptance.
+
+## 14. Reference-argument contract TDD slice
+
+**Pin:** b9f97597fa9b3501fc9dbf7280aae0f47c9fe2b8.
+**Design:** companion spec§13. Parent uses the user's delegated recommended-choice
+authority; independent written review must approve before code release.
+**Files:** new src/agent/contracts/decision_bindings.py; modify only the B constant
+definitions/imports in src/web/ordinary_capabilities.py; new
+tests/agent/test_decision_binding_arguments.py. Do not edit existing tests.
+
+- [ ] Review spec§13 and confirm the current four-tool serialization is unchanged.
+- [ ] Write first RED without collection/import failure:
+```python
+def test_rag_user_reference():
+    import importlib.util
+    name = 'src.agent.contracts.decision_bindings'
+    assert importlib.util.find_spec(name) is not None, 'binding contract missing'
+    import importlib
+    bindings = importlib.import_module(name)
+    result = bindings.parse_binding_arguments(
+        'rag_search', {'input_ref': 'user'},
+        profile_revision='ordinary-semantic-b1-v1')
+    assert result.model_dump(mode='json', exclude_none=True) == {'input_ref': 'user'}
+```
+- [ ] Run only that node; expected failure is absent new module, not bad fixture.
+- [ ] Build table tests through a shared module-presence assertion. Cover all nine
+  canonical tools in B2 and seven in B1; B1 generation/ranking rejection; missing/
+  unknown profile/tool; input_ref=user versus evidence; both target forms;
+  generator with/without target; rank properties-only/all roles/role order.
+- [ ] Negative table: each unknown key and role, explicit null optional values,
+  empty/oversize/whitespace/newline/URL/path IDs, user in evidence-only roles,
+  duplicate rank IDs including input source, missing properties, wrong field types,
+  booleans/bytes/list/tuple/subclass and custom Mapping or dict hook objects.
+  Use synthetic markers only; assert fixed errors and zero custom-hook calls.
+- [ ] Test actual outer decode_protocol_json rejects duplicate JSON keys before
+  invoking parser; a valid outer tool envelope composes with parser. Preserve
+  legacy parse_task_requirements rejection of version2 and original capability
+  admission guards; do not claim this pure contract executes tools.
+- [ ] Test preflight byte/depth/node boundaries including cycles, NaN/Infinity,
+  lone surrogates, overlong multibyte text and secret-shaped synthetic fields.
+  Test caller mutation, frozen nested fields, detached snapshots, stable JSON
+  round-trip and reordering. Warm required lazy imports before I/O guard test;
+  then fail all environment/file/network/registry/health callbacks if touched.
+- [ ] Run module RED and retain actual failing reasons/counts before implementation.
+- [ ] Implement frozen classes and shape-specific validators exactly per spec.
+  Reuse EvidenceId, bounded JSON validation and existing secret detector.
+  Public parser flow (all exceptions replaced by the fixed code):
+```python
+# lazy bound helper import may avoid existing harness/contract initialization cycle
+validate_json(arguments, max_bytes=4096, max_depth=8, max_nodes=64,
+              reason='invalid_binding_arguments')
+# validate exact profile/tool/native dict, secrets, then chosen strict DTO
+# full-match every reference, enforce only spec's closed shape rules
+# return chosen_model.model_validate(arguments, strict=True)
+```
+- [ ] Move only identical B constants to the new contract; Web imports/re-exports
+  preserve public names and identities. New parser/DTOs stay uncalled by runtime.
+- [ ] Run new module GREEN once, then the joint regression below. If failure,
+  diagnose its specific node before any retry; never relax timeouts/assertions.
+- [ ] Freeze three source/test files with hashes, exact RED/GREEN results and
+  no running sessions. Independent SPEC then QUALITY; only parent stages/commits.
+
+All commands use the already approved worktree-specific launcher SHA256
+F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+Single test slot only; no ad-hoc app imports, full suite or external models.
+The existing reviewed launcher may read/copy its three tracked evaluation JSONL
+fixtures; existing app-assembly regression may import app and use synthetic
+configuration inside that isolated environment. No real user configuration,
+credentials or scientific runtime assets may be read. New argument unit tests
+remain pure-contract tests. Do not alter the launcher or existing tests; poll
+the same process until terminal.
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_arguments.py::test_rag_user_reference
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_arguments.py
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_arguments.py tests/agent/test_decision_binding_profiles.py tests/agent/test_ordinary_capabilities.py tests/agent/test_ordinary_app_assembly.py tests/agent/test_task_requirements.py
+```
+
+The prior read-only v2 audit found the old evaluator only consumes v1 molecular
+sections. Keep its parser unchanged until closed v2 sections and deterministic
+evaluators are integrated together; a widened parser alone is not safe execution.
+This reference grammar is a prerequisite, not a replacement for that work or the
+remaining actual-loop, receipts, B8/root, Web, B2, C and P8 acceptance gates.
+
+### 14.1 Written review and implementation release
+
+Independent review found two P2 documentation inconsistencies: omitted profile
+would have raised a Python TypeError before the fixed-error boundary; blanket
+import/asset wording contradicted the already-approved isolated fixture/app
+regressions. Both are corrected explicitly in spec§13 and this plan. The same
+reviewer rechecked and approved with no remaining P1/P2. No tests were run for
+that review. Parent adopts the recommendation under delegated user authority
+and releases exactly the three-file slice after this two-document checkpoint.
+Use a fresh worker, the unchanged reviewed launcher and serialized test slot;
+freeze for independent SPEC then QUALITY before source commit. No broader B
+execution, model activation or publication is released by this checkpoint.

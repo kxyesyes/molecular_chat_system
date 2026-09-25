@@ -620,3 +620,103 @@ ActiveSegment; B1 G=0 does not waive root closure. B2 token grant/actual transpo
 proof, C consent/Vina and P8 real normal-entry proof remain separate gates.
 Companion plan §12 gives the future runner and TDD sequence. No code/tests are
 released by this docs-only change; stop after parent/independent plan review.
+
+## 13. Closed reference-argument contract slice
+
+### 13.1 Current pin and selected approach
+
+Pure capability views landed locally at b9f97597fa9b3501fc9dbf7280aae0f47c9fe2b8,
+after independent SPEC/QUALITY and two 194-pass runs. This next component pins
+that source. User delegates recommended choices; parent selects the following
+bounded design under the already-approved §5 grammar.
+
+Alternatives considered: widening the existing legacy resolver/parser now would
+let incomplete v2 obligations enter an evaluator that only understands v1;
+coupling every B tool, receipt and continuation in one patch would obscure the
+authority boundary. Instead add the closed reference parser first, leaving
+legacy execution untouched, then implement v2 and evidence resolution as the
+remaining required integration. This sequencing does not replace actual-loop,
+whole-request, scientific or Web acceptance.
+
+### 13.2 Exact API and immutable values
+
+New module `src/agent/contracts/decision_bindings.py` owns the existing B1/B2
+profile constants, TOOL_FEATURE_PAIRS, B1_TOOLS and B2_TOOLS unchanged. The Web
+capability module imports/re-exports those same public names; original profile,
+catalog text and serialization remain exact. No contracts module imports Web.
+The two private mapping proxies may remain in the Web module.
+
+Expose `parse_binding_arguments(tool_name, arguments, *, profile_revision=None)`.
+Only a native dict of bounded plain JSON is accepted, not DTO instances, dict
+subclasses, arbitrary Mapping or JSON strings. Tool/profile selectors must be
+native str, exact canonical B names/closed B profile; B1 forbids generation and
+ranking. Original/no profile is rejected by this new parser, not upgraded.
+Unknown tool/alias/feature IDs/docking/staged helpers reject. Omitted profile
+and explicit None both reach the fixed payload error; Python calling mistakes
+such as omitting the required tool_name/arguments positional parameters are
+outside that payload-error contract. Bound both selector lengths at64 before
+membership/hash comparisons.
+
+Return frozen, strict, extra-forbid Pydantic values, reusing the existing
+`EvidenceId` lexical bound (1–128 ASCII identifier characters). These references
+are syntactic handles, NOT proof of existence or scientific input. For example
+an identifier-shaped string CCO still requires a future same-run evidence lookup;
+the parser must never treat it as literal SMILES. A reference cannot contain
+path separators, whitespace, URLs, expressions or raw scientific payloads.
+
+| Tool | Returned class | Closed fields |
+|---|---|---|
+| property_calculator, drug_likeness_assessment, activity_predictor, admet_predictor, reverse_target_predictor | MolecularBindingArguments | input_ref: EvidenceId, including reserved user |
+| rag_search | RagBindingArguments | input_ref: Literal['user'] only |
+| target_database_search | TargetBindingArguments | input_ref and optional record_ref: EvidenceId |
+| llm_molecular_generator | GenerationBindingArguments | input_ref: Literal['user']; optional target_ref: EvidenceId |
+| candidate_ranker | RankingBindingArguments | input_ref: EvidenceId; evidence_refs: RankingEvidenceReferences |
+| nested ranking roles | RankingEvidenceReferences | required properties: EvidenceId; optional admet/activity: EvidenceId |
+
+Target shape is either exactly input_ref=user without record_ref, or non-user
+input_ref with a non-user record_ref. Generation target_ref, if present, cannot
+be user. Ranking input_ref and every role cannot be user, and all ranking source/
+role IDs must be pairwise distinct: one sealed producer observation cannot serve
+as another producer's result. A record handle is not counted as a second source
+observation; source evidence maximum is four in this grammar (under §5's five).
+Optional fields may be omitted but never explicitly null. Use None internally
+for absent optional fields; wire projection/round-trip uses
+`model_dump(mode='json', exclude_none=True)`. Role order follows the class field
+order, independent of incoming dictionary order.
+
+No other fields are allowed: count, SMILES, query, k, paths, weights, scores,
+top-N, model names, endpoint names or arbitrary nested role keys are rejected.
+Missing properties, duplicate role evidence, arrays and boolean/string coercion
+reject. Duplicate JSON keys remain the outer decoder's responsibility: retain
+its current rejection and test the actual decoder→parser composition.
+
+### 13.3 Bounds, failure and purity
+
+Preflight the arguments with existing bounded plain-JSON validation before
+Pydantic conversion/copy; max4096 UTF-8 bytes, max depth8, max nodes64. Use lazy
+imports if required by existing package initialization; no new bounds framework.
+Reject secret-bearing values with the existing secret detector after bounds.
+Every parser error is a fixed `ValueError('invalid_binding_arguments')`, without
+input-bearing error text or warnings. Do not run custom container/serialization
+hooks. No normalization, trimming, identifier substitution, registry lookup,
+file/environment/network/health/model probing or chemistry in this parser.
+Return detached immutable nested values.
+
+Existing EvidenceId has a terminal-$ pattern: add an explicit full-match check
+for each reference so a trailing newline cannot pass. Do not change the shared
+EvidenceId alias and thus accidentally alter outer decision/v1 behavior.
+The parser is the public trust boundary; direct Pydantic constructors are not
+execution authority.
+
+### 13.4 Exact implementation boundary and remaining gates
+
+Only new contract module, Web constants relocation and new
+`tests/agent/test_decision_binding_arguments.py` may change in the code slice.
+No changes to old resolver, TaskRequirements/v1 parser, Session, evaluator,
+permissions, carry, B8, budgets or Web dispatch. All existing tests remain intact.
+
+Actual B execution stays closed; future resolver must verify owner/trace,
+observation seals, role producer/schema, source receipts, whole-candidate closure
+and immutable v2 obligations. Target-required generation cannot be established by
+optional target_ref alone; reverse still needs exactly one subject; role IDs
+are untrusted until resolved. These are mandatory later tests, not passed here.
