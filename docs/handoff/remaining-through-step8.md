@@ -71,7 +71,9 @@ At `5ad17c8`, local static checks passed (15 Node entrypoints, four changed-JS s
 
 The subsequent complete affected root run at `9540516` passed **2060 cases and 173 subtests**, with 143 skips, five warnings and no failures in 324.08s. It excludes all 30 separately verified activity files and the three other test partitions.
 
-Remaining A2 gates: complete Agent confirmation, final snapshot review and all CI gates before the unique PR can merge. P7 ordinary-chat, B/C integrations and P8 live acceptance remain pending; this follow-up does not redefine them as complete. The historical verification below is preserved rather than presented as current full success.
+Complete Agent confirmation at `dd14409` passed **8114 cases**, with two skips, seven warnings and no failures in **687.44s**. Final SOURCE/SPEC and SOURCE/QUALITY reviews approve that 27-file snapshot. This duration exceeds the CI Agent command budget of 600 seconds; local success is not CI equivalence, nor proof that historical timeout causes are fixed.
+
+Remaining A2 gates: remote branch/head check, unique PR publication, all eight CI gates and final reviewed/merged tree equality before merging. P7 ordinary-chat, B/C integrations and P8 live acceptance remain pending; this follow-up does not redefine them as complete. The historical verification below is preserved rather than presented as current full success.
 
 PR #62 merge was rechecked through GitHub API and local fetch; merge tree matched the reviewed head. New step-2 branch is based on origin/main 6af7292.
 Six baseline files: test_chat_handler_partial_results, test_chat_handler_agent_events, test_chat_input_budget, test_agent_audit_regressions, test_chat_local_cleanup, test_scientific_reference_web (all under tests/agent).
