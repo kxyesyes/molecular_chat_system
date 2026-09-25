@@ -8,6 +8,7 @@ from functools import partial
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 from test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision, result_of
 
@@ -217,6 +218,704 @@ async def receive_complete(socket):
         if frame['type'] == 'complete':
             return frames
     pytest.fail('turn did not complete')
+
+
+@pytest.mark.parametrize('kind', ['unknown-control', [], {}, None, True, False, 0, 1.5],
+                         ids=['unknown-string', 'array', 'object', 'null', 'true', 'false', 'integer', 'float'])
+def test_invalid_control_type_preserves_socket_history_and_wait(actual_app, kind):
+    """Migrated QUALITY route probes plus JSON scalar neighbors."""
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    async def run():
+        count = 0
+        async def respond(payload):
+            nonlocal count
+            count += 1
+            return chat_decision('safe retained explanation') if count == 1 else clarify().model_dump()
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            socket = ActualSocket(b.app, await cookie_for(b.app))
+            await socket.__aenter__()
+            receiving = None
+            try:
+                await socket.ready()
+                warm = result_of(await socket.turn({'message': 'Explain logP'}))
+                frames = await socket.turn({'message': '计算 logP'})
+                assert result_of(frames)['status'] == 'waiting_for_input'
+                sender, = b.app.decision_runtime.sockets
+                waiting = sender.waiting
+                before = deepcopy(b.app.agent_state_store.get_run(frames[-1]['trace_id']))
+                memory = [{'user': 'Explain logP', 'assistant': warm['final_answer']}]
+                assert sender.memory == memory
+                admission_count = len(b.admission_calls)
+                await socket.send({'type': kind})
+                receiving = asyncio.create_task(socket.receive())
+                done, _ = await asyncio.wait({socket.task, receiving}, timeout=3,
+                                            return_when=asyncio.FIRST_COMPLETED)
+                error = socket.task.exception() if socket.task.done() and not socket.task.cancelled() else None
+                facts = dict(receiver_done=socket.task.done(), receiver_error=type(error).__name__ if error else None,
+                    history_pairs=len(sender.memory), handle_retained=sender.waiting is waiting,
+                    model_calls=len(b.calls), cas_claims=len(b.claims))
+                assert socket.task not in done, json.dumps(facts)
+                assert receiving in done, json.dumps(facts)
+                assert receiving.result() == {'type': 'error', 'code': 'invalid_control'}
+                assert sender.waiting is waiting and sender.memory == memory
+                assert len(b.calls) == 2 and not b.claims and len(b.admission_calls) == admission_count
+                assert b.app.agent_state_store.get_run(frames[-1]['trace_id']) == before
+                await socket.send({'type': 'ping', 'timestamp': 0})
+                assert await socket.receive() == {'type': 'pong', 'timestamp': 0}
+                resumed = result_of(await socket.turn({'type': 'resume', 'trace_id': frames[-1]['trace_id'],
+                    'continuation_id': frames[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCO'}))
+                assert resumed['status'] == 'waiting_for_input' and len(b.claims) == 1 and len(b.calls) == 3
+                assert sender.memory == memory and sender.waiting.context.memory == memory
+            finally:
+                if receiving is not None:
+                    if not receiving.done():
+                        receiving.cancel()
+                    await asyncio.gather(receiving, return_exceptions=True)
+                await socket.incoming.put({'type': 'websocket.disconnect', 'code': 1000})
+                await asyncio.wait_for(asyncio.gather(socket.task, return_exceptions=True), 5)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('wire', ['native', 'json'])
+@pytest.mark.parametrize('failure', ['cancel-before-lease', 'refresh-failed'])
+def test_terminal_resume_before_loop_erases_local_handle(actual_app, monkeypatch, wire, failure):
+    """Migrated SPEC route probe: terminal failure is not a bad-resume rejection."""
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    async def run():
+        async def respond(payload):
+            return clarify().model_dump()
+        async with actual_app(mode='decision_a2', wire=wire, respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                first = await socket.turn({'message': '计算 logP'})
+                assert result_of(first)['status'] == 'waiting_for_input'
+                sender, = b.app.decision_runtime.sockets
+                payload = dict(type='resume', trace_id=first[-1]['trace_id'],
+                    continuation_id=first[-1]['continuation_id'], message='计算 logP; SMILES: CCO')
+                before = deepcopy(b.app.agent_state_store.get_run(payload['trace_id']))
+                if failure == 'cancel-before-lease':
+                    async with b.app.model_request_gate.exclusive():
+                        await socket.send(payload)
+                        accepted = await socket.receive()
+                        assert accepted['type'] == 'request_accepted'
+                        await socket.send({'type': 'ping', 'timestamp': 0})
+                        assert (await socket.receive())['type'] == 'pong'
+                        turn, = b.app.decision_runtime.active_owners
+                        assert turn.started and not turn.dispatching
+                        await socket.send({'type': 'cancel', 'turn_id': accepted['turn_id']})
+                        terminal = result_of(await receive_complete(socket))
+                    assert terminal['status'] == 'cancelled'
+                else:
+                    original = b.app._llm_env_file_signature
+                    def fail():
+                        raise RuntimeError('synthetic refresh unavailable')
+                    monkeypatch.setattr(b.app, '_llm_env_file_signature', fail)
+                    try:
+                        terminal = result_of(await socket.turn(payload))
+                        assert terminal['status'] == 'failed'
+                    finally:
+                        monkeypatch.setattr(b.app, '_llm_env_file_signature', original)
+                assert not b.claims and len(b.calls) == 1
+                assert b.app.agent_state_store.get_run(payload['trace_id']) == before
+                retained = sender.waiting is not None
+                await socket.send(payload)
+                retried = await socket.receive()
+                retry_status = None
+                if retried['type'] == 'request_accepted':
+                    retry_status = result_of(await receive_complete(socket))['status']
+                facts = dict(terminal_status=terminal['status'], old_handle_retained=retained,
+                    retry_type=retried['type'], retry_status=retry_status,
+                    model_calls=len(b.calls), cas_claims=len(b.claims))
+                assert retried == {'type': 'error', 'code': 'continuation_unavailable'}, json.dumps(facts)
+                assert sender.waiting is None and not b.claims and len(b.calls) == 1
+                assert b.app.agent_state_store.get_run(payload['trace_id']) == before
+                assert not b.app.decision_runtime.active_owners and b.app.model_request_gate._readers == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('send_failure', [False, True])
+def test_history_commits_only_after_successful_complete_send(actual_app, monkeypatch, send_failure):
+    """SPEC transport positive/negative controls; successful send is not UI ACK."""
+    from starlette.websockets import WebSocket
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        original_send = WebSocket.send_text
+        count = 0
+        async def send(socket, text):
+            nonlocal count
+            if json.loads(text)['type'] == 'complete' and count == 0:
+                count += 1
+                entered.set()
+                await release.wait()
+                if send_failure:
+                    raise ConnectionError('synthetic complete send failure')
+            return await original_send(socket, text)
+        async with actual_app(mode='decision_a2') as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                monkeypatch.setattr(WebSocket, 'send_text', send)
+                try:
+                    await socket.send({'message': 'Explain logP'})
+                    await asyncio.wait_for(entered.wait(), 3)
+                    sender, = b.app.decision_runtime.sockets
+                    assert sender.memory == []
+                    tasks = tuple(b.app.decision_runtime.tasks)
+                    assert len(tasks) == 1
+                    release.set()
+                    await asyncio.wait_for(asyncio.gather(*tasks), 3)
+                    if send_failure:
+                        assert sender.memory == [] and not sender.writable
+                    else:
+                        displayed = result_of(await receive_complete(socket))['final_answer']
+                        assert sender.memory == [{'user': 'Explain logP', 'assistant': displayed}]
+                        result_of(await socket.turn({'message': '解释分子生成的概念'}))
+                        assert b.calls[-1]['messages'][2:4] == [
+                            {'role': 'user', 'content': 'Explain logP'},
+                            {'role': 'assistant', 'content': displayed}]
+                finally:
+                    release.set()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failed_frame', ['agent_result', 'complete'])
+def test_failed_resume_terminal_send_cannot_preserve_handle(actual_app, monkeypatch, failed_frame):
+    from copy import deepcopy
+    from starlette.websockets import WebSocket
+    from test_decision_loop import clarify
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def respond(payload):
+            return clarify().model_dump()
+        original_send = WebSocket.send_text
+        async def fail_send(socket, text):
+            if json.loads(text)['type'] == failed_frame:
+                entered.set()
+                await release.wait()
+                raise ConnectionError('synthetic terminal send failure')
+            return await original_send(socket, text)
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            socket = ActualSocket(b.app, await cookie_for(b.app))
+            await socket.__aenter__()
+            tasks = ()
+            try:
+                await socket.ready()
+                first = await socket.turn({'message': '计算 logP'})
+                sender, = b.app.decision_runtime.sockets
+                trace = first[-1]['trace_id']
+                before = deepcopy(b.app.agent_state_store.get_run(trace))
+                def fail_refresh():
+                    raise RuntimeError('synthetic refresh unavailable')
+                monkeypatch.setattr(b.app, '_llm_env_file_signature', fail_refresh)
+                monkeypatch.setattr(WebSocket, 'send_text', fail_send)
+                await socket.send({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': first[-1]['continuation_id'], 'message': '计算 logP; SMILES: CCO'})
+                await asyncio.wait_for(entered.wait(), 3)
+                tasks = tuple(b.app.decision_runtime.tasks)
+                assert tasks
+                # Revocation must precede attempted delivery, not depend on
+                # successful terminal send or eventual socket disconnection.
+                assert sender.waiting is None
+                release.set()
+                settled = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 3)
+                assert all(value is None or isinstance(value, ConnectionError) for value in settled)
+                assert sender.waiting is None and not sender.writable
+                assert not b.claims and len(b.calls) == 1
+                assert b.app.agent_state_store.get_run(trace) == before
+            finally:
+                release.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await socket.incoming.put({'type': 'websocket.disconnect', 'code': 1000})
+                settled = await asyncio.wait_for(asyncio.gather(socket.task, return_exceptions=True), 3)
+                assert all(value is None or isinstance(value, ConnectionError) for value in settled)
+            assert sender.waiting is None and not b.app.decision_runtime.active_owners
+            assert b.app.model_request_gate._readers == 0
+    asyncio.run(run())
+
+
+def test_actual_route_two_wait_cycles_resumed_cancel_then_fresh_chat(actual_app):
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    async def run():
+        entered, exited = asyncio.Event(), asyncio.Event()
+        calls = 0
+        async def respond(payload):
+            nonlocal calls
+            calls += 1
+            if calls in {2, 3}:
+                return clarify().model_dump()
+            if calls == 4:
+                entered.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    exited.set()
+            return chat_decision('safe concept response')
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                warm = result_of(await socket.turn({'message': 'Explain logP'}))
+                first_frames = await socket.turn({'message': '计算 logP'})
+                first = result_of(first_frames)
+                assert first['status'] == 'waiting_for_input' and not first['success']
+                trace, nonce = first['trace_id'], first_frames[-1]['continuation_id']
+                record = deepcopy(b.app.agent_state_store.get_run(trace))
+                assert record['status'] == 'waiting_for_input'
+                assert not b.app.decision_runtime.active_owners and b.app.model_request_gate._readers == 0
+                await socket.send({'type': 'resume', 'trace_id': trace, 'continuation_id': nonce,
+                                   'message': '计算 logP；SMILES: CCO'})
+                accepted = await socket.receive()
+                assert accepted['type'] == 'request_accepted', accepted
+                assert accepted['trace_id'] == trace
+                second_frames = [accepted] + await receive_complete(socket)
+                second = result_of(second_frames)
+                next_nonce = second_frames[-1]['continuation_id']
+                assert second['status'] == 'waiting_for_input' and next_nonce != nonce
+                assert second['trace_id'] == trace
+                assert second['metadata']['task_requirements'] == first['metadata']['task_requirements']
+                assert b.app.agent_state_store.get_run(trace)['metadata']['decision_continuation']['configuration'] == (
+                    record['metadata']['decision_continuation']['configuration'])
+                assert second['metadata']['model_requests'] == 2
+                await socket.send({'type': 'resume', 'trace_id': trace, 'continuation_id': next_nonce,
+                                   'message': '计算 logP；SMILES: CCO'})
+                active = await socket.receive()
+                assert active['type'] == 'request_accepted' and active['turn_id'] != accepted['turn_id']
+                await asyncio.wait_for(entered.wait(), 3)
+                await socket.send({'type': 'cancel', 'turn_id': active['turn_id']})
+                assert result_of(await receive_complete(socket))['status'] == 'cancelled'
+                assert exited.is_set() and not b.app.decision_runtime.active_owners
+                assert len(b.claims) == 2
+                assert b.app.agent_state_store.get_tool_executions(trace) == []
+                final = result_of(await socket.turn({'message': '你好'}))
+                assert final['status'] == 'completed'
+                assert [m for m in b.calls[-1]['messages'] if m['role'] != 'system'] == [
+                    {'role': 'user', 'content': 'Explain logP'},
+                    {'role': 'assistant', 'content': warm['final_answer']},
+                    {'role': 'user', 'content': '你好'}]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('clarification', [
+    '计算分子量；SMILES: CCO', '计算 logP；SMILES: CCN',
+    '计算 logP 及类药性；SMILES: CCO', '计算 logP；SMILES: CCO; CCN',
+    '解释 logP\n对接这个分子', '计算 CCO 的分子量和熔点',
+    '计算性质（禁用 property_calculator）；SMILES: CCO',
+    '分析两种化合物的性质；SMILES: CCO', '计算 logP；SMILES: CCOjunk',
+])
+def test_resume_cannot_change_original_obligations_before_cas(actual_app, clarification):
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    async def run():
+        async def respond(payload):
+            return clarify().model_dump()
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message': '计算 logP；SMILES: CCO'})
+                waiting = result_of(frames)
+                assert waiting['status'] == 'waiting_for_input'
+                trace = waiting['trace_id']
+                before = deepcopy(b.app.agent_state_store.get_run(trace))
+                await socket.send({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': frames[-1]['continuation_id'], 'message': clarification})
+                accepted = await socket.receive()
+                assert accepted['type'] == 'request_accepted', accepted
+                result = result_of(await receive_complete(socket))
+                assert result['status'] == 'rejected'
+                assert len(b.calls) == 1
+                assert b.app.agent_state_store.get_run(trace) == before
+                assert b.app.agent_state_store.get_tool_executions(trace) == []
+                assert not b.claims
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('original,clarified,valid', [
+    ('计算 logP；SMILES: CCO', '计算 logP；SMILES: OCC', True),
+    ('预测 PDE4D 活性；SMILES: CCO', '预测 PDE5A 活性；SMILES: CCO', False),
+    ('预测 BuChE 活性；SMILES: CCO', '预测 BChE 活性；SMILES: CCO', True),
+    ('预测活性；SMILES: CCO', '预测 BuChE 活性；SMILES: CCO', True),
+    ('预测 PDE4D 活性；SMILES: CCO', '预测未知靶点活性；SMILES: CCO', False),
+    ('查询 EGFR 的靶点结构', '查询 KRAS 的靶点结构', False),
+    ('查询 EGFR 的靶点结构', '查询 EGFR 的靶点结构', True),
+])
+def test_resume_uses_public_whole_subject_and_target_boundaries(actual_app, original, clarified, valid):
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    async def run():
+        async def respond(payload):
+            return clarify().model_dump()
+        async with actual_app(mode='decision_a2', respond=respond, optional_tools=True) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                first = await socket.turn({'message': original})
+                assert result_of(first)['status'] == 'waiting_for_input'
+                trace = first[-1]['trace_id']
+                before = deepcopy(b.app.agent_state_store.get_run(trace))
+                resumed = result_of(await socket.turn({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': first[-1]['continuation_id'], 'message': clarified}))
+                assert resumed['status'] == ('waiting_for_input' if valid else 'rejected')
+                assert len(b.claims) == int(valid) and len(b.calls) == 1 + int(valid)
+                if not valid:
+                    assert b.app.agent_state_store.get_run(trace) == before
+                assert b.app.agent_state_store.get_tool_executions(trace) == []
+                for name, attribute in [('activity_predictor', '_predictor'), ('target_database_search', '_service')]:
+                    # No tool execution means no asset/service initialization.
+                    adapter = b.app.decision_runtime.registry.resolve(name)
+                    assert getattr(adapter.tool, attribute) is None
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('during_complete', [False, True])
+def test_shutdown_cannot_restore_socket_waiting_or_history(actual_app, monkeypatch, during_complete):
+    from starlette.websockets import WebSocket
+    from test_decision_loop import clarify
+    async def run():
+        entered, release, shutdown_checked = (asyncio.Event() for _ in range(3))
+        count = 0
+        async def respond(payload):
+            nonlocal count
+            count += 1
+            return chat_decision('retained warm pair') if count == 1 else clarify().model_dump()
+        send_text = WebSocket.send_text
+        async def block_complete(self, text):
+            if during_complete and json.loads(text)['type'] == 'complete' and count == 2:
+                entered.set()
+                await release.wait()
+            await send_text(self, text)
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            monkeypatch.setattr(WebSocket, 'send_text', block_complete)
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                result_of(await socket.turn({'message': 'Explain logP'}))
+                sender, = b.app.decision_runtime.sockets
+                assert sender.memory
+                shutdown = None
+                try:
+                    if during_complete:
+                        await socket.send({'message': '计算 logP'})
+                        await asyncio.wait_for(entered.wait(), 3)
+                    else:
+                        assert result_of(await socket.turn({'message': '计算 logP'}))['status'] == 'waiting_for_input'
+                        assert sender.waiting is not None
+                    async def stop():
+                        operation = asyncio.create_task(b.app.shutdown())
+                        # FIFO scheduling checkpoint after shutdown starts;
+                        # no elapsed-time assumption or provider stub.
+                        asyncio.get_running_loop().call_soon(shutdown_checked.set)
+                        await operation
+                    shutdown = asyncio.create_task(stop())
+                    await asyncio.wait_for(shutdown_checked.wait(), 3)
+                    assert b.app.decision_runtime.closing
+                    assert not sender.memory and sender.waiting is None
+                    release.set()
+                    await asyncio.wait_for(asyncio.shield(shutdown), 3)
+                    assert not sender.memory and sender.waiting is None
+                    assert not b.app.decision_runtime.active_owners
+                    assert b.app.model_request_gate._readers == 0
+                finally:
+                    release.set()
+                    if shutdown is not None:
+                        await shutdown
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change', ['epoch', 'schema', 'requirements', 'frozen-history', 'snapshot-history', 'revision5'])
+def test_changed_waiting_fingerprint_rejects_before_actual_cas(actual_app, monkeypatch, change):
+    from contextlib import AsyncExitStack
+    from copy import deepcopy
+    from dataclasses import replace
+    import sqlite3
+    from test_decision_loop import clarify
+    from src.agent.evidence import EvidenceLedger
+    from src.agent.openai_compatible_model import OpenAICompatibleModel
+    async def run():
+        count = 0
+        async def respond(payload):
+            nonlocal count
+            count += 1
+            return chat_decision('{safe historical prose}') if count == 1 else clarify().model_dump()
+        async with AsyncExitStack() as clients, actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                result_of(await socket.turn({'message': 'Explain logP'}))
+                scientific = change in {'schema', 'requirements'}
+                query = '计算 logP' if scientific else 'Explain logP'
+                frames = await socket.turn({'message': query})
+                assert result_of(frames)['status'] == 'waiting_for_input'
+                trace, nonce = frames[-1]['trace_id'], frames[-1]['continuation_id']
+                sender, = b.app.decision_runtime.sockets
+                store = b.app.agent_state_store
+                if change == 'epoch':
+                    async def forbidden_transport(request):
+                        pytest.fail('stale continuation reached replacement provider')
+                    client = await clients.enter_async_context(httpx.AsyncClient(transport=httpx.MockTransport(forbidden_transport)))
+                    replacement = OpenAICompatibleModel('synthetic-credential-rotation', 'protocol-only',
+                        'https://example.invalid/v1', client=client)
+                    monkeypatch.setattr(b.app, '_create_model_from_llm_config', lambda config: replacement)
+                    previous = b.app.model_generation
+                    await b.app._replace_llm_config(dict(b.app.active_llm_config,
+                        api_key='synthetic-credential-rotation'))
+                    assert previous != b.app.model_generation
+                elif change == 'schema':
+                    adapter = b.app.decision_runtime.registry.resolve('property_calculator')
+                    adapter.spec = replace(adapter.spec, version='changed-test-schema')
+                elif change == 'requirements':
+                    from src.agent.contracts.task_requirements import TaskRequirements, MolecularRequirement
+                    sender.waiting = replace(sender.waiting, prepared=replace(sender.waiting.prepared,
+                        requirements=TaskRequirements(molecular_results=(MolecularRequirement(
+                            tool_name='property_calculator', required_metrics=('logp',), exact_molecule_count=1),))))
+                elif change == 'frozen-history':
+                    sender.waiting.context.memory[0]['assistant'] = 'substituted safe history'
+                else:
+                    # Deliberately corrupt a temporary persisted fixture, with
+                    # a recomputed checksum. The real claim API is not replaced;
+                    # semantic prefix/revision checks, not a checksum, must reject.
+                    record = store.get_run(trace)
+                    metadata = deepcopy(record['metadata'])
+                    payload = metadata['decision_continuation']
+                    if change == 'revision5':
+                        payload['snapshot']['decision_protocol_revision'] = 5
+                    else:
+                        payload['snapshot']['messages'][2]['content'] = 'substituted safe history'
+                    payload['checksum'] = EvidenceLedger.output_digest({k: v for k, v in payload.items() if k != 'checksum'})
+                    with sqlite3.connect(store.db_path) as connection:
+                        connection.execute('UPDATE agent_runs SET metadata_json=? WHERE trace_id=?',
+                            (json.dumps(metadata), trace))
+                before = deepcopy(store.get_run(trace))
+                result = result_of(await socket.turn({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': nonce, 'message': '计算 logP；SMILES: CCO' if scientific else query}))
+                assert result['status'] == 'rejected'
+                assert not b.claims and len(b.calls) == 2
+                assert store.get_run(trace) == before and store.get_tool_executions(trace) == []
+                assert sender.waiting is not None and sender.waiting.continuation_id == nonce
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change', ['revoked', 'replace-subject', 'invalid-explicit', 'same-subject'])
+def test_confirmed_source_resume_is_sealed_before_cas(actual_app, change):
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    from test_scientific_reference_web import seed, pointer
+    async def run():
+        async def respond(payload):
+            return clarify().model_dump()
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as socket:
+                await socket.ready()
+                sender, = b.app.decision_runtime.sockets
+                owner = sender.scope['agent_session_id']
+                store = b.app.agent_state_store
+                source = seed(store, status='partial', warnings=['synthetic historical source only'])
+                # Bind the synthetic historical fixture to the real middleware
+                # identity before it has a presentation. No generated molecule
+                # or mounted browser ACK is claimed by this protocol test.
+                store.start_run(dict(store.get_run('trace'), session_id=owner, user_id=owner))
+                event, = b.app.decision_runtime.references.project(source, session_id=owner)
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b.app.app),
+                        base_url='http://127.0.0.1') as client:
+                    client.cookies.set('medchat_agent_session', cookie, domain='127.0.0.1', path='/')
+                    confirmed = await client.post('/api/agent/workflows/references/confirm', json=event['reference'])
+                    assert confirmed.status_code == 200
+                    restored = await client.post('/api/agent/workflows/references/restore', json=pointer(event))
+                    assert restored.status_code == 200
+                frames = await socket.turn({'message': '计算 logP', 'reference': pointer(event), 'selection': {'ordinal': 1}})
+                assert result_of(frames)['status'] == 'waiting_for_input'
+                trace = frames[-1]['trace_id']
+                assert sender.waiting.context.resolved_molecule.canonical_smiles == 'CCO'
+                if change == 'revoked':
+                    store.update_run_status('trace', 'failed')
+                query = {'replace-subject': '计算 logP；SMILES: CCN',
+                         'invalid-explicit': '计算 logP；SMILES: CCOjunk'}.get(change, '计算 logP')
+                before = deepcopy(store.get_run(trace))
+                result = result_of(await socket.turn({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': frames[-1]['continuation_id'], 'message': query}))
+                valid = change == 'same-subject'
+                assert result['status'] == ('waiting_for_input' if valid else 'rejected')
+                assert len(b.claims) == int(valid) and len(b.calls) == 1 + int(valid)
+                if not valid:
+                    assert store.get_run(trace) == before
+                assert store.get_tool_executions(trace) == []
+                assert store.get_run('trace')['status'] == ('failed' if change == 'revoked' else 'partial')
+    asyncio.run(run())
+
+
+def test_refined_subject_is_sealed_but_invalid_resume_does_not_consume_handle(actual_app):
+    from copy import deepcopy
+    from test_decision_loop import clarify, tool, finish
+    async def run():
+        count = 0
+        async def respond(payload):
+            nonlocal count
+            count += 1
+            if count <= 2:
+                return clarify().model_dump()
+            observations = [json.loads(m['content']) for m in payload['messages'] if m['role'] == 'tool']
+            return (finish([o['quality']['evidence_id'] for o in observations]) if observations else tool()).model_dump()
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                first = await socket.turn({'message': '计算 logP'})
+                trace = first[-1]['trace_id']
+                second = await socket.turn({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': first[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCO'})
+                assert result_of(second)['status'] == 'waiting_for_input'
+                sender, = b.app.decision_runtime.sockets
+                frozen = deepcopy(sender.waiting.context)
+                requirements = sender.waiting.prepared.requirements.model_dump(mode='json')
+                record = deepcopy(b.app.agent_state_store.get_run(trace))
+                # Invalid new chats and invalid refinements must not consume
+                # the local handle, mutate original obligations or claim CAS.
+                assert result_of(await socket.turn({'message': '检索知识库中的相关文献'}))['status'] == 'rejected'
+                bad = await socket.turn({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': second[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCN'})
+                assert result_of(bad)['status'] == 'rejected'
+                assert b.app.agent_state_store.get_run(trace) == record and len(b.claims) == 1
+                good = result_of(await socket.turn({'type': 'resume', 'trace_id': trace,
+                    'continuation_id': second[-1]['continuation_id'], 'message': '计算 logP；SMILES: OCC'}))
+                assert good['status'] == 'completed' and good['success']
+                assert len(b.claims) == 2 and len(b.calls) == 4
+                assert len(b.app.agent_state_store.get_tool_executions(trace)) == 1
+                assert frozen.query == '计算 logP' and frozen.resolved_molecule is None
+                assert good['metadata']['task_requirements'] == requirements
+                assert sender.waiting is None and not sender.memory
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'partial', 'failed', 'rejected', 'waiting_for_input', 'cancelled'])
+def test_history_excludes_nonchat_and_uncompleted_turns(actual_app, outcome):
+    from test_decision_loop import clarify, tool, finish
+    async def run():
+        phase = 'warm'
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def respond(payload):
+            if phase != 'main':
+                return chat_decision('safe admitted explanation')
+            if outcome == 'cancelled':
+                entered.set()
+                await release.wait()
+            if outcome == 'waiting_for_input':
+                return clarify().model_dump()
+            if outcome == 'failed':
+                raise RuntimeError('synthetic protocol transport unavailable')
+            observations = [json.loads(m['content']) for m in payload['messages'] if m['role'] == 'tool']
+            if observations and outcome == 'partial':
+                raise RuntimeError('synthetic protocol transport unavailable after real observation')
+            return (finish([o['quality']['evidence_id'] for o in observations]) if observations else tool()).model_dump()
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                warm = result_of(await socket.turn({'message': 'Explain logP'}))
+                phase = 'main'
+                query = ('计算 logP；SMILES: CCO' if outcome in {'completed', 'partial'} else
+                         '检索知识库中的相关文献' if outcome == 'rejected' else '解释分子生成的概念')
+                try:
+                    if outcome == 'cancelled':
+                        await socket.send({'message': query})
+                        accepted = await socket.receive()
+                        await asyncio.wait_for(entered.wait(), 3)
+                        await socket.send({'type': 'cancel', 'turn_id': accepted['turn_id']})
+                        frames = await receive_complete(socket)
+                    else:
+                        frames = await socket.turn({'message': query})
+                    result = result_of(frames)
+                    assert result['status'] == outcome
+                    sender, = b.app.decision_runtime.sockets
+                    assert sender.memory == [{'user': 'Explain logP', 'assistant': warm['final_answer']}]
+                    if outcome in {'completed', 'partial'}:
+                        assert len(b.app.agent_state_store.get_tool_executions(result['trace_id'])) == 1
+                    phase = 'next'
+                    result_of(await socket.turn({'message': '你好'}))
+                    assert [m for m in b.calls[-1]['messages'] if m['role'] != 'system'] == [
+                        {'role': 'user', 'content': 'Explain logP'}, {'role': 'assistant', 'content': warm['final_answer']},
+                        {'role': 'user', 'content': '你好'}]
+                finally:
+                    release.set()
+    asyncio.run(run())
+
+
+def test_chat_resume_replays_brace_prefix_and_retains_current_clarified_input(actual_app):
+    from test_decision_loop import clarify
+    async def run():
+        count = 0
+        async def respond(payload):
+            nonlocal count
+            count += 1
+            if count == 2:
+                return clarify().model_dump()
+            return chat_decision('{ordinary safe answer}' if count == 1 else 'resumed safe explanation')
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                warm = result_of(await socket.turn({'message': 'Explain logP'}))
+                waiting = await socket.turn({'message': 'Explain logP'})
+                assert result_of(waiting)['status'] == 'waiting_for_input'
+                resumed = result_of(await socket.turn({'type': 'resume', 'trace_id': waiting[-1]['trace_id'],
+                    'continuation_id': waiting[-1]['continuation_id'], 'message': '解释分子生成的概念'}))
+                assert resumed['status'] == 'completed' and len(b.claims) == 1
+                assert resumed['metadata']['model_requests'] == 2
+                result_of(await socket.turn({'message': '你好'}))
+                assert [m for m in b.calls[-1]['messages'] if m['role'] != 'system'] == [
+                    {'role': 'user', 'content': 'Explain logP'}, {'role': 'assistant', 'content': warm['final_answer']},
+                    {'role': 'user', 'content': '解释分子生成的概念'}, {'role': 'assistant', 'content': resumed['final_answer']},
+                    {'role': 'user', 'content': '你好'}]
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('case', ['foreign-cookie', 'other-socket', 'disconnect', 'stale', 'trace',
+                                 'duplicate', 'expired', 'abandoned', 'new-chat', 'extra-options'])
+def test_waiting_handle_is_socket_local_single_use_and_bounded(actual_app, case):
+    from copy import deepcopy
+    from test_decision_loop import clarify
+    async def run():
+        async def respond(payload):
+            return clarify().model_dump()
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message': '计算 logP'})
+                result_of(frames)
+                trace, nonce = frames[-1]['trace_id'], frames[-1]['continuation_id']
+                payload = {'type': 'resume', 'trace_id': trace, 'continuation_id': nonce,
+                           'message': '计算 logP；SMILES: CCO'}
+                sender, = b.app.decision_runtime.sockets
+                if case == 'expired':
+                    sender.waiting = replace(sender.waiting, expires_at=0)
+                if case == 'stale':
+                    payload['continuation_id'] = '0' * 32
+                if case == 'trace':
+                    payload['trace_id'] = '0' * 32
+                if case == 'extra-options':
+                    payload['enable_tools'] = False
+                if case == 'duplicate':
+                    second = await socket.turn(payload)
+                    assert result_of(second)['status'] == 'waiting_for_input'
+                    assert second[-1]['continuation_id'] != nonce
+                if case == 'abandoned':
+                    await socket.send({'type': 'abandon', 'trace_id': trace, 'continuation_id': nonce})
+                    assert await socket.receive() == {'type': 'continuation_abandoned', 'trace_id': trace}
+                if case == 'new-chat':
+                    result_of(await socket.turn({'message': 'Explain logP'}))
+                before = deepcopy(b.app.agent_state_store.get_run(trace))
+                before_calls, before_claims = len(b.calls), len(b.claims)
+                if case in {'foreign-cookie', 'other-socket', 'disconnect'}:
+                    if case == 'disconnect':
+                        await socket.__aexit__(None, None, None)
+                    other_cookie = await cookie_for(b.app) if case == 'foreign-cookie' else cookie
+                    async with ActualSocket(b.app, other_cookie) as other:
+                        await other.ready()
+                        await other.send(payload)
+                        rejected = await other.receive()
+                else:
+                    await socket.send(payload)
+                    rejected = await socket.receive()
+                assert rejected == {'type': 'error', 'code': 'continuation_unavailable'}
+                assert b.app.agent_state_store.get_run(trace) == before
+                assert (len(b.calls), len(b.claims)) == (before_calls, before_claims)
+                assert b.app.agent_state_store.get_tool_executions(trace) == []
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('failure', ['overflow', 'event-serialization', 'result-serialization'])

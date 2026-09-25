@@ -555,3 +555,67 @@ These fixture corrections are not labelled production RED. Intermediate GREEN gr
 | `tests/agent/test_web_decision_runtime_lifecycle.py` | `fca58900c73df51ceb053a157c0f96731e5b7248` |
 
 Next is Task 6's real socket history and nonce-safe continuation, including frozen original obligations, pre-CAS refinement, two clarification cycles, resumed cancellation, stale epoch and waiting shutdown. Tasks 7–8 reference/ACK/report and frontend controls follow separately. The pure history dependency is not Web history acceptance; active/idle shutdown is not waiting-handle shutdown acceptance. Original final ordinary-chat/capability and multi-turn cases, B bindings, C integration, full offline gates and package-8 real model/science/browser evidence remain pending. This checkpoint is a local scoped commit only, not a push, PR, merge or deployment.
+
+## 15. Task 6 Web history and continuation checkpoint
+
+Base: `eab355a1ed62fd5d5c1ead18f9e478f1d1328ad4`. This checkpoint changes only the Web runtime and its two existing actual-route test files, plus this evidence append. Shared history/loop/continuation/CAS, A1 admission, scientific parsers and reference service remain unchanged. No provider, production model, asset, deployment or default entry is activated.
+
+Implemented: socket-only ordinary-text history using the shared 20-pair/16-KiB whole-pair policy; actual displayed text retained only after successful complete delivery; explicit omission/eviction metadata; detached original context/obligations for continuation; two clarification cycles with fresh nonces; expiry/abandon/socket/owner/configuration and source checks; pre-CAS input refinement using existing scientific parsers; resumed cancellation and fresh-turn recovery; shutdown cannot restore cleared history/waiting state. Scientific, partial, failed, cancelled and waiting responses do not become successful ordinary-chat history. The exact admitted concept pair is still incremental history proof, not arbitrary normal-chat understanding.
+
+### Independent findings and minimal fixes
+
+1. **SPEC P2, reproduced:** a resumed turn cancelled before the loop or failing configuration refresh emitted a non-waiting terminal but retained the old socket handle. Reusing its nonce caused one additional CAS and model invocation. Failed/cancelled terminal construction now clears local authority before delivery, including failed delivery, without modifying the durable waiting audit. Rejected invalid refinement still preserves a valid handle. SPEC reproduced four failures with native/json, then closed the finding on the fixed snapshot.
+2. **QUALITY P2, reproduced:** `type: []` or `type: {}` reached set membership before type validation, raised TypeError and disconnected the socket, clearing history and valid waiting state. The receiver now checks native string type before control dispatch; malformed controls receive fixed `invalid_control` with no admission/model/CAS calls. Subsequent ping and valid resume still work. QUALITY closed the original two failures on the final snapshot.
+
+These are narrow lifecycle/input fixes, not broader protocol admission, model capability expansion, tool execution or scientific-validation changes. No timeout or assertion was weakened.
+
+### Actual offline evidence, including failures
+
+Runs used the approved pre-import OS-whitelist runner, temporary configuration/database/cwd, live flags off, and three tracked JSONL copies with matching SHA. The five-Web-file invocation is the exact one in section 14. The separate core invocation selected `test_decision_history.py`, `test_decision_loop.py`, `test_decision_continuation.py`, `test_decision_continuation_store.py` and `test_decision_protocol_recovery.py` under `tests/agent/`, with the same runner and `-B -q -p no:cacheprovider --tb=short -rs`.
+
+| Run | Actual result |
+|---|---|
+| Initial completed implementation, five Web files | 216 passed / 7 warnings / 153.92s |
+| Unchanged shared history/loop/continuation core | 511 passed / 0 warnings / 117.13s |
+| Independent SPEC first five Web files | 216 passed / 7 warnings / 156.17s |
+| SPEC original probes plus positive control | 4 failed / 3 passed / 7 warnings / 15.53s; retained-handle finding |
+| Migrated SPEC regression RED | 4 failed / 2 passed / 7 warnings / 14.36s |
+| Failed-terminal-send regression RED | 2 failed / 7 warnings / 7.72s |
+| Fixed handle matrix / five Web files | 36 passed / 7 warnings / 39.41s; 224 passed / 7 warnings / 158.94s |
+| Independent SPEC recheck | 36 passed / 7 warnings / 50.52s; first P2 closed |
+| Independent QUALITY first five Web files | 224 passed / 7 warnings / 184.49s |
+| QUALITY malformed-control probes | 2 failed / 1 passed / 7 warnings / 9.02s; no fixture correction |
+| Migrated control-type RED / GREEN group | 2 failed / 6 passed / 7 warnings / 19.49s; 22 passed / 7 warnings / 28.19s |
+| Final implementation, five Web files | 232 passed / 7 warnings / 159.09s |
+| Final SPEC original probes/new types/positive controls | 21 passed / 1 failed / 7 warnings / 49.59s |
+| SPEC unchanged eight-type recheck | 8 passed / 7 warnings / 16.58s |
+| Final QUALITY original probe/type/history/nonce/send controls | 16 passed / 7 warnings / 30.62s; second P2 closed |
+
+No skips in these runs. Seven-warning groups retain existing SWIG/FastAPI deprecations. Final SPEC's `unknown-string` case timed out in the three-second receive wait during its `Explain logP` warmup, **before sending the malformed control**. The cause remains unknown. The unchanged eight-case rerun is not a fix or proof of environmental causation. Keep both this failure and section 14's original `[24576-chat]` timeout visible through later full/CI gates; neither is declared resolved.
+
+Earlier implementation failures are also preserved:
+
+| Run | Actual result / cause |
+|---|---|
+| History initial RED | 2 failed / 6.57s; second request lacked prior pair |
+| Omission/eviction group | 4 failed / 24.63s; missing metadata plus an oversized-response fixture crossing the earlier protocol bound |
+| Displayed-text fixture correction | 1 failed / 3 passed / 23.37s; raw trailing whitespace incorrectly compared with actual displayed text |
+| Resume initial RED | 1 failed / 6.95s, then 9 failed / 14.29s; resume still returned invalid_control |
+| Resumed history RED | 1 failed / 10 passed / 16.66s; retained original instead of clarified completed question |
+| Shutdown RED | 1 failed / 8 passed / 15.99s; late complete restored cleared state |
+| HTTP fixture corrections | 5 failed / 5 passed / 14.31s, missing httpx import; 4 failed / 6 passed / 14.43s, duplicate cookie |
+| Persisted-shape fixture correction | 1 failed / 6 passed / 16.92s; Python tuple compared with JSON list |
+
+Fixture errors are not counted as production RED. No shared-core source changed during the two final minimal fixes, so the 511-case result was not rerun or attributed to a later full suite. Original independent scratch probes were retained unchanged and remain ignored. Reviewers' attempts to diff previously unstored blob hashes produced `bad object`; these are Git inspection errors, not pytest failures. Final QUALITY verified the tiny delta by removing it in memory and recomputing Git blob hashes. Three-file in-memory compilation and diff checks passed; implementer filename-only credential scanning found no match. All returned test sessions ended and no leftover Python test process was observed at freezes. Failed-join test-child forced termination remains containment evidence, not graceful cleanup.
+
+### Frozen review and next boundary
+
+Both SPEC and QUALITY approve only Task 6 on the same final blobs, with both reproduced P2 findings closed and the receive timeouts explicitly unresolved:
+
+| File | Reviewed blob |
+|---|---|
+| `src/web/decision_runtime.py` | `b45782733e56a02717ea64e17ff7c77c37a20778` |
+| `tests/agent/test_web_decision_runtime.py` | `e807b373e1d7fc73bad983f0fe5ac1baf4502ad0` |
+| `tests/agent/test_web_decision_runtime_lifecycle.py` | `886f44042ccea79f172ea878d67aa9cb010f3fc7` |
+
+Parent authorizes the local four-file checkpoint commit after same-blob and scoped-stage checks. Next is Task 7's single existing candidate/report projection and actual protected reference/mount-ACK matrix, then Task 8's frontend controls/status. Projection cancellation must retain its actual offloaded store work, and report transport errors must not masquerade as optional sidecar success. These are future integration checks, not fixes claimed here. No push, PR or merge occurs at this checkpoint. Full A2/P7, original ordinary-chat/RAG/repeated scientific requirements, C lifecycle/topology and package-8 real/browser evidence remain pending.

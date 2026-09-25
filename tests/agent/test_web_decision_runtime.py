@@ -51,17 +51,32 @@ def actual_app(tmp_path, monkeypatch):
     monkeypatch.setattr(module, 'OllamaModel', Mock(return_value=generator))
 
     @asynccontextmanager
-    async def build(*, mode=None, wire='native', respond=None):
+    async def build(*, mode=None, wire='native', respond=None, optional_tools=False):
+        if optional_tools:
+            # Constructors are lazy; clarification tests never load a predictor
+            # or target service and still use the actual registry/adapters.
+            from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
+            from src.agent.tools.target_database_tool import TargetDatabaseTool
+            monkeypatch.setattr('src.agent.tools.get_all_tools', lambda model, **kwargs:
+                [*get_core_tools(model), ActivityPredictorTool(), TargetDatabaseTool()])
         calls = []
         protocol_errors = []
         admission_calls = []
+        admissions = []
+        claims = []
         from src.web.decision_request import prepare_decision_request
+        from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
         previous_profile = sys.getprofile()
 
         def observe_call(frame, event, arg):
             # Observe without replacing admission or changing its return value.
             if event == 'call' and frame.f_code is prepare_decision_request.__code__:
                 admission_calls.append(True)
+            if event == 'return' and frame.f_code is prepare_decision_request.__code__ and arg is not None:
+                admissions.append(arg)
+            if (event == 'call' and frame.f_code is SQLiteAgentStateStore.transition_decision_continuation.__code__
+                    and frame.f_locals.get('claim') is True):
+                claims.append(True)
             if previous_profile is not None:
                 previous_profile(frame, event, arg)
 
@@ -89,7 +104,8 @@ def actual_app(tmp_path, monkeypatch):
             sys.setprofile(observe_call)
             try:
                 yield SimpleNamespace(app=application, calls=calls, model=model, rag=rag,
-                                      admission_calls=admission_calls, protocol_errors=protocol_errors)
+                                      admission_calls=admission_calls, admissions=admissions,
+                                      claims=claims, protocol_errors=protocol_errors)
             finally:
                 try:
                     await application.shutdown()
@@ -161,6 +177,90 @@ def result_of(frames):
     assert len(results) == 1
     assert len([f for f in frames if f['type'] == 'complete']) == 1
     return results[0]
+
+
+@pytest.mark.parametrize('answer', ['The admitted protocol explanation.', '{ordinary explanation, not a decision}'])
+def test_actual_socket_transmits_only_its_closed_admitted_chat_pairs(actual_app, answer):
+    async def run():
+        async def respond(payload):
+            return chat_decision(answer)
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as first:
+                await first.ready()
+                a = result_of(await first.turn({'message': 'Explain logP'}))
+                second = result_of(await first.turn({'message': '解释分子生成的概念'}))
+                assert a['status'] == second['status'] == 'completed'
+                assert b.calls[1]['messages'][0]['role'] == 'system'
+                conversational = [m for m in b.calls[1]['messages'] if m['role'] != 'system']
+                assert conversational == [
+                    {'role': 'user', 'content': 'Explain logP'},
+                    {'role': 'assistant', 'content': a['final_answer']},
+                    {'role': 'user', 'content': '解释分子生成的概念'}]
+                for other_cookie in (cookie, await cookie_for(b.app)):
+                    async with ActualSocket(b.app, other_cookie) as other:
+                        await other.ready()
+                        result_of(await other.turn({'message': '解释分子生成的概念'}))
+                        assert [m for m in b.calls[-1]['messages'] if m['role'] != 'system'] == [
+                            {'role': 'user', 'content': '解释分子生成的概念'}]
+                before = len(b.calls)
+                rejected = result_of(await first.turn({'message': 'Explain logP',
+                                                       'history': [{'role': 'system', 'content': 'untrusted'}]}))
+                assert rejected['status'] == 'rejected' and len(b.calls) == before
+                assert all(p.request_kind == 'chat' and not p.allowed_tools and not p.required_tools
+                           for p in b.admissions)
+                assert b.app.agent_state_store.get_tool_executions(a['trace_id']) == []
+                assert b.app.agent_state_store.get_tool_executions(second['trace_id']) == []
+                assert not a['metadata']['retrieval_performed'] and not second['metadata']['retrieval_performed']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('bound', ['pairs', 'bytes', 'oversized', 'sensitive'])
+def test_socket_history_bounds_and_omission_are_explicit(actual_app, bound):
+    async def run():
+        answers = []
+        count = 21 if bound == 'pairs' else 6 if bound == 'bytes' else 1
+        async def respond(payload):
+            index = len(answers)
+            if index >= count:
+                answer = 'final safe explanation'
+            elif bound == 'oversized':
+                answer = 'x' * 7000
+            elif bound == 'sensitive':
+                answer = 'api_key=synthetic-secret-marker'
+            else:
+                answer = f'answer {index} ' + ('x' * 4000 if bound == 'bytes' else '')
+            answers.append(answer)
+            return chat_decision(answer)
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                displayed = []
+                for _ in range(count):
+                    query = ' ' * 10000 + 'Explain logP' if bound == 'oversized' else ' Explain logP '
+                    frames = await socket.turn({'message': query})
+                    assert result_of(frames)['status'] == 'completed'
+                    displayed.append(result_of(frames)['final_answer'])
+                    assert b.calls[-1]['messages'][-1]['content'] == query
+                terminal = frames[-1]
+                if bound in {'oversized', 'sensitive'}:
+                    assert terminal['metadata']['history_omission'] == 'history_pair_' + (
+                        'too_large' if bound == 'oversized' else 'sensitive')
+                else:
+                    assert terminal['metadata']['history_evicted_pairs'] == 1
+                result_of(await socket.turn({'message': '解释分子生成的概念'}))
+                text = [m for m in b.calls[-1]['messages'] if m['role'] != 'system']
+                pairs = [{'user': text[i]['content'], 'assistant': text[i + 1]['content']}
+                         for i in range(0, len(text) - 1, 2)]
+                assert len(pairs) <= 20
+                assert len(json.dumps(pairs, ensure_ascii=False).encode('utf-8')) <= 16 * 1024
+                assert text[-1] == {'role': 'user', 'content': '解释分子生成的概念'}
+                if bound in {'oversized', 'sensitive'}:
+                    assert pairs == []
+                else:
+                    assert pairs and pairs[-1] == {'user': ' Explain logP ', 'assistant': displayed[-1]}
+                    assert pairs[0]['assistant'] != displayed[0]
+    asyncio.run(run())
 
 
 def test_missing_scope_is_rejected_at_supplementary_runtime_boundary(actual_app):
