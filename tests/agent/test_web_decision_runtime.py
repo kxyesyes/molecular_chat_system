@@ -163,6 +163,61 @@ def result_of(frames):
     return results[0]
 
 
+def test_missing_scope_is_rejected_at_supplementary_runtime_boundary(actual_app):
+    """Supplementary only: middleware/auth actual-route tests remain above/below."""
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            closes = []
+            async def close(*, code):
+                closes.append(code)
+            socket = SimpleNamespace(scope={}, close=close)
+            await b.app.decision_runtime.handle_websocket(handler=b.app.chat_handler, websocket=socket)
+            assert closes == [1008]
+            assert not b.admission_calls and not b.calls
+            assert not b.app.decision_runtime.active_owners
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('mode', [None, 'decision_a2'])
+def test_actual_app_static_plan_run_contracts_are_unchanged(actual_app, monkeypatch, tmp_path, mode):
+    from src.task_runtime.manager import TaskManager
+    from src.web.routes import agent_workflow_routes
+    async def run():
+        manager = TaskManager(tmp_path / 'static-workflow.sqlite', max_workers=1)
+        monkeypatch.setattr(agent_workflow_routes, 'get_task_manager', lambda: manager)
+        try:
+            async with actual_app(mode=mode) as b:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=b.app.app),
+                                             base_url='http://127.0.0.1') as client:
+                    for route in ('plan', 'run'):
+                        bad = await client.post('/api/agent/workflows/' + route, json={})
+                        assert bad.status_code == 422 and bad.json()['code'] == 'QUERY_REQUIRED'
+                    payload = {'query': '计算性质和类药性；SMILES: CCO', 'skill_name': 'admet_assessment'}
+                    planned = await client.post('/api/agent/workflows/plan', json=payload)
+                    assert planned.status_code == 200
+                    plan = planned.json()
+                    assert plan['success'] and plan['code'] == 'OK' and plan['request_id']
+                    assert plan['data']['steps'] and plan['data']['trace_id']
+                    submitted = await client.post('/api/agent/workflows/run', json=payload)
+                    assert submitted.status_code == 200
+                    receipt = submitted.json()
+                    assert receipt['success'] and receipt['code'] == 'OK' and receipt['request_id']
+                    task_id = receipt['data']['task_id']
+                    await asyncio.wait_for(asyncio.to_thread(manager.wait_for_completion, task_id), 5)
+                    await asyncio.gather(*tuple(b.app.model_request_gate._background))
+                    record = manager.get(task_id)
+                    # TaskManager persists its GENERIC_SAFE projection, not
+                    # the raw Supervisor result envelope.
+                    assert record.status.value == 'succeeded'
+                    assert b.app.model_request_gate._readers == 0
+                    assert not b.calls and not b.admission_calls
+                    assert '/api/chat' not in {r.path for r in b.app.app.routes}
+                    assert (b.app.decision_runtime is None) == (mode is None)
+        finally:
+            await asyncio.to_thread(manager.executor.shutdown, wait=True)
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('kind', ['ping', 'chat'])
 @pytest.mark.parametrize('size', [24576, 24577, '25000-leading-spaces'])
 def test_exact_raw_frame_boundary_through_actual_route(actual_app, kind, size):

@@ -220,12 +220,16 @@ class WebDecisionRuntime:
                 turn = _Turn(payload)
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
                                    'trace_id': turn.trace_id})
+                if self.closing:
+                    break
                 operation = self._execute(handler, sender, turn)
                 try:
                     turn.task = asyncio.create_task(operation)
-                except Exception:
+                except BaseException as exc:
                     operation.close()
                     await turn.worker_owner.settle()
+                    if not isinstance(exc, Exception):
+                        raise
                     await self._terminal(handler, sender, turn, RunOutcome.FAILED, 'turn_dispatch_failed')
                     if turn.pending_complete is not None:
                         await sender.send_text(turn.pending_complete)

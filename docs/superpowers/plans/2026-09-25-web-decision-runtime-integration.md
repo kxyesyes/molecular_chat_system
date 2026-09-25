@@ -482,3 +482,76 @@ The two-finding targeted invocation used the same runner with these four exact n
 WorkerCleanupError remains unresolved ownership, not a normal failure result: runtime retains owner/task/reader and does not emit terminal or close still-used resources. There is no automatic join retry, tool replay, successful-settlement fabrication, or finite shutdown guarantee. **Actual failed-join route verification is still pending.** Parent approved its later isolated-child strategy: use the real route in an independently created offline child with OS-only environment, temporary root, no live services/secrets, and hidden Windows process; use controlled synchronization/state snapshots to prove active owner/reader retention, `modelclose=0`, no terminal and shutdown pending. Terminate only that confirmed-owned child; timeout/failure paths also terminate/wait/drain output in `finally`. Forced isolation-test termination is explicitly **not graceful cleanup**. No production escape/test flag may be added. Ordinary blocked-worker tests instead release their barriers in `finally` and verify real physical cleanup. The A2 versus C finite-UI-terminal/retained-cleanup difference stays unresolved.
 
 Both reviewers approved only the implemented foundation on the seven blobs above. Parent authorizes this plan-only append and exact local commit of those seven files plus the plan after same-blob, diff/scope and filename-only secret checks. Commit/tree/clean status and all eight blobs are reported outside the document. Then stop: parent will release lifecycle-core completion (Tasks 4/5 and the approved failed-join child) before history/resume/references/UI, without another user confirmation merely to start that released batch. This sequence neither expands nor reduces the final requirements; no push, PR, merge, full/live run, or further implementation belongs to the current commit step.
+
+## 14. Lifecycle checkpoint — independently reviewed, not full A2
+
+This checkpoint follows foundation `07131a48eea41dc95be55c68bdfc8c508564a3d9` on the same A2 branch. Only four source/test files change, plus this evidence append. No default activation, deployment, live inference, model training, credentials or production assets are involved. The original mixed checkout is unchanged.
+
+Implemented and verified within the released Tasks 2–5 lifecycle subset:
+
+- The common model publisher stages consumer bindings before publishing the new model/configuration/opaque epoch. A consumer failure restores previous bindings and closes an unpublished client; the independently owned generator stays unchanged.
+- Cancellation during runtime task creation closes the unscheduled coroutine. Shutdown crossing the accepted-frame send boundary cannot dispatch a late turn.
+- Actual mounted WebSocket and HTTP tests cover default-off/static contracts, a separately labelled missing-scope boundary, failed refresh, credential-only epoch rotation, reader/writer concurrency, and unsupported-client no-fallback behavior.
+- Actual Session/workflow/adapter submissions cover both nested timeout orders, delayed descendants, repeated cancellation and disconnect. A completed future does not imply executor join; owner/reader and resources remain retained until physical settlement. Late worker completion does not convert timeout/cancellation to scientific success.
+- Send/serialization/overflow, stale cancellation, concurrent chat, queued admission, creation and finish races, plus active/idle shutdown are covered. No timeout or scientific assertion was relaxed.
+
+The permanently failed-join test uses an independently created hidden, isolated child with real executor/future attachment. It observes retained owner/reader, no terminal, no model close and pending shutdown, then terminates and waits for only its own child. **Forced test-process termination is not graceful cleanup.** No production escape, fake settlement, retry or replay was added. Ordinary blocked tests release their barriers and verify joins. A2 still has no finite terminal/shutdown guarantee for an uncooperative worker; C's finite-UI-terminal policy remains a separate unresolved integration requirement.
+
+### Actual commands and results
+
+All Python runs used the approved pre-import OS-only isolation runner from `2026-09-24-rag-service-extraction.md`, temporary configuration/database roots, live flags off, and copying only the three tracked real/golden/diverse JSONLs with SHA verification. The five-file invocation was:
+
+```powershell
+$runner | & C:/Users/xkx52/.conda/envs/MedChat/python.exe -B -c "import sys; exec(sys.stdin.read())" `
+  tests/agent/test_web_decision_runtime.py `
+  tests/agent/test_web_decision_runtime_lifecycle.py `
+  tests/agent/test_decision_chat_transport.py `
+  tests/test_model_request_lifecycle.py `
+  tests/test_web_app_lifecycle.py
+```
+
+The runner applies `-q -p no:cacheprovider --tb=short -rs` with the normal conftest. Results are focused offline integration evidence, not a complete suite or real provider/browser acceptance:
+
+| Run | Actual result |
+|---|---|
+| Implementer final five files | 163 passed / 7 warnings / 99.10s |
+| Independent SPEC five files | 162 passed / 1 failed / 7 warnings / 100.54s |
+| SPEC original failed node plus two cancellation probes | 3 passed / 7 warnings / 6.53s |
+| SPEC original ordered first five cases | 5 passed / 7 warnings / 7.05s |
+| Independent QUALITY five files | 163 passed / 7 warnings / 81.96s |
+| QUALITY original node plus SPEC two and QUALITY two probes | 5 passed / 7 warnings / 6.90s |
+
+No skips. Warnings remain the existing SWIG/FastAPI deprecations. SPEC's `[24576-chat]` failed at a three-second receive wait; its cause remains **unknown**. Subsequent unchanged reruns are not a fix or proof that the first failure was environmental. Keep it visible through the later full/CI gates; do not replace its failed result with a passing summary. Review probes remain ignored scratch files, not publication assets.
+
+Both independent reviewers approved this lifecycle checkpoint on unchanged seven-file blobs, with no important findings. They did not approve unfinished Tasks 6–8 or full A2. Seven-file in-memory compile and diff checks passed. Implementer also passed filename-only secret-pattern/scope checks. All returned test sessions ended; no remaining test child or Python process was observed at freeze.
+
+### TDD and unsuccessful-run history
+
+| Earlier run | Actual result and disposition |
+|---|---|
+| Common publisher RED | 4 failed / 6.60s; real early-publication/rollback defects |
+| Nested first run | 8 failed / 45.67s; incorrect invocation-boundary and enum observer fixtures |
+| Single-case diagnosis | Interrupted, result not collected; no process killed; not counted as a pass |
+| Following single-case diagnosis | 1 failed / 9.20s; waited for complete while its own join barrier remained held |
+| Corrected nested observation | 5 failed / 3 passed / 32.74s; invalid assumption about which executor joins first |
+| Queued/creation/shutdown group | 4 failed / 2 passed / 4.57s; two real runtime defects, two premature outer-task completion assertions |
+| Static HTTP first run | 2 failed / 1 passed / 3.01s; tool name used instead of workflow policy |
+| Static HTTP second run | 2 failed / 3.22s; expected raw results instead of the persisted safe projection |
+| Display/transport group | 1 failed / 5 passed / 6.18s; missing barrier to establish overflow |
+| Five-file first combined run | 1 failed / 162 passed / 42.06s; fixture's 0.2s total budget exhausted before dispatch |
+
+These fixture corrections are not labelled production RED. Intermediate GREEN groups contained 42, 8, 63, 2, 1, 20, 3, 15 and 3 passes; a combined 163-pass / 57.21s run preceded the final strengthened assertions. None supersedes the independently observed, still-unexplained SPEC timeout above. No broader reliability attribution is made.
+
+### Reviewed blobs and next work
+
+| File | Reviewed blob |
+|---|---|
+| `src/web/app.py` | `c5a5ff21c9e7ca7f902a4fec66cec5ffbac77c22` |
+| `src/web/chat_handler.py` | `969bd0ee50aebc64e596adb10b3f0ed1334b20a3` |
+| `src/web/decision_chat.py` | `5357cffad8db3b9c04c63c6ae7cb59327774935b` |
+| `src/web/decision_runtime.py` | `7748014c3e1482679e856eac7b86d4bc2191f09c` |
+| `tests/agent/test_decision_chat_transport.py` | `1c5059ca0f1b97cad64924540b62a55d7c347d49` |
+| `tests/agent/test_web_decision_runtime.py` | `2905503a36f885a00c92038f0bfd0fe033d18851` |
+| `tests/agent/test_web_decision_runtime_lifecycle.py` | `fca58900c73df51ceb053a157c0f96731e5b7248` |
+
+Next is Task 6's real socket history and nonce-safe continuation, including frozen original obligations, pre-CAS refinement, two clarification cycles, resumed cancellation, stale epoch and waiting shutdown. Tasks 7–8 reference/ACK/report and frontend controls follow separately. The pure history dependency is not Web history acceptance; active/idle shutdown is not waiting-handle shutdown acceptance. Original final ordinary-chat/capability and multi-turn cases, B bindings, C integration, full offline gates and package-8 real model/science/browser evidence remain pending. This checkpoint is a local scoped commit only, not a push, PR, merge or deployment.

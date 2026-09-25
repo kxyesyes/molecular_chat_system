@@ -340,25 +340,50 @@ class MolecularChatApp:
 
     async def _apply_and_close_llm(self, config):
         old_model = getattr(self, 'model', None)
-        result = self._apply_llm_config(config)
+        config = normalize_llm_config(config)
+        model = self._create_model_from_llm_config(config)
+        try:
+            result = self._publish_llm_config(config, model)
+        except BaseException:
+            if model is not old_model:
+                await finish_on_cancel(close_owned_model(model))
+            raise
         if old_model is not getattr(self, 'model', None):
             await finish_on_cancel(close_owned_model(old_model))
         return result
 
     def _apply_llm_config(self, llm_config: Dict[str, Any]) -> Dict[str, Any]:
         config = normalize_llm_config(llm_config)
-        self.model = self._create_model_from_llm_config(config)
+        return self._publish_llm_config(config, self._create_model_from_llm_config(config))
+
+    def _publish_llm_config(self, config, model):
+        # The writer holds admission closed. Stage the real consumer bindings
+        # first; their setter may fail after updating only part of the graph.
+        # Roll back known main-model consumers directly, without invoking the
+        # failed setter again. The separately owned generator is never touched.
+        agent = self.agent_system
+        bindings = []
+        if agent:
+            consumers = [agent] + [tool for name, tool in agent.tools.items()
+                                   if name != 'llm_molecular_generator']
+            bindings = [(consumer, consumer.llm) for consumer in consumers
+                        if hasattr(consumer, 'llm')]
+            try:
+                if hasattr(agent, 'set_llm'):
+                    agent.set_llm(model)
+                else:
+                    agent.llm = model
+            except BaseException:
+                for consumer, previous in bindings:
+                    consumer.llm = previous
+                raise
+        self.model = model
         self.model_generation = uuid4().hex
         self.active_llm_config = config
         self.config.setdefault("inference", {})["stream"] = config.get("stream", True)
         if self.chat_handler:
             self.chat_handler.model = self.model
             self.chat_handler.config = self.config
-        if self.agent_system:
-            if hasattr(self.agent_system, "set_llm"):
-                self.agent_system.set_llm(self.model)
-            else:
-                self.agent_system.llm = self.model
         return config
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
