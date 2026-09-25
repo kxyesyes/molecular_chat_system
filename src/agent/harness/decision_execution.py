@@ -51,7 +51,7 @@ class SingleAttemptTool:
         return result
 
 
-async def settle_action(session):
+async def settle_action(session, *, worker_owner=None):
     index = session.next_index
 
     def advance():
@@ -63,16 +63,31 @@ async def settle_action(session):
             # attempted outcomes. Stable record/event IDs handle commit-then-error.
             return session.execute_step(index)
 
-    worker = asyncio.create_task(asyncio.to_thread(advance))
+    root = worker_owner.start_action() if worker_owner is not None else None
     cancelled = False
-    while True:
+    try:
+        call = (asyncio.to_thread(advance) if root is None else
+                asyncio.to_thread(root.run, advance))
         try:
-            await asyncio.shield(worker)
-            break
-        except asyncio.CancelledError:
-            cancelled = True
-            if worker.done():
+            worker = asyncio.create_task(call)
+        except BaseException:
+            call.close()  # No Task owns the not-yet-awaited dispatch coroutine.
+            raise
+        while True:
+            try:
+                await asyncio.shield(worker)
                 break
+            except asyncio.CancelledError:
+                cancelled = True
+                if worker.done():
+                    break
+    finally:
+        if root is not None:
+            root.abort_unstarted()
+            try:
+                await root.settle()
+            except asyncio.CancelledError:
+                cancelled = True
     if cancelled:
         raise asyncio.CancelledError()
     return worker.result()

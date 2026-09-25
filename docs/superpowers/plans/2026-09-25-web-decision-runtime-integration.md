@@ -274,3 +274,68 @@ These existing filenames include #77's verified `home_evidence_report_test.js` r
 | Broader generation/rank/ADMET/reverse/RAG bindings | Explicitly excluded | **P7-B blocked, not completed** |
 
 This handoff is a **local three-document release freeze** on the existing A2 integration branch based on landed #78 plus approved-doc cherry-picks through `20aeef5`. Writing-plans' dependency-first decomposition and source-checked readiness bindings define the next worker's two-batch TDD start. G1 is satisfied and parent implementation release is open after this freeze; no further start confirmation is required. This worker performs no code/tests/push and stops after the docs commit. A2 completion, P7 final ordinary-chat coverage, B/C integration, package-8 live acceptance and C compatibility are not claimed; the explicit C terminal/cleanup difference remains unchanged.
+
+## 11. Ownership-only execution and independent review closure
+
+The preceding documentation-freeze statements are historical. Parent released only the first **ownership sub-batch**, based on `048d0999eebd16b8fe8e403668210922451ff608`, on `codex/web-decision-runtime-integration`. Approved implementation is the seven source/test files below; this plan is the only additional evidence document authorized for local commit. No spec/ledger edits. History/prefix/revision work and all Web/app/WS/UI integration remain **pending and unstarted**. This is neither Batch 1 as a whole, A2, nor P7 completion. No full suite, live providers/services/browser, default activation, push or PR was performed; the original A1 checkout was untouched.
+
+Implemented ownership reserves at both existing real submit sites before executor creation, propagates/reset bindings explicitly through the outer Session and both executor paths, drains each action root without awaiting its parent loop, and retains shared asynchronous join helpers across repeated cancellation. Successful records are released only after executor join; failed records remain unresolved. SingleAttemptTool validation/no-retry, adapter slots, and no-owner timeout/return behavior remain unchanged. Tests include the existing no-owner `test_adapter_cannot_retry_after_outer_deadline`, whose barrier is released after awaiting the loop result. Nonterminating workers remain retained indefinitely; no arbitrary detached-thread coverage or change to the A2/C terminal policy is claimed.
+
+### RED, failure and recovery record (separate runs, not additive totals)
+
+| Actual worker test group | Observed RED / failure | Verification after minimal correction |
+|---|---|---|
+| `test_actual_nested_deadlines_drain_worker_and_join` | **2 failed / 1.09s**; both deadline orders settled before real worker exit | **2 passed / 1.07s** |
+| `test_owned_loop_has_no_terminal_until_nested_workers_join` | **2 failed / 2.81s**; timeout/repeated cancellation could terminate before owned join | Combined with preceding group: **4 passed / 2.80s** |
+| `test_turn_drains_other_roots_even_when_one_join_fails` | **1 failed / 0.97s**; failed join left another root undrained | Ownership module **17 passed / 1.73s**; first seven-file freeze later **190 passed / 17.67s** |
+| SPEC migration: `test_outer_session_dispatch_failure_closes_only_unstarted_root` | **2 failed, 2 passed, 1 warning / 3.22s**; owned submit/task-creation failures left empty unfinished roots; no-owner controls passed. Warning: unawaited `to_thread` coroutine on task-creation failure | **4 passed / 2.40s**; with atomic abort/running-work controls **6 passed / 2.56s**; seven-file focus + SPEC probes **199 passed / 18.29s** |
+| QUALITY migration: `test_failed_parent_join_does_not_abandon_late_child_cleanup` | **1 failed / 1.12s**; failed parent could register a child after the helper had cached failure, leaving the child unjoined | Included in final three-test and combined verification below |
+| `test_failed_parent_pending_future_and_completion_notification` | **2 failed / 1.15s**; running and queued producer variants both cached cleanup failure too soon | Corrected three-test group **3 passed / 1.18s** |
+
+One intermediate attempted GREEN group was **interrupted, not passed**: session `6696` printed two progress dots then hung in the queued test's cleanup. Its initial fixture made `Future.cancel()` fail but still allowed executor shutdown to discard the queued work item, fabricating a future that could never complete. Only that identified pytest child was stopped; the wrapper reported `T11A_PYTEST_EXIT=4294967295` (shell exit 1). The test fixture was corrected to preserve the injected uncancellable queue item as well as its Future; no production timeout or assertion was weakened. Subsequent tests release all worker/queue/completion barriers in `finally`. This interrupted attempt is not a full-suite run or a passing count, and is not erased by later GREEN results.
+
+Independent findings and closure, as reported by parent:
+
+- Galileo SPEC originally reproduced outer submission failure: **1 failed, 2 passed / 2.74s**; seven-file focus **190 passed / 17.31s** did not cover the missing boundary. Root entry and abort now share one lock: only a never-started root is closed, a late queued callable is barred, and already-running work remains owned until actual completion. Failed task creation closes its unowned coroutine. Actual loop regressions require zero tool invocations, one model call, a settled failed journal and owner count zero. Intermediate SPEC recheck **199 passed / 18.04s**, no skips/warnings, approved that correction.
+- Peirce QUALITY subsequently reproduced late-child cleanup loss twice: **1 failed, 2 passed**, latest **2.73s**; seven-file + SPEC **199 passed / 17.83s** did not cover it. A failed record now prevents drain termination while its Future can still execute/register descendants, even when `active` is false. A bookkeeping-only Future completion callback wakes the condition after `run.finally`, including completion-before-attachment races; it never joins. Failed records remain unresolved and scientific actions are not retried. If failed submit supplied no Future and executor join also fails, completion cannot be proved: retain pending cleanup rather than fabricate quiescence.
+- **Final Galileo SPEC APPROVE:** independently **205 passed / 19.00s**, no skips/warnings.
+- **Final Peirce QUALITY APPROVE:** independently **205 passed / 19.10s**, plus an independent unknown-future probe **1 passed / 0.81s**, no skips/warnings. No important remaining findings reported. These are independent review counts supplied by parent, not extra worker executions or a new summed total.
+
+### Final worker verification and exact commands
+
+Final worker seven-file focus plus both unchanged review probe files: **205 passed / 19.28s**, exit 0, no skips/warnings. All seven changed Python files compiled in memory with `compile(source, filename, 'exec')`, **7 passed**, no bytecode; `git diff --check` passed. No tests were rerun merely for the documentation commit.
+
+Used the complete existing fenced `$runner` from [RAG extraction plan](2026-09-24-rag-service-extraction.md#实际验证命令与包装), changing only `repo` to `D:/MedChat/molecular_chat_system_worktrees/web-decision-runtime-integration`. Before imports it clears inherited application/credential environment with the documented OS-variable whitelist, isolates cwd/config/DB/cache in a TemporaryDirectory, sets live-acceptance flags to zero, and uses MedChat Python with `-B`. Only Git-tracked `real_agent_cases.jsonl`, `golden_scientific_cases.jsonl`, and `diverse_scientific_cases.jsonl` are copied into temporary `data/agent_evals`, with source/destination SHA-256 assertions. No other assets, secrets or host env/config/key stores are read. Keep normal conftest and `-q -p no:cacheprovider --tb=short -rs`; no installs or full heavy suite.
+
+```powershell
+$ownershipFocus = @(
+    'tests/agent/test_worker_ownership.py',
+    'tests/agent/test_decision_loop.py',
+    'tests/agent/test_decision_adapter_retry.py',
+    'tests/agent/test_tool_adapters.py',
+    'tests/agent/test_tool_adapter_compat.py',
+    'tests/agent/test_workflow_orchestrator.py',
+    'tests/agent/test_workflow_run_session.py'
+)
+$reviewProbes = @(
+    'scratch/spec_p7a2_ownership_review.py',
+    'scratch/quality_p7a2_ownership_review.py'
+)
+$runner | & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -B -c "import sys; exec(sys.stdin.read())" @ownershipFocus @reviewProbes
+```
+
+Earlier RED/GREEN groups used the same runner with the exact test-file/node names in the table. Review scratch files were read/run unchanged and verified ignored with `git check-ignore`; they are **not staged**. Their before/after SHA-256 values were SPEC `6479f6fbb87801d9c40d13dca30c998a8b795b5501d22ba4e55641170f4f345b` and QUALITY `0af940f180a124c57cf163bea096073263f7c086bb6aa40d1e8c866f47fc5493`. Parent's separate presentation tests are not claimed as worker ownership evidence.
+
+### Exact reviewed source/test snapshot
+
+| Approved path | Git blob |
+|---|---|
+| `src/agent/runtime/worker_ownership.py` | `b8a1c8035339530c5044d4fa4de1c46ef0d03027` |
+| `src/agent/orchestrators/workflow.py` | `541789263e40cd4a70cb690f456d301101a0645b` |
+| `src/agent/tooling/adapters.py` | `e66f4b58a2462957792a15efd1d19059bc7723a5` |
+| `src/agent/harness/decision_execution.py` | `c3cb3251d4cb396e9fe71c18d539b4bbaaf740f4` |
+| `src/agent/harness/decision_loop.py` | `455c6e9a4d04039f795a4aa9418aceda0666d54b` |
+| `tests/agent/test_worker_ownership.py` | `97854fbd3b77f747e04d82789057c521c1d400a6` |
+| `tests/agent/test_decision_loop.py` | `6f1e7ee8f6c6943dbf6509e9861cc39f0fee3d3a` |
+
+Parent authorizes explicit staging of exactly these seven files plus this plan for one conventional local commit, after unchanged-blob, diff and filename-only secret checks. Final commit SHA/status/hash manifest is reported outside this document. Stop after that commit for parent confirmation: history/Web remain unstarted; no push/PR, spec/ledger edit, or completion claim for A2/P7.

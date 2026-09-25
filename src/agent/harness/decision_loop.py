@@ -101,7 +101,17 @@ class ModelDecisionLoop:
         self.max_tool_attempts, self.timeout_seconds = max_tool_attempts, timeout_seconds
 
     async def run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
-                  continuation_id=None, clarified_query=None, requirements=None):
+                  continuation_id=None, clarified_query=None, requirements=None, worker_owner=None):
+        try:
+            return await self._run(context, request_kind=request_kind, allowed_tools=allowed_tools,
+                required_tools=required_tools, event_bus=event_bus, continuation_id=continuation_id,
+                clarified_query=clarified_query, requirements=requirements, worker_owner=worker_owner)
+        finally:
+            if worker_owner is not None:
+                await worker_owner.settle()
+
+    async def _run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
+                   continuation_id=None, clarified_query=None, requirements=None, worker_owner=None):
         from langgraph.graph import END, StateGraph
 
         try:
@@ -340,7 +350,7 @@ class ModelDecisionLoop:
                               'model_version': str(getattr(getattr(getattr(adapter, 'tool', None),
                                                                    'llm_model', None), 'model_name', ''))},
                 ))
-                await settle_action(session)
+                await settle_action(session, worker_owner=worker_owner)
                 observed = session.results[-1]
                 verify_observation_integrity(observed, session)
                 state.observed[key] = observed
@@ -395,6 +405,12 @@ class ModelDecisionLoop:
                 if any(map(family_review_observation, active_results(session))):
                     state.outcome = RunOutcome.PARTIAL
                 state.answer = scientific_answer(active_results(session)) + '\n\n任务要求尚未全部满足，请查看结构化验收差项。'
+        if worker_owner is not None:
+            try:
+                await worker_owner.settle()
+            except asyncio.CancelledError:
+                state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
+                error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
         # Seal the settled results before callbacks/persistence can run again.
         # Tools may retain their own mutable result objects, never these copies.
         for observed in session.results:
