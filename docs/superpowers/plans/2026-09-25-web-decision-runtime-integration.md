@@ -903,3 +903,65 @@ Invocation is the existing ignored `scratch/p7a2_fixture_failure_runner.py`, whi
 Review command selects the exact nodes `test_fixture_dependency_readiness_precedes_observer`, `test_actual_first_chat_completes_with_observer`, `test_failed_join_checkpoint_uses_distinct_budgets_and_returns_facts`, `test_failed_join_checkpoint_rejects_invalid_child_state`, `test_failed_join_checkpoint_propagates_queue_timeout` and `test_permanent_failed_join_retains_route_owner_in_isolated_child` through that same runner. Memory compilation and `git diff --check` pass. Existing ignored probes are unchanged and not staged.
 
 The two historical 174P/1F groups are not erased. The first failure identity, three older warmup UNKNOWN cases, startup-variability root cause and production cold-start risk remain explicitly unresolved. The passing full pair validates this current test boundary; it is neither a performance repair nor full Agent/repository/CI evidence. Parent may explicitly stage the two reviewed tests plus this evidence for a local checkpoint. Full A2 review/offline/CI/unique PR, ordinary-chat/B/C integration and P8 live acceptance still require subsequent work; no push, merge, default activation or deployment occurs here.
+
+## 21. Full offline findings and bounded configuration-fixture correction
+
+Checkpoint `ec8a60506c1db517a436cab2e9a3bb228ec50a67`, tree `7e4032f2ab6811a53749e026177127d89fa2b9c6`, is clean and independently SOURCE/SPEC and SOURCE/QUALITY approved for the complete 26-file A2 increment, conditional on runtime/CI gates. Production source remains identical to `2769e1e`. This is not merge approval.
+
+### First complete offline gate results (failures retained)
+
+| Group, each executed once | Passed | Failed | Skipped | Warnings | Seconds |
+|---|---:|---:|---:|---:|---:|
+| Agent | 8109 | 5 | 2 | 7 | 1729.74 |
+| sandbox-api | 143 | 0 | 10 | 0 | 15.71 |
+| sandbox-core | 1912 | 0 | 65 | 0 | 165.95 |
+| task-runtime | 1547 | 2 | 25 | 0 | 197.63 |
+| root, excluding activity | 2055 | 4 | 143 | 5 | 477.87 |
+| root-activity | 1851 | 0 | 10 | 2 | 714.43 |
+
+Root also reports 173 passed subtests. Collection confirms 15883 cases across six non-overlapping partitions, with 30 activity files separated as in CI. Sessions 93612, 62265, 37070, 66883, 83110 and 79985 exited. Skips retain platform/symlink, disabled real acceptance, missing Docker/promtool and existing conditional reasons. `pytest-timeout` is absent locally, so sandbox `--timeout=60` was not supplied; no outer process-kill limit was added. Activity duration exceeds the CI 600-second command budget: local results are not CI-equivalent evidence. Node/static and CI are still pending.
+
+The ignored repository runner changes only pytest argument forwarding to support absolute targets/options, preserving approved pre-import OS-whitelist, temporary cwd/config/DB/cache, normal conftest, three tracked JSONL copies/SHA, network denial and safe failure reporting. It does not enable models or read user assets.
+
+The five Agent failures are original credential-guard `[0..4-many_urls]` subprocess 10-second timeouts. An unchanged single-node control passed in 4.91s; a phase control passed in 5.00s (import 1.299s, valid envelope 0.159s, 15 suffix checks 3.016s, final rejection 0.170s). An original-order prefix diagnostic through the last affected node passed 2119 cases, skipped 1 and deselected 5996 in 180.31s, with 7 warnings. That prefix is not a full gate. Its detailed passing-case phase observations were captured by pytest and not returned; do not invent them. Original timeouts' causes remain UNKNOWN; no guard algorithm, credential coverage or 10-second budget changed.
+
+Task-runtime failures are separate: managed child startup did not reach `child-started` within its original five seconds (cause pending); metrics HTTP was blocked by the ignored runner's blanket network denial despite the test owning its loopback server. Neither is fixed in this sub-batch. A narrowly owned-local-server harness exception is being source-designed separately; no general network permission is implied.
+
+### Reproduced root configuration-test cause
+
+Original `tests/test_user_llm_routes.py` once: **4 failed / 5 passed / 0 skipped / 7 warnings / 17.51s**, session 47778 exit 1. The passive type-only fourth-case probe once: **1 failed / 7 warnings / 8.72s**, session 56787 exit 1. All failures match the root gate identities:
+
+- `test_save_restart_blank_clear_and_new_checkout`
+- `test_changed_endpoint_never_borrows_key_for_save_or_test`
+- `test_refresh_clear_delete_and_malformed_file_fail_closed`
+- `test_connected_socket_revalidates_config_before_each_message`
+
+The factory returns a bare `Mock()`, whose `tools.items()` is not iterable. Actual configuration publication snapshots real Agent tool/model bindings at `app.py:367`. The first three failures repeat this TypeError; the fourth passive trace confirms `connection_ready → refresh → app.py:367 TypeError → error`, while the unchanged test expects `status`. No full frame/config/secret was printed. This is a test-double contract mismatch, not justification for a production fallback or weakening error handling.
+
+### Approved minimal design and TDD sequence
+
+Under delegated recommended-choice authority, extend the A2 test allowlist **only** to `tests/test_user_llm_routes.py`; append resulting evidence here later. Preserve every original assertion, synthetic configuration, temporary path, error status, timeout and existing cleanup. Do not change application/handler/config persistence code, add defensive fallback, enable a provider or inspect real credentials.
+
+Replace only the bare factory Mock with an explicit configuration-only stub local to the fixture:
+
+```python
+class ConfigurationAgent:
+    def __init__(self, model):
+        self.tools = {}
+        self.llm = model
+
+    def set_llm(self, model):
+        self.llm = model
+
+monkeypatch.setattr(MolecularChatApp, '_create_chat_agent',
+                    lambda self: ConfigurationAgent(self.model))
+```
+
+No scientific tool or model response is implemented by this stub. The actual app, config persistence, model objects, publication/retired-model cleanup and WebSocket handler remain in use. Unexpected scientific execution is not silently accepted by a broad mock.
+
+- [ ] Add `test_factory_agent_rebinds_model_on_config_save` before changing the fixture. Obtain the actual app/client; assert `agent.tools == {}` and `agent.llm is app.model`. Save a default configuration with synthetic model name `synthetic-rebound-model`; assert HTTP 200/success, model identity changed, and both `agent.llm` and `app.chat_handler.model` are the new `app.model`. No generation/API request.
+- [ ] Run this new case RED with the old fixture, preserving the original four-case RED evidence above. Then implement exactly the local stub shown above.
+- [ ] Run the whole user-config route module GREEN with all original assertions unchanged. Run `tests/test_model_request_lifecycle.py` and `tests/test_web_app_lifecycle.py` as related lifecycle regressions through the approved isolated repository runner. Record failures instead of retrying until green.
+- [ ] Independent SPEC then QUALITY review the exact final test blob and execute the affected module serially. Memory-compile and diff-check; parent explicitly stages only this test and evidence after review, not old scratch probes. Remaining offline/CI/full confirmation gates and broader P7/P8 stay pending.
+
+Commands use MedChat Python `-B`, ignored `scratch/p7a2_repository_offline_runner.py`, absolute selected test paths, and its unchanged pytest `-q -p no:cacheprovider --tb=short -rs` options inside the approved isolated child. This section is documentation-checkpointed before code changes. No push, PR, merge or deployment is performed by this sub-batch.
