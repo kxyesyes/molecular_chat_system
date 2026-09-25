@@ -10,11 +10,13 @@
 
 **Status/base:** Parent-approved two-doc receipt freeze on `codex/dynamic-tool-bindings-plan`, following docs commit `74739aa72c36af27e1561a21359e87521860897b`, original source base `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`; implementation release remains closed. Companion spec: `docs/superpowers/specs/2026-09-25-dynamic-tool-bindings-design.md`. Unchecked steps are future work, not execution evidence.
 
+**2026-09-26 draft:** §11 proposes the ordinary-profile/root-budget amendment against committed ordinary `1da64f2694203de0ef3f3c875ceb775e4be0dee4`. It supersedes historical constructor-only/revision/budget assumptions, not the original scientific positives. Independent written review and explicit parent budget/scope approval precede code. Only these two docs may change in this task; **no commit, tests, implementation or publication now**.
+
 **Historical parent-reported dependency update:** G2 PR72 merged as `27170d95`; 4C post-P2 full 6676 passed / 2 skipped, then joint 525 passed + 162 subtests, at that time PR73 head `beaf9cf4a57cf7c6045f5980c175c217fd42e96f` with CI pending; A1 SPEC4 repair `48d8356` under recheck at that time. No network verification or merge was performed here. These earlier statuses are superseded by the current parent record below; original design source base remains `5db56b0`.
 
 **Receipt amendment source pin:** The preceding dependency report is historical, not fresh CI/landing status. Read `current-real-acceptance` HEAD `0d5ac1e4c79b51bbe76fbdd2e78f05ae1e818209`; local `git diff --name-only 5ad08ac -- src` showed no differences. Only source/standards/tests were read, no real data or environment. This verifies the requested reverse/RAG source snapshot against local `5ad08ac`, not new implementation approval. Re-pin all landed dependencies before execution; do not copy that worktree or refresh old result receipts using its current metadata.
 
-**Current parent-reported record for this freeze:** 4C PR73 **merged `0295e996`**; main #76=**`5ad08ac`**; G1 PR77 head **`f48039e` in CI, not landed**; A1 current **four-file diff blob-identical to `9d1305e`, both reviews passed, not landed**; A2 revised docs **`15a903d9`, no implementation**. No fresh network/CI check is claimed. Parent approved the amendment text/future allowlist and local two-doc commit; stable mmap/source proof and separate implementation release are still required.
+**Historical parent-reported record for the receipt freeze:** 4C PR73 **merged `0295e996`**; main #76=**`5ad08ac`**; G1 PR77 head **`f48039e` in CI, not landed**; A1 then **four-file diff blob-identical to `9d1305e`, both reviews passed, not landed**; A2 revised docs **`15a903d9`, no implementation**. No fresh network/CI check is claimed. Parent approved that amendment text/future allowlist and local two-doc commit; stable mmap/source proof and separate implementation release are still required. See §§10–11 for newer local source pins.
 
 ## 1. Preflight and dependency contract
 
@@ -128,7 +130,7 @@ Later focused command, **not run in this sidecar**: `python -B -m pytest tests/t
 
 ## 5. B1 — normal entry and continuation vertical slice
 
-- [ ] Add actual app `/ws` RED using landed A2 assembly with constructor-only opt-in and B profile injected by server. Obtain real anonymous session cookie through protected HTTP/matching origin. Run actual admission→bridge→loop→Session; never register a test-only route or fake scope/loop result.
+- [ ] After the §11 ordinary Web re-pin, add actual app `/ws` RED using the reviewed async semantic factory and a B profile injected only by server. Do not remove the Task7A assembly-only fail-closed guard to route through old A2 without carry. Obtain real anonymous session cookie through protected HTTP/matching origin. Run actual admission→bridge→loop→Session; never register a test-only route or fake scope/loop result.
 - [ ] Verify selected trusted molecule, same-owner per-socket chat history, explicit local RAG request versus RAG-true chat, forbidden whole request, partial status and subsequent normal turn. No static workflow fallback.
 - [ ] Write continuation RED: source-role proof or source/generator/main-model generation changes before CAS; foreign/repeated nonce; altered original obligations/history; unsupported new count on resume. Waiting record stays unchanged on invalid claim; uncertain CAS never dispatches again.
 - [ ] Add actual `/ws` negatives using the real producer/core fixture paths from §4a/4b: tampered same-length popcount, same fingerprint/different weight, all-invalid versus valid-empty RAG, and source change before resume. Assert no successful known-subset/no-hit completion, no static fallback, and no target/generator downstream call on rejected evidence. Sealed prior reports remain historical; current metadata cannot repair their receipts. Valid receipt route still uses existing mount/ACK tests, not a lab-only replacement.
@@ -202,7 +204,7 @@ Future command: `python -B -m pytest tests/agent/test_dynamic_evidence_report.py
 - [ ] Separate P7-C design/release for Vina consent, receptor/ligand/grid ownership, at-most-once side effects, new finite energy/pose/hash and authorized download. Never expose staged helpers in B or label ranked candidates as docked.
 - [ ] Parent decides releases and whether supported partial scientific scope is acceptable; user goal remains packages 1–8, no deployment. B1, B2, C and package-8 final proof are tracked separately; this sidecar completes none of them.
 
-Design handoff: **parent-approved amendment, local commit of exactly two docs following `74739aa`**; return hash and clean status, then stop. B2 remains one logical invocation/at-most-five internal rounds with unchanged budgets/non-replay/drain and no new model strategy. Exact dependency pins, actual stable mmap/source proof and separate implementation release remain required; do not infer a safe snapshot from design approval. No code/tests/assets/environment/network/push/merge here; P7-B, P7-C and package-8 real normal-route proof remain pending.
+Historical design handoff: **parent-approved receipt amendment, local commit of exactly two docs following `74739aa`**. This is not permission to commit the §11 draft. B2 remains one logical invocation/at-most-five internal rounds; §11 now proposes the explicit inclusive root ceiling while retaining old main/outer limits, non-replay/drain and model strategy. Exact dependency pins, actual stable mmap/source proof and separate implementation release remain required; do not infer a safe snapshot from design approval. No code/tests/assets/environment/network/push/merge here; P7-B, P7-C and package-8 real normal-route proof remain pending.
 
 ## 10. Source re-pin audit after ordinary Task6 — implementation still closed
 
@@ -248,3 +250,271 @@ This audit changed documentation only. No implementation, tests, imports,
 configuration/credential/assets inspection, network, publication or live run.
 Stable source ownership, generator budget bounds, B integration, C and final
 package8 acceptance remain pending; the audit is not a new passing test.
+
+## 11. Proposed implementation amendment: profiles and inclusive root accounting
+
+### 11.1 Draft authority and exact source facts
+
+This section implements companion spec §11 **only after approval/release**. Draft
+base is docs HEAD `a3ceb1880b61ad58000b8ad5b667a15f03411ef4`; all new source reads used
+`git show 1da64f2694203de0ef3f3c875ceb775e4be0dee4:<path>`, never the dirty ordinary
+checkout. Task7A at that pin exposes async assembly/capability publication but
+intentionally blocks semantic Web/direct dispatch. Task7B/C execution/delivery APIs
+are still unfrozen. Existing §1/§8 PR-status descriptions are historical; use §10's
+local ancestry record and the new committed pin, then confirm the final integrated
+revision before release. No fresh remote landing/CI claim is made here.
+
+The source facts driving the amendment are concrete:
+
+- `ordinary_capabilities.py` defines only `ordinary-semantic-original-four-v1` and
+  tests product feature names as if they were canonical registered tool names.
+  `ordinary_admission.loop_admission` rejects all other profiles/catalogs. Extend
+  these boundaries explicitly, not by registering more tools or trusting an intent.
+- `decision_loop.py` counts intent plus decision/repair under16 and already accepts
+  carry/exchange; `decision_continuation.py` uses semantic7/no-carry6 and adjacent
+  pre-CAS TTL/credit checks. Preserve these paths; B adds a profile-selected8.
+- Generator `_generate_with_retry` has up to five rounds; both generation and
+  optimization reach `_call_llm_sync` with1000 completion tokens. Current
+  `OllamaModel.generate` owns the actual POST but returns text/error-as-text only.
+  Query/evidence character bounds do not provide a proven token bound. The chain
+  `GenerationToolAdapter` → `_CandidateContractAdapter` →
+  `LegacyPythonToolAdapter._invoke_guarded` calls `tool.execute(payload)`; a relay must
+  preserve that adapter's reservation and worker ownership, not create another pool.
+
+No commands below were executed. All RED/GREEN descriptions are future assertions,
+not expected numeric pass counts. Parent retains all historical failures/UNKNOWNs.
+
+### 11.2 Minimal future allowlist changes and responsibilities
+
+These additions are **proposed for review**, not silently authorized by the old
+§2 allowlist. Existing B files keep their previously bounded responsibilities.
+
+| File | Narrow future responsibility |
+|---|---|
+| `src/web/ordinary_capabilities.py` | Closed B1/B2 profile constants, the exact nine-tool mapping in spec §11.2, B catalog and pure independent-RAG request projection; old call defaults identical |
+| `src/agent/contracts/ordinary_admission.py` | Admit only the two named B profiles/catalog/assessment revisions; reuse strict carry/binding/segment validation, keep ordinary metadata and original profile output unchanged |
+| `src/web/app.py` | Server-only profile injection into existing async assembly/base projection/writer pair; retain failure cleanup, no synchronous semantic/default activation |
+| Existing proposed `src/agent/contracts/decision_bindings.py` / `src/agent/harness/decision_bindings.py` | Closed B root/gen receipt validation and profile policy alongside binding proofs; no separate budget framework/module/store |
+| Existing `decision_loop.py`, `decision_continuation.py`, `decision_execution.py`, `run_session.py`, `ledger.py` | Root checks, request-local generator control, durable reservations/settlement, B8 fingerprint/replay and evidence propagation using their current ownership/execution paths |
+| Conditional `src/web/models/ollama_model.py` | Only reviewed optional per-request control/receipt seam at `generate` POST; async equivalent only if the supported generator binding needs it; no token discovery or default behavior change |
+| Conditional `src/agent/tooling/adapters.py` | Only if existing request-local view cannot relay control: optional invocation-scoped generator relay through the same validation/slot/owner/finally path, default no extra kwargs |
+
+The two conditional additions need parent scope approval after the source-backed
+proposal below; they are not currently approved code scope. Shared factory flags,
+4C generation input schema/workflow canonicalization, CandidateSet schema, Ranker
+formula, model selection/temperature and five-round strategy remain unchanged.
+No new config file, tokenizer dependency, asset loader, protocol service or pool.
+
+New proposed tests: `tests/agent/test_decision_binding_profiles.py` and
+`tests/agent/test_decision_binding_budgets.py`; conditional client test
+`tests/test_ollama_generation_budget.py`. Use already planned
+`test_decision_generation_once.py`, `test_decision_binding_continuation.py` and
+`test_web_dynamic_bindings.py` for the actual vertical slices, not duplicate loops.
+Related existing modification allowance: `tests/agent/test_ordinary_capabilities.py`,
+`test_ordinary_app_assembly.py`, `test_ordinary_admission_budget.py`,
+`test_ordinary_continuation.py` for additive compatibility negatives/positives only.
+Keep old assertions/default outputs/timeouts intact. These new names are future
+files, not claims about APIs or tests already present at the pin.
+
+### 11.3 Amendment A — implement profile contracts before B admission
+
+- [ ] Parent reviews spec §11, explicitly chooses inclusive root16 and B-only8,
+  and releases this contract slice. Do not change the meaning of the original
+  `ordinary-semantic-original-four-v1` or reinterpret the main counter as21.
+- [ ] RED in `test_decision_binding_profiles.py`: table-test every tool→feature
+  row from spec §11.2 under B1/B2, unknown profile/feature-as-tool/extra-name rejection,
+  registered-but-unwired, wired-but-unregistered, false/readiness-unknown and forged
+  ready cases. All original-four calls must have exactly the old serialized view.
+  Required positives include B1 RAG-only with scientific=false, B2 all nine when
+  permitted, and ordinary chat with RAG=true and zero allowed/required tools.
+- [ ] Introduce closed profile lookup/mapping in `ordinary_capabilities.py` first;
+  the existing builder gains optional server-only B arguments with old defaults.
+  B requires explicit reviewed wired names, captured names/flags and independent
+  RAG flag, never registry discovery. Reuse frozen `CapabilitySnapshot` bounds.
+  Define B assessment revision `whole-request-b-v1` together with its existing
+  whole-request admission task; original `whole-request-v1` stays exact. Extend
+  `loop_admission` only to the finite profile/catalog/assessment combinations.
+- [ ] RED binding mutation table: altered B profile, view digest, permission,
+  catalog/assessment revision, model/capability generation and original obligations
+  reject before Session/dispatch or continuation CAS. Same tool list is insufficient.
+  Ordinary intent approval with a scientific/tool request grants no tool. Unknown
+  classification/error does not take a chat fallback. Pure display validation still
+  rejects an unavailable/unknown capability assertion against the captured B view.
+- [ ] Implement the minimal B binding extension in the existing contracts and
+  admission/catalog paths. One source of tool mapping, no second hardcoded aliases
+  table in Web/replay. Keep actual `allowed_tools` authorization separate from view.
+- [ ] RED additive assembly/writer tests: server B profile unknown rejects early;
+  missing approved wiring leaves entry blocked; new model/capability stage fails
+  before mutation and closes only its new owned candidate; old reader/intent/loop
+  retains the old pair until drained. Snapshot captured once, then flag projection
+  cannot reread app fields. Generator remains `gmm-llama:latest`, not main model.
+- [ ] Implement only the existing `create_async`/base/project/writer seams in app.
+  Actual route integration remains blocked until §11.6; do not make incomplete B
+  work by replacing the semantic guard with original A2 dispatch. GREEN profile,
+  carry, assembly and original-four tests; record actual commands/counts/errors.
+
+### 11.4 Amendment B — shared root receipts and B8 replay
+
+Contract-first within existing proposed `decision_bindings.py`: define strict
+version1 `b_root_budget` / at-most-five `generator_requests` views before their
+loop/Session consumers. Reuse the same Task6 carry/exchange; add no new wall clock.
+The following is the future arithmetic oracle, **not an existing callable API**:
+
+```python
+# M preserves the existing intent + decision/repair debit semantics.
+M = intent_requests + decision_requests
+G = generator_request_debits  # dispatched, uncertain, or reserved; not refunded on unknown
+root_request_debits = M + G
+can_main = M < configured_main_limit and root_request_debits < 16
+can_generator = G < 5 and root_request_debits < 16
+# A candidate intent also requires two remaining main and root slots.
+```
+
+- [ ] RED arithmetic/identity tests: intent1+decision10 represented as M11 permits
+  five gen requests to reach16, then zero additional main/gen; M14/G1 permits
+  one more request, not both; M16/G0 rejects all generator calls; M1/G5 forbids
+  a sixth even with root credit. Add configured main limits below16, schema repair,
+  intent attempt0/no dispatch, and no double charge when a reservation becomes a
+  dispatch. An outer logical slot is charged in the existing tool counter, not
+  additionally in root requests. Tools still max12, chat still zero tool attempts.
+- [ ] RED journal state cases: reservation failure→no HTTP; successful reservation
+  plus proven queued cancellation→durable `not_dispatched`; ambiguous dispatch,
+  commit-then-error or lost settlement→retained debit/unknown/no replay. Ensure a
+  second same-ID persistence attempt makes zero extra backend calls. Reject bool,
+  NaN, negative/mismatched sums, missing/duplicate IDs/rounds, >five receipts or
+  >16KiB B budget view. Main `model_calls` contains only actual decision records;
+  generator and intent receipts do not masquerade as decisions.
+- [ ] Wire root check into existing intent/decision/repair and inner generator
+  reservation points without reducing `max_model_requests` from16 or resetting
+  counters after clarification. B1 gen debit is0; B2 shares remaining root credit.
+  Persist reservations before dispatch, factual settlement after it, retaining
+  separate observed versus conservative/unknown counts. Never store raw payloads.
+- [ ] RED B8 replay: original no-carry6 and ordinary7 positive controls unchanged;
+  B8 requires validated B server profile and full matching budget/binding policy.
+  Inject6/7 as B, B1 as B2, removed root fields, changed token policy/gen epoch,
+  impossible counters or altered generator slot/history/seals: actual CAS0 and
+  provider/tool0, durable waiting record unchanged. Explicitly test old profiles
+  with forged B keys do not gain B authorization. No migration/converter.
+- [ ] Select B-only8 in `configuration_digest`, snapshot and claim from validated
+  server profile; preserve the revision7 core fields and exact history/system
+  reconstruction. Validate root/gen closure and all old science/source/display
+  checks before adjacent TTL/credit/root check and actual CAS. After successful
+  CAS, deadline expiry still means consumed nonce plus zero dispatch, not rollback.
+- [ ] RED logical-clock tests reuse module-local aliases: start before refresh,
+  charge queue/validation/executor/internal rounds/cleanup/delivery, no refund at
+  snapshot, paused human wait only, TTL=`bridge_returned_at+900`. Use the existing
+  100(snapshot)/120(bridge)/130(delivery) fixture: TTL1020, not1000/1030; available
+  credit downclamps through130. At1010 positive credit alone is insufficient:
+  require current identity/source, intact journals and unused valid CAS nonce.
+- [ ] GREEN actual loop/Session/store and original budget/continuation/history
+  tests. Do not claim Web delivery accounting from core tests alone.
+
+### 11.5 B2 gate — bounded generator/client dispatch, then full dataflow
+
+- [ ] Before client edits, present the exact proposed token grant to parent:
+  the exact closed grant fields/bounds in spec §11.5, pinned generator
+  artifact/tokenizer/backend template/options identities and
+  bound algorithm, context-limit enforcement, total generator-token allowance
+  and per-prompt ceiling. Values/proof are **not available from inspected source**;
+  do not choose an arbitrary character multiplier or infer tokens from output.
+  Missing proof keeps B2 backend dispatch blocked with the fixed unavailable code.
+  This does not hold B1 receipt/core work or waive B2 multi-round positives.
+- [ ] Parent decides the named `OllamaModel.generate` (async only if applicable)
+  optional keyword-only control seam and any necessary adapter relay. First RED
+  demonstrates current text-only status/usage loss and no dispatch-time hook using
+  the real generator/helper/client with lowest HTTP transport replaced, not a copied
+  method. Keep legacy generate result/signature behavior as a positive control.
+- [ ] Define a concrete request-local control in the existing B execution wrapper:
+  captured segment/cancel, validated token grant, stable root/logical IDs, and
+  idempotent journal reserve/dispatch/settle callbacks. It is not input JSON or a
+  mutable field of shared generator/adapter/client. At each formatted final prompt
+  obtain its trusted upper bound including backend overhead, reserve bound+1000,
+  then check at actual POST. If adapter relay is needed, test shared slot identity,
+  worker reservation/rollback and `finally` reset with concurrent roots and queued
+  cancellation; no new executor and no kwargs on no-control legacy invocations.
+- [ ] RED token/request table: unknown/stale/missing grant→zero HTTP; insufficient
+  prompt+1000 or context capacity→zero HTTP; exact allowance positive; repeated
+  prompts charged each round; unknown usage charged at reserved upper bound;
+  over-bound actual usage stops/invalidates, never erases the violation. Ensure
+  actual POST gets1000 and the original prompt/temperature/gmm. Test HTTP error,
+  partial response, disconnect and cancellation as factual failure/uncertainty,
+  not the legacy apology string misreported as successful molecular generation.
+- [ ] Preserve and extend §6 real-helper scenarios: one logical invocation,
+  first-round completion, multi-round ten-candidate completion, five exhausted
+  rounds, smaller root budget exhaustion, unchanged seed, and no outer replay.
+  Queue/validation delay and cancellation before every inner request block new
+  dispatch; blocked in-flight threads/async calls must physically settle before
+  lease/close, including failure of another cleanup. Barriers release in `finally`.
+  A timeout or closed event loop is not evidence of drainage.
+- [ ] GREEN §6–§8 actual generated CandidateSet→all-candidate property/ADMET/activity
+  →actual Ranker→full dynamic report dataflow, preserving mandatory evidence/count/
+  core/target checks, exact weights/missing values and no pIC50/risk fabrication.
+  Candidate ACK still confers selection authority only, not calculation success.
+
+### 11.6 Independent sequence, Web dependency and review evidence
+
+After written approval and separate release, B1 closed profiles/bindings/receipts
+and loop/Session/B8 replay can be developed independently of unfinished Web. B2
+root/gen contract work may proceed against the pinned core after its budget choice,
+but backend dispatch/release waits for the proven token grant and reviewed narrow
+control seam. No stock generator is silently exposed while those gates are open.
+
+Before actual B Web work, parent supplies the final ordinary Task7B/C commit and
+allowlist re-pin. Compare committed `create_async`, captured base/project/writer,
+runtime carry/one-lease/intent cancellation, bridge checkpoint and post-delivery
+clamp APIs. Adapt §5 to those **actual** signatures before writing route tests.
+Use real mounted app/middleware/A1-or-B admission/loop/Session/CAS, not source-array
+mocks. Pending ordinary interface drift is not permission to read/copy active files.
+Original REAL010/DIVERSE015/multi-turn and B016/B017/RAG/generation/ADMET/reverse/ranking
+positives remain full gates; neither component tests nor an honest blocked request
+count as their completion. No second loop/budget service/static fallback.
+
+Future focused commands must be invoked through the parent-approved pre-import
+isolated runner with its verified SHA, temp stores/config and tracked-data copies;
+the following are pytest targets only, **not commands to execute in this docs task**:
+
+```text
+python -B -m pytest tests/agent/test_decision_binding_profiles.py tests/agent/test_ordinary_capabilities.py tests/agent/test_ordinary_app_assembly.py tests/agent/test_decision_binding_requirements.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_decision_binding_budgets.py tests/agent/test_ordinary_admission_budget.py tests/agent/test_ordinary_continuation.py tests/agent/test_decision_binding_continuation.py tests/agent/test_decision_continuation.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_decision_generation_once.py tests/test_ollama_generation_budget.py tests/agent/test_generation_ranking_contract_integration.py tests/agent/test_web_dynamic_bindings.py -q -p no:cacheprovider
+```
+
+Run only the released focused slice; do not invent a runner ABI or missing current
+test APIs. Actual RED must demonstrate the intended boundary, not collection/import
+failure. Record exact hashes, commands, counts, warnings, failed fixtures and ended
+sessions; no prescribed pass count or blanket closure of previous UNKNOWNs. Parent
+schedules independent SPEC/QUALITY and later broader/real gates. This draft runs
+nothing, changes no production defaults and completes neither B nor C/package8.
+
+### 11.7 Draft self-review / remaining decisions
+
+Self-review maps spec §11.2→§11.3, §11.3–11.4→§11.4, §11.5→§11.5, and full unchanged
+scientific endstate→original §§4–8 plus §11.6. Closed profiles/mapping, independent
+RAG, capture/fingerprint, inclusive16 versus old main16, at-most-five non-replayed
+generator requests, receipts/unknown handling and B8 compatibility are specified.
+No claimed tokenizer bound, runtime pass or real scientific result has been added.
+
+Open decisions are bounded: (1) explicit parent approval of root-inclusive16/B8;
+(2) a trusted enforceable generator token grant and the named client/possible
+adapter seam; (3) final ordinary Web source pin. They do not authorize a wider
+model framework or weaken any positive acceptance case. Stop after this two-doc
+draft/diff/hash review; no implementation release or commit follows automatically.
+
+### 11.8 Written review and local planning checkpoint — 2026-09-26
+
+Independent written review approved this amendment with no P1/P2. Its one P3
+source-name correction is applied above: the pinned generation path delegates
+to LegacyPythonToolAdapter, not a nonexistent CallableToolAdapter. The review
+read only the committed source pin; it did not execute tests or verify assets.
+
+Parent adopts inclusive root16 and B-only revision8, and approves the named
+Ollama/adapter invocation seams as bounded design scope, not immediate client
+code authority. Before that code slice, the actual counted transport probe and
+enforceable token grant still require evidence and an explicit implementation
+release. B1 profile/binding/source-receipt core may be released separately after
+source re-pin; B Web remains dependent on the final ordinary Web interface.
+No implementation slice is released by this documentation checkpoint itself.
+
+Parent authorizes a local commit of these two reviewed planning documents only.
+No push, merge, test run, model activation or deployment follows. All B1/B2,
+C and final package8 completion gates remain pending.

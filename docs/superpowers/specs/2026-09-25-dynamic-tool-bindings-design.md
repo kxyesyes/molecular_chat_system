@@ -2,7 +2,9 @@
 
 Date: 2026-09-25. Status: **G0 / B-D0 design and written Reverse/RAG receipt amendment parent-approved, including the two existing RAG files' narrow interfaces/future allowlist. Local docs-only freeze authorized. Dependency/implementation gates remain closed; stable mmap/source ownership still requires actual proof. Not P7 completion.**
 
-Worktree: `dynamic-tool-bindings-plan`; branch: `codex/dynamic-tool-bindings-plan`; original source base: `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5` (Planner #71); prior docs freeze: `74739aa72c36af27e1561a21359e87521860897b`. Only this file and `docs/superpowers/plans/2026-09-25-dynamic-tool-bindings.md` may be written, explicitly staged and locally committed under the current approval. No implementation, tests, compilation, network, environment/credential or scientific-asset inspection, merge or push. Authority remains `AGENTS.md`, `docs/PROJECT_STANDARDS.md` and the narrower request. Read-only source/review documents are interface evidence, not live results.
+2026-09-26 amendment status: **§11 is a proposed profile/root-budget amendment for independent written review and explicit parent budget approval, not an implementation release.** Its source pin and async-assembly boundary supersede the historical dependency/constructor descriptions below. This drafting task permits edits to these same two docs only; the earlier local-commit instruction does not apply: **no commit in this task**.
+
+Worktree: `dynamic-tool-bindings-plan`; branch: `codex/dynamic-tool-bindings-plan`; original source base: `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5` (Planner #71); prior docs freeze: `74739aa72c36af27e1561a21359e87521860897b`. Only this file and `docs/superpowers/plans/2026-09-25-dynamic-tool-bindings.md` may be written in the current draft; no staging or commit. No implementation, tests, compilation, network, environment/credential or scientific-asset inspection, merge or push. Authority remains `AGENTS.md`, `docs/PROJECT_STANDARDS.md` and the narrower request. Read-only source/review documents are interface evidence, not live results.
 
 ## 1. Approved bounded decision and alternatives
 
@@ -45,7 +47,7 @@ The dependency table and coordination bullets above are historical observations,
 
 Gauss's two important precheck findings are confirmed by source inspection. `src/reverse_target/predictor.py::_load_or_compute_popcounts` (128) accepts a cached array on row count alone, while `batch_tanimoto_similarity` uses its values in the denominator. `_combine_similarity_scores` (150) reads/resolves/clamps Morgan weight at each call. Thus TSV/fingerprint hashes alone omit both an actually consumed cache and effective scoring configuration. `src/rag/retrieval.py::search_molecular_index` (12) skips invalid labels/non-finite scores and can return `[]` after dropping everything; `RAGSearchTool.execute` then reports successful no-hit. `RAGSystem` has mutable source/index/manifest fields, but no same-invocation receipt or `metadata` API proving this distinction. The previous plan's phrase "via existing service metadata" was insufficient and is removed.
 
-### Current parent-reported dependency/approval record for this freeze
+### Historical parent-reported dependency/approval record for the receipt freeze
 
 - 4C PR #73 **merged as `0295e996`**; the earlier PR-head/CI-pending statements above are historical.
 - Main PR #76 is **`5ad08ac`**. This does not rebase or merge the docs branch's original source base.
@@ -78,7 +80,7 @@ Scientific source reads were not executed. Adapter validation proves a shape, no
 
 ## 4. Tool scope, permissions and unsupported requests
 
-B1 profile contains the initial four plus `admet_predictor`, `reverse_target_predictor`, `rag_search`; B2 adds `llm_molecular_generator` and `candidate_ranker`. Profiles are immutable server allowlists intersected with admitted obligations and existing owners, not new browser modes. Keep default startup unchanged and A2 constructor-only activation; no separate endpoint or settings/key store. Parent reviews how B's server profile is injected into the eventual A2 runtime; a browser cannot select it.
+B1 profile contains the initial four plus `admet_predictor`, `reverse_target_predictor`, `rag_search`; B2 adds `llm_molecular_generator` and `candidate_ranker`. Profiles are immutable server allowlists intersected with admitted obligations and existing owners, not new browser modes. Keep default startup unchanged; the proposed §11 amendment uses the reviewed semantic async factory rather than synchronous semantic construction. No separate endpoint or settings/key store. Parent reviews how B's server profile is injected into the eventual ordinary runtime; a browser cannot select it.
 
 - `scientific_tools=false` denies calculation/generation/ranking/reverse; `rag=false` denies actual retrieval. Parent-approved rule: an explicit local retrieval request with tools false and RAG true allows only `rag_search`; the two permissions remain separate. Chat never gains tools just because RAG defaults true.
 - Ordinary `enable_rag=true` chat means permission/preference, not `retrieval_performed`. Actual retrieval is a model-chosen action on an admitted local-retrieval request and yields a source-backed observation. Do not auto-run legacy RAG or inject retrieved instructions as authority.
@@ -214,7 +216,7 @@ Parent approves separate, still pending **P7-C** for `molecular_docking` / real 
 
 The current-real-acceptance plan's E01–E12 are proposed final rows, not twelve existing passes. B1/B2 component tests, A2 enabled-route contracts, local reviewed 4C/G1 or property-only ranking do not prove all twelve ordinary-route cases. Vina/side effects and final repeated real entry acceptance remain pending under C/package 8. Goal stays packages 1–8, no deployment; parent decides final scope, not this sidecar.
 
-## 10. Parent decision / revision gates
+## 10. Historical parent decision / revision gates (see §11 re-pin)
 
 - **G0 / B-D0 and written receipt amendment approved:** B1 then B2, closed arguments/proofs, independent explicit RAG permission, full-batch coverage, actual Ranker/no rescore/mandatory unknown fail, and separate pending P7-C. Generation remains at most one logical invocation/root-request slot with existing at-most-five internal replenishment rounds, counted/budgeted/drained and never logically replayed. No new model policy or retry-field plumbing. Parent approved the amendment text/future allowlist and local two-doc commit only, not implementation/A2 activation.
 - **B-D1 dependency pin (blocked):** 4C PR73 merged `0295e996`; main #76=`5ad08ac`; G2 merge `27170d95` recorded. A1's four-file diff matches `9d1305e` and passed both reviews but still needs landing. A2 docs `15a903d9` still have no implementation and require runtime implementation/review/landing. G1 PR77 `f48039e` is in CI, not landed. Pin the exact integrated content before implementation; this coordination update does not release it.
@@ -222,4 +224,281 @@ The current-real-acceptance plan's E01–E12 are proposed final rows, not twelve
 - **B-D3 implementation review:** actual-loop and normal-route dataflow/cancellation/continuation/ACK tests plus exact file allowlist. Main/dataset/generator revision changes invalidate waiting runs as appropriate. No static-plan surrogate.
 - **B-D4 final evidence:** parent-coordinated offline regressions, independent review, CI and explicitly authorized repeated real provider/science/browser acceptance on integrated revision; C still required for Vina scope. No new default activation/deployment inferred.
 
-Companion plan defines precise future write ownership and tests. Current delivery is the **parent-approved two-document local commit freeze following `74739aa`**; return its hash and clean status, then stop. No implementation/tests/assets/network/push/merge. Stable source ownership is unproven until actual implementation evidence establishes it; P7-B implementation, P7-C and final package-8 proof remain incomplete.
+Companion plan defines precise future write ownership and tests. The historical delivery was the **parent-approved two-document local commit freeze following `74739aa`**; this is not a commit instruction for the §11 draft. No implementation/tests/assets/network/push/merge. Stable source ownership is unproven until actual implementation evidence establishes it; P7-B implementation, P7-C and final package-8 proof remain incomplete.
+
+## 11. Proposed ordinary-profile and shared-root-budget amendment
+
+### 11.1 Source pin, scope and compatibility
+
+This section is a draft, not a claim that B is implemented. Source was read only
+through `git show 1da64f2694203de0ef3f3c875ceb775e4be0dee4:<path>`: the committed
+ordinary Task7A checkpoint containing Task6 `dc1295e`. No active ordinary Web
+files, configuration, credentials or assets were inspected; no imports, tests
+or network calls were made. Plan §10's local ancestor record remains historical
+evidence, not a fresh remote/CI check. Ordinary Task7B/C Web flow is **not frozen**
+at this pin. `create_async` currently assembles capabilities but rejects semantic
+entry with `ordinary_semantic_not_assembled`; do not remove that guard to test B
+against the old no-carry route.
+
+Reuse `AdmissionCarryIn`, `ActiveSegment`, `AdmissionExchange`, the existing
+Session journal, loop, ownership ledger and single model lease. Source interfaces:
+`ordinary_capabilities.build_capability_snapshot` currently implements only
+original-four; `ordinary_admission.loop_admission` explicitly accepts only
+`ordinary-semantic-original-four-v1`; `ModelDecisionLoop.run` already accepts
+`admission_carry`/`admission_exchange`; `SingleAttemptTool` and adapters already
+have per-invocation dispatch guards. The outer guard does not cover the generator's
+inner requests. None of these observations proves a running B contract.
+
+No-carry callers keep revision6 and their existing budgets/outputs. Existing
+`ordinary-semantic-original-four-v1` keeps its exact catalog, permissions,
+16-main/12-outer-tool/300-second limits, display gate and revision7 behavior.
+No new B field is mandatory in either old path. Intent still proposes a class,
+never tool authority; known science cannot downgrade to chat on failure.
+
+### 11.2 Closed profiles and canonical mapping
+
+Proposed server-only profile IDs are `ordinary-semantic-b1-v1` and
+`ordinary-semantic-b2-v1`. B1 contains exactly seven canonical tools; B2 exactly
+nine. Unknown profile IDs/aliases reject before dispatch. The browser, model,
+continuation payload and retrieved text cannot choose a profile or permission.
+Keep the ordinary policy selector `semantic_v1` distinct from this binding profile.
+
+| Canonical tool ID | Capability feature ID | B1 | B2 | Request permission |
+|---|---|---|---|---|
+| `property_calculator` | `property_calculator` | yes | yes | scientific |
+| `drug_likeness_assessment` | `drug_likeness_assessment` | yes | yes | scientific |
+| `activity_predictor` | `activity_predictor` | yes | yes | scientific |
+| `target_database_search` | `target_database_search` | yes | yes | scientific |
+| `admet_predictor` | `admet_prediction` | yes | yes | scientific |
+| `reverse_target_predictor` | `reverse_target` | yes | yes | scientific |
+| `rag_search` | `rag_retrieval` | yes | yes | independent RAG |
+| `llm_molecular_generator` | `molecule_generation` | no | yes | scientific |
+| `candidate_ranker` | `molecule_ranking` | no | yes | scientific |
+
+`ordinary_chat` is a product feature, not a tool; `molecular_docking` remains
+unwired/unpermitted in both profiles. Feature IDs are never adapter lookup keys.
+Use the same eleven reviewed product features, max32 features/16-KiB immutable
+snapshot. B uses catalog revision `ordinary-product-b-v1` so descriptions can
+describe installed B wiring without changing the old catalog's text/digest.
+Use B assessment revision `whole-request-b-v1`; the accepted profile/catalog/
+assessment triples are closed, leaving the original `whole-request-v1` unchanged.
+Descriptions distinguish product support, wiring, permission and unknown health;
+they cannot promise ADMET completeness, usable assets, retrieval or generation.
+
+The pure builder takes closed profile, canonical registered names and an explicit
+server-reviewed wired-name set from completed assembly, plus strict request
+flags/permitted names. Profile membership **and** reviewed wiring **and** presence
+are required for `wired`; registration alone cannot set it. Capability permission
+is only an upper bound. A scientific feature additionally needs
+`scientific_tools=true` and its canonical tool in the request allowlist. RAG needs
+its independent strict `rag_enabled=true` and `rag_search` in that allowlist,
+regardless of `scientific_tools`. Actual action authorization further intersects
+whole-request admission/obligations and source preconditions. An ordinary chat
+with `enable_rag=true` still has zero allowed/required tools and zero retrieval.
+An explicitly admitted local search with scientific tools false and RAG true can
+dispatch **only** RAG. Disabled/unsupported mixed obligations cannot be discarded.
+Every current readiness remains `unknown`; no discovery, health, env or model probe.
+
+Reuse committed `MolecularChatApp.create_async`, `_build_ordinary_capability_base`,
+`project_ordinary_capabilities(base, ...)`, `_replace_ordinary_capability_base`
+and `_publish_llm_config`. Future additive server-only arguments must preserve
+the old signatures' defaults; do not introduce another constructor/startup path.
+Capture one immutable base once under the existing reader, project the flags once,
+then use that same snapshot in admission, intent, answer/display validation and
+replay. When reconstructing B canonical names from features, use the inverse of
+the explicit table, not the old identity-name projection. Model/capability pair
+changes stage before mutation in the existing writer;
+no nested writer, generator-model rebind or partial publication. Profile/catalog/
+wiring changes rotate capability generation. B2 also binds its independently owned
+generator generation and token-policy digest; they cannot be inferred from the
+main-model epoch. Any unassembled B entry fails closed, not back to original-four.
+
+Bind exact profile, catalog revision, full projected-view digest, model/capability
+generations and original query/history/obligations in the existing admission binding
+and B configuration fingerprint. Revalidate against a current trusted capture before
+CAS and before releasing an answer. A snapshot cannot select a new view; same tools
+with different profile, permission, source or generator generation are not equivalent.
+Preserve the original ordinary display gate, including validation before persistence
+or exposure, and the unchanged deterministic scientific finish/evidence requirements.
+
+### 11.3 Recommended root ceiling, not a second main-model allowance
+
+**Proposed choice requiring explicit parent approval: root backend ceiling16,
+inclusive of main requests and generator backend requests.** Keep the existing
+names/semantics: `M = total_model_requests = intent_requests + model_requests`
+(intent plus decision, including schema repair), `M <= configured_main_limit <=16`;
+outer tool reservations/attempt ceiling remains12. One logical generator invocation
+uses its existing outer tool slot, not an extra backend-request debit. Its actual
+inner requests use separate generator receipts, at most five, within the same root.
+
+| Alternative | Consequence | Recommendation |
+|---|---|---|
+| Inclusive16 | Generation competes with remaining main-call allowance; bounded total work, may stop before five rounds | Adopt subject to parent budget approval |
+| Main16 plus generator5, total21 | Keeps all old main slots after generation but authorizes a larger root budget | Not selected; would need a different explicit budget decision |
+| Main16 plus unaccounted/free5 | Conceals internal resource use and uncertain attempts | Reject |
+
+Define `generator_request_debits` as dispatched, uncertain and outstanding reserved
+backend requests, excluding only **durably proven never-dispatched** released
+reservations. `root_request_debits = M + generator_request_debits <=16` is the
+conservative admission check. Preserve factual counts separately:
+`generator_backend_requests` counts observed dispatches; an uncertain transport
+boundary has bounded unknown status, not a fabricated zero or exact success count.
+Existing main counters are not rewritten as physical HTTP counts. If reporting
+`root_backend_requests`, derive actual main and generator dispatch facts from their
+journals and disclose uncertainty; never label a reservation as an observed request.
+Temporary pre-call reservations cannot be counted twice when converted to these
+debits. Root capacity is checked before intent, every decision/repair and every
+generator backend call; a candidate intent still needs two remaining main **and**
+root slots. Known chat needs one. A useful finishing decision also costs a main/root
+slot; budget exhaustion cannot fabricate successful completion without that step.
+
+Before each generator dispatch, persist a unique reservation in the existing root
+Session execution journal, tied to root trace/logical slot, round1..5, request ID,
+input/proof digest, generator generation and token-policy digest. Recheck deadline,
+cancel, remaining main/root limits and tokens adjacent to actual dispatch, after
+validation/queue delays as well as at the producer boundary. On a proven pre-dispatch
+stop, persist `not_dispatched`; on ambiguous dispatch/write/commit, retain the debit
+and uncertainty and never rerun. Journal retries reuse the same ID and never repeat
+HTTP. Persistence failure before reservation means zero dispatch; failed settlement
+after dispatch cannot refund the reservation or manufacture a durable receipt.
+
+Use separately named `b_root_budget` and `generator_requests` metadata (closed
+version1 projections in existing binding contracts/Session metadata, not a new DB
+or budget service). Include policy ID `b-root-inclusive-16-v1`, configured main and
+root limits, main total, generator debits, root debit total, logical-slot identity/
+state, and at most five generator receipts. Each receipt has its reservation ID,
+round, dispatch state (`reserved`, `not_dispatched`, `dispatched`, `settled`,
+`uncertain`), fixed outcome, reserved tokens, nullable verified usage and actual
+request identity when known. Validate native scalar types, finite values, identities,
+state transitions and all sums; bound the combined B budget view to16KiB within the
+unchanged total snapshot limit. No raw prompts/responses, credentials, live objects
+or absolute monotonic clocks in durable metadata. Missing/corrupt facts fail closed.
+
+The process-local control uses Task6's **same ActiveSegment**, begun before Web
+refresh/lease acquisition. Every internal round, backend wait and cleanup consumes
+that credit; no per-round/retry/resume300 reset. Stop scheduling on deadline/cancel,
+then physically drain workers/tasks/client consumers before lease/model close.
+Timeout is not settlement. Keep the set-once saved checkpoint and post-drain/delivery
+downward clamp; human waiting alone pauses credit. Keep Web TTL anchored to
+`bridge_returned_at + 900`, and validate TTL/cap/budgets immediately before CAS and
+again before first dispatch. If CAS succeeded then the cap expires, record failure
+without dispatch; do not claim the nonce remained unconsumed.
+
+### 11.4 B versioning composes with semantic revision7
+
+Use B-only `decision_protocol_revision=8` plus `binding_revision='dynamic-bindings-v1'`
+and `budget_policy='b-root-inclusive-16-v1'` in its fingerprint. Revision8 reuses the
+validated revision7 ordinary-admission fields, exact history prefix, display replay,
+carry/exchange and counter relations; it adds B proofs/root receipts, not another
+loop or clock. `TaskRequirements.version=2` and outer decision envelope version1 are
+separate schemas. Expected revision is selected by validated **server** profile,
+not a snapshot field. Old no-carry6 and original ordinary7 keep their existing paths.
+No converter promotes an old6/7 snapshot into B8 or B1 into B2. Switching profile,
+root/token policy, generation or binding schema invalidates waiting before CAS.
+B execution requires the validated semantic carry and matching server B profile;
+no-carry plus a B profile flag is rejected, not interpreted as an old revision6 run.
+
+B8 replay validates main journal length/intent receipt exactly as Task6, plus root
+sums, generator receipt continuity, consumed logical slot and source closure. No
+unknown generator dispatch resets to zero; no consumed generation resumes its inner
+rounds. Completed/partial/failed/cancelled/uncertain slots remain non-replayable.
+Direct old callers gain no B authority merely by adding snapshot keys. The trusted
+carry stays separate from browser-derived AgentContext metadata; any optional B
+binding extension must be absent in old fingerprints and preserve their exact output.
+
+### 11.5 Token bound gate and minimal client seam proposal
+
+At the pinned source, `LLMMolecularGenerator._generate_with_retry` defaults to five;
+`_generate_with_llm` / `_optimize_with_llm` build the actual final prompt and each
+call `_call_llm_sync`. That method and `_run_async_in_new_loop` pass `max_tokens=1000`.
+`generation_request.py` bounds query/evidence **characters**, not tokens.
+`OllamaModel.generate` sends `options.num_predict=max_tokens` to `sync_client.post`,
+returns only `response`, and converts HTTP/errors to text. It has no trusted prompt
+token counter, template/context enforcement contract, usage receipt or per-call
+dispatch hook. `generate_async` has the same text-only boundary. A model name or
+post-call usage field does not prove a pre-dispatch token ceiling.
+
+For B2 require an immutable server-owned generator token grant, bound to the captured
+generator generation and policy digest: exact backend/model artifact identity,
+tokenizer and server template/system/options identity, reviewed bound-algorithm
+revision, positive total generator-token allowance, per-prompt token ceiling and
+verified backend context/output limit behavior. No browser, model answer or raw
+environment value supplies it. Compute a conservative bound for the **complete final
+prompt and backend-added template/special/system tokens** before each dispatch;
+reserve that bound plus1000 against the remaining generator-token allowance. Check
+context fit without silently truncating required input. Repeated prompts are charged
+again. Five rounds reserve all five prompt bounds plus up to5000 completion tokens.
+Unknown usage retains the full reservation; validated actual usage may be reported
+separately but does not refund a same-root allowance. Usage exceeding the reservation
+is a violated bound: stop further requests and block release, not truncate the receipt.
+
+The grant is a closed frozen record in the proposed binding contracts, bounded to
+4KiB, with exact fields: `version='1'`, `generator_generation`, `backend_revision`,
+`model_artifact_digest`, `tokenizer_digest`, `template_options_digest`,
+`bound_policy_revision`, `total_reserved_tokens`, `prompt_token_ceiling`,
+`context_token_limit`, `completion_token_limit=1000`. Token values are positive
+native integers (not bool); identities are bounded safe IDs/digests. Its digest is
+part of the B fingerprint. A record's shape or a caller-supplied "verified" flag is
+not proof: the assembly owner must validate the reviewed bound implementation and
+backend identity before publishing it. The total is specifically a generator-token
+reservation ceiling, not a newly asserted all-main-plus-generator token budget;
+existing main token limits remain unchanged.
+
+No numeric prompt ceiling/total token grant, tokenizer guarantee or actual usage is
+invented here. Until the pinned backend/tokenizer/template can supply the above proof,
+`generator_token_bound_unavailable` blocks B2 backend dispatch; it does not turn a
+generation obligation into chat or a one-call workaround. B1 has no generator and
+can proceed under its own later release. Full B2 remains mandatory, not completed by
+this blocked state or by narrowing the original positive multi-round/count cases.
+
+Narrow proposed extra allowlist, **requiring parent approval before code**:
+`src/web/models/ollama_model.py::generate` (and `generate_async` only for the supported
+async binding) may gain an optional keyword-only request-local control/receipt seam.
+Legacy signatures/default behavior remain compatible; no global client mutation,
+health/discovery/tokenizer download, main-model replacement or new model framework.
+At the actual POST boundary this seam verifies the supplied trusted grant, checks
+deadline/cancel, durably reserves and marks dispatch, then records sanitized status/
+settlement and verified usage if available. The B path must not mistake the current
+exception-to-apology text for successful generation. Preserve gmm, temperature,
+prompt semantics, completion1000 and the five-round algorithm; no hidden transport
+retry. A live enforcement/tokenizer capability missing from this client cannot be
+fixed just by passing a number: return the exact missing proof to parent.
+
+The existing adapter calls `tool.execute(payload)` without a control argument.
+Before B2 implementation, prove a request-local execution view shares the **existing**
+adapter concurrency reservation/owner and passes control to the real generator.
+If that cannot be expressed through the existing execution wrapper, the only proposed
+additional adapter change is an opt-in per-invocation control relay in
+`src/agent/tooling/adapters.py` to that generator view, with default no-keyword behavior,
+reset in `finally`, no shared tool fields and no new pool. This is a named scope gate,
+not permission to bypass adapters or copy their executor/slot machinery.
+
+### 11.6 Unchanged endstate and release decisions
+
+All original positives remain: explicit B1 local RAG with same-invocation source
+receipts, full ADMET obligations, reverse-to-target identity, B2 targeted/seeded
+generation with multi-round completion of ten when feasible, all-candidate analyses,
+actual Ranker scores/weights and full same-frame report/mount/ACK/follow-up dataflow.
+No missing ADMET becomes zero; no pIC50 becomes normalized activity. B016/B017 and
+the parent ordinary REAL010/DIVERSE015/multi-turn gates are not rewritten as rejection
+tests. Their evidence remains pending, alongside C and package8 real acceptance.
+
+Decisions still needed before affected code: parent approval of inclusive16 and B8;
+the exact enforceable generator grant and any named client/adapter extension; final
+ordinary Task7B/C source pin before Web integration. These are bounded gates, not a
+request to prove a real model successful before writing B1 contracts. After written
+review and a separate release, B1 core can start; no B implementation is released by
+this draft and no scientific assets are declared safe by source inspection.
+
+### 11.7 Written amendment decision — 2026-09-26
+
+Independent written review approved the §11 design and companion plan without
+P1/P2; a non-blocking adapter-class citation in the plan was corrected against
+the same committed source pin. Parent chooses inclusive root16 and B-only8,
+and approves the named optional client/adapter control seams as bounded design
+scope only. Numeric token grants and enforcement proof remain unestablished;
+the counted actual transport probe and trusted bound must precede their code
+release. Ordinary Web re-pin remains required for B normal-entry integration.
+This supersedes the two undecided parent choices above, not the remaining proof
+gates. The two documents may be committed locally; B source implementation,
+network/model execution, publication and deployment are not released here.
