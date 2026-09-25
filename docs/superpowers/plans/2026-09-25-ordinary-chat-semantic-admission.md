@@ -193,7 +193,7 @@ No command in this document has run. A RED run must fail for the named missing c
 
 **Files:** create `src/agent/contracts/ordinary_intent.py`, `tests/agent/test_ordinary_intent_protocol.py`.
 
-- [ ] Add the following RED test plus parametrized invalid documents. Run the test module through §2; expect missing module/parser before implementation.
+- [x] Add the following RED test plus parametrized invalid documents. Run the test module through §2; expect missing module/parser before implementation.
 
 ```python
 import json
@@ -212,7 +212,7 @@ def test_namespaced_strict_intent():
         parse_ordinary_intent_json(raw.replace('false', '"false"'))
 ```
 
-- [ ] Implement the closed frozen contract and parser. Required fields have no defaults; schema is `IntentEnvelope.model_json_schema()`. Use the existing decoder for duplicate/nonfinite/wire errors, then the stricter depth4 bound and fixed-error translation. No rationale, spans, confidence, rewrite or tools.
+- [x] Implement the closed frozen contract and parser. Required fields have no defaults; schema is `IntentEnvelope.model_json_schema()`. Use the existing decoder for duplicate/nonfinite/wire errors, then the stricter depth4 bound and fixed-error translation. No rationale, spans, confidence, rewrite or tools.
 
 ```python
 from typing import Literal
@@ -252,9 +252,9 @@ def parse_ordinary_intent_json(raw):
         raise DecisionProtocolError('invalid_ordinary_intent') from None
 ```
 
-- [ ] Parametrize all eight kinds, wrong version/type, extra nested/root keys, duplicate key, nonfinite, empty/free text/fenced JSON, multiple envelopes, decision envelope and >4096 UTF-8 bytes. History existence is a server admission test, not a claim that JSON validation establishes memory.
-- [ ] GREEN: §2 with `tests/agent/test_ordinary_intent_protocol.py` and `tests/agent/test_decision_transport_boundaries.py`; retain all old decision-v1 expectations.
-- [ ] Check diff and explicitly checkpoint only these files after the task review; suggested commit `feat: define bounded ordinary intent protocol`.
+- [x] Parametrize all eight kinds, wrong version/type, extra nested/root keys, duplicate key, nonfinite, empty/free text/fenced JSON, multiple envelopes, decision envelope and >4096 UTF-8 bytes. History existence is a server admission test, not a claim that JSON validation establishes memory.
+- [x] GREEN: §2 with `tests/agent/test_ordinary_intent_protocol.py` and `tests/agent/test_decision_transport_boundaries.py`; retain all old decision-v1 expectations.
+- [x] Check diff and explicitly checkpoint only these files after the task review; suggested commit `feat: define bounded ordinary intent protocol`.
 
 ## Task 2 — One shared transport operation and factual intent journal
 
@@ -808,3 +808,25 @@ Independent SPEC review of `51b795e` found one P2: Task7C and Task8C incorrectly
 ## 11. Plan approval and bounded implementation release
 
 Independent SPEC re-review approves `a5c37a6c9e962598d7b4fe26c21fec4ab047f45a` (tree `710f73a0ad5f89c561981fc46131c1f642ed52e4`) and closes the TTL P2. Parent has reviewed the plan against the approved spec and current source and now releases **Task1 only**, using TDD in this independent worktree. This supersedes the historical planning-only status for that task, not the whole implementation. The new ignored §2 launcher must receive source inspection before test imports. Only `src/agent/contracts/ordinary_intent.py`, `tests/agent/test_ordinary_intent_protocol.py`, and later truthful Task1 evidence in this plan may change. No routing, transport, model/asset activation or other task implementation is released yet. Task1 requires independent SPEC then QUALITY on its frozen code/test snapshot before the next code batch. Tests have not run at this release checkpoint.
+
+## 12. Task1 TDD and independent review evidence
+
+Task1 is complete locally, not published or integrated into routing. At parent `1b98c01d425919e31c59e57af36451ecfa1e927f`, only these two new files implement the protocol:
+
+| File | Frozen SHA256 |
+|---|---|
+| `src/agent/contracts/ordinary_intent.py` | `b6816709be2a14a956729abd063d6efa01aafc1c3b869f2c8fc3454ec18a4fbd` |
+| `tests/agent/test_ordinary_intent_protocol.py` | `191cda1d729d31be4b1b7d86a008483f9a770aa4ea3788d4c73997d45e91717f` |
+
+The ignored §2 launcher was copied exactly from the approved plan, source-inspected and AST-checked before imports. SHA256 `c56e66ad7ddec7e7004e2171b630370e9450897b8a89ac0bf6c1b60a099891b4` stayed unchanged. Tests use real Pydantic/parser behavior under the synthetic OS-whitelisted/temp-cwd/config/data/network-denied environment; no external provider, user credential or scientific asset is involved.
+
+| Actual execution | Result |
+|---|---|
+| RED, all new tests before module creation | 186 failed / 18.82s / exit 1, session 28332 |
+| GREEN, new protocol plus unchanged decision transport boundaries | 312 passed / 18.60s / exit 0, session 90639 |
+| Independent SPEC, same two modules once | 312 passed / 18.34s / exit 0, session 49718 |
+| Independent QUALITY, same two modules once | 312 passed / 18.81s / exit 0, session 47664 |
+
+RED failures are explicit in-test missing-module assertions, not collection/setup/teardown errors. GREEN/review runs contain 186 new and 126 existing cases, with zero failures, skips, warnings or deselections. Both independent reviews approve the exact unchanged hashes with no finding. All sessions ended, temporary directories cleaned and final Python/pythonw process counts are zero. Existing decision-v1 implementation/tests are untouched.
+
+Commands use MedChat Python `-I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_intent_protocol.py`; GREEN and reviews append `tests/agent/test_decision_transport_boundaries.py`. The parser only returns a strict non-authoritative proposal. Native API envelope transport, semantic admission/history, capability/display/budget integration and real-model behavior remain future tasks. This checkpoint is not full Agent, CI or live-acceptance evidence; no production mode was changed.
