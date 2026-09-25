@@ -1646,3 +1646,59 @@ limitations remain. Parent may now publish a draft PR for the reviewed code
 and truthful evidence documents. Publication is not merge approval or proof
 that the remaining eight remote checks have passed. Recheck exact head, remote
 main, all checks and unresolved reviews before any later authorized merge.
+
+## 30. First PR81 CI failure — schema-version assertion
+
+Draft PR81 was published at `e2e654bbf8ac0e73c8e96ee2efbd4f95368c757f`.
+Run `36165824833`, Agent job `108173199465`, completed with
+**1 failed, 9338 passed, 1 skipped, 23858 warnings in 556.97s**, exit1.
+It did not hit the unchanged 600-second command deadline. Other six executable
+partitions passed; `offline-quality` failed because Agent failed. PR remains
+unmerged. A real remote read confirmed main still `30a2353`, no unresolved PR
+review threads and no omitted thread pages; that is not a passing-CI gate.
+
+The unique failure is
+`test_ordinary_intent_protocol.py::test_schema_helper_matches_existing_contract_style_and_is_fresh`,
+line319: `properties['version']['type']` raises `KeyError: 'type'` under CI's
+Pydantic2.5.0. The preceding assertion verified `const == '1'`; a constant
+string already restricts both value and type. The local newer schema also
+includes a redundant `type: string`. This is an overly specific representation
+assertion, not evidence that scientific validation failed or the provider ran.
+
+The bounded repair is test-only: retain exact constant, required/extra/freshness
+and all invalid-input checks; accept omitted redundant type, but reject an
+explicit non-string type. Verify the missing-type and wrong-type controls as
+version-compatibility fixtures, not live provider responses. No production
+schema, dependency version, scientific assertion or deadline change is allowed.
+The first failed run remains recorded even if a later corrected head passes.
+Focused verification and independent re-review remain pending at this entry.
+
+### Compatibility RED/GREEN (review pending)
+
+Only `tests/agent/test_ordinary_intent_protocol.py` changes: the two version
+assertions share a tiny test helper; missing redundant type is accepted only
+with `const == '1'`, and explicit type must equal `string`. Six schema-fixture
+controls cover valid const-only/const-string, wrong/null type, numeric constant
+and a different string constant. Production parser/schema and all original
+required/extra/freshness/invalid-input checks remain unchanged.
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_intent_protocol.py::test_schema_helper_matches_existing_contract_style_and_is_fresh tests/agent/test_ordinary_intent_protocol.py::test_version_schema_compatibility_variants
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_intent_protocol.py tests/agent/test_ordinary_intent_transport.py
+```
+
+Before repair, the first command reproduced the missing-type `KeyError` in the
+const-only control: **1 failed, 6 passed, zero warnings, 1.22s, exit1**.
+After repair, the second command gave **267 passed, zero warnings, 2.22s,
+exit0**. No Pydantic2.5 installation/local execution is claimed: actual old-version
+evidence is the failed CI, with controlled schema-shape fixtures locally.
+Test SHA256 is `1423AC9900A7331F5B7E0DDDEDC8D1646501BA48CAE436E8BF8371018307C76E`;
+runner is unchanged. No broad rerun or timeout adjustment occurred.
+
+Independent SPEC approved the one-file test repair; subsequent independent
+QUALITY approved and ran the same two-module command once: **267 passed,
+zero warnings/skips/deselections, 1.98s, exit0**. HEAD, test and runner hashes
+were unchanged; `diff --check` passed and no Python process remained. Parent
+may commit this bounded test-only repair and evidence, then obtain a fresh
+exact-head CI result. Earlier full-source reviews still apply to unchanged
+production code; the original failed CI is retained above, not rerun in place.

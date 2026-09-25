@@ -304,6 +304,29 @@ def test_decision_and_intent_namespaces_never_cross(action, fields):
                           "invalid_ordinary_intent")
 
 
+def _assert_version_schema(version):
+    assert version["const"] == "1"
+    # Pydantic 2.5 omits type here; the string const already fixes its value/type.
+    assert version.get("type", "string") == "string"
+
+
+@pytest.mark.parametrize("version,valid", [
+    pytest.param({"const": "1"}, True, id="const-only"),
+    pytest.param({"const": "1", "type": "string"}, True, id="const-string"),
+    pytest.param({"const": "1", "type": "integer"}, False, id="wrong-type"),
+    pytest.param({"const": "1", "type": None}, False, id="null-type"),
+    pytest.param({"const": 1, "type": "string"}, False, id="numeric-const"),
+    pytest.param({"const": "2", "type": "string"}, False, id="wrong-const"),
+])
+def test_version_schema_compatibility_variants(version, valid):
+    # Pydantic-version schema fixtures, not production model responses.
+    if valid:
+        _assert_version_schema(version)
+    else:
+        with pytest.raises(AssertionError):
+            _assert_version_schema(version)
+
+
 def test_schema_helper_matches_existing_contract_style_and_is_fresh():
     module = contract()
     schema = module.ordinary_intent_json_schema()
@@ -315,8 +338,7 @@ def test_schema_helper_matches_existing_contract_style_and_is_fresh():
     assert inner["type"] == "object" and inner["additionalProperties"] is False
     assert set(inner["required"]) == set(inner["properties"]) == set(FIELDS)
     properties = inner["properties"]
-    assert properties["version"]["const"] == "1"
-    assert properties["version"]["type"] == "string"
+    _assert_version_schema(properties["version"])
     assert properties["kind"]["enum"] == list(KINDS)
     assert properties["history_relation"]["enum"] == list(RELATIONS)
     assert properties["unresolved"]["type"] == "boolean"

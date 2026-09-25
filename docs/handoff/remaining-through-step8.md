@@ -47,6 +47,13 @@ section29 records reviewer availability and exact evidence boundaries. Local
 duration exceeds CI's 600-second Agent command budget; remote CI remains a
 separate gate. No full repository/real scientific success is claimed.
 
+PR81 first CI at `e2e654b` failed solely on a Pydantic2.5 constant-schema test
+representation assumption: **1 failed, 9338 passed, 1 skipped in 556.97s**,
+not a timeout. Six other executable gates passed; aggregate failed. The
+test-only compatibility repair and six controls passed267 locally and267 in
+independent review. Production code/dependencies/deadlines are unchanged.
+PR81 stays unmerged until fresh exact-head CI is green; details in plan§30.
+
 Historical 2026-09-25 checkpoint (superseded status, retained chronology): package7 A1 was in independent finding closure; A2 design awaited landed A1; package8-A offline aggregator was under review. Those dependency/publication states are updated below, not evidence that the historical failures never occurred. No production-entry switch, external provider activation or deployment occurred in those batches.
 
 ## A2 G1 release and documentation freeze — 2026-09-25
