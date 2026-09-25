@@ -78,61 +78,190 @@ def last_observation(messages):
 
 @pytest.mark.parametrize('cancelled', [False, True])
 def test_owned_loop_has_no_terminal_until_nested_workers_join(setup_loop, monkeypatch, cancelled):
-    import inspect
     import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from src.agent.runtime.worker_ownership import WorkerOwner
+    from src.agent.tooling import adapters
     from tests.agent.test_worker_ownership import (
-        owner_if_available, instrument_executors, signalled, pending,
+        instrument_executors, signalled, pending,
     )
     entered, release, exited, allow_join = (threading.Event() for _ in range(4))
     records = instrument_executors(monkeypatch, allow_join)
+
+    class RunningExecutor(adapters.ThreadPoolExecutor):
+        def submit(self, *args, **kwargs):
+            self.future = super().submit(*args, **kwargs)
+            # Only the inner adapter is gated. Its real 0.03s result wait
+            # starts after tool entry; return the original executor Future.
+            assert entered.wait(5), 'running-case tool must enter before submit returns'
+            return self.future
+
+    monkeypatch.setattr(adapters, 'ThreadPoolExecutor', RunningExecutor)
 
     class Blocked(CountingTool):
         timeout_seconds = 0.03
 
         def execute(self, query):
+            self.inputs.append(query)
             entered.set()
             try:
                 assert release.wait(5)
-                return super().execute(query)
+                return ToolResult.error_result(self.name, AgentErrorCode.TOOL_UNAVAILABLE,
+                                              'Lifecycle fixture; no scientific computation')
             finally:
                 exited.set()
 
     b = setup_loop([tool(), finish_last], [Blocked()])
-    owner = owner_if_available()
+    owner = WorkerOwner()
 
     async def exercise():
-        options = ({'worker_owner': owner} if 'worker_owner' in inspect.signature(b.loop.run).parameters
-                   else {})  # RED exercises actual pre-owner loop behavior.
         task = asyncio.create_task(b.loop.run(AgentContext('CCO', 'owned-loop'),
             request_kind='scientific', allowed_tools={'property_calculator'},
-            required_tools={'property_calculator'}, event_bus=b.bus, **options))
+            required_tools={'property_calculator'}, event_bus=b.bus, worker_owner=owner))
+
+        async def still_owned():
+            await pending(task)
+            assert b.store.get_run('owned-loop')['status'] == 'running'
+            terminal = {'task_completed', 'task_failed', 'task_cancelled', 'task_rejected'}
+            assert not terminal.intersection(e.event.value for e in b.bus.events)
+            assert owner.status == 'pending' and owner.pending_roots == 1
+
         try:
             await signalled(entered)
             await signalled(records[0].future_done)
-            await pending(task)
-            assert b.store.get_run('owned-loop')['status'] == 'running'
+            assert len(records) == 2
+            inner = records[1]
+            assert inner.future.running() and not inner.future.cancelled()
+            assert not exited.is_set()
+            await still_owned()
             if cancelled:
                 for _ in range(3):
                     task.cancel()
-                    await pending(task)
+                    await still_owned()
             release.set()
             await signalled(exited)
-            await pending(task)
+            await signalled(inner.future_done)
+            assert inner.future.done() and not inner.joined.is_set()
+            await still_owned()
             assert len(b.model.messages) == 1
             allow_join.set()
             result = await task
             assert all(e.joined.is_set() for e in records)
             assert not result.success
             assert result.outcome == (RunOutcome.CANCELLED if cancelled else RunOutcome.FAILED)
+            assert b.store.get_run('owned-loop')['status'] == ('cancelled' if cancelled else 'failed')
             assert result.tool_results[0].error.code == AgentErrorCode.TOOL_TIMEOUT
+            assert result.tool_results[0].error.message == 'Tool timed out after 0.03 seconds'
             assert len(b.model.messages) == 1 and len(b.tools[0].inputs) == 1
             assert owner.status == 'settled' and owner.pending_roots == 0
         finally:
             release.set()
             allow_join.set()
-            await asyncio.gather(task, return_exceptions=True)
-            for executor in records:
-                await asyncio.to_thread(executor.shutdown, wait=True)
+            try:
+                await asyncio.gather(task, return_exceptions=True)
+            finally:
+                for executor in records:
+                    await asyncio.to_thread(ThreadPoolExecutor.shutdown, executor, wait=True)
+                assert all(not thread.is_alive() for executor in records for thread in executor._threads)
+
+    asyncio.run(exercise())
+
+
+@pytest.mark.parametrize('cancelled', [False, True])
+def test_owned_loop_pending_worker_has_no_terminal_until_join(setup_loop, monkeypatch, cancelled):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from src.agent.runtime.worker_ownership import WorkerOwner
+    from src.agent.tooling import adapters
+    from tests.agent.test_worker_ownership import instrument_executors, signalled, pending
+
+    initialized, release_initializer, initializer_exited, allow_join, entered = (
+        threading.Event() for _ in range(5))
+    records = instrument_executors(monkeypatch, allow_join)
+
+    def initialize():
+        initialized.set()
+        try:
+            assert release_initializer.wait(5), 'test must release initializer barrier'
+        finally:
+            initializer_exited.set()
+
+    class PendingExecutor(adapters.ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            # A real executor thread exists but cannot consume the queued
+            # callable before the adapter's unchanged 0.03s wait expires.
+            super().__init__(*args, initializer=initialize, **kwargs)
+
+        def submit(self, *args, **kwargs):
+            self.future = super().submit(*args, **kwargs)
+            return self.future
+
+    monkeypatch.setattr(adapters, 'ThreadPoolExecutor', PendingExecutor)
+
+    class Unstarted(CountingTool):
+        timeout_seconds = 0.03
+
+        def execute(self, query):
+            self.inputs.append(query)
+            entered.set()
+            raise AssertionError('cancelled pending tool must not be invoked')
+
+    b = setup_loop([tool(), finish_last], [Unstarted()])
+    owner = WorkerOwner()
+
+    async def exercise():
+        task = asyncio.create_task(b.loop.run(AgentContext('CCO', 'owned-loop-pending'),
+            request_kind='scientific', allowed_tools={'property_calculator'},
+            required_tools={'property_calculator'}, event_bus=b.bus, worker_owner=owner))
+
+        async def still_owned():
+            await pending(task)
+            assert b.store.get_run('owned-loop-pending')['status'] == 'running'
+            terminal = {'task_completed', 'task_failed', 'task_cancelled', 'task_rejected'}
+            assert not terminal.intersection(e.event.value for e in b.bus.events)
+            assert owner.status == 'pending' and owner.pending_roots == 1
+
+        try:
+            await signalled(initialized)
+            await signalled(records[0].future_done)
+            assert len(records) == 2
+            inner = records[1]
+            assert inner.future.cancelled() and inner.future.done()
+            assert not entered.is_set() and not b.tools[0].inputs
+            assert not initializer_exited.is_set()
+            assert inner._threads and all(t.is_alive() for t in inner._threads)
+            await still_owned()
+            if cancelled:
+                for _ in range(3):
+                    task.cancel()
+                    await still_owned()
+            allow_join.set()
+            await signalled(inner.join_entered)
+            # Remove the artificial join gate first: even a cancelled Future
+            # cannot settle ownership while the real initializer thread lives.
+            await still_owned()
+            assert not inner.joined.is_set() and not initializer_exited.is_set()
+            assert all(t.is_alive() for t in inner._threads)
+            release_initializer.set()
+            result = await task
+            assert initializer_exited.is_set()
+            assert all(e.joined.is_set() for e in records)
+            assert not result.success
+            assert result.outcome == (RunOutcome.CANCELLED if cancelled else RunOutcome.FAILED)
+            assert b.store.get_run('owned-loop-pending')['status'] == ('cancelled' if cancelled else 'failed')
+            assert result.tool_results[0].error.code == AgentErrorCode.TOOL_TIMEOUT
+            assert result.tool_results[0].error.message == 'Tool timed out after 0.03 seconds'
+            assert len(b.model.messages) == 1 and not entered.is_set() and not b.tools[0].inputs
+            assert owner.status == 'settled' and owner.pending_roots == 0
+        finally:
+            release_initializer.set()
+            allow_join.set()
+            try:
+                await asyncio.gather(task, return_exceptions=True)
+            finally:
+                for executor in records:
+                    await asyncio.to_thread(ThreadPoolExecutor.shutdown, executor, wait=True)
+                assert all(not thread.is_alive() for executor in records for thread in executor._threads)
 
     asyncio.run(exercise())
 
