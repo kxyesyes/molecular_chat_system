@@ -17,6 +17,9 @@ from src.agent.contracts import (
     AgentExecutionError, AgentErrorCode,
 )
 from src.agent.evidence import EvidenceLedger
+from src.agent.contracts.ordinary_admission import (
+    binding_digest, loop_admission, admission_metadata, restored_deadline,
+)
 from src.agent.persistence.redaction import contains_secret_material
 from .decision_policy import DecisionBoundaryError
 from .decision_bounds import validate_json, context_value, configuration_generation
@@ -24,9 +27,12 @@ from .decision_history import history_prefix
 
 
 PROTOCOL_REVISION = 6
+SEMANTIC_PROTOCOL_REVISION = 7
+_now = time.monotonic
 
 
-def configuration_digest(loop, context, request_kind, allowed, required, specs, adapters, *, requirements=None):
+def configuration_digest(loop, context, request_kind, allowed, required, specs, adapters, *, requirements=None,
+                         admission_binding=None):
     def spec_value(value):
         if isinstance(value, type):
             return value.model_json_schema()
@@ -38,8 +44,12 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
     # Never inspect model.__dict__ or credentials, even for a fingerprint.
     model = loop.model
     generation = configuration_generation(getattr(loop, 'config_generation', None))
+    if admission_binding is not None:
+        binding_digest(admission_binding)
     return EvidenceLedger.output_digest({
-        'schema': 1, 'decision_protocol_revision': PROTOCOL_REVISION, 'request': context_value(context), 'kind': request_kind,
+        'schema': 1, 'decision_protocol_revision': (
+            SEMANTIC_PROTOCOL_REVISION if admission_binding is not None else PROTOCOL_REVISION),
+        'request': context_value(context), 'kind': request_kind,
         'allowed': sorted(allowed), 'required': sorted(required),
         'mode': loop.mode, 'limits': [loop.max_model_requests, loop.max_tool_attempts, loop.timeout_seconds],
         'specs': {n: spec_value(s) for n, s in specs.items()},
@@ -48,20 +58,25 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
         'model': {n: getattr(model, n, None) for n in ('provider', 'model_name', 'base_url')},
         **({'task_requirements': requirements} if requirements else {}),
         **({'config_generation': generation} if generation is not None else {}),
+        **({'admission_binding': admission_binding} if admission_binding is not None else {}),
     })
 
 
-def snapshot_payload(state, session, fingerprint):
+def snapshot_payload(state, session, fingerprint, *, created_at=None):
     from .decision_inputs import verify_observation_integrity
     for result in session.results:
         verify_observation_integrity(result, session)
+    ordinary = getattr(state, 'ordinary_admission', None)
+    if created_at is None:
+        created_at = _now() if ordinary is not None else time.monotonic()
     snapshot = {
-        'decision_protocol_revision': PROTOCOL_REVISION,
+        'decision_protocol_revision': SEMANTIC_PROTOCOL_REVISION if ordinary is not None else PROTOCOL_REVISION,
+        **({'ordinary_admission': ordinary} if ordinary is not None else {}),
         **state.counters(), 'messages': state.messages,
         'proposals': getattr(state, 'proposals', []),
         'call_ids': sorted(state.call_ids), 'current_query': session.context.query,
         'input_queries': list(getattr(session, 'input_queries', [session.context.query])),
-        'remaining_seconds': max(0, state.deadline - time.monotonic()),
+        'remaining_seconds': max(0, state.deadline - created_at),
         'tool_attempt_count': session.tool_attempt_count,
         'results': [{'tool_name': r.tool_name, **r.to_legacy_dict()} for r in session.results],
     }
@@ -109,10 +124,14 @@ def decode_results(snapshot, session, specs):
 
 
 def claim_continuation(loop, session, fingerprint, continuation_id, clarified_query, *,
-                       system_message=None, requirements=None, required_tools=(), request_kind='scientific'):
+                       system_message=None, requirements=None, required_tools=(), request_kind='scientific',
+                       admission_carry=None):
     """Validate without writes, then atomically consume the waiting nonce once."""
     context = session.context
     try:
+        if admission_carry is not None:
+            admission_carry = loop_admission(admission_carry, context=context,
+                request_kind=request_kind, timeout_seconds=loop.timeout_seconds)
         record = loop.store.get_run(context.trace_id)
         if not record:
             raise ValueError('missing continuation')
@@ -137,7 +156,8 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
             raise ValueError('invalid continuation snapshot')
         snapshot = payload['snapshot']
         if (type(snapshot.get('decision_protocol_revision')) is not int
-                or snapshot['decision_protocol_revision'] != PROTOCOL_REVISION):
+                or snapshot['decision_protocol_revision'] != (
+                    SEMANTIC_PROTOCOL_REVISION if admission_carry is not None else PROTOCOL_REVISION)):
             raise ValueError('unsupported historical snapshot revision')
         queries = snapshot['input_queries']
         if (not isinstance(queries, list) or not 1 <= len(queries) <= loop.max_model_requests
@@ -155,18 +175,38 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
         if (type(snapshot['remaining_seconds']) not in (int, float)
                 or not 0 <= snapshot['remaining_seconds'] <= loop.timeout_seconds):
             raise ValueError('invalid remaining deadline')
+        if admission_carry is not None:
+            expected = admission_metadata(admission_carry, decision_requests=snapshot['model_requests'])
+            if (type(snapshot.get('intent_requests')) is not int
+                    or type(snapshot.get('total_model_requests')) is not int
+                    or snapshot['intent_requests'] != admission_carry.intent_requests
+                    or snapshot['total_model_requests'] != expected['total_model_requests']
+                    or snapshot['total_model_requests'] > loop.max_model_requests
+                    or EvidenceLedger.output_digest(snapshot.get('ordinary_admission')) != EvidenceLedger.output_digest(expected)):
+                raise ValueError('invalid semantic admission history')
+        elif any(key in snapshot for key in ('ordinary_admission', 'intent_requests', 'total_model_requests')):
+            raise ValueError('unexpected semantic admission')
         specs = {name: tool.adapter.spec for name, tool in session.tools.items()}
         results = decode_results(snapshot, session, specs)
         if snapshot['tool_attempt_count'] != len(results):
             raise ValueError('invalid settled attempt count')
         validate_history(snapshot, loop, results, specs, session=session,
                          system_message=system_message, requirements=requirements,
-                         required_tools=required_tools, request_kind=request_kind)
+                         required_tools=required_tools, request_kind=request_kind,
+                         admission_carry=admission_carry)
         from .decision_inputs import seal_observation, require_current_reference
         for result in results:
             seal_observation(result, session)
         claimed = {**payload, 'claimed_by': uuid4().hex}
         require_current_reference(context, loop.store)
+        if admission_carry is not None:
+            cap = restored_deadline(admission_carry.segment,
+                                    snapshot_remaining=snapshot['remaining_seconds'])
+            now = _now()
+            if (admission_carry.resume_expires_at is None
+                    or now >= admission_carry.resume_expires_at or now >= cap
+                    or snapshot['intent_requests'] + snapshot['model_requests'] >= loop.max_model_requests):
+                raise DecisionBoundaryError('continuation_rejected')
         if not loop.store.transition_decision_continuation(context.trace_id,
                 user_id=context.user_id, session_id=context.session_id,
                 expected=payload, replacement=claimed, claim=True):
@@ -177,7 +217,7 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
 
 
 def validate_history(snapshot, loop, results, specs, *, session,
-                     system_message, requirements, required_tools, request_kind='scientific'):
+                     system_message, requirements, required_tools, request_kind='scientific', admission_carry=None):
     """Check complete bounded history/counter relations before the CAS claim."""
     from src.agent.decision_transport import _snapshot_messages
 
@@ -267,6 +307,11 @@ def validate_history(snapshot, loop, results, specs, *, session,
         elif call_id is not None:
             raise ValueError('JSON proposal has native call identity')
         if isinstance(decision, ClarifyDecision):
+            if admission_carry is not None and request_kind == 'chat':
+                from .ordinary_chat_policy import validate_ordinary_display
+                validate_ordinary_display(decision.question, query=replay.context.query,
+                    context=replay.context, session=replay,
+                    capability_snapshot=admission_carry.capability_snapshot())
             if index == len(proposals) - 1:
                 if turn != len(queries):
                     raise ValueError('unused input turns')

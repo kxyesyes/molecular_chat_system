@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import re
 import sqlite3
@@ -13,7 +14,13 @@ from types import MappingProxyType
 from uuid import uuid4
 
 from src.agent.contracts import AgentErrorCode, AgentExecutionError, AgentResult, RunOutcome
-from src.agent.contracts.decision import ToolDecision, ClarifyDecision, parse_decision_json
+from src.agent.contracts.decision import (
+    ToolDecision, ClarifyDecision, parse_decision_json, MAX_DECISION_BYTES, MAX_DECISION_DEPTH,
+)
+from src.agent.contracts.ordinary_admission import (
+    loop_admission, admission_metadata, validate_exchange, restored_deadline,
+    WaitingCheckpoint, binding_digest,
+)
 from src.agent.evidence import EvidenceLedger
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
@@ -33,12 +40,35 @@ from .decision_inputs import (
     effective_molecule, require_current_reference,
 )
 from .decision_clarification import scientific_clarification
-from .decision_bounds import context_value, configuration_generation
+from .decision_bounds import context_value, configuration_generation, validate_json
 from .decision_history import history_pairs, history_prefix
 from .decision_requirements import prepare_requirements, evaluate_requirements
 from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
 )
+from .ordinary_chat_policy import OrdinaryChatOutputError, validate_ordinary_display
+
+
+_now = time.monotonic
+
+
+class _AdmissionTool(SingleAttemptTool):
+    """Last process-local check after Session callbacks, before adapter dispatch.
+
+    Session still journals/settles the attempted wrapper call; no adapter retry
+    is enabled and the shared adapter is never modified.
+    """
+    def __init__(self, adapter, deadline):
+        self._deadline = deadline
+        super().__init__(adapter, dispatch_guard=self._check_deadline)
+
+    def _check_deadline(self):
+        if _now() >= self._deadline():
+            raise DecisionBoundaryError('task_deadline_exceeded')
+
+    def execute(self, input_data):
+        self._check_deadline()
+        return super().execute(input_data)
 
 
 class _GraphState(TypedDict):
@@ -50,6 +80,8 @@ class _Run:
     messages: list[dict[str, Any]]
     deadline: float
     model_requests: int = 0
+    intent_requests: int = 0
+    ordinary_admission: dict | None = None
     protocol_repairs: int = 0
     protocol_feedback: str | None = None
     tool_budget_reserved: int = 0
@@ -68,11 +100,15 @@ class _Run:
     proposals: list[dict] = field(default_factory=list)
 
     def counters(self):
-        return {'model_requests': self.model_requests,
+        counters = {'model_requests': self.model_requests,
                 'protocol_repairs': self.protocol_repairs,
                 'tool_budget_reserved': self.tool_budget_reserved,
                 'reused_decisions': self.reused_decisions,
                 'model_calls': self.model_calls}
+        if self.ordinary_admission is not None:
+            counters.update(intent_requests=self.intent_requests,
+                            total_model_requests=self.intent_requests + self.model_requests)
+        return counters
 
 
 class ModelDecisionLoop:
@@ -102,17 +138,20 @@ class ModelDecisionLoop:
         self.max_tool_attempts, self.timeout_seconds = max_tool_attempts, timeout_seconds
 
     async def run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
-                  continuation_id=None, clarified_query=None, requirements=None, worker_owner=None):
+                  continuation_id=None, clarified_query=None, requirements=None, worker_owner=None,
+                  admission_carry=None, admission_exchange=None):
         try:
             return await self._run(context, request_kind=request_kind, allowed_tools=allowed_tools,
                 required_tools=required_tools, event_bus=event_bus, continuation_id=continuation_id,
-                clarified_query=clarified_query, requirements=requirements, worker_owner=worker_owner)
+                clarified_query=clarified_query, requirements=requirements, worker_owner=worker_owner,
+                admission_carry=admission_carry, admission_exchange=admission_exchange)
         finally:
             if worker_owner is not None:
                 await worker_owner.settle()
 
     async def _run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
-                   continuation_id=None, clarified_query=None, requirements=None, worker_owner=None):
+                   continuation_id=None, clarified_query=None, requirements=None, worker_owner=None,
+                   admission_carry=None, admission_exchange=None):
         from langgraph.graph import END, StateGraph
 
         try:
@@ -124,6 +163,27 @@ class ModelDecisionLoop:
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'invalid_context'})
         context = deepcopy(context)
+        ordinary_capabilities = None
+        try:
+            if admission_carry is not None:
+                admission_carry = loop_admission(admission_carry, context=context,
+                    request_kind=request_kind, timeout_seconds=self.timeout_seconds)
+                ordinary_capabilities = admission_carry.capability_snapshot()
+                # A resume's transport turn is not the original intent receipt.
+                receipt = admission_carry.intent_record()
+                if receipt is not None:
+                    context.metadata['turn_id'] = receipt['turn_id']
+            if admission_exchange is not None:
+                validate_exchange(admission_exchange)
+                if admission_carry is None or admission_exchange.checkpoint is not None:
+                    raise ValueError('ordinary_admission_invalid')
+        except (ValueError, TypeError):
+            return AgentResult(context.trace_id, False, 'Ordinary admission rejected',
+                error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Ordinary admission rejected'),
+                outcome=RunOutcome.REJECTED,
+                metadata={'backend': 'model_decision_loop', 'stop_reason': 'ordinary_admission_invalid'})
+        # Legacy clock seams/behavior are deliberately unchanged for no-carry callers.
+        clock = _now if admission_carry is not None else lambda: time.monotonic()
         if contains_secret_material(projected):
             return AgentResult(context.trace_id, False, 'Input contains credential material',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Remove credentials from the request'),
@@ -165,22 +225,26 @@ class ModelDecisionLoop:
         specs = {name: deepcopy(adapter.spec) for name, adapter in adapters.items()}
         session = WorkflowRunSession(
             WorkflowOrchestrator(state_store=self.store, event_bus=bus, workflow_version='decision-loop-1'),
-            context, [], {name: SingleAttemptTool(adapter) for name, adapter in adapters.items()}, dynamic=True,
+            context, [], {name: (_AdmissionTool(adapter, lambda: state.deadline)
+                                if admission_carry is not None else SingleAttemptTool(adapter))
+                          for name, adapter in adapters.items()}, dynamic=True,
             observation_capture=lambda result: seal_observation(result, session),
         )
         fingerprint = configuration_digest(self, context, request_kind, allowed_tools, required_tools, specs, adapters,
-            requirements=requirement_payload if requirements.molecular_results or requirements.forbidden_tools else None)
+            requirements=requirement_payload if requirements.molecular_results or requirements.forbidden_tools else None,
+            admission_binding=admission_carry.binding() if admission_carry is not None else None)
         restored, prior_payload = None, None
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
-        system_message = decision_system_message(request_kind, required_tools, catalog, requirement_payload)
+        system_message = decision_system_message(request_kind, required_tools, catalog, requirement_payload,
+            ordinary_capabilities=ordinary_capabilities if request_kind == 'chat' else None)
         prefix = history_prefix(system_message, context.query, context.memory, request_kind=request_kind)
         if continuation_id is not None or clarified_query is not None:
             try:
                 restored, previous_results, prior_payload = claim_continuation(
                     self, session, fingerprint, continuation_id, clarified_query,
                     system_message=system_message, requirements=requirements, required_tools=required_tools,
-                    request_kind=request_kind)
+                    request_kind=request_kind, admission_carry=admission_carry)
             except DecisionBoundaryError:
                 return AgentResult(context.trace_id, False, 'Continuation request rejected',
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Continuation request rejected'),
@@ -203,7 +267,11 @@ class ModelDecisionLoop:
                                                          'Existing trace cannot be replayed'),
                                outcome=RunOutcome.REJECTED,
                                metadata={'backend': 'model_decision_loop', 'stop_reason': 'trace_exists'})
-        state = _Run(prefix, time.monotonic() + self.timeout_seconds)
+        state = _Run(prefix, clock() + self.timeout_seconds)
+        if admission_carry is not None:
+            state.deadline = min(state.deadline, admission_carry.segment.deadline)
+            state.intent_requests = admission_carry.intent_requests
+            state.ordinary_admission = admission_metadata(admission_carry, decision_requests=0)
         if restored is not None:
             session.restore_observations(previous_results, restored['tool_attempt_count'])
             # claim_continuation validated the decoded observations and their
@@ -214,7 +282,10 @@ class ModelDecisionLoop:
                 {'role': 'assistant', 'content': '需要用户补充完整输入；尚未完成任务。'},
                 {'role': 'user', 'content': clarified_query},
             ]
-            state.deadline = time.monotonic() + restored['remaining_seconds']
+            state.deadline = clock() + restored['remaining_seconds']
+            if admission_carry is not None:
+                state.deadline = min(state.deadline, restored_deadline(admission_carry.segment,
+                    snapshot_remaining=restored['remaining_seconds']))
             for key in ('model_requests', 'protocol_repairs', 'tool_budget_reserved', 'reused_decisions', 'model_calls'):
                 setattr(state, key, deepcopy(restored[key]))
             state.call_ids = set(restored['call_ids'])
@@ -223,12 +294,16 @@ class ModelDecisionLoop:
         state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
 
         def persist(phase):
+            if admission_carry is not None:
+                state.ordinary_admission = admission_metadata(admission_carry,
+                    decision_requests=state.model_requests)
             retry_persistence(lambda: self.store.update_run_metadata(context.trace_id, {
                 'decision_loop': {**state.counters(), 'phase': phase,
                                   'decision_id': state.decision_id,
                                   'required_tools': sorted(required_tools),
                                   'allowed_tools': sorted(adapters), 'request_kind': request_kind},
                 'task_requirements': requirement_payload, 'task_acceptance': state.task_acceptance,
+                **({'ordinary_admission': state.ordinary_admission} if admission_carry is not None else {}),
             }))
 
         def emit(event, message, payload=None):
@@ -237,9 +312,9 @@ class ModelDecisionLoop:
 
         async def decide(_):
             require_current_reference(context, self.store)
-            if state.model_requests >= self.max_model_requests:
+            if state.intent_requests + state.model_requests >= self.max_model_requests:
                 raise DecisionBoundaryError('model_budget_exhausted')
-            remaining = state.deadline - time.monotonic()
+            remaining = state.deadline - clock()
             if remaining <= 0:
                 raise DecisionBoundaryError('task_deadline_exceeded')
             state.model_requests += 1
@@ -251,6 +326,13 @@ class ModelDecisionLoop:
             if state.protocol_feedback is not None:
                 messages.insert(1, {'role': 'system', 'content': state.protocol_feedback})
                 state.protocol_feedback = None
+            if admission_carry is not None:
+                remaining = state.deadline - clock()
+                if remaining <= 0:
+                    # No decision transport request was dispatched. Do not
+                    # manufacture a call or spend its slot for a callback delay.
+                    state.model_requests -= 1
+                    raise DecisionBoundaryError('task_deadline_exceeded')
             response = await asyncio.wait_for(self.model.decide(
                 messages, mode=self.mode, timeout_seconds=min(60, remaining)),
                 timeout=min(60, remaining))
@@ -261,7 +343,7 @@ class ModelDecisionLoop:
             if not response.success:
                 feedback = schema_correction(response)
                 if feedback is not None and state.protocol_repairs == 0:
-                    if state.model_requests >= self.max_model_requests:
+                    if state.intent_requests + state.model_requests >= self.max_model_requests:
                         raise DecisionBoundaryError('model_budget_exhausted')
                     state.protocol_repairs += 1
                     # Preserve paired native observations. Do not replay malformed
@@ -273,7 +355,26 @@ class ModelDecisionLoop:
                           'accepted': False, 'reason': 'invalid_decision_schema'})
                     return {'route': 'decide'}
                 raise DecisionBoundaryError('model_decision_unavailable')
-            decision = parse_decision_json(encode_observation({'decision': response.decision.model_dump()}))
+            proposal = {'decision': response.decision.model_dump()}
+            if admission_carry is not None and request_kind == 'chat':
+                # The ordinary display gate must see the original text. The
+                # observation encoder redacts credentials and is not an ingress
+                # validator: redaction must never turn unsafe prose into success.
+                validate_json(proposal, max_bytes=MAX_DECISION_BYTES,
+                    max_depth=MAX_DECISION_DEPTH, reason='chat_output_unsafe')
+                decision = parse_decision_json(json.dumps(proposal, ensure_ascii=False, allow_nan=False))
+            else:
+                decision = parse_decision_json(encode_observation(proposal))
+            if admission_carry is not None and request_kind == 'chat' and not isinstance(decision, ToolDecision):
+                try:
+                    validate_ordinary_display(
+                        decision.question if isinstance(decision, ClarifyDecision) else decision.text,
+                        query=context.query, context=context, capability_snapshot=ordinary_capabilities,
+                        session=session)
+                except OrdinaryChatOutputError as exc:
+                    state.waiting_for_input = False
+                    state.answer = '本次回复未通过安全校验，未发布未经验证的内容。'
+                    raise DecisionBoundaryError(exc.code) from None
             if self.mode == 'native':
                 call_id = response.tool_call_id
                 if (type(call_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', call_id) is None
@@ -334,7 +435,7 @@ class ModelDecisionLoop:
                 attempts = adapter.spec.retry_policy.max_attempts
                 if state.tool_budget_reserved + attempts > self.max_tool_attempts:
                     raise DecisionBoundaryError('tool_budget_exhausted')
-                remaining = state.deadline - time.monotonic()
+                remaining = state.deadline - clock()
                 if remaining <= 0:
                     raise DecisionBoundaryError('task_deadline_exceeded')
                 state.tool_budget_reserved += attempts
@@ -351,6 +452,8 @@ class ModelDecisionLoop:
                               'model_version': str(getattr(getattr(getattr(adapter, 'tool', None),
                                                                    'llm_model', None), 'model_name', ''))},
                 ))
+                if clock() >= state.deadline:
+                    raise DecisionBoundaryError('task_deadline_exceeded')
                 await settle_action(session, worker_owner=worker_owner)
                 observed = session.results[-1]
                 verify_observation_integrity(observed, session)
@@ -400,6 +503,9 @@ class ModelDecisionLoop:
             state.stop_reason = str(exc) if isinstance(exc, DecisionBoundaryError) else (
                 'task_deadline_exceeded' if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else 'decision_runtime_failed')
             state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.FAILED
+            if state.stop_reason in {'chat_claim_not_grounded', 'chat_capability_conflict', 'chat_output_unsafe'}:
+                state.waiting_for_input = False
+                state.outcome = RunOutcome.FAILED
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Decision run did not complete',
                                         {'reason': state.stop_reason})
             if state.stop_reason == 'task_requirements_unfulfilled':
@@ -461,13 +567,16 @@ class ModelDecisionLoop:
         if not state.answer:
             state.answer = '本次任务未完成，未生成未经验证的科研结论。'
         waiting_payload = None
+        checkpoint_created_at = None
         if state.waiting_for_input and context.user_id and context.session_id:
             try:
-                waiting_payload = snapshot_payload(state, session, fingerprint)
+                checkpoint_created_at = clock()
+                waiting_payload = snapshot_payload(state, session, fingerprint, created_at=checkpoint_created_at)
             except DecisionBoundaryError:
                 state.waiting_for_input = False
                 state.stop_reason = 'continuation_snapshot_not_persistable'
         metadata = {**state.counters(), 'backend': 'model_decision_loop',
+                    **({'ordinary_admission': state.ordinary_admission} if admission_carry is not None else {}),
                     'task_requirements': requirement_payload, 'task_acceptance': state.task_acceptance,
                     'active_input_digest': EvidenceLedger.output_digest(context.query),
                     'stop_reason': state.stop_reason, 'waiting_for_input': state.waiting_for_input,
@@ -485,6 +594,13 @@ class ModelDecisionLoop:
         if waiting_payload is not None:
             retry_persistence(lambda: publish_continuation(
                 self.store, context, waiting_payload, prior_payload))
+            if admission_exchange is not None:
+                saved = waiting_payload['snapshot']
+                admission_exchange.checkpoint = WaitingCheckpoint(
+                    trace_id=context.trace_id, continuation_id=waiting_payload['id'],
+                    remaining_seconds=float(saved['remaining_seconds']), created_at=checkpoint_created_at,
+                    intent_requests=saved['intent_requests'], decision_requests=saved['model_requests'],
+                    binding_digest=binding_digest(saved['ordinary_admission']['binding']))
         elif state.waiting_for_input:
             retry_persistence(lambda: self.store.update_run_status(context.trace_id, 'waiting_for_input'))
         return result

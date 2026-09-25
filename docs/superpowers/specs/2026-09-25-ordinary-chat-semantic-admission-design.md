@@ -278,3 +278,74 @@ The approved waiting semantics are unchanged: execution credit pauses only after
 ### 13.2 Unchanged final gate
 
 REAL-010 and DIVERSE-015 remain full, positive, real-main-model normal-entry cases; CHAT-SUP-01 is a separately named new semantic follow-up, not an original ID. B1 retains DIVERSE-016/017 actual RAG/source duties. No keyword-only substitute, static answer, unknown-to-chat fallback, second Agent loop, scientific-number self-certification, production activation or P8 denominator change is authorized. This documentation pass runs no tests/imports/models/network and changes only the spec append, companion plan and package ledger. Independent plan approval and later implementation release remain required.
+
+## 14. Task7 assembly lifecycle refinement — reviewed, not implemented
+
+Source inspection on `aa32f52` found that `MolecularChatApp.__init__` is
+synchronous while owned model cleanup is asynchronous. Consequently the earlier
+Task7 instruction to close newly acquired resources on semantic assembly failure
+needs an awaitable construction boundary. This is a design gap, not evidence
+that the new semantic mode has already leaked a resource: it is not wired yet.
+
+Use a dedicated async factory on the existing application class, backed by the
+same initialization routine. Do not add another application/runtime framework
+or postpone semantic assembly to ASGI startup. Default synchronous construction
+remains `a1_closed`, including existing legacy/A2 behavior. A synchronous request
+for `semantic_v1` is rejected before configuration loading or resource creation;
+the explicit async factory is its supported construction entry. Browser, env
+and UI profile switches remain prohibited; normal production activation is
+unchanged. Test fixtures await the factory only for the semantic profile.
+
+The async factory retains its partial instance and a local standard-library
+`AsyncExitStack`. Validate closed profile/wire/mode before loading configuration;
+validate the configured provider before constructing a model; validate the actual
+approved OpenAI-compatible adapter and required intent method before constructing
+RAG, generator or tools. These are in-memory checks, not credential, health,
+asset or network probes. Register each newly acquired owned resource immediately.
+Any assembly failure or cancellation awaits rollback through `finish_on_cancel`
+before propagating a safe failure. No fire-and-forget cleanup, swallowed semantic
+Agent/handler construction exception, or downgrade to another chat mode.
+
+Ownership must be explicit rather than inferred from presence of a close method:
+the main model and generator belong to the app; tools borrow the injected
+generator/RAG. Capture the returned tool list before constructing Supervisor,
+so a later failure cannot lose it. Deduplicate identities when handing tools to
+the registry; do not register unconditional individual-tool and registry cleanup
+for the same objects. Rollback attempts remaining closes after a close failure,
+retains the original assembly failure without raw diagnostic disclosure, and
+does not claim resources were successfully closed when a close failed. Successful
+assembly disarms rollback and transfers exactly those owners to normal shutdown.
+The stack is an implementation aid, not a generic resource-management subsystem.
+
+One concrete constructor gap is in `OllamaModel`: it currently acquires an async
+client before a sync client. If the second constructor fails, the partial model
+is not returned to the app. The minimal bounded fix is to obtain the sync client
+first, then the async client; if the latter raises `BaseException`, close the
+former synchronously and re-raise the original failure. Cleanup failure must not
+replace it or leak diagnostics. Preserve the public signature, 150-second client
+timeouts, normal close behavior and scientific generator identity. No broad
+tool/model refactor is included; semantic assembly always injects its owned
+generator rather than triggering `get_core_tools` fallback construction.
+
+Model replacement retains the existing writer gate/common publisher. Stage and
+validate the candidate adapter, safe capability projection and new generations
+before mutating consumer bindings. Publish the coherent model/config/capability
+combination without an intervening await. Failure preserves the old combination
+and closes only the rejected candidate through the existing async caller. Do
+not acquire a nested writer or rebind the separately owned generator.
+
+Required TDD adds constructor failure stages, exact-once ownership, cancellation
+during awaited close, failure of one close while others still run, and the
+two-client partial-construction case. Existing legacy/A2 constructor and normal
+shutdown regressions remain. The refinement changes only the semantic assembly
+entry and the explicit client acquisition gap, not the budget, continuation,
+scientific evidence or final live-acceptance gates. It requires independent
+written review before Task7 implementation; no Task6 file is changed by it.
+
+Independent written review approved this addendum with no design-level blocking
+finding. The reviewer checked the actual lifecycle, registry and model source;
+no tests or model calls were run for that review. In particular, registry.close
+stops on its first error, so rollback must attempt owned tools individually;
+the factory is not `initialize()` and must not start its watcher/RAG warm-up or
+background preload. Source implementation and all stated RED/GREEN/ownership
+tests are still pending.

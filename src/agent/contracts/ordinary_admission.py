@@ -263,6 +263,36 @@ class ActiveSegment:
             raise ValueError(ADMISSION_ERROR)
 
 
+def _duration(value, *, positive=False):
+    if (type(value) not in (int, float) or not math.isfinite(value)
+            or not (0 < value <= 300 if positive else 0 <= value <= 300)):
+        raise ValueError('invalid_execution_credit')
+    return float(value)
+
+
+def begin_segment(*, now, allowance):
+    if type(now) not in (int, float) or not math.isfinite(now) or now < 0:
+        raise ValueError('invalid_segment_clock')
+    value = _duration(allowance, positive=True)
+    return ActiveSegment(float(now), value, float(now) + value)
+
+
+def remaining_credit(segment, *, now):
+    ActiveSegment(**_plain_record(segment, ActiveSegment))
+    if type(now) not in (int, float) or not math.isfinite(now):
+        raise ValueError('invalid_segment_clock')
+    return max(0.0, segment.allowance - max(0.0, now - segment.started_at))
+
+
+def settled_waiting_credit(segment, *, now, snapshot_remaining):
+    return min(_duration(snapshot_remaining), remaining_credit(segment, now=now))
+
+
+def restored_deadline(segment, *, snapshot_remaining):
+    ActiveSegment(**_plain_record(segment, ActiveSegment))
+    return min(segment.deadline, segment.started_at + _duration(snapshot_remaining))
+
+
 @dataclass(frozen=True)
 class AdmissionCarryIn:
     segment: ActiveSegment
@@ -311,6 +341,41 @@ def validate_carry_in(carry, *, capability_snapshot, query, history, assessment_
     if binding != expected:
         raise ValueError(ADMISSION_ERROR)
     return fresh
+
+
+def loop_admission(carry, *, context, request_kind, timeout_seconds):
+    """Validate trusted server carry, not browser metadata or a durable snapshot.
+
+    The runtime owns current generations and preparation. This seam verifies
+    its immutable projection; it never discovers a new configuration/view.
+    """
+    fresh = AdmissionCarryIn(**_plain_record(carry, AdmissionCarryIn))
+    snapshot = fresh.capability_snapshot()
+    fresh = validate_carry_in(fresh, capability_snapshot=snapshot, query=context.query,
+        history=context.memory, assessment_revision='whole-request-v1')
+    binding = fresh.binding()
+    kind = binding['intent_kind']
+    if (snapshot.profile_revision != 'ordinary-semantic-original-four-v1'
+            or snapshot.catalog_revision != 'ordinary-product-v1'
+            or fresh.segment.allowance > timeout_seconds
+            or request_kind not in {'chat', 'scientific'}
+            or (request_kind == 'scientific' and kind != 'known_scientific')
+            or (request_kind == 'chat' and kind not in {
+                'known_chat', 'capability', 'general_knowledge', 'conversation', 'follow_up'})):
+        raise ValueError(ADMISSION_ERROR)
+    record = fresh.intent_record()
+    if record is not None and record['trace_id'] != context.trace_id:
+        raise ValueError(ADMISSION_ERROR)
+    return fresh
+
+
+def admission_metadata(carry, *, decision_requests):
+    """Safe durable projection only; no clocks, envelopes or exchange objects."""
+    _count(decision_requests, 16)
+    _count(carry.intent_requests + decision_requests, 16)
+    return dict(version='1', binding=carry.binding(), intent_record=carry.intent_record(),
+        intent_requests=carry.intent_requests,
+        total_model_requests=carry.intent_requests + decision_requests)
 
 
 @dataclass(frozen=True)

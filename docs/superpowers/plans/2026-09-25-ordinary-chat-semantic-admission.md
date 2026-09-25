@@ -1097,3 +1097,197 @@ visible; no changed timeout, counter or scientific assertion to gain a pass.
 Freeze for independent SPEC then QUALITY review without committing; parent
 reviews and checkpoints only after the stated gates. Web profile/epoch/lease
 ownership and same-socket tests remain Task7/8, not implied by this release.
+
+## 23. Task6 first frozen implementation and isolated-runner repair
+
+The implementer froze three production files and two new test modules on
+`aa32f52`, without committing or changing Web code. Actual shared model budgets,
+revision7 continuation/replay and pre-exposure chat checks are implemented but
+not release-approved. Independent SPEC then QUALITY remains required.
+
+| Implementer stage | Actual result |
+|---|---|
+| Arithmetic RED | 12 failed, 2.59s |
+| Initial integration RED | 49 failed, 4.62s |
+| First focused GREEN | 49 passed, 15.70s |
+| First joint regression | 1123 passed, 15 failed, 72.32s |
+| Additional boundaries | 12 passed, 2 failed, 6.47s; included one invalid test-hook argument |
+| Corrected boundary RED | 2 failed, 4.77s; actual model/tool post-callback deadline gaps |
+| Focused GREEN after fixes | 63 passed, 18.85s |
+| Final implementer joint regression | 1186 passed, 15 failed, 87.89s |
+
+Parent independently reproduced
+`test_decision_continuation_store.py::test_guard_url_scan_is_bounded_and_checks_all_credentials_near_end[0-dotted]`:
+**1 failed, 1.47s, exit1**, specifically `ModuleNotFoundError: No module named
+'src'`. The unchanged test launches plain Python from the isolated runner's
+temporary working directory; the runner added source paths only to its immediate
+pytest child's `sys.path`, not to grandchildren. This explains the observed
+15 import failures, not unrelated historical scheduling failures.
+
+Only the ignored local `scratch/ordinary_chat_offline_runner.py` was repaired:
+its already synthetic environment now sets `PYTHONPATH` to this reviewed source
+tree and `PYTHONNOUSERSITE=1`. No inherited PYTHONPATH, user config, credential
+value or production asset is copied. The parent pytest child remains `-I -S -B`
+with its existing socket ban, temporary cwd/config/storage and fixture checks.
+The existing pure credential-scan subprocess is not replaced or skipped; its
+10-second guard, 75 suffixes/five batches, assertions and production imports
+are unchanged. Do not infer universal subprocess network isolation from the
+parent-only socket monkeypatch.
+
+Runner SHA256 after repair:
+`56584BEB8D671C6621D5F3BD8C8E5D7452F0EA216444E7A1FFEDD605A19A4B6C`.
+Parent reran all 15 guard nodes: **15 passed, 27.38s, exit0**; session62370
+ended. The full original ten-file joint selection then passed **1201 tests,
+111.50s, exit0**; session48758 ended. It includes the two new test modules,
+ordinary policy/capabilities, decision loop/protocol recovery, continuation,
+continuation store/history/clarification. No failures or skip/warning summary.
+Original 15-failure runs remain part of the evidence. This closes the observed
+local import regression only; independent review and Web/live gates remain.
+
+### First SPEC review: two open P2 findings, not approved
+
+The independent source-only reviewer did not approve the frozen implementation:
+
+1. `encode_observation` redacts a whole secret-bearing decision string before
+   the ordinary display gate sees it. Thus a synthetic credential can become
+   the otherwise-safe literal `[REDACTED]`, permitting a completed/waiting result
+   instead of the required `chat_output_unsafe`. Gate strictly parsed, bounded
+   original ordinary text before redaction; leave legacy/scientific observation
+   redaction unchanged. Both finish and clarify need actual-loop RED tests.
+2. The wrapper's tool deadline check occurs before adapter input validation.
+   Validation can consume the remaining segment and the adapter still submits
+   execution. Verify with the actual input validator and a module-local clock
+   advance; extend an opt-in per-invocation guard to the real dispatch boundary.
+
+Parent inspected both call paths and released minimal cross-file fixes in
+`src/agent/tooling/adapters.py` and, if necessary,
+`src/agent/harness/decision_execution.py`, in addition to the original five
+files. Default/no-carry callers must not receive new kwargs or shared adapter
+state. Keep retry policy, slots, reservation rollback and owned executor drain;
+check immediately before submit and before invoke after any queue delay.
+Tests must prove no actual tool action after exhaustion, slot reuse and no
+owner leak. No old scientific assertion, timeout or ceiling is relaxed.
+The same implementer is reproducing/fixing these sequentially under TDD; no
+commit or publication is approved. The 1201-pass run is evidence of its tested
+scope, not proof that these newly found boundaries were covered.
+
+### P2 repair candidate and parent targeted replay
+
+The same implementer froze a seven-file candidate (five original files plus
+the explicitly authorized adapter/execution seam). Independent re-SPEC is
+pending; no checkpoint or release approval yet.
+
+| Repair stage | Actual result |
+|---|---|
+| Original-text gate RED | 4 failed, 2 passed, 4.66s; finish/clarify in native/json, with legacy controls |
+| Gate GREEN, two new modules | 69 passed, 19.90s |
+| Dispatch-boundary RED | 8 failed, 1 passed, 6.73s; validation/reservation/executor/queued, with/without owner |
+| Dispatch-boundary GREEN | 9 passed, 5.31s |
+| Implementer joint regression | 1271 passed, 120.87s, exit0; sessions35451/71823 ended |
+| Parent independent gate/dispatch/legacy targeted replay | 15 passed, 6.38s, exit0 |
+
+Parent targeted command selected these four functions in
+`tests/agent/test_ordinary_admission_budget.py` using the same isolated runner:
+`test_raw_credential_display_is_rejected_not_redacted_into_success`,
+`test_no_carry_chat_keeps_legacy_redaction`,
+`test_semantic_dispatch_guard_covers_adapter_boundaries_without_resource_leaks`,
+and `test_no_carry_adapter_override_receives_no_dispatch_guard_keyword`.
+The tests preserve original-text rejection and legacy behavior separately;
+they exercise the real adapter and actual executor/reservation paths, inspect
+zero underlying tool calls and reuse of every concurrency slot, and require
+owned join/empty roots before finally cleanup. Synthetic inputs are not actual
+credentials or model/scientific execution evidence. Original RED history is
+retained; all new behaviors still need re-SPEC followed by QUALITY.
+
+Exact implementer joint command (the final four modules cover the expanded
+adapter/owner seam):
+
+```powershell
+C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_admission_budget.py tests/agent/test_ordinary_continuation.py tests/agent/test_ordinary_chat_policy.py tests/agent/test_decision_loop.py tests/agent/test_decision_protocol_recovery.py tests/agent/test_decision_continuation.py tests/agent/test_decision_continuation_store.py tests/agent/test_decision_history.py tests/agent/test_decision_clarification.py tests/agent/test_ordinary_capabilities.py tests/agent/test_tool_adapters.py tests/agent/test_tool_adapter_compat.py tests/agent/test_decision_adapter_retry.py tests/agent/test_worker_ownership.py
+```
+
+The separate package2 compatibility reconfirmation in the prior turn ran
+`test_chat_presentation_boundary.py`, `test_chat_handler_partial_results.py`
+and `test_chat_input_budget.py`: **246 passed, 14.55s, exit0**, with no source
+changes. It does not close Task6, Web integration or live scientific acceptance.
+
+## 24. Task7 assembly addendum — written review approved, code pending
+
+The [spec section14](../specs/2026-09-25-ordinary-chat-semantic-admission-design.md#14-task7-assembly-lifecycle-refinement--proposed-not-implemented)
+supersedes only Task7A's synchronous semantic assembly mechanism and Task8A's
+fixture construction detail. Preserve every remaining Task7/8 assertion. The
+source-reviewed recommended choice is an explicit async factory with shared
+initialization and local `AsyncExitStack`, rather than ASGI startup deferral.
+Parent selected it under delegated recommended choices. Independent written
+review approved the source-supported addendum, with no design-level blocking
+finding; Task6 approval still precedes implementation. The factory is assembly,
+not `initialize()` (which starts watcher/RAG/preload). Registry.close alone is
+not sufficient rollback because it stops on the first tool close error.
+
+Additional bounded files: `src/web/models/ollama_model.py` for the two-client
+acquisition order/partial-construction cleanup only, and focused app/Ollama
+lifecycle tests. Do not change generator algorithms, model timeouts, other tool
+implementations or default production startup. No new async model framework.
+
+Task7A TDD order after Task6 approval:
+
+1. Add exact failure-stage/rollback tests with synthetic constructors and actual
+   app assembly: invalid profile before config, incompatible config before
+   model, incompatible actual adapter before RAG/generator/tools, and failure
+   at RAG/generator/Supervisor/registry/handler/runtime/routes after acquisition.
+2. Cover acquired tool ownership before Supervisor construction, deduplication,
+   borrowed model references, and all subsequent cleanup attempts after one
+   close failure. Hold asynchronous close with a real event, cancel the factory,
+   prove it does not return/lose ownership before close settles, then release
+   barriers in `finally`. Do not use app shutdown on an incompletely initialized
+   object as an untested substitute for this rollback boundary.
+3. Add a synthetic `httpx.Client` acquired / `AsyncClient` constructor failing
+   case; test exactly one sync close, unchanged exception identity, failed-close
+   handling and preserved normal client timeout/signatures. Implement only the
+   reviewed sync-first acquisition fix after RED.
+4. Implement async factory/shared initialization, fail-closed semantic assembly,
+   safe bounded cleanup diagnostics, and explicit ownership handoff. Keep
+   synchronous defaults and legacy catches on the legacy path unchanged.
+5. In Task8A fixture, await the factory only when `ordinary_policy='semantic_v1'`;
+   retain original synchronous path for absent/a1_closed policy. Synthetic
+   provider transport, real Session/store/route, observer and socket deadlines
+   remain unchanged.
+6. Validate candidate capability/model pairing before mutation in the existing
+   writer publisher; test failure rollback, pending-reader exclusion and old
+   model close. Keep generation/gmm separation and no nested writer.
+
+These are planned tests, not executed results. No public model activation,
+deployment or external call is authorized by this assembly clarification.
+
+## 25. Task6 review closure and local checkpoint authorization
+
+Independent SOURCE/SPEC re-review approved the seven-file repair candidate and
+closed both P2 findings. Independent QUALITY then approved the same immutable
+source/test hashes, with no new P1/P2. QUALITY independently ran once:
+
+```powershell
+C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_admission_budget.py tests/agent/test_ordinary_continuation.py tests/agent/test_decision_loop.py tests/agent/test_decision_continuation.py tests/agent/test_worker_ownership.py
+```
+
+Result: **211 passed, 48.62s, exit0**, with no failure/warning/skip/deselection.
+Session34474 ended; source hashes and repaired runner hash unchanged; no live
+Python process or cleanup error remained. This independent check does not
+substitute for, or misattribute, the implementer's 1271-pass joint regression.
+Parent's separate 15-pass targeted replay and original failures remain above.
+
+Parent authorizes a local scoped checkpoint of Task6 and these evidence/design
+documents only. No publication, production activation, deployment or live
+model/scientific acceptance follows from it. Task7 Web/profile/waiting delivery
+and Task8 actual-route integration remain mandatory before the ordinary feature
+is complete; package7 B/C and package8 final/live acceptance also remain open.
+
+Release the next bounded increment after that checkpoint: **Task7A assembly and
+capability publication plus Task8A's narrow fixture seam only**, following the
+reviewed section24/spec14. Keep runtime execution/carry/bridge/presentation work
+for Task7B/C afterward rather than touching their files in this assembly batch.
+The new explicit async factory does not replace default synchronous production
+startup or call initialize(). Add focused assembly/ownership tests; existing
+actual route fixture changes only the optional semantic factory and concrete
+HTTP-response transport seam. No existing assertions or socket deadlines may
+be removed/relaxed. SPEC then QUALITY and focused regressions are still required
+for this next increment.
