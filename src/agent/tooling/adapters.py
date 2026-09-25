@@ -42,11 +42,14 @@ class ToolAdapter(ABC):
         }
 
     def execute(self, input_data: Any, *, allow_retry: bool = True,
-                raw_validator: Callable[[Any], None] | None = None) -> ToolResult:
+                raw_validator: Callable[[Any], None] | None = None,
+                dispatch_guard: Callable[[], None] | None = None) -> ToolResult:
         if type(allow_retry) is not bool:
             raise TypeError("allow_retry must be a bool")
         if raw_validator is not None and not callable(raw_validator):
             raise TypeError("raw_validator must be callable")
+        if dispatch_guard is not None and not callable(dispatch_guard):
+            raise TypeError("dispatch_guard must be callable")
         if not self._available:
             return ToolResult.error_result(
                 self.spec.name,
@@ -62,8 +65,15 @@ class ToolAdapter(ABC):
         max_attempts = policy.max_attempts if allow_retry else 1
         last_result: ToolResult | None = None
         for attempt in range(1, max_attempts + 1):
-            last_result = (self._execute_once(payload) if raw_validator is None else
-                           self._execute_once(payload, raw_validator=raw_validator))
+            if dispatch_guard is not None:
+                # Input validation and any retry backoff consume active credit.
+                dispatch_guard()
+                last_result = self._execute_once(payload, raw_validator=raw_validator,
+                                                  dispatch_guard=dispatch_guard)
+            else:
+                # No new kwargs for existing _execute_once overrides.
+                last_result = (self._execute_once(payload) if raw_validator is None else
+                               self._execute_once(payload, raw_validator=raw_validator))
             if last_result.success:
                 return self._validate_output(last_result)
             last_result = self._validate_output(last_result)
@@ -103,7 +113,7 @@ class ToolAdapter(ABC):
             return data["query"]
         return data
 
-    def _execute_once(self, payload: Any, *, raw_validator=None) -> ToolResult:
+    def _execute_once(self, payload: Any, *, raw_validator=None, dispatch_guard=None) -> ToolResult:
         if not self._invocation_slots.acquire(blocking=False):
             return ToolResult.error_result(
                 self.spec.name,
@@ -131,8 +141,23 @@ class ToolAdapter(ABC):
         try:
             call = self.invoke if raw_validator is None else self._invoke_guarded
             args = (payload,) if raw_validator is None else (payload, raw_validator)
-            future = (executor.submit(call, *args) if reservation is None else
-                      executor.submit(reservation.run, call, *args))
+            if dispatch_guard is not None:
+                # Reservation/executor construction may consume the remaining
+                # credit. A failure here uses the same rollback/join journal as
+                # a failed submit, with no physical tool invocation.
+                dispatch_guard()
+
+                def guarded_call():
+                    # A submitted worker can wait in a queue past its cap.
+                    # Recheck inside the reservation scope, before invoke.
+                    dispatch_guard()
+                    return call(*args)
+
+                submitted_call, submitted_args = guarded_call, ()
+            else:
+                submitted_call, submitted_args = call, args
+            future = (executor.submit(submitted_call, *submitted_args) if reservation is None else
+                      executor.submit(reservation.run, submitted_call, *submitted_args))
         except BaseException:
             if reservation is not None:
                 reservation.rollback(executor)

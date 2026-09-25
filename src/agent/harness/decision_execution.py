@@ -30,10 +30,11 @@ class DecisionEvents:
 
 
 class SingleAttemptTool:
-    def __init__(self, adapter):
+    def __init__(self, adapter, *, dispatch_guard=None):
         self.adapter = adapter
         self.name = adapter.spec.name
         self.version = adapter.spec.version
+        self._dispatch_guard = dispatch_guard
 
     def execute(self, input_data):
         # No inner retry may survive an outer deadline/cancellation. Keep the
@@ -41,8 +42,12 @@ class SingleAttemptTool:
         from .decision_bounds import validate_raw_observation
         from .decision_policy import DecisionBoundaryError
         from src.agent.contracts import ToolResult, AgentErrorCode
+        # Keep legacy adapter overrides compatible: opt-in kwargs exist only
+        # on this request-local view, never on the shared adapter.
+        guarded = ({'dispatch_guard': self._dispatch_guard}
+                   if self._dispatch_guard is not None else {})
         result = self.adapter.execute(input_data, allow_retry=False,
-                                      raw_validator=validate_raw_observation)
+                                      raw_validator=validate_raw_observation, **guarded)
         try:
             validate_raw_observation(result)
         except DecisionBoundaryError:

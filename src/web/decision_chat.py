@@ -88,6 +88,46 @@ def _failure(context, reason):
         outcome=RunOutcome.FAILED, metadata={'stop_reason': reason})
 
 
+def _public_admission(value):
+    """Bounded presentation only; durable Session metadata retains its binding."""
+    validate_json(value, max_bytes=16384, reason='result_display_invalid')
+    public = {key: value[key] for key in (
+        'version', 'intent_requests', 'total_model_requests', 'stage', 'reason') if key in value}
+    record = value.get('intent_record')
+    if type(record) is dict:
+        public['intent_record'] = {key: record[key] for key in (
+            'intent_id', 'trace_id', 'turn_id', 'request_id', 'phase', 'protocol_name',
+            'protocol_version', 'stage', 'stages', 'http_status', 'parser_outcome',
+            'completion', 'model_call_metadata') if key in record}
+    return public
+
+
+def _presentation_admission(value):
+    # Only the reserved result metadata field, never similarly named tool data.
+    metadata = value.get('metadata') if type(value) is dict else None
+    if type(metadata) is dict and 'ordinary_admission' in metadata:
+        return {**value, 'metadata': {**metadata,
+            'ordinary_admission': _public_admission(metadata['ordinary_admission'])}}
+    return value
+
+
+def _durable_admission_facts(store, trace_id, carry):
+    """Recover only committed call facts after settlement, never resume authority."""
+    try:
+        saved = store.get_run(trace_id)['metadata']
+        ordinary = saved['ordinary_admission']
+        if ordinary['binding'] != carry.binding():
+            raise ValueError('different admission')
+        counters = {key: saved['decision_loop'][key] for key in (
+            'model_requests', 'intent_requests', 'total_model_requests', 'model_calls',
+            'protocol_repairs', 'tool_budget_reserved', 'reused_decisions')}
+        validate_json(counters, max_bytes=64 * 1024, reason='result_display_invalid')
+        validate_json(ordinary, max_bytes=16384, reason='result_display_invalid')
+        return {**counters, 'ordinary_admission': ordinary}
+    except Exception:
+        return {}  # Unavailable durable facts must not be reconstructed.
+
+
 def _event_frame(handler, event):
     raw = event.to_dict()
     compacted = False
@@ -102,6 +142,7 @@ def _event_frame(handler, event):
             raw['payload']['result_delivery'] = 'agent_result'
             compacted = True
     validate_json(raw, max_bytes=64 * 1024, reason='event_display_invalid')
+    raw['payload'] = _presentation_admission(raw['payload'])
     public = handler._sanitize_agent_event(raw)
     changed = compacted or public != raw
     return json.dumps({'type': 'agent_event', 'event': public,
@@ -120,6 +161,7 @@ def _result_frame(handler, result, display_changed):
     # Bound before recursive sanitization/equality; never recurse over raw cycles.
     validate_json(envelope, max_bytes=4 * 1024 * 1024, max_nodes=65536,
                   reason='result_display_invalid')
+    envelope = _presentation_admission(envelope)
     keyed = handler._sanitize_agent_event_keys(envelope, max_depth=16, max_items=256)
     bounded, changed = sanitize_bounded(keyed, max_depth=16, max_items=256, max_text_chars=16384)
     public = redact_sensitive(bounded)
@@ -225,7 +267,8 @@ async def _deliver_result(handler, websocket, frames, execution):
 async def process_decision_message(handler, websocket, *, context, decision_loop,
                                    request_kind, allowed_tools, required_tools,
                                    requirements=None, continuation_id=None, clarified_query=None,
-                                   worker_owner=None, cancel_event=None):
+                                   worker_owner=None, cancel_event=None,
+                                   admission_carry=None, admission_exchange=None):
     """Server binds identity/permissions; scientific text comes only from harness.
 
     Disconnect/send timeout propagates to the caller after cancellation settles.
@@ -246,13 +289,29 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
                 requirements=requirements, continuation_id=continuation_id,
                 clarified_query=clarified_query,
                 event_bus=AgentEventBus(on_event=on_event, state_store=decision_loop.store),
+                **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
+                   if admission_carry is not None else {}),
                 **({'worker_owner': worker_owner} if worker_owner is not None else {}))
         except WorkerCleanupError:
             # A failed join is not a terminal result. The runtime must retain
             # this owner and its lease; never display completion here.
             raise
         except Exception:
-            return _failure(context, 'decision_execution_failed')
+            result = _failure(context, 'ordinary_admission_persistence_failed'
+                              if admission_carry is not None else 'decision_execution_failed')
+            if admission_carry is not None:
+                result.metadata['ordinary_admission'] = dict(version='1',
+                    intent_requests=admission_carry.intent_requests,
+                    intent_record=admission_carry.intent_record(), stage='failed',
+                    reason='ordinary_admission_persistence_failed')
+                # A final checkpoint write can fail after the real model-call
+                # facts were committed. Preserve only those actual durable
+                # facts; no second Session, execution, or invented receipt.
+                result.metadata.update(_durable_admission_facts(
+                    decision_loop.store, context.trace_id, admission_carry))
+                result.metadata['ordinary_admission'].update(stage='failed',
+                    reason='ordinary_admission_persistence_failed')
+            return result
         finally:
             buffer.finish()
 
@@ -299,6 +358,8 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
     except Exception:
         result = _failure(context, 'result_display_invalid')
         frames = _result_frame(handler, result, True)
-    await _deliver_result(handler, websocket, frames,
-                          {**result.to_legacy_dict(), 'trace_id': result.trace_id})
+    execution = {**result.to_legacy_dict(), 'trace_id': result.trace_id}
+    validate_json(execution, max_bytes=4 * 1024 * 1024, max_nodes=65536,
+                  reason='result_display_invalid')
+    await _deliver_result(handler, websocket, frames, _presentation_admission(execution))
     return result

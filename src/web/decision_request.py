@@ -5,8 +5,10 @@ boundary may ask for clarification; it must not promise unsupported work.
 """
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass, replace
+import unicodedata
+from dataclasses import dataclass, fields, replace
 
 from src.agent.contracts import AgentContext
 from src.agent.contracts.task_requirements import MolecularRequirement, TaskRequirements
@@ -40,6 +42,53 @@ class DecisionAdmissionError(ValueError):
     def __init__(self, code):
         self.code = code
         super().__init__(code)
+
+
+@dataclass(frozen=True)
+class ValidatedRequest:
+    """Detached server envelope; JSON hints have no reference/owner authority."""
+    query: str
+    session_id: str
+    trace_id: str
+    enable_tools: bool
+    enable_rag: bool
+    temperature: float
+    mol_count: int
+    rag_count: int
+    config_generation: str | None
+    _reference_json: str
+    _selection_json: str
+
+    @property
+    def reference(self):
+        return json.loads(self._reference_json)
+
+    @property
+    def selection(self):
+        return json.loads(self._selection_json)
+
+
+@dataclass(frozen=True)
+class WholeRequestAssessment:
+    """Recomputed server record, not a signature or model-authored obligations."""
+    version: str
+    kind: str
+    reason: str
+    query_digest: str
+
+    def __post_init__(self):
+        reasons = {
+            'known_scientific': {'supported_scientific_request'},
+            'known_chat': {'closed_chat_request'},
+            'semantic_candidate': {'intent_required'},
+            'blocked': {'request_clarification_required', 'unsupported_scientific_request',
+                        'scientific_tools_disabled'},
+        }
+        if (self.version != '1' or type(self.kind) is not str or self.kind not in reasons
+                or type(self.reason) is not str or self.reason not in reasons[self.kind]
+                or type(self.query_digest) is not str
+                or not re.fullmatch(r'[a-f0-9]{64}', self.query_digest)):
+            raise DecisionAdmissionError('request_clarification_required')
 
 
 @dataclass(frozen=True)
@@ -359,6 +408,13 @@ def prepare_decision_request(payload, *, session_id, trace_id, references=None, 
     Missing molecule/target may be clarified by the later model loop; unsupported
     intent is rejected here as a whole request, never partially reclassified chat.
     """
+    envelope = validate_request_envelope(payload, session_id=session_id, trace_id=trace_id,
+        config_generation=config_generation)
+    return _prepare_validated_science(envelope, references=references)
+
+
+def validate_request_envelope(payload, *, session_id, trace_id, config_generation=None):
+    """Original validation and order, before any semantic or scientific analysis."""
     try:
         validate_json(payload, max_bytes=24 * 1024, reason='invalid_request')
         if type(payload) is not dict:
@@ -385,6 +441,24 @@ def prepare_decision_request(payload, *, session_id, trace_id, references=None, 
         temperature = payload.get('temperature', 0.7)
         if type(temperature) not in (int, float) or not 0 <= temperature <= 2:
             raise DecisionAdmissionError('invalid_options')
+        return ValidatedRequest(query, session_id, trace_id, enable_tools, enable_rag,
+            temperature, mol_count, rag_count, generation,
+            json.dumps(payload.get('reference'), ensure_ascii=False, allow_nan=False),
+            json.dumps(payload.get('selection'), ensure_ascii=False, allow_nan=False))
+    except DecisionAdmissionError:
+        raise
+    except (DecisionBoundaryError, ValueError, TypeError, ImportError):
+        raise DecisionAdmissionError('request_clarification_required') from None
+
+
+def _prepare_validated_science(envelope, *, references=None):
+    """Original classifier and preparation tail; never accept proposed tool sets."""
+    query, session_id, trace_id = envelope.query, envelope.session_id, envelope.trace_id
+    enable_tools, enable_rag = envelope.enable_tools, envelope.enable_rag
+    temperature, mol_count, rag_count = envelope.temperature, envelope.mol_count, envelope.rag_count
+    generation = envelope.config_generation
+    payload = {'reference': envelope.reference, 'selection': envelope.selection}
+    try:
         kind, required, metrics = _classify(query)
         if kind == 'scientific' and not enable_tools:
             raise DecisionAdmissionError('scientific_tools_disabled')
@@ -417,4 +491,251 @@ def prepare_decision_request(payload, *, session_id, trace_id, references=None, 
     except DecisionAdmissionError:
         raise
     except (DecisionBoundaryError, ValueError, TypeError, ImportError):
+        raise DecisionAdmissionError('request_clarification_required') from None
+
+
+# Version the bounded lexical policy separately from the immutable record shape.
+# This is a conservative proposal gate, NOT a universal natural-language proof.
+# Unrecognized indirect obligations remain a residual risk requiring later gates.
+ASSESSMENT_REVISION = 'whole-request-v1'
+_NOMINAL_RISK = (
+    r'分子(?:生成|对接|设计|优化|筛选|性质|属性|活性)|毒性预测|活性预测|靶点搜索|'
+    r'(?:科研|科学)计算|知识库|数据库|文献|检索|类药性|成药性|溶解度|毒性|熔点|亲和力|'
+    r'结合能|对接能|分子量|氢键供体|氢键受体|性质|属性|活性|'
+    r'logp|tpsa|hbd|hba|qed|pic50|ic50|admet|'
+    r'\b(?:molecular\s+(?:generation|docking|design|optimization|properties|activity|weight)|'
+    r'drug[ -]?likeness|target\s+search|toxicity\s+prediction|scientific\s+computing|'
+    r'retrieval|docking|solubility|toxicity|affinity|properties|potency|activity|mw|rag)\b'
+)
+_ACTION_RISK = (
+    r'计算|预测|测量|测定|生成|优化|设计|对接|检索|搜索|查询|查找|运行|执行|调用|'
+    r'输出|给出|提供|筛选|排序|读取|下载|上传|保存|写入|删除|评估|分析|寻靶|反向|'
+    r'\b(?:compute|calculate|predict|measure|generate|optimi[sz]e|dock|retrieve|search|run|'
+    r'execute|invoke|call|give|provide|find|lookup|screen|rank|design|assess|evaluate|'
+    r'analy[sz]e|read|download|upload|save|write|delete|set)\b'
+)
+_RISK_SCAN = re.compile(
+    r'(?P<boundary>[\r\n;；。!?！？,，]+|\.(?=\s|$))|'
+    r'(?P<evidence>检索结果|数据库检索|引用|来源|参考文献|数值|结果|是多少|为多少|'
+    r'\b(?:citations?|sources?|references?|doi|pubmed|results?|values?|binding\s+energy|'
+    r'melting\s+point)\b)|'
+    r'(?P<asset>smiles|box|文件|代码|脚本|工具|\b(?:file|files|code|script|scripts|tools?|'
+    r'python|bash|powershell|curl)\b|\b[a-z][a-z0-9_]{0,63}\s{0,8}\(|```|'
+    r'\.(?:sdf|pdb|csv|py|sh|exe)\b|[a-z]:[/\\]|[/\\][a-z]|\b[cnops]{3,}\b)|'
+    r'(?P<nominal>' + _NOMINAL_RISK + r')|(?P<action>' + _ACTION_RISK + r')')
+# Complete nominal descriptions, not an allowlist of prompts or a prefix grant.
+# Bound coordination to eight topics. Unconsumed text (including a noun used as
+# a command, quantities, subject arguments, or a new imperative) is ambiguous.
+_TOPIC_LIST = (r'(?:' + _NOMINAL_RISK + r')(?:\s*(?:和|与|及|、|\band\b|\bor\b|&)'
+               r'\s*(?:' + _NOMINAL_RISK + r')){0,7}')
+_DESCRIPTION_ONLY = re.compile(
+    r'(?:(?:请)?(?:解释|介绍|讲解|什么是|聊聊)|'
+    r'(?:我)?(?:只是)?(?:想|希望)(?:了解|理解|听听))\s*(?:一下|有关|关于)?\s*'
+    + _TOPIC_LIST + r'(?:的(?:基本|一般)?(?:概念|原理|含义|定义|用途|区别)|是什么)?|'
+    r'(?:(?:(?:please|could\s+you|can\s+you)\s+)?(?:explain|describe|define)\s+'
+    r'(?:what\s+)?|what\s+(?:is|are)\s+)' + _TOPIC_LIST
+    + r'(?:\s+means)?(?:\s+in\s+(?:simple|plain|general)\s+(?:terms|language))?')
+_CAPABILITY_TOPICS = (r'(?:' + _NOMINAL_RISK
+    + r'|生成分子|对接分子|计算分子性质|预测毒性|预测活性|'
+      r'generate\s+molecules|(?:compute|calculate)\s+molecular\s+properties)')
+_CAPABILITY_ONLY = re.compile(
+    r'(?:这个|该)?(?:系统|平台)(?:能|可以|支持)' + _CAPABILITY_TOPICS
+    + r'(?:\s*(?:和|与|及|、)\s*' + _CAPABILITY_TOPICS + r'){0,7}(?:吗)?|'
+    r'(?:what\s+can\s+(?:this|the)\s+(?:system|platform)\s+do\s+for|'
+    r'(?:can|does)\s+(?:this|the)\s+(?:system|platform)(?:\s+support)?)\s+'
+    + _CAPABILITY_TOPICS + r'(?:\s+(?:and|or)\s+' + _CAPABILITY_TOPICS + r'){0,7}')
+_PROHIBITION = re.compile(
+    r'^(?:请)?(?:不要|不用|不使用|禁止)(?:调用|使用|运行|执行)?(?:任何)?'
+    r'(?:(?:科研|科学|计算|预测|生成|对接|检索|分子|工具|模型)|\s){1,24}$|'
+    r'^(?:please\s+)?(?:do\s+not|don\x27t|never)\s+(?:use|call|run|invoke|execute)\s+'
+    r'(?:(?:any|scientific|computation|calculation|compute|research|tools?|models?)\s*){1,12}$')
+
+
+def _validated_envelope(envelope):
+    """Recheck server records too; frozen values are not cryptographic provenance."""
+    if (type(envelope) is not ValidatedRequest
+            or set(vars(envelope)) != {field.name for field in fields(ValidatedRequest)}):
+        raise DecisionAdmissionError('invalid_request')
+    for raw in (envelope._reference_json, envelope._selection_json):
+        if type(raw) is not str or len(raw) > 24 * 1024:
+            raise DecisionAdmissionError('invalid_request')
+    try:
+        # Do not charge omitted defaults against the original 24KiB allowance.
+        # Exact types matter: e.g. 5.0/True must not disappear as an int default.
+        payload = {'message': envelope.query}
+        for name, default in (('enable_tools', True), ('enable_rag', True),
+                              ('temperature', 0.7), ('mol_count', 5), ('rag_count', 5)):
+            value = getattr(envelope, name)
+            if type(value) is not type(default) or value != default:
+                payload[name] = value
+        for name, value in (('reference', envelope.reference), ('selection', envelope.selection)):
+            if value is not None:
+                payload[name] = value
+        checked = validate_request_envelope(payload,
+            session_id=envelope.session_id, trace_id=envelope.trace_id,
+            config_generation=envelope.config_generation)
+        if checked != envelope:
+            raise DecisionAdmissionError('invalid_request')
+        return checked
+    except (ValueError, TypeError, RecursionError):
+        raise DecisionAdmissionError('invalid_request') from None
+
+
+def _whole_risk(query):
+    """One full linear token scan; at most 128 independently scoped clauses.
+
+    Nominal mentions are safe only in descriptive scope. Negative-only commands
+    match an entire narrow tool-prohibition grammar, never text deletion. An
+    unseparated action/asset/result suffix still has its own risk token. No token
+    or intent supplies executable obligations; the old whole-coverage parser does.
+    """
+    view = unicodedata.normalize('NFKC', query).casefold()
+    clauses, start, roles = [], 0, set()
+    overflow = False
+    for token in _RISK_SCAN.finditer(view):
+        role = token.lastgroup
+        if role == 'boundary':
+            if len(clauses) < 128:
+                clauses.append((view[start:token.start()].strip(), roles))
+            else:
+                overflow = True
+            start, roles = token.end(), set()
+        else:
+            roles.add(role)
+    if overflow or len(clauses) >= 128:
+        return 'ambiguous'
+    clauses.append((view[start:].strip(), roles))
+    demand = negative = False
+    for clause, risks in clauses:
+        if not clause:
+            continue
+        if _PROHIBITION.fullmatch(clause):
+            negative = True
+            continue
+        if not risks:
+            continue
+        if ((risks <= {'nominal'} and _DESCRIPTION_ONLY.fullmatch(clause))
+                or (risks <= {'nominal', 'action'} and _CAPABILITY_ONLY.fullmatch(clause))):
+            continue
+        demand = True
+    return 'ambiguous' if demand and negative else 'demand' if demand else 'clear'
+
+
+def assess_whole_request(envelope):
+    """Only known complete science/chat bypass intent; a candidate is NOT chat."""
+    from src.agent.evidence.ledger import EvidenceLedger
+    envelope = _validated_envelope(envelope)
+    digest = EvidenceLedger.output_digest(envelope.query)
+    risk = _whole_risk(envelope.query)
+    def result(kind, reason):
+        return WholeRequestAssessment('1', kind, reason, digest)
+    if risk == 'ambiguous':
+        return result('blocked', 'request_clarification_required')
+    try:
+        kind, required, _ = _classify(envelope.query)
+        if kind == 'scientific' and 'target_database_search' in required:
+            if analyze_target_request(envelope.query).needs_clarification:
+                return result('blocked', 'request_clarification_required')
+    except (DecisionAdmissionError, DecisionBoundaryError, ValueError, TypeError, ImportError) as exc:
+        if risk != 'clear':
+            code = getattr(exc, 'code', None)
+            return result('blocked', code if code == 'unsupported_scientific_request'
+                          else 'request_clarification_required')
+        # Eligibility was independently checked above, NOT inferred from failure.
+        return result('semantic_candidate', 'intent_required')
+    if kind == 'scientific':
+        if not envelope.enable_tools:
+            return result('blocked', 'scientific_tools_disabled')
+        return result('known_scientific', 'supported_scientific_request')
+    if risk != 'clear':
+        return result('blocked', 'request_clarification_required')
+    return result('known_chat', 'closed_chat_request')
+
+
+def _current_capability_snapshot(value, envelope):
+    from src.agent.contracts.ordinary_admission import (
+        CapabilitySnapshot, capability_digest, parse_capability_snapshot,
+    )
+    from src.web.ordinary_capabilities import CATALOG_REVISION, PROFILE_REVISION, PRODUCT_CATALOG
+    if type(value) is not CapabilitySnapshot:
+        raise DecisionAdmissionError('ordinary_capabilities_unavailable')
+    # Strict Task3 validation precedes serialization; no attribute discovery/hooks.
+    capability_digest(value)
+    current = parse_capability_snapshot(value.model_dump_json())
+    if (current.profile_revision != PROFILE_REVISION or current.catalog_revision != CATALOG_REVISION
+            or current.model_generation != envelope.config_generation
+            or tuple((f.id, f.product_description) for f in current.features) != PRODUCT_CATALOG
+            or any(f.readiness != 'unknown' for f in current.features)):
+        raise DecisionAdmissionError('ordinary_capabilities_unavailable')
+    return current
+
+
+def _ordinary_prepared(envelope):
+    empty = frozenset()
+    requirements = prepare_requirements(TaskRequirements(), request_kind='chat',
+        allowed_tools=empty, required_tools=empty)
+    return PreparedDecision(envelope.query, envelope.session_id, envelope.trace_id,
+        envelope.enable_tools, envelope.enable_rag, envelope.temperature, envelope.mol_count,
+        envelope.rag_count, None, 'chat', empty, empty, requirements, envelope.config_generation)
+
+
+def prepare_with_intent(envelope, assessment, intent, *, history, capability_snapshot,
+                        intent_requests, references=None):
+    """Use an untrusted proposal only after server whole-query/history/view checks.
+
+    history is already eligible ordinary history captured by the server caller,
+    not browser or model history. This layer validates its established shape and
+    binds it; Web must capture prepared.context once and assign that frozen copy.
+    No model calls, reference resolution for chat, or context.memory writes here.
+    """
+    from src.agent.contracts.ordinary_intent import OrdinaryIntent
+    from src.agent.contracts.ordinary_admission import build_admission_binding
+    from src.agent.harness.decision_history import history_pairs
+    try:
+        envelope = _validated_envelope(envelope)
+        fresh = assess_whole_request(envelope)
+        if (type(assessment) is not WholeRequestAssessment
+                or set(vars(assessment)) != {field.name for field in fields(WholeRequestAssessment)}
+                or assessment != fresh):
+            raise DecisionAdmissionError('request_clarification_required')
+        if fresh.kind == 'blocked':
+            raise DecisionAdmissionError(fresh.reason)
+        # Task3's 32KiB checksum limit is NOT the existing 20-pair/16KiB policy.
+        kept = history_pairs(history)
+        current = _current_capability_snapshot(capability_snapshot, envelope)
+        if type(intent_requests) is not int:
+            raise DecisionAdmissionError('request_clarification_required')
+        if fresh.kind in {'known_chat', 'known_scientific'}:
+            if intent is not None or intent_requests != 0:
+                raise DecisionAdmissionError('request_clarification_required')
+            prepared = _prepare_validated_science(envelope, references=references)
+            intent_kind = fresh.kind
+        else:
+            if (intent_requests != 1 or type(intent) is not OrdinaryIntent
+                    or set(vars(intent)) != {'version', 'kind', 'history_relation', 'unresolved'}
+                    or intent.model_extra):
+                raise DecisionAdmissionError('request_clarification_required')
+            # Task1 does not revalidate instances: validate the exact plain fields,
+            # including constructed/copied instances, with its strict schema.
+            proposal = OrdinaryIntent.model_validate(dict(vars(intent)), strict=True)
+            if (proposal.unresolved or proposal.kind in {'mixed', 'uncertain'}
+                    or (proposal.history_relation == 'prior_ordinary_turn' and not kept)):
+                raise DecisionAdmissionError('request_clarification_required')
+            intent_kind = proposal.kind
+            if intent_kind in {'scientific_execution', 'retrieval'}:
+                prepared = _prepare_validated_science(envelope, references=references)
+                if prepared.request_kind != 'scientific':
+                    raise DecisionAdmissionError('request_clarification_required')
+            else:
+                feature = current.features[0]
+                if not feature.wired or not feature.permitted:
+                    raise DecisionAdmissionError('ordinary_capabilities_unavailable')
+                prepared = _ordinary_prepared(envelope)
+        binding = build_admission_binding(current, query=envelope.query, history=kept,
+            assessment_revision=ASSESSMENT_REVISION, intent_kind=intent_kind,
+            intent_requests=intent_requests)
+        return prepared, json.dumps(binding, ensure_ascii=False, allow_nan=False)
+    except DecisionAdmissionError:
+        raise
+    except (DecisionBoundaryError, ValueError, TypeError, ImportError, RecursionError):
         raise DecisionAdmissionError('request_clarification_required') from None

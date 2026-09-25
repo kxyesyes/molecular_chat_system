@@ -12,10 +12,47 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | 4. Remaining tool contracts | Inventory every registered tool; explicit reusable input/output contracts or justified non-executable helper boundaries; status/evidence retained | DONE: inventory PR #75 merged `7b5611f`, closing the former publication gate. Earlier evidence retained: 4A #67 merged1bba025; 4B #69 merged16b91575229be987b0c5cf3d8d9039135d8ade29, exact-headd1575f3 CI8/8/unresolved0, tree491b2a3d11fd7609ab741ee9c558f0737a32ccdc equal, full6318 passed/2 skipped. 4C #73 merged0295e9960b15c850bb212e434da66824181ef546, headbeaf9cf CI8/8/unresolved0, tree869d6f1592e1135797e176ee807c8c394b245857 equal; full6676 passed/2 skipped, G2 integration525 passed/162 subtests. 4D historical RED4 failed/12 passed →16 passed on merged4C; joint310 passed. RAG/activity/docking already typed |
 | 5. Planner separation | Selection, request parsing and pure step templates have separate responsibilities; same plan/data bindings/clarifications verified | DONE: PR #71 squash5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5, exact-head7f9abdc CI8/8, unresolved0; reviewed/merged treed10464ad002088622e8f5d1ef93ffddc2aa1c9a1. Integrated full6351 passed/2 skipped, final651 focused passed. Separate snapshot fix PR #68 mergede173d432f767fe76e1c1f101d9cd8824ffee612d after CI8/8 including Linux. Historical failed runs retained; controlled ancestor-mtime repro is not unique attribution of every historical sandbox failure |
 | 6. Historical residual audit | Each original code-only residual classified as superseded, migrated or intentionally retained, with evidence; no dirty-tree reset | DONE: ADMET unknown evidence #74 merged `c3195f9` and evidence-bound report/cards #77 merged `be0219e`, together with existing #66/#70/#72. Earlier evidence retained: #66 merged3a68264; #70 mergedbb11ded0bdb62d919ca64969730cfd2b85d77980 (CI8/8, tree6ce2a90faaf01d319c853344262cf1bf9b37af79 equal); #72 merged27170d95b17ccae224b95b493ec8a9276944f421 (head548baca, CI8/8, tree789bb5fc17ba6db3db6b9e09596e09cd2ef37a50 equal). G2 full6412 passed/2 skipped before Planner integration; final639 passed/162 subtests. No wholesale dirty-tree merge or asset deletion |
-| 7. Production-entry dynamic decisions | Normal Web entry actually supports the approved model-driven decision path, using existing loop/Session/authorization/evidence and bounded recovery; integration/browser evidence | PENDING overall. A1 #78 merged `782cd13129cb4c2328c398a3930f61172ea3ec62`; G1 satisfied and A2 implementation released after this docs freeze. A2 implementation/evidence, B bindings and C integration remain pending; isolated admission/bridge is not completion. Final ordinary-chat coverage remains required; deployment excluded |
+| 7. Production-entry dynamic decisions | Normal Web entry actually supports the approved model-driven decision path, using existing loop/Session/authorization/evidence and bounded recovery; integration/browser evidence | PENDING overall. A1 #78 and A2 #79 merged; ordinary semantic chat Tasks1–4 locally committed as be0b268 / 162a4ac / e295589 / 42e2424 after independent reviews and focused tests. Task5 pure display policy committed as d96eec5 after SPEC/QUALITY, independent510 and integrated638 passes. Separate lifecycle-test PR #80 merged30a2353 with CI8/8, unresolved0, reviewed/merged tree equality; historical timing failures retained as UNKNOWN in unique cause. Task6 checkpoint dc1295e includes loop/replay, shared counters and revision7 after both P2 boundaries were reproduced/fixed: joint1271, parent15 and independent211 passed. Prior15 import failures and their ignored-runner repair remain recorded. Task7A/8A async assembly/capability publication and narrow fixture seam now implemented and independently SPEC/QUALITY approved: joint174 and independent174 passed. A half-assembled semantic entry downgrade was reproduced and closed with zero-provider route negatives. Semantic request entry remains explicitly closed until Task7B/C wiring passes; this is not ordinary Web execution or live acceptance. Ordinary branch remains unpublished. Task7B/C and Task8B/C Web integration, B bindings, C integration and final real ordinary-chat/multi-turn evidence remain pending; deployment excluded |
 | 8. Current real scientific acceptance | Latest integrated code tested with real configured providers/local generation/scientific tools and requested artifacts/data flow; repeats and honest failed/partial reasons reported | PENDING live/final acceptance. 8A offline aggregator #76 merged `5ad08ac`, with `live_execution_verified=false` and `final_acceptance=false`; not a live run. Historical real PDE/BuChE verification remains evidence, not a replacement for current integrated end-to-end testing |
 
 The final audit must check all eight rows against current code, PR state and real reports. Passing offline CI is not proof of model quality, real Vina operation or server readiness. A missing dependency does not become a scientific pass.
+
+### Package7 ordinary Web checkpoint update (supersedes the row's staging status)
+
+Task7B/C and Task8B/C now have a reviewed local implementation on top of
+`1da64f2`: the real Web request path shares intent/decision credit, immutable
+capability/model capture, bounded history, continuation authority and safe
+presentation through the existing loop/Session. The temporary semantic
+WebSocket blocker is removed only for this complete path; legacy direct
+dispatch remains closed and default A2 behavior is unchanged.
+
+Independent SPEC and QUALITY approve the eight-file freeze. Evidence:
+implementer focused246 and existing A2 216 passed; parent joint **2717 passed**;
+independent QUALITY **160 passed**; compileall **339 files**; **15 Node
+entrypoints** passed (local Node24, not CI20). Full commands, timings, warnings
+and all intermediate failures are retained in ordinary plan sections27–28.
+
+This supersedes the table's "Task7B/C pending" local implementation status,
+not package7 completion. Full Agent and remaining CI partitions/publication
+are still pending at this checkpoint. Conservative-language false positives,
+indefinite cleanup for unresolved owners, B scientific bindings/C integration
+and package8 real-model/UI acceptance remain pending. B's separately reviewed
+design amendment is `0487d79`; it is not B implementation or live execution.
+
+Follow-up on code checkpoint `67ad078`: the complete Agent suite passed
+**9338 tests, 2 skipped, 7 warnings in 1045.48s**, exit0. Skips are unavailable
+directory symlinks and the disabled performance test. Whole-branch independent
+source SPEC and QUALITY checks approve the same code tree. The ordinary plan
+section29 records reviewer availability and exact evidence boundaries. Local
+duration exceeds CI's 600-second Agent command budget; remote CI remains a
+separate gate. No full repository/real scientific success is claimed.
+
+PR81 first CI at `e2e654b` failed solely on a Pydantic2.5 constant-schema test
+representation assumption: **1 failed, 9338 passed, 1 skipped in 556.97s**,
+not a timeout. Six other executable gates passed; aggregate failed. The
+test-only compatibility repair and six controls passed267 locally and267 in
+independent review. Production code/dependencies/deadlines are unchanged.
+PR81 stays unmerged until fresh exact-head CI is green; details in plan§30.
 
 Historical 2026-09-25 checkpoint (superseded status, retained chronology): package7 A1 was in independent finding closure; A2 design awaited landed A1; package8-A offline aggregator was under review. Those dependency/publication states are updated below, not evidence that the historical failures never occurred. No production-entry switch, external provider activation or deployment occurred in those batches.
 
@@ -63,7 +100,7 @@ This inventory is not implementation or test evidence. Reconfirm each boundary i
 
 ## Current verification
 
-### A2 local verification follow-up (2026-09-25)
+### Historical A2 local verification follow-up (2026-09-25; publication status superseded below)
 
 A2 is implemented locally on `codex/web-decision-runtime-integration`; it has not been published or merged. Production source is unchanged since `2769e1e`. The later user-config fixture correction is independently reviewed; the ignored offline harness now permits only its one test-owned metrics endpoint, not general networking. Detailed original failures, scoped fixes and commands are retained in sections 21–25 of the A2 implementation plan.
 
@@ -78,3 +115,15 @@ Remaining A2 gates: remote branch/head check, unique PR publication, all eight C
 PR #62 merge was rechecked through GitHub API and local fetch; merge tree matched the reviewed head. New step-2 branch is based on origin/main 6af7292.
 Six baseline files: test_chat_handler_partial_results, test_chat_handler_agent_events, test_chat_input_budget, test_agent_audit_regressions, test_chat_local_cleanup, test_scientific_reference_web (all under tests/agent).
 Executed with MedChat Python and the existing isolated runner documented in docs/superpowers/plans/2026-09-24-rag-service-extraction.md, replacing only the worktree path. No model API or production assets used.
+
+### A2 #79 landed; ordinary semantic chat planning only (2026-09-25)
+
+Parent reports #79 reviewed head `83db95aab2a724530ee1d1d038754efae8a06093`, squash `ed284b7baed2024d10de80583d524c828683585a`, CI run `36125453304` **8/8 success**, unresolved **0**. Local Git source inspection confirms both trees equal `bca9dd63c84a450661db99d297dca0005e6230f6`; it does not independently query or rerun CI. The former A2 publication/merge gates above are now satisfied.
+
+- Linux CI Agent: **8115 passed, 1 skipped, 18333 warnings, 393.05s** (parent-provided remote evidence).
+- Windows local Agent: **8114 passed, 2 skipped, 7 warnings, 687.44s** (existing local evidence, not a new run).
+- Preserve all earlier failed runs and guard/startup UNKNOWNs. A passing run does not uniquely attribute the old failures; high warnings remain, not a side project for ordinary chat.
+
+Parent created `codex/ordinary-chat-semantic-admission` from the real squash and cherry-picked only the approved ordinary-chat spec, initial clean HEAD `77e36cf83c40e7bbaceb7fd2f70c370d8cc0c3ce`. This batch re-pins the [approved spec](../superpowers/specs/2026-09-25-ordinary-chat-semantic-admission-design.md#13-landed-a2-re-pin-and-implementation-plan-authorization--2026-09-25) and drafts its [implementation plan](../superpowers/plans/2026-09-25-ordinary-chat-semantic-admission.md). **No ordinary-chat code or tests were implemented or run; code release follows independent plan review.** Only those two documents and this ledger may be committed locally; no push/deployment.
+
+P7 remains open for real-model complete capability questions and semantic same-socket multi-turn, B scientific bindings/RAG receipts, and C consent/cleanup integration. A2 admitted-only history is incremental evidence, not the full end state. P8 remains offline aggregator plus pending integrated real/UI acceptance: preserve 32 GOLD/DIVERSE ×3 core slots, separately named REAL-010 UI positive and 16 legacy contract accounting. Do not turn positive questions into expected rejections or count repeated scientific workflows as conversational memory. No step9.

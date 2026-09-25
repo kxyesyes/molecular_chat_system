@@ -1,5 +1,6 @@
 import asyncio
-from contextlib import nullcontext
+from contextlib import AsyncExitStack, nullcontext
+import inspect
 import json
 import logging
 import os
@@ -109,9 +110,85 @@ class MolecularChatApp:
     """Main application class"""
     
     def __init__(self, config_path: str = "config/ollama_config.yaml", *,
-                 normal_chat_mode='legacy', decision_wire_mode='native'):
-        if normal_chat_mode not in {'legacy', 'decision_a2'} or decision_wire_mode not in {'native', 'json'}:
+                 normal_chat_mode='legacy', decision_wire_mode='native',
+                 ordinary_chat_policy='a1_closed'):
+        self._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
+        if ordinary_chat_policy == 'semantic_v1':
+            raise ValueError('Semantic assembly requires create_async')
+        self._assemble(config_path, normal_chat_mode=normal_chat_mode,
+                       decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
+
+    @staticmethod
+    def _validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy):
+        if (type(normal_chat_mode) is not str or normal_chat_mode not in {'legacy', 'decision_a2'}
+                or type(decision_wire_mode) is not str or decision_wire_mode not in {'native', 'json'}
+                or type(ordinary_chat_policy) is not str or ordinary_chat_policy not in {'a1_closed', 'semantic_v1'}):
             raise ValueError('Invalid normal chat or decision wire mode')
+        if ordinary_chat_policy == 'semantic_v1' and normal_chat_mode != 'decision_a2':
+            raise ValueError('Semantic assembly requires decision_a2')
+
+    @classmethod
+    async def create_async(cls, config_path: str = "config/ollama_config.yaml", *,
+                           normal_chat_mode='legacy', decision_wire_mode='native',
+                           ordinary_chat_policy='a1_closed'):
+        """Assemble only; never start initialize/watcher/index or preload work."""
+        cls._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
+        instance = cls.__new__(cls)
+        stack = AsyncExitStack()
+        instance._assembly_stack = stack
+        instance._assembly_owner_ids = set()
+        instance._ordinary_owned_tools = ()
+        try:
+            instance._assemble(config_path, normal_chat_mode=normal_chat_mode,
+                               decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
+        except BaseException:
+            try:
+                await finish_on_cancel(stack.aclose())
+            except asyncio.CancelledError:
+                # finish_on_cancel has already drained the stack. Retain the
+                # original assembly failure, even if cancellation arrived later.
+                pass
+            raise
+        finally:
+            instance._assembly_stack = None
+            instance._assembly_owner_ids.clear()
+        stack.pop_all()  # Transfer owners to the fully assembled app's shutdown.
+        instance._assembly_owners_transferred = True
+        return instance
+
+    @staticmethod
+    async def _close_assembly_owner(owner):
+        try:
+            close = getattr(owner, 'close', None)
+            if callable(close):
+                result = close()
+                if inspect.isawaitable(result):
+                    await result
+        except BaseException:
+            logger.warning('Assembly owner cleanup failed; exception details omitted')
+
+    def _register_assembly_owner(self, owner):
+        stack = getattr(self, '_assembly_stack', None)
+        if stack is not None and id(owner) not in self._assembly_owner_ids:
+            self._assembly_owner_ids.add(id(owner))
+            stack.push_async_callback(self._close_assembly_owner, owner)
+
+    @staticmethod
+    def _validate_ordinary_adapter(config, model=None):
+        # Only reviewed public in-memory fields; no credentials/URL/health probes.
+        if config.get('provider') not in {'openai_compatible', 'custom'}:
+            raise ValueError('Semantic assembly requires an approved provider')
+        if model is not None:
+            from src.agent.openai_compatible_model import OpenAICompatibleModel
+            if (type(model) is not OpenAICompatibleModel or any(
+                    not callable(getattr(model, name, None)) for name in
+                    ('propose_ordinary_intent', 'decide', 'generate', 'stream_generate', 'close'))):
+                raise ValueError('Semantic assembly requires the approved intent adapter')
+
+    def _assemble(self, config_path, *, normal_chat_mode, decision_wire_mode, ordinary_chat_policy):
+        self.ordinary_chat_policy = ordinary_chat_policy
+        self.capability_generation = uuid4().hex
+        self.ordinary_capability_base = None
         self.normal_chat_mode = normal_chat_mode
         self.decision_wire_mode = decision_wire_mode
         self.decision_runtime = None
@@ -131,8 +208,13 @@ class MolecularChatApp:
         self.model_request_gate = ModelRequestGate()
         self._llm_env_signature = self._llm_env_file_signature()
         self.active_llm_config = self._load_active_llm_config()
+        if ordinary_chat_policy == 'semantic_v1':
+            self._validate_ordinary_adapter(self.active_llm_config)
         self.config.setdefault("inference", {})["stream"] = self.active_llm_config["stream"]
         self.model = self._create_model_from_llm_config(self.active_llm_config)
+        self._register_assembly_owner(self.model)
+        if ordinary_chat_policy == 'semantic_v1':
+            self._validate_ordinary_adapter(self.active_llm_config, self.model)
         self.model_generation = uuid4().hex
         self._llm_watch_task = None
         logger.info(
@@ -142,6 +224,7 @@ class MolecularChatApp:
         )
         
         self.rag_system = RAGSystem(self.config)
+        self._register_assembly_owner(self.rag_system)
         
         self.agent_state_store = None
         self.agent_tool_registry = None
@@ -149,9 +232,12 @@ class MolecularChatApp:
         # 初始化Agent系统
         try:
             self.molecular_generator_model = _init_ollama_model()
+            self._register_assembly_owner(self.molecular_generator_model)
             self.agent_system = self._create_chat_agent()
             logger.info("✅ Agent系统初始化成功")
         except Exception as e:
+            if ordinary_chat_policy == 'semantic_v1':
+                raise
             logger.warning(f"⚠️ Agent系统初始化失败: {e}")
             self.agent_system = None
         # 初始化ChatHandler
@@ -168,6 +254,8 @@ class MolecularChatApp:
             logger.info("✅ ChatHandler初始化成功")
             self.chat_handler.model_request_gate = self.model_request_gate
         except Exception as e:
+            if ordinary_chat_policy == 'semantic_v1':
+                raise
             logger.error(f"❌ ChatHandler初始化失败: {e}")
             self.chat_handler = None
         
@@ -178,21 +266,102 @@ class MolecularChatApp:
             self.decision_runtime = WebDecisionRuntime(self, wire_mode=decision_wire_mode)
             self.chat_handler.decision_runtime = self.decision_runtime
 
+        if ordinary_chat_policy == 'semantic_v1':
+            self.ordinary_capability_base = self._build_ordinary_capability_base(
+                self.active_llm_config, self.model, self.model_generation, self.capability_generation)
+            # Web requests now enter the supervised semantic runtime. The legacy
+            # direct API cannot supply that admission and remains closed; the
+            # decision bridge itself requires server-owned carry and exchange.
+            self.chat_handler._process_message = self._reject_unassembled_ordinary_dispatch
+
         # Create FastAPI app
         self.app = FastAPI(title="Molecular Chat System")
         from .agent_session_config import setup_agent_sessions
         setup_agent_sessions(self.app)
         self._setup_routes()
 
+    async def _reject_unassembled_ordinary_websocket(self, websocket, *, handler=None):
+        """No ready/accepted/answer frames: this profile is assembly-only."""
+        await websocket.accept()
+        try:
+            await websocket.send_json({
+                'type': 'error', 'code': 'ordinary_semantic_not_assembled',
+                'message': 'Semantic chat admission and display gates are not assembled.',
+            })
+        finally:
+            await websocket.close(code=1013)
+
+    async def _reject_unassembled_ordinary_dispatch(self, *args, **kwargs):
+        """Also reject server-side direct handler calls before any provider use."""
+        raise HTTPException(status_code=503, detail='ordinary_semantic_not_assembled')
+
+    def _build_ordinary_capability_base(self, config, model, model_generation, capability_generation):
+        """Reviewed assembly facts only, never runtime readiness or authority."""
+        from .ordinary_capabilities import ORIGINAL_FOUR, build_capability_snapshot
+        self._validate_ordinary_adapter(config, model)
+        return build_capability_snapshot(
+            registered_names=frozenset(self.agent_tool_registry.as_mapping()),
+            provider_descriptor={'provider': config.get('provider'), 'model': model.model_name,
+                                 'mode': self.decision_wire_mode},
+            semantic_profile=True, intent_capable=True, original_four_profile=True,
+            scientific_tools=True, permitted_names=ORIGINAL_FOUR,
+            model_generation=model_generation, capability_generation=capability_generation)
+
+    @staticmethod
+    def project_ordinary_capabilities(base, *, scientific_tools, permitted_names):
+        """Project a base captured ONCE under the caller's request lease.
+
+        This method never rereads the app/model/registry. Task7B must retain this
+        same snapshot (and its digest) through intent, answer and binding.
+        """
+        from src.agent.contracts.ordinary_admission import CAPABILITY_ERROR, CapabilitySnapshot
+        from .ordinary_capabilities import ORIGINAL_FOUR, build_capability_snapshot
+        if type(base) is not CapabilitySnapshot:
+            raise ValueError(CAPABILITY_ERROR)
+        base = CapabilitySnapshot.model_validate(base, strict=True)
+        facts = dict(registered_names=frozenset(f.id for f in base.features if f.wired),
+                     provider_descriptor=base.provider_descriptor.model_dump(),
+                     semantic_profile=True, intent_capable=True, original_four_profile=True,
+                     model_generation=base.model_generation, capability_generation=base.capability_generation)
+        # Reject partial schemas, readiness claims or a request projection used
+        # as a base. Reuse the reviewed contract/builder, not a second catalog.
+        if base != build_capability_snapshot(**facts, scientific_tools=True, permitted_names=ORIGINAL_FOUR):
+            raise ValueError(CAPABILITY_ERROR)
+        return build_capability_snapshot(**facts, scientific_tools=scientific_tools, permitted_names=permitted_names)
+
+    async def _replace_ordinary_capability_base(self, base):
+        """The only independent base publisher; a pending writer bars readers."""
+        from src.agent.contracts.ordinary_admission import CAPABILITY_ERROR, CapabilitySnapshot
+        async with self.model_request_gate.exclusive():
+            if self.model_request_gate.closed or self.ordinary_chat_policy != 'semantic_v1':
+                raise ValueError(CAPABILITY_ERROR)
+            if type(base) is not CapabilitySnapshot:
+                raise ValueError(CAPABILITY_ERROR)
+            base = CapabilitySnapshot.model_validate(base, strict=True)
+            expected = self._build_ordinary_capability_base(
+                self.active_llm_config, self.model, self.model_generation, base.capability_generation)
+            if base != expected:
+                raise ValueError(CAPABILITY_ERROR)
+            generation = uuid4().hex
+            staged = CapabilitySnapshot.model_validate(dict(base.model_dump(), capability_generation=generation), strict=True)
+            self.ordinary_capability_base = staged
+            self.capability_generation = generation
+            return staged
+
     def _create_chat_agent(self):
         """Create the sole chat-facing Supervisor entry point."""
         from src.agent.supervisor import SupervisorAgent
         from src.agent.tools import get_all_tools
 
-        tools = {
-            tool.name: tool
-            for tool in get_all_tools(self.molecular_generator_model, rag_system=self.rag_system)
-        }
+        acquired_tools = get_all_tools(self.molecular_generator_model, rag_system=self.rag_system)
+        # Retain the returned pool before Supervisor or registry construction.
+        # Tools borrow the injected generator/RAG; those owners close separately.
+        unique_tools = tuple({id(tool): tool for tool in acquired_tools}.values())
+        if getattr(self, '_assembly_stack', None) is not None:
+            self._ordinary_owned_tools = unique_tools
+        for tool in unique_tools:
+            self._register_assembly_owner(tool)
+        tools = {tool.name: tool for tool in unique_tools}
         return SupervisorAgent(
             tools=tools,
             llm=self.model,
@@ -357,33 +526,53 @@ class MolecularChatApp:
         return self._publish_llm_config(config, self._create_model_from_llm_config(config))
 
     def _publish_llm_config(self, config, model):
+        # The async caller already owns the writer. Validate all semantic values
+        # and epochs BEFORE binding any consumers; never acquire a nested writer.
+        generation = uuid4().hex
+        capability_generation = getattr(self, 'capability_generation', None)
+        base = getattr(self, 'ordinary_capability_base', None)
+        if getattr(self, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1':
+            capability_generation = uuid4().hex
+            base = self._build_ordinary_capability_base(config, model, generation, capability_generation)
         # The writer holds admission closed. Stage the real consumer bindings
         # first; their setter may fail after updating only part of the graph.
         # Roll back known main-model consumers directly, without invoking the
         # failed setter again. The separately owned generator is never touched.
         agent = self.agent_system
         bindings = []
+        inference = self.config.get('inference', {})
+        if type(inference) is not dict:
+            raise ValueError('Invalid inference configuration')
+        stream = config.get('stream', True)
+        handler = self.chat_handler
+        previous_handler = (handler.model, handler.config) if handler else None
         if agent:
             consumers = [agent] + [tool for name, tool in agent.tools.items()
                                    if name != 'llm_molecular_generator']
             bindings = [(consumer, consumer.llm) for consumer in consumers
                         if hasattr(consumer, 'llm')]
-            try:
+        try:
+            if agent:
                 if hasattr(agent, 'set_llm'):
                     agent.set_llm(model)
                 else:
                     agent.llm = model
-            except BaseException:
-                for consumer, previous in bindings:
-                    consumer.llm = previous
-                raise
+            if handler:
+                handler.model = model
+                handler.config = self.config
+        except BaseException:
+            for consumer, previous in bindings:
+                consumer.llm = previous
+            if handler:
+                handler.model, handler.config = previous_handler
+            raise
         self.model = model
-        self.model_generation = uuid4().hex
+        self.model_generation = generation
+        self.ordinary_capability_base = base
+        self.capability_generation = capability_generation
         self.active_llm_config = config
-        self.config.setdefault("inference", {})["stream"] = config.get("stream", True)
-        if self.chat_handler:
-            self.chat_handler.model = self.model
-            self.chat_handler.config = self.config
+        inference['stream'] = stream
+        self.config['inference'] = inference
         return config
     
     def _load_config(self, config_path: str) -> Dict[str, Any]:
@@ -715,6 +904,18 @@ class MolecularChatApp:
         agent_tools = list(getattr(agent_system, "tools", {}).values())
         if agent_system is not None:
             agent_system.tools = {}
+
+        if getattr(self, '_assembly_owners_transferred', False):
+            self._assembly_owners_transferred = False
+            # Do not also close registry adapters: they wrap these same owners,
+            # and registry.close stops at its first error.
+            tools, self._ordinary_owned_tools = self._ordinary_owned_tools, ()
+            seen = {id(getattr(self, name, None)) for name in ('model', 'molecular_generator_model')}
+            for owner in (*tools, self.rag_system):
+                if id(owner) not in seen:
+                    seen.add(id(owner))
+                    await self._close_assembly_owner(owner)
+            return
 
         registry_tool_ids = set()
         if registry is not None:
