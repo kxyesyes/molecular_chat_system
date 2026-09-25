@@ -915,3 +915,146 @@ Independent QUALITY subsequently approved the same frozen two files with no P1/P
 Parent revalidated clean Task4 commit `42e2424aa31337ee77209cc06dab9c76a449c57e`. This is progress, not a blocked wait. Release the pure portion of Task5 in three files: new `src/agent/harness/ordinary_chat_policy.py`, new `tests/agent/test_ordinary_chat_policy.py`, and the backward-compatible `decision_system_message(..., ordinary_capabilities=None)` extension in `src/agent/harness/decision_policy.py`. Use the approved Task5 and spec section 8 in full, including negative and positive scope, current capability consistency, unchanged released text and bounded residual-risk disclosure. The existing strict decision parser owns the action-specific 1000/8000-character limits; the common display helper has no new action discriminator or parallel decision schema.
 
 As already specified by Task5's dependency on Task6, actual loop gating and its persistence/non-exposure regressions are implemented with the real `admission_carry` seam, not an extra temporary runtime/profile API. Until that happens, Task5 is only partially implemented: pure-policy success is not an integrated safety gate. Parent separately audits the existing loop/continuation call sites while the worker implements these three files with TDD. No production model/configuration, source assets, route activation or external service may be accessed. Independent SPEC then QUALITY are required on the frozen three-file change; the full Task5/6 loop obligations and later Web/live gates remain open.
+
+## 20. Task5 pure-policy implementation freeze and retained failures
+
+All worker runs used the unchanged section-2 offline launcher, with the new policy tests (or their explicit nodes) and the two approved existing regression modules. Scripted parsed decisions exercise finish/clarify text contracts but are not actual-loop non-exposure proof. The worker supplied the complete chronology from existing outputs without retesting:
+
+| Stage | Result | Seconds | Exit | Ended session / direct completion |
+|---|---|---:|---:|---|
+| Explicit missing-module/API RED | 1 failed | 2.50 | 1 | direct `f96abb` |
+| Initial pure GREEN | 278 passed | 4.65 | 0 | direct `64a20d` |
+| Scope/layout RED | 18 failed / 7 passed | 2.15 | 1 | direct `b88576` |
+| Pure GREEN | 303 passed | 6.96 | 0 | `92190`, ended `7ceee1` |
+| Counts/units/transcript RED | 13 failed / 17 passed | 3.00 | 1 | direct `ae5b69` |
+| Pure GREEN | 333 passed | 6.58 | 0 | direct `6803f3` |
+| Initial three-module regression | 435 passed | 40.20 | 0 | `73397`, ended `2bd88d` |
+| Parent scope-counterexample RED | 40 failed / 28 passed | 2.66 | 1 | direct `ebab7f` |
+| Targeted scope GREEN | 68 passed | 1.91 | 0 | direct `5a884a` |
+| Final pure suite | 401 passed | 5.50 | 0 | direct `edbcd7` |
+| Final three-module regression | 503 passed | 62.47 | 0 | `24882`, ended `a9d772` |
+
+Initial RED was an assertion inside a collected test, not a collection error. The 18 scope/layout failures comprised seven capability/mixed-negation misses, ten quotation/source/artifact/cross-line numeric misses and one false numeric classification of “百分比”. The 13 later failures comprised four scientific-count misses, six attached-unit misses and three authority-transcript classifications. These original failures remain recorded; later passes do not erase them.
+
+Parent read-only review then identified broad negation/uncertainty scope swallowing later claims. The worker reproduced all five parent examples in both parsed actions: `不表示当前已执行计算且已预测活性`, `不表示当前已执行计算但已预测活性`, `分子对接不仅可用`, `分子对接并不是不可用`, and `尚不能确认活性模型是否可用且活性模型当前可用`. The expanded RED had 36 missed rejections and four false rejections of matching limitations. The fix binds denied actions to one action/object, capability negation to the adjacent predicate and uncertainty to one reviewed subject/state; simple truthful negatives, unknowns and product descriptions remain accepted. No snapshot/readiness fact or original test was changed.
+
+Frozen SHA256s: policy `3d03e9b7d332846eed4ed14989bde4b27b0a8c30e188c38e899fdf57c46bb1ea`; new tests `b8b3106c46a1b39906dcdedceaa45612d423310d70abea1e87f50b06c4e16059`; prompt extension `653653fc89c0effbc448ecd956694ecb1b13a6f70b14b6961acc49d9106b3ed6`; launcher unchanged `c56e66ad7ddec7e7004e2171b630370e9450897b8a89ac0bf6c1b60a099891b4`. Parent independently matched these hashes and diff checks. SPEC review is pending at this freeze; all worker sessions ended and no real provider, deployment, science execution or runtime activation occurred.
+
+### Re-pinned integration obligations (source audit, not executed proof)
+
+The actual continuation validator builds a server-owned `SimpleNamespace` with context/results/outputs/ledger for semantic replay; the pure helper accepts that same reviewed fact interface rather than requiring a live Session class as purported authentication. Task6 must invoke it on stored clarify proposals before CAS, as well as on newly parsed finish/clarify before `state.proposals.append`. The current bridge is `src/web/decision_chat.py` (not under `src/agent/harness`); it retains worker/lease ownership through delivery. Initial journal `turn_id` identifies the admission turn: a later resume must retain that original binding, not demand equality with the new transport turn or rerun intent. No-carry revision6, current deterministic scientific replay and the bridge-return TTL origin remain unchanged until the conditional Task6/7 integration. These are pending implementation checks, not claims that the pure policy is already enforced by normal Web requests.
+
+### Task5 initial SPEC findings and failed regression (retained)
+
+Independent SPEC did not approve the initial freeze. It identified two P2 source-path counterexamples: decimal punctuation split `logP = .5` / `logP = -.5` away from the metric, and single-character Chinese counts missed `该分子有三个氢键受体。`. The reviewer did not execute extra probes, so these were source-supported findings, not already-observed REDs. Parent reopened only the new policy/tests for deterministic reproduction and correction, preserving ordinary labels/dates/counts and existing scientific validation.
+
+The independent three-module command also returned **502 passed / 1 failed, 96.53s, exit 1**, session `82888` ended. All 401 new policy tests passed. The old `test_owned_loop_has_no_terminal_until_nested_workers_join[False]` failed at the `entered` barrier: its five-second event wait did not observe the tool entering. The reviewer reported no remaining Python/pythonw processes and unchanged frozen hashes. Cause is **UNKNOWN**; neither environment attribution nor a production ownership fix is claimed. Parent read the exact barrier/executor fixture and verified loop/adapters/old tests are unchanged, but source inspection alone does not establish runtime causality. No timeout, old assertion or scientific check is relaxed. A later run on corrected policy source is new-revision verification, not evidence that this original timing failure was repaired. QUALITY remains gated on SPEC closure.
+
+### Task5 SPEC-counterexample correction, awaiting re-review
+
+Worker reproduced the numerical findings with **24 failed / 18 passed, 3.77s, exit 1** (direct `7a4fef`): twelve decimal misses, ten Chinese-count misses and two false rejections of the qualitative phrase “logP 是一个描述……的指标”, across parsed finish/clarify. Minimal correction keeps leading-dot/signed/exponent/full-width decimals attached to metrics and recognizes metric-associated Chinese counts while preserving ordinary dates, labels and non-scientific counts. Targeted GREEN: **42 passed, 6.13s, exit 0**, direct `a0c11b`; pure suite: **443 passed, 12.30s**, session `4159` ended `5eda27`; the exact three-module regression once on this changed revision: **545 passed, 36.45s, exit 0**, session `91371` ended `cf6a42`. All worker sessions ended.
+
+New frozen SHA256s: policy `b1db3ba1756d62781d9d5411920aa2b77385894b2ed8d993673f876091763c34`; new tests `b52860c7bb0cd3098e64161bfd9abd45bc37669b75cd5c5ec3fff3ebdf77fc22`; prompt extension and launcher unchanged. Parent independently matched source/test hashes and diff check and requested SPEC re-review. No old test or loop/timeout change occurred. The earlier lifecycle-barrier failure remains UNKNOWN and is not reclassified as fixed by this new passing run.
+
+### Task5 numerical findings closed; numbered-label finding remains
+
+Independent SPEC re-review closed both numerical P2s and ran the exact command once: **545 passed, 36.82s, exit 0**, session `54746` ended, no warning/skip summary, hashes unchanged and no remaining Python/pythonw reported. It confirmed one additional parent-supplied source counterexample: `1、分子量和 LogP 是基础指标。` is an ordinary numbered label, but the leading `1、` is currently treated as a scientific value. This is within the promised label-positive scope, not the disclosed numerical-teaching limitation. No extra probe was run by the reviewer. Parent reopened only the new policy/tests for TDD and bounded sentence-start list-prefix handling; genuine values such as `1、LogP=.5`, scientific Chinese counts and table assignments must still fail. SPEC approval and QUALITY remain pending. The old ownership barrier's cause remains UNKNOWN despite this passing run.
+
+### Task5 numbered-label correction, awaiting re-review
+
+The worker reproduced **12 failed / 31 passed, 16.47s, exit 1** (session `67942` ended `54248b`), all twelve failures being label false rejections. It then excluded exactly one line-start prefix of one to three digits plus `、`, with at most three indentation characters, from numeric scanning only. Original returned text and length validation remain unchanged; subsequent values, repeated/inline prefixes, scientific Chinese counts and table assignments still fail their negative tests. Targeted GREEN: **43 passed, 9.83s**, session `2247` ended `631b88`; pure suite: **486 passed, 33.33s**, session `96918` ended `547686`; exact three-module changed-revision regression once: **588 passed, 135.08s, exit 0**, session `71203` ended `5a17e5`. All worker sessions ended; no old tests, runtime or timeout changed.
+
+Re-frozen SHA256s: policy `8c21fcf35a9725faf077c33cd098c80bc6ed120f33f6609b59aea12d97316167`; new tests `0c1894f91f59a14e3a08e2f27a2d26a43839786920ef9e337d4dff33a52b613e`; prompt extension and launcher unchanged. SPEC re-review is pending. The original lifecycle-barrier failure remains UNKNOWN; the passing revision run does not establish an ownership fix.
+
+### Task5 source approval; repeated lifecycle failure remains open
+
+The subsequent independent SPEC review approved the frozen pure-policy source with no remaining P1/P2 findings, but the three-module regression returned **587 passed / 1 failed, 114.54s, exit 1**, ended session `80659`. The unchanged `test_owned_loop_has_no_terminal_until_nested_workers_join[False]` again failed its first five-second `entered` barrier. The 486 policy tests passed. SOURCE approval is not a passing regression gate; QUALITY and the local Task5 checkpoint remain pending.
+
+Parent added a temporary, uncommitted bounded phase-recording diagnostic around that existing test. Its first run (**1 failed, 3.69s**, direct `0ca764`) is **invalid ownership evidence**: the diagnostic wrapper hid the `run` signature, causing the original test's introspection to omit `worker_owner`. Its different premature-settlement failure must not be attributed to production code. The diagnostic was corrected with `functools.wraps`, explicit signature equality and a `worker_owner` parameter assertion; no production code, old tests or timeouts changed.
+
+One corrected diagnostic run using the section-2 launcher and `tests/agent/test_owned_loop_entry_diagnostic.py` passed (**1 passed, 4.05s, exit 0**, direct `e45e89`). Recorded order: outer worker started at 914.107ms; inner worker at 914.602ms; first barrier observed at 914.881ms; outer future completed at 956.451ms; physical joins returned at 1050.576ms and 1050.713ms; loop returned at 1074.018ms. This confirms physical ownership in that run only. It does **not** reproduce or explain the two prior missing-entry failures. A focused source audit of pre-entry deadline/cancellation scheduling is next; there is no timeout relaxation, blind retry or claim of a repaired runtime bug. The diagnostic file is excluded from Task5 staging.
+
+Independent source audit identifies a permitted schedule, not unique historical causality: the **inner adapter** has the 0.03-second timeout; the outer workflow has the loop's remaining budget. If the inner Future is still pending at its actual timeout, cancellation may succeed and the callable never enters. The existing test unconditionally waits for tool entry, thereby assuming a start-before-timeout schedule that it does not control. Physical executor join remains required even on the cancelled-before-entry path. The two historical failures remain UNKNOWN until reproduced with observations.
+
+Recommended isolated test-only follow-up: use a real inner executor initializer barrier to prove cancellation before entry with zero tool calls and retained ownership; separately control submit-to-entry ordering for the running-tool lifetime test, retaining the same actual 0.03-second timeout, repeated cancellation, actual exit/join barriers and failure result. Do not change production deadlines, use fake Futures/timeouts or describe deterministic scheduling as a performance guarantee. No implementation of that test-only follow-up is claimed here. The diagnostic `future_started` is a wrapper-entry timestamp and `barrier_reached` is observer-resumption time, not precise tool-entry timing.
+
+The user's two-pure-module confirmation was also reconciled against existing package 2 / PR #63 rather than implemented twice. Current `ChatHandler` delegates to `agent_result_presentation` and `chat_prompt_builder`. A fresh isolated run of `tests/agent/test_chat_presentation_boundary.py` returned **99 passed, 18.35s, exit 0**, session `25444` ended (`0784cf`); no production changes or model calls. This is the boundary scope, not another full Agent run. The temporary ownership diagnostic was moved out of pytest discovery to ignored `scratch/owned_loop_entry_diagnostic.py` after recording its result; it is not part of the proposed Task5 commit.
+
+## 21. Test isolation and Task6 source re-pin (not implementation proof)
+
+The lifecycle-test follow-up is now isolated on `codex/owned-loop-scheduling-test`, based on landed A2 `ed284b7`, with its written requirements committed as `67f1efb`. Only test scheduling and evidence documents are in scope; the ordinary-chat production changes remain separate and frozen. Its worker owns the heavy-test slot. Task5 SOURCE/QUALITY review may proceed read-only after SOURCE/SPEC approval, but neither source approval closes the failed regression gate.
+
+Parent re-read current loop and continuation source for the mandatory Task5/6 integration:
+
+- The real file is `src/agent/harness/decision_continuation.py`. Its no-carry revision remains **6**. Semantic revision7 must be conditional; do not globally change `PROTOCOL_REVISION`, fingerprints or existing no-carry histories.
+- Decision metadata is recorded before parsing, but unsafe display text must be rejected **before `state.proposals.append`**, any assignment to `state.answer`, and the prepared event/persistence. Translate only the pure helper's bounded error code into the loop's `DecisionBoundaryError`; never persist the provider's rejected text. Both finish and clarify need real-loop regressions, not just pure helper coverage.
+- Server assessment can carry `known_scientific` as well as ordinary chat. Only chat receives `ordinary_capabilities` in `decision_system_message`; the pure prompt extension intentionally rejects its use for scientific prompts. Carry accounting must not convert scientific requests into tool-free chat.
+- Current `snapshot_payload` samples `time.monotonic()` internally. The semantic path must use one module-local clock sample for both stored remaining credit and the process-local `WaitingCheckpoint`. Publish the exchange only after `publish_continuation` succeeds; do not expose monotonic timestamps in durable/WS metadata.
+- The continuation validator reconstructs each historical query in its replay Session and skips to the next turn on clarify. Gate every semantic chat clarify **before** that skip, using the replay query/context and frozen capabilities, before CAS. Do not compare the original intent receipt's turn ID with a new resume transport turn ID.
+- Current model and schema-repair ceilings inspect only `model_requests`; semantic paths must inspect intent plus decisions, preserving actual decision call records and configured limits. Fresh dispatch and restored dispatch deadlines must include elapsed preprocessing and delivery rather than refunding it at loop entry or resume.
+
+These are reviewed implementation obligations, not a claim that Task6 exists or that the normal Web entry enforces this policy. No model activation or real acceptance is performed by this source audit.
+
+### Task5 SOURCE/QUALITY finding (unexecuted counterexample)
+
+The independent read-only QUALITY review requested one P2 correction: `_EXPLANATORY_USE` can remove `可用并能执行上述描述` from `分子对接可用并能执行上述描述的任务。`, hiding a recognized capability assertion for an unwired docking feature. This is a concrete exemption-scope defect, not an unknown-language residual. The reviewer ran no tests or imports and confirmed all frozen hashes unchanged. Reopen only the new policy/tests for RED/GREEN on parsed finish and clarify, preserving the qualitative positive `毒性也可用百分比来表述，这里不报告数值。`. No unbounded blacklist expansion or readiness-fact changes. The policy implementer is instructed to wait for the isolated lifecycle worker to release the heavy-test slot. SOURCE/QUALITY and Task5 remain open; no checkpoint or publication is authorized by the earlier SOURCE/SPEC approval.
+
+### Explanatory-form correction and independent lifecycle branch publication
+
+After the lifecycle worker released the test slot, the policy worker reproduced
+four predicate-swallowing examples in both parsed actions: **8 failed / 16 passed,
+1.87s, exit 1** (`1879a1`). Replacing the wildcard with the bounded local form
+`可/可以用 + 百分比/比例/文字 + [来] + 表述动词` produced targeted **24 passed,
+3.76s** (`4e499d`) and pure-policy **510 passed, 9.94s**, session `36058` ended
+(`6b6003`), both exit 0. The original three-module run was deliberately not
+repeated before integrating the separate lifecycle test fix.
+
+New freeze: policy `320e04d1af1430c2612d11e2c2546357f0ce58ce604b5f2f59f48f584fb7ae6b`;
+tests `355047eaab40c6199ce02083d000b7187c4769061dac90629fe8a7990bc88e91`;
+prompt and ordinary launcher unchanged. Independent SOURCE/SPEC confirmed the
+scope and P2 closure without executing tests. SOURCE/QUALITY re-review and its
+single pure-policy verification are pending; no new runtime gate is claimed.
+
+The separately reviewed lifecycle change was committed as `78cce530eafc96652ca5fa2fde21f119458e4d89`
+after independent SOURCE/SPEC, SOURCE/QUALITY and parent **4 passed, 4.20s**.
+Worker three-module regression was **128 passed, 45.30s**. It is published as
+draft [PR #80](https://github.com/kxyesyes/molecular_chat_system/pull/80).
+CI run `36147321680` was observed live: static-quality passed and six Python
+jobs in progress. Required checks and final reviewed/merged tree equality
+remain gates; not merged or integrated into this ordinary branch at this point.
+The earlier two historical missing-entry failures remain UNKNOWN in unique cause.
+
+### Task5 pure SOURCE/QUALITY closure
+
+Independent SOURCE/QUALITY approved the corrected three-file freeze with no
+remaining P1/P2. It independently ran only the pure-policy module once through
+the unchanged offline launcher: **510 passed, 8.34s, exit 0**, zero failures,
+warnings, skips or deselections; session `32477` ended and no Python/pythonw
+processes remained. Source/test/prompt/launcher hashes matched before and after.
+This closes the explanatory-scope finding, not Task6 runtime gating, combined
+regression or CI. The pure policy remains frozen while PR #80 checks run.
+
+### PR #80 landed and integrated Task5 pure regression
+
+PR #80 passed all **8/8** required checks in run `36147321680`. Final head
+`78cce530eafc96652ca5fa2fde21f119458e4d89`, base `main`, mergeability and zero
+unresolved review threads were rechecked; no changes-requested review existed.
+It was squash merged as `30a23530875f3046bb756685bbd180852a5d48d3` under the user's
+default authorization. Reviewed and merged trees are both
+`50c40dc2b0884995ea653d634512a2be1d5eeedc`. No deployment or model activation.
+
+The landed main was merged into this development branch as `8cb22c5`; existing
+uncommitted pure-policy and evidence edits were preserved without conflicts.
+Parent then ran once:
+
+```powershell
+C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_ordinary_chat_policy.py tests/agent/test_decision_loop.py tests/agent/test_worker_ownership.py tests/agent/test_decision_protocol_recovery.py
+```
+
+Result: **638 passed, 53.52s, exit 0**. Session `70773` ended (`6403c2`) after
+the launcher reported cleanup/exit; no failures, warning or skip summary.
+Three frozen source/test SHA256s remained unchanged. This closes the combined
+offline regression gate on the integrated test revision. It does not establish
+unique causality of historical failures, production performance or actual
+ordinary-chat enforcement. Task5 **pure portion** is approved for a local
+checkpoint; actual loop/replay gating and Task6–9 remain mandatory.
