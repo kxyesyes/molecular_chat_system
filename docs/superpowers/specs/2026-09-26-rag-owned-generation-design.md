@@ -65,6 +65,14 @@ Direct legacy _load_or_create_index/_create_index revoke strict certification;
 they may continue to populate public legacy state. Manually assigned public
 objects or is_initialized=True never constitute strict initialization. Share
 candidate construction and loading helpers, not a second FAISS algorithm.
+Revocation alone does not protect a later initialize from an incorrectly tagged
+persisted index. Default legacy builds therefore also capture one transport
+client/model/endpoint for the whole operation and verify source/configuration
+freshness before saving. Preserve explicit get_embedding injections and legitimate
+public overrides already present at operation start; compare those captured
+values plus the captured effective configuration, not constructor defaults.
+On drift, preserve the prior disk pair. Default build client ownership is per
+operation, not per source row.
 
 ## Configuration and lifecycle
 
@@ -75,6 +83,12 @@ embedding, and immediately before returning a receipt. A mismatch invalidates
 strict readiness and advances epoch; resetting fields later cannot resurrect
 that invalidated generation. Public dataframe/index/manifest in-place changes
 are isolated rather than treated as authenticated source updates.
+During builds, per-row checks are cheap epoch/configuration/closed checks. Full
+content hashing remains at capture/load and commit/publication boundaries, and
+at strict query boundaries, not twice per row. Count full source reads in tests
+across both service and index-module references: stable-build count must not
+grow with row count. Private parsed bytes remain the source identity; a source
+change during embedding must still prevent persistence/publication.
 
 Initialize begins a new epoch; a failed or cancelled older initializer cannot
 clear/publish over a newer initializer. `close()` is idempotent, marks the service
@@ -129,7 +143,11 @@ Return a detached plain dictionary with exactly records and receipt. Receipt:
 
 Canonical JSON is ensure_ascii=False, sort_keys=True, separators=(',', ':'),
 allow_nan=False encoded UTF-8; no default=str coercion. Mapping uses the same
-encoding. Non-JSON values fail receipt creation, not forged string provenance.
+encoding. Require native JSON values and string dictionary keys before encoding;
+tuples or integer keys must not be silently converted. Non-JSON values fail
+receipt creation, not forged string provenance. This compact receipt digest is
+distinct from EvidenceLedger.output_digest's existing whitespace codec; later
+integration must verify each using its named codec, not compare unlike hashes.
 No raw query, endpoint, environment or credentials in receipt. Existing row
 provenance fields remain unchanged. Malformed results may return invalid_discard
 with diagnostic accepted rows, but never valid_hits/valid_empty; subsequent B

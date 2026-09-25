@@ -45,6 +45,20 @@ plan§§16–17. This is only core accounting: loaded-source generation ownershi
 strict service/tool receipt integration and actual B execution remain pending.
 No external model, production assets or deployment was used.
 
+R2 owned-source producer is now implemented locally and independently approved:
+actual initialize hashes/parses one private CSV snapshot, owns its index/mapping,
+captures request configuration, and returns a same-call strict retrieval receipt.
+Legacy default builds retain compatible overrides but cannot save under config
+or source drift; clients are operation-owned/borrowed with cancellation cleanup.
+Two review findings were reproduced and fixed: legacy mixed-model persistence
+and per-row full-CSV hashing. Stable builds now perform6 full-source hash checks
+for both2-row and9-row fixtures, not10/24 respectively. Worker and independent
+six-module regressions both746 passed,0 failed,0 skipped,7 warnings (19.26s and
+19.82s). Full chronology/spec in the 2026-09-26 rag-owned-generation documents.
+This is NOT strict Agent RAG integration: tool/adapter receipt consumption,
+current-source eligibility, Session ledger/seal binding, B1/B2 execution, C and
+P8 real/UI acceptance remain pending. No actual embedding model was invoked.
+
 | Package | Required end state / evidence | Current state |
 |---|---|---|
 | 1. Publish terminal-label fix | PR #62 merged after exact-head checks; reviewed and merged trees equal | DONE: squash 6af7292bcd4280d597e2f5a124332fb91264a400; CI 7/7, no unresolved review threads, tree equals fc99a6e |

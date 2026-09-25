@@ -218,3 +218,157 @@ First command should fail before implementation for the two reasons above;
 final two commands must pass after fixes. These are offline source/contract tests,
 not scientific accuracy, actual model, complete B or P8 evidence. Completion of
 R2 still requires tool/adapter/Session integration in the full B plan afterward.
+
+## Downstream source inspection while R2 implementation runs
+
+Read-only inspection, not code release or executed integration evidence:
+
+- RAGSearchTool currently calls the legacy list method and reads embedding_model
+  after return. This must not be used as B source proof; R2 only supplies the
+  missing producer API, and does not automatically switch the tool.
+- RAGToolAdapter reduces its validated input to query alone. An arbitrary new
+  require_receipt keyword in the resolver would not reach the tool through that
+  existing path. Select the eventual strict binding explicitly and test actual
+  adapter dispatch; do not claim a discarded flag enforces strictness.
+- execute_tool_compat preserves evidence/quality but not arbitrary extra root
+  envelope fields. EvidenceLedger stores evidence and selected input-binding
+  metadata, not every quality field. A receipt left only at an extra root key or
+  only in quality cannot establish the planned persisted ledger proof.
+- WorkflowRunSession registers validated evidence before observation_capture;
+  the decision callback seals the full normalized observation before persistence
+  and event callbacks. Reuse that sequence, ensure the validated receipt reaches
+  evidence before registration/seal, and test valid-empty as well as real rows.
+- Receipt result_sha256 uses the explicitly compact R2 JSON codec; existing
+  EvidenceLedger.output_digest uses default whitespace. Verify both separately,
+  never equate unlike digests or change the existing ledger codec incidentally.
+
+Future strict result/status/schema/digest/ownership validation and pre-dispatch
+plus reuse source eligibility remain mandatory. These observations do not
+authorize a legacy fallback in B, scientific success on malformed receipt, or a
+new runtime. No tool/adapter/Session code was changed during this inspection.
+
+## Initial R2 implementation evidence (before independent code review)
+
+Worker freeze at2ed7af0 changes only service.py (+405/-202) and new
+test_rag_owned_generation.py (863 lines). Retrieval/index and old tests unchanged.
+All runs used the approved isolated launcher; no skips. Full recorded chronology:
+
+| Run | Scope | Passed | Failed | Warnings | Seconds |
+|---|---|---:|---:|---:|---:|
+| 1 | Two initial exact nodes | 0 | 2 | 3 | 0.84 |
+| 2 | New module | 0 | 13 | 3 | 1.12 |
+| 3 | New module + index | 65 | 1 | 7 | 5.91 |
+| 4 | New module | 12 | 50 | 3 | 3.12 |
+| 5 | Six modules | 672 | 0 | 7 | 16.25 |
+| 6 | New module | 84 | 1 | 3 | 3.00 |
+| 7 | New module | 85 | 0 | 3 | 2.76 |
+| 8 | New module | 87 | 10 | 3 | 3.75 |
+| 9 | New module | 97 | 0 | 3 | 3.29 |
+| 10 | New module | 108 | 0 | 3 | 3.50 |
+| 11 | Malformed configuration nodes | 0 | 3 | 3 | 1.01 |
+| 12 | New module | 111 | 0 | 3 | 3.71 |
+| 13 | Six modules | 721 | 0 | 7 | 18.36 |
+| 14 | Repeated cancellation nodes | 2 | 2 | 3 | 0.93 |
+| 15 | New module | 113 | 0 | 3 | 3.80 |
+| 16 | Six modules | 723 | 0 | 7 | 19.56 |
+
+First RED actually accepted old parsed rows under a replacement CSV digest;
+the other node lacked the strict API. Subsequent REDs covered owned client leaks,
+source/configuration races, stale initializer persistence, missing strict API,
+failure paths skipping invalidation, incompatible reasons overwritten, malformed
+configuration not invalidated, and cleanup failure swallowing cancellation.
+Warnings are three SWIG plus four FastAPI deprecations on combined runs.
+Final six-module command is the one above. Last worker session93305 exited0,
+with no live reviewed runner or unfinished cleanup task reported.
+
+Initial frozen SHA256 (review may require follow-up):
+
+- service.py: D66C88B3988D36EF1617E5FB31641982E033A92D1FE53C1C258BA0A8B844E768
+- new test: B750B05AF872FF41D9D34A72009DA9D07C17ED29331B7CCDA79FC4EF99AB7BD3
+
+SPEC then QUALITY are pending. Parent raised a source-only performance concern:
+the build's per-row operation checks reread/hash the entire CSV twice per row.
+That needs counted-I/O reproduction and review before approval, not a timing
+threshold relaxation. No runtime reproduction of that concern is claimed yet.
+
+### SOURCE/SPEC changes requested and narrow repair release
+
+Goodall confirmed two P2 findings on the initial frozen files:
+
+1. Legacy default build captured manifest config but reread transport model,
+   endpoint/client per row, and checked only epoch/closed before persistence.
+   Mid-build drift can persist mixed vectors labeled with old config, then be
+   accepted by a later owned initialize. Required TDD uses actual default legacy
+   transport with synthetic HTTP mutation and verifies prior disk pair preserved;
+   capture one default operation client/config, retain explicit get_embedding
+   injection and legitimate public overrides, and check source/config before save.
+2. Owned build checked full source digest twice per embedding row, introducing
+   2N whole-file reads and O(N * source bytes) work. Required TDD counts actual
+   source hashing through service and index references for two row counts. Use
+   cheap epoch/config checks per row; retain complete source checks at the
+   lifecycle/commit/query boundaries and preserve source-change failure tests.
+
+Parent releases these two scoped repairs in the same worker files, retaining the
+initial failures/hashes above. Specification now makes both constraints explicit.
+No old scientific assertion, timeout, formula or prior failure is removed. Worker
+must freeze again after the full six-module command; independent SPEC re-review
+and QUALITY still gate the implementation checkpoint.
+
+### P2 repair evidence and second freeze
+
+Worker reproduced both findings through the approved runner. Exact new nodes:
+test_legacy_default_build_drift_preserves_previous_pair,
+test_legacy_default_build_captures_one_client_and_existing_public_overrides,
+test_owned_build_full_source_hash_count_is_row_independent. Initial RED:
+1 passed/11 failed/3 warnings/1.90s. Drift tests observed replacement of the old
+pair, mixed model/endpoint requests and a subsequent owned initialize accepting
+the incorrectly tagged pair. Two rows opened two default legacy clients.
+Real full-source file_sha256 counts were10 atN=2 and24 atN=9 (both service and
+index references counted); this is measured call-count evidence, not a runtime
+benchmark on a real dataset.
+
+After repair, default legacy builds own/borrow one captured operation client and
+compare initial effective config separately from initial public overrides.
+Request-time and cleanup-time drift reject before replacing the prior pair;
+explicit callback injection remains compatible. Owned per-row checks no longer
+rehash the source; both row counts now require6 full-source file checks
+(service5 + index1), in addition to the initial private-byte digest. Required
+load/commit/publication/query checks and old scientific assertions remain.
+
+| Repair stage | Passed | Failed | Warnings | Seconds |
+|---|---:|---:|---:|---:|
+| New three-node RED | 1 | 11 | 3 | 1.90 |
+| Legacy fixes + existing index module | 64 | 0 | 7 | 5.43 |
+| Both fixes, new module | 125 | 0 | 3 | 4.02 |
+| Pre-save drift/client-switch coverage | 136 | 0 | 3 | 4.31 |
+| Six-module regression | 746 | 0 | 7 | 19.26 |
+
+All runs have0 skips; failures exit1 and green runs exit0. Same approved runner;
+last session35269 terminated. Only the same two worker files changed. Revised
+SHA256 for independent SPEC re-review then QUALITY:
+
+- service.py: D41A9082F210F2A9949665BF094BDDC900B4B9071B37807C3BE7D073F6632611
+- tests: DAC01F2EEDF6CFDA28315604A18FDF6AAB5E30CBA7D4626A9A339ECE1EB67144
+
+No final code-review approval or actual-model/full-B success is claimed yet.
+
+### Final R2 source-component approval
+
+The preceding pending-review state is superseded only for this source component.
+Goodall's independent SOURCE/SPEC re-review approved the second freeze, explicitly
+closing both P2s. Wegener's independent QUALITY review approved with no actionable
+P1/P2 and repeated the exact six-module command: **746 passed, 0 failed, 0 skipped,
+7 warnings, 19.82s, exit0**. The single session37804 was polled to completion.
+Both source/test hashes and the ignored launcher hash matched the second freeze
+before and after review. No timeout, old test or scientific assertion was changed.
+
+Parent also compiled service.py and test_rag_owned_generation.py in memory with
+MedChat Python -I -S -B:2 files passed, no imports/bytecode writes; this is not a
+full compileall. git diff --check passed. Parent stages only these two worker
+files, this plan/spec and the remaining-work ledger for a local checkpoint.
+
+R2 now establishes the strict producer API and source ownership. It does NOT
+switch RAGSearchTool, add B dispatch permission, integrate receipt validation
+into the adapter/Session seal, or prove real embedding/scientific accuracy.
+Those full-B requirements, C integration and P8 real/UI acceptance remain open.
+No push/merge, production model, service activation or deployment in this batch.
