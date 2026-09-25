@@ -369,7 +369,7 @@ class AdmissionExchange:
 
 **Files:** modify `src/web/decision_request.py`; create `tests/agent/test_ordinary_semantic_admission.py`.
 
-- [ ] RED complete original positive prompts with strict validated server identity; assert they yield semantic candidates, not direct chat or errors converted into chat. Preserve tests for original A1 supported/blocked science. Use exact strings:
+- [x] RED complete original positive prompts with strict validated server identity; assert they yield semantic candidates, not direct chat or errors converted into chat. Preserve tests for original A1 supported/blocked science. Use exact strings:
 
 ```python
 CAPABILITY_CASES = (
@@ -388,14 +388,14 @@ def test_full_capability_is_only_a_candidate(case_id, query):
 
 The test imports new helper names from decision_request; add imports explicitly. Before factoring expect missing helper behavior. No changed dataset file or replacement expected rejection.
 
-- [ ] Factor the first validation/options portion of `prepare_decision_request` into `validate_request_envelope` returning a frozen `ValidatedRequest` with query/session/trace/flags/temperature/counts/generation and bounded plain JSON reference/selection hints. Preserve `_FIELDS`, size/secret/type/identity/count checks exactly. Preserve old prepare signature by using the helper internally, then the existing `_classify` and full scientific preparation tail. Add `prepare_validated_science` as a private helper only for that unchanged tail; never trust external kind/tools/metrics values.
-- [ ] Implement `WholeRequestAssessment` (frozen) fields `version='1'`, kind closed to `known_scientific|known_chat|semantic_candidate|blocked`, fixed reason, query digest. No list of model-authored obligations. Assessment precedence:
+- [x] Factor the first validation/options portion of `prepare_decision_request` into `validate_request_envelope` returning a frozen `ValidatedRequest` with query/session/trace/flags/temperature/counts/generation and bounded plain JSON reference/selection hints. Preserve `_FIELDS`, size/secret/type/identity/count checks exactly. Preserve old prepare signature by using the helper internally, then the existing `_classify` and full scientific preparation tail. Add `prepare_validated_science` as a private helper only for that unchanged tail; never trust external kind/tools/metrics values.
+- [x] Implement `WholeRequestAssessment` (frozen) fields `version='1'`, kind closed to `known_scientific|known_chat|semantic_candidate|blocked`, fixed reason, query digest. No list of model-authored obligations. Assessment precedence:
   1. Invalid envelope never reaches assessment. Normalize a separate NFKC/casefold scan view; authoritative query stays byte-for-byte unchanged.
   2. Recognize whole-request executable science/retrieval/result demands, including newline/semicolon and unseparated appended clauses. The existing supported scientific analyzers and coverage checks remain the only producers of typed obligations; unknown action/mixed/result demands block, not partially execute.
   3. Pure capability/definition mentions and negative-only tool prohibitions are not execution. Detect scoped prohibitions before deciding whether an action is demanded, but keep their original text; a prohibition plus conflicting positive imperative remains blocked. An ambiguous risky construction blocks. `_UNSUPPORTED` noun hits alone cannot reject a capability description; `_classify` exception alone cannot authorize a candidate.
   4. Known A1 closed chat is `known_chat` only after the whole risk check. Remaining bounded human text with no detected execution/result/code/asset instruction is a **proposal candidate**, never a Prepared chat. The model must return an allowed ordinary intent with matching relation and unresolvedFalse. This is not unknown-to-chat fallback; unfamiliar indirect obligations remain disclosed residual risk, not claimed semantic proof.
-- [ ] Keep the execution-risk vocabulary versioned and bounded (whole query <=16KiB, one linear scan plus bounded clauses, no nested catastrophic regex). At minimum recognize English/Chinese compute/calculate/predict/measure/generate/optimize/dock/retrieve/search/run verbs, known metrics/SMILES/box/file/tool invocation, citation-as-retrieval requirements and subject-specific result demands. Inspect unseparated suffixes too. Do not maintain an allowed-prompt list. Unit tests must include arbitrary qualitative paraphrases plus the actual positive full prompts.
-- [ ] `prepare_with_intent(envelope, assessment, intent, *, history, capability_snapshot, intent_requests, references=None)` validates query/assessment binding, `history_pairs`, current view/generations and intent. Ordinary kind requires empty typed obligations and tools; `prior_ordinary_turn` requires eligible history. Scientific/retrieval proposal re-enters the unchanged server scientific preparation with the original full query and flags; failure stays its fixed failure, not chat. `mixed/uncertain/unresolved` returns `request_clarification_required`. Return `(PreparedDecision, binding_json)`; bind context.memory only in Web once after obtaining the detached getter. Never accept client binding/capability fields.
+- [x] Keep the execution-risk vocabulary versioned and bounded (whole query <=16KiB, one linear scan plus bounded clauses, no nested catastrophic regex). At minimum recognize English/Chinese compute/calculate/predict/measure/generate/optimize/dock/retrieve/search/run verbs, known metrics/SMILES/box/file/tool invocation, citation-as-retrieval requirements and subject-specific result demands. Inspect unseparated suffixes too. Do not maintain an allowed-prompt list. Unit tests must include arbitrary qualitative paraphrases plus the actual positive full prompts.
+- [x] `prepare_with_intent(envelope, assessment, intent, *, history, capability_snapshot, intent_requests, references=None)` validates query/assessment binding, `history_pairs`, current view/generations and intent. Ordinary kind requires empty typed obligations and tools; `prior_ordinary_turn` requires eligible history. Scientific/retrieval proposal re-enters the unchanged server scientific preparation with the original full query and flags; failure stays its fixed failure, not chat. `mixed/uncertain/unresolved` returns `request_clarification_required`. Return `(PreparedDecision, binding_json)`; bind context.memory only in Web once after obtaining the detached getter. Never accept client binding/capability fields.
 
 Concrete ordinary branch assembly after validation:
 
@@ -408,8 +408,8 @@ prepared = PreparedDecision(envelope.query, envelope.session_id, envelope.trace_
     envelope.config_generation)
 ```
 
-- [ ] Add original-negative regression matrix: `解释 logP\n对接这个分子`, `计算 CCO 的分子量和熔点`, disabled properties, two subjects/count mismatch, target+calculation mix, unseparated unsupported imperative, malicious intent calling recognized science ordinary, hidden client history/profile/permissions, invalid/omitted-history follow-up. DIVERSE016/017 remain unavailable/unsupported actual RAG duties, never qualitative-chat successes. Assert zero intent/model/tool calls for detected blocks using counters, not mock scientific outcomes.
-- [ ] GREEN: §2 with `tests/agent/test_ordinary_semantic_admission.py`, `tests/agent/test_web_decision_admission.py`, `tests/agent/test_decision_requirements.py`, `tests/agent/test_task_requirements.py`. These regression paths were verified in L. Checkpoint only decision_request and the new tests.
+- [x] Add original-negative regression matrix: `解释 logP\n对接这个分子`, `计算 CCO 的分子量和熔点`, disabled properties, two subjects/count mismatch, target+calculation mix, unseparated unsupported imperative, malicious intent calling recognized science ordinary, hidden client history/profile/permissions, invalid/omitted-history follow-up. DIVERSE016/017 remain unavailable/unsupported actual RAG duties, never qualitative-chat successes. Assert zero intent/model/tool calls for detected blocks using counters, not mock scientific outcomes.
+- [x] GREEN: §2 with `tests/agent/test_ordinary_semantic_admission.py`, `tests/agent/test_web_decision_admission.py`, `tests/agent/test_decision_requirements.py`, `tests/agent/test_task_requirements.py`. These regression paths were verified in L. Checkpoint only decision_request and the new tests.
 
 ## Task 5 — Gate both chat outputs before any proposal persistence/exposure
 
@@ -878,3 +878,34 @@ These records deliberately do not prove their own origin: the server/DB ownershi
 ## 17. Task4 bounded implementation release
 
 Parent revalidated clean Task3 commit `e2955898f5d1162df057b537e5beb3a865770c60`; the prior goal turn is progress, not a blocked wait. Release Task4 only: `src/web/decision_request.py` and new `tests/agent/test_ordinary_semantic_admission.py`. Preserve the original `prepare_decision_request` signature/behavior and scientific obligation producers; factor envelope validation and add separate server-only semantic assessment/preparation. Whole original positive prompts and qualitative paraphrases must be tested, not replaced by a greeting whitelist or expected rejections. Negative/mixed/code/asset/result demands cannot become chat through an exception catch. Use existing Task3 contracts and real eligible-history helper, with no model/tool calls or runtime activation. Fresh worker implements TDD; parent reviews integration and adversarial coverage independently. Require SPEC then QUALITY on frozen files; Tasks5–9 and B/C remain unreleased here.
+
+## 18. Task4 initial implementation freeze and retained failures
+
+Task4 worker reports the following offline runs using the unchanged section-2 launcher and only the four approved test files or their explicit node IDs. These are local results, not CI, live provider acceptance or a production switch. All worker test sessions ended.
+
+| Stage | Result | Seconds | Exit |
+|---|---|---:|---:|
+| Initial explicit missing-API RED | 2 failed | 1.41 | 1 |
+| Expanded missing-API RED | 96 failed | 6.33 | 1 |
+| First implementation | 80 passed / 16 failed | 28.04 | 1 |
+| Snapshot round-trip node | 1 passed | 11.48 | 0 |
+| Assessment-revision binding node | 1 failed | 12.15 | 1 |
+| Corrected new module | 98 passed | 9.76 | 0 |
+| Four-file regression | 600 passed | 61.43 | 0 |
+| Nominal suffix RED | 5 failed | 1.97 | 1 |
+| Qualitative paraphrases | 12 passed / 2 failed | 3.19 | 1 |
+| Suffix, paraphrases and original positives | 21 passed | 4.18 | 0 |
+| Payload-size and reference-owner nodes | 1 passed / 1 failed | 16.28 | 1 |
+| Final worker four-file regression | 611 passed | 62.51 | 0 |
+
+The first REDs were assertions inside collected tests, not collection import errors. Initial implementation failures included an assessment revision containing a credential-shaped substring rejected by Task3's existing secret guard, and omitted English-period clause separation. Neither security coverage nor old tests were relaxed. Parent's source concern was reproduced: nominal phrases consumed action tokens and a description prefix incorrectly covered an appended execution request. Both `请解释分子对接然后分子生成10个候选` and `解释 logP并分子对接这个分子`, plus three variants, initially became candidates. Full-description scope now blocks them, with zero intent/model/tool counter increments. Original capability questions and qualitative paraphrases remain positive. The later payload boundary regression exposed default-field overhead when rebuilding an already-valid 24-KiB request; the worker changed record revalidation rather than raising the browser payload limit.
+
+Frozen SHA256s: `decision_request.py` `1d1da9fde5aa16682f6591b7fd81cf92b041707707818d207a044a3ca1a01669`; new tests `dc116fca09d838849e392e3c326b26783342b25c10f5affb9205d0d791264241`; unchanged launcher `c56e66ad7ddec7e7004e2171b630370e9450897b8a89ac0bf6c1b60a099891b4`. Parent independently verified these hashes and `git diff --check`, then dispatched SPEC review. SPEC/QUALITY approval and a local checkpoint remain pending at this freeze. Existing classifier, scientific preparation, datasets and old test files remain unchanged; no external model, original checkout or scientific assets were accessed. The bounded lexical check does not prove arbitrary-language intent, and server history/snapshot ownership still requires later Web integration.
+
+### Task4 independent SPEC closure
+
+Independent SPEC approved the exact two-file freeze with no P1/P2 findings. The reviewer confirmed the original classifier/scientific analyzers/preparation tail are unchanged and ran the same four-module command once: **611 passed (109 new + 502 existing), 115.21s, exit 0, zero warnings/skips/deselection**. Session `38659` ended; reviewer reported zero Python/pythonw processes and exact before/after SHA matches for both files and the launcher. Parent-maintained plan changes were explicitly outside the production/test freeze. QUALITY has been dispatched separately; this SPEC approval is not the remaining review, CI or production acceptance.
+
+### Task4 independent QUALITY closure
+
+Independent QUALITY subsequently approved the same frozen two files with no P1/P2 or additional changes. Its single four-module run gave **611 passed (109 new + 502 existing), 94.82s, exit 0, zero failures/warnings/skips/deselections**. Session `23606` ended, runner cleanup completed and the reviewer reported zero Python/pythonw processes. Before/after source/test/launcher SHA256s exactly match the freeze above; HEAD remained `b9cf37a8a2b78bcdf85824829cd97bfb9f5bf35b`. No test expectation, timeout, scientific contract or data file changed during reviews. Task4 is complete locally and may be checkpointed with the parent-owned evidence documents. Later output gating, shared-budget continuation, Web wiring, CI publication and real-model/browser verification remain pending. No push, merge, model activation or deployment is implied by these offline approvals.
