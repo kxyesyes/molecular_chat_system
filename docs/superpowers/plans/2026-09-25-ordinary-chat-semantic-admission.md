@@ -56,7 +56,7 @@ async def propose_ordinary_intent(self, messages, *, mode='native',
                                  max_tokens=256, timeout_seconds=30.0, _journal=None):
     from src.agent.decision_transport import request_ordinary_intent
     return await request_ordinary_intent(self, messages, mode=mode,
-        max_tokens=max_tokens, timeout_seconds=timeout_seconds, journal=_journal)
+        max_tokens=max_tokens, timeout_seconds=timeout_seconds, _journal=_journal)
 
 # decision_request: existing prepare_decision_request signature/default unchanged.
 # New helpers (defined in Task4): validate_request_envelope, assess_whole_request,
@@ -306,9 +306,9 @@ def _function_name(profile):
 
 **Files:** create `src/agent/contracts/ordinary_admission.py`, `src/web/ordinary_capabilities.py`, `tests/agent/test_ordinary_capabilities.py`.
 
-- [ ] RED pure test `test_registration_is_not_readiness`: provide a real `ToolRegistry` with adapters whose health method raises if called; build snapshot from `frozenset(registry.as_mapping())` and safe provider descriptor. Assert registered current tools are wired, readiness unknown, and B/C features are unwired; no health/resolve/file/network call occurs. Invalid snapshot, secret-like descriptor, >32 features or >16-KiB view must fail with fixed `ordinary_capabilities_unavailable`.
-- [ ] Implement frozen `CapabilityFeature`/`CapabilitySnapshot` Pydantic records under contracts with `extra='forbid', strict=True, frozen=True`; features are a tuple of frozen records, not mutable dictionaries. All fields required except optional factual observation age/source; in this increment omit observation fields entirely because no audited readiness publication source is installed. Schema fields are exactly spec§6.1; safe descriptor is provider/model/mode only, no endpoint. Keep `readiness='unknown'` until an explicit reviewed fact exists; do not claim capabilities by reading model.api_key.
-- [ ] Define the reviewed catalog below in `ordinary_capabilities.py` as immutable product descriptions and limitations, not text copied from adapters. The builder accepts a frozen set of assembled registered names and validated flags. It does no discovery. Present supported product functions separately from the selected entry's wiring.
+- [x] RED pure test `test_registration_is_not_readiness`: provide a real `ToolRegistry` with adapters whose health method raises if called; build snapshot from `frozenset(registry.as_mapping())` and safe provider descriptor. Assert registered current tools are wired, readiness unknown, and B/C features are unwired; no health/resolve/file/network call occurs. Invalid snapshot, secret-like descriptor, >32 features or >16-KiB view must fail with fixed `ordinary_capabilities_unavailable`.
+- [x] Implement frozen `CapabilityFeature`/`CapabilitySnapshot` Pydantic records under contracts with `extra='forbid', strict=True, frozen=True`; features are a tuple of frozen records, not mutable dictionaries. All fields required except optional factual observation age/source; in this increment omit observation fields entirely because no audited readiness publication source is installed. Schema fields are exactly spec§6.1; safe descriptor is provider/model/mode only, no endpoint. Keep `readiness='unknown'` until an explicit reviewed fact exists; do not claim capabilities by reading model.api_key.
+- [x] Define the reviewed catalog below in `ordinary_capabilities.py` as immutable product descriptions and limitations, not text copied from adapters. The builder accepts a frozen set of assembled registered names and validated flags. It does no discovery. Present supported product functions separately from the selected entry's wiring.
 
 | Feature ID | Current normal-entry wiring rule | Description/limitation |
 |---|---|---|
@@ -326,7 +326,7 @@ def _function_name(profile):
 
 `wired` is profile support AND assembly presence; `permitted` also applies server ownership/options, independent of readiness. `scientific_tools=False` makes the four scientific features unpermitted, never removes product descriptions. A chat turn itself still has zero allowed tools even when the product snapshot describes a tool permitted for a different scientific request. The system message must explain this distinction. Unknown/unwired capability cannot be promoted by earlier chat history.
 
-- [ ] Define shared frozen plain records with bounded JSON strings for nested admission metadata; validate on construction/ingress and deserialize fresh copies only. This avoids shared mutable aliases and a harness→Web import:
+- [x] Define shared frozen plain records with bounded JSON strings for nested admission metadata; validate on construction/ingress and deserialize fresh copies only. This avoids shared mutable aliases and a harness→Web import:
 
 ```python
 from dataclasses import dataclass
@@ -362,8 +362,8 @@ class AdmissionExchange:
 ```
 
 `ActiveSegment`, `resume_expires_at`, checkpoint.created_at and the exchange are process-local only; never persist their absolute monotonic values. Validate exact types (bool is not int), finite/nonnegative durations, 0<allowance<=300 at dispatch, deadline==started_at+allowance and no cap increase. All metadata JSON uses existing bounded decoder/plain JSON validator and secret checks. Binding/record/capability limits: 4/8/16 KiB respectively. Exchange is exact-type checked, set once; mismatched trace/ID/digest is `continuation_rejected`, not silently ignored.
-- [ ] New binding v1 fields: `version`, `profile_revision`, `assessment_revision`, `query_digest`, `history_digest`, `capability_digest`, `model_generation`, `capability_generation`, `intent_kind`, `intent_requests`. Digests use `EvidenceLedger.output_digest` on bounded sanitized views, never credentials. Known chat/science with no intent use kind `known_chat`/`known_scientific`, requests0, recordNone. Unknown intent values do not enter the binding.
-- [ ] GREEN: `test_ordinary_capabilities.py` checks detached views, aliases do not expand catalog, stale/secret metadata rejection, disabled flags, deterministic digest and no I/O. Epoch writer integration follows Task7, not an in-turn writer. Checkpoint only the three task files.
+- [x] New binding v1 fields: `version`, `profile_revision`, `assessment_revision`, `query_digest`, `history_digest`, `capability_digest`, `model_generation`, `capability_generation`, `intent_kind`, `intent_requests`. Digests use `EvidenceLedger.output_digest` on bounded sanitized views, never credentials. Known chat/science with no intent use kind `known_chat`/`known_scientific`, requests0, recordNone. Unknown intent values do not enter the binding.
+- [x] GREEN: `test_ordinary_capabilities.py` checks detached views, aliases do not expand catalog, stale/secret metadata rejection, disabled flags, deterministic digest and no I/O. Epoch writer integration follows Task7, not an in-turn writer. Checkpoint only the three task files.
 
 ## Task 4 — Whole-request assessment without relaxing scientific admission
 
@@ -850,3 +850,27 @@ The journal conservatively retains completion as unknown when parsing fails whil
 ## 15. Task3 bounded implementation release
 
 Parent revalidated clean Task2 commit `162a4acc9c896171fd3ac994879ffd502d5bec0d`. The previous goal turn made concrete progress and has no blocking condition. Task3 alone is released: new `src/agent/contracts/ordinary_admission.py`, `src/web/ordinary_capabilities.py`, `tests/agent/test_ordinary_capabilities.py`. Use the reviewed catalog, immutable bounded records and existing digest/JSON/privacy primitives; no model/registry health hooks, asset/config discovery, epoch publisher, route activation, new authority or task4–9 code. The fresh implementation worker owns these three files; parent owns documentation and checks their downstream integration boundary. Isolated RED/GREEN uses the unchanged inspected launcher, followed by independent SPEC then QUALITY on frozen files. No Task3 test is yet claimed at this release.
+
+## 16. Task3 initial TDD evidence (review pending)
+
+On parent `e43512a83ac7d50c43f8e11c7b502f76d630d718`, the worker added only Task3's three new files. Initial single registration/readiness RED: **1 failed / 7.15s / exit1**, session56144; all-new RED: **71 failed / 21.17s / exit1**, session26417, explicit missing-module assertions. GREEN with the new capability tests plus unchanged intent protocol/transport tests: **332 passed / 21.23s / exit0**, session80702. After removing two unused imports and adding assertions inside existing tests for Pydantic JSON roundtrip, strict direct-list rejection and nested catalog tuple immutability, final GREEN: **332 passed / 21.61s / exit0**, session48049. No unchanged-failure retry occurred; all sessions ended. Tests use the same inspected offline launcher, not external models or real scientific dependencies.
+
+Frozen SHA256s: contracts `963e1a0697dffae838336d7a8816c509365406743e752358e8c9e9b1d9b8f69d`; builder `937f34b0098ff3c093dcd38142f13c41b7b9f7d5bb366398d790420a759d869c`; tests `9dd630b395b16ed8b847e5a69e119fc89ac35402f2b271642f21a67c237c4028`. Parent separately corrected the plan's illustrative transport keyword to the actually implemented `_journal`; no Task2 code changed. SPEC/QUALITY are still required; this initial record is not a final approval or route/production activation. Cross-segment credit provenance and current-generation publication remain Task6/7 obligations.
+
+### Task3 SPEC finding, not yet closed
+
+Independent SPEC ran the three focused modules once: **332 passed / 4.88s / exit0**, no warnings/skips/deselections, command ended and Python/pythonw counts zero. Frozen hashes stayed unchanged. Despite green tests, SPEC found P2: successful journal ingress accepts arbitrary HTTP2xx and optional/arbitrary mode/finish strings, whereas the actual Task2 transport can only produce HTTP200 plus native/tool_calls or json/stop. Parent verified the source mismatch and released only a same-file regression/minimal fix; this is an internal-consistency issue, not a demonstrated browser authorization bypass. Reproduction tests and corrected results remain pending here.
+
+The 32-KiB binding-history digest ceiling alone is not the ordinary-history eligibility policy; Task4 must first enforce existing `history_pairs` 20-pair/16-KiB rules. Generic frozen feature types are not trusted publishers: the current builder is the reviewed eleven-feature source and always emits unknown readiness. These responsibility boundaries were reviewed and do not waive later integration checks.
+
+### Task3 P2 closure and SPEC re-review
+
+Focused native/json actual-transport positive controls and journal-mutation regressions reproduced the issue on unchanged implementation: **16 failed / 10 passed / 3.60s / exit1**, terminal chunk `e29f41`. The minimal contract/test correction requires HTTP200, mandatory mode/finish_reason, and only native/tool_calls or json/stop. Corrected three-module GREEN once: **357 passed / 6.51s / exit0**, terminal chunk `8397f4`. Builder, launcher, Task2 and all old tests were unchanged.
+
+New contract SHA256 `dec6aa9fc4ca8c481959a73baebbe7a766f54b590f99f3502fb3d05de5f6a4ab`; new test SHA256 `c0a5dc947bcb7dbe51bff87e10117aa758aab05061e80fd7e2388f2e2b53ed3a`. Independent SPEC then approved and closed P2 on the same frozen files: **357 passed / 8.09s / exit0**, session68364 ended, zero warnings/skips/deselections, Python/pythonw counts zero. No new finding or edit. QUALITY remains pending; initial pre-fix green results above were insufficient and remain in the record rather than being replaced.
+
+### Task3 final QUALITY and local checkpoint
+
+Independent QUALITY approves the exact corrected frozen files, with no finding or extra change suggestion. Its single three-module test run: **357 passed / 7.22s / exit0**, zero failures/warnings/skips/deselections; command completed directly without a persistent session. Python count zero, temporary runner cleanup completed, all three file hashes and the launcher hash unchanged. Parent source/diff checks agree; old source/tests are untouched. Task3 is now complete locally and may be checkpointed with these docs, not published or connected to production.
+
+These records deliberately do not prove their own origin: the server/DB ownership boundary remains trusted, and checksums detect inconsistency rather than authenticate a malicious writer. Task4 must enforce eligible ordinary history and bind the full request. Tasks6/7 must compare recorded trace/turn with the active owner, captured provider/model/wire mode with the same leased adapter, current epochs, retained budget and publication outcome. No real API, model activation, browser acceptance, scientific readiness or later-task completion is claimed by the 357 offline tests.
