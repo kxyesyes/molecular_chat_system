@@ -52,6 +52,8 @@ def actual_app(tmp_path, monkeypatch):
 
     @asynccontextmanager
     async def build(*, mode=None, wire='native', respond=None, optional_tools=False):
+        if mode == 'decision_a2':
+            importlib.import_module('langgraph.graph')
         if optional_tools:
             # Constructors are lazy; clarification tests never load a predictor
             # or target service and still use the actual registry/adapters.
@@ -177,6 +179,74 @@ def result_of(frames):
     assert len(results) == 1
     assert len([f for f in frames if f['type'] == 'complete']) == 1
     return results[0]
+
+
+@pytest.mark.parametrize('mode', ['decision_a2', 'legacy'])
+def test_fixture_dependency_readiness_precedes_observer(actual_app, monkeypatch, mode):
+    marks = []
+    original_import, original_profile = importlib.import_module, sys.setprofile
+
+    def observed_import(name, *args, **kwargs):
+        module = original_import(name, *args, **kwargs)
+        if name == 'langgraph.graph':
+            marks.append('graph_ready')
+        return module
+
+    def observed_profile(callback):
+        if getattr(callback, '__name__', '') == 'observe_call':
+            marks.append('observer')
+        return original_profile(callback)
+
+    monkeypatch.setattr(importlib, 'import_module', observed_import)
+    monkeypatch.setattr(sys, 'setprofile', observed_profile)
+
+    async def run():
+        previous_profile = sys.getprofile()
+        async with actual_app(mode=mode):
+            expected = ['graph_ready', 'observer'] if mode == 'decision_a2' else ['observer']
+            assert marks == expected
+            assert getattr(sys.getprofile(), '__name__', '') == 'observe_call'
+        assert sys.getprofile() is previous_profile
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('send_before_ready', [True, False], ids=['pre-ready', 'post-ready'])
+@pytest.mark.parametrize('full_payload', [False, True], ids=['minimal', 'full'])
+def test_actual_first_chat_completes_with_observer(actual_app, send_before_ready, full_payload):
+    """Prepared protocol fixture, not a production cold-start latency assertion."""
+    async def run():
+        previous_profile = sys.getprofile()
+        async with actual_app(mode='decision_a2') as b:
+            observer = sys.getprofile()
+            assert getattr(observer, '__name__', '') == 'observe_call'
+            payload = {'message': 'Explain logP'}
+            if full_payload:
+                payload.update(type='chat', enable_rag=True, enable_tools=True,
+                               rag_count=3, temperature=0.7, mol_count=1,
+                               timestamp=0, client_id='web_client')
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                if send_before_ready:
+                    await socket.send(payload)
+                ready = await socket.ready()
+                assert ready['normal_chat_mode'] == 'decision_a2'
+                if not send_before_ready:
+                    await socket.send(payload)
+                frames = []
+                for _ in range(150):
+                    frame = await socket.receive()
+                    frames.append(frame)
+                    if frame['type'] == 'complete':
+                        break
+                assert frames[0]['type'] == 'request_accepted'
+                assert sum(frame['type'] == 'request_accepted' for frame in frames) == 1
+                result = result_of(frames)
+                assert result['status'] == 'completed'
+                assert len(b.calls) == len(b.admission_calls) == len(b.admissions) == 1
+                assert b.app.agent_state_store.get_tool_executions(result['trace_id']) == []
+                assert sys.getprofile() is observer
+            assert not b.app.decision_runtime.active_owners
+        assert sys.getprofile() is previous_profile
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('answer', ['The admitted protocol explanation.', '{ordinary explanation, not a decision}'])

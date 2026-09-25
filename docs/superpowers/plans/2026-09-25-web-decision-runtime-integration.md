@@ -869,3 +869,37 @@ assert (await asyncio.to_thread(sys.stdin.readline)).strip() == 'begin'
 - [ ] Independent SPEC then QUALITY review both exact test blobs; allow independent focused execution sequentially. Memory-compile, `git diff --check`, preserve original probes/hashes, record exact counts and cleanup. Parent owns explicit staging/local checkpoint only after review. Full A2 offline/CI/PR gates remain separate.
 
 Commands inside the approved OS-whitelisted/temp-cwd/config/DB/cache child with tracked JSONL copies and normal conftest: `python -B -m pytest <absolute-lifecycle-path> -k failed_join_checkpoint -q -p no:cacheprovider --tb=short -rs` for policy tests; exact `.../test_web_decision_runtime_lifecycle.py::test_permanent_failed_join_retains_route_owner_in_isolated_child` for real ownership; both absolute module paths for the full pair. No external model, credential, user database, network call or deployment is authorized in this sub-batch. This written follow-up is locally checkpointed before implementation.
+
+## 20. Fixture/child-boundary correction: executed review checkpoint
+
+Section 19 design was checkpointed as `d0bf6f923bfdf8150a7ee94534e25d2ef89c33a1` and independently source-reviewed before implementation. Sections 18/19's bounded test implementation and focused verification are now complete; their earlier checklist text records the planned sequence, not an outstanding code release. Overall A2 remains pending.
+
+Only these test blobs are approved; no production files change in this checkpoint:
+
+| File | Reviewed Git blob |
+|---|---|
+| `tests/agent/test_web_decision_runtime.py` | `dc7adcf075694f65cbb72aed0b56d3504339502f` |
+| `tests/agent/test_web_decision_runtime_lifecycle.py` | `0e01612bceaabc540cce141bc2974942b46e0bc6` |
+
+The first file adds 70 lines as recorded in section 19. The lifecycle file adds 64/removes 3: small checkpoint helper, 11 policy cases, child bootstrap/begin handshake, and reuse of the helper in the original three-stage loop. Original ownership/scientific assertions, subsequent shutdown/cancel commands and finally cleanup are preserved. The startup 60-second budget is new; it must not be described as preserving the original total wall-clock budget.
+
+| Actual execution | Result |
+|---|---|
+| Policy RED, helper absent | 11 failed / 13.53s, expected missing-helper NameError |
+| Policy GREEN | 11 passed / 8.42s |
+| Actual isolated failed-join child | 1 passed / 31.42s |
+| Whole runtime + lifecycle modules, one run | **186 passed / 7 warnings / 0 skipped / 648.58s**, exit 0 |
+| Independent SPEC focused execution | **18 passed / 7 warnings / 0 skipped / 59.19s**, exit 0 |
+| Independent QUALITY focused execution | **18 passed / 7 warnings / 0 skipped / 60.92s**, exit 0 |
+
+Each reviewer independently ran six readiness controls, 11 checkpoint-policy cases and the actual child once, not the full pair again. SPEC and QUALITY approve only this two-test-file correction on identical before/after hashes. Existing warnings are SWIG/FastAPI deprecations, not hidden failures. All implementation/review sessions exited; review sessions were 20115 and 12185. Actual child PID/liveness, forced terminate/wait, stdout-reader join and original cleanup assertions passed. This is **forced isolated-child cleanup, not graceful production shutdown**.
+
+Invocation is the existing ignored `scratch/p7a2_fixture_failure_runner.py`, which delegates the approved OS-whitelisted pre-import/temp-cwd/config/DB/cache runner and adds only safe per-failure node/type/stack reporting. Formal tests load normal conftest; three tracked JSONL copies have matching SHA. No real provider, key, user data or network is used. Full-pair command:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -B scratch/p7a2_fixture_failure_runner.py tests/agent/test_web_decision_runtime.py tests/agent/test_web_decision_runtime_lifecycle.py
+```
+
+Review command selects the exact nodes `test_fixture_dependency_readiness_precedes_observer`, `test_actual_first_chat_completes_with_observer`, `test_failed_join_checkpoint_uses_distinct_budgets_and_returns_facts`, `test_failed_join_checkpoint_rejects_invalid_child_state`, `test_failed_join_checkpoint_propagates_queue_timeout` and `test_permanent_failed_join_retains_route_owner_in_isolated_child` through that same runner. Memory compilation and `git diff --check` pass. Existing ignored probes are unchanged and not staged.
+
+The two historical 174P/1F groups are not erased. The first failure identity, three older warmup UNKNOWN cases, startup-variability root cause and production cold-start risk remain explicitly unresolved. The passing full pair validates this current test boundary; it is neither a performance repair nor full Agent/repository/CI evidence. Parent may explicitly stage the two reviewed tests plus this evidence for a local checkpoint. Full A2 review/offline/CI/unique PR, ordinary-chat/B/C integration and P8 live acceptance still require subsequent work; no push, merge, default activation or deployment occurs here.

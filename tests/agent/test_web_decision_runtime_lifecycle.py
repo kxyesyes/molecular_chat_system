@@ -45,6 +45,64 @@ def route_executors(monkeypatch, allow_join, join_started):
     return records
 
 
+def _wait_failed_join_checkpoint(snapshots, child, owned_pid, stage):
+    facts = snapshots.get(timeout=60 if stage == 'bootstrap-ready' else 20)
+    assert facts['stage'] == stage, 'isolated child did not reach controlled checkpoint'
+    assert facts['pid'] == owned_pid and child.poll() is None
+    return facts
+
+
+def test_failed_join_checkpoint_uses_distinct_budgets_and_returns_facts():
+    stages = ['bootstrap-ready', 'retained', 'shutdown', 'retained-after-cancel']
+    facts = [{'stage': stage, 'pid': 123, 'marker': index}
+             for index, stage in enumerate(stages)]
+    pending = iter(facts)
+    timeouts = []
+    def get(*, timeout):
+        timeouts.append(timeout)
+        return next(pending)
+    snapshots = SimpleNamespace(get=get)
+    child = SimpleNamespace(poll=lambda: None)
+    for stage, expected in zip(stages, facts):
+        assert _wait_failed_join_checkpoint(snapshots, child, 123, stage) is expected
+    assert timeouts == [60, 20, 20, 20]
+
+
+@pytest.mark.parametrize('stage', ['bootstrap-ready', 'retained'])
+@pytest.mark.parametrize('failure', ['wrong-stage', 'eof', 'foreign-pid', 'exited'])
+def test_failed_join_checkpoint_rejects_invalid_child_state(stage, failure):
+    facts = {'stage': stage, 'pid': 123}
+    if failure == 'wrong-stage':
+        facts['stage'] = 'unexpected'
+    elif failure == 'eof':
+        facts = {'stage': 'child-output-ended'}
+    elif failure == 'foreign-pid':
+        facts['pid'] = 124
+    timeouts = []
+    def get(*, timeout):
+        timeouts.append(timeout)
+        return facts
+    snapshots = SimpleNamespace(get=get)
+    child = SimpleNamespace(poll=lambda: 0 if failure == 'exited' else None)
+    with pytest.raises(AssertionError):
+        _wait_failed_join_checkpoint(snapshots, child, 123, stage)
+    assert timeouts == [60 if stage == 'bootstrap-ready' else 20]
+
+
+@pytest.mark.parametrize('stage', ['bootstrap-ready', 'retained'])
+def test_failed_join_checkpoint_propagates_queue_timeout(stage):
+    import queue
+    timeouts = []
+    def get(*, timeout):
+        timeouts.append(timeout)
+        raise queue.Empty
+    snapshots = SimpleNamespace(get=get)
+    child = SimpleNamespace(poll=lambda: None)
+    with pytest.raises(queue.Empty):
+        _wait_failed_join_checkpoint(snapshots, child, 123, stage)
+    assert timeouts == [60 if stage == 'bootstrap-ready' else 20]
+
+
 def _failed_join_child():
     """Test-only isolated process entry; intentionally never claims graceful cleanup."""
     import os
@@ -88,6 +146,8 @@ def _failed_join_child():
             mp.setattr(b.model, 'close', close)
             async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                 await socket.ready()
+                print('P7A2_CHILD ' + json.dumps({'stage': 'bootstrap-ready', 'pid': os.getpid()}), flush=True)
+                assert (await asyncio.to_thread(sys.stdin.readline)).strip() == 'begin'
                 await socket.send({'message': '计算性质；SMILES: CCO'})
                 accepted = await socket.receive()
                 assert accepted['type'] == 'request_accepted'
@@ -178,11 +238,12 @@ def test_permanent_failed_join_retains_route_owner_in_isolated_child(tmp_path, r
     reader = threading.Thread(target=drain_output, name='owned-failed-join-output')
     reader.start()
     try:
+        _wait_failed_join_checkpoint(snapshots, child, owned_pid, 'bootstrap-ready')
+        child.stdin.write('begin\n')
+        child.stdin.flush()
         for stage, next_command in (('retained', 'shutdown'), ('shutdown', 'cancel-again'),
                                      ('retained-after-cancel', None)):
-            facts = snapshots.get(timeout=20)
-            assert facts['stage'] == stage, 'isolated child did not reach controlled ownership checkpoint'
-            assert facts['pid'] == owned_pid and child.poll() is None
+            facts = _wait_failed_join_checkpoint(snapshots, child, owned_pid, stage)
             assert facts['owner_retained'] and facts['reader_count'] == 1
             assert facts['owner_status'] == 'unresolved' and facts['turn_pending']
             assert facts['actual_attached_pairs'] and facts['executor_count'] == 2
