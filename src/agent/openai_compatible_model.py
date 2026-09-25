@@ -270,6 +270,17 @@ class OpenAICompatibleModel:
             timeout_seconds=timeout_seconds,
         )
 
+    async def propose_ordinary_intent(
+        self, messages, *, mode="native", max_tokens=256, timeout_seconds=30.0, _journal=None,
+    ):
+        """Return one strict intent proposal using the same bounded transport."""
+        from src.agent.decision_transport import request_ordinary_intent
+
+        return await request_ordinary_intent(
+            self, messages, mode=mode, max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds, _journal=_journal,
+        )
+
     async def close(self) -> None:
         close = getattr(self.client, "aclose", None) if self.client is not None else None
         if close:
