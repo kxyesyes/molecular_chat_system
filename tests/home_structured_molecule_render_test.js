@@ -945,6 +945,7 @@ const behaviorDocument = {
   addEventListener() {},
   createElement(tagName) { return new FakeElement(tagName); },
   querySelector() { return null; },
+  querySelectorAll() { return []; },
 };
 const behaviorNotifications = [];
 const behaviorSandbox = {

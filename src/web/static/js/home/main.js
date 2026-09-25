@@ -19,6 +19,15 @@
   let maxReconnectAttempts = 5;
   let agentTaskRunActive = false;
   let protocolDesyncedSocket = null;
+  let decisionMode = false;
+  let decisionAwaitingReady = false;
+  let decisionTurn = null;
+  let decisionWaiting = null;
+  let decisionAbandonAwait = null;
+  let decisionControls = null;
+  const decisionSeenTurns = new Set();
+  const decisionStatuses = {completed: "已完成", waiting_for_input: "等待补充输入",
+    partial: "部分完成", failed: "失败", rejected: "已拒绝", cancelled: "已取消"};
   const maxWebSocketMessageLength = 256 * 1024;
   const moleculeCandidateLifecycle =
     window.HomeMoleculeCandidates.createLifecycle({
@@ -96,6 +105,194 @@
     saveLlmConfig: null,
     agentTaskPanel: null,
   };
+
+  function decisionActive() {
+    return decisionTurn && decisionTurn.phase !== "ended";
+  }
+
+  function updateDecisionControls() {
+    if (elements.sendBtn) elements.sendBtn.disabled = decisionAwaitingReady ||
+      (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
+    if (!decisionControls) return;
+    decisionControls.box.hidden = !decisionMode;
+    decisionControls.stop.disabled = !decisionMode || !decisionActive() || !decisionTurn.turnId ||
+      Boolean(decisionTurn.result) || decisionTurn.cancelSent;
+    decisionControls.resume.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
+    decisionControls.fresh.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
+  }
+
+  function decisionStatus(turn, text) {
+    if (!turn.box) {
+      appendToLastMessage("");
+      turn.box = elements.chatContainer.querySelector(".assistant-wrapper:last-child .message-box");
+    }
+    if (!turn.statusElement) {
+      turn.statusElement = document.createElement("div");
+      turn.statusElement.className = "decision-runtime-status";
+      turn.statusElement.setAttribute("role", "status");
+      turn.box.appendChild(turn.statusElement);
+    }
+    turn.statusElement.textContent = text;
+  }
+
+  function clearDecisionConnection() {
+    decisionAwaitingReady = true; // every new socket must announce its own mode
+    if (decisionMode) {
+      scientificReferences?.startRequest(); // invalidate pending ACKs/restores, never replay
+      if (decisionActive()) {
+        decisionStatus(decisionTurn, decisionTurn.result
+          ? `${decisionTurn.statusElement.textContent} 连接已断开，结果传输未确认结束。`
+          : "连接已断开，执行结果未确认。");
+        decisionTurn.box.classList.remove("streaming");
+        decisionTurn.box.classList.add("complete");
+        removeTypingIndicator();
+      }
+    }
+    decisionMode = false;
+    decisionTurn = decisionWaiting = decisionAbandonAwait = null;
+    decisionSeenTurns.clear();
+    updateDecisionControls();
+  }
+
+  function configureDecisionMode(message) {
+    decisionAwaitingReady = false;
+    decisionMode = message.normal_chat_mode === "decision_a2";
+    if (decisionMode && !decisionControls && elements.input?.parentNode) {
+      const box = document.createElement("div");
+      box.className = "decision-runtime-controls";
+      const button = (label, action) => {
+        const node = document.createElement("button");
+        node.type = "button"; node.textContent = label;
+        node.addEventListener("click", action); box.appendChild(node); return node;
+      };
+      decisionControls = {box,
+        stop: button("停止", () => {
+          if (!decisionActive() || !decisionTurn.turnId || decisionTurn.result || decisionTurn.cancelSent) return;
+          if (sendDecisionControl({type: "cancel", turn_id: decisionTurn.turnId})) decisionTurn.cancelSent = true;
+          updateDecisionControls();
+        }),
+        resume: button("继续", () => sendDecisionMessage(true)),
+        fresh: button("开始新请求", () => {
+          if (decisionActive() || decisionAbandonAwait || !decisionWaiting) return;
+          if (sendDecisionControl({type: "abandon", trace_id: decisionWaiting.traceId,
+            continuation_id: decisionWaiting.nonce})) {
+            decisionAbandonAwait = {socket: ws, traceId: decisionWaiting.traceId};
+          }
+          updateDecisionControls();
+        })};
+      elements.input.parentNode.appendChild(box);
+    }
+    updateDecisionControls();
+  }
+
+  function sendDecisionControl(payload) {
+    if (!decisionMode || !ws || ws.readyState !== WebSocket.OPEN || protocolDesyncedSocket === ws) return false;
+    try {ws.send(JSON.stringify(payload)); return true;}
+    catch (_) {closeProtocolSocket(ws, 1011, "request send failed"); return false;}
+  }
+
+  function sendDecisionMessage(resume = false) {
+    const message = elements.input.value;
+    if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
+    const config = HomeAdvancedOptions.getConfig();
+    const payload = resume
+      ? {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message}
+      : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
+        rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
+        ...(scientificReferences?.outgoing() || {})};
+    if (!sendDecisionControl(payload)) return;
+    decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null,
+      resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
+    scientificReferences?.startRequest();
+    moleculeCandidateLifecycle.startRequest();
+    evidenceReportLifecycle?.startRequest();
+    if (!chatMode) enterChatMode();
+    addUserMessage(message);
+    elements.input.value = "";
+    showTypingIndicator();
+    updateDecisionControls();
+  }
+
+  function handleDecisionMessage(message, socket) {
+    if (["connection_ready", "pong"].includes(message.type)) return false;
+    if (message.type === "continuation_abandoned") {
+      if (decisionAbandonAwait?.socket === socket && message.trace_id === decisionAbandonAwait.traceId) {
+        decisionAbandonAwait = decisionWaiting = null;
+        updateDecisionControls();
+      }
+      return true;
+    }
+    const turn = decisionTurn;
+    if (message.type === "error") {
+      HomeChatRenderer.showNotification("请求控制未被接受，请检查当前状态后重试。", "warning");
+      // Well-formed chat/resume/abandon cannot yield invalid_control. A late
+      // cancel error has no request ID: notify, but retain pending authority.
+      if (!["invalid_frame", "turn_in_progress", "continuation_unavailable"].includes(message.code)) return true;
+      // Control errors have no request ID. Do not admit another turn until the
+      // outstanding abandon response is consumed; never queue or replay input.
+      if (decisionAbandonAwait?.socket === socket) {
+        if (message.code === "continuation_unavailable") decisionWaiting = null;
+        decisionAbandonAwait = null;
+        updateDecisionControls();
+        return true;
+      }
+      const requestRejected = ["invalid_frame", "turn_in_progress"].includes(message.code) ||
+        (message.code === "continuation_unavailable" && Boolean(turn?.resume));
+      if (turn?.phase === "pending" && requestRejected) {
+        turn.phase = "ended";
+        if (message.code === "continuation_unavailable") decisionWaiting = null;
+        moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
+        decisionStatus(turn, "请求未被接受。"); removeTypingIndicator();
+        turn.box.classList.add("complete"); updateDecisionControls();
+      }
+      return true;
+    }
+    if (!turn || turn.socket !== socket || turn.phase === "ended") return true;
+    if (message.type === "request_accepted") {
+      if (turn.phase !== "pending" || !/^[a-f0-9]{32}$/.test(message.turn_id || "") ||
+        !/^[a-f0-9]{32}$/.test(message.trace_id || "") || decisionSeenTurns.has(message.turn_id) ||
+        (turn.resume && message.trace_id !== turn.resume.traceId)) return true;
+      turn.turnId = message.turn_id; turn.traceId = message.trace_id; turn.phase = "active";
+      decisionSeenTurns.add(turn.turnId);
+      if (decisionSeenTurns.size > 64) decisionSeenTurns.delete(decisionSeenTurns.values().next().value);
+      updateDecisionControls(); return true;
+    }
+    const strict = ["molecule_candidates", "scientific_report"].includes(message.type);
+    if (!turn.turnId || (strict ? message.trace_id !== turn.traceId : message.turn_id !== turn.turnId)) return true;
+    if (strict) return !turn.result; // existing strict DTOs never receive a turn_id
+    if (message.type === "agent_event") {
+      return Boolean(turn.result) || message.event?.trace_id !== turn.traceId;
+    }
+    if (message.trace_id !== turn.traceId) return true;
+    if (message.type === "agent_result") {
+      if (turn.result || !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status)) return true;
+      const text = typeof message.final_answer === "string" ? message.final_answer : message.message || "";
+      turn.result = {status: message.status, text, metadata: message.metadata || {}};
+      const rag = message.metadata?.retrieval_performed === false
+        ? (message.metadata.rag_requested === true ? " RAG已开启，本轮未执行检索。" : " 本轮未执行检索。") : "";
+      decisionStatus(turn, decisionStatuses[message.status] + rag);
+      turn.box.setAttribute("data-content", text);
+      turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text);
+      updateDecisionControls(); return true;
+    }
+    if (message.type === "complete") {
+      if (!turn.result) return true;
+      const {status, text, metadata} = turn.result;
+      if (["failed", "rejected", "cancelled"].includes(status)) {
+        moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
+      }
+      completeLastMessage(text); clearToolStatus();
+      turn.phase = "ended";
+      if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
+        message.continuation_id === metadata.continuation_id) {
+        decisionWaiting = {traceId: turn.traceId, nonce: metadata.continuation_id};
+      } else {
+        decisionWaiting = metadata.stop_reason === "continuation_rejected" ? turn.resume : null;
+      }
+      updateDecisionControls(); return true;
+    }
+    return true; // decision mode does not accept legacy stream/message authority
+  }
 
   // 初始化函数
   function init() {
@@ -212,6 +409,7 @@
 
   // WebSocket连接管理 - 修复版
   function connectWebSocket() {
+    clearDecisionConnection();
     const previousSocket = ws;
     ws = null;
     protocolDesyncedSocket = null;
@@ -268,33 +466,27 @@
           handleWebSocketMessage(event.data, socket);
         } catch (error) {
           closeProtocolSocket(socket, 1002, "message handling failed");
-          console.error("❌ 处理WebSocket消息时出错:", {
-            error: error.message,
-            stack: error.stack,
-            rawData: event.data,
-          });
-          showErrorMessage(`消息处理错误: ${error.message}`);
+          console.error("WebSocket message handling failed");
+          showErrorMessage("消息处理失败，连接已关闭。");
         }
       };
 
       socket.onerror = (error) => {
         if (socket !== ws) return;
+        clearDecisionConnection();
         clearTimeout(connectionTimeout);
         if (protocolDesyncedSocket !== socket) {
           moleculeCandidateLifecycle.clear();
           if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
         }
-        console.error("❌ WebSocket错误:", {
-          error: error,
-          readyState: socket.readyState,
-          url: socket.url,
-        });
+        console.error("WebSocket connection error");
         HomeChatRenderer.updateConnectionStatus("error");
         HomeChatRenderer.showNotification("WebSocket连接出错", "error");
       };
 
       socket.onclose = (event) => {
         if (socket !== ws) return;
+        clearDecisionConnection();
         clearTimeout(connectionTimeout);
         moleculeCandidateLifecycle.clear();
         protocolDesyncedSocket = null;
@@ -302,7 +494,6 @@
         ws = null;
         console.log("🔌 WebSocket连接关闭:", {
           code: event.code,
-          reason: event.reason || "无原因说明",
           wasClean: event.wasClean,
           timestamp: new Date().toISOString(),
         });
@@ -353,6 +544,7 @@
 
   function closeProtocolSocket(socket, code, reason) {
     if (!socket || socket !== ws) return;
+    clearDecisionConnection();
     protocolDesyncedSocket = socket;
     isConnected = false;
     if (
@@ -404,25 +596,27 @@
 
     try {
       const message = JSON.parse(data);
-      console.log("📋 解析后的消息:", message);
 
       // 消息格式验证
       if (!message || typeof message !== "object") {
         closeProtocolSocket(socket, 1002, "invalid message shape");
-        console.warn("⚠️ 消息格式无效:", message);
+        console.warn("Invalid WebSocket message shape");
         return;
       }
 
       if (!message.type) {
         closeProtocolSocket(socket, 1002, "missing message type");
-        console.warn("⚠️ 消息缺少type字段:", message);
+        console.warn("Missing WebSocket message type");
         return;
       }
 
+      if (decisionAwaitingReady && !["connection_ready", "pong"].includes(message.type)) return;
+      if (message.type === "connection_ready") configureDecisionMode(message);
+      if (decisionMode && handleDecisionMessage(message, socket)) return;
       // 处理不同类型的消息
       switch (message.type) {
         case "connection_ready":
-          console.log("✅ 收到连接就绪消息:", message);
+          console.log("WebSocket ready");
           HomeChatRenderer.updateConnectionStatus("connected");
           HomeChatRenderer.showNotification("模型已就绪", "success");
           if (!moleculeCandidateLifecycle.isRequestInFlight()) {
@@ -554,29 +748,17 @@
           moleculeCandidateLifecycle.clear();
           if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
           const errorMsg = message.message || message.error || "未知错误";
-          console.error("❌ 服务器返回错误:", {
-            message: errorMsg,
-            details: message.details,
-            code: message.code,
-          });
+          console.error("Server request error");
           showErrorMessage(errorMsg);
           break;
 
         default:
-          console.log("❓ 未知消息类型:", message.type, message);
+          console.log("Unknown WebSocket message type");
       }
     } catch (error) {
       closeProtocolSocket(socket, 1002, "invalid message");
-      console.error("❌ 解析WebSocket消息时出错:", {
-        error: error.message,
-        stack: error.stack,
-        rawData: data,
-        dataType: typeof data,
-        dataLength: data.length,
-        dataPreview: data.substring(0, 200) + (data.length > 200 ? "..." : ""),
-      });
-
-      showErrorMessage(`消息解析错误: ${error.message}`);
+      console.error("Invalid WebSocket message");
+      showErrorMessage("消息解析失败，连接已关闭。");
     }
   }
 
@@ -1264,15 +1446,9 @@
 
   // 修复后的消息发送函数
   function sendMessage() {
+    if (decisionAwaitingReady) return; // no legacy fallback before the new server announcement
+    if (decisionMode) {sendDecisionMessage(); return;}
     const message = elements.input.value.trim();
-
-    console.log("📤 准备发送消息:", {
-      message: message,
-      messageLength: message.length,
-      wsExists: !!ws,
-      wsReadyState: ws ? ws.readyState : "null",
-      isConnected: isConnected,
-    });
 
     if (!message) {
       HomeChatRenderer.showNotification("请输入消息内容", "warning");
@@ -1342,12 +1518,6 @@
 
       const payloadStr = JSON.stringify(payload);
 
-      console.log("📤 发送消息到WebSocket:", {
-        payload: payload,
-        payloadString: payloadStr,
-        wsReadyState: ws.readyState,
-        payloadSize: payloadStr.length,
-      });
 
       // 发送到服务器
       ws.send(payloadStr);
@@ -1365,13 +1535,8 @@
     } catch (error) {
       moleculeCandidateLifecycle.clear();
       if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
-      console.error("❌ 发送消息时出错:", {
-        error: error.message,
-        stack: error.stack,
-        wsReadyState: ws ? ws.readyState : "null",
-      });
-
-      showErrorMessage(`发送失败: ${error.message}`);
+      console.error("WebSocket send failed");
+      showErrorMessage("消息发送失败，请检查连接。");
       removeTypingIndicator();
 
       // 如果是网络错误，尝试重连

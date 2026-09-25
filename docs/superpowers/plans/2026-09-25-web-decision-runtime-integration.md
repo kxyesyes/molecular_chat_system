@@ -690,3 +690,65 @@ SPEC and QUALITY approve **Task 7 only** on these same blobs, with reproduced P2
 | `tests/agent/test_web_decision_runtime_references.py` | `053af24437dcb10e80096fa09183e1739dffa468` |
 
 Parent authorizes only a local six-file checkpoint after same-blob and explicit-stage checks. No push, PR, merge or deployment occurs here. Task 8 UI controls/persistent status/actual DOM ACK remain next, followed by full A2 review and verification. Original final ordinary-chat/capability/semantic follow-up, B tool bindings, C consent/topology/lifecycle integration and package-8 real-model/scientific/browser acceptance remain incomplete. These offline fixtures must not be reported as real molecular generation or browser acceptance.
+
+## 17. Task 8 UI controls, connection ownership and independent review
+
+This section supersedes only the preceding statement that Task 8 has not started. Parent released Task 8 on `cf28246e911b7e4a59fb721d0fc0c6f71daef465`, then three narrowly scoped compatibility changes: the active homepage script cache query, its existing exact-tag assertion, and the missing `querySelectorAll()` method in the existing structured-render fake document. No scientific assertion, controller, strict schema, backend or model configuration changed in this sub-batch.
+
+The home script now waits for every socket's server announcement before sending, including the first connection. Decision mode has server-owned turn/trace controls, socket-only continuation, a response-bound abandon wait and persistent per-message outcomes. It does not queue or replay user input. Uncorrelated old `invalid_control` errors cannot terminate a newer pending request or release an outstanding abandon. Real request rejection codes still permit honest recovery. Completed transport does not promote partial/failed/rejected/cancelled/waiting science to success. Candidate/report frames retain their strict no-`turn_id` shape and existing source checks; confirmation follows actual ordered DOM mount, not receipt. Touched transport logs no longer print raw input, payloads or exception data.
+
+Tests load the complete actual home script with a small DOM fixture and the existing candidate/reference/report modules; they do not implement a second event handler. The positive same-frame tests use the existing RDKit/SQLite report fixture, explicitly synthetic historical candidates, and assert zero model generation calls. They are not live molecular generation or real browser acceptance.
+
+### RED and diagnostic history retained
+
+Separate runs below are not additive totals. Missing timing/warning summaries are not inferred.
+
+| Stage | Observed result and disposition |
+|---|---|
+| Initial controls/status, reconnect and late-stream development | 1P/1F; 1P/10F to 11P; 11P/2F to 13P; mount/ACK coverage to 18P, identity/disconnect to 20P; 20P/1F to 21P. The old active-cache assertion also failed before its approved update |
+| Initial Python/whole-main frame fixture | Session 44575: 70P/141.85s, then 3P/1F plus nonexistent store `close()` cleanup error, exit 1. Cross-VM plain-object handling and fixture cleanup were corrected without production edits; sessions 25127 and 77303: 70P/71.17s + 4P, and 70P/63.87s + 4P, exit 0 |
+| Parent abandon-response race | In-memory complete-script probe 22P/1F/4.54s; formal 21P/4F/0.75s to 25P/4.29s. Final 25P/4.47s, approved legacy checks passed; session 46083 report 70P/182.99s + same-frame 4P, exit 0 |
+| SPEC: late old cancel kills new pending turn | Independent 1P/1F/0.584s; formal 28P/2F/4.33s to 30P/4.47s. Final 30P/4.49s and old probe 2P; report session 51628: 70P/182.85s + 4P, exit 0 |
+| SPEC: late old cancel releases abandon wait | Independent 1P/2F/0.624s proved duplicate control/premature resume, not unauthorized calculation. Formal 31P/2F/4.48s to 33P/4.60s; final 33P/4.48s, probes 2P/3.96s and 3P/3.79s; report session 37675: 70P/86.84s + 4P, exit 0 |
+| QUALITY: first-open send before ready loses ownership | Original and corrected full-script probes each 1P/1F, 0.454s/0.453s. The first probe's claim that A1 rejects `timestamp/client_id` was wrong and is withdrawn; A1 permits them. The UI failure remained after correcting that assumption. Formal ready-gate RED 33P/3F/4.42s to 36P/4.47s |
+| Existing structured-render fake document | Original test failed at line 1034/3.82s, then line 1057/3.67s after removing an unnecessary initial-variable change; diagnostic exit 1/3.96s. `clearToolStatus()` called missing `document.querySelectorAll`, closing the fake socket. A one-method in-memory correction passed/4.08s. Parent approved only that missing method; no assertions or production guard were weakened |
+
+The four original ignored Node probes remain unchanged: `spec_p7a2_task8_review.js`, `spec_p7a2_task8_abandon_review.js`, `quality_p7a2_task8_review.js` and `quality_p7a2_task8_review_corrected.js`. Their later passes do not retroactively validate the withdrawn A1 hypothesis. They are not staged.
+
+### Final five-file verification
+
+All following direct Node commands exited 0 on the final frozen five files:
+
+| Command | Worker result |
+|---|---|
+| `node --check src/web/static/js/home/main.js` | Passed / 3.66s |
+| `node tests/home_decision_runtime_test.js` | 36 passed / 4.35s |
+| `node tests/home_scientific_references_test.js` | Passed / 3.96s |
+| `node tests/home_evidence_report_test.js` | Hostile preflight passed / 3.55s; not positive same-frame coverage |
+| `node tests/home_agent_task_panel_test.js` | Passed / 3.50s |
+| `node tests/home_structured_molecule_render_test.js` | Passed / 3.86s |
+| `node tests/home_workflow_completion_behavior_test.js` | Passed / 3.84s |
+| `node tests/frontend_safe_render_test.js` | Passed / 3.73s |
+| Original SPEC / abandon / QUALITY / corrected QUALITY probes | 2P/3.77s; 3P/3.89s; 2P/3.82s; 2P/3.64s |
+
+Final session **13248 exited 0**: isolated `pytest.main` on `tests/agent/test_evidence_report_frames.py` with `-q -p no:cacheprovider --tb=short -rs` reported **70 passed / 182.85s**, followed by **4 same-frame passed** from `node tests/home_decision_runtime_test.js --frames-stdin`. The wrapper did not print a warning summary. It reuses the approved RAG-extraction plan's pre-import OS whitelist, temporary cwd/config/database/cache and three tracked JSONL copies with matching SHA. Only the child invocation changes: after pytest succeeds, the existing fixture/capture helpers create a partial historical result with a valid 32-character trace, assert zero model generation calls, and pass UTF-8 JSON frames to Node. The temporary fixture factory is restored in `finally`; the store has per-operation connections, not a `close()` API. No live model, user asset or configuration is loaded.
+
+Final independent **SPEC approves Task 8 only**: 36P/1.201s, original probes 2P/0.572s and 3P/0.568s, plus syntax and all six existing Node scripts. Final independent **QUALITY approves this UI checkpoint only**: 36P/1.125s, corrected QUALITY 2P/0.453s, SPEC 2P/0.438s and abandon 3P/0.468s, plus syntax and six existing scripts. Both used OS-whitelisted Node subprocesses, verified unchanged blobs before/after, and reported all sessions ended. Neither final re-review reran Python positive frames; standalone report remains hostile preflight only.
+
+### Actual-route timeout remains unresolved, not waived
+
+During the earlier QUALITY review, an additional real mounted-route probe in `scratch/quality_p7a2_task8_frames.py` failed after acceptance: **1P/1F/7 warnings/31.83s** (the passing test independently generated RDKit/SQLite frames and passed all four whole-main DOM contracts). Its exact route rerun failed **1F/7 warnings/27.30s**; a safe phase-only diagnostic failed **1F/7 warnings/27.80s**. All retain the original three-second `ActualSocket.receive()` deadline.
+
+The diagnostic observed ready at 1.438s, accepted at 1.454s and timeout raised at 10.235s. Await-chain locations included the existing graph `ainvoke` and serialized deadline-aware sends. No locals, prompt or environment data was printed. This snapshot does not locate the delay or prove whether the provider transport was entered; neither profiler nor environment is established as the cause. These three failures and the three earlier backend warmup UNKNOWN cases remain visible. The DOM fixture correction does not fix them; no timeout was relaxed and no passing rerun erases a failed group. A separate causal investigation and final full/CI gates are still required before A2 publication/merge.
+
+### Reviewed blobs and checkpoint boundary
+
+| File | SPEC/QUALITY reviewed blob |
+|---|---|
+| `src/web/static/js/home/main.js` | `d6b5a4dc26ad034d5bcbb56a65060370d875db5f` |
+| `src/web/templates/index.html` | `603b0a5ef4a6cb0988a5f96508055b9406a9930c` |
+| `tests/home_decision_runtime_test.js` | `caa3f2a8fdbf4731b267e59be79a650161e797f3` |
+| `tests/home_workflow_completion_behavior_test.js` | `ee4038586665a75b699f1fb7a0ca9cad3c26e3a2` |
+| `tests/home_structured_molecule_render_test.js` | `c86e168034ccbc0b5462cd400a31e723d287a2a7` |
+
+The five Task 7 backend/test files remain byte-identical to `cf28246`. Diff and filename-only credential-pattern checks passed. Parent authorizes a local checkpoint of these five files plus this evidence section after explicit staging; no push, PR, merge, activation or deployment. A2 overall review, unresolved route diagnostics, full offline gates, final ordinary-chat behavior, B/C integration and package-8 real provider/scientific/browser acceptance remain unfinished. Completing this Task 8 subtask does not complete work package 8 or P7.
