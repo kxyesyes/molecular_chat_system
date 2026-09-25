@@ -1,6 +1,6 @@
 # P7-B Dynamic Tool Bindings Implementation Plan
 
-> **For agentic workers:** G0 / B-D0 and the written Reverse/RAG receipt amendment/future allowlist are parent-approved, including the two existing RAG files' narrow interfaces. Only after separate dependency-gated release, use `subagent-driven-development` or `executing-plans`. Current sidecar is DESIGN ONLY: update, explicitly stage and locally commit only this plan and its companion spec; verify clean/hash and stop. No implementation, tests, imports, compile, network, environment/asset inspection, merge or push. Stable mmap/source ownership remains an actual proof gate, not an assumed safe snapshot.
+> **For agentic workers:** G0 / B-D0, the receipt amendment and §11's written decisions are recorded approvals, not a code release. Only after separate parent release, use `subagent-driven-development` or `executing-plans` with TDD. Current task is DOCS ONLY in `dynamic-bindings-b1`: update this plan and its companion spec, inspect the diff and stop. No staging, commit, implementation, tests, imports, compile, network, environment/asset inspection, merge or push. Older local-commit instructions below are historical. Stable source ownership remains an actual proof gate.
 
 **Goal:** Expand the existing initial-four-tool model decision path through bounded, evidence-bound molecular/RAG/reverse actions and real generation/ranking dataflow, without model-authored inputs/numbers or a static workflow substitute.
 
@@ -8,9 +8,9 @@
 
 **Tech Stack:** Existing FastAPI/native JS, Python/Pydantic/asyncio, LangGraph decision loop, SQLite Session journals, RDKit and current typed adapters. No new framework, DSL, dependency upgrade or datastore.
 
-**Status/base:** Parent-approved two-doc receipt freeze on `codex/dynamic-tool-bindings-plan`, following docs commit `74739aa72c36af27e1561a21359e87521860897b`, original source base `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`; implementation release remains closed. Companion spec: `docs/superpowers/specs/2026-09-25-dynamic-tool-bindings-design.md`. Unchecked steps are future work, not execution evidence.
+**Current status/base:** §12 re-pins to reviewed684e4a1 source in `codex/dynamic-bindings-b1`, initial HEAD `d672497a8c7b812378dddad91e195de3d04bbb65`. PR81 is not confirmed merged; do not call it landed. Historical two-doc freeze: `codex/dynamic-tool-bindings-plan`, following `74739aa72c36af27e1561a21359e87521860897b`, original source base `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5`. Companion spec: `docs/superpowers/specs/2026-09-25-dynamic-tool-bindings-design.md`. Implementation release remains closed; unchecked steps are future work, not execution evidence.
 
-**2026-09-26 draft:** §11 proposes the ordinary-profile/root-budget amendment against committed ordinary `1da64f2694203de0ef3f3c875ceb775e4be0dee4`. It supersedes historical constructor-only/revision/budget assumptions, not the original scientific positives. Independent written review and explicit parent budget/scope approval precede code. Only these two docs may change in this task; **no commit, tests, implementation or publication now**.
+**2026-09-26 history/current amendment:** §11 was drafted against ordinary `1da64f2694203de0ef3f3c875ceb775e4be0dee4`; its approval is recorded in §11.8. §12 supersedes its assembly-only/source-status descriptions, not the scientific positives or separate code-release gate. Only these two docs may change now; **no commit, tests, implementation or publication**.
 
 **Historical parent-reported dependency update:** G2 PR72 merged as `27170d95`; 4C post-P2 full 6676 passed / 2 skipped, then joint 525 passed + 162 subtests, at that time PR73 head `beaf9cf4a57cf7c6045f5980c175c217fd42e96f` with CI pending; A1 SPEC4 repair `48d8356` under recheck at that time. No network verification or merge was performed here. These earlier statuses are superseded by the current parent record below; original design source base remains `5db56b0`.
 
@@ -130,7 +130,7 @@ Later focused command, **not run in this sidecar**: `python -B -m pytest tests/t
 
 ## 5. B1 — normal entry and continuation vertical slice
 
-- [ ] After the §11 ordinary Web re-pin, add actual app `/ws` RED using the reviewed async semantic factory and a B profile injected only by server. Do not remove the Task7A assembly-only fail-closed guard to route through old A2 without carry. Obtain real anonymous session cookie through protected HTTP/matching origin. Run actual admission→bridge→loop→Session; never register a test-only route or fake scope/loop result.
+- [ ] After separate B Web release against §12's ordinary source re-pin, add actual app `/ws` RED using the reviewed async semantic factory and a B profile injected only by server. Task7A's assembly-only guard is historical: reuse the now-wired semantic carry path, retaining the legacy/no-carry closures. Do not enable incomplete B under revision7. Obtain real anonymous session cookie through protected HTTP/matching origin. Run actual admission→bridge→loop→Session; never register a test-only route or fake scope/loop result.
 - [ ] Verify selected trusted molecule, same-owner per-socket chat history, explicit local RAG request versus RAG-true chat, forbidden whole request, partial status and subsequent normal turn. No static workflow fallback.
 - [ ] Write continuation RED: source-role proof or source/generator/main-model generation changes before CAS; foreign/repeated nonce; altered original obligations/history; unsupported new count on resume. Waiting record stays unchanged on invalid claim; uncertain CAS never dispatches again.
 - [ ] Add actual `/ws` negatives using the real producer/core fixture paths from §4a/4b: tampered same-length popcount, same fingerprint/different weight, all-invalid versus valid-empty RAG, and source change before resume. Assert no successful known-subset/no-hit completion, no static fallback, and no target/generator downstream call on rejected evidence. Sealed prior reports remain historical; current metadata cannot repair their receipts. Valid receipt route still uses existing mount/ACK tests, not a lab-only replacement.
@@ -349,8 +349,8 @@ files, not claims about APIs or tests already present at the pin.
   retains the old pair until drained. Snapshot captured once, then flag projection
   cannot reread app fields. Generator remains `gmm-llama:latest`, not main model.
 - [ ] Implement only the existing `create_async`/base/project/writer seams in app.
-  Actual route integration remains blocked until §11.6; do not make incomplete B
-  work by replacing the semantic guard with original A2 dispatch. GREEN profile,
+  Actual B route integration remains blocked until §11.6/§12; do not make incomplete B
+  work through original A2 or semantic7 dispatch. GREEN profile,
   carry, assembly and original-four tests; record actual commands/counts/errors.
 
 ### 11.4 Amendment B — shared root receipts and B8 replay
@@ -459,12 +459,12 @@ root/gen contract work may proceed against the pinned core after its budget choi
 but backend dispatch/release waits for the proven token grant and reviewed narrow
 control seam. No stock generator is silently exposed while those gates are open.
 
-Before actual B Web work, parent supplies the final ordinary Task7B/C commit and
-allowlist re-pin. Compare committed `create_async`, captured base/project/writer,
+Historical gate, now source-re-pinned in §12: before actual B Web work parent
+must still release its precise write scope. Compare committed `create_async`, captured base/project/writer,
 runtime carry/one-lease/intent cancellation, bridge checkpoint and post-delivery
 clamp APIs. Adapt §5 to those **actual** signatures before writing route tests.
 Use real mounted app/middleware/A1-or-B admission/loop/Session/CAS, not source-array
-mocks. Pending ordinary interface drift is not permission to read/copy active files.
+mocks. Any later interface drift requires another pin, not copying active files.
 Original REAL010/DIVERSE015/multi-turn and B016/B017/RAG/generation/ADMET/reverse/ranking
 positives remain full gates; neither component tests nor an honest blocked request
 count as their completion. No second loop/budget service/static fallback.
@@ -518,3 +518,153 @@ No implementation slice is released by this documentation checkpoint itself.
 Parent authorizes a local commit of these two reviewed planning documents only.
 No push, merge, test run, model activation or deployment follows. All B1/B2,
 C and final package8 completion gates remain pending.
+
+## 12. Re-pinned first TDD slice: pure B capability profiles only
+
+### 12.1 Pin, scope and stop conditions
+
+Use spec §12.1's local pins: current worktree `D:/MedChat/molecular_chat_system_worktrees/dynamic-bindings-b1`,
+branch `codex/dynamic-bindings-b1`, starting HEAD d672497; source/tests equal684e4a1,
+production equal67ad078 (e2e654b/684 add docs/schema-test compatibility only).
+Parent reports local ancestor checks and pre-edit B-doc equality to0487d79 as
+recorded in the spec. PR81 is not confirmed merged; this is not landing evidence.
+
+**Future code write allowlist:** modify `src/web/ordinary_capabilities.py`; create
+`tests/agent/test_decision_binding_profiles.py`. No edits to existing tests, DTOs,
+app, routes, loop_admission, carry, budgets or replay. No B execution under7.
+Current authorization covers these two **documents only**, not those code files.
+
+- [ ] Parent/independent plan review confirms spec §12.2's proposed exclusive flag
+  semantics and precise defaults; parent then separately releases this two-file
+  code slice and its single test slot. No automatic stage/commit/push.
+- [ ] Confirm code base and clean unrelated state read-only. Preserve parent edits.
+  Stop for pin/scope mismatch, not by silently widening this slice.
+
+### 12.2 Future runner gate — rebuild for this worktree, never run the old pin
+
+The ordinary launcher pins another repository. Do not execute/copy it unchanged,
+even from this cwd. After code/test release, parent must rebuild/review the same
+stdlib-only isolated launcher with `REPO` set to the resolved new worktree above.
+No launcher file is created or executed during this docs task. Do not invent a
+different runner ABI or use direct pytest/probe imports as a workaround.
+
+- [ ] Read the rebuilt launcher before execution: verify its literal/resolved REPO
+  and every child import/tracked-fixture source point here, not the ordinary tree;
+  preserve synthetic temp cwd/config/store, pre-import socket ban, isolated
+  `-I -S -B` startup and reviewed tracked-data copy/hash checks. No host asset/env
+  discovery or provider access. Test payloads stay synthetic.
+- [ ] Parent records/reviews the rebuilt SHA256. Old launcher hash
+  `56584BEB8D671C6621D5F3BD8C8E5D7452F0EA216444E7A1FFEDD605A19A4B6C`
+  identifies the old pin and is **not** approval of a new-path runner. If the new
+  runner/hash has not been reviewed, stop before execution; do not self-approve.
+- [ ] Future commands below assume that reviewed launcher is
+  `scratch/ordinary_chat_offline_runner.py` in this new worktree. Run one session
+  at a time; poll its handle to terminal, preserve failures, and diagnose one
+  failed node before any repeat. Do not run full Agent or loosen existing timeouts.
+
+### 12.3 RED: exact API, view arithmetic and negative table
+
+Create only the new test module. Import the existing capability module normally;
+inspect the existing function signature in the test body so missing new kwargs
+fail an assertion, not collection. Use spec §12's exact builder signature,
+constant names, catalog text, flag truth table and existing DTO bounds/reasons.
+The first positive fixture is deliberately pure (not installed B wiring proof):
+
+```python
+def test_b1_rag_permission_is_independent():
+    import inspect
+    from src.web import ordinary_capabilities as caps
+    assert {'binding_profile', 'wired_names', 'rag_enabled'} <= set(
+        inspect.signature(caps.build_capability_snapshot).parameters)
+    view = caps.build_capability_snapshot(
+        registered_names=frozenset({'rag_search'}),
+        provider_descriptor={'provider': 'openai_compatible', 'model': 'fixture', 'mode': 'json'},
+        semantic_profile=True, intent_capable=True, original_four_profile=False,
+        scientific_tools=False, permitted_names=frozenset({'rag_search'}),
+        model_generation='model-fixture', capability_generation='cap-fixture',
+        binding_profile='ordinary-semantic-b1-v1',
+        wired_names=frozenset({'rag_search'}), rag_enabled=True)
+    features = {f.id: f for f in view.features}
+    assert features['rag_retrieval'].wired and features['rag_retrieval'].permitted
+    assert not any(f.permitted for key, f in features.items()
+                   if key not in {'ordinary_chat', 'rag_retrieval'})
+    assert all(f.readiness == 'unknown' for f in view.features)
+```
+
+- [ ] Run the one node with the reviewed new-path runner (command below). Expected
+  RED is absent profile parameters, not fixture/import/environment failure.
+- [ ] Add table tests named `test_profile_flag_combinations_are_closed`,
+  `test_b_canonical_mapping_and_wiring`, `test_b_permission_matrix`,
+  `test_original_serialization_is_unchanged`, `test_builder_is_pure_and_detached`
+  and `test_b_view_does_not_open_loop_admission`. Cover every §11.2 mapping for
+  B1/B2 and these exact contrasts:
+  - Explicit empty wiring versus missing wiring; registered-only versus
+    reviewed-only; B1 excludes generator/ranker; B2 all nine permitted positive.
+  - Four native scientific/RAG flag combinations; missing permitted name;
+    intent_capable=False; all readiness unknown and exact reason precedence.
+  - B+original_four_profile=True and B+semantic_profile=False reject; original
+    default/explicit ID remain identical for every old bool combination.
+    Original+nondefault B kwargs reject; unknown/None/non-string profile rejects.
+  - Full registry including B1-excluded canonical generator/ranker and unknown/
+    alias/noncanonical feature IDs is accepted but grants nothing extra; the
+    same extras in B wired/permitted sets reject, not silently intersect.
+    Original registered/permitted extra-ignore behavior stays exact. Sets/lists instead of
+    frozensets and non-bool flags reject with the existing fixed error code.
+  - Pin literal original expected views from the pre-change source, including
+    ordered descriptions/reasons; do not compute the expected catalog from the
+    modified implementation. Compare model_dump_json as well as plain values.
+  - Detached descriptor/output mutation; frozen fields; no new ready value;
+    existing size/schema bounds; I/O/health/registry hooks fail if invoked.
+    Build a B carry using existing contracts, then assert unchanged
+    loop_admission rejects it; no Session, provider, app or tool execution needed.
+- [ ] Run the new module RED before editing production; record each cause. New
+  assertions for already-preserved behavior may pass. Do not change old tests.
+
+### 12.4 Minimal GREEN, unchanged regressions and freeze
+
+- [ ] In ordinary_capabilities only, add the closed constants/immutable mapping
+  and B catalog specified in spec §12.2. Validate new selector/flags/sets before
+  projection. Keep the original branch's catalog/logic/output exact.
+- [ ] Implement only spec §12.3's intersection and reason precedence using the
+  existing CapabilityFeature/CapabilitySnapshot constructors. Reuse existing
+  validators/error handling; add no DTO reason or new service/factory/discovery.
+- [ ] Run the new module GREEN, then the unchanged capability and assembly
+  regression modules with it. Do not claim RAG dispatch or B8 coverage from views.
+
+Future exact commands, **not executed by this documentation task**, from the
+new worktree after the runner/hash and code slice are released:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_profiles.py::test_b1_rag_permission_is_independent
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_profiles.py
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_profiles.py tests/agent/test_ordinary_capabilities.py tests/agent/test_ordinary_app_assembly.py
+```
+
+- [ ] Freeze after self-review: report exact diff/files/hashes, runner hash/pin,
+  RED/GREEN commands/counts/warnings/durations/exits and no active sessions. Parent
+  coordinates independent SPEC then QUALITY. No commit/stage/push by worker.
+- [ ] Keep later app/carry/root/requirements/receipts/Session/B8/Web work explicitly
+  incomplete under the existing full plan; retain B1/B2 positives and C/P8 gates.
+  This first slice neither activates B nor replaces any final acceptance case.
+
+### 12.5 Written approval and bounded implementation release
+
+Independent SPEC/plan review approved the two-document re-pin at source684e4a1,
+with no P1/P2. Parent adopts the exact exclusive flag and three-set rules in
+spec§12; this is not permission to weaken original serialization or B execution
+guards. PR81 is still awaiting the explicit per-PR merge response. This local
+dependent branch may progress without describing that PR as landed.
+
+Parent now releases **only** the two-file pure profile-view slice in §12.1 for
+offline TDD, after this document checkpoint. A fresh implementation worker owns
+`src/web/ordinary_capabilities.py` and new
+`tests/agent/test_decision_binding_profiles.py`. It must not touch app, contracts,
+admission, budgets, replay, existing tests or defaults. No B tool execution, B
+publication, real model call, asset discovery or deployment is released.
+
+Before test imports, parent recreates the ignored launcher for this worktree,
+verifies that only its literal REPO differs from the reviewed ordinary launcher,
+and obtains independent source review/hash confirmation. That reviewed launcher
+and the serialized test slot are mandatory. Stop after the focused RED/GREEN,
+unchanged regression modules and frozen code/test report; independent SPEC then
+QUALITY must approve before a local source checkpoint or another code slice.

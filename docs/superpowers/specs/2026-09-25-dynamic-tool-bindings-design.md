@@ -2,9 +2,9 @@
 
 Date: 2026-09-25. Status: **G0 / B-D0 design and written Reverse/RAG receipt amendment parent-approved, including the two existing RAG files' narrow interfaces/future allowlist. Local docs-only freeze authorized. Dependency/implementation gates remain closed; stable mmap/source ownership still requires actual proof. Not P7 completion.**
 
-2026-09-26 amendment status: **§11 is a proposed profile/root-budget amendment for independent written review and explicit parent budget approval, not an implementation release.** Its source pin and async-assembly boundary supersede the historical dependency/constructor descriptions below. This drafting task permits edits to these same two docs only; the earlier local-commit instruction does not apply: **no commit in this task**.
+2026-09-26 current status: **§11's written approval is recorded in §11.7; §12 re-pins the reviewed ordinary source and proposes the first pure profile-view TDD slice. Neither is a code release.** The current worktree is `dynamic-bindings-b1`, branch `codex/dynamic-bindings-b1`, starting HEAD `d672497a8c7b812378dddad91e195de3d04bbb65`. Only these two B documents may change now; no code, tests, staging, commit or push. PR81 is not confirmed merged and must not be described as landed.
 
-Worktree: `dynamic-tool-bindings-plan`; branch: `codex/dynamic-tool-bindings-plan`; original source base: `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5` (Planner #71); prior docs freeze: `74739aa72c36af27e1561a21359e87521860897b`. Only this file and `docs/superpowers/plans/2026-09-25-dynamic-tool-bindings.md` may be written in the current draft; no staging or commit. No implementation, tests, compilation, network, environment/credential or scientific-asset inspection, merge or push. Authority remains `AGENTS.md`, `docs/PROJECT_STANDARDS.md` and the narrower request. Read-only source/review documents are interface evidence, not live results.
+Historical worktree: `dynamic-tool-bindings-plan`; branch: `codex/dynamic-tool-bindings-plan`; original source base: `5db56b0c79ac30da1ba4646c2c567e7d2dd71cc5` (Planner #71); prior docs freeze: `74739aa72c36af27e1561a21359e87521860897b`. Only this file and `docs/superpowers/plans/2026-09-25-dynamic-tool-bindings.md` may be written in the current draft; no staging or commit. No implementation, tests, compilation, network, environment/credential or scientific-asset inspection, merge or push. Authority remains `AGENTS.md`, `docs/PROJECT_STANDARDS.md` and the narrower request. Read-only source/review documents are interface evidence, not live results.
 
 ## 1. Approved bounded decision and alternatives
 
@@ -230,7 +230,8 @@ Companion plan defines precise future write ownership and tests. The historical 
 
 ### 11.1 Source pin, scope and compatibility
 
-This section is a draft, not a claim that B is implemented. Source was read only
+Historical §11 drafting evidence, superseded for current source/entry status by
+§12 below; not a claim that B is implemented. Source was read only
 through `git show 1da64f2694203de0ef3f3c875ceb775e4be0dee4:<path>`: the committed
 ordinary Task7A checkpoint containing Task6 `dc1295e`. No active ordinary Web
 files, configuration, credentials or assets were inspected; no imports, tests
@@ -498,7 +499,117 @@ the same committed source pin. Parent chooses inclusive root16 and B-only8,
 and approves the named optional client/adapter control seams as bounded design
 scope only. Numeric token grants and enforcement proof remain unestablished;
 the counted actual transport probe and trusted bound must precede their code
-release. Ordinary Web re-pin remains required for B normal-entry integration.
+release. That checkpoint still required an ordinary Web re-pin; §12 now records
+it without releasing B normal-entry integration.
 This supersedes the two undecided parent choices above, not the remaining proof
 gates. The two documents may be committed locally; B source implementation,
 network/model execution, publication and deployment are not released here.
+
+## 12. Ordinary source re-pin and first pure profile-view slice
+
+### 12.1 Current source and authority
+
+Current worktree `dynamic-bindings-b1` / `codex/dynamic-bindings-b1` starts at
+`d672497a8c7b812378dddad91e195de3d04bbb65`. Its source/tests equal reviewed
+`684e4a117fbf94859a539c182f611afd7ee825fa`; relative to684 only these two B docs
+differ. Ordinary production source is `67ad0781d4d28ca00dd58a5c9d222ae940cfb22a`;
+`e2e654bbf8ac0e73c8e96ee2efbd4f95368c757f` adds documentation, and684 adds only
+schema-test compatibility/documentation, not production behavior. Parent's local
+read-only checks also confirmed both B docs matched0487d79 before this edit and
+ancestors `4C=0295e996`, `G2=27170d95`, `G1=be0219e`, `A1=782cd131`,
+`A2=ed284b7`, `30a2353` and `684e4a1`.
+These are local source facts, not new network/landing evidence: **PR81 remains
+unconfirmed merged; no B push or automatic code release/commit.**
+
+§11's assembly-only status describes historical1da64f2. At the current pin the
+semantic Web route is fully wired through one reader, captured base/history,
+carry/exchange, segment supervision and post-send waiting debit. Default policy
+remains a1_closed; legacy direct `_process_message` and no-carry semantic dispatch
+remain closed. Preserve this path. B still cannot execute: original-only
+`loop_admission`, assessment/catalog checks and6/7 replay are unchanged. A B view
+must not enable B execution under7; later server-selected B8 remains required.
+
+### 12.2 Minimum API — parent-selected after independent written review
+
+First future code slice writes only `src/web/ordinary_capabilities.py` and new
+`tests/agent/test_decision_binding_profiles.py`. No app/route/admission/carry/
+budget/DTO changes. Existing tests remain unchanged. This is a pure view, not
+tool authorization, readiness, completed B assembly or B1 functional acceptance.
+
+```python
+build_capability_snapshot(*, registered_names, provider_descriptor,
+    semantic_profile, intent_capable, original_four_profile, scientific_tools,
+    permitted_names, model_generation, capability_generation,
+    binding_profile=PROFILE_REVISION, wired_names=None, rag_enabled=False)
+```
+
+All existing arguments remain required. Keep existing constants/catalog and all
+original-profile serialized views exact. Add `B1_PROFILE_REVISION` and
+`B2_PROFILE_REVISION` for §11's exact profile IDs, immutable `B1_TOOLS`/`B2_TOOLS`,
+`B_PRODUCT_CATALOG` and one `TOOL_FEATURE_PAIRS` tuple using exactly §11.2's
+nine mappings; derive lookup/inverse from it, without aliases. B profile IDs and
+`B_CATALOG_REVISION='ordinary-product-b-v1'` are exactly those approved in §11.
+Use the same ordered11 feature IDs. For B catalog only, change generation's text
+to `Separate local gmm molecular generation requires approved B2 controls; readiness is unknown.`,
+reverse's to `Reverse target hypotheses require same-invocation source receipts; readiness is unknown.`,
+and RAG's to `Local molecular retrieval requires explicit RAG permission and same-invocation source receipts; readiness is unknown.`
+Other descriptions stay exact; none asserts installed wiring or actual readiness.
+
+Parent-selected closed combinations (code release is separate):
+
+| binding_profile | Legacy flags | New arguments |
+|---|---|---|
+| omitted or exact original ID | All current strict-bool combinations preserved | wired_names=None; native rag_enabled=False only |
+| exact B1/B2 ID | native semantic_profile=True and original_four_profile=False required | explicit frozenset wired_names (empty allowed); native bool rag_enabled |
+| unknown/alias/None/non-string | Reject | ValueError(CAPABILITY_ERROR), no fallback |
+
+The old required `original_four_profile` selects the **legacy wiring branch**,
+not a denial of the original four members inside B. B+True is contradictory and
+rejects; never silently ignore it. Scientific permission remains the separate
+`scientific_tools` bool. `intent_capable=False` remains a valid absent-intent-capability
+view; ordinary_chat keeps its existing flag rules. Alternative flag semantics
+require parent review, not implementer discretion.
+
+### 12.3 Pure projection and counterexamples
+
+Use existing strict frozenset/name/bounds validation. Keep the three inputs distinct:
+
+| Input | Recommended B rule | Original-profile compatibility |
+|---|---|---|
+| registered_names | Full registry names allowed; unrelated/unknown/alias/noncanonical feature IDs contribute no wiring, never resolve aliases | Preserve existing extra-ignore behavior |
+| wired_names | Explicit reviewed canonical subset of selected profile; outside-profile or unknown/alias/feature-as-tool names reject | New argument must be None; existing wiring behavior unchanged |
+| permitted_names | Request-view canonical subset of selected profile; outside-profile or unknown/alias/feature-as-tool names reject, not silent intersection | Preserve existing extra-ignore behavior |
+
+For B1, a registered llm_molecular_generator is harmless; putting it in reviewed
+wiring or request permission rejects. Full-registry assembly must therefore
+pass separately reviewed profile-scoped wiring/permission sets, not reuse the
+registry set for all three arguments. This strict B permission choice is for
+parent adoption after written review; it is not a change to legacy callers. `admet_prediction` cannot
+register/authorize `admet_predictor`; the four identity mappings remain canonical.
+
+For canonical t, wired requires profile membership AND reviewed wired_names AND
+registered_names. Permission additionally requires t in permitted_names and
+rag_enabled for rag_search, otherwise scientific_tools. ordinary_chat is not a
+tool; molecular_docking stays unwired/unpermitted. All readiness stays unknown.
+Reason precedence uses the existing DTO enum only: excluded/unreviewed wiring →
+profile_not_supported; then absent registration → not_registered; then denied
+permission → permission_disabled; else readiness_unknown. Do not add not_wired.
+The first reason describes this binding view, not lack of product support.
+
+Required counterexamples: B+legacy True; B missing explicit wiring; wired but
+unregistered; registered but unreviewed; B1 generator/ranker names; alias/feature
+IDs; non-bool flags; scientific=False/RAG=True allowing only the RAG **view**;
+ordinary chat with RAG preference still has no execution authority. No live
+registry/model/health/file/environment/asset reads or callbacks belong here.
+
+### 12.4 Deferred work is still mandatory
+
+Later app/carry/root contracts, B whole-request permissions, requirements-v2,
+RAG/reverse same-call receipts, Session seals, B8 replay and actual Web positives
+remain the full §§3–11 plan, not waived by this first slice. Do not open
+loop_admission(B) before matching B8 execution. Preserve no-carry6/original7.
+Approved accounting remains M<=16, G<=5, M+G<=16, tools<=12 and the same <=300s
+ActiveSegment; B1 G=0 does not waive root closure. B2 token grant/actual transport
+proof, C consent/Vina and P8 real normal-entry proof remain separate gates.
+Companion plan §12 gives the future runner and TDD sequence. No code/tests are
+released by this docs-only change; stop after parent/independent plan review.
