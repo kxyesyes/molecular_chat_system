@@ -4,6 +4,32 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+PR84 is now MERGED asf1152617fc02c057d6bbf4774055c35b6db7b42d. Aligned3ddafd6
+run36247412305 attempt2 passed8/8; Agent9548 passed/1 skipped/23858 warnings
+575.44s. Parent checked exact head/base/current main, all eight checks, complete
+review pagination with zero threads/changes requests, then marked ready/squash
+merged. Fresh fetch verifies reviewed/landed tree equalityd10c1429adfc93864fd508cad43178c2608d91bd.
+Attempt1 timeout and earlier native probe failures remain; no performance-root-
+cause fix is claimed. PR86 now aligned/pushedbbc498e, predicted/actual tree
+17a2d7ae41c7a1cd02d8eea535a0ef127864a9b6, independent Nash integration confirmed.
+Its seven-file delta is unchanged; newCI36248942747 is live, not merged.
+
+R4 clean transplant is locald976422 oncodex/rag-current-eligibility-final at
+actualmainf115261, tree718607c0fdc44008cac36792a698250963d6c0d6. Original5c392ff
+branch is retained. Plain ancestry merge-tree (read-only) showed squash-history
+conflicts; explicit reviewed R3 base518be62 yielded a clean tree whose complete
+eight-file raw delta equals the reviewed old branch. No conflict tree was applied.
+Copernicus independently checks the transplant before draft publication/newCI.
+
+Normal-Web Task3 next QUALITY finding: after an owned worker returns, coroutine
+scheduling may consume TTL before model dispatch. Actual native/JSON RED2 failed
+2.52s (HTTP3 instead of2). Synchronous existing-authority recheck plus rollback
+of the never-dispatched reservation passed focused22/3 warnings11.57s, terminal
+11872. Updated loop2FC675AC/test24B5CE67 freeze awaits corrected source reviews.
+Previous union378 passed337.23s (10310 terminal) predates this amendment; not final.
+Tesla explicitly released the test slot; no next long union until both source
+reviews agree, then worker/independent full repeats. P7/P8 remain incomplete.
+
 Current local gates: R4 corrected tests are committed5c392ff after Erdos SOURCE
 and fresh Herschel QUALITY. Parent exact12 union1323 passed/4 warnings72.31s
 (62174 terminal36f89b); independent1323 passed/4 warnings73.88s (8628 terminal
