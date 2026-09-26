@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | Independent SOURCE/QUALITY and CI-only alignment audit approve; draft PR89 updatedcee8701, CI36261000462 running | Original CI36255095764 failed600s retained; fresh9-check CI and merge gates pending |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 corrected SOURCE approves stronger exact-credit/details-only controls; focused6 passed54.29s | Harvey fresh QUALITY owns exact4-module union test slot; final union and Tasks6–8 pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 corrected SOURCE approves stronger controls; independent union461 passed1 failed624.40s | JSON RAG resume hit fixture3s receive timeout, cause UNKNOWN; Raman owns bounded diagnostic slot. Task5 QUALITY and Tasks6–8 remain pending |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | SOURCE/QUALITY and CI-only alignment audit approve; draftPR91 headf1fc421, CI36261062523 running | Fresh9-check CI/collection proof and merge gates; not yet merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -26,6 +26,16 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Task5 QUALITY is NOT approved: independent exact4-module union24652/f03a9f
+terminated461 passed1 failed7 warnings624.40s, runner/process exit1. Failure is
+test_b1_rag_then_clarify_reuses_sqlite_observation[json] on resumed socket.turn,
+ActualSocket.receive's3-second asyncio deadline. Source freeze unchanged. This
+is an actual test failure, not an exec observation timeout or established flake.
+Harvey found no definite production blocker by inspection, but did not waive the
+failure. Raman has sole local slot for one exact native/JSON focused reproduction
+and source diagnosis; no edits, timeout relaxation or repeated-until-green runs.
+Task6 is not released. Earlier458-pass evidence cannot supersede this failure.
 
 Goodall alignment audit approves both exact heads: upstream-only patch is exactly
 the five landed CI files; full src and tests/agent trees and original theme diffs

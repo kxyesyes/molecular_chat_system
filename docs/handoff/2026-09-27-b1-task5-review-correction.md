@@ -163,3 +163,18 @@ all three production hashes and runner above unchanged. Curie corrected SOURCE
 approves both sufficiency corrections. Harvey fresh QUALITY owns the sole local
 test slot for the exact four-module union U; no union terminal is claimed yet.
 No production mutation experiment was run or represented as evidence.
+
+## Independent union failure — unresolved
+
+Harvey's exact U run24652 (start5fef66, terminalf03a9f) completed **461 passed,
+1 failed,7 warnings624.40s**, runner/process exit1. Failure:
+`test_b1_rag_then_clarify_reuses_sqlite_observation[json]`, resumed socket.turn at
+test line1044, through ActualSocket.receive's3-second deadline. The process
+terminated normally with failure; no restart or observation-timeout substitution.
+All three production hashes, testA20167 and runnerF2DAB8 remained unchanged.
+
+QUALITY is withheld; source inspection alone is not a pass. Root cause is UNKNOWN,
+not assumed environment noise. A bounded one-run native/JSON reproduction and
+source diagnosis is delegated to Raman, with sole local scientific slot and no
+test/production edits, new probe imports, live providers or timeout changes.
+Task6 remains unreleased until this quality gap is honestly resolved.
