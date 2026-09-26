@@ -16,7 +16,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226 after Maxwell SOURCE/Galileo QUALITY; worker463 passed504.39s, independent463 passed608.04s | Wegener released for approved Task6 TDD; pure Node allowed, Python waits for slot; original resume timeout cause UNKNOWN; Tasks6–8 pending |
-| B1 binding foundation | Seven-production/five-test extraction complete on729d986; Averroes SOURCE approves; parent compile12/scoped scan passed | Euler owns sole scientific slot for ordered36-module union; fresh QUALITY source audit in parallel; no new production entry |
+| B1 binding foundation | Seven-production/five-test extraction on729d986; Averroes SOURCE/Hypatia source-quality approve; worker36 union3924 passed375.25s | Hypatia owns sole scientific slot for independent36repeat; no commit/push or production entry activation |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -27,6 +27,17 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Foundation worker36 run96987/bb7382 completed3924 passed,3 SWIG warnings375.25s,
+runner/process exit0. All45 before/after path hashes matched; no restart after
+observation timeout. Averroes SOURCE and Hypatia quality-source reviews approve.
+Hypatia now owns sole scientific slot for independent exact36repeat; current
+evidence is offline, not real-model activation or P7/P8 completion. Euler released
+the slot and completed extraction; parent owns later publication decisions.
+
+Task6 Wegener proceeds with pureNode TDD and test authoring only while that
+scientific slot is occupied. Python REDs and backend behavior changes still await
+explicit release; frontend changes remain unreviewed/uncommitted at this point.
 
 Task5 is locally committed5c2e2268a26e6cc3549e186f974756b753aaa0f7 after exact-file
 staging and parent checks. Its full historical failure chronology remains intact.
