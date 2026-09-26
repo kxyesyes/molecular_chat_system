@@ -275,3 +275,38 @@ def assess(envelope):
     if risk != 'clear':
         return result('blocked', 'request_clarification_required')
     return result('known_chat', 'closed_chat_request')
+
+
+def validate_reply_scope(query, *, original_query, request_kind, required_tools):
+    """Pure whole-reply grammar, not admission or scientific input reduction.
+
+    The authenticated B8 journal owns identities and monotonic refinement. This
+    guard only prevents a reply from adding execution/count/permission clauses.
+    It deliberately does not assemble a new request from clarification fragments.
+    """
+    from .decision_request import _whole_risk
+    from src.target_identifiers import TARGET_PATTERN
+    if (type(query) is not str or not query.strip() or len(query) > 16384
+            or len(query.encode('utf-8')) > 16384 or contains_secret_material(query)):
+        _error()
+    if request_kind == 'chat':
+        if _whole_risk(query) != 'clear' or _B_ANALYSIS.search(query):
+            _error()
+        return
+    if query == original_query or query.strip().casefold() in {'继续', 'continue'}:
+        return
+    molecular = required_tools - {'rag_search', 'target_database_search'}
+    fields = re.split(r'[；;\r\n]+', query.strip())
+    seen = set()
+    for field in fields:
+        match = re.fullmatch(r'\s*(SMILES|target|靶点)\s*[:：=]\s*(\S+)\s*', field, re.I)
+        if match is None:
+            _error()
+        name, value = match.groups()
+        name = 'smiles' if name.casefold() == 'smiles' else 'target'
+        if name in seen or not molecular:
+            _error()
+        seen.add(name)
+        if name == 'target' and ('activity_predictor' not in required_tools
+                                 or TARGET_PATTERN.fullmatch(value) is None):
+            _error()

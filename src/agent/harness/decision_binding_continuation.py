@@ -314,6 +314,31 @@ def validate_continuation(loop, session, fingerprint, nonce, reply, *, requireme
     check_deadline()
     resolver.verify_binding_closure()
     check_deadline()
+    if admission_carry is not None:
+        # Trial only: never admit into the authenticated saved head or the live
+        # Session before CAS. Reuse the resolver's sequential reduction so an
+        # invalid supplied input cannot disappear behind a later omission.
+        trial_journal = BindingInputJournal.restore_trusted(journal.export(), original_context=context)
+        trial_context = trial_journal.context()
+        trial_context.query, trial_context.resolved_molecule = reply, None
+        trial_journal.admit_context(trial_context, input_turn=trial_journal.head_turn + 1)
+        trial = WorkflowRunSession(session.orchestrator, trial_context, [], {}, dynamic=True)
+        trial.results, trial.outputs = deepcopy(projection.results), deepcopy(projection.outputs)
+        trial.ledger = deepcopy(projection.ledger)
+        trial._decision_binding_profile = B1_PROFILE_REVISION
+        trial._decision_observation_seals = MappingProxyType(dict(projection._decision_observation_seals))
+        trial_resolver = B1BindingResolver(session=trial, requirements=requirements,
+            original_context=journal.context(0), adapters=adapters, input_journal=trial_journal)
+        trial_resolver.restore_records(resolver.export_records())
+        trial_resolver.verify_binding_closure()
+        if 'reverse_target_predictor' in required_tools and requirements.reverse_result is None:
+            # A reverse-only request can be admitted before its subject exists.
+            # Its explicit obligation still requires whole-journal reduction;
+            # an empty typed group is not permission to defer validation to CAS.
+            admitted, _ = trial_resolver._journal_inputs(trial_journal.head_turn)
+            if admitted is not None and len(trial_resolver._user_molecules(admitted)) != 1:
+                raise ValueError('invalid reverse-target subject count')
+        check_deadline()
     originals = tuple(_observation_wire(result) for result in projection.results)
     return ValidatedReplay(payload, saved, journal, projection.results, proofs, resolver.export_records(), resolver,
         originals, ordinary_metadata, check_deadline if admission_carry is not None else None)

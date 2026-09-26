@@ -514,6 +514,23 @@ Files: `src/web/decision_runtime.py`, `decision_binding_request.py`,
 
 ## Task 6 — actual Web dataflow, publication flags and home behavior
 
+### Task5 current offline gate and Task6 release (2026-09-27)
+
+Task5 bounded production correction and strengthened replay/budget assertions
+retain corrected SOURCE approval. Diagnostic-only freeze928B2C now also has
+Maxwell SOURCE and fresh Galileo QUALITY approval: worker exact4 union463 passed
+504.39s; independent85221/afe598463 passed608.04s,0 failed/skipped,7 warnings,
+runner/process exit0. All six source/test/fixture/launcher hashes unchanged.
+The additional case proves diagnostic failure cannot bypass original cleanup.
+Parent source compilation and scoped credential scan passed. Historical JSON
+RAG receive timeout (461 passed/1 failed624.40s) is preserved, cause UNKNOWN;
+current verification does not claim a production-timeout fix.
+
+Parent explicitly releases only the Task6 scope below for TDD. Required REDs must
+precede behavior changes, scientific tests need an explicit exclusive slot, and
+SOURCE then fresh QUALITY remain mandatory. No Task7/8 implementation, B2/C,
+live model activation or deployment is included in this release.
+
 Files: `src/web/decision_chat.py`, `decision_runtime.py`,
 `src/web/static/js/home/main.js`, `advanced_options.js`; new runtime tests and
 additive `tests/home_decision_runtime_test.js` cases.

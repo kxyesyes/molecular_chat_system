@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 diagnostic/control freeze928B2C union463 passed504.39s; Maxwell SOURCE approves | Galileo fresh QUALITY owns sole local test slot; original JSON RAG resume3s timeout cause UNKNOWN; Tasks6–8 pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 Maxwell SOURCE/Galileo QUALITY approve; worker463 passed504.39s, independent463 passed608.04s | Parent releases Task6 bounded Web dataflow/presentation TDD; original JSON RAG resume3s timeout cause UNKNOWN; Tasks6–8 pending |
 | B1 binding foundation | Prerequisites landed; branch729d986 aligned to actual main82bb6c7; only foundation plan differs before extraction | Euler implementing approved seven-production/five-test extraction; no tests until slot grant; no new production entry |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
@@ -27,6 +27,20 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Galileo fresh QUALITY approves current Task5 freeze after exact4 run85221/afe598:
+463 passed,0 failures/skips,7 warnings608.04s, runner/process exit0. Six hashes
+unchanged, scope/diff check clean, no reviewer edits or repeated-until-green.
+The seven warnings are3 SWIG +4 FastAPI deprecations. Original461-pass/1-failure
+timeout remains valid and its cause UNKNOWN. Parent accepts current offline
+Task5 gate and explicitly releases Task6's approved dataflow/presentation scope,
+not a production timeout-fix claim or final acceptance. Local test slot released.
+
+Foundation code extraction is complete: seven production/five test files match
+the approved donor boundary; only already-carried owned-call tests are removed
+with AST/text equivalence evidence. Parent in-memory compiled12 files and scoped
+credential-pattern scan found no matches. Independent SOURCE Averroes reviews;
+its36-module execution and fresh QUALITY are still pending. No activation.
 
 Foundation729d986 aligns actual main82bb6c7. Only add/add conflict was the target
 integration plan's empty local tail versus main's appended36 evidence lines;

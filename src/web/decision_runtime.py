@@ -273,6 +273,8 @@ class WebDecisionRuntime:
             record = self.store.get_run(turn.trace_id)
             payload = record['metadata']['decision_continuation']
             if (record['status'] != 'waiting_for_input' or 'claimed_by' in payload
+                    or (self.binding_profile == B1_PROFILE_REVISION
+                        and 'decision_publication_invalidation' in record['metadata'])
                     or payload['id'] != turn.waiting.continuation_id):
                 raise ValueError('consumed authority')
         except Exception:
@@ -349,6 +351,15 @@ class WebDecisionRuntime:
         try:
             if generation != prepared.config_generation or self._clock() >= waiting.expires_at:
                 raise ValueError('stale waiting state')
+            if self.binding_profile == B1_PROFILE_REVISION:
+                from .decision_binding_request import validate_reply_scope
+                if prepared.requirements.profile != B1_PROFILE_REVISION:
+                    raise ValueError('changed binding profile')
+                validate_reply_scope(query, original_query=original.query,
+                    request_kind=prepared.request_kind, required_tools=prepared.required_tools)
+                # Reference/source and sequential input validation run in the
+                # owned decoder against authenticated SQLite, before its CAS.
+                return
             require_current_reference(original, self.store)
             refined = prepare_decision_request(dict(message=query,
                 enable_tools=original.metadata['capabilities']['scientific_tools'],
@@ -447,10 +458,14 @@ class WebDecisionRuntime:
                     if self.semantic:
                         try:
                             snapshot = self._snapshot(base, generation, capability_generation,
-                                turn.waiting.context.metadata['capabilities']['scientific_tools'])
+                                turn.waiting.context.metadata['capabilities']['scientific_tools'],
+                                turn.waiting.context.metadata['capabilities']['rag'])
+                            revision = ASSESSMENT_REVISION
+                            if self.binding_profile == B1_PROFILE_REVISION:
+                                from .decision_binding_request import ASSESSMENT_REVISION as revision
                             validate_carry_in(turn.admission_carry, capability_snapshot=snapshot,
                                 query=turn.waiting.context.query, history=turn.waiting.context.memory,
-                                assessment_revision=ASSESSMENT_REVISION)
+                                assessment_revision=revision)
                         except (ValueError, TypeError):
                             sender.waiting = None
                             raise DecisionAdmissionError('continuation_rejected') from None
