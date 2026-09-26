@@ -16,7 +16,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226 after Maxwell SOURCE/Galileo QUALITY; worker463 passed504.39s, independent463 passed608.04s | Wegener released for approved Task6 TDD; pure Node allowed, Python waits for slot; original resume timeout cause UNKNOWN; Tasks6–8 pending |
-| B1 binding foundation | Seven-production/five-test extraction on729d986; Averroes SOURCE/Hypatia source-quality approve; worker36 union3924 passed375.25s | Hypatia owns sole scientific slot for independent36repeat; no commit/push or production entry activation |
+| B1 binding foundation | PR92 draft head7b43a1e; Averroes SOURCE/Hypatia QUALITY approve; worker3924 passed375.25s, independent3924 passed337.27s | Exact-head CI36265829338 in_progress;9checks/fullcollection/review/merge pending; no activation |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -27,6 +27,26 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Foundation Hypatia independent36 run67226/a78bb7 completed3924 passed,0 failures/
+skips,3 SWIG warnings337.27s; runner/process exit0,45 hashes unchanged, QUALITY
+approved. Parent exact-file committed7b43a1e379a94da8d8f4dbdb7edaa1e688edd3fd,
+pushed branch and created/attached draftPR92. Exact-head CI36265829338 is actually
+in_progress; all9checks and fresh paginatedreviews/main/head/tree audit still
+required. No production entry activation or completion claim.
+
+Publication tooling correction: first PR lookup accidentally wrapped REST's
+empty Object[] as one item, producing null PR fields and no creation. Parent
+flattened the response explicitly, rechecked zero existing PRs, then created
+exactly PR92. The same explicit flattening re-audited PR91 reviews: actual0,
+not the previously recorded1. PR91 remains merged,0 changes_requested; earlier
+GraphQL0threads/0unresolved and exact9checks/tree evidence stand. Future REST
+review pagination uses the flattened item count, not the response wrapper count.
+
+The local scientific slot transferred to Wegener for Task6's prepared Python
+REDs, followed by bounded backend changes and remaining task tests. PureNode
+stage recorded44passed/9failed RED to54passed/0failed GREEN, not fullTask6 or
+realASGI proof. Corresponding Python outcomes remain pending; no otherlocalrun.
 
 Foundation worker36 run96987/bb7382 completed3924 passed,3 SWIG warnings375.25s,
 runner/process exit0. All45 before/after path hashes matched; no restart after
