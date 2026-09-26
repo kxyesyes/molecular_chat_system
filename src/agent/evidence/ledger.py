@@ -83,12 +83,38 @@ class EvidenceLedger:
         result.provenance = provenance
         return provenance
 
+    @staticmethod
+    def validated_binding_proof(binding_proof, quality_proof) -> dict[str, Any]:
+        """Revalidate BOTH native projections before equality/copy/hash.
+
+        This validates shape, not authority. Only explicit server callers may
+        opt in; a tool's quality extension alone never enrolls legacy evidence.
+        """
+        from src.agent.contracts.decision_bindings import parse_binding_proof
+
+        if type(binding_proof) is not dict or type(quality_proof) is not dict:
+            raise ValueError("invalid_binding_proof")
+        proof = parse_binding_proof(binding_proof).model_dump(mode="json")
+        quality = parse_binding_proof(quality_proof).model_dump(mode="json")
+        if proof != quality:
+            raise ValueError("invalid_binding_proof")
+        return proof
+
     def register_tool_result(
         self,
         step_id: str,
         input_digest: str,
         result: ToolResult,
+        *,
+        binding_proof: dict[str, Any] | None = None,
     ) -> str:
+        proof = None
+        if binding_proof is not None:
+            proof = self.validated_binding_proof(
+                binding_proof, result.quality.get("binding_proof"))
+            if any(result.quality.get(name) is None for name in (
+                    "request_input_digest", "input_evidence_ids", "operation_key")):
+                raise ValueError("binding proof requires base input binding")
         provenance = self.prepare_provenance(input_digest, result)
         payload = {
             "trace_id": self.trace_id,
@@ -114,6 +140,8 @@ class EvidenceLedger:
                     "operation_key",
                 )
             }
+            if proof is not None:
+                payload["input_binding"]["binding_proof"] = proof
         digest = hashlib.sha256(
             json.dumps(
                 payload,

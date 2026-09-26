@@ -83,6 +83,8 @@ class _StepJournal:
     running_checkpoint_saved: bool = False
     tool_attempted: bool = False
     result: ToolResult | None = None
+    prepared: bool = False
+    binding_proof: dict[str, Any] | None = None
     normalized: bool = False
     observation_captured: bool = False
     execution_recorded: bool = False
@@ -112,6 +114,7 @@ class WorkflowRunSession:
         *,
         dynamic: bool = False,
         observation_capture: Callable[[ToolResult], None] | None = None,
+        observation_prepare: Callable[[ToolResult, WorkflowStep], None] | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.context = context
@@ -125,6 +128,9 @@ class WorkflowRunSession:
         if observation_capture is not None and (not dynamic or not callable(observation_capture)):
             raise SessionLifecycleError("observation capture requires a dynamic session and callable")
         self._observation_capture = observation_capture
+        if observation_prepare is not None and (not dynamic or not callable(observation_prepare)):
+            raise SessionLifecycleError("observation preparation requires a dynamic session and callable")
+        self._observation_prepare = observation_prepare
         self._resume_claimed = False
         self._observations_restored = False
         self._restored_step_ids: set[str] = set()
@@ -345,11 +351,16 @@ class WorkflowRunSession:
 
     def restore_observations(
         self, results: list[ToolResult], tool_attempt_count: int,
+        *, binding_proofs: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """Atomically install caller-PREVALIDATED settled observations.
 
         Caller owns checksum/authentication, budgets and revision compatibility.
         This only checks local lifecycle/identity, and is not crash recovery.
+        binding_proofs is explicit server authority, never inferred from quality:
+        an exact dict of at most 128 evidence IDs (1..128 characters) to native
+        B proofs (each <=8192 JSON bytes). Keys must all name restored results.
+        None preserves legacy identity. Revision8 decoding is a separate caller.
         """
         self._require_active()
         if (not self.dynamic or not self._resume_claimed or self.steps or self.results
@@ -359,11 +370,24 @@ class WorkflowRunSession:
         if type(tool_attempt_count) is not int or tool_attempt_count < 0:
             raise SessionLifecycleError("restored attempt count must be a nonnegative integer")
 
+        proofs = {}
+        if binding_proofs is not None:
+            if type(binding_proofs) is not dict or len(binding_proofs) > 128:
+                raise SessionLifecycleError("invalid restored binding proofs")
+            try:
+                for eid, proof in binding_proofs.items():
+                    if type(eid) is not str or not 1 <= len(eid) <= 128:
+                        raise ValueError("invalid evidence identifier")
+                    proofs[eid] = EvidenceLedger.validated_binding_proof(proof, proof)
+            except (TypeError, ValueError) as exc:
+                raise SessionLifecycleError("invalid restored binding proofs") from exc
+
         # Stage detached copies: even the ledger prepares/mutates provenance.
         ledger = EvidenceLedger(self.context.trace_id)
         state = deepcopy(self.state)
         restored = deepcopy(results)
         step_ids: set[str] = set()
+        used_proofs: set[str] = set()
         try:
             for result in restored:
                 if not isinstance(result, ToolResult) or not isinstance(result.status, ObservationStatus):
@@ -373,8 +397,13 @@ class WorkflowRunSession:
                     raise SessionLifecycleError("restored action identifiers must be unique")
                 if result.provenance is None or not result.provenance.input_digest:
                     raise SessionLifecycleError("restored observation requires input provenance")
+                old_id = result.quality["evidence_id"]
+                proof_args = {}
+                if old_id in proofs:
+                    proof_args["binding_proof"] = proofs[old_id]
+                    used_proofs.add(old_id)
                 evidence_id = ledger.register_tool_result(
-                    step_id, result.provenance.input_digest, result)
+                    step_id, result.provenance.input_digest, result, **proof_args)
                 if evidence_id != result.quality["evidence_id"]:
                     raise SessionLifecycleError("restored evidence identity changed")
                 step_ids.add(step_id)
@@ -391,6 +420,8 @@ class WorkflowRunSession:
                         "step": step_id, "tool": result.tool_name,
                         "error": result.error.to_dict() if result.error else None,
                     })
+            if used_proofs != proofs.keys():
+                raise SessionLifecycleError("restored binding proofs contain unknown observations")
         except (AttributeError, KeyError, TypeError, ValueError) as exc:
             raise SessionLifecycleError("invalid restored observation") from exc
         self.ledger = ledger
@@ -490,7 +521,7 @@ class WorkflowRunSession:
 
         result = journal.result
         assert result is not None
-        if not journal.normalized:
+        if not journal.prepared:
             if self.dynamic:
                 if result.tool_name != step.tool_name:
                     result = ToolResult.error_result(
@@ -526,24 +557,61 @@ class WorkflowRunSession:
                 )
             journal.reused_result_changed = journal.checkpoint_reused and prior_outcome != (
                 result.success, result.status, result.error)
-            if self.dynamic:
-                # Validators may scrub provenance/quality; alignment changes data.
-                # Bind only the accepted representation, never the raw tool payload.
-                result.quality.update({
-                    "step_id": step.name, "output_key": step.output_key,
-                    "tool_version": journal.tool_version,
-                    **{key: deepcopy(step.metadata.get(key)) for key in (
-                        "input_evidence_ids", "operation_key", "request_input_digest")},
-                })
-                provenance = self.ledger.prepare_provenance(journal.input_hash, result)
-                result.provenance = replace(
-                    provenance, tool_version=journal.tool_version,
-                    output_digest=EvidenceLedger.output_digest(result.data),
-                )
+            if self._observation_prepare is not None:
+                from src.agent.harness.decision_bounds import observation_value, validate_json
+
+                # Raw tool extras cannot acquire server authority. The callback
+                # receives the accepted result and the actual append_step copy.
+                result.quality.pop("binding_proof", None)
+                original_metadata = deepcopy(step.metadata)
+                accepted_success = result.success
+                try:
+                    self._observation_prepare(result, step)
+                    # A normally returning callback may still leave hostile or
+                    # oversized fields. Bound them before proof/binding copies,
+                    # dataclass conversion or the final output hash.
+                    validate_json(step.metadata, max_bytes=64 * 1024,
+                                  reason="invalid_prepared_metadata")
+                    observation_value(result)
+                    if not accepted_success and result.success:
+                        raise ValueError("preparation cannot promote rejected output")
+                    if "binding_proof" in result.quality or "binding_proof" in step.metadata:
+                        journal.binding_proof = EvidenceLedger.validated_binding_proof(
+                            step.metadata.get("binding_proof"), result.quality.get("binding_proof"))
+                        result.quality["binding_proof"] = deepcopy(journal.binding_proof)
+                        step.metadata["binding_proof"] = deepcopy(journal.binding_proof)
+                        if any(step.metadata.get(key) is None for key in (
+                                "input_evidence_ids", "operation_key", "request_input_digest")):
+                            raise ValueError("binding proof requires base input binding")
+                    self._bind_dynamic_observation(result, step, journal)
+                    observation_value(result)  # final binding/provenance also consume the bound
+                except Exception:
+                    # Do not reuse a mutated provisional result or expose callback
+                    # text. Roll back provisional source/key metadata as well.
+                    original_metadata.pop("binding_proof", None)
+                    # Restore the frozen step's saved slot directly: the callback
+                    # may have replaced it with None or a hostile container.
+                    object.__setattr__(step, "metadata", original_metadata)
+                    journal.binding_proof = None
+                    result = ToolResult.error_result(
+                        step.tool_name, AgentErrorCode.INVALID_OUTPUT,
+                        "Observation preparation failed",
+                    )
+                    self._bind_dynamic_observation(result, step, journal)
+            elif self.dynamic:
+                self._bind_dynamic_observation(result, step, journal)
+            # Distinct from normalized: registration itself can fail before or
+            # after commit. Retain this exact decision, never revalidate/prepare.
+            journal.result = result
+            journal.prepared = True
+
+        if not journal.normalized:
             evidence_id = self.ledger.register_tool_result(
                 step_id=step.name,
                 input_digest=journal.input_hash,
                 result=result,
+                **({"binding_proof": deepcopy(journal.binding_proof)}
+                   if journal.binding_proof is not None else {}),
             )
             result.quality = {
                 **result.quality,
@@ -654,6 +722,23 @@ class WorkflowRunSession:
         self._consume_step(index)
         self._terminal_reached = terminal
         return journal.advance
+
+    def _bind_dynamic_observation(
+        self, result: ToolResult, step: WorkflowStep, journal: _StepJournal,
+    ) -> None:
+        # Validators may scrub provenance/quality; alignment changes data.
+        # Bind only the accepted representation, never the raw tool payload.
+        result.quality.update({
+            "step_id": step.name, "output_key": step.output_key,
+            "tool_version": journal.tool_version,
+            **{key: deepcopy(step.metadata.get(key)) for key in (
+                "input_evidence_ids", "operation_key", "request_input_digest")},
+        })
+        provenance = self.ledger.prepare_provenance(journal.input_hash, result)
+        result.provenance = replace(
+            provenance, tool_version=journal.tool_version,
+            output_digest=EvidenceLedger.output_digest(result.data),
+        )
 
     def _prepare_step_result(
         self,
