@@ -70,6 +70,11 @@ def verify_observation_integrity(source, session):
         value = observation_value(source)
         record = next((r for r in session.ledger.to_list()
                        if r['evidence_id'] == source.quality.get('evidence_id')), None)
+        input_binding = {name: source.quality.get(name) for name in (
+            'request_input_digest', 'input_evidence_ids', 'operation_key')}
+        if record is not None and 'binding_proof' in record.get('input_binding', {}):
+            input_binding['binding_proof'] = EvidenceLedger.validated_binding_proof(
+                record['input_binding']['binding_proof'], source.quality.get('binding_proof'))
         intact = (record is not None and record['trace_id'] == session.context.trace_id
             and record['step_id'] == source.quality.get('step_id')
             and record['tool_name'] == source.tool_name
@@ -80,8 +85,7 @@ def verify_observation_integrity(source, session):
             and record['artifacts'] == [a.to_dict() for a in source.artifacts]
             and record['scientific_usable'] == bool(source.success and not source.provenance.demo_mode
                                                     and not source.provenance.fallback_used)
-            and record.get('input_binding') == {name: source.quality.get(name) for name in (
-                'request_input_digest', 'input_evidence_ids', 'operation_key')}
+            and record.get('input_binding') == input_binding
             and source.provenance.output_digest == EvidenceLedger.output_digest(source.data))
         seal = getattr(session, '_decision_observation_seals', {}).get(source.quality.get('evidence_id'))
         if hasattr(session, '_decision_observation_seals'):
