@@ -4,6 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.agent.test_generation_transport_characterization import offline_models
+
 from src.agent.contracts import AgentErrorCode, CandidateSet, ObservationStatus, ToolResult
 from src.agent.tooling.factory import build_tool_registry
 from src.agent.tools.base_tool import execute_tool_compat
@@ -42,10 +44,11 @@ def registered(tool, request):
 
 @pytest.mark.parametrize("wrapped", [False, True])
 @pytest.mark.parametrize("count", [1, 10])
-def test_actual_generator_count_temperature_and_partial_transport(monkeypatch, wrapped, count):
-    generator = LLMMolecularGenerator(SimpleNamespace(model_name="offline-sentinel"))
+def test_actual_generator_count_temperature_and_partial_transport(monkeypatch, wrapped, count, offline_models):
+    model = offline_models("", max_calls=0, model_name="offline-sentinel")
+    generator = LLMMolecularGenerator(model)
     intents = []
-    def candidates(intent):
+    def candidates(intent, *, round_state=None):
         intents.append(deepcopy(intent))
         return [{"smiles": "CCO", "source": "llm", "model": "offline-sentinel"}]
     monkeypatch.setattr(generator, "_generate_with_retry", candidates)
@@ -82,7 +85,13 @@ def test_missing_generation_model_is_not_reported_as_quality_success():
     result = registered(LLMMolecularGenerator(None), {"query": "generate 1 molecule"})
     assert not result.success
     assert result.data is None
-    assert result.error.details["raw_result"]["success"] is False
+    assert result.message == "Strict molecular generation unavailable"
+    assert result.error.code is AgentErrorCode.TOOL_UNAVAILABLE
+    assert result.error.message == "Strict molecular generation unavailable"
+    assert result.error.details == {"reason": "generation_strict_unavailable"}
+    # This legacy normalization keeps FAILED; unavailable is the typed error.
+    assert result.status is ObservationStatus.FAILED
+    assert result.quality == {}
 
 
 @pytest.mark.parametrize("data", [

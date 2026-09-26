@@ -10,6 +10,8 @@ from typing import get_type_hints
 
 import pytest
 
+from tests.agent.test_generation_transport_characterization import offline_models
+
 from src.agent.contracts import AgentContext, AgentErrorCode, AgentResult
 from src.agent.orchestrators import WorkflowOrchestrator
 from src.agent.orchestrators.base import WorkflowStep
@@ -71,22 +73,11 @@ class FakeTool:
         }
 
 
-class CapturingGeneratorModel:
-    model_name = "gmm-llama:latest"
-
-    def __init__(self):
-        self.prompts = []
-
-    def generate(self, prompt, temperature=0.7, max_tokens=1000):
-        self.prompts.append(prompt)
-        return "\n".join("C" * length for length in range(1, 11))
-
-
 def test_legacy_target_binding_reaches_real_generator_with_canonical_count(
-    monkeypatch,
+    monkeypatch, offline_models,
 ):
     target = FakeTool("target_database_search")
-    model = CapturingGeneratorModel()
+    model = offline_models("\n".join("C" * length for length in range(1, 11)), max_calls=1)
     generator = LLMMolecularGenerator(llm_model=model)
     monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
     monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
