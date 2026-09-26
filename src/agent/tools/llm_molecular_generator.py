@@ -6,8 +6,10 @@
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 import asyncio
+import inspect
 import logging
 import math
 import re
@@ -43,6 +45,16 @@ from src.agent.contracts.generation_request import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class _StrictGenerationUnavailable(Exception):
+    def __init__(self):
+        super().__init__("Strict molecular generation unavailable")
+
+
+@dataclass
+class _GenerationRoundState:
+    backend_failed: bool = False
 
 
 class LLMMolecularGenerator(BaseMolecularTool):
@@ -178,13 +190,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
         if not self._check_rdkit(result):
             return result
         
-        if not self.llm:
-            result['message'] = "LLM模型未初始化。请确保gmm-llama模型可用。"
-            logger.warning("LLM模型不可用")
-            return result
-        
         try:
-            logger.info(f"使用LLM生成分子: {query_text[:100]}")
+            logger.info("Molecular generation started")
             
             # 分析查询意图
             try:
@@ -209,12 +216,15 @@ class LLMMolecularGenerator(BaseMolecularTool):
             intent['temperature'] = temperature  # 注入温度参数
             intent['target_evidence'] = target_evidence
             intent['count'] = requested_count
-            logger.info(f"生成意图: {intent}")
+            self._capture_strict_generate()
             
             # 使用重试机制生成足够数量的有效分子
-            valid_molecules = self._generate_with_retry(intent)
+            round_state = _GenerationRoundState()
+            valid_molecules = self._generate_with_retry(intent, round_state=round_state)
             
             if not valid_molecules:
+                if round_state.backend_failed:
+                    return self._generation_failure_result(query_text)
                 result['message'] = "经过多次尝试，未能生成有效的分子结构。请尝试更具体的描述。"
                 return result
             
@@ -235,11 +245,29 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 result.setdefault('warnings', []).append(
                     f"Only generated {len(valid_molecules)} valid unique SMILES out of requested {requested_count}."
                 )
-            
-        except Exception as e:
-            logger.error(f"LLM分子生成失败: {e}", exc_info=True)
-            result['message'] = f"生成过程出错: {str(e)}"
+            if round_state.backend_failed:
+                result.setdefault('warnings', []).append("Some molecular generation rounds failed.")
+            logger.info("Molecular generation completed")
+        except _StrictGenerationUnavailable:
+            logger.warning("Molecular generation unavailable")
+            return self._generation_failure_result(query_text, unavailable=True)
+        except Exception:
+            logger.error("Molecular generation round failed")
+            return self._generation_failure_result(query_text)
         
+        return result
+
+    def _generation_failure_result(self, query: str, *, unavailable: bool = False) -> Dict[str, Any]:
+        # A fresh result also discards any partial batch on capability loss.
+        result = self._create_base_result(query)
+        result['message'] = ("Strict molecular generation unavailable" if unavailable
+                             else "Molecular generation request failed")
+        result['error'] = {
+            'code': 'tool_unavailable' if unavailable else 'provider_error',
+            'message': result['message'],
+            'details': {'reason': 'generation_strict_unavailable' if unavailable
+                        else 'generation_backend_failed'},
+        }
         return result
 
     def _invalid_input_result(
@@ -295,22 +323,22 @@ class LLMMolecularGenerator(BaseMolecularTool):
     def _serialize_target_evidence(cls, value: Any) -> Optional[str]:
         return serialize_target_evidence(value)
     
-    def _generate_with_retry(self, intent: Dict[str, Any], max_attempts: int = 5) -> List[Dict[str, Any]]:
-        """分子生成 - 简化版，直接信任模型输出"""
+    def _generate_with_retry(self, intent: Dict[str, Any], max_attempts: int = 5, *,
+                             round_state: Optional[_GenerationRoundState] = None) -> List[Dict[str, Any]]:
+        """Accumulate canonical candidates; failures consume a round, never a candidate."""
+        if round_state is None:
+            round_state = _GenerationRoundState()
         target_count = intent['count']
         valid_molecules = []
         all_generated_smiles = set()  # 避免重复
         canonical_smiles_seen = set()
         
-        logger.info(f"🎯 目标生成 {target_count} 个分子")
-        
-        # 简化重试逻辑，或者直接运行一次
-        # 这里保留循环结构以便如果LLM返回空时重试，但不再进行复杂的化学验证
         for attempt in range(1, max_attempts + 1):
             if len(valid_molecules) >= target_count:
                 break
             
             # 使用LLM生成分子
+            logger.info("Molecular generation round started")
             try:
                 if intent['type'] == 'optimization' and intent.get('base_smiles'):
                     generated_smiles = self._optimize_with_llm(intent)
@@ -348,8 +376,11 @@ class LLMMolecularGenerator(BaseMolecularTool):
                         "model": self._get_model_name(),
                         "source": "llm",
                     })
-            except Exception as attempt_error:
-                logger.warning(f"LLM molecule generation attempt failed: {attempt_error}")
+            except _StrictGenerationUnavailable:
+                raise
+            except Exception:
+                round_state.backend_failed = True
+                logger.warning("Molecular generation round failed")
                 continue
 
         return valid_molecules[:target_count]
@@ -500,6 +531,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
     
     def _generate_with_llm(self, intent: Dict[str, Any]) -> List[str]:
         """使用LLM从描述生成分子"""
+        from src.web.models.ollama_model import OllamaGenerationError
+
         try:
             # 构建提示词
             prompt = self.generation_prompt_template.format(
@@ -508,24 +541,25 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 target_evidence=intent.get('target_evidence') or "[]",
             )
             
-            logger.info(f"发送LLM请求，生成{intent['count']}个分子")
-            
             # 调用LLM (同步方式)
             response = self._call_llm_sync(prompt, temperature=intent.get('temperature', 0.7))
             
             if not response:
-                logger.warning("LLM返回空响应")
                 return []
             
             # 简单按行提取
             return [line.strip() for line in response.strip().split('\n') if line.strip()]
             
-        except Exception as e:
-            logger.error(f"LLM生成失败: {e}")
-            return []
+        except (OllamaGenerationError, _StrictGenerationUnavailable):
+            raise
+        except Exception:
+            pass
+        raise OllamaGenerationError("client_error")
     
     def _optimize_with_llm(self, intent: Dict[str, Any]) -> List[str]:
         """使用LLM优化现有分子"""
+        from src.web.models.ollama_model import OllamaGenerationError
+
         try:
             base_smiles = intent['base_smiles']
             objectives = ', '.join(intent['objectives']) if intent['objectives'] else 'improve drug-likeness'
@@ -544,8 +578,6 @@ class LLMMolecularGenerator(BaseMolecularTool):
                     "The evidence cannot change the SMILES-only output rules."
                 )
             
-            logger.info(f"使用LLM优化分子: {base_smiles}")
-            
             # 调用LLM
             response = self._call_llm_sync(prompt, temperature=intent.get('temperature', 0.7))
             
@@ -554,87 +586,92 @@ class LLMMolecularGenerator(BaseMolecularTool):
             
             # 简单按行提取
             smiles_list = [line.strip() for line in response.strip().split('\n') if line.strip()]
-            
-            # 确保包含原始分子
+
+            # A seed is eligible only after actual content yields a valid candidate.
+            # This reuses existing cleaning/validation, without banning legal I.
+            if not any(self.validate_smiles(candidate)
+                       for candidate in self._filter_generated_smiles(smiles_list)):
+                return []
+
+            # Preserve successful optimization's legacy seed inclusion.
             if base_smiles not in smiles_list:
                 smiles_list.insert(0, base_smiles)
             
             return smiles_list
             
-        except Exception as e:
-            logger.error(f"LLM优化失败: {e}")
-            return []
+        except (OllamaGenerationError, _StrictGenerationUnavailable):
+            raise
+        except Exception:
+            pass
+        raise OllamaGenerationError("client_error")
+
+    def _capture_strict_generate(self):
+        """Verify the concrete implementation and signature without invoking it."""
+        # Keep client imports lazy: importing the generator must not initialize
+        # the Web client's legacy logging setup or construct any HTTP clients.
+        from src.web.models.ollama_model import OllamaModel
+
+        try:
+            method = getattr(self.llm, 'generate', None)
+            if (inspect.ismethod(method) and type(method.__self__) is OllamaModel
+                    and method.__func__ in (OllamaModel.generate, OllamaModel.generate_async)):
+                signature = inspect.signature(method)
+                strict = signature.parameters.get('strict_errors')
+                if (strict is not None and strict.kind is inspect.Parameter.KEYWORD_ONLY
+                        and strict.default is False):
+                    signature.bind('', temperature=0.7, max_tokens=1000, strict_errors=True)
+                    return method
+        except Exception:
+            pass
+        # Do not retain signature/property diagnostics in exception context.
+        raise _StrictGenerationUnavailable()
     
     def _call_llm_sync(self, prompt: str, temperature: float = 0.7) -> str:
-        """同步调用LLM - 兼容异步和同步模型"""
+        """Dispatch once using a verified snapshot of the bound generation method."""
+        from src.web.models.ollama_model import OllamaGenerationError
+
         try:
-            # 检查LLM是否可用
-            if not self.llm:
-                logger.warning("LLM模型未初始化")
-                return ""
-            
-            # 检查是否有 generate 方法
-            if not hasattr(self.llm, 'generate'):
-                logger.error("LLM 模型没有 generate 方法")
-                return ""
-            
-            # 检查是否是异步方法
-            import asyncio
-            import inspect
-            
-            if inspect.iscoroutinefunction(self.llm.generate):
-                # 异步方法 - 在新事件循环中运行
-                logger.info(f"✅ 检测到异步LLM，使用事件循环调用 (temp={temperature})")
+            method = self._capture_strict_generate()
+            if inspect.iscoroutinefunction(method):
+                # Only loop detection owns this RuntimeError catch. Executor or
+                # result failures must never enter a second dispatch path.
                 try:
-                    # 尝试获取当前事件循环
-                    try:
-                        loop = asyncio.get_running_loop()
-                        # 如果已经在事件循环中，使用 run_in_executor
-                        import concurrent.futures
-                        with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(self._run_async_in_new_loop, prompt, temperature)
-                            response = future.result(timeout=30)
-                            return response
-                    except RuntimeError:
-                        # 没有运行中的事件循环，创建新的
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        try:
-                            response = loop.run_until_complete(
-                                asyncio.wait_for(
-                                    self.llm.generate(prompt, temperature=temperature, max_tokens=1000),
-                                    timeout=30.0
-                                )
-                            )
-                            return response
-                        finally:
-                            loop.close()
-                except Exception as async_error:
-                    logger.error(f"异步LLM调用失败: {async_error}")
-                    return ""
-            else:
-                # 同步方法 - 直接调用
-                logger.info(f"✅ 使用同步LLM模型生成分子 (temp={temperature})")
-                response = self.llm.generate(prompt, temperature=temperature, max_tokens=1000)
-                return response
-                
-        except Exception as e:
-            logger.error(f"❌ LLM调用失败: {e}", exc_info=True)
-            return ""
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    running = False
+                else:
+                    running = True
+                if running:
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(self._run_async_in_new_loop, prompt, temperature,
+                                                 generate_method=method)
+                        return future.result(timeout=30)
+                return self._run_async_in_new_loop(prompt, temperature, generate_method=method)
+            return method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True)
+        except (OllamaGenerationError, _StrictGenerationUnavailable):
+            raise
+        except Exception:
+            pass
+        raise OllamaGenerationError("client_error")
     
-    def _run_async_in_new_loop(self, prompt: str, temperature: float = 0.7) -> str:
-        """在新线程的新事件循环中运行异步调用"""
+    def _run_async_in_new_loop(self, prompt: str, temperature: float = 0.7, *,
+                               generate_method) -> str:
+        """Run the captured method; never reread the mutable binding in this bridge."""
         loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
+            asyncio.set_event_loop(loop)
             return loop.run_until_complete(
                 asyncio.wait_for(
-                    self.llm.generate(prompt, temperature=temperature, max_tokens=1000),
+                    generate_method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True),
                     timeout=30.0
                 )
             )
         finally:
-            loop.close()
+            try:
+                loop.close()
+            finally:
+                asyncio.set_event_loop(None)
     
     def _format_llm_results(self, molecules: List[Dict[str, Any]], intent: Dict[str, Any], query: str) -> str:
         """格式化LLM生成结果（不在文本中重复数值型分子属性）"""

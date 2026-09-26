@@ -1,8 +1,12 @@
 """Actual public compatibility boundary; synthetic tools, never real services."""
 from copy import deepcopy
+import _socket
 import socket
+import sys
 
 import pytest
+
+from tests.agent.test_generation_transport_characterization import offline_models
 
 import src.agent.tools as factories
 from src.agent.contracts import AgentErrorCode, AgentResult, ObservationStatus, ToolResult
@@ -42,8 +46,16 @@ class ActionModel:
 def offline(monkeypatch):
     def block(*args, **kwargs):
         raise AssertionError("No network in adapter regression")
+    def guarded_connect(sock, address):
+        caller = sys._getframe(1)
+        # Same narrow stdlib self-pipe exception as the approved offline runner.
+        # Real client cleanup needs an event loop on Windows; no HTTP is allowed.
+        if (caller.f_code.co_name == "_fallback_socketpair"
+                and caller.f_code.co_filename == socket.__file__):
+            return _socket.socket.connect(sock, address)
+        return block()
     monkeypatch.setattr(socket, "create_connection", block)
-    monkeypatch.setattr(socket.socket, "connect", block)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", block)
     monkeypatch.setenv("AGENT_HARNESS_MODE", "legacy")
 
@@ -301,15 +313,14 @@ def test_public_signatures_and_model_consumers_remain_compatible(monkeypatch):
     assert consumer.llm is agent.llm is next_model
 
 
-def test_real_generator_uses_dedicated_model_and_request_temperature(monkeypatch):
+def test_real_generator_uses_dedicated_model_and_request_temperature(monkeypatch, offline_models):
     from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
-    from tests.agent.test_generation_temperature_transport import RecordingModel
 
     class MainModel:
         def generate(self, *args, **kwargs):
             pytest.fail("Main model must not generate or rewrite scientific results")
 
-    local = RecordingModel()
+    local = offline_models("CCO", max_calls=2)
     generator = LLMMolecularGenerator(local)
     factory_args = []
     def factory(model):
