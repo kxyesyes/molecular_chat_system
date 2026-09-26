@@ -15,8 +15,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226 after Maxwell SOURCE/Galileo QUALITY; worker463 passed504.39s, independent463 passed608.04s | Wegener released for approved Task6 TDD; pure Node allowed, Python waits for slot; original resume timeout cause UNKNOWN; Tasks6–8 pending |
-| B1 binding foundation | PR92 MERGED82322c3; reviewed/landed treee37261af equal; SOURCE/QUALITY and currentCI36265829338 success9/9 | Next admitted-input/scientific-acceptance integration plan under review; no activation |
+| Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata RED reproduced and focused controls passed, but mixed ADMET/PDE5A input still rejected | Task6 parser correction and two timeout investigations remain; scientific slot released to admission integration; Tasks6–8 not complete |
+| B1 binding foundation | PR92 MERGED82322c3; reviewed/landed treee37261af equal; SOURCE/QUALITY and currentCI36265829338 success9/9 | Admitted-input/scientific-acceptance plan537601b reviewed; exact tests/launcher verified; RED/integration released, not yet passed |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -27,6 +27,24 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Admission/acceptance plan537601b preserves valid sparse ADMET with observed
+values; empty/no-observation output remains unsatisfied. Laplace prepared exact
+donor tests8ffd78e/f008fd3 and launcher6D49050C; parent independently verified
+both blobs and full REPO-only substitution, with no production differences.
+Wegener explicitly released the scientific slot after all Task6 handles reached
+terminal. Parent grants Laplace the exclusive RED -> exact four-file integration
+-> GREEN -> ordered38 sequence; no runtime result is claimed by this release.
+
+Task6 actual metadata failures preceded the bounded bridge/runtime corrections;
+ten metadata cases then passed in run64378. Actual mixed ADMET/PDE5A whole-batch
+request still fails in journal target reduction before model/tool invocation:
+the target-list parser mistakes ADMET for another target. Read-only source/root
+analysis is in progress; no query rewrite, global whitelist or core edit is
+authorized yet. Two native-wire receive timeouts remain cause UNKNOWN, with
+bounded test-local diagnostics prepared but unrun. Node active-script assertions
+now follow the authorized two URL cache changes; old RED and fresh passed
+404db2 are retained. Task6 is incomplete, not ready for SOURCE/QUALITY closure.
 
 PR92 exact7b43a1e passed9/9 CI36265829338. Actual Agent collection10490 =10266
 core +224 Web, core10265 passed1 skipped17238 warnings419.49s; Web224 passed
