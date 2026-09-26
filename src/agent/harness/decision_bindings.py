@@ -243,13 +243,18 @@ class B1BindingResolver:
     seal_observation as observation_capture. export_records() returns bounded
     native original inputs for Task5's explicitly authorized snapshot boundary.
     """
-    def __init__(self, *, session, requirements, original_context, adapters):
+    def __init__(self, *, session, requirements, original_context, adapters, input_journal=None):
         from src.agent.runtime.run_session import WorkflowRunSession
         from src.agent.tooling.adapters import ToolAdapter
         if type(session) is not WorkflowRunSession or not session.dynamic:
             raise DecisionBoundaryError(_BINDING_ERROR)
         self.session = session
-        self._original = _wire(_context_snapshot(original_context))
+        from .decision_binding_inputs import BindingInputJournal
+        if input_journal is not None and (type(input_journal) is not BindingInputJournal
+                or not input_journal.matches_context(original_context, input_turn=0)):
+            raise DecisionBoundaryError(_BINDING_ERROR)
+        self._input_journal = input_journal
+        self._original = _wire(self._snapshot(original_context))
         self._owner = tuple(json.loads(self._original)[key] for key in ('trace_id', 'session_id', 'user_id'))
         self.adapters = dict(adapters)
         if any(name not in B1_TOOLS or not isinstance(adapter, ToolAdapter)
@@ -264,12 +269,132 @@ class B1BindingResolver:
         self._check_owner()
 
     def _check_owner(self):
+        if self._input_journal is not None and not self._input_journal.matches_context(self.session.context):
+            raise DecisionBoundaryError(_BINDING_ERROR)
         if tuple(getattr(self.session.context, key) for key in (
                 'trace_id', 'session_id', 'user_id')) != self._owner:
             raise DecisionBoundaryError(_BINDING_ERROR)
         requirements = parse_binding_requirements(self.requirements)
         if _digest(requirements.model_dump(mode='json')) != self.requirements_sha256:
             raise DecisionBoundaryError(_BINDING_ERROR)
+
+    def _snapshot(self, context):
+        if self._input_journal is None:
+            return _context_snapshot(context)
+        return json.loads(_wire(context_value(context, query_content_bytes=True)))
+
+    def _record_turn(self, record):
+        if self._input_journal is None:
+            return None
+        turn = record.get('input_turn')
+        if (type(turn) is not int
+                or record.get('input_prefix_sha256') != self._input_journal.prefix_digest(turn)
+                or _wire(record['context']) != _wire(self._snapshot(self._input_journal.context(turn)))):
+            raise DecisionBoundaryError(_BINDING_ERROR)
+        return turn
+
+    def _journal_requires_science(self, name, observations):
+        """Scope semantic checks by consumption/obligation, never the catalog.
+
+        RAG questions (including comparisons) and user-bound target lookups do
+        not consume a molecular selection. They still retain all structural
+        owner/head/context/prefix commitments. Molecular actions, explicit
+        molecular obligations (including a required reverse-derived target),
+        and earlier authenticated molecular observations require reduction of
+        the entire relevant prefix. Choosing RAG or citing only a lookup cannot
+        erase a task's existing scientific constraints or its needed ancestors.
+        Authenticate records BEFORE classifying, including failed diagnostics:
+        mutable result names/usability must not hide that scientific scope.
+        """
+        molecular = _MOLECULAR | {'reverse_target_predictor'}
+        target = self.requirements.target_result
+        needed = (name in molecular or bool(required_binding_tools(self.requirements) & molecular)
+                  or target is not None and target.input == 'reverse')
+        for source in observations.values():
+            record, _ = self._authenticated_record(source)
+            needed = needed or record['tool_name'] in molecular
+        return needed
+
+    def _journal_inputs(self, turn):
+        """Sequential scientific reduction, never a backwards 'find valid' scan.
+
+        Admission only bounds inputs. Every explicit structure here is parsed
+        whole, original obligations are checked, and every effective selected
+        reference is revalidated using the current store. No tool is reexecuted.
+        """
+        from .decision_inputs import has_explicit_molecule
+        from .decision_requirements import _canonical
+        from src.agent.contracts.target_request import analyze_target_request
+        from src.agent.tools.activity_input import _TARGET_LABEL, _TARGET_VALUE, _target_context_start
+        from src.agent.tools.base_tool import BaseMolecularTool
+        from src.agent.tools.molecular_input import _FIELD_END, parse_molecular_smiles
+        from src.target_identifiers import canonical_target_identifier
+        import re
+
+        effective, subject, target = None, None, None
+        selected_identity, cleared = None, False
+        queries = []
+        parser = BaseMolecularTool('binding', '')
+        prefix = self._input_journal.prefix(turn)
+        for entry in prefix['entries']:
+            context = self._input_journal.context(entry['input_turn'])
+            queries.append(context.query)
+            # Activity grammar permits a whole SMILES in a `for` position.
+            # Mask that occurrence only in the target-analysis projection:
+            # value-based filtering would also erase an explicit `target: CCO`.
+            # Reuse its position/value grammar, not its family validator (EGFR
+            # remains a valid property context). Original molecular parsing and
+            # all commitments still consume the unchanged admitted query.
+            target_text = _FIELD_END.sub('；', context.query)
+            projection = list(target_text)
+            for match in re.finditer(_TARGET_LABEL + _TARGET_VALUE, target_text, re.I):
+                if match[1].strip().casefold() != 'for':
+                    continue
+                field = target_text[match.start(2):].split('；', 1)[0]
+                following_context = _target_context_start(field)
+                if following_context is not None:
+                    field = field[:following_context]
+                try:
+                    if parse_molecular_smiles('SMILES: ' + field, parser) != [match[2]]:
+                        continue
+                except ValueError:
+                    continue  # unknown identifiers/malformed structures survive
+                projection[match.start():match.end()] = ' ' * (match.end() - match.start())
+            request = analyze_target_request(''.join(projection))
+            targets = [*request.targets, *request.unknown]
+            if entry['input_turn'] == 0 and 'target' in context.metadata:
+                targets.append(context.metadata['target'])
+            for value in targets:
+                if type(value) is not str or not value.strip():
+                    raise DecisionBoundaryError(_BINDING_ERROR)
+                identity = canonical_target_identifier(value) or value.strip().casefold()
+                if target is not None and identity != target:
+                    raise DecisionBoundaryError(_BINDING_ERROR)
+                target = identity
+            explicit = has_explicit_molecule(context.query)
+            selected = effective_molecule(context)
+            if explicit:
+                # Clearing is sticky even if the raw UI projection still carries
+                # its old selection alongside an explicit SMILES field.
+                context = replace(context, resolved_molecule=None)
+            elif selected is not None:
+                identity = self._snapshot(context)['resolved_molecule']
+                if (cleared or subject is not None and selected_identity is None
+                        or selected_identity is not None and identity != selected_identity):
+                    raise DecisionBoundaryError(_BINDING_ERROR)
+                selected_identity = identity
+            else:
+                continue  # omission retains the preceding effective identity
+            snapshot = self._snapshot(context)
+            values = self._user_molecules(snapshot)
+            canonical = frozenset(_canonical(v) for v in values)
+            if subject is not None and canonical != subject:
+                raise DecisionBoundaryError(_BINDING_ERROR)
+            subject = canonical
+            effective = snapshot
+            if explicit:
+                selected_identity, cleared = None, True
+        return effective, queries
 
     def _adapter(self, name):
         from src.agent.tooling.factory import TOOL_AGENT_OWNERS
@@ -305,6 +430,8 @@ class B1BindingResolver:
     def _molecular_context(self, snapshot, admitted=None):
         from .decision_inputs import has_explicit_molecule
         context = _snapshot_context(snapshot)
+        if self._input_journal is not None:
+            return _snapshot_context(admitted) if admitted is not None else context
         # A target-only reply is not a new molecular subject. Retain the whole
         # ORIGINAL admitted input, not fragments or model conversation history.
         # Explicit malformed structures still take precedence and fail parsing.
@@ -343,7 +470,8 @@ class B1BindingResolver:
         from .decision_inputs import has_explicit_molecule
         from .decision_requirements import _canonical
         # Original explicit subjects constrain every later clarification/action.
-        for source in (json.loads(self._original), snapshot, admitted):
+        sources = (admitted,) if self._input_journal is not None else (json.loads(self._original), snapshot, admitted)
+        for source in sources:
             if source is None:
                 continue
             context = _snapshot_context(source)
@@ -425,7 +553,19 @@ class B1BindingResolver:
                 raise DecisionBoundaryError(_BINDING_ERROR)
         return projected
 
-    def _resolve(self, name, arguments, snapshot, prior, admitted=None, admitted_queries=()):
+    def _resolve(self, name, arguments, snapshot, prior, admitted=None, admitted_queries=(), *, input_turn=None):
+        if self._input_journal is None:
+            return self._resolve_inputs(name, arguments, snapshot, prior, admitted, admitted_queries)
+        turn = self._input_journal.head_turn if input_turn is None else input_turn
+        if _wire(snapshot) != _wire(self._snapshot(self._input_journal.context(turn))):
+            raise DecisionBoundaryError(_BINDING_ERROR)
+        admitted, queries = (self._journal_inputs(turn)
+            if self._journal_requires_science(name, prior) else (None, ()))
+        record = self._resolve_inputs(name, arguments, snapshot, prior, admitted, queries)
+        record.update(input_turn=turn, input_prefix_sha256=self._input_journal.prefix_digest(turn))
+        return record
+
+    def _resolve_inputs(self, name, arguments, snapshot, prior, admitted=None, admitted_queries=()):
         if tuple(snapshot[key] for key in ('trace_id', 'session_id', 'user_id')) != self._owner:
             raise DecisionBoundaryError(_BINDING_ERROR)
         adapter = self._adapter(name)
@@ -480,7 +620,7 @@ class B1BindingResolver:
             # clarification text cannot invalidate independent properties;
             # explicit subjects and selected-reference identity remain bound.
             authority = dict(molecules=self._user_molecules(snapshot, admitted),
-                selected=(_context_snapshot(context)['resolved_molecule']
+                selected=(self._snapshot(context)['resolved_molecule']
                           if effective_molecule(context) is not None else None))
             if name == 'activity_predictor':
                 authority['target'] = target
@@ -522,7 +662,7 @@ class B1BindingResolver:
         admitted = self._prior_subject(prior) if decision.tool_name in _MOLECULAR | {'reverse_target_predictor'} else None
         queries = self._verified_target_queries(prior) if decision.tool_name == 'activity_predictor' else ()
         record = self._resolve(decision.tool_name, dict(decision.arguments),
-                              _context_snapshot(self.session.context), prior, admitted, queries)
+                              self._snapshot(self.session.context), prior, admitted, queries)
         action = ResolvedBindingAction(_wire(record, _RECORD_BYTES))
         self._issued.add(action.record_json)
         return action
@@ -559,11 +699,13 @@ class B1BindingResolver:
             if set(records) != {r.quality['step_id'] for r in observations.values()}:
                 raise ValueError(_BINDING_ERROR)
             trial = B1BindingResolver(session=self.session, requirements=self.requirements,
-                original_context=_snapshot_context(json.loads(self._original)), adapters=self.adapters)
+                original_context=_snapshot_context(json.loads(self._original)), adapters=self.adapters,
+                input_journal=self._input_journal)
             trial._records = {key: _wire(value, _RECORD_BYTES) for key, value in records.items()}
             for record in records.values():
-                if _context_snapshot(_snapshot_context(record['context'])) != record['context']:
+                if self._snapshot(_snapshot_context(record['context'])) != record['context']:
                     raise ValueError(_BINDING_ERROR)
+                trial._record_turn(record)
             trial.verify_binding_closure()
         except (KeyError, TypeError, ValueError, AttributeError):
             raise DecisionBoundaryError(_BINDING_ERROR) from None
@@ -630,7 +772,8 @@ class B1BindingResolver:
             parse_binding_arguments(record['tool_name'], record['arguments'],
                                     profile_revision=B1_PROFILE_REVISION)
             context = record['context']
-            if (_context_snapshot(_snapshot_context(context)) != context
+            self._record_turn(record)
+            if (self._snapshot(_snapshot_context(context)) != context
                     or tuple(context[k] for k in ('trace_id', 'session_id', 'user_id')) != self._owner
                     or record['tool_name'] != source.tool_name
                     or proof.requirements_sha256 != self.requirements_sha256
@@ -663,6 +806,8 @@ class B1BindingResolver:
         return admitted
 
     def _prior_subject(self, observations):
+        if self._input_journal is not None:
+            return None
         from .decision_inputs import has_explicit_molecule
         original = _snapshot_context(json.loads(self._original))
         if effective_molecule(original) is not None or has_explicit_molecule(original.query):
@@ -683,6 +828,8 @@ class B1BindingResolver:
                 for source in verified.values() if usable(source)]
 
     def _verified_target_queries(self, observations):
+        if self._input_journal is not None:
+            return ()
         # Validate even excluded diagnostics before consulting usability. This
         # checks their original seals, not a success proof/receipt requirement.
         for source in observations.values():
@@ -706,9 +853,15 @@ class B1BindingResolver:
         admitted = self._prior_subject(prior) if record['tool_name'] in _MOLECULAR | {'reverse_target_predictor'} else None
         queries = self._verified_target_queries(prior) if record['tool_name'] == 'activity_predictor' else ()
         reconstructed = self._resolve(record['tool_name'], record['arguments'],
-                                      record['context'], prior, admitted, queries)
+                                      record['context'], prior, admitted, queries,
+                                      input_turn=self._record_turn(record))
         if _wire(reconstructed, _RECORD_BYTES) != _wire(record, _RECORD_BYTES):
             raise DecisionBoundaryError(_BINDING_ERROR)
+        if self._input_journal is not None:
+            current = self._resolve(record['tool_name'], record['arguments'],
+                                    self._snapshot(self.session.context), prior)
+            if current['action_sha256'] != record['action_sha256']:
+                raise DecisionBoundaryError(_BINDING_ERROR)
         observation_value(result)
         record_sha256 = _record_digest(record)
         proof = record['proof']
@@ -727,6 +880,8 @@ class B1BindingResolver:
     def verify_binding_closure(self, evidence_ids=None):
         """Rebuild reachable ancestors in Session order, never trust model history."""
         observations = self._observations()
+        if self._input_journal is not None and self._journal_requires_science(None, observations):
+            self._journal_inputs(self._input_journal.head_turn)
         wanted = list(observations) if evidence_ids is None else evidence_ids
         _native(wanted)
         if type(wanted) is not list or len(wanted) != len(set(wanted)) or any(e not in observations for e in wanted):
@@ -763,15 +918,16 @@ class B1BindingResolver:
                 continue
             record_json = self._records[source.quality['step_id']]
             queries = self._target_queries(verified)
-            rebuilt = self._resolve(record['tool_name'], record['arguments'], record['context'], verified, admitted, queries)
+            rebuilt = self._resolve(record['tool_name'], record['arguments'], record['context'], verified, admitted, queries,
+                                    input_turn=self._record_turn(record))
             if _wire(rebuilt, _RECORD_BYTES) != record_json or source.tool_name != record['tool_name']:
                 raise DecisionBoundaryError(_BINDING_ERROR)
             # Replaying an old per-action input is necessary, but is not current
             # authority. Equal structures from another selected presentation
             # cannot reactivate old actions; unrelated clarification text can.
             current = self._resolve(record['tool_name'], record['arguments'],
-                                    _context_snapshot(self.session.context), verified,
-                                    _context_snapshot(self._molecular_context(record['context'], admitted)),
+                                    self._snapshot(self.session.context), verified,
+                                    self._snapshot(self._molecular_context(record['context'], admitted)),
                                     [*queries, record['context']['query']])
             if current['action_sha256'] != rebuilt['action_sha256']:
                 raise DecisionBoundaryError(_BINDING_ERROR)
@@ -790,7 +946,7 @@ class B1BindingResolver:
                     or source.provenance.tool_version != self._adapter(source.tool_name).spec.version):
                 raise DecisionBoundaryError(_BINDING_ERROR)
             verified[identity] = source
-            admitted = self._admitted_subject(verified)
+            admitted = self._admitted_subject(verified) if self._input_journal is None else None
         return [identity for identity in verified if identity in needed]
 
     def record_descriptors(self, evidence_id):
@@ -806,8 +962,15 @@ class B1BindingResolver:
         Unusable observations remain diagnostics in Session; signal a fixed
         denial instead of authorizing another scientific dispatch by cache miss.
         """
+        self._check_owner()
         if type(action) is not ResolvedBindingAction or action.record_json not in self._issued:
             raise DecisionBoundaryError(_BINDING_ERROR)
+        if self._input_journal is not None:
+            record = json.loads(action.record_json)
+            current = self._resolve(record['tool_name'], record['arguments'],
+                                    self._snapshot(self.session.context), self._observations())
+            if current['action_sha256'] != action.action_sha256:
+                raise DecisionBoundaryError(_BINDING_ERROR)
         for identity, source in self._observations().items():
             record, diagnostic = self._authenticated_record(source)
             if record['action_sha256'] == action.action_sha256:
