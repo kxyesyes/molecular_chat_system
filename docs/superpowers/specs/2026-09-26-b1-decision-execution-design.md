@@ -374,3 +374,139 @@ Retain all v1/current Web regression tests unchanged. Approved isolated runner o
 no external API or host assets. Independent SPEC then QUALITY and actual-loop
 regression precede commit. Next normal-entry slice must use real /ws, not a lab
 endpoint. No final P7/P8 claim from this core release alone.
+
+## Task4 source-grounded input-admission clarification
+
+Task3 at33f2847 authenticates original action records and can preserve a prior
+admitted subject/target after an actual sealed action. It deliberately cannot
+authorize pure clarification text just because it appears in session.input_queries.
+The real loop already has server-owned original input, explicit clarified_query,
+owner-bound continuation claims and proposal input_turn. Use these existing
+boundaries to support original request -> SMILES reply -> target reply even when
+no tool has yet executed. This is required normal clarification behavior, not a
+new agent, conversation store or scientific evidence source.
+
+Recommended approach: a small bounded BindingInputJournal in new
+src/agent/harness/decision_binding_inputs.py. Alternatives considered were making
+the resolver read mutable session.input_queries (authority is implicit) or
+duplicating the entire dialogue/persistence system (unnecessary). The journal
+contains only explicit server-admitted context projections; it never mines model
+messages or infers user inputs from a model's tool arguments. User delegated the
+recommended bounded choice; independent written review remains required.
+
+The constructor freezes the original owner/context and seeds turn0. The explicit
+admit_context(context, input_turn=...) operation admits only the next native
+integer turn; retry of the same turn is idempotent only for exactly equal native
+input. Reject bools, gaps, rewrites and foreign trace/session/user. Original
+metadata/capabilities/obligations remain fixed; only query and the server-resolved
+molecule selection may vary in a reply. Store detached native projections of
+query and selected-reference identity, not live objects. At most16 turns and
+512KiB total journal; each query <=16384 UTF-8 content bytes and each reconstructed
+context <=64KiB. The eventual entire revision8 snapshot remains <=512KiB,
+including records/messages/results; the journal does not grant an extra budget.
+
+The journal is a server-input boundary, not scientific authority. Admission does
+not certify SMILES, target support, a selected reference, tool success or facts.
+Those checks stay in the owned resolver/validators/current-reference checks.
+Original obligations and the first admitted valid molecular subject/explicit
+target cannot silently be replaced by a later reply; malformed explicit input
+never falls back to an earlier valid subject. Property parsing remains separate
+from activity-family validation. Original RAG/target user queries retain their
+existing exact-input policy; clarification does not silently change the retrieval
+question. A selected reference's identity must be retained/revalidated, not
+replaced merely because a new reference has equal canonical SMILES.
+
+Pass the journal explicitly to the B resolver; no implicit import of Session
+history. Default absent journal preserves the reviewed Task3 direct API. Normal
+B-loop execution must always supply it. Original action records additionally
+commit the zero-based admitted input turn and a digest of that journal prefix.
+This affects the sealed full-record identity, not logical action identity, so a
+target-only clarification still permits independent property reuse. Historical
+resolution uses only the prefix that existed at that action; current reuse also
+checks current admitted constraints. Unexecuted human replies can supply input
+but never satisfy a scientific requirement or become an evidence ID/role.
+
+The loop alone appends a new admitted reply after its owner-bound continuation
+claim is validated. Task5 revision8 persists the bounded journal with original
+action records and reconstructs it before CAS: compare original context, exact
+input query order, each proposal's existing input_turn, each action's committed
+prefix, selection identity and original obligations. Replay only semantically
+validates saved server inputs; no model/tool calls. A native dictionary or its
+checksum alone is not authorization. Expose explicit restoration only for the
+caller-validated revision8 path; never read arbitrary transcript/query lists in
+the resolver. Legacy revision6/7 readers and fingerprints remain unchanged.
+
+Split Task4 implementation into reviewable increments without narrowing its end
+state: (4A) this input boundary/resolver integration and deterministic B acceptance;
+(4B) actual seven-tool loop/catalog/owned boundaries and native/JSON execution.
+Put acceptance in new harness/decision_binding_acceptance.py rather than adding
+another responsibility to the now large resolver. Reuse existing metric/domain
+validators and the same Session/ledger/source closure, not another interpreter.
+These two focused helper files are explicit additions to the core allowlist.
+Task4 tests may use new test_decision_binding_inputs.py and
+test_decision_binding_acceptance.py; actual loop cases remain a separate new
+test_decision_binding_loop.py to preserve Task3's focused resolver tests.
+
+Acceptance of this clarification requires no-action multi-reply positive,
+foreign/mutable/gapped/reordered history negatives, historical-prefix tampering,
+same-structure/different-reference rejection, immutable target/count/subject
+constraints, property reuse after target-only clarification, and no authority
+from model history. The full actual SQLite continuation case remains mandatory
+in Task5; helper-only success cannot count as completed loop/resume behavior.
+
+### Input clarification review resolution
+
+The existing proposal convention stays one-based. A sealed action uses
+`record.input_turn = proposal.input_turn - 1`; its digest covers journal entries
+0 through that record turn inclusive. Original -> SMILES -> target has journal
+turns0/1/2 and proposal turns1/2/3. Reuse does not rewrite an earlier sealed record
+or prefix: validate the new proposal against the current admitted constraints,
+then reuse only the unchanged eligible earlier observation.
+
+With an injected journal it is the exclusive input authority. Before resolution,
+preparation, reuse and closure, the full admitted projection of session.context
+must match its current head, or reject. Historical reconstruction uses the exact
+record prefix with that prefix's reconstructed context, not the current head.
+restore_records must explicitly propagate that journal to its trial resolver;
+an omitted argument must not silently take the no-journal compatibility branch.
+
+Freeze all AgentContext dataclass fields, not the Task3 reduced projection:
+trace_id, user_id, session_id, active_skill, workflow_name, model_name, stream,
+temperature, mol_count, memory and metadata remain exactly the detached original
+values. Only query and resolved_molecule may vary at explicit admission. Rebuild
+every context from this full frozen base, never dataclass defaults. Raw admitted
+selection and its effective scientific identity are distinct: omission of a
+selection retains the preceding effective reference; a replacement reference is
+not interchangeable merely because its canonical SMILES agrees. Explicit SMILES
+takes precedence over selection as in effective_molecule, while preserving the
+already fixed molecular subject. Once explicit SMILES clears a selection, later
+omission cannot resurrect it. A new selection after clearing is a new identity
+and cannot silently replace the fixed subject's authority.
+
+Reduce each prefix in order through the existing scientific input checks. Do
+not search backwards for any valid molecule. A malformed explicit molecular
+input or subject/count/target conflict anywhere in a prefix remains an error
+for that task; a later omission, target-only reply or "continue" cannot erase
+it. Thus CCO -> malformed explicit SMILES -> PDE5A must reject, not recover CCO.
+Admission itself may preserve that input for diagnostics; it does not certify
+its scientific validity. Target-family rejection is applied only when resolving
+activity; it must not prevent properties for an otherwise valid subject.
+
+The narrow bounds dependency is explicitly allowed in decision_bounds.py:
+extend context_value with keyword-only query_content_bytes=False, requiring an
+exact bool. Default False retains the existing JSON-encoded16KiB query check;
+True enforces <=16384 UTF-8 content bytes instead, retaining native/surrogate,
+field and whole64KiB JSON context checks unchanged. Explicit B journal, initial
+loop admission, fingerprinting and revision8 replay use True consistently.
+Legacy6/7 paths retain False. This switch does not grant B execution or change
+the aggregate512KiB snapshot ceiling. Boundary tests cover escaped quotes,
+backslashes and non-ASCII content, full-context overflow and malformed values.
+
+Task5 restores from the existing trusted server store plus authenticated owner,
+configuration and waiting nonce. A digest detects corruption; even internally
+consistent query/proposal/digest edits do not create authority outside that
+boundary. Build and validate an isolated candidate journal before CAS; install
+it only after a successful claim, then admit the newly supplied server reply
+exactly once. Failed or uncertain claims expose no dispatch authority. No new
+signature system or parallel transcript store is introduced. The helper restore
+API is only for that trusted caller and cannot itself prove storage provenance.

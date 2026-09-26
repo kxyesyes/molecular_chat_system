@@ -237,6 +237,60 @@ evidence. Task4/5/6 were explicitly outside this interim review.
 
 ## Task 4: Actual seven-tool dynamic execution and acceptance
 
+### Task4A/4B implementation order after Task3 review
+
+Read the source-grounded input-admission clarification appended to the core
+spec. Independent written review must approve it before implementation. It adds
+only harness/decision_binding_inputs.py (server human-input boundary) and
+harness/decision_binding_acceptance.py (pure deterministic acceptance using the
+existing resolver/validators), with focused new input/acceptance/loop test files.
+No new conversation database, model inference, Web protocol or legacy rewrite.
+The input clarification review resolution also allows only the keyword-only
+context_value(query_content_bytes=False) extension in decision_bounds.py; exact
+bool True selects B content bytes while preserving every other existing bound.
+Default/legacy behavior remains unchanged. Follow the full-context freeze,
+one-based proposal/zero-based journal mapping, exclusive journal authority and
+trusted-store/pre-CAS candidate/post-CAS installation rules in that resolution.
+
+- [ ] 4A-input RED: original missing both inputs, admit SMILES, then target,
+  without executing a tool between replies. Resolve correct molecule/target;
+  model/session history alone still cannot supply them. Verify native turn index,
+  owner/fixed metadata, exact retry vs rewrite, gaps, prefix digest, detached
+  projections,16-turn/16KiB-query/64KiB-context/512KiB-total boundaries.
+- [ ] Implement BindingInputJournal original freeze, explicit admit_context,
+  bounded prefix export/restore and context projection. Restore requires explicit
+  caller validation; do not infer authority from a raw dict or checksum. Actual
+  revision8 claim integration remains Task5 and must validate every saved turn.
+- [ ] Extend resolver only with explicit optional journal injection. Normal B
+  loop will require it; direct Task3 API retains its current behavior. Commit each
+  action's input_turn/prefix digest in the full original record, not logical
+  action hash. Resolve historical actions from their own prefixes and current
+  reuse from current constraints. Preserve malformed-input rejection, original
+  requirements, target changes/new subjects, and selected-reference identity.
+- [ ] Cover sequential-prefix negatives: valid -> malformed -> omitted input,
+  conflict -> continue, omitted reference retention, equal-SMILES foreign
+  reference and sticky explicit-SMILES selection clearing. No later reply erases
+  a prior conflict; unknown activity families do not block property parsing.
+- [ ] Cover all frozen AgentContext fields and journal-head mismatch at resolve,
+  prepare, reuse and closure. Restore trial resolver must retain explicit journal
+  authority; historical actions use their own prefix, not the latest context.
+- [ ] Keep proposal input_turn one-based and record/journal turn zero-based;
+  test 0/1/2 journal against 1/2/3 proposals and unchanged earlier reuse records.
+  Test B UTF-8 content boundary plus unchanged legacy JSON limit and64KiB context.
+- [ ] Run new input module plus Task3/requirements/Session/receipt regression;
+  independent SPEC then fresh QUALITY before the 4A-input checkpoint.
+- [ ] 4A-acceptance RED/GREEN: implement the existing seven-tool/group checks and
+  citation closure specified below in the focused acceptance module. Use actual
+  sealed Session observations, not dictionaries standing in for evidence. Domain
+  failures/demo/fallback/family disagreement remain unusable or partial/review;
+  no-hit differs from requested hits. Required tools include all explicit groups.
+- [ ] 4B actual loop: implement the catalog and execution tests below. Readonly
+  source evidence shows legacy preparation only includes molecular groups and
+  legacy context limits; do not reuse those paths accidentally for explicit B.
+  Until revision8 is implemented, B must not mint or claim a revision6/7 nonce.
+  Task4 alone cannot be published as complete B1 or enabled in normal Web; Task5/6
+  and full integration gates remain required in this same core effort.
+
 Source inspection after Task1: context_value still enforces the legacy16KiB
 JSON-encoded query limit, and the loop calls it before requirements preparation.
 Task1's UTF-8 retrieval-content regression alone therefore does not establish the
