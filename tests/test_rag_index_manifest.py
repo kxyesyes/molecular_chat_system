@@ -586,7 +586,7 @@ def test_shared_search_skips_invalid_labels_and_empty_hits(retrieval_service, mo
     assert [row['source_index'] for row in result['data']] == [2, 0]
     assert [row["SMILES"] for row in ordinary] == (["CCC"] if labels else [])
     # Fault the actual strict FAISS search only after its initialized baseline.
-    monkeypatch.setattr(type(rag._generation.index), 'search', lambda self, vector, k: (
+    monkeypatch.setattr(rag._generation.index, 'search', lambda vector, k: (
         np.ones((1, len(labels)), dtype=np.float32), np.asarray([labels], dtype=np.int64)))
     strict = RAGSearchTool(rag).execute('query', k=20)
     assert strict['success'] is False and strict['status'] == 'partial'

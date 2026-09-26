@@ -292,3 +292,52 @@ C745FA0201B6FF37EDB3EE2A9B636CE3A73F19F20A074E5DB5132B9FCD90F2A7 and runner
 Parent in-memory compilation and diff checks passed. The failure-only message
 was not exercised by these local passes. New exact-head Linux diagnostics are
 still necessary; this is not root-cause attribution or merge approval.
+
+## Fifth CI and bounded instance-hook correction design
+
+Workflow36245576733 atd0b73fe root job108414032897 failed1/2642 passed/75
+skipped/5 warnings223.58s: native-extra. New failure-only evidence reports
+class_dict_hook=True, class_hook=False, bound_hook=False and calls=[]. Thus the
+installed class-dictionary callback was not exposed by ordinary lookup or called.
+The underlying CPython/SWIG cause is not uniquely established. Do not change
+production retrieval, flush runtime caches or adjust dependency/time limits.
+
+Independent Hume SOURCE design review approves replacing all seven class-level
+search probes in the three affected test files with exact-owned-instance hooks.
+Production already invokes that instance's search method; other retrieval tests
+already use this seam. Retain actual FAISS, original bound-method passthrough,
+all HTTP/result/provenance/ledger/scientific assertions and native/base-IP plus
+wrapped/unwrapped variants. Update diagnostics to test instance-function identity,
+not obsolete class/__func__ hook expectations. No fake index/proxy or new runner.
+
+Before correction add a positive isolation control using the real public clone
+and a distinct same-runtime-class index with the same vectors/metric. During the
+old class hook their actual normal search must preserve scores/labels and not
+increment the owned counter. Expected local RED demonstrates cross-instance
+leakage, NOT reproduction of the Linux method-lookup anomaly. Then replace only
+test hooks and require the same control plus existing malformed-result and
+actual Session assertions to pass. Scope: tests/test_rag_owned_generation.py,
+tests/agent/test_rag_receipt_consumption.py, tests/test_rag_index_manifest.py;
+parent owns this plan. New independent reviews and Linux CI remain mandatory.
+
+Parent actual isolation RED under old class hooks: all6 native/base-IP loaded/
+built/empty variants failed the new zero-other-index-interception assertion in
+1.11s (terminalfa9bb9), with two real control calls incorrectly entering the
+owned counter. After all seven exact-instance substitutions, affected three
+modules passed445/7 SWIG/FastAPI warnings28.45s (21759 terminal463cc6). Expanded
+eleven-module union passed1209/7 warnings68.08s (27991 terminal10666c), exit0.
+Corrected Hume SOURCE/SPEC approves; Darwin fresh QUALITY/repeat is pending.
+Frozen test hashes (owned generation / index manifest / receipt consumption):
+ABEA44385A29B3DD14BA3039982C39739A56A802945E2AF1B64A5E2CEB2BE467;
+58D1FF5181837CB17608F72296D9F5976CDCC17B172934C17EA2DEDD27508F65;
+F5BF57A2BC33E466B94F84FC58F6D8BD86B7528F24A2B59A63A61A0A1D935A8A.
+Parent in-memory compilation and diff checks pass. Production remains unchanged;
+no Linux passing result or underlying extension-cache fix is claimed yet.
+
+Fresh Darwin QUALITY approves the reviewed test-only correction: independent
+exact eleven-module union1209 passed/0 failed/0 skipped/7 warnings67.22s, session
+91479 terminala55a48, process/wrapper exit0. All three test hashes and approved
+runner match before/after; no actionable findings. Parent will publish the scoped
+three tests and this plan, then require new exact-head Linux CI. PR86's corrected
+reverse tests also passed its next root run, but that run still failed three
+inherited native RAG injections; it must not merge around this shared gate.
