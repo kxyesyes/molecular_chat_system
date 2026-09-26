@@ -11,6 +11,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
+| Reverse receipt consumer | Clean-main extraction; evidence-only redaction P2 reproduced24 failures then32 focused passes; corrected SOURCE approved | Fresh QUALITY and15-module current-main/independent regression, scoped publication and CI |
 | PR87 RAG current source | DRAFT7187099; bounded diagnostic SOURCE/QUALITY approved; workflow contracts10 passed; CI36251616084 live | Retain old600s timeouts at76%/98%; inspect named progress; no performance-fix or merge claim |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 RELEASED; Tasks5–8 PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
@@ -22,6 +23,14 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Reverse consumer P2 is now behaviorally established:24 failures7.87s under the
+extracted adapter; full covered-data/evidence security normalization guard yields
+32 focused passes7.15s. Corrected SOURCE/SPEC approves; no producer/scoring/Session
+or redaction bypass change. Pauli QUALITY reviews source; expanded15-module union
+still waits for Rawls's local slot. Task4 display-context amendment SOURCE/DESIGN
+is approved with original validation/error priority and unknown-profile guards;
+only two extra files granted, no global query-limit change. P7/P8 remain open.
 
 PR87 diagnostic7187099 is published after Epicurus SOURCE and fresh Ptolemy
 QUALITY source approvals. Actual workflow-contract RED1 failed0.17s/547193,

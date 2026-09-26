@@ -364,8 +364,17 @@ direct display tests cover B content16KiB positive, one-byte-over rejection,
 original-profile serialized-limit rejection and mismatched session context.
 Run unchanged original display tests plus the Task4 five-module union. Independent
 source/design approval is required before this extra production-file edit; no
-change has been granted yet. This fulfills the existing positive requirement,
+change had been granted at proposal time. This fulfills the existing positive requirement,
 not additional model/scientific capability or default activation.
+
+Singer independent SOURCE/DESIGN approves the exact two-file amendment. Keep
+validation order unchanged: _view(text), _view(query), strict snapshot, session,
+risk/capability. Select the byte policy only after that snapshot check; unknown,
+B2 or mismatched pairs retain false. Add combined-invalid-input error-priority
+and unknown/mismatched-pair regressions. Parent now grants these two additional
+files and TDD under that order; do not move snapshot ahead of original _view.
+Pascal's short reverse correction is terminal32 passed7.15s and slot released;
+Rawls now receives the sole slot for prefix/display RED/GREEN and final union.
 
 - [ ] RED `test_b1_server_profile_assembly_is_closed`: B requires async
   decision_a2/semantic_v1, exact seven reviewed canonical adapters, distinct feature
