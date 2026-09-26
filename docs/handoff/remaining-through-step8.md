@@ -4,6 +4,28 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Current checkpoint superseding older pending-CI entries: PR85 is MERGED as
+d05dec2433d28f6df7fbc3be0a085662c2e1216f after all8 gates, zero unresolved reviews
+and reviewed/landed tree equality7e4a9ac85f8eaa631ff70700cf0d1edd49e60a54.
+PR84 thirdCI36242795132 failed1/9547pass/1skip469.28s: unwrapped native hits
+returned tool success but the class search counter stayed0. Root cause is not
+established; no merge or production repair claim. Parent is adding failure-only
+identity diagnostics without altering dispatch/assertions. Original failures stay.
+
+Normal-Web B1 Task1 worker is terminal: original mounted native/JSON requests
+reproduce2 intended unsupported_scientific_request failures before any intent/model
+request; new fixture controls13pass, unchanged/existing union207pass111.07s.
+Only3 authorized test/fixture files changed; production remains a5189a5. Independent
+SOURCE/SPEC is active; no Task2 release or normal-Web success claim yet.
+
+Reverse-owned producer extraction now has its own clean-main worktree/branch
+codex/reverse-owned-source-integration at d05dec2, with exact historical source
+extraction but no fresh release evidence. Source review found one P2: pandas
+can infer an implicit index for overwide TSV rows or drop blank records before
+strict validation. Fresh TDD worker Aristotle owns this bounded correction and
+the sole local test slot; parent and reviewers are source-only meanwhile. R4
+publication/repeat waits for a resolved PR84 prerequisite. P7/P8 remain incomplete.
+
 Latest checkpoint: PR84 controlled follow-up7f8e4cd is published, exact-head
 CI36242795132 live (Agent108406355064). Parent1209pass66.88s and independent
 Hooke1209pass66.68s,4 FastAPI warnings each; testwrapped/unwrappedcontrols are
