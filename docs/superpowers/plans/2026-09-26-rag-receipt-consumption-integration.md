@@ -237,3 +237,30 @@ FastAPI warnings66.68s,terminal35522/chunk19d9d2,exit0. Receipt test SHA256
 C2F748F8D9D3D27E53F177284C6B4C25259A6DA246CAAD60A053EB1A01614C27 and runner
 hash match before/after; no scoped actionable findings. Approval supports the
 controlled new Linux CI publication, not a root-cause fix or merge claim.
+
+## Third CI: unwrapped native counter mismatch remains unresolved
+
+Workflow36242795132 at7f8e4cd is terminal with Agent1 failed/9547 passed/1
+skipped/23858 warnings469.28s, normal exit1 (job108406355064). The sole failure
+is [False-native-None-hits]: HTTP count1 passes, the returned tool observation
+has success=True/error=None, but the FAISS class search probe counted0, not1.
+This does not establish a scientific retrieval failure; it establishes an
+unexplained missed probe. All35 other controlled variants passed. No merge,
+waived assertion, production fix or blind same-head retry follows this result.
+
+Next diagnostic is failure-only post-dispatch identity flags (owned index,
+generation, class/bound hook, instance shadow and returned generation). The
+assertion message expression runs only after a mismatch; the unwrapped success
+path gets no extra wrapper or search/getattr before dispatch. Keep all existing
+scientific/status/ledger/SQLite assertions. No claims yet about subclass caches,
+thread interference or other possible causes; fresh local validation and source
+review precede diagnostic publication.
+
+Failure-only diagnostic SOURCE/SPEC (Dewey) and fresh QUALITY (Lagrange) approve
+publication only. Parent exact36 actual Session variants passed6.50s, terminal
+cb1e11; independent same36 passed6.54s, terminal72a7cc. Each has3 SWIG warnings,
+zero skips, normal exit0. Test hashD1CAF5217F1D92460B9931286A736ADB02F469C293CE5633C573171BEC7A8AAC
+and isolated launcher220D8B2D07BE845898ED495ACE8474D5B6F9390A93FA3530373263275C3EEDFA
+were verified unchanged. In-memory compilation and diff checks passed. No full
+suite rerun is claimed here; new exact-head Linux CI is still required. The
+post-dispatch flags cannot by themselves prove dispatch-time state/root cause.
