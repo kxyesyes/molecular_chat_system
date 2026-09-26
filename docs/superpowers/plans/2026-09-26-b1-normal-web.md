@@ -288,6 +288,30 @@ Fresh independent QUALITY follows corrected SOURCE and worker final union.
 Task4, mounted refresh/queued-reader integration and end-to-end display remain
 unreleased/unproven. Task1's two original normal-route REDs remain unchanged.
 
+### Task3 worker-to-coroutine dispatch boundary correction
+
+The updated five-module union10310 completed378 passed/3 SWIG warnings337.23s,
+exit0, frozen hashes unchanged. Fresh Nietzsche QUALITY then found a separate
+handoff gap: a worker can settle at400 while the event-loop coroutine resumes
+at402, past TTL401 but within active deadline475. Its prior worker-side check
+cannot certify this later dispatch boundary. Actual native/JSON regressions
+failed2 in2.52s: model HTTP count increased from2 to3. This is distinct from
+expiry inside the live source callback, and the378-pass union is pre-correction.
+
+The existing pre-dispatch block now synchronously rechecks B deadline/TTL, then
+rolls back only the current never-dispatched decision reservation on rejection.
+Original-profile carry/no-carry behavior is retained. Focus plus adjacent tests
+passed22/3 warnings11.57s, session11872 terminal. No further long union started
+until both corrected source reviews are complete. Updated loop/test hashes:
+
+- decision_loop.py2FC675ACFCAA8E8925959A1C9E5312FDE63B82B1050C1231C1D44BA23BD572A8
+- test_b1_normal_web_continuation.py24B5CE6799EF0CD33DC61F78F41BD3B84F5011EC0AE52E0689393033C2F9392E
+
+Other three code hashes and approved launcher remain unchanged. Nietzsche
+corrected QUALITY source review approves this freeze; fresh Huygens SOURCE
+checks the amendment before worker final union and independent repeat. No Task4
+assembly/activation, normal-route success or P7/P8 completion is claimed.
+
 ## Task 4 — atomic server assembly and actual normal entry
 
 Files: `src/web/app.py`, `ordinary_capabilities.py`, `decision_runtime.py`;
