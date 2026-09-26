@@ -83,3 +83,20 @@ scientific test process slot and poll actual handles to terminal.
 
 Only after gated squash should PR89 align the actual landing and rerun its full
 CI. Retain its original failure. No P7/P8 completion is inferred from CI work.
+
+## Reviewed boundary correction
+
+Independent SOURCE review identified unguarded UDP/DNS APIs and a missing total
+deadline around final parsing/cleanup. The reviewed minimal correction blocks
+sendto, available sendmsg and DNS lookup entry points before site initialization,
+retaining socketpair. Behavioral tests substitute native callbacks before the
+actual guard, so a RED run cannot contact a network.
+
+The Ubuntu step uses GNU `timeout --signal=KILL 180s` in default process-group
+mode around the entire verifier, plus unchanged internal180/60 limits and a final
+clock check after cleanup. This bounds imports, fixture copying and cleanup too.
+Hard kill can leave disposable files on the ephemeral CI runner and does not
+guarantee graceful cleanup. It kills descendants remaining in its process group,
+not deliberately detached processes; this remains an offline guard, not an OS
+sandbox. A Linux-only actual-wrapper test uses a shorter test deadline with a
+TERM-ignoring descendant; Windows records that test as skipped, not passed.
