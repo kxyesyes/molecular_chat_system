@@ -18,8 +18,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
-| B1 terminal publication | Independent SOURCE-approved test preparation; actual4 behavioral RED+1 API RED,8 controls passed | Four-production implementation in progress; revision8 separate |
-| Strict generation transport | Draft PR97 head1053951; SOURCE/fresh QUALITY passed, both migrated exact17 runs752 passed+162 subtests; CI36279601921 in progress | Latest-head CI/review/merge gates pending; not full B2 closure |
+| B1 terminal publication | Actual4 behavioral RED+1 API RED,8 controls passed; four-production implementation independently SOURCE-approved | Focused GREEN/expanded regression/fresh QUALITY pending; revision8 separate |
+| Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | Test-only equivalence30 passed; permanent actual2 RED/45 passed then47 GREEN; implementation SOURCE-approved0D26E2 | Exact49 released, fresh QUALITY and original Web deadlines still pending |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
@@ -33,6 +33,24 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR97 SHA-squash terminal29241/6fa048 merged
+`c612c9873a04823c936d710861bf890ad30b844a`. Fresh paginated guards on
+105395187fae2812984b410f41ee5a2e561cedb9 before ready and merge found9/9
+successful checks and0 unresolved review threads; base remainedaa3cddd.
+Actual collection11379=11155core+224Web; core11154passed1skipped20468warnings
+573.08s; Web224passed7166warnings216.09s; activity1855passed6skipped6075warnings
+352.31s; root2892passed75skipped5warnings241.51s; task-runtime1569passed7skipped
+1warning76.14s. Fetch6dee3b confirms full reviewed/landed tree
+9da5ad26be82cbae3942dfac61a6478385021822 equal, origin/mainc612c98.
+This closes strict transport only, not root generator/token/slot accounting or
+full B2/P8. No model activation or deployment.
+
+Lovelace independently APPROVES publication four-production freeze
+582a6fb/d3c580b/bf162d1/beb9ce7 and unchangedtestf2628b6, with no P1/P2.
+Focused GREEN is not yet run: sole local Python slot remains with ASCII exact49,
+child30164/parent50400 confirmed alive in7b5cfe. Source-close-then-restore is
+not a directly demonstrated publication test and remains explicitly unclaimed.
 
 Parent current-process check3a51e8 confirms the ASCII-tree test childPID30164,
 parent50400, created07:33:50; exact49 is actually running, not merely intended.
