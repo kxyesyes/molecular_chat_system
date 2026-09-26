@@ -4,6 +4,27 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest reverse consumer update (2026-09-26): approved design/plan `9cabb11` is
+implemented on `codex/dynamic-bindings-b1`. Existing ReverseTargetTool now uses
+lazy owned strict prediction, rejects list-only providers, and preserves the
+original receipt/records alongside deterministic normalized output. Existing
+TargetToolAdapter binds optional proofs to actual input and fails closed if
+normalization/redaction changes their data/evidence. No new execution engine.
+Actual dynamic Session tests prove ledger/seal/events/SQLite preservation and
+post-seal tamper rejection. Close/callback lock order, borrowed ownership, whole
+input rejection and one local180s credit have regression coverage.
+
+Independent SPEC and QUALITY approve. Implementation ten-module union:942 passed,
+2 subtests passed,7 deprecation warnings,84.02s; independent repeat:942 passed,
+2 subtests passed,0 skipped,7 warnings,177.16s, exit0. Seven changed Python files
+compiled in memory without imports; diff check clean. Initial legacy-path REDs,
+intermediate errors/fixture corrections and truncated-output limitations are
+preserved in [consumer plan](../superpowers/plans/2026-09-26-reverse-receipt-consumption.md).
+No scientific scoring changes, original dirty-checkout edits, real services,
+credentials, push/merge or deployment. Local component evidence is not P7/P8
+completion. Next: integrate source-aware B bindings/reuse/resume/finish checks;
+generation/ranking/root budgets, C cleanup and final real/UI acceptance remain.
+
 Latest package7 update: ordinary semantic Web PR81 is now merged as `a1258d9`,
 after explicit user squash authorization. Reviewed head684e4a1, CI run36167669649
 all8 success, unresolved reviews0; reviewed/merged trees equal

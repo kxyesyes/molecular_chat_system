@@ -1,22 +1,27 @@
-from types import SimpleNamespace
-
 import pytest
 
 from src.agent.tools import base_tool, reverse_target_tool
 from src.agent.tools.molecular_input import MolecularInputUnavailable
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
+from tests.agent.test_reverse_receipt_consumption import strict_source_factory
 
 
 @pytest.fixture
-def tool_and_calls():
+def tool_and_calls(strict_source_factory, monkeypatch):
     calls = []
-    tool = ReverseTargetTool()
+    predictor = strict_source_factory(())
+    tool = ReverseTargetTool(predictor)
+    strict = predictor.predict_with_receipt
 
     def predict(smiles, **kwargs):
-        calls.append((smiles, kwargs))
-        return []
+        assert 0 < kwargs['timeout_seconds'] <= 180
+        assert kwargs['cancelled']() is False
+        calls.append((smiles, {k: v for k, v in kwargs.items() if k not in ('timeout_seconds', 'cancelled')}))
+        return strict(smiles, **kwargs)
 
-    tool._predictor = SimpleNamespace(predict=predict)
+    monkeypatch.setattr(predictor, 'predict_with_receipt', predict)
+    monkeypatch.setattr(predictor, 'predict', lambda *a, **kw: pytest.fail('legacy predict'))
+    monkeypatch.setattr(predictor, 'load', lambda *a, **kw: pytest.fail('legacy load'))
     return tool, calls
 
 
@@ -43,9 +48,11 @@ def test_invalid_whole_input_never_reaches_predictor(tool_and_calls, value):
 def test_valid_structure_reaches_predictor_unchanged(tool_and_calls, smiles, prefix):
     tool, calls = tool_and_calls
     result = tool.execute(prefix + smiles)
-    assert calls == [(smiles, {'threshold': 0.6, 'top_k': 10, 'combine_by_target': True})]
+    assert calls == [(smiles, {'threshold': 0.6, 'top_k': 10, 'combine_by_target': True, 'organism_filter': ''})]
     assert result['success'] is True
-    assert result.get('data') is None  # Real zero-hit contract, not fabricated targets.
+    assert result['data'] == []  # Verified empty, not a missing/unavailable result.
+    assert result['evidence'][0]['prediction_receipt']['status'] == 'verified_empty'
+    assert result['evidence'][0]['input_smiles'] == smiles
     assert smiles in result['formatted']
     if prefix:
         assert tool.should_use(prefix + smiles)
