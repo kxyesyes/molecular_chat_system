@@ -103,8 +103,9 @@ Task6. Its two native-wire receive timeouts remain independently unresolved.
 
 ## Validation requirements
 
-- TDD: exact positive request and bounded spelling/order/spacing variants fail
-  before the correction; assert original query unchanged, PDE5A retained and no
+- TDD: require observed RED for the exact reproducer and demonstrated failing
+  variants; retain already-green spelling/order variants as compatibility
+  controls. Assert original query unchanged, PDE5A retained and no
   false analytical unknown. Include QED before/after ADMET, LOGP/LogP case variants,
   longer analytical lists, and both ordering directions for analytical items.
 - Explicit target:ADMET/against ADMET/for ADMET and PDE5A remain unknown, including
@@ -131,3 +132,5 @@ Banach source review confirmed that exempting only ADMET starts is insufficient:
 QED can itself start a list containing ADMET and PDE5A. The selected whole-clause
 `list_matches` exclusion above corrects the design, while explicit/known-target
 traversal remains unchanged. This is source reasoning, not runtime evidence.
+Final SOURCE review approves d8e3eea with the validation wording correction now
+applied above: already-correct variants remain GREEN controls, not required REDs.
