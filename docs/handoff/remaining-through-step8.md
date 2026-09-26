@@ -16,7 +16,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata RED reproduced and focused controls passed, but mixed ADMET/PDE5A input still rejected | Task6 parser correction and two timeout investigations remain; scientific slot released to admission integration; Tasks6–8 not complete |
-| B1 binding foundation | PR92 MERGED82322c3; reviewed/landed treee37261af equal; SOURCE/QUALITY and currentCI36265829338 success9/9 | Admitted-input/scientific-acceptance plan537601b reviewed; exact tests/launcher verified; RED/integration released, not yet passed |
+| B1 binding foundation | PR92 MERGED82322c3; admitted-input/scientific-acceptance worker4176 passed and SOURCE approved | Fresh QUALITY exact38 repeat owns scientific slot; no new PR/merge yet |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -27,6 +27,26 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Admission/acceptance worker completed RED45773/c812d9 (252 call failures,
+no collection/setup failure; repeated traceback middle truncated and explicitly
+not fully recovered), GREEN14231/8a1ed8 (252 passed), and exact38
+63587/d395dc (4176 passed,0 failed/skipped,3 SWIG warnings492.18s pytest,
+500.290s wall). All frozen six blobs and launcher hashes match. Heisenberg
+independent SOURCE approves; parent compiled six files in memory and scoped
+credential-pattern filename scan found no matches. Worker released the slot.
+Dewey fresh QUALITY source review has no findings and now has the sole slot
+for independent exact38 execution; final approval/publication remains pending.
+
+The Task6 target-role failure has a separate main-based corrective branch
+`codex/analysis-target-role-boundary`, spec804be52 and implementation plan7072ca6.
+Banach SOURCE approves whole-clause analytical role recognition affecting only
+inferred `list_matches` starts. Original explicit labels, target mentions and
+qualification remain intact; no global ADMET whitelist. QED/ADMET both orders
+are included, and already-green variants stay compatibility controls rather
+than fabricated REDs. Exact-parser tests are being prepared only; no production
+correction or runtime success yet. Subsequent empty journal closure and actual
+Task6 Web gates remain mandatory. Its two receive timeouts remain UNKNOWN.
 
 Admission/acceptance plan537601b preserves valid sparse ADMET with observed
 values; empty/no-observation output remains unsatisfied. Laplace prepared exact
