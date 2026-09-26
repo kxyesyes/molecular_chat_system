@@ -7,6 +7,7 @@ import math
 import re
 import sqlite3
 import time
+import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, TypedDict
@@ -15,7 +16,7 @@ from uuid import uuid4
 
 from src.agent.contracts import AgentErrorCode, AgentExecutionError, AgentResult, RunOutcome
 from src.agent.contracts.decision import (
-    ToolDecision, ClarifyDecision, parse_decision_json, MAX_DECISION_BYTES, MAX_DECISION_DEPTH,
+    ToolDecision, ClarifyDecision, FinishDecision, parse_decision_json, MAX_DECISION_BYTES, MAX_DECISION_DEPTH,
 )
 from src.agent.contracts.ordinary_admission import (
     loop_admission, admission_metadata, validate_exchange, restored_deadline,
@@ -34,7 +35,7 @@ from .decision_policy import (
     scientific_answer, usable, verify_finish, family_review_observation,
     model_call_metadata, schema_correction, decision_system_message,
 )
-from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, retry_persistence
+from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, settle_owned_call, retry_persistence
 from .decision_inputs import (
     resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest, seal_observation,
     effective_molecule, require_current_reference,
@@ -47,6 +48,11 @@ from .decision_continuation import (
     configuration_digest, snapshot_payload, claim_continuation, publish_continuation,
 )
 from .ordinary_chat_policy import OrdinaryChatOutputError, validate_ordinary_display
+from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
+from src.agent.contracts.binding_requirements import required_binding_tools
+from .decision_bindings import B1BindingResolver, prepare_binding_requirements, _tool_names
+from .decision_binding_inputs import BindingInputJournal
+from .decision_binding_acceptance import evaluate_binding_acceptance, render_binding_scientific_answer
 
 
 _now = time.monotonic
@@ -121,7 +127,10 @@ class ModelDecisionLoop:
 
     def __init__(self, model, registry, state_store, *, mode='native',
                  max_model_requests=16, max_tool_attempts=12, timeout_seconds=300,
-                 config_generation=None):
+                 config_generation=None, binding_profile=None):
+        if binding_profile is not None and (type(binding_profile) is not str or binding_profile != B1_PROFILE_REVISION):
+            raise ValueError('invalid_binding_profile')
+        self.binding_profile = binding_profile
         self.config_generation = configuration_generation(config_generation)
         if mode not in {'native', 'json'}:
             raise ValueError('unsupported decision mode')
@@ -146,7 +155,8 @@ class ModelDecisionLoop:
                 clarified_query=clarified_query, requirements=requirements, worker_owner=worker_owner,
                 admission_carry=admission_carry, admission_exchange=admission_exchange)
         finally:
-            if worker_owner is not None:
+            from src.agent.runtime.worker_ownership import WorkerOwner
+            if worker_owner is not None and (self.binding_profile is None or type(worker_owner) is WorkerOwner):
                 await worker_owner.settle()
 
     async def _run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
@@ -154,15 +164,30 @@ class ModelDecisionLoop:
                    admission_carry=None, admission_exchange=None):
         from langgraph.graph import END, StateGraph
 
+        binding = self.binding_profile is not None
+        if binding:
+            from src.agent.runtime.worker_ownership import WorkerOwner
+            reason = ('continuation_rejected' if continuation_id is not None or clarified_query is not None else
+                      'invalid_binding_admission' if type(worker_owner) is not WorkerOwner
+                      or admission_carry is not None or admission_exchange is not None else None)
+            if reason:
+                return AgentResult('invalid-binding-admission', False, 'Binding admission rejected',
+                    error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Binding admission rejected'),
+                    outcome=RunOutcome.REJECTED,
+                    metadata={'backend': 'model_decision_loop', 'stop_reason': reason})
         try:
-            projected = context_value(context)
+            projected = context_value(context, query_content_bytes=binding)
             history_pairs(context.memory)
-        except (DecisionBoundaryError, TypeError):
+            if binding:
+                # Native bounded names before hashing/set conversion/deepcopy.
+                allowed_tools, required_tools = _tool_names(allowed_tools), _tool_names(required_tools)
+        except (ValueError, TypeError):
             return AgentResult('invalid-context', False, 'Input exceeds the plain JSON boundary',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Input is invalid or too large'),
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'invalid_context'})
         context = deepcopy(context)
+        journal = BindingInputJournal(context) if binding else None
         ordinary_capabilities = None
         try:
             if admission_carry is not None:
@@ -189,9 +214,11 @@ class ModelDecisionLoop:
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Remove credentials from the request'),
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'sensitive_input_rejected'})
-        context.resolved_molecule = effective_molecule(context)
+        if not binding:
+            context.resolved_molecule = effective_molecule(context)
         try:
-            require_current_reference(context, self.store)
+            if not binding:
+                require_current_reference(context, self.store)
         except DecisionBoundaryError:
             return AgentResult(context.trace_id, False, 'Scientific reference unavailable',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Reselect a confirmed molecule'),
@@ -201,44 +228,126 @@ class ModelDecisionLoop:
             raise ValueError('request_kind must be explicit')
         required_tools = frozenset(required_tools)
         allowed_tools = frozenset(allowed_tools)
+        root_deadline = clock() + self.timeout_seconds if binding else None
+        latch_lock, failures = threading.Lock(), []
+
+        def check_latch():
+            with latch_lock:
+                if failures:
+                    raise DecisionBoundaryError(failures[0])
+
+        def guarded(call):
+            check_latch()
+            try:
+                if clock() >= root_deadline:
+                    raise DecisionBoundaryError('task_deadline_exceeded')
+                value = call()
+                if clock() >= root_deadline:
+                    raise DecisionBoundaryError('task_deadline_exceeded')
+                check_latch()
+                return value
+            except Exception as exc:
+                reason = str(exc) if isinstance(exc, DecisionBoundaryError) else 'invalid_dynamic_binding'
+                with latch_lock:
+                    if not failures:
+                        failures.append(reason)
+                    reason = failures[0]
+                raise DecisionBoundaryError(reason) from None
+
+        async def owned(call):
+            try:
+                return await settle_owned_call(lambda: guarded(call), worker_owner=worker_owner)
+            finally:
+                check_latch()
+
         try:
-            requirements = prepare_requirements(requirements, request_kind=request_kind,
-                allowed_tools=allowed_tools, required_tools=required_tools)
+            if binding:
+                requirements = await owned(lambda: prepare_binding_requirements(requirements,
+                    context=context, request_kind=request_kind, allowed_tools=allowed_tools,
+                    required_tools=required_tools))
+            else:
+                requirements = prepare_requirements(requirements, request_kind=request_kind,
+                    allowed_tools=allowed_tools, required_tools=required_tools)
         except (ValueError, ImportError):
             return AgentResult(context.trace_id, False, 'Task requirements invalid or unavailable',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Task requirements could not be validated'),
                 outcome=RunOutcome.REJECTED,
-                metadata={'backend': 'model_decision_loop', 'stop_reason': 'invalid_task_requirements'})
+                metadata={'backend': 'model_decision_loop', 'stop_reason': (
+                    'task_deadline_exceeded' if binding and failures == ['task_deadline_exceeded']
+                    else 'invalid_task_requirements')})
         requirement_payload = requirements.model_dump(mode='json')
-        required_tools |= {r.tool_name for r in requirements.molecular_results}
+        required_tools = (required_binding_tools(requirements, required_tools) if binding else
+                          required_tools | {r.tool_name for r in requirements.molecular_results})
         bus = event_bus or AgentEventBus(state_store=self.store)
         if bus.state_store is not self.store:
             raise ValueError('event and run stores must have the same authority')
         bus = DecisionEvents(bus)
         catalog, adapters = authorized_catalog(self.registry, context, request_kind,
-                                               allowed_tools - set(requirements.forbidden_tools))
-        if not {r.tool_name for r in requirements.molecular_results} <= set(adapters):
+            allowed_tools - set(requirements.forbidden_tools), binding_profile=self.binding_profile)
+        if not (required_tools if binding else {r.tool_name for r in requirements.molecular_results}) <= set(adapters):
             return AgentResult(context.trace_id, False, 'Task requirements exceed effective tool authorization',
                 error=AgentExecutionError(AgentErrorCode.UNAUTHORIZED_TOOL, 'Required molecular tools are not authorized'),
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'task_requirements_not_authorized'})
         specs = {name: deepcopy(adapter.spec) for name, adapter in adapters.items()}
+        admitted_step_metadata = {}
+
+        def reference_guard(step, input_data):
+            def verify():
+                validate_json(step.metadata, max_bytes=65536, reason='invalid_dynamic_binding')
+                if json.dumps(step.metadata, sort_keys=True, ensure_ascii=False, allow_nan=False) != admitted_step_metadata.get(step.name):
+                    raise DecisionBoundaryError('invalid_dynamic_binding')
+                if resolver.guard_dispatch(step, input_data) is not None:
+                    raise DecisionBoundaryError('invalid_dynamic_binding')
+            return guarded(verify)
+
+        def dispatch_guard():
+            step = session.steps[session.next_index]
+            return reference_guard(step, session._step_journals[session.next_index].input_data)
+
         session = WorkflowRunSession(
             WorkflowOrchestrator(state_store=self.store, event_bus=bus, workflow_version='decision-loop-1'),
-            context, [], {name: (_AdmissionTool(adapter, lambda: state.deadline)
+            context, [], {name: (SingleAttemptTool(adapter, dispatch_guard=dispatch_guard) if binding else
+                                _AdmissionTool(adapter, lambda: state.deadline)
                                 if admission_carry is not None else SingleAttemptTool(adapter))
                           for name, adapter in adapters.items()}, dynamic=True,
             observation_capture=lambda result: seal_observation(result, session),
+            observation_prepare=(lambda result, step: guarded(
+                lambda: resolver.prepare_observation(result, step))) if binding else None,
+            reference_guard=reference_guard if binding else None,
         )
+        if binding:
+            session._decision_binding_profile = self.binding_profile
         fingerprint = configuration_digest(self, context, request_kind, allowed_tools, required_tools, specs, adapters,
-            requirements=requirement_payload if requirements.molecular_results or requirements.forbidden_tools else None,
+            requirements=requirement_payload if binding or requirements.molecular_results or requirements.forbidden_tools else None,
             admission_binding=admission_carry.binding() if admission_carry is not None else None)
         restored, prior_payload = None, None
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
+        resolver = None
+        if binding:
+            try:
+                resolver = await owned(lambda: B1BindingResolver(session=session, requirements=requirements,
+                    original_context=journal.context(0), adapters=adapters, input_journal=journal))
+            except DecisionBoundaryError as exc:
+                return AgentResult(context.trace_id, False, 'Binding admission rejected',
+                    error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Binding admission rejected'),
+                    outcome=RunOutcome.REJECTED,
+                    metadata={'backend': 'model_decision_loop', 'stop_reason': str(exc)})
         system_message = decision_system_message(request_kind, required_tools, catalog, requirement_payload,
-            ordinary_capabilities=ordinary_capabilities if request_kind == 'chat' else None)
-        prefix = history_prefix(system_message, context.query, context.memory, request_kind=request_kind)
+            ordinary_capabilities=ordinary_capabilities if request_kind == 'chat' else None,
+            binding_profile=self.binding_profile)
+        if binding:
+            system_message['content'] += (' B1: reverse observations expose record_references. '
+                'For target lookup from reverse use input_ref=evidence_id and record_ref from those descriptors. '
+                'ADMET/activity consume the whole molecular evidence batch. Never invent record handles.')
+        # B has already bounded the complete raw context and UTF-8 query content.
+        # Preserve legacy history semantics without reapplying its JSON-string
+        # query ceiling to the independently admitted B content.
+        prefix = history_prefix(system_message, '' if binding else context.query,
+                                context.memory, request_kind=request_kind)
+        if binding:
+            prefix[-1]['content'] = context.query
         if continuation_id is not None or clarified_query is not None:
             try:
                 restored, previous_results, prior_payload = claim_continuation(
@@ -267,7 +376,7 @@ class ModelDecisionLoop:
                                                          'Existing trace cannot be replayed'),
                                outcome=RunOutcome.REJECTED,
                                metadata={'backend': 'model_decision_loop', 'stop_reason': 'trace_exists'})
-        state = _Run(prefix, clock() + self.timeout_seconds)
+        state = _Run(prefix, root_deadline if binding else clock() + self.timeout_seconds)
         if admission_carry is not None:
             state.deadline = min(state.deadline, admission_carry.segment.deadline)
             state.intent_requests = admission_carry.intent_requests
@@ -291,7 +400,20 @@ class ModelDecisionLoop:
             state.call_ids = set(restored['call_ids'])
             state.proposals = deepcopy(restored['proposals'])
             state.observed = {r.quality['operation_key']: r for r in active_results(session)}
-        state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
+        async def boundary():
+            if binding:
+                await owned(lambda: resolver.verify_binding_closure())
+            else:
+                require_current_reference(context, self.store)
+
+        async def acceptance(evidence_ids=None):
+            if binding:
+                return await owned(lambda: evaluate_binding_acceptance(resolver,
+                    required_tools=required_tools, evidence_ids=evidence_ids))
+            return evaluate_requirements(requirements, session, required_tools)
+
+        if not binding:
+            state.task_acceptance = await acceptance()
 
         def persist(phase):
             if admission_carry is not None:
@@ -311,7 +433,9 @@ class ModelDecisionLoop:
                 context.trace_id + ':' + state.decision_id + ':' + event.value))
 
         async def decide(_):
-            require_current_reference(context, self.store)
+            await boundary()
+            if binding:
+                state.task_acceptance = await acceptance()
             if state.intent_requests + state.model_requests >= self.max_model_requests:
                 raise DecisionBoundaryError('model_budget_exhausted')
             remaining = state.deadline - clock()
@@ -322,6 +446,9 @@ class ModelDecisionLoop:
             persist('deciding')
             emit(TaskEventType.PLANNING_STARTED, 'Model decision started',
                  {'round': state.model_requests, 'decision_id': state.decision_id})
+            if binding:
+                await boundary()
+                remaining = state.deadline - clock()
             messages = deepcopy(state.messages)
             if state.protocol_feedback is not None:
                 messages.insert(1, {'role': 'system', 'content': state.protocol_feedback})
@@ -336,10 +463,12 @@ class ModelDecisionLoop:
             response = await asyncio.wait_for(self.model.decide(
                 messages, mode=self.mode, timeout_seconds=min(60, remaining)),
                 timeout=min(60, remaining))
-            require_current_reference(context, self.store)
+            await boundary()
             state.model_calls.append({**model_call_metadata(response),
                                       'decision_id': state.decision_id, 'round': state.model_requests})
             persist('decision_received')
+            if binding:
+                await boundary()
             if not response.success:
                 feedback = schema_correction(response)
                 if feedback is not None and state.protocol_repairs == 0:
@@ -355,6 +484,13 @@ class ModelDecisionLoop:
                           'accepted': False, 'reason': 'invalid_decision_schema'})
                     return {'route': 'decide'}
                 raise DecisionBoundaryError('model_decision_unavailable')
+            if binding:
+                if type(response.decision) not in (ToolDecision, ClarifyDecision, FinishDecision):
+                    raise DecisionBoundaryError('invalid_decision_schema')
+                # Constructed/mutated DTOs are not a native boundary. Reject
+                # subclasses/cycles/oversize before Pydantic can normalize them.
+                validate_json({'decision': vars(response.decision)}, max_bytes=MAX_DECISION_BYTES,
+                    max_depth=MAX_DECISION_DEPTH, reason='invalid_decision_schema')
             proposal = {'decision': response.decision.model_dump()}
             if admission_carry is not None and request_kind == 'chat':
                 # The ordinary display gate must see the original text. The
@@ -391,6 +527,8 @@ class ModelDecisionLoop:
                  {'round': state.model_requests, 'decision_id': state.decision_id,
                   'action': decision.action})
             persist('prepared')
+            if binding:
+                await boundary()
             if isinstance(decision, ToolDecision):
                 return {'route': 'tool'}
             if isinstance(decision, ClarifyDecision):
@@ -398,8 +536,21 @@ class ModelDecisionLoop:
                 # Free scientific prose must not smuggle fabricated results into clarify.
                 state.answer = (decision.question if request_kind == 'chat'
                                 else scientific_clarification(context.query, required_tools))
-                state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.REJECTED
+                state.outcome = RunOutcome.PARTIAL if any(map(usable, session.results if binding else active_results(session))) else RunOutcome.REJECTED
                 state.stop_reason = 'clarification_required'
+            elif binding:
+                if decision.response_kind != request_kind:
+                    raise DecisionBoundaryError('finish_kind_mismatch')
+                if request_kind == 'chat':
+                    if session.results or decision.evidence_ids:
+                        raise DecisionBoundaryError('chat_evidence_forbidden')
+                    state.answer, state.outcome, state.stop_reason = decision.text, RunOutcome.COMPLETED, 'model_finished'
+                else:
+                    state.task_acceptance = await acceptance(decision.evidence_ids)
+                    state.answer = await owned(lambda: render_binding_scientific_answer(resolver,
+                        required_tools=required_tools, evidence_ids=decision.evidence_ids))
+                    state.outcome = RunOutcome.COMPLETED if state.task_acceptance['finish_eligible'] else RunOutcome.PARTIAL
+                    state.stop_reason = 'model_finished' if state.task_acceptance['finish_eligible'] else 'task_requirements_unfulfilled'
             else:
                 needs_review = verify_finish(decision, session, required_tools, request_kind)
                 state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
@@ -417,18 +568,26 @@ class ModelDecisionLoop:
             return {'route': 'end'}
 
         async def execute(_):
+            if binding:
+                await boundary()
             decision = state.decision
             if decision.tool_name in requirements.forbidden_tools:
                 raise DecisionBoundaryError('tool_forbidden_by_task')
             if decision.tool_name not in adapters:
                 raise DecisionBoundaryError('tool_not_authorized')
-            input_data, evidence_ids = resolve_decision_input(decision, session)
+            if binding:
+                action = await owned(lambda: resolver.resolve(decision))
+                input_data = action.input_data
+                evidence_ids = [role['evidence_id'] for role in json.loads(action.record_json)['proof']['roles']]
+            else:
+                input_data, evidence_ids = resolve_decision_input(decision, session)
             adapter = adapters[decision.tool_name]
             if adapter.spec != specs[decision.tool_name]:
                 raise DecisionBoundaryError('tool_configuration_changed')
-            key = EvidenceLedger.output_digest([decision.tool_name, adapter.spec.version, input_data])
-            if key in state.observed:
-                observed = state.observed[key]
+            key = action.action_sha256 if binding else EvidenceLedger.output_digest([decision.tool_name, adapter.spec.version, input_data])
+            reusable = await owned(lambda: resolver.find_reusable(action)) if binding else state.observed.get(key)
+            if reusable is not None:
+                observed = reusable
                 verify_observation_integrity(observed, session)
                 state.reused_decisions += 1
             else:
@@ -440,32 +599,54 @@ class ModelDecisionLoop:
                     raise DecisionBoundaryError('task_deadline_exceeded')
                 state.tool_budget_reserved += attempts
                 persist('dispatch')
-                session.append_step(WorkflowStep(
+                if binding:
+                    await boundary()
+                initial_metadata = await owned(lambda: resolver.register_action(state.decision_id, action)) if binding else {}
+                step = WorkflowStep(
                     name=state.decision_id, tool_name=decision.tool_name,
                     input_data=input_data, required=False,
                     output_key=state.decision_id, timeout_seconds=remaining,
                     metadata={'tool_version': adapter.spec.version,
                               'input_evidence_ids': evidence_ids, 'operation_key': key,
-                              'request_input_digest': decision_input_digest(session, decision.tool_name),
+                              'request_input_digest': (initial_metadata['request_input_digest'] if binding else
+                                                       decision_input_digest(session, decision.tool_name)),
                               'decision_id': state.decision_id, 'round': state.model_requests,
                               'tool_call_id': state.response.tool_call_id,
                               'model_version': str(getattr(getattr(getattr(adapter, 'tool', None),
-                                                                   'llm_model', None), 'model_name', ''))},
-                ))
+                                                                   'llm_model', None), 'model_name', '')),
+                              **initial_metadata},
+                )
+                if binding:
+                    validate_json(step.metadata, max_bytes=65536, reason='invalid_dynamic_binding')
+                    admitted_step_metadata[step.name] = json.dumps(step.metadata,
+                        sort_keys=True, ensure_ascii=False, allow_nan=False)
+                session.append_step(step)
                 if clock() >= state.deadline:
                     raise DecisionBoundaryError('task_deadline_exceeded')
-                await settle_action(session, worker_owner=worker_owner)
+                try:
+                    await settle_action(session, worker_owner=worker_owner)
+                finally:
+                    if binding:
+                        check_latch()
+                if binding:
+                    await boundary()
                 observed = session.results[-1]
                 verify_observation_integrity(observed, session)
                 state.observed[key] = observed
-            state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
+            state.task_acceptance = await acceptance()
             # Serialize an isolated, verified observation before persistence
             # callbacks can mutate the tool's retained object again.
             verify_observation_integrity(observed, session)
             outgoing = deepcopy(observed)
             verify_observation_integrity(outgoing, session)
-            content = encode_observation({**outgoing.to_legacy_dict(), 'task_acceptance': state.task_acceptance})
+            descriptors = (await owned(lambda: resolver.record_descriptors(outgoing.quality['evidence_id']))
+                if binding and outgoing.tool_name == 'reverse_target_predictor' and usable(outgoing) else None)
+            content = encode_observation({**outgoing.to_legacy_dict(), 'task_acceptance': state.task_acceptance,
+                **({'tool_name': outgoing.tool_name} if binding else {}),
+                **({'record_references': descriptors} if descriptors is not None else {})})
             persist('observed')
+            if binding:
+                await boundary()
             if self.mode == 'native':
                 call_id = state.response.tool_call_id
                 if not isinstance(call_id, str) or not call_id:
@@ -502,17 +683,19 @@ class ModelDecisionLoop:
         except Exception as exc:
             state.stop_reason = str(exc) if isinstance(exc, DecisionBoundaryError) else (
                 'task_deadline_exceeded' if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else 'decision_runtime_failed')
-            state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.FAILED
+            state.outcome = RunOutcome.PARTIAL if any(map(usable, session.results if binding else active_results(session))) else RunOutcome.FAILED
+            if binding:
+                state.answer = ''
             if state.stop_reason in {'chat_claim_not_grounded', 'chat_capability_conflict', 'chat_output_unsafe'}:
                 state.waiting_for_input = False
                 state.outcome = RunOutcome.FAILED
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Decision run did not complete',
                                         {'reason': state.stop_reason})
-            if state.stop_reason == 'task_requirements_unfulfilled':
+            if not binding and state.stop_reason == 'task_requirements_unfulfilled':
                 if any(map(family_review_observation, active_results(session))):
                     state.outcome = RunOutcome.PARTIAL
                 state.answer = scientific_answer(active_results(session)) + '\n\n任务要求尚未全部满足，请查看结构化验收差项。'
-        if worker_owner is not None:
+        if worker_owner is not None and not binding:
             try:
                 await worker_owner.settle()
             except asyncio.CancelledError:
@@ -551,16 +734,48 @@ class ModelDecisionLoop:
                     session.outputs[record['step_id']] = deepcopy(observed.data)
                 session.state.artifacts.extend(deepcopy(record['artifacts']))
         try:
-            state.task_acceptance = evaluate_requirements(requirements, session, required_tools)
+            state.task_acceptance = await acceptance(
+                state.decision.evidence_ids if binding and getattr(state.decision, 'action', None) == 'finish'
+                and request_kind == 'scientific' else None)
+        except asyncio.CancelledError:
+            if not binding:
+                raise
+            state.answer, state.waiting_for_input = '', False
+            state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
+            state.task_acceptance = {'version': '2', 'profile': self.binding_profile,
+                'satisfied': False, 'finish_eligible': False, 'checks': [], 'reason_codes': ['cancelled']}
+            error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
         except Exception:
-            state.task_acceptance = {'version': '1', 'satisfied': False, 'checks': [],
+            state.task_acceptance = {'version': '2' if binding else '1', 'satisfied': False, 'checks': [],
                                      'reason_codes': ['acceptance_verification_failed']}
+            if binding:
+                state.answer = ''
+                state.waiting_for_input = False
+                state.stop_reason = failures[0] if failures else 'acceptance_verification_failed'
+                state.outcome = RunOutcome.FAILED
+                error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Binding verification failed')
         if state.outcome == RunOutcome.COMPLETED and not state.task_acceptance['satisfied']:
-            state.outcome = RunOutcome.PARTIAL if any(map(usable, active_results(session))) else RunOutcome.FAILED
+            state.outcome = RunOutcome.PARTIAL if any(map(usable, session.results if binding else active_results(session))) else RunOutcome.FAILED
             state.stop_reason = 'task_requirements_unfulfilled'
             state.answer = '任务成果复核未通过，不能声明任务已完成。'
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Task acceptance did not pass')
         persist('waiting_for_input' if state.waiting_for_input else 'terminal')
+        if binding:
+            try:
+                await boundary()
+            except asyncio.CancelledError:
+                state.answer, state.waiting_for_input = '', False
+                state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
+                state.task_acceptance = {'version': '2', 'profile': self.binding_profile,
+                    'satisfied': False, 'finish_eligible': False, 'checks': [], 'reason_codes': ['cancelled']}
+                error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
+                # Replace the earlier acceptance metadata, not the finish journal.
+                persist('terminal')
+            except DecisionBoundaryError as exc:
+                state.answer = ''
+                state.waiting_for_input = False
+                state.stop_reason, state.outcome = str(exc), RunOutcome.FAILED
+                error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Binding verification failed')
         if session.next_index != session.step_count:
             session.fail_runtime('action_journal_incomplete')
             state.outcome = RunOutcome.FAILED
@@ -568,7 +783,7 @@ class ModelDecisionLoop:
             state.answer = '本次任务未完成，未生成未经验证的科研结论。'
         waiting_payload = None
         checkpoint_created_at = None
-        if state.waiting_for_input and context.user_id and context.session_id:
+        if state.waiting_for_input and context.user_id and context.session_id and not binding:
             try:
                 checkpoint_created_at = clock()
                 waiting_payload = snapshot_payload(state, session, fingerprint, created_at=checkpoint_created_at)
@@ -576,6 +791,7 @@ class ModelDecisionLoop:
                 state.waiting_for_input = False
                 state.stop_reason = 'continuation_snapshot_not_persistable'
         metadata = {**state.counters(), 'backend': 'model_decision_loop',
+                    **({'binding_profile': self.binding_profile} if binding else {}),
                     **({'ordinary_admission': state.ordinary_admission} if admission_carry is not None else {}),
                     'task_requirements': requirement_payload, 'task_acceptance': state.task_acceptance,
                     'active_input_digest': EvidenceLedger.output_digest(context.query),

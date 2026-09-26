@@ -1,6 +1,6 @@
 # B1 Model-Selected Loop Integration Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Independent SOURCE/SPEC and fresh QUALITY reviews are required. This draft grants no implementation, test-slot or publication authority.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Hume SOURCE and fresh Halley QUALITY approve the amended freeze. Both ordered58 runs passed6107; see sections17-18. Parent owns scoped publication and exact-head CI/merge gates. No Web/model activation is authorized.
 
 **Goal:** Integrate the reviewed Task4B seven-tool, evidence-bound model decision loop into the current B1 foundation, as a dormant server-only profile.
 
@@ -12,54 +12,69 @@
 
 ## 1. Status, authority and hard gates
 
-This is a **documentation/source audit only**, dated 2026-09-27. The only current
-write is this file. No Python process, tests (including collection), probes,
-application imports, compilation, runner creation, environment/asset/model
-discovery, network access, source/test edits, staging, commit or push is permitted
-by this task. All commands in execution tasks below are future instructions.
+Current state, 2026-09-27: **SOURCE and fresh QUALITY approved; author and
+independent exact58 each passed6107; sole local slot released**. Sections12-18
+preserve actual RED/GREEN and expanded verification. Parent may publish only this
+reviewed slice, subject to exact-head CI/review/tree guards. No further worker
+source edit, test run, environment/asset/model discovery, commit or push is
+released automatically. This is dormant/offline integration, not live acceptance.
+
+Subsequent Hume P2: parent accepted focused cancellation RED (section 15), released
+the narrow production fix, and its unchanged four cases passed (section 16).
+Current manifest has explicit loop-production/test exceptions. Parent subsequently
+reported Hume re-review SOURCE APPROVE with no P1/P2 and released the one exact58
+run recorded in section 17; no further execution is inferred.
 
 Audited worktree: `D:/MedChat/molecular_chat_system_worktrees/b1-model-loop-integration`.
 Branch: `codex/b1-model-loop-integration`.
-Initial worktree/index: clean.
-Reviewed PR93 head / local HEAD: `a84aa921b20de2417c830b2717bba7f77e54952c`.
-Reviewed tree: `7977ae132abe215bb14643c7bb3a1059ee461aab`.
-PR93 CI `36268575293` is **failed per the latest parent/user update**: core job
-`108478025405` exited 124 at exactly 600 seconds; collection succeeded with
-`10742 = 10518 core + 224 Web`. Parent diagnoses timeout configuration; this
-source-only task has not independently established the cause or queried remote
-state. Successful collection is not a passing core run. The initial pending
-status is superseded; landing/alignment/release gates remain closed. A reviewed
-candidate is not a landed prerequisite. Any reviewed-head change for the CI fix
-requires a fresh pin/tree/dependency check before later release.
+Preparation-start worktree/index: clean. Parent-aligned local HEAD:
+`f99cf7efb9e92632e4f6b961363f5a5730a1a179`.
+Reviewed PR93 head: `0d6f40c3030467032bdae007d1c68e61fe477f9a`.
+Actual SHA-squash landing / locally verified `origin/main`:
+`5d36eee2977152fe5047dc21e260500d6c965c4b`.
+Read-only Git object verification confirms both complete reviewed/landed trees
+equal `a3ebb7b758df36daad66197928a2700c7b79a6c6`.
+Before preparation, `git diff --name-status origin/main HEAD` contains only this
+own plan. The parent resolved the admission-plan add/add conflict by retaining
+main's record; this task verifies that file equals landed main and does not edit it.
 
-Local read-only refs at audit time were `main=3b87853066069231891bad09efefd165ecf5af26`
-and `origin/main=82322c3d0098d44082e732b41084c71b4d73c230`. Neither proves current
-remote state or PR93 landing. Their trees differ from the reviewed PR93 tree.
-Do not fetch, align, merge or interpret a local branch name as release authority
-during this documentation task.
+Parent-reported prerequisite evidence (not a local rerun or network check here):
+PR93 CI `36272209579`, exact nine checks all success; core job `108488189672`
+collected `10820 = 10596 core + 224 Web`, core `10595 passed, 1 skipped` in
+467.02 seconds, Web `224 passed` in 180.48 seconds. Parent reports two fresh
+guards at head `0d6f40c` / base `4d896b6`, reviews 0 / unresolved threads 0,
+then ready/merge, session `86313` terminal `33649a`, and fetched tree equality.
+The earlier 600-second CI timeout and pending-landing statements are historical;
+they are superseded for the prerequisite, not evidence of next-loop test success.
 
-- [ ] Parent reviews this plan, including Session-test de-duplication, behavioral
-  RED staging and the exact56 regression selection.
-- [ ] Parent supplies actual PR93 landing and required CI/review evidence; verify
-  the **complete landed commit tree** equals the reviewed PR93 tree, not just a
-  selected-path diff. A mismatch requires reconciliation/review, not a waiver.
-- [ ] Parent aligns this worktree with actual landed main and inspects the full
-  diff. Apart from this draft, no unexplained source/test difference may remain.
-  Recheck every manifest/dependency against that aligned baseline. Any later
-  main changes require a renewed overlap audit; the table below is not permission
-  to overwrite them.
-- [ ] Parent explicitly releases test-file preparation and separately grants the
-  sole local scientific/Python test slot and approved isolation runner.
-- [ ] Observe genuine behavioral RED before production edits. Collection/setup,
-  missing dependencies and an unexpected constructor keyword alone do not count.
+- [x] Parent and Mill SOURCE approved the eight-file manifest, Session de-duplication
+  and behavioral RED plan; parent released the updated 58-module selection.
+- [x] Actual PR93 landing/review/CI evidence supplied; complete reviewed/landed
+  tree equality verified from local Git objects.
+- [x] Parent aligned this worktree; full pre-preparation diff contains only this
+  plan. Manifest baseline blobs are unchanged from the original audit. Any later
+  main change still requires a renewed overlap/dependency audit.
+- [x] Parent explicitly released this plan re-pin and three-test preparation only.
+- [x] Parent separately granted the sole slot and approved the isolated runner
+  for exactly two sequential nodes. Both are terminal; slot is now released.
+- [x] Observe genuine behavioral RED before production edits: checkpoint guard
+  assertion failed in phase=call, not collection/setup or a missing keyword.
+- [x] Parent reviewed actual RED and restored Session blob, then separately
+  released only the five exact donor production files for source-only extraction.
 - [ ] Freeze implementation for independent SOURCE/SPEC before expanded QUALITY;
   parent reviews results and explicitly releases each later stage.
 
 No elapsed time, historical approval, CI completion elsewhere or publication of
-this draft automatically advances a gate. Do not update another handoff file:
-the user's one-document scope overrides the general handoff convention.
+this plan automatically advances another gate. Do not update another plan or
+handoff file; the only additional writes released are the three manifest tests.
 
 ## 2. Immutable sources and complete eight-file manifest
+
+The donor columns below remain immutable historical sources. The current freeze
+is recorded in section 16: only `decision_loop.py` and its loop test additionally
+carry the parent-approved Hume P2 cancellation correction/regression. Do not claim
+those two are still donor-exact. The Session adaptation remains the same; the
+other five files still equal their selected donor blobs.
 
 Selected donor: `0064c30dce5d2c38aa4c655a45026e0baf66dd7e`.
 Actual first parent: `ce47c826d8347caaf91dbc17c9211252475a0f87`.
@@ -125,8 +140,15 @@ text against current text, then current-plus-the-48-line-block against donor
 minus those same duplicates. With the existing LF/single-final-newline file
 format, the planned final Session test is 549 lines, Git blob
 `54b12b4cc2d46b93998a6d7911e4d15359f0c66f`. No file was created by this check.
-The other seven final files must equal their selected donor blobs exactly.
-This exception is not permission for further test adaptation.
+The initial extraction's other seven files equaled their donor blobs exactly.
+Only the subsequently authorized Hume P2 exceptions in sections 15-16 supersede
+that equality; no other test/production adaptation is permitted.
+
+Re-pin at landed PR93 `5d36eee`: all seven existing manifest baseline blobs
+still equal this table; `test_decision_binding_loop.py` remains absent before
+preparation. Thus the reviewed donor extraction and 549-line Session adaptation
+are unchanged. The five production files must remain at the baseline column
+through test preparation and genuine RED; donor production blobs are future targets.
 
 ## 3. Dependency audit: preserve the current implementation
 
@@ -220,6 +242,35 @@ Importing a helper does not execute its provider module's test suite. This is wh
 the regression explicitly includes the family and current-source modules.
 Static compatibility is not proof that fixtures collect or run in the future
 approved environment. No environment installation/discovery is authorized now.
+
+### Landed-baseline delta: parser, empty journal and CI capacity
+
+Compared with the initial `a84aa921` audit, the only production-source delta in
+landed PR93 is `src/agent/contracts/target_request.py`, preserved blob
+`2ec6087fdf3276a97154fd436a282caf83f44713`. This is the PR94 full-clause analytical
+role fix: ADMET/QED analysis items no longer become inferred unknown targets;
+explicit labels, recognized targets and ambiguity guards remain authoritative.
+Do not extract the historical donor parser or rewrite the user's whole query.
+All prerequisite/helper blobs and current RAG/target/source/dispatch guard fixes
+listed above remain unchanged from the initial audit.
+
+Preserve the two added regression-only modules without edits:
+
+- `tests/agent/test_binding_analysis_clause_integration.py`, blob
+  `6ceed90d4072b77204bfad186d7f1fff853ca149`: seven zero-science-state journal cases,
+  exact Task6 query, four whole-batch obligations and unknown/multiple-target guards.
+  Parent reported genuine old-parser RED 3 failed / 4 passed (4.90 seconds), then
+  aligned GREEN 7 passed (4.19 seconds), unchanged test hash. These are prerequisite
+  evidence, not next-loop runs or full Web acceptance.
+- `tests/agent/test_target_analysis_phrase.py`, blob
+  `8033991b1f346d64f117c23cfaa46aa6eefeaa83`: 71 parser/router/planner clause and
+  ambiguity cases, with bounded scanner coverage; no model/scientific readiness claim.
+
+PR95 changed only the core CI command budget 600 -> 1200 and its workflow contract
+tests, plus documentation. Preserve `.github/workflows/quality.yml` and
+`tests/test_quality_workflow_contract.py`; no runtime deadline or performance fix
+is implied. Other baseline deltas are parent plans/design records, not extraction
+targets. The admission plan is byte-for-byte landed main after parent alignment.
 
 ## 4. Required behavior and deliberate non-goals
 
@@ -332,10 +383,10 @@ scientific/UI repeated acceptance are separate gated work. P7/P8 remain incomple
 `tests/agent/test_decision_binding_loop.py`. This plan may record evidence.
 No production changes at this stage.
 
-- [ ] Satisfy section 1 gates; read AGENTS/PROJECT_STANDARDS again after alignment.
+- [x] Satisfy section 1 preparation gates; read AGENTS/PROJECT_STANDARDS again after alignment.
   Use read-only `git status --short`, `git rev-parse HEAD 'HEAD^{tree}'`,
   `git ls-tree`, `git show` and `git diff` to recheck complete blobs and scope.
-- [ ] Read the exact complete test source (do not transcribe selected assertions):
+- [x] Read the exact complete test source (do not transcribe selected assertions):
 
 ```powershell
 git show 0064c30dce5d2c38aa4c655a45026e0baf66dd7e:tests/agent/test_decision_binding_loop.py
@@ -343,20 +394,21 @@ git show 0064c30dce5d2c38aa4c655a45026e0baf66dd7e:tests/agent/test_decision_bind
 git show 0064c30dce5d2c38aa4c655a45026e0baf66dd7e:tests/agent/test_decision_binding_session.py
 ```
 
-- [ ] Apply the full loop/input tests with apply_patch. Add only the exact
+- [x] Apply the full loop/input tests with apply_patch. Add only the exact
   48-line Session block, preserving current de-duplication. Pin test blobs.
   Full authoritative blob references above specify all code, fixtures and
   parameters; no historical document extraction is needed.
-- [ ] Parent separately approves/prepares the isolated launcher. The prior
+- [x] Parent separately approves/prepares the isolated launcher. The prior
   admission worktree's approved launcher is documented with SHA-256
   `6D49050C00D66642F2045828AAAE927C7254B8C282ACCFC0EC1E24A7AF5623AD` in
   `docs/superpowers/plans/2026-09-27-b1-admission-acceptance-integration.md`.
-  This audit did not read/copy/run that ignored file. Later verify its full bytes
-  and parent approval, substitute only literal REPO using apply_patch if released,
-  compare full bytes and reverse substitution, and record the new hash. A
+  The initial audit did not read/copy/run that ignored file. Under the later
+  explicit release, verified its full bytes and parent approval, substituted
+  only literal REPO using apply_patch, compared full bytes and reverse
+  substitution, and recorded the new hash in section 12. A
   documented historical hash is not a substitute for checking the actual runner.
   No raw pytest, new runner logic, environment change or asset discovery.
-- [ ] With the sole slot explicitly granted, first run the donor's existing
+- [x] With the sole slot explicitly granted, first run the donor's existing
   legacy authorization characterization through that runner:
 
 ```powershell
@@ -380,7 +432,7 @@ being tested. It exercises actual Session checkpoint processing and settle_actio
 with unchanged assertions. It neither mocks `_reject_unavailable_reference` nor
 changes production code, source eligibility or legacy expectations.
 
-- [ ] Temporarily use this complete body for the donor-named test in
+- [x] Temporarily use this complete body for the donor-named test in
   `tests/agent/test_decision_binding_session.py`; no other assertions change:
 
 ```python
@@ -406,7 +458,7 @@ def test_reference_guard_replaces_provisional_checkpoint_before_reentry(build, m
     assert not session.reused_steps and not session._step_journals[0].checkpoint_reused
 ```
 
-- [ ] Run exactly this focused node, before changing any production blob:
+- [x] Run exactly this focused node, before changing any production blob:
 
 ```powershell
 & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_session.py::test_reference_guard_replaces_provisional_checkpoint_before_reentry
@@ -419,14 +471,15 @@ fails first, do not claim RED and do not implement. Have the parent review the
 observed failure and any necessary test-only correction. This is a missing
 dispatch-guard behavior reproduction, not proof of seven-tool execution yet.
 
-- [ ] Restore the exact donor constructor form `dynamic=True, reference_guard=guard`
+- [x] Restore the exact donor constructor form `dynamic=True, reference_guard=guard`
   and remove the bootstrap assignment/comment using apply_patch. Recheck the
   adapted Session blob `54b12b4...`. Keep the behavioral RED output and exact
   temporary diff in the review record; never count the subsequent keyword error
   as another behavioral RED or leave a private-attribute bypass in final tests.
-- [ ] If parent releases the broader pre-integration run, run the three modules
-  in the following order and classify each failure (behavior/interface/setup).
-  No fake GREEN, xfail/skip or assertion weakening is allowed:
+The parent expressly declined the full three-module preflight: missing-keyword
+failures add no useful behavioral evidence. The historical command below is
+**NOT RUN and NOT RELEASED**; it must not be treated as the next automatic step.
+No fake GREEN, xfail/skip or assertion weakening is allowed:
 
 ```powershell
 & 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_loop.py tests/agent/test_decision_binding_inputs.py tests/agent/test_decision_binding_session.py
@@ -437,7 +490,7 @@ dispatch-guard behavior reproduction, not proof of seven-tool execution yet.
 **Files:** The five production paths in section 2 only. The three test paths
 must be at their final selected/adapted blobs before GREEN.
 
-- [ ] Parent accepts the genuine RED and releases extraction. Verify baseline
+- [x] Parent accepts the genuine RED and releases extraction. Verify baseline
   blobs again; read these complete immutable production bodies:
 
 ```powershell
@@ -448,17 +501,17 @@ git show 0064c30dce5d2c38aa4c655a45026e0baf66dd7e:src/agent/harness/decision_con
 git show 0064c30dce5d2c38aa4c655a45026e0baf66dd7e:src/agent/harness/decision_loop.py
 ```
 
-- [ ] Use apply_patch to install only these exact bodies, in the displayed order.
+- [x] Use apply_patch to install only these exact bodies as one five-file patch.
   Do not execute a partially integrated tree. Their full blobs are the exact
   implementation specification; do not reconstruct them from historical prose.
-- [ ] Verify all eight final manifest blobs (seven exact donor, one adapted
+- [x] Verify all eight final manifest blobs (seven exact donor, one adapted
   Session test), LF endings, empty index, and `git diff --check`. Preserve every
   section 3 prerequisite blob; inspect a complete diff against aligned main.
 - [ ] Independently inspect the section 4 contracts against source, especially
   the Session-owned copy, denied checkpoint retry and first-reason latch. Confirm
   `INITIAL_TOOLS`, Web callers and ordinary v6/v7 remain unmodified.
-- [ ] After explicit test-slot grant, rerun the identical focused checkpoint node
-  and the identical ordered three-module command from Task 1. Expected GREEN is
+- [ ] After explicit test-slot grant, first run the identical ordered three-module
+  command from Task 1 (which includes the checkpoint node). Expected GREEN is
   genuine assertions passing with final constructor paths, not a promised count.
   Capture actual failures/warnings/skips/exit codes; no outcome is preclaimed.
 - [ ] Freeze the eight source/test blobs and runner for independent SOURCE/SPEC.
@@ -476,12 +529,14 @@ foreign-reference and reverse-ancestor tests must continue to reject.
 ## 7. Task 3 — exact source-selected regression
 
 **Files:** Read/run the following existing tests plus the new loop test. No edits
-to the 53 regression-only modules are authorized by selecting them.
+to the 55 regression-only modules are authorized by selecting them.
 
 Selection: preserve the prior admission plan's **exact38 in its original order**
 (positions 1-38), then append binding-loop (39) and the 17 affected modules
-(40-56). Static `Test-Path`/Git inventory verified 56 unique paths: 55 exist in the
-current worktree; only binding-loop is intentionally new and exists at the donor.
+(40-56), followed by the landed empty-journal integration (57) and parser-role
+regression (58). Neither addition was already selected: **58 unique paths**,
+preserving the complete previous 56 order. Landed PR93 contains 57; the donor
+supplies binding-loop. After this test preparation all 58 paths exist locally.
 `test_decision_owned_call.py` exists only in the current integration history and
 must not be replaced by the donor's duplicated definitions. This is filename
 verification, not pytest collection.
@@ -502,6 +557,10 @@ Reasons for additions:
   limit expansion or normalization bypass.
 - 54-56: current Web runtime constructs default loops and consumes lifecycle/
   selected-reference behavior; run its existing contracts without enrolling B.
+- 57: newly landed empty-journal closure regression imports the selected input
+  helper; retain four whole-batch obligations and zero scientific dispatch.
+- 58: newly landed analytical-clause parser underlies journal reduction; retain
+  full-query intent, explicit unknown/multiple-target guards and bounded scanning.
 
 - [ ] After SOURCE approval and explicit parent slot grant, invoke the approved
   launcher once with this exact ordered argument vector. The complete command
@@ -566,10 +625,12 @@ tests/agent/test_decision_transport_boundaries.py
 tests/agent/test_web_decision_runtime.py
 tests/agent/test_web_decision_runtime_references.py
 tests/agent/test_web_decision_runtime_lifecycle.py
+tests/agent/test_binding_analysis_clause_integration.py
+tests/agent/test_target_analysis_phrase.py
 ```
 
 - [ ] Record the fully expanded command, branch/HEAD/aligned-base identities,
-  eight source/test blobs, SHA-256 of runner and all56 modules before/after,
+  eight source/test blobs, SHA-256 of runner and all58 modules before/after,
   process handle, terminal exit, duration, actual pass/fail/error/skip counts and
   warnings. Label all fixtures appropriately. Do not infer collection from filenames
   or runtime dependencies from import text.
@@ -587,7 +648,7 @@ tests/agent/test_web_decision_runtime_lifecycle.py
   extraction, prerequisite tree equality/alignment, current dependency preservation,
   RED classification and dormant scope. This audit is not that approval.
 - [ ] Fresh independent QUALITY reviews the unchanged freeze; parent explicitly
-  transfers the sole slot for one identical exact56 repeat. Record its real
+  transfers the sole slot for one identical exact58 repeat. Record its real
   terminal evidence and before/after hashes separately from implementer results.
 - [ ] After parent authorization, perform source compilation and scoped,
   filename-only credential scanning under the approved isolation rules. Full
@@ -600,7 +661,7 @@ tests/agent/test_web_decision_runtime_lifecycle.py
   source/test paths and this plan, never `git add -A`. Suggested single-theme
   commit: `feat: integrate dormant B1 model-selected loop`. Commit to this task
   branch, never main; no commit is made in the current task.
-- [ ] Only with separate publication release, open one draft PR against actual
+- [ ] Parent alone executes publication after the required gates, opening one draft PR against actual
   main, describing scope, dependencies, exact validation, risks and remaining
   gates. Attach the actual PR to the task when created. Do not reuse PR93 as this
   implementation's PR and do not manufacture a URL/number now.
@@ -608,10 +669,12 @@ tests/agent/test_web_decision_runtime_lifecycle.py
   all review findings. Review state must be fully paginated, not a first-page
   sample; required checks/protection are revalidated at release, not inferred
   from a prior run ID or historical pass count.
-- [ ] No automatic merge. Only a later explicit authorization naming this PR
-  and merge method, with every required CI/review gate satisfied, may release
-  merge. Recheck head/base and then actual landed tree equality. Preserve the
-  dormant profile through landing; no Web activation/deployment follows.
+- [ ] Within this target's scope, the latest user instruction grants default
+  authorization to the parent; no repeated item-by-item or per-PR user permission
+  request is needed. This does not waive exact-head CI, complete review/thread,
+  fresh head/base or reviewed/landed full-tree gates. Parent alone coordinates
+  push/merge; this worker has no push/merge authority. Preserve the dormant
+  profile through landing; no Web activation/deployment follows.
 
 ## 9. Audit evidence and handoff
 
@@ -625,16 +688,20 @@ is treated as the complete eight-file source audit.
 
 Recommendations delegated by the user: keep exactly this source slice; preserve
 current Session de-duplication; require actual behavior RED plus legacy gap
-characterization before production extraction; use the exact56 source-selected
-union; keep all later publication/revision8/Web work excluded. These choices are
-written for parent review, not implemented by delegation.
+characterization before production extraction; use the originally exact56
+source-selected union, now extended to exact58 by the landed-baseline audit;
+keep all later revision8/Web work excluded. Production remains held.
 
-Current implementation/tests/probes/compilation/runner/network/commit/push/PR:
-**NOT RUN / NOT PERFORMED**. No test-pass, CI-success, landed-PR93, runtime-readiness
-or P7/P8 completion claim. Parent plan review and prerequisite landing/alignment/
-explicit release are the next gates; do not offer or begin execution while held.
+At the initial drafting audit, implementation/tests/probes/compilation/runner/
+network/commit/push/PR were **NOT RUN / NOT PERFORMED**. Section 10 records the
+subsequent documentation-only release; sections 1 and 11 supersede its historic
+pending-landing state. This preparation runs no tests and makes no next-loop
+pass, runtime-readiness or P7/P8 completion claim.
 
 ## 10. Independent SOURCE plan approval and documentation-only commit release
+
+Historical pre-landing record; current authorization and pins are in sections 1
+and 11. Do not interpret this earlier slot/landing status as current.
 
 2026-09-27, parent/user-reported review: independent reviewer **Mill SOURCE
 APPROVES** this plan, with no findings. The review verified the exact eight-file
@@ -661,3 +728,399 @@ and re-audited, and the parent explicitly releases the next stage. Mill's plan
 approval does not bypass these gates or grant a test slot. Earlier NOT PERFORMED
 statements describe the drafting audit; only the separately authorized plan-only
 commit follows this append.
+
+## 11. Actual landing re-pin and three-test preparation handoff
+
+Preparation snapshot before the subsequent explicit two-node release in section 12.
+
+2026-09-27: parent explicitly released this plan update and only the original
+three manifest tests. Local HEAD remains
+`f99cf7efb9e92632e4f6b961363f5a5730a1a179`, based on actual PR93 squash
+`5d36eee2977152fe5047dc21e260500d6c965c4b`; reviewed/landed full-tree equality is
+`a3ebb7b758df36daad66197928a2700c7b79a6c6`. The preserved admission-plan blob is
+`33cde99627627fd80591ba56fa55de02bd3c232a`, identical to landed main.
+
+Prepared with apply_patch, checked by Git blob hashing (no Python/import/collection):
+
+| Prepared test | Verified Git blob | Exact change |
+|---|---|---|
+| `tests/agent/test_decision_binding_inputs.py` | `bd377facce7f997572fb9a51a33e46451ed77205` | Full selected donor; +25/-17 |
+| `tests/agent/test_decision_binding_loop.py` | `bb021cb19090967f9a547823b1682e444463ebf3` | Full selected donor; 666-line new file |
+| `tests/agent/test_decision_binding_session.py` | `54b12b4cc2d46b93998a6d7911e4d15359f0c66f` | Exactly +48/-0 guard block; 549 lines; no duplicated owned-call tests |
+
+All five production manifest files remain at their baseline blobs in section 2,
+not the donor targets. Parser `2ec6087...`, empty-journal test `6ceed90...`,
+parser-role test `8033991...` and owned-call test `25683ce...` remain byte-identical
+to landed main. Only this plan and the three manifest tests are changed; the new
+loop file is untracked, and nothing is staged, committed or pushed.
+
+Prepared eight-file manifest SHA-256:
+`765cb9976d24893302de9196a36c129265a287a4bcabff96ea48445845dac27c`.
+Definition: section 2's eight paths in table order, each serialized as
+`path<TAB>current Git blob<LF>`, UTF-8 without BOM, including the final LF.
+This identifies five unchanged production baseline blobs plus the three prepared
+test blobs, not a completed donor integration. Read-only inventory confirms
+58 distinct existing module paths and byte-identical first-56 path ordering.
+Git whitespace checks reported no errors; these are static checks, not collection.
+
+The source-exact test preparation is **ready for parent review, not executed RED**.
+The Session constructor remains in final donor form; the temporary constructor
+bootstrap in section 5 has not been installed. After explicit parent RED/slot
+authorization, use that reviewed test-only bootstrap to exercise the real
+checkpoint behavior, record actual call-phase assertion failure, then restore
+the exact prepared Session blob. A missing keyword or fixture/setup failure is
+not behavioral RED. No production edit follows without parent review/release.
+
+Parent reports Wegener `8486` terminal and slot released; this worker neither
+claims nor uses that slot. Runner creation/edit/execution and every Python/test
+process remain held pending the separate grant. The 58-module selection preserves
+all previous 56 positions and appends journal integration then parser coverage.
+
+Authorization consistency: the latest user instruction provides default parent
+authorization within this target's scope, superseding the old section 8 demand
+for fresh per-PR user permission. Exact-head CI, reviews/thread checks and full
+tree gates remain mandatory. Parent alone executes publication/merge; this worker
+has no push/merge authority, and this preparation includes no commit or push.
+
+## 12. Authorized two-node execution: terminal evidence and slot release
+
+Parent approved the three test diffs/blobs and the section 5 bootstrap, then
+explicitly transferred the sole LOCAL SCIENCE slot for exactly these two runs.
+No full three-module preflight, production modification, retry or additional
+test command was performed. Both commands ran in this worktree at unchanged
+HEAD `f99cf7efb9e92632e4f6b961363f5a5730a1a179`.
+
+The ignored `scratch/ordinary_chat_offline_runner.py` was created with apply_patch
+from the admission worktree's approved runner, changing only its literal REPO
+from `D:/MedChat/molecular_chat_system_worktrees/b1-admission-acceptance-integration`
+to `D:/MedChat/molecular_chat_system_worktrees/b1-model-loop-integration`.
+Source SHA-256: `6D49050C00D66642F2045828AAAE927C7254B8C282ACCFC0EC1E24A7AF5623AD`.
+Actual runner SHA-256 before/after both runs:
+`1317F77937C508A2E99DBBA693A4E046672B8D5B583229B03D074323A3E1508B` (4723 bytes).
+PowerShell/.NET compared all actual bytes both forward and after reverse literal
+replacement: both equal. No runner logic, inherited host configuration or asset
+discovery was added; the approved runner retains its synthetic environment/cwd
+and socket ban. `git check-ignore` confirms the runner is ignored.
+
+### Command 1: legacy rejection baseline, not behavioral RED
+
+```powershell
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_loop.py::test_actual_legacy_graph_seven_tool_gap
+```
+
+Started once; initial chunk `40382f`, handle `90652`, then polled that same handle
+to terminal chunk `84d326`, exit **0**. Full combined pytest/runner output:
+
+```text
+...                                                                      [100%]
+============================== warnings summary ===============================
+<frozen importlib._bootstrap>:241
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:241
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+<frozen importlib._bootstrap>:241
+  <frozen importlib._bootstrap>:241: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+3 passed, 3 warnings in 8.97s
+ORDINARY_PYTEST_EXIT=0
+```
+
+### Command 2: genuine checkpoint guard behavioral RED
+
+Only after command 1 terminated, apply_patch installed exactly the section 5
+bootstrap in the single checkpoint test. Relative to final `54b12b4...`, the
+complete temporary delta was:
+
+```diff
+     session = WorkflowRunSession(old.orchestrator, AgentContext('fixture', 'guard-checkpoint'),
+-        [], {tool.name: tool}, dynamic=True, reference_guard=guard)
++        [], {tool.name: tool}, dynamic=True)
++    # RED-only constructor bootstrap; current execution does not consult this slot.
++    session._reference_guard = guard
+```
+
+Temporary Session Git blob: `455e3e89833d8b4b7ee2a9b3fe24dfbd6c14318e`;
+SHA-256: `A3D53558247F0772D9B45606DD55769D0F1BC4D1F8347E2D2BA0AAD866664259`.
+Assertions and real Session/settle_action behavior were not changed.
+
+```powershell
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_session.py::test_reference_guard_replaces_provisional_checkpoint_before_reentry
+```
+
+Started once; returned directly at terminal chunk `a3402a`, exit **1**, no live
+handle or restart. Complete output (apart from insignificant display spacing):
+
+```text
+FORDINARY_FAILURE phase=call node_sha256=5f567d01a6a2ebe5976bb631a1d0999debe1c74fc65539087d1df43b34cbe755
+                                                                        [100%]
+================================== FAILURES ===================================
+_____ test_reference_guard_replaces_provisional_checkpoint_before_reentry _____
+D:\MedChat\molecular_chat_system_worktrees\b1-model-loop-integration\tests\agent\test_decision_binding_session.py:77: in test_reference_guard_replaces_provisional_checkpoint_before_reentry
+    assert calls == [1] and not tool.calls and session.tool_attempt_count == 0
+E   assert ([] == [1]
+E
+E     Right contains one more item: 1
+E     Use -v to get more diff)
+1 failed in 1.77s
+ORDINARY_PYTEST_EXIT=1
+```
+
+This is actual call-phase assertion RED: the installed guard was not called
+(`calls == []`, expected `[1]`). It is not collection/setup failure or a missing
+constructor keyword. Later denial assertions were not reached; do not report
+them as separately observed failures or claim seven-tool integration success.
+
+Immediately after terminal, apply_patch restored the donor constructor and
+removed the bootstrap. Full file hash verifies exact final Session blob
+`54b12b4cc2d46b93998a6d7911e4d15359f0c66f`. All eight manifest blobs are unchanged
+from the prepared manifest, whose SHA-256 remains
+`765cb9976d24893302de9196a36c129265a287a4bcabff96ea48445845dac27c`.
+Runner hash is unchanged. Parser `2ec6087...`, empty-journal `6ceed90...` and
+parser-role `8033991...` remain unchanged; `git diff origin/main -- src .github
+tests/conftest.py` is empty. Whitespace checks report no errors. Nothing staged,
+committed or pushed.
+
+**Both commands terminal; sole LOCAL SCIENCE slot explicitly RELEASED.** Ready
+for parent review of genuine RED. No further tests, production changes or runner
+execution are authorized by these completed two commands.
+
+## 13. Parent-accepted RED and exact eight-file source freeze
+
+Parent read the complete section 12 evidence, accepted `phase=call`, `calls=[]`
+versus `[1]` as the missing guard behavior, retained the three legacy denials and
+verified restored Session blob `54b12b4...`. Parent then explicitly released
+source-only extraction of the existing five production manifest files, with
+apply_patch, full-blob checks and own-plan recording only. This supersedes the
+production hold for that extraction, not the test-slot or publication holds.
+
+No baseline conflict or interface divergence was found: immediately before the
+patch, all five baseline blobs matched section 2 and the donor parent. Applied
+the exact donor delta, without touching dependencies or adapting production:
+
+| Frozen production path | Verified donor-exact Git blob |
+|---|---|
+| `src/agent/harness/decision_bindings.py` | `0ebd9aa7aa046aaa7a7f9c8275d761638236cf48` |
+| `src/agent/harness/decision_continuation.py` | `b44a0cbcbab7d13286c2c3c4fe94a65f4b5750af` |
+| `src/agent/harness/decision_loop.py` | `251cd452ddfc69ad442de82dd4818bcebcb4a2ed` |
+| `src/agent/harness/decision_policy.py` | `52d723de6901597b9b2e2478d2078ad959444089` |
+| `src/agent/runtime/run_session.py` | `94b03a668834a2a994bde8157b603ec6d28fde1c` |
+
+The three tests remain `bd377facce7f997572fb9a51a33e46451ed77205`,
+`bb021cb19090967f9a547823b1682e444463ebf3` and
+`54b12b4cc2d46b93998a6d7911e4d15359f0c66f` in section 2 order. All eight full
+files now equal the reviewed targets: seven exact donor blobs and only the
+approved de-duplicated Session adaptation. Frozen manifest SHA-256, using the
+same eight ordered `path<TAB>Git blob<LF>` rows defined in section 11:
+`bcd07dabc6f7330a6b88e73ee022bc518ceeda03fec088329dd44eeb66c7cf96`.
+
+Thirteen explicitly preserved paths were rehashed against landed main: parser,
+empty-journal test, parser-role test, RAG/target contracts, RAG tool/service,
+reverse owned source/tool, owned execution helper, typed adapters, owned-call
+tests and the parent admission plan. All remain equal to main. The 58-module
+selection is unchanged; no Web caller, producer, schema, asset or environment
+configuration was changed. Git whitespace checks report no errors; the index
+is empty and only the eight-file manifest plus this own plan differ locally.
+
+**Source freeze READY; GREEN NOT RUN.** No Python, test, runner execution or new
+scientific process occurred during extraction. Sole slot is with Wegener;
+wait for explicit parent transfer before the ordered three-module GREEN. Do not
+start the expanded 58 selection automatically. No commit, push or merge performed.
+
+## 14. Authorized exact three-module GREEN: terminal and hashes
+
+After Wegener `42865` / `dfb617` terminated and released its slot, parent explicitly
+transferred the sole LOCAL SCIENCE slot for this one ordered command:
+
+```powershell
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_loop.py tests/agent/test_decision_binding_inputs.py tests/agent/test_decision_binding_session.py
+```
+
+Run once at unchanged HEAD `f99cf7efb9e92632e4f6b961363f5a5730a1a179`.
+Initial chunk `db96a8`, actual session **31449**; polled the same session through
+`020d44`, `2fd685`, `3dca83` to terminal **b0c4a3**, exit **0**, no restart.
+Terminal: **327 passed, 3 warnings in 212.98s (0:03:32)**;
+`ORDINARY_PYTEST_EXIT=0`. The warnings are the existing SwigPyPacked, SwigPyObject
+and swigvarlink `__module__` deprecations, not suppressed.
+
+Before and after the run, all eight Git blobs matched the frozen manifest and
+all nine actual SHA-256 values (eight files plus runner) compared identical.
+Manifest before = after:
+`bcd07dabc6f7330a6b88e73ee022bc518ceeda03fec088329dd44eeb66c7cf96`.
+Runner SHA-256 before = after:
+`1317F77937C508A2E99DBBA693A4E046672B8D5B583229B03D074323A3E1508B`.
+Full per-file before/after hashes are retained in the tool output; no source or
+test correction occurred. Parent's separately reported 347-source/script
+in-memory compilation, diff check and filename credential scan (rg exit 1,
+no matches) are not this worker's runs and do not replace the scientific tests.
+
+**Session terminal; sole LOCAL SCIENCE slot RELEASED.** Three-module GREEN ready
+for parent review. Hume SOURCE was reported in progress; no approval is inferred.
+No 58-module run, commit or push started.
+
+## 15. Hume P2 amendment: post-graph cancellation RED only
+
+Parent and this worker verified that final `await acceptance` and post-terminal-
+metadata `await boundary` sit outside the graph's CancelledError handler; outer
+`run` only drains. Parent releases this short amendment, new loop regression and
+its focused RED run with sole LOCAL SCIENCE slot, not a production fix or 58 run.
+The original section 14 **327 passed** remains evidence for the unchanged donor
+freeze; it is not overwritten or represented as covering this new regression.
+
+New node: `test_tail_cancellation_drains_owned_worker_and_persists_one_cancelled_terminal`,
+parameterized by tail acceptance/boundary and native/json (four cases). Real graph
+execution and real validation are forwarded intact. A threading barrier holds
+the actual owned validation worker after graph return; task.cancel must keep
+owner/run pending until release, then drain and persist exactly one cancelled
+terminal with no additional tool/model calls. Finally cleanup always releases
+the worker and awaits the run. No mocked CancelledError, timeout change, disabled
+validation or producer edit. Run only this node through runner `1317F779...1508B`;
+report actual RED for parent review before any production change. Only the loop
+test may diverge from the earlier test manifest during this amendment.
+
+Focused command, run once (no original-327 or full-58 rerun):
+
+```powershell
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_loop.py::test_tail_cancellation_drains_owned_worker_and_persists_one_cancelled_terminal
+```
+
+Actual session **77285**, initial chunk `e576fa`, same-handle terminal `3ef772`,
+exit **1**: **4 failed, 3 warnings in 9.85s**, `ORDINARY_PYTEST_EXIT=1`.
+All four parameter cases (`tail_acceptance-native`, `tail_acceptance-json`,
+`tail_boundary-native`, `tail_boundary-json`) report `ORDINARY_FAILURE phase=call`
+at loop-test line 770:
+
+```text
+assert status == 'cancelled', (status, type(result).__name__, memory_terminal, stored_terminal)
+AssertionError: ('running', 'CancelledError', [], [])
+assert 'running' == 'cancelled'
+```
+
+Each reached the post-drain status assertion: pre-release owner/run-pending and
+no-terminal checks passed; after release the real worker exited, root finished,
+owner settled with zero pending roots, exactly one property call and two scripted
+model requests remained. Cancellation escaped while SQLite status stayed running
+and both in-memory/persisted terminal-event lists were empty. Subsequent desired
+cancelled-result assertions were not reached and are not claimed as observed.
+Warnings are the same three SWIG `__module__` deprecations. No restart or fixture
+repair occurred; finally cleanup awaited every run after releasing its worker.
+
+New loop-test blob before = after: `d298090d240f441a9739c9da03bb88c99b1c97b1`;
+SHA-256 `B91F60FF053D4315DB07DD9960116A4AA4AD37462217553E86274EA23839D490`.
+All other seven manifest blobs remain the prior freeze, unchanged during the run;
+runner remains `1317F77937C508A2E99DBBA693A4E046672B8D5B583229B03D074323A3E1508B`.
+No production modification. **Sole LOCAL SCIENCE slot RELEASED; RED ready for
+parent review and separate production-fix release.**
+
+## 16. Hume P2 narrow fix, four-case GREEN and amended manifest
+
+Parent accepted the four real cancellation RED cases and separately released
+only `decision_loop.py`'s two tail waits. Added 16 lines versus donor: explicit
+`except asyncio.CancelledError` projects cancelled outcome/error, clears waiting
+and successful answer, and sets acceptance `satisfied=False`,
+`finish_eligible=False`, `reason_codes=['cancelled']`. The first catch re-raises
+on the legacy path. The second refreshes already-written acceptance metadata
+through existing `persist('terminal')`; existing `finish_dynamic` alone handles
+the terminal event/run status. No validation, owner draining, real tool_results,
+noncancel handler, timeout or publication barrier was removed or added.
+
+Ran the exact section 15 node once, with its four cases unchanged:
+session **79946**, initial chunk `fef6e5`, same-handle terminal **785efb**, exit
+**0**: **4 passed, 3 warnings in 8.03s**, `ORDINARY_PYTEST_EXIT=0`.
+Warnings are the same three SWIG deprecations. No extra node, original-327 rerun
+or expanded58 run occurred. Original 327-pass and P2 four-failure evidence remain
+separate; do not combine them into a full amended-tree regression result.
+
+Current eight-file manifest (supersedes the source-exact freeze in section 13):
+
+| Path | Current Git blob | Basis |
+|---|---|---|
+| `src/agent/harness/decision_bindings.py` | `0ebd9aa7aa046aaa7a7f9c8275d761638236cf48` | Donor exact |
+| `src/agent/harness/decision_continuation.py` | `b44a0cbcbab7d13286c2c3c4fe94a65f4b5750af` | Donor exact |
+| `src/agent/harness/decision_loop.py` | `963682752927ff6e52ce235158699526691129e2` | Donor + two cancellation catches, +16/-0 |
+| `src/agent/harness/decision_policy.py` | `52d723de6901597b9b2e2478d2078ad959444089` | Donor exact |
+| `src/agent/runtime/run_session.py` | `94b03a668834a2a994bde8157b603ec6d28fde1c` | Donor exact |
+| `tests/agent/test_decision_binding_inputs.py` | `bd377facce7f997572fb9a51a33e46451ed77205` | Donor exact |
+| `tests/agent/test_decision_binding_loop.py` | `d298090d240f441a9739c9da03bb88c99b1c97b1` | Donor + four-case P2 regression |
+| `tests/agent/test_decision_binding_session.py` | `54b12b4cc2d46b93998a6d7911e4d15359f0c66f` | Original approved 549-line adaptation |
+
+Manifest SHA-256 (same ordered path/TAB/blob/LF convention):
+`a676a81cc3096e09dc5dbd5d8836ad02909fa5be416a4c077d5a50db1e7b8be0`.
+Run-before/after SHA-256 matched for production loop
+`881C5EBBABB07BB176BC65C6D068A63A37896F71E161E078D691507EC854F794`,
+loop test `B91F60FF053D4315DB07DD9960116A4AA4AD37462217553E86274EA23839D490`
+and runner `1317F77937C508A2E99DBBA693A4E046672B8D5B583229B03D074323A3E1508B`.
+Remaining six manifest blobs stay at the prior freeze; no additional source/API/
+model/asset or fixture edit. Whitespace checks pass; index remains empty.
+
+**Terminal; sole LOCAL SCIENCE slot RELEASED.** Ready for parent/Hume source
+re-review. Expanded58 requires separate release after that review; no automatic
+run, staging, commit or push.
+
+## 17. Hume SOURCE approval and exact58 terminal evidence
+
+Parent reports Hume overall SOURCE APPROVE, no P1/P2 remaining, for manifest
+`a676a81c...` / loop `9636827...` / loop test `d298090...`. After the parent's
+other runs terminated, parent explicitly transferred the sole LOCAL SCIENCE slot
+for one exact58 run. Executed the approved Conda `-I -S -B` runner once with all
+58 section 7 paths as explicit arguments in unchanged order (original56, then
+empty journal and parser). The fully expanded command is retained in tool output;
+there was no path filter, reduction, restart or second run.
+
+Actual session **89924**, initial chunk `86ce96`; parent independently identified
+runner-wrapper PID **56480**, creation **06:04:08**. Polled only that session;
+reported progress 9/36/62/68/74/78/95/97 percent before completion. Parent's
+interrupt stopped a waiting tool call only, not the scientific process. Resumed
+observation of the same session and received real terminal chunk **58e614**,
+exit **0**:
+
+```text
+6107 passed, 7 warnings in 916.84s (0:15:16)
+ORDINARY_PYTEST_EXIT=0
+```
+
+Warnings: three SWIG `__module__` deprecations and four FastAPI `on_event`
+deprecations from the Web readiness fixture. No suppression, failure or skip was
+reported. This is the amended freeze's actual expanded result, not an inference
+from the historical 327-pass run or parent's compilation/credential checks.
+
+Before/after captures include all eight manifest files, all58 targets, 14 explicit
+preservation paths and runner, deduplicated to **75 files**. Every Git blob and
+actual SHA-256 is unchanged; full per-file hashes are retained in tool output.
+Hash-set digest before = after:
+`732e45ff843a103e861d77823da7a0cc2a9ded37d87c0210d3bbe76c0100e011`.
+Definition: UTF-8 `path<TAB>lowercase file SHA-256<LF>`, final LF included, first
+occurrence order of manifest + section7 exact58 + captured preservation14 + runner.
+Manifest remains `a676a81cc3096e09dc5dbd5d8836ad02909fa5be416a4c077d5a50db1e7b8be0`;
+runner remains `1317F77937C508A2E99DBBA693A4E046672B8D5B583229B03D074323A3E1508B`.
+
+**Run terminal and hashes verified; ready for parent review.** No live run remains
+owned by this session. Per the parent's latest explicit no-release instruction,
+this worker does not unilaterally transfer the slot; parent controls reassignment.
+No further test, source edit, staging, commit or push performed.
+
+## 18. Fresh QUALITY and parent publication release
+
+After the author's terminal, parent explicitly transferred the sole local
+scientific slot to independent Halley. Same approved runner and ordered58,
+no restart or narrowed selection: session **77863**, wrapper PID40244 and child
+PID56340; real terminal **bd9896**, exit0, `ORDINARY_PYTEST_EXIT=0`:
+**6107 passed, 7 warnings in 971.91s**, no failures/skips. All frozen75 file
+SHA-256/Git blobs, including the section17 plan, matched before/after. Processes
+were observed exited before release. QUALITY APPROVE, no blocking P1/P2, limited
+to this dormant/offline scope. Hume SOURCE approval remains the prior independent
+source gate; neither reviewer claims real-provider or full-Web acceptance.
+
+Parent additionally compiled all347 src/scripts Python sources in memory with
+stdlib only (no project imports or bytecode writes), checked whitespace and ran
+a filename-only scoped credential-pattern scan with no matches. The scan is a
+limited check, not proof of absence of every possible secret. Parent's remote
+read-only check found main still5d36eee and no open PR at that time.
+
+Parent now releases exact staging/commit and a unique draft PR for these eight
+implementation files and this plan only. No worktree-wide add or production
+activation. Final head-specific CI, full collection, paginated review/thread
+checks, fresh main/head guards and reviewed/landed tree equality remain required
+before reporting merge. Later publication/revision8/Web/B2/C/P8 remain incomplete.
