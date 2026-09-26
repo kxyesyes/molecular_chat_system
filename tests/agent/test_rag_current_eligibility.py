@@ -20,6 +20,25 @@ from src.rag.receipt import canonical_digest, validate_retrieval_envelope
 QUERY = 'synthetic query'
 
 
+def unrelated_search_control(owned_index):
+    """Retain a real same-class search outside this invocation's fault hook."""
+    index_type = type(owned_index)
+    unrelated = index_type(owned_index.d)
+    unrelated.metric_type = owned_index.metric_type
+    if owned_index.ntotal:
+        unrelated.add(owned_index.reconstruct_n(0, owned_index.ntotal))
+    assert type(unrelated) is index_type
+    probe = np.asarray([[1., 0.]], dtype=np.float32)
+    expected = unrelated.search(probe, 2)
+
+    def check():
+        actual = unrelated.search(probe, 2)
+        np.testing.assert_array_equal(actual[0], expected[0])
+        np.testing.assert_array_equal(actual[1], expected[1])
+
+    return check
+
+
 def source_projection(receipt):
     return {key: value for key, value in receipt.items() if key not in {
         'invocation_id', 'input_sha256', 'diagnostics', 'result_sha256'}}
@@ -90,7 +109,9 @@ def test_snapshot_detached_and_no_science_validation(tmp_path, monkeypatch, empt
     envelope = service.search_similar_molecules_sync_with_receipt(query, k=3)
     original = deepcopy(envelope)
     files = {p: p.read_bytes() for p in tmp_path.rglob('*') if p.is_file()}
-    monkeypatch.setattr(type(service._generation.index), 'search', lambda *a, **kw: pytest.fail('search'))
+    check_unrelated = unrelated_search_control(service._generation.index)
+    monkeypatch.setattr(service._generation.index, 'search', lambda *a, **kw: pytest.fail('search'))
+    check_unrelated()
     monkeypatch.setattr(service, '_embedding_sync', lambda *a: pytest.fail('embedding'))
     snapshot = service.capture_retrieval_eligibility()
     assert type(snapshot) is RetrievalEligibility
@@ -205,7 +226,9 @@ def test_receipt_source_disagrees_with_matching_snapshot(tmp_path, monkeypatch, 
         value['receipt'][mismatch] = 'f' * 64
     original = deepcopy(value)
     assert validate_retrieval_envelope(value, query=QUERY, k=3) == original
-    monkeypatch.setattr(type(service._generation.index), 'search', lambda *a, **kw: pytest.fail('search'))
+    check_unrelated = unrelated_search_control(service._generation.index)
+    monkeypatch.setattr(service._generation.index, 'search', lambda *a, **kw: pytest.fail('search'))
+    check_unrelated()
     monkeypatch.setattr(service, '_embedding_sync', lambda *a: pytest.fail('embedding'))
     with pytest.raises(RAGIndexCompatibilityError):
         service.validate_retrieval_source(value, query=QUERY, k=3, expected=snapshot)
@@ -337,9 +360,10 @@ def test_formatting_record_mutation_is_invalid_output(tmp_path, monkeypatch, ada
     snapshot = service.capture_retrieval_eligibility()
     strict = service.search_similar_molecules_sync_with_receipt
     validate_source = service.validate_retrieval_source
-    index_type = type(service._generation.index)
-    original_search = index_type.search
+    owned_index = service._generation.index
+    original_search = owned_index.search
     producer_calls, searches, validation_errors, produced = [], [], [], []
+    check_unrelated = unrelated_search_control(service._generation.index)
 
     def produce(query, k=3):
         producer_calls.append((query, k))
@@ -364,7 +388,9 @@ def test_formatting_record_mutation_is_invalid_output(tmp_path, monkeypatch, ada
             raise
 
     monkeypatch.setattr(service, 'search_similar_molecules_sync_with_receipt', produce)
-    monkeypatch.setattr(index_type, 'search', search)
+    monkeypatch.setattr(owned_index, 'search', search)
+    check_unrelated()
+    assert searches == []
     monkeypatch.setattr(service, 'validate_retrieval_source', validate)
     monkeypatch.setattr('src.agent.tools.rag_search_tool.format_rag_context', format_then_mutate)
     tool = RAGSearchTool(service)
@@ -464,16 +490,19 @@ def test_actual_service_diagnostic_status_is_not_source_authority(tmp_path, monk
     service, requests = initialized_service(tmp_path, monkeypatch, empty=mode == 'empty')
     assert RAGSearchTool(service).execute(QUERY)['success']
     requests.clear()
-    index_type = type(service._generation.index)
-    original_search = index_type.search
+    owned_index = service._generation.index
+    original_search = owned_index.search
     searches = []
-    def search(index, vector, k, *args, **kwargs):
+    check_unrelated = unrelated_search_control(service._generation.index)
+    def search(vector, k, *args, **kwargs):
         searches.append(k)
-        scores, labels = original_search(index, vector, k, *args, **kwargs)
+        scores, labels = original_search(vector, k, *args, **kwargs)
         if mode == 'partial':
             labels[0, -1] = -1
         return scores, labels
-    monkeypatch.setattr(index_type, 'search', search)
+    monkeypatch.setattr(owned_index, 'search', search)
+    check_unrelated()
+    assert searches == []
     snapshot = service.capture_retrieval_eligibility()
     result = RAGSearchTool(service).execute(QUERY)
     assert result['success'] is (mode != 'partial')
@@ -568,12 +597,15 @@ def test_actual_session_seal_and_current_source_are_separate(tmp_path, monkeypat
     snapshot = service.capture_retrieval_eligibility()
     strict = service.search_similar_molecules_sync_with_receipt
     produced, searches = [], []
-    index_type = type(service._generation.index)
-    original_search = index_type.search
+    owned_index = service._generation.index
+    original_search = owned_index.search
+    check_unrelated = unrelated_search_control(service._generation.index)
     def search(*args, **kwargs):
         searches.append(True)
         return original_search(*args, **kwargs)
-    monkeypatch.setattr(index_type, 'search', search)
+    monkeypatch.setattr(owned_index, 'search', search)
+    check_unrelated()
+    assert searches == []
     def after(query, k=3):
         value = strict(query, k=k)
         produced.append(deepcopy(value))

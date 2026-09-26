@@ -158,3 +158,69 @@ PR84 latest controlled CI36242795132 is still live. Its prior8/8 passing run doe
 not explain the first six native failures; no false root-cause fix claim.
 R4 remains unpublished until actual prerequisite landing, clean transplant and
 final affected-change verification.
+
+## Remaining test-isolation alignment before publication
+
+PR84 follow-up518be62 changes seven inherited search hooks to the exact owned
+FAISS instance. Its local independent1209-pass result does not establish Linux
+success or an underlying extension-cache fix. R4 still has five additional
+class-level search hooks in test_rag_current_eligibility.py; publishing them
+unchanged would reintroduce cross-instance interception already reproduced in
+PR84. No R4 production change is proposed by this alignment.
+
+Selected bounded approach: first bring in the reviewed inherited test-only
+changes, preserving R4 source and extra receipt fixtures. Add same-runtime-class
+real-index isolation controls to the five R4 hook sites. Capture real scores and
+labels before each hook; during injection, unrelated real search must match that
+baseline without entering an owned counter or no-search sentinel. Keep native
+and base-IP cases, all current-source/status/HTTP/SQLite/seal assertions and the
+explicit owned no-search guard reachability tests. Observe RED under class hooks
+before replacing them with exact-instance hooks and bound-method passthrough.
+This RED establishes cross-instance leakage, not the unique cause of historical
+Linux method lookup failures.
+
+Only this plan and tests/agent/test_rag_current_eligibility.py are new R4-local
+scope; inherited PR84 tests are applied separately and checked against that
+reviewed source. SOURCE/SPEC and fresh QUALITY remain required, as do the full
+twelve-module union (the command above plus test_chat_input_budget.py), exact
+clean-main transplant and complete CI. Do not change production, assertions,
+dependencies, timeout gates or launchers. Tesla's normal-Web Task3 currently owns
+the sole local scientific test slot; source preparation is allowed but no tests
+start until an explicit terminal handover. Publication still waits for PR84.
+
+Inherited reviewed corrections applied cleanly as2f47457/0909b36/600947a.
+Tool and service hashes remain C1957C09712FB879231E9E385B87F6DB75A9D3B702A9A1EE9DE94223F032CAF9
+and7168B1FF0FD37FDE1E1C42A476DC2E7CEC2D8B175CB7D2E3DA1CE5ED32327809.
+The inherited receipt test differs from518be62 only by R4's explicit synthetic
+source contract fixture; owned-generation and manifest tests exactly match it.
+
+Erdos SOURCE design/control review approved the prepared RED checks. After
+Tesla explicitly released its terminal test slot, parent ran all five changed
+families:24 failed/3 SWIG warnings3.50s (chunk55e37a). Two sentinels intercepted
+unrelated searches, counting hooks recorded them, and partial injection changed
+the unrelated labels. The failures directly demonstrate cross-instance leakage.
+After replacing only five class hooks with exact-instance hooks and bound-method
+forwarding, the same24 passed/3 warnings3.38s (chunk970482), exit0. Both runs
+reached normal terminal state before the slot returned to Tesla's Task3 union.
+No index proxy, source code, timeout or original assertion changed.
+
+New eligibility-test SHA256:
+9ABBFD2A873A38224AF108860A05F71C17355F3C480DB8D388ACA5CF54776651.
+Corrected SOURCE/SPEC, full twelve-module regression and independent QUALITY
+remain release gates. PR84 old head518be62 passed eight CI gates; aligned head
+3ddafd6 is now awaiting its new CI, so R4 still has no landed prerequisite/PR.
+
+Corrected Erdos SOURCE/SPEC approves frozen9ABBFD2A; Herschel's source-only
+QUALITY found no actionable issue. Parent full twelve-module run62174 is now
+terminal36f89b:1323 passed/0 failed/0 skipped/4 FastAPI warnings72.31s, exit0.
+Sole slot transferred explicitly to Herschel for the independent exact repeat;
+do not count that repeat until its actual terminal result. No R4 source change
+since a35c9c4. PR84 aligned CI attempt1 timed out at600s around77%, so its single
+bounded attempt2 and eventual actual landing remain prerequisites to publication.
+
+Fresh Herschel QUALITY exact twelve-module repeat is terminal8628/chunk5e65d8:
+1323 passed/0 failed/0 skipped/4 FastAPI warnings73.88s, exit0. Five frozen code/
+test hashes and approved runner matched before/after; no edits or findings. The
+local test slot was explicitly released, then granted to corrected normal-Web
+Task3's final union. Parent in-memory syntax and diff checks pass. This supports
+a scoped local test-isolation checkpoint, not R4 publication or live acceptance.
