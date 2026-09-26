@@ -4,6 +4,21 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Current local gates: R4 corrected tests are committed5c392ff after Erdos SOURCE
+and fresh Herschel QUALITY. Parent exact12 union1323 passed/4 warnings72.31s
+(62174 terminal36f89b); independent1323 passed/4 warnings73.88s (8628 terminal
+5e65d8), both exit0/zero skips and frozen hashes unchanged. It is not published;
+PR84 actual landing/clean transplant/CI remain required.
+
+Normal-Web Task3 late-source TTL defect was reproduced with real temporary
+RAG/SQLite in native/JSON:2 assertion failures8.06s, four model HTTP calls where
+two were allowed. Existing owned-call guard now checks the existing deadline
+before/after callbacks; focused20 passed24.99s. Corrected Hooke SOURCE approves
+the five-file freeze. Old union376 passed340.25s predates this correction and
+is not final evidence. Tesla has the sole slot for UPDATED final five-module
+union; fresh Nietzsche QUALITY is source-only until a later explicit test grant.
+Task4 and full normal-entry/B2/C/P8 acceptance remain pending; no activation.
+
 New exact-head CI gate: PR84 aligned3ddafd6 run36247412305 attempt1 is terminal
 failure. Agent108419063990 reached about77% then exited124 at the unchanged600s
 command deadline; no completed suite summary exists. Other six jobs passed and
