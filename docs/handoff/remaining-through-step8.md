@@ -4,6 +4,35 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Current authoritative checkpoint: normal-Web B1 Task2 is committed954e4f4 after
+corrected SOURCE/SPEC Carson and fresh QUALITY Carver. Two reviewed P2s were
+actually reproduced/fixed (distinct same-family target obligations and complete
+descriptive reverse-target questions). Worker775 passed42.40s; independent exact
+four-module union775 passed41.71s, terminal97543, no reported warnings/skips.
+Task3 released in dcdc5a9: Tesla prepares/implements only four continuation/
+admission production files plus the new continuation test. It owns the sole
+local test slot now; Task1's two normal-route REDs remain unchanged. This is not
+normal-Web activation or P7/P8 completion.
+
+PR84 sixthCI36246714194 is live at518be62 after reviewed test-only isolation
+correction. Fifth root run36245576733 failed1/2642 passed/75 skipped223.58s;
+diagnostics show class_dict_hook=True but class_hook=False/bound_hook=False and
+calls=[]. Underlying CPython/SWIG cause is not uniquely established. Seven probes
+now target exact owned instances, preserving actual FAISS and original assertions.
+New cross-instance control actually RED6/1.11s under old class hooks; corrected
+affected445 passed28.45s, expanded parent1209 passed68.08s, independent Darwin
+1209 passed67.22s (each full run7 SWIG/FastAPI warnings). Hume SOURCE/SPEC and
+Darwin QUALITY approve; new Linux CI is still required. No merge; R4 waits.
+
+PR86 follow-up8c71709 fixes the independently reproduced test package-attribute
+pollution, with original health-before-receipts RED4/6pass, new lifecycle RED4,
+focusedGREEN14, worker632/2subtests20.24s and independent Sagan632/2subtests19.04s.
+Its next CI36246104348 root has no remaining reverse failures, but fails3 inherited
+native RAG injections (2867 passed/75 skipped223.63s). Do not waive this shared
+gate; align PR86 to corrected main after PR84 passes/lands, then rerun its gates.
+The original mixed checkout still has its same13 dirty paths, untouched. No real
+provider invocation, production activation or step9 deployment has occurred.
+
 Latest checkpoint (supersedes staging entries below): normal-Web B1 Task1 is
 committed68d0d25 after independent SOURCE/SPEC and QUALITY. The fixture/existing
 union passed207 locally111.07s and independently111.49s; the two original mounted
