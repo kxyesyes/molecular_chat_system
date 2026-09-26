@@ -4,6 +4,19 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest publication: R4 clean transplantd976422 passed independent Copernicus
+SOURCE integration review (eight-file raw delta/modes/blobs identical, source and
+upstream popcount files preserved). Published as draft PR87, attached to this
+task; CI36249184214 is live. It is not merged. PR86 alignedbbc498e CI36248942747
+also remains live; neither gate is waived because PR84 already landed.
+
+Task3 corrected Huygens SOURCE and Nietzsche QUALITY source both approve the
+2FC675AC loop /24B5CE67 test freeze (other three unchanged). Tesla explicitly
+received the sole local test slot for the final updated five-module union after
+both source gates. Nietzsche awaits a separate grant for independent execution;
+no concurrent local science tests. No current final-union pass is claimed yet.
+PR84 merged, R4 component regression/review passed, but P7/P8 remain incomplete.
+
 PR84 is now MERGED asf1152617fc02c057d6bbf4774055c35b6db7b42d. Aligned3ddafd6
 run36247412305 attempt2 passed8/8; Agent9548 passed/1 skipped/23858 warnings
 575.44s. Parent checked exact head/base/current main, all eight checks, complete
