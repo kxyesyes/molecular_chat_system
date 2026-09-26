@@ -4,6 +4,26 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Current integration update: R4 frozen source is locally committeda35c9c4 after
+Meitner independent exact1252-pass repeat69.12s/7 warnings, terminal55939. It is
+not published; PR84 prerequisite and inherited changes remain a release gate.
+Independent reverse-popcount extraction is committedc7bd67d on actual main29502ca:
+Socrates SOURCE/SPEC and Galileo QUALITY approve, parent394pass/2subtests8.51s,
+independent394pass/2subtests7.40s, no warnings/skips. Draft PR85 is attached;
+CI36242554838 is live, not merged. Original13 dirty paths remain unchanged.
+
+PR84 secondCI36241771811 passed8/8; Agent9530pass/1skip/23858warnings589.78s.
+Six original native search failures did not recur and remain unattributed. To
+rule out diagnostic instrumentation masking, parent added explicit wrapped and
+unwrapped actual-Session variants without changing assertions. Focus36pass6.87s;
+expanded11-module union1209pass/4FastAPIwarnings66.88s, terminal97422. Tesla
+SOURCE/SPEC approves; independent QUALITY and new Linux CI still pending. No
+production FAISS fix claim or premature merge from a single passing repeat.
+
+Popper normal-Web B1 written design/plan draft is complete; parent is reviewing
+current APIs and independent Euclid written review is active. No implementation
+release yet. B2/C/P8 real acceptance and normal-entry positives remain required.
+
 Task5 offline core is now locally committeda5189a5: independent Jason exact
 25-module QUALITY union22518 passed2078/3 SWIG warnings/592.33s, hashes unchanged,
 no actionable findings. It is not a normal-Web activation or complete P7/P8.
