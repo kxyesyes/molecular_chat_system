@@ -11,10 +11,10 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| Reverse receipt consumer | Clean-main extraction; evidence-only redaction P2 reproduced24 failures then32 focused passes; corrected SOURCE and fresh QUALITY source approved | Parent-first and independent15-module current-main regression, scoped publication and CI |
-| PR87 RAG current source | DRAFT7187099; bounded diagnostic SOURCE/QUALITY approved; workflow contracts10 passed; CI36251616084 live | Retain old600s timeouts at76%/98%; inspect named progress; no performance-fix or merge claim |
+| Reverse receipt consumer | Corrected SOURCE/QUALITY approve; parent1802 passed74.96s and independent1802 passed75.07s, each7 warnings/2 subtests | Align landed PR87, scoped publication and fresh exact-head CI |
+| PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 in progress with approved display-context amendment; focused assembly15 passed; Rawls owns sole local slot | Prefix/display actual RED/GREEN and six-module final union; Tasks5–8 still pending |
+| Normal-Web B1 Tasks4–8 | Task4 union863 passed/2 failed; original default-profile probes require approved explicit-B1 setup migration, preserving original assertions and adding actual RAG/SQLite checks; Rawls owns sole local slot | Migrated probes and final six-module union, independent reviews; Tasks5–8 still pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -23,6 +23,22 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR87 exact7187099 CI36251616084 passed8/8: Agent9662 passed/1 skipped/23858
+warnings596.81s; root2873 passed/75 skipped/5 warnings209.78s. Fresh head/base/main
+and complete review pagination had zero unresolved threads/changes requests.
+SHA-guarded squash landed b33e2c044e4866a9f6228b28f4c734c22565eda9; fresh fetch
+proves tree cf78512a43b0bd7e574229c83cf63b67e1aa95bd equals reviewed head. Earlier
+600s failures remain; named diagnostics did not establish a performance fix.
+
+Reverse consumer parent15 union76189/94fdce passed1802/7 warnings/2 subtests in
+74.96s; independent65275/4a8497 passed same counts75.07s,exit0, hashes unchanged.
+Pauli released the slot. Rawls receives it for the approved Task4 original-probe
+setup migration and final union. Prior Task4 union9277/b5dba1 was863 passed,
+2 failed,7 warnings60.68s: original native/JSON probes invoked the default
+four-tool entry rather than explicit B1. Preserve query and original assertion;
+configure actual B1 temporary sources and strengthen one-call/persistence checks,
+without default activation, xfail, assertion inversion or production changes.
 
 Reverse consumer P2 is now behaviorally established:24 failures7.87s under the
 extracted adapter; full covered-data/evidence security normalization guard yields

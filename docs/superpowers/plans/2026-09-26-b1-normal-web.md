@@ -47,8 +47,11 @@ No live provider, host model/science assets or credentials in the offline phase.
 
 ## Exact file ownership
 
-Production files are exactly design §3's eleven existing files plus new
-`src/web/decision_binding_request.py` (12 total). No changes to auth/store schemas,
+Production files were design §3's eleven existing files plus new
+`src/web/decision_binding_request.py` (12 total). The independently approved
+Task4 amendment below adds only `src/agent/harness/ordinary_chat_policy.py`
+(13 total) to preserve the existing B query-content policy through display.
+No changes to auth/store schemas,
 scientific producers, RAG service/core, model clients, Session, ledger, binding
 resolver/requirements, lab entry, launcher or defaults. Any need outside that
 allowlist returns a source-grounded amendment before implementation.
@@ -64,6 +67,8 @@ Future test files:
   injections to its existing `actual_app` fixture; keep all old defaults/assertions.
 - Modify `tests/home_decision_runtime_test.js` additively for B pending events/count
   override and actual-frame input mode; use existing home code, not a copied handler.
+- Task4 amendment only: add regression cases to `tests/agent/test_ordinary_chat_policy.py`;
+  retain all existing assertions, validation order and original-profile limits.
 
 Existing reference/ordinary/core tests are regression targets, not permission to
 rewrite them. No new shared test framework or runner. Temporary generated test
@@ -333,7 +338,7 @@ This completes Task3 locally, not P7 integration or P8 live acceptance.
 Files: `src/web/app.py`, `ordinary_capabilities.py`, `decision_runtime.py`;
 new runtime/lifecycle tests.
 
-### Task4 scoped display-context amendment (design review pending)
+### Task4 scoped display-context amendment (design approved; final review pending)
 
 Actual assembly TDD has initial RED5/4.34s and RED8/5.96s, then focused GREEN15/
 2.55s. These worker-reported terminal results establish assembly only; prefix
@@ -375,6 +380,24 @@ and unknown/mismatched-pair regressions. Parent now grants these two additional
 files and TDD under that order; do not move snapshot ahead of original _view.
 Pascal's short reverse correction is terminal32 passed7.15s and slot released;
 Rawls now receives the sole slot for prefix/display RED/GREEN and final union.
+
+### Original Task1 probe migration after assembly
+
+Final six-module attempt9277/b5dba1 actually yielded863 passed,2 failed,
+7 warnings60.68s,exit1. The two original native/JSON Task1 probes still assembled
+the default original-four profile, deliberately unchanged by this opt-in design.
+Parent approved test-only migration: retain the original prompt and stop-reason
+assertion, explicitly assemble B1 with actual temporary sources and the existing
+actual_b1_factory. Synthetic HTTP chooses the real rag_search and finishes from
+its actual evidence. Also assert completed success, exactly one real RAG call and
+SQLite data/evidence/quality equality. Share the existing mounted-entry scenario
+without reducing its eight positive cases. No xfail, inverted expectation,
+production/default change, fake observations or runner alteration is authorized.
+
+After reverse independent regression reached terminal65275/4a8497 and released
+the slot, Rawls is granted the two original probes followed by the final six-module
+union (the five listed below plus tests/agent/test_ordinary_chat_policy.py).
+Independent full Task4 SOURCE and fresh QUALITY remain required after passing.
 
 - [ ] RED `test_b1_server_profile_assembly_is_closed`: B requires async
   decision_a2/semantic_v1, exact seven reviewed canonical adapters, distinct feature
