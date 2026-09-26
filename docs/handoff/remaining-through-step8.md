@@ -31,6 +31,21 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Parent test-only ASCII prototype terminal dfe89f:30passed2.88s,0failures/warnings/
+skips; reference/test/plan/runner hashes unchanged. Fixed40-pair AB p50 reference
+versus prototype:66bytes22.8us/3.5us;2476bytes859.85us/70.3us;
+escaped7682bytes452.4us/450.75us;Unicode5122bytes651.9us/650.2us.
+This supports a minimal native-ASCII candidate, not a Web timeout-fix claim.
+Worker may prepare actual-production oracle/regression tests and design only;
+production remains unchanged pending RED/review. No caching or skipped checks.
+
+Strict-generation nine-fixture migration source is frozen (ownmodule67FDFD,
+plan54FE10). Parent fast-forwarded its isolated tree from5d36eee toaa3cddd,
+verified no overlapping main paths and all14owned hashes unchanged (8a5190).
+Plato is reviewing the migration/expanded selection; no migrated-suite pass yet.
+Publication test preparation f2628b6 is independently SOURCE-reviewed next;
+four-production integration remains gated on actual behavioral RED.
+
 Strict generation SOURCE re-review now APPROVES the same two-production freeze
 independently of445GREEN. Parent released only the exact nine test-fixture
 migrations, preserving successful generation/ranking/temperature/target assertions
