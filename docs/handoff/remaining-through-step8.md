@@ -12,12 +12,12 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
 | Reverse receipt consumer | PR88 MERGED fb62f53 after CI36253262488 success8/8; reviewed/landed tree dd2de4c4 equal; aligned1926 passed | Later load-free current-source hooks remain separate |
-| Attached-source hooks | Independent SOURCE/QUALITY approve; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 remote3d6a872, local alignment cee8701 | Original CI36255095764 failed600s; alignment review and fresh9-check CI still pending |
+| Attached-source hooks | Independent SOURCE/QUALITY and CI-only alignment audit approve; draft PR89 updatedcee8701, CI36261000462 running | Original CI36255095764 failed600s retained; fresh9-check CI and merge gates pending |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 corrected SOURCE approves stronger exact-credit/details-only controls; focused6 passed54.29s | Harvey fresh QUALITY owns exact4-module union test slot; final union and Tasks6–8 pending |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
-| Target execution guard integration | SOURCE/QUALITY approve; parent437 passed26.25s and independent437 passed57.02s; committed b706d25, local CI alignment f1fc421 | Alignment review then draftPR/fresh9-check CI; not yet pushed or merged |
+| Target execution guard integration | SOURCE/QUALITY and CI-only alignment audit approve; draftPR91 headf1fc421, CI36261062523 running | Fresh9-check CI/collection proof and merge gates; not yet merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -26,6 +26,16 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Goodall alignment audit approves both exact heads: upstream-only patch is exactly
+the five landed CI files; full src and tests/agent trees and original theme diffs
+are unchanged. Prior1813x2 and437x2 application evidence remains applicable,
+not a rerun claim. Parent updated PR89 tocee8701f07f6ae0cea54fd9884568c13ca8afb8d
+and opened draftPR91 atf1fc421e0af5bc7ef188768ba275622daecab091. Actual remote
+runs36261000462 and36261062523 are both in_progress at this checkpoint; neither
+may use PR90's green checks as its own gate. Both PRs are attached to the task.
+Only Harvey's Task5 QUALITY agent owns the local scientific test slot; no parallel
+local scientific run is authorized. Foundation plan remains HOLD for prerequisites.
 
 PR90 exactheadfdd7680 passed all9 CI36260272170 checks. Parent repeated head/base/
 main and fully paginated review audits (0reviews/0threads/0unresolved), transitioned
