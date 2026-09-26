@@ -597,6 +597,8 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
 
     service, requests = initialized_service(tmp_path, monkeypatch, empty=mode == 'empty')
     searches = []
+    owned_index = service._generation.index
+    owned_generation = service._generation.identity
     index_type = type(service._generation.index)
     original_search = index_type.search
     def search(index, vector, k, *args, **kwargs):
@@ -662,6 +664,23 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
         assert searches == ([] if mode == 'empty' else [2]), {
             'diagnostics': diagnostics, 'success': observed.success,
             'error_code': observed.error.code.value if observed.error else None,
+            # Evaluated only after a count mismatch, leaving the unwrapped
+            # dispatch untouched. These flags distinguish a replaced index,
+            # an instance shadow and a lost class hook without logging records.
+            'post_dispatch': {
+                'same_index': service._generation.index is owned_index,
+                'same_generation': service._generation.identity == owned_generation,
+                'same_class': type(owned_index) is index_type,
+                'class_hook': index_type.search is search,
+                'bound_hook': getattr(owned_index.search, '__func__', None) is search,
+                'instance_shadow': 'search' in vars(owned_index),
+                'index_type': index_type.__name__,
+                'index_module': index_type.__module__,
+                'original_search_name': getattr(original_search, '__qualname__', None),
+                'returned_same_generation': bool(observed.evidence) and (
+                    observed.evidence[0].get('retrieval_receipt', {}).get('generation_id')
+                    == owned_generation),
+            },
         }
         assert observed.success is (mode != 'partial')
         receipt = observed.evidence[0]['retrieval_receipt']
