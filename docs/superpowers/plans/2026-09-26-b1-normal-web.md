@@ -213,6 +213,13 @@ warnings/skips. All three frozen hashes, Task1 files and approved runner matched
 before/after. Parent in-memory compile/diff checks pass. This is a reviewed local
 admission checkpoint; Task1 route gaps and normal-Web assembly are still pending.
 
+Parent accepts Task2 local checkpoint954e4f4 and releases Task3 only against the
+already approved design and four-production-file/new-test allowlist below. Keep
+Task1's two route REDs and all old snapshots/defaults intact. Preparation/source
+edits may begin; local tests require a separate sole-slot grant after the active
+RAG test-isolation regression/review. No Task4 assembly or production activation
+is released. Parent owns documentation, commits and subsequent publication gates.
+
 Files: `src/agent/contracts/ordinary_admission.py`,
 `src/agent/harness/decision_loop.py`, `decision_continuation.py`,
 `decision_binding_continuation.py`; new continuation tests.
