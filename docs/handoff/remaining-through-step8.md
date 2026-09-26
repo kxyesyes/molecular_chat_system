@@ -34,6 +34,15 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Parent current-process check3a51e8 confirms the ASCII-tree test childPID30164,
+parent50400, created07:33:50; exact49 is actually running, not merely intended.
+Kant independent QUALITY SOURCE-ready on0D26/D43/08E40, no blocking findings;
+fresh execution waits for author terminal/slot transfer. Frozen plan's NOT RUN
+text is historical; actual47GREEN1b123f is separately recorded here.
+PR97 CI36279601921 remainsin_progress at1053951 (b57bff): static-quality,
+sandbox-api,sandbox-core,task-runtime completed success; root,activity,Agent,
+Web still running, aggregate gate not yet final. No merge result claimed.
+
 ASCII focusedGREEN1b123f:47passed1.72s,0warnings/skips,5hashes unchanged.
 Plato independent implementationSOURCE approves0D26E2/D43AAB/08E40D without
 P1/P2. Exact49 union released to Wegener once; fresh Kant QUALITY is read-only
