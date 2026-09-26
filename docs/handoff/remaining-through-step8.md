@@ -30,6 +30,35 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Next-loop3module GREEN31449/b0c4a3:327passed3SWIGwarnings212.98s,8files+runner
+hashes unchanged. Hume SOURCE then identified real P2 at two new post-graph
+awaits: cancellation bypassed finish_dynamic. Controlled real owned workers
+77285/3ef772 reproduced4failed9.85s (two boundaries/native+JSON), all run statuses
+running/no terminal after actual worker drain. Minimal decision_loop+16 lines,
+explicitcancelled outcome/unsatisfiedacceptance/clearwaiting+answer, existing
+finish_dynamic retained. 79946/785efb4passed8.03s; Hume re-review APPROVES noP1/P2.
+New loopblob9636827/testd298090; manifest a676a81cc3096e09dc5dbd5d8836ad02909fa5be416a4c077d5a50db1e7b8be0.
+Exact58 released to Mencius, fresh Halley QUALITY source-only preparation; not
+claimed green until actual terminal. This batch is not yet committed/published.
+
+Parent lookup-only microprobe6ca3a8:1passed3SWIG3.10s. Four synthetic records:
+scan p50/p95 .342/.3666ms versus get .0855/.0941ms; copycount4vs1. Small absolute
+saving does not explain measured authentication window, and index-corruption
+semantics differ. Do NOT implement this candidate as a supposed timeout fix.
+Source-only preparation for one bounded stdlib profile, not more production
+changes; no skipped integrity/source checks or relaxed deadlines.
+
+B2 transport characterization independently SOURCE-approved by Sartre, then
+parent approved runner9F6F5A2F68272442316DD614F6BEBD62C49371669C8E5E90DC4BC50BC5BED778
+with full forward/reverse byte equality except REPO. Exact new module366731
+terminal46passed3.14s,0warnings/skips; test/plan/runner hashes unchanged, no
+productiondiff. This POSITIVELY REPRODUCES bad legacy behavior: HTTP503/ReadError
+apology's standalone I becomes valid iodine candidate, may contaminate count10
+or accompany optimization seed. Tests are characterization, NOT safe/live
+scientific passes. Source-design for a strict generation-only error boundary is
+next; no filtering legitimate iodine or regexing apology text as a substitute.
+Logical slot/token-grant/multi-round wholecandidate/P8 gates remain unimplemented.
+
 Next-loop integration atf99cf7e reproduced actual checkpoint-guard gap:
 legacy3passed8.97s (90652/84d326); reviewed test-only constructor bootstrap
 a3402a call-phase1failed1.77s because guard calls[] !=[1]. Final Sessiontest
