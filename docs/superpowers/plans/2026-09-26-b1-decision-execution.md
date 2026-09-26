@@ -10,6 +10,29 @@
 
 ## Release boundary
 
+### Task5 final regression command (current evidence, not release approval)
+
+The ordered 25-module union referred to by current worker/reviewer handoffs is
+exactly the command below. Only one local heavy-test process may own the slot.
+Use the unchanged isolated launcher SHA256
+F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+Do not replace terminal execution evidence with a static count or a short subset.
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_continuation.py tests/agent/test_decision_binding_publication.py tests/agent/test_decision_binding_loop.py tests/agent/test_decision_binding_inputs.py tests/agent/test_decision_binding_acceptance.py tests/agent/test_decision_dynamic_bindings.py tests/agent/test_decision_binding_requirements.py tests/agent/test_decision_binding_session.py tests/agent/test_current_source_tool_hooks.py tests/agent/test_decision_continuation.py tests/agent/test_decision_loop.py tests/agent/test_decision_inputs.py tests/agent/test_decision_requirements.py tests/agent/test_ordinary_continuation.py tests/agent/test_ordinary_admission_budget.py tests/agent/test_worker_ownership.py tests/agent/test_workflow_run_session.py tests/agent/test_dynamic_run_session.py tests/agent/test_run_session_ownership.py tests/agent/test_delegated_session_lifecycle.py tests/agent/test_delegated_session_parity.py tests/agent/test_agent_event_stream.py tests/agent/test_decision_history.py tests/agent/test_decision_clarification.py tests/agent/test_decision_continuation_store.py
+```
+
+Union79040 passed2072/3 SWIG warnings/590.44s before the newest P2 correction.
+That is historical evidence, not the final frozen-code regression. The later
+source-traced quality=None restore failure was actually reproduced:2 failed
+5.82s, then expanded first-failure/reentry coverage6 failed10.83s (2 None,
+4 stale-positive fallbacks). Minimal harness correction passed those6 in10.12s,
+handle9439 terminal; Session/eventbus/execution source stayed unchanged.
+Corrected Locke SOURCE/SPEC approves all six final hashes; fresh Jason source-
+quality inspection has no new findings but independent runtime remains pending.
+Worker final union79030 is live at this checkpoint; poll that exact handle, never
+restart solely on an observation timeout. Final review and commit are not done.
+
 This plan is grounded in source `66039eb` and design commit `c6d150f`; the
 attached-source hooks are a separately reviewed prerequisite, now implemented
 and independently approved at `435ae32`. Written core review approval is recorded
