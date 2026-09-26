@@ -4,6 +4,24 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+PR83 follow-up: second workflow36238246328 at43ea6fd cleared root and the other
+five non-Agent/dependent gates. Agent job108393878491 printed9345 passed,
+1 skipped,23858 warnings in598.64s, but the process hit the unchanged600s command
+deadline during exit and returned124. Dependent offline-quality therefore failed.
+This is NOT full CI success; cause beyond the observed budget exhaustion is not
+uniquely established. Parent verified terminal attempt1 and unchanged PR head,
+then requested ONE failed-job retry on the same run/head, preserving the prior
+attempt. No deadline/assertion/source change and no merge. Track attempt2 rather
+than restarting on observation timeout; no automatic unlimited retry loop.
+
+Task5 corrected focused35-node run12518 passed152.85s after restoring whole-
+observation comparison, strict native details and synchronous comparison/sealing.
+Worker re-froze the six files and started the final25-module union; Locke is
+performing corrected source SPEC in parallel without tests. Fresh independent
+QUALITY is still required. R3 corrected security SOURCE/SPEC approves the bounded
+fix but full integration remains pending, including two old FAISS interception
+sites and the prerequisite PR83 outcome. Original13 dirty paths remain unchanged.
+
 Current integration update (2026-09-26): focused RAG owned-generation PR83 is
 OPEN/DRAFT, not merged. Original head950880a passed independent local760 tests,
 but Linux CI36237526916 root failed16 new fault-injection cases (2463 passed,
