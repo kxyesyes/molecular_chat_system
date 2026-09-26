@@ -4,6 +4,28 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest checkpoint (supersedes staging entries below): normal-Web B1 Task1 is
+committed68d0d25 after independent SOURCE/SPEC and QUALITY. The fixture/existing
+union passed207 locally111.07s and independently111.49s; the two original mounted
+requests still intentionally reproduce unsupported_scientific_request before
+any intent/model call. Task2 is now released only for request admission and its
+tests; Kuhn owns the sole local test slot. No normal-Web completion claim yet.
+
+PR84 fourthCI36244230995 atc49ccdd is terminal/failure: Agent9548 passed/1
+skipped413.52s, root5 failed/2638 passed/75 skipped223.43s. All five root failures
+are native FAISS invalid-result injections returning valid_hits. Root cause
+remains unproven; failure-only identity diagnostics are being extended to that
+exact test family. No waived gates or merge. Dependent R4 remains unpublished.
+
+Reverse owned-source PR86 is open/draft at1d4dd928, based on actual main d05dec2.
+TSV structural preflight correction has independent reviews and final six-module
+parent628 passed/2 subtests19.36s, independent628 passed/2 subtests19.52s.
+CI36244742726 root subsequently failed4/2862 passed/75 skipped233.82s: three
+loading callback injections did not raise, and late-candidate acquisition did
+not produce the expected failure. Other CI jobs were still live at observation.
+Possible test import-identity pollution is being investigated, not assumed as
+the cause; no merge. P7/P8 remain incomplete, with full original scope retained.
+
 Current checkpoint superseding older pending-CI entries: PR85 is MERGED as
 d05dec2433d28f6df7fbc3be0a085662c2e1216f after all8 gates, zero unresolved reviews
 and reviewed/landed tree equality7e4a9ac85f8eaa631ff70700cf0d1edd49e60a54.
