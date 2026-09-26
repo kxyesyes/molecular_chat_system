@@ -216,3 +216,10 @@ Parent now authorizes one exact ordered four-module U on the corrected diagnosti
 freeze, including the additional deliberate failure control. No timeout changes,
 retries or science relaxation. Raman owns the sole local scientific slot; result
 pending. Original461-pass/1-failure evidence and unknown cause remain preserved.
+
+Exact U12436/ba2135 on diagnostic/control freeze928B2C completed463 passed,
+7 warnings504.39s, runner/process exit0. The additional case is the deliberate
+diagnostic-failure control. All six hashes unchanged, no retries or edits during
+execution; slot released. Current full verification passes, but original timeout
+was not reproduced and its cause is still UNKNOWN. Fresh diagnostic source/quality
+review remains required before deciding Task5 release; no root-cause repair claim.

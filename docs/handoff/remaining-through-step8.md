@@ -15,9 +15,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 corrected SOURCE approves stronger controls; independent union461 passed1 failed624.40s | JSON RAG resume hit fixture3s receive timeout, cause UNKNOWN; Raman owns bounded diagnostic slot. Task5 QUALITY and Tasks6–8 remain pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 diagnostic/control freeze928B2C union463 passed504.39s; prior independent461 passed1 failed retained | Original JSON RAG resume3s timeout cause UNKNOWN; current diagnostic SOURCE/fresh QUALITY and Tasks6–8 remain pending |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
-| Target execution guard integration | PR91 currentheadc2125a6 published; Confucius SOURCE/McClintock QUALITY approve; parent2031 passed203.63s, independent2031 passed163.97s | Exact-head CI36262868730 in_progress; all9checks/review/merge gates pending |
+| Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -26,6 +26,21 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR91 exactc2125a6 passed all9 CI36262868730 gates. Actual collection10058 =9834
+core +224 Web; core9833 passed1 skipped17238 warnings417.96s, Web224 passed6628
+warnings236.40s. Parent repeated head/main/checks and fully paginated reviews
+(1review,0threads,0unresolved), markedready, rechecked and SHA-guard squash merged
+82bb6c7c58923f8994f5706c9ef0a0923a1d5780. Freshfetch verifies reviewed/landed
+tree1ced6acab43f04e484d0412b91a42ab273f88363 equal. Foundation may now align
+actual main before its approved bounded extraction; live model remains disabled.
+
+Raman diagnostic union12436/ba2135 completed463 passed7 warnings504.39s,
+runner/process exit0, all source/test/fixture/runner hashes unchanged. This is
+the previous462 cases plus deliberate diagnostic-emission-failure control. No
+original timeout reproduced; cause remains UNKNOWN and prior461-pass/1-failure
+is retained. No repeated-until-green sequence occurred. Slot released; current
+diagnostic source and fresh quality review are next, not a root-cause-fix claim.
 
 PR91 aligned source passed the exact16-module union twice: parent54858 completed
 2031 passed3 warnings203.63s, independent97501/62a661 completed2031 passed3
