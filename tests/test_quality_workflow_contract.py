@@ -118,7 +118,7 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
               _quality_jobs()["python-tests"]["strategy"]["matrix"]["include"]}
     assert matrix["agent"] == {
         "name": "agent", "pytest_target": AGENT_CORE_TARGET,
-        "pytest_args": "-vv --durations=25", "command_timeout": 600,
+        "pytest_args": "-vv --durations=25", "command_timeout": 1200,
     }
     assert matrix["agent-web-lifecycle"] == {
         "name": "agent-web-lifecycle", "pytest_target": AGENT_WEB_TARGET,
@@ -131,6 +131,17 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
     }
 
 
+def test_core_suite_budget_fits_unchanged_job_deadline():
+    python = _quality_jobs()["python-tests"]
+    matrix = {row["name"]: row for row in python["strategy"]["matrix"]["include"]}
+    assert python["timeout-minutes"] == 30
+    assert matrix["agent"]["command_timeout"] == 1200
+    collection_seconds = 180
+    assert python["timeout-minutes"] * 60 - (
+        matrix["agent"]["command_timeout"] + collection_seconds
+    ) >= 300
+
+
 def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
@@ -141,7 +152,8 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     assert matrix["root"]["pytest_args"] == ""
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
-    assert all(row["command_timeout"] == (180 if name == "sandbox-api" else 600)
+    assert all(row["command_timeout"] == (
+                   1200 if name == "agent" else 180 if name == "sandbox-api" else 600)
                for name, row in matrix.items())
     assert jobs["offline-quality"]["needs"] == ["python-tests", "static-quality"]
     assert jobs["offline-quality"]["if"] == "${{ always() }}"
