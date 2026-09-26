@@ -80,7 +80,15 @@ After a confirmed successful claim, start the actual Session using its existing
 claimed path and install detached prevalidated observations via its existing
 restore_observations(binding_proofs=...) API. Install the validated input journal
 only then; the new reply is admitted exactly once. Start a fresh live seal map
-and write-once seal the actual detached restored results before restore_records
+only after comparing the complete ordered actual restored observations with
+detached prevalidated originals through the bounded full-observation native
+representation. Reject any type/value/count/order change, including warnings,
+message, formatted output and other fields not covered by ledger equality.
+A restore callback may not modify an observation and have a fresh seal confer
+authority on that change. This comparison precedes all new live seals; retain
+existing legitimate native/JSON roundtrip representation without normalizing
+mutated values into acceptance. Then write-once seal the actual detached
+restored results before restore_records
 and closure validation: restore_observations does not install seals or invoke
 observation capture. Do not adopt the staging map or infer authority from a
 supplied seal. Install the validated action records after those live seals.

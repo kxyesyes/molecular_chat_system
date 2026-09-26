@@ -663,6 +663,42 @@ existing rejection, not satisfaction of the original successful-dispatch goal.
 
 ## Task 5: Revision8 restore and charged verification time
 
+### Integration review: authenticate the actual restored observations
+
+On2026-09-26 independent SOURCE/SPEC reviewer Helmholtz inspected the six-file
+Task5 freeze at parent c0e80dd and found one actionable P1, not yet executed:
+after the actual restore_observations callback, replay.verify_claim authenticates
+the staging projection, then the loop creates fresh seals for session.results.
+A callback that calls the real restore and changes only a warning could be
+legitimized: the ledger's checks do not cover warnings. Parent traced this path
+in decision_loop, decision_inputs and run_session and confirmed the missing
+complete live-result comparison; source review is not a passing reproduction.
+
+Under the delegated minimal-fix choice, the same worker must finish the live
+25-module union78513 without restarting it, preserve that evidence, then add
+actual native/JSON loop regressions for the restore-callback mutation. Before
+creating any new live seal or restoring resolver records, authenticate the
+complete ordered live observations against detached prevalidated originals.
+Use the existing bounded full-observation/native codec, not ledger-only checks,
+projection that drops warnings, or hashes recomputed from the changed live data.
+Reject mismatch before model/tool dispatch, reuse or scientific publication.
+Preserve legitimate existing native/JSON representation behavior without
+weakening value/type/count/order verification. No Session API or legacy6/7
+change is part of this repair. Corrected SPEC and fresh QUALITY remain required.
+
+Worker reports the unchanged final25-module union78513 completed2041 passed in
+532.36s, before the independent finding. It does not close the newly reproduced
+gap. Follow-up expected RED96990 is terminal with2 failures12.28s; the worker
+retains the warning/count/order/type/native-value reproduction chronology for
+the final evidence report. No production correction or passing result is inferred
+from that RED. Helmholtz approves the bounded design choice, not implementation:
+freeze canonical ordered full-observation strings before exposing results to
+callbacks; after callback checks compare all before sealing without an await.
+Sorted keys handle SQLite order, but False/1/1.0 must remain distinct. Existing
+error.details None/{} wire equivalence is allowed only after exact native type
+validation; False/0/[] must not be collapsed through to_dict. Test slot returned
+to the worker after parent RAG repair/review and focused R3 RED/GREEN completed.
+
 Source-grounded pre-claim staging choice is documented in the spec's Task5
 pre-claim replay isolation section. Legacy SimpleNamespace replay cannot be
 passed to the exact-type B resolver, while calling start/restore on the live

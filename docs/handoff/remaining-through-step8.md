@@ -4,6 +4,32 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Current integration update (2026-09-26): focused RAG owned-generation PR83 is
+OPEN/DRAFT, not merged. Original head950880a passed independent local760 tests,
+but Linux CI36237526916 root failed16 new fault-injection cases (2463 passed,
+75 skipped,5 warnings,218.62s). Parent reproduced the same16 failures locally
+with actual equivalent base-IP FAISS objects, then changed only test interception
+to the owned index's concrete class. Native load coverage and original assertions
+remain. Corrected independent SPEC/QUALITY approve; local797 passed19.60s and
+independent797 passed20.03s,0 skipped,7 warnings. PR83 head43ea6fd awaits NEW full
+CI. This is not a waived failure or a merged prerequisite.
+
+Task5 worker's frozen25-module union78513 reached terminal:2041 passed532.36s.
+Independent SOURCE/SPEC then found that a restore callback could change warnings
+before fresh live seals. Actual native/JSON reproductions are RED; do not treat
+that union as final approval. The approved bounded repair compares all ordered
+complete restored observations against an immutable prevalidated representation
+before any seal, preserving native-value identity and old6/7 behavior. Worker
+owns this correction and the sole local test slot; no Task5 commit/release yet.
+
+Parent also prepared focused R3 receipt consumption in a separate dependent
+worktree, with original R2 source/dtype guards retained. Independent review
+found evidence-only redaction could alter an empty/partial receipt in SQLite
+after sealing. Actual service/Session reproductions2 failed2 passed became
+4 passed after a narrow proof-bearing security-transformation check. Full union,
+corrected review and prior PR83 landing remain required; R3 is not published.
+Packages7/8, normal Web/B2/C and final live acceptance remain incomplete.
+
 Focused P7 publication update (2026-09-26): RAG core diagnostics are now landed
 through PR82, not by merging the accumulated B1 branch. Clean-base branch
 `codex/rag-retrieval-diagnostics-integration` extracted exactly the two reviewed
