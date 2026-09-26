@@ -53,3 +53,18 @@ gaps but cannot precisely separate setup/call/teardown. A duration summary may
 still be absent on external timeout. Parent added the focused YAML test only;
 workflow remains unchanged until behavioral RED under the existing launcher.
 P7/P8 remain incomplete; normal-Web worker proceeds in its disjoint tree.
+
+Parent TDD after explicit Rawls terminal slot release:
+`python -I -S -B scratch/ordinary_chat_offline_runner.py tests/test_quality_workflow_contract.py::test_agent_timeout_diagnostics_only_add_named_progress_and_durations`
+failed1/0.17s, exit1, terminal547193: actual empty pytest_args differed from the
+expected '-vv --durations=25'. After that single YAML value edit, the complete
+test_quality_workflow_contract.py module passed10/1.27s, exit0, terminal987f2a.
+This proves configuration/partition contracts, not the cause of the600s failure.
+Launcher SHA8C044090FB83203EC756C1C99A975BA9505E6E3B3422D930E9484A1EFA2C3703
+is unchanged. Independent code review remains required before publication.
+
+Epicurus SOURCE/code and fresh Ptolemy QUALITY approve the bounded diagnostic
+diff with no actionable findings. Both reviews are source-only, not independent
+test executions. Ptolemy independently verified the launcher hash. Parent's
+actual RED/GREEN above remains the test evidence. Ready for scoped publication
+and new exact-head CI, not merge or timeout-resolution claims.

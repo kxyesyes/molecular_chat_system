@@ -102,6 +102,20 @@ def _quality_jobs():
     return yaml.safe_load((ROOT / ".github/workflows/quality.yml").read_text("utf-8"))["jobs"]
 
 
+def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
+    matrix = {row["name"]: row for row in
+              _quality_jobs()["python-tests"]["strategy"]["matrix"]["include"]}
+    assert matrix["agent"] == {
+        "name": "agent", "pytest_target": "tests/agent",
+        "pytest_args": "-vv --durations=25", "command_timeout": 600,
+    }
+    assert {name: row["pytest_args"] for name, row in matrix.items()
+            if name != "agent"} == {
+        "sandbox-api": "--timeout=60", "sandbox-core": "--timeout=60",
+        "task-runtime": "", "root": "", "root-activity": "",
+    }
+
+
 def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
