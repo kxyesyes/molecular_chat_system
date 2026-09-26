@@ -28,17 +28,40 @@ def record():
 
 
 class InjectedService:
+    """Synthetic strict-envelope fixture only, never scientific ownership proof."""
     is_initialized = True
     vector_index = object()
     embedding_model_name = "synthetic-only"
 
     def __init__(self, rows=None):
-        self.rows = [record()] if rows is None else rows
+        self.rows = deepcopy([record()] if rows is None else rows)
+        for row in self.rows:
+            row['provenance'].update(manifest_schema_version=2, builder_version='1')
         self.calls = []
 
-    def search_similar_molecules_sync(self, query, k=3):
+    def search_similar_molecules_sync_with_receipt(self, query, k=3):
+        import hashlib
+        from src.rag.receipt import canonical_digest
         self.calls.append((query, k))
-        return self.rows
+        count = len(self.rows)
+        return {'records': self.rows, 'receipt': {
+            'schema_version': '1', 'validation_revision': 'rag-owned-generation-v1',
+            'invocation_id': 'c' * 32, 'generation_id': 'd' * 32,
+            'input_sha256': hashlib.sha256(query.encode('utf-8')).hexdigest(),
+            'source_path': 'synthetic.csv', 'source_sha256': 'a' * 64,
+            'source_row_count': count, 'index_sha256': 'b' * 64,
+            'row_mapping_sha256': canonical_digest(list(range(count))),
+            'vector_dimension': 2, 'vector_count': count,
+            'manifest_schema_version': 2, 'builder_version': '1',
+            'embedding_model': 'synthetic-only', 'embedding_endpoint_sha256': 'e' * 64,
+            'embedding_weights_verified': False, 'index_embedding_endpoint_sha256': None,
+            'result_sha256': canonical_digest(self.rows), 'diagnostics': {
+                'version': '1', 'status': 'valid_hits' if count else 'valid_empty',
+                'requested_k': k, 'effective_k': count, 'index_search_executed': bool(count),
+                'score_count': count, 'label_count': count, 'accepted_count': count,
+                'discarded_count': 0, 'reason_codes': [],
+            },
+        }}
 
 
 class ResultTool:
@@ -78,7 +101,7 @@ def test_actual_rag_preserves_text_default_k_and_rows(wrapped, rows):
     result = adapter.execute({"query": query} if wrapped else query)
     assert result.success is True
     assert result.status is ObservationStatus.SUCCEEDED
-    assert result.data == rows
+    assert result.data == service.rows
     assert service.calls == [(query, 3)]
     assert result.evidence[0]["record_count"] == len(rows)
 

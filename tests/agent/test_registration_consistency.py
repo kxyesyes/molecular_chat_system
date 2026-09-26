@@ -57,15 +57,15 @@ def test_default_app_factory_rag_workflow_api(tmp_path, monkeypatch, ready, lega
     persisted = atomic_save_index_pair(index, index_path, manifest, faiss_module=faiss)
     rag = RAGSystem({"rag": {
         "csv_path": str(source), "embedding_model": "offline-embedding",
+        "vector_store_path": str(store),
         "embedding_endpoint": "http://embedding.test/api/embeddings",
     }})
-    rag.molecules_df = pd.read_csv(source)
     calls = []
 
     def embed(request):
         payload = json.loads(request.content)
         calls.append(payload["prompt"])
-        assert ready, "uninitialized RAG must not call the embedding endpoint"
+        assert rag.is_initialized, "uninitialized RAG must not call the embedding endpoint"
         assert request.method == "POST"
         assert str(request.url) == rag.embedding_endpoint
         assert payload["model"] == rag.embedding_model_name
@@ -76,11 +76,14 @@ def test_default_app_factory_rag_workflow_api(tmp_path, monkeypatch, ready, lega
     transport = httpx.MockTransport(embed)
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request",
                         lambda self, request: transport.handle_request(request))
-    asyncio.run(rag._load_or_create_index(str(store)))
+    asyncio.run(rag.initialize())
+    assert rag.is_initialized
     assert rag.index_status == "loaded"
     assert rag.manifest == persisted
     assert rag.manifest.row_mapping == [0, 2]
     assert calls == []
+    assert RAGSearchTool(rag).execute('baseline')['success'] is True
+    calls.clear()
     rag.is_initialized = ready
     app = MolecularChatApp.__new__(MolecularChatApp)
     app.model = object()
@@ -180,39 +183,25 @@ def test_unknown_factory_tool_is_not_silently_filtered():
 
 
 @pytest.mark.parametrize("name", ["rag_search", "rag_database_search"])
-def test_default_rag_owner_accepts_canonical_and_alias(name):
+def test_default_rag_owner_accepts_canonical_and_alias(name, tmp_path, monkeypatch):
     from src.agent.specialists import AgentTask
     from src.agent.tooling import RetryPolicy
-    # Keep the ownership test on the actual RAG tool/adapter boundary. These
-    # source fields are synthetic contract fixtures, not scientific evidence.
-    rows = [{"source_index": 0, "similarity_score": 0.75,
-             "source": "synthetic-db", "SMILES": "CCO",
-             "provenance": {
-                 "source_path": "synthetic.csv", "source_sha256": "a" * 64,
-                 "index_sha256": "b" * 64, "embedding_model": "offline-test",
-                 "manifest_schema_version": 2, "builder_version": "1",
-                 "vector_label": 0,
-             }}]
-    calls = []
-
-    class Service:
-        is_initialized = True
-        vector_index = object()
-        embedding_model_name = "offline-test"
-
-        def search_similar_molecules_sync(self, query, k=3):
-            calls.append((query, k))
-            return rows
-
-    registry = build_tool_registry([RAGSearchTool(Service())])
+    from tests.agent.test_rag_receipt_consumption import initialized_service
+    service, calls = initialized_service(tmp_path, monkeypatch)
+    rows = service.search_similar_molecules_sync_with_receipt('CCO', k=3)['records']
+    calls.clear()
+    registry = build_tool_registry([RAGSearchTool(service)])
     specialist = build_default_specialists()["rag"]
     task = AgentTask(task_id="rag-1", trace_id="trace-1", agent_name="rag", objective="retrieve", inputs={"query": "CCO"},
         allowed_tools=[name], dependencies=[], retry_policy=RetryPolicy(),
         timeout_seconds=5, idempotency_key="rag-1", metadata={})
-    result = specialist.execute_task(task, registry)
-    assert result.status == "succeeded"
-    assert result.tool_results[0].data == rows
-    assert calls == [("CCO", 3)]
+    try:
+        result = specialist.execute_task(task, registry)
+        assert result.status == "succeeded"
+        assert result.tool_results[0].data == rows
+        assert calls == [{'model': 'synthetic-only', 'prompt': 'CCO'}]
+    finally:
+        registry.close()
 
 
 @pytest.mark.parametrize("capability", CAPABILITY_CATALOG, ids=lambda item: item.name)
@@ -315,12 +304,18 @@ def test_app_precheck_rejects_missing_required_tool_without_constructing_models(
             app.agent_tool_registry.close()
 
 
-def test_rag_readiness_can_recover_without_reregistering():
-    state = SimpleNamespace(is_initialized=False, vector_index=None)
+def test_rag_readiness_can_recover_without_reregistering(tmp_path, monkeypatch):
+    import asyncio
+    from tests.agent.test_rag_receipt_consumption import initialized_service
+    state, _ = initialized_service(tmp_path, monkeypatch)
+    state.is_initialized = False
     registry = build_tool_registry([RAGSearchTool(state)])
-    assert not registry.health()[0]["available"]
-    state.is_initialized, state.vector_index = True, object()
-    assert registry.resolve("rag_database_search").health()["available"]
+    try:
+        assert not registry.health()[0]["available"]
+        asyncio.run(state.initialize())
+        assert registry.resolve("rag_database_search").health()["available"]
+    finally:
+        registry.close()
 
 
 def test_optional_adapter_unavailable_is_reported_without_blocking_others():

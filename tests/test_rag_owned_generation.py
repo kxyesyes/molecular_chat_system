@@ -286,11 +286,26 @@ def test_strict_actual_initialize_receipt_and_single_search(tmp_path, monkeypatc
     request_start = len(http.requests)
     searches = []
     index_type = type(rag._generation.index)
-    original = index_type.search
-    def counted(index, vector, k):
+    # Both real controls remain outside the owned invocation's search probe.
+    # A clone alone need not have the same Python wrapper class on every FAISS.
+    unrelated = index_type(rag._generation.index.d)
+    unrelated.metric_type = rag._generation.index.metric_type
+    if rag._generation.index.ntotal:
+        unrelated.add(rag._generation.index.reconstruct_n(0, rag._generation.index.ntotal))
+    assert type(unrelated) is index_type
+    probe = np.asarray([[1., 0.]], dtype=np.float32)
+    controls = [(index, index.search(probe, 2)) for index in (unrelated, rag.vector_index)]
+    owned_index = rag._generation.index
+    original = owned_index.search
+    def counted(vector, k):
         searches.append((vector.copy(), k))
-        return original(index, vector, k)
-    monkeypatch.setattr(index_type, 'search', counted)
+        return original(vector, k)
+    monkeypatch.setattr(owned_index, 'search', counted)
+    for index, expected in controls:
+        actual = index.search(probe, 2)
+        np.testing.assert_array_equal(actual[0], expected[0])
+        np.testing.assert_array_equal(actual[1], expected[1])
+    assert searches == [], 'owned search probe must not intercept other real indexes'
     # Legacy public overrides are not evidence of the strict request identity.
     monkeypatch.setattr(rag, 'get_embedding_sync', lambda query: pytest.fail('legacy override used'))
     result = strict(rag)
@@ -387,13 +402,13 @@ def test_strict_changes_invalidate_without_resurrection(tmp_path, monkeypatch, w
             return httpx.Response(200, json={'embedding': [1., 0.]})
         http.handler = embed
     else:
-        index_type = type(rag._generation.index)
-        original = index_type.search
-        def search(index, vector, k):
-            answer = original(index, vector, k)
+        owned_index = rag._generation.index
+        original = owned_index.search
+        def search(vector, k):
+            answer = original(vector, k)
             mutate()
             return answer
-        monkeypatch.setattr(index_type, 'search', search)
+        monkeypatch.setattr(owned_index, 'search', search)
     with pytest.raises(RAGIndexCompatibilityError):
         strict(rag)
     assert len(http.requests) == (0 if when == 'before' else 1)
@@ -483,8 +498,11 @@ def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation
     rag, _, _, _, _ = make_loaded_source(tmp_path)
     http = SyntheticHTTP(monkeypatch)
     asyncio.run(rag.initialize())
+    owned_index = rag._generation.index
+    owned_generation = rag._generation.identity
+    index_type = type(owned_index)
     calls = []
-    def malformed(index, vector, k):
+    def malformed(vector, k):
         calls.append(k)
         if malformation == 'extra':
             return np.asarray([[1., .5, 0.]]), np.asarray([[0, 1, 0]])
@@ -495,10 +513,23 @@ def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation
         if malformation == 'label':
             return np.asarray([[1., .5]]), np.asarray([[0, -1]])
         return np.asarray([[1., np.nan]]), np.asarray([[0, 1]])
-    monkeypatch.setattr(type(rag._generation.index), 'search', malformed)
+    monkeypatch.setattr(owned_index, 'search', malformed)
     result = strict(rag)
     diagnostics = result['receipt']['diagnostics']
-    assert diagnostics['status'] == 'invalid_discard'
+    assert diagnostics['status'] == 'invalid_discard', {
+        # Failure-only inspection: do not bind/read the method before dispatch,
+        # introduce another search, or weaken any result/transport assertion.
+        'calls': calls,
+        'same_index': rag._generation.index is owned_index,
+        'same_generation': rag._generation.identity == owned_generation,
+        'returned_same_generation': result['receipt']['generation_id'] == owned_generation,
+        'instance_hook': owned_index.search is malformed,
+        'instance_dict_hook': vars(owned_index).get('search') is malformed,
+        'index_type': index_type.__name__,
+        'index_module': index_type.__module__,
+        'metaclass': type(index_type).__name__,
+        'faiss_version': faiss.__version__,
+    }
     assert diagnostics['reason_codes'] == [{'extra': 'invalid_result_shape', 'short': 'invalid_result_shape',
                                            'duplicate': 'duplicate_hit', 'label': 'invalid_label',
                                            'score': 'invalid_score'}[malformation]]
@@ -811,7 +842,7 @@ def test_failed_search_still_invalidates_changed_configuration(tmp_path, monkeyp
         rag.embedding_endpoint = 'http://synthetic-other.invalid/embeddings'
         raise RuntimeError('synthetic failed search or projection')
     if phase == 'backend':
-        monkeypatch.setattr(type(rag._generation.index), 'search', fail)
+        monkeypatch.setattr(rag._generation.index, 'search', fail)
     else:
         monkeypatch.setattr('src.rag.retrieval._project_record', fail)
     with pytest.raises(RuntimeError, match='synthetic failed'):

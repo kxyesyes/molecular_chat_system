@@ -15,6 +15,8 @@ from src.agent.contracts import (
     AgentErrorCode, AgentExecutionError, ObservationStatus, ToolProvenance,
     ToolResult, WorkflowArtifact,
 )
+from src.rag.receipt import canonical_digest, validate_retrieval_envelope
+from src.agent.persistence.redaction import redact_sensitive
 
 from .adapters import LegacyPythonToolAdapter
 
@@ -123,6 +125,45 @@ class _InvalidRAGOutput(Exception):
     """Private marker separating our validation from the caller's validator."""
 
 
+def _proof_digest(raw, *, query=None, normalized=False, sensitive_fields=None):
+    """Check optional proof without changing generic receipt-free contracts."""
+    fields = vars(raw) if isinstance(raw, ToolResult) else raw
+    if not isinstance(fields, dict):
+        return None
+    evidence = fields.get('evidence') or []
+    receipts = [entry['retrieval_receipt'] for entry in evidence
+                if isinstance(entry, dict) and 'retrieval_receipt' in entry]
+    if not receipts:
+        return None
+    if len(receipts) != 1:
+        raise ValueError('Conflicting retrieval receipts')
+    envelope = validate_retrieval_envelope(
+        {'records': fields.get('data'), 'receipt': receipts[0]}, query=query)
+    status, success, error = fields.get('status'), fields.get('success'), fields.get('error')
+    outcome = envelope['receipt']['diagnostics']['status']
+    if outcome in {'valid_hits', 'valid_empty'}:
+        legal = (success is True and error is None and
+                 (status is ObservationStatus.SUCCEEDED if normalized else
+                  status in (None, 'succeeded', ObservationStatus.SUCCEEDED)))
+    else:
+        structured_error = (isinstance(error, AgentExecutionError)
+                            and error.code is AgentErrorCode.INVALID_OUTPUT) if normalized else (
+            (type(error) is dict and error.get('code') == 'invalid_output') or
+            (isinstance(error, AgentExecutionError) and error.code is AgentErrorCode.INVALID_OUTPUT))
+        legal = (success is False and structured_error and
+                 (status is ObservationStatus.PARTIAL if normalized else
+                  status in ('partial', ObservationStatus.PARTIAL)))
+    if not legal:
+        raise ValueError('Invalid proof observation status')
+    # Compare the native codec, not Python equality (True == 1), and include
+    # evidence extensions. Never repair hashes after security redaction.
+    covered = {'data': fields['data'], 'evidence': evidence}
+    digest = canonical_digest(covered)
+    if canonical_digest(redact_sensitive(covered, sensitive_fields)) != digest:
+        raise ValueError('Proof changes under security normalization')
+    return digest
+
+
 class RAGToolAdapter(LegacyPythonToolAdapter):
     def _validate_input(self, input_data: Any) -> Any:
         if isinstance(input_data, str):
@@ -143,7 +184,10 @@ class RAGToolAdapter(LegacyPythonToolAdapter):
         )
 
     def _invoke_guarded(self, payload: Any, raw_validator) -> Any:
+        proof = None
+
         def validate(raw):
+            nonlocal proof
             if raw_validator is not None:
                 raw_validator(raw)
             try:
@@ -153,20 +197,42 @@ class RAGToolAdapter(LegacyPythonToolAdapter):
                     RAGRawOutput.model_validate(raw)
                 else:
                     RAGRawOutput.model_validate({"success": True, "data": raw})
-            except ValidationError:
+                proof = _proof_digest(raw, query=payload, normalized=isinstance(raw, ToolResult),
+                                      sensitive_fields=self.spec.sensitive_fields)
+            except (ValueError, TypeError, RecursionError):
                 raise _InvalidRAGOutput from None
 
         try:
             # Executes once, inside the existing worker/slot/deadline. The legacy
             # adapter alone performs compat normalization and provenance handling.
-            return super()._invoke_guarded(payload, validate)
+            result = super()._invoke_guarded(payload, validate)
         except _InvalidRAGOutput:
             return self._invalid_output()
+        try:
+            if _proof_digest(result, query=payload, normalized=True,
+                             sensitive_fields=self.spec.sensitive_fields) != proof:
+                return self._invalid_output()
+            return result
+        except (ValueError, TypeError, RecursionError):
+            return self._invalid_output()
+
+    def _normalize(self, raw: Any, elapsed_ms: int) -> ToolResult:
+        # This is the existing worker's normalization hook, not another tool
+        # execution. Per-call snapshots avoid adapter state/concurrency coupling.
+        try:
+            proof = _proof_digest(raw, normalized=True, sensitive_fields=self.spec.sensitive_fields)
+            result = super()._normalize(raw, elapsed_ms)
+            if _proof_digest(result, normalized=True, sensitive_fields=self.spec.sensitive_fields) != proof:
+                return self._invalid_output(elapsed_ms)
+            return result
+        except (ValueError, TypeError, RecursionError):
+            return self._invalid_output(elapsed_ms)
 
     def _validate_output(self, result: ToolResult) -> ToolResult:
         try:
             self.spec.output_schema.model_validate(vars(result))
-        except ValidationError:
+            _proof_digest(result, normalized=True, sensitive_fields=self.spec.sensitive_fields)
+        except (ValueError, TypeError, RecursionError):
             return self._invalid_output(result.elapsed_ms)
         # Never project a model_dump into data or metadata (including CSV extras).
         return result
