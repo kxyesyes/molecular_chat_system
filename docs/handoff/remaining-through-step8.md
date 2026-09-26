@@ -11,10 +11,10 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| Reverse receipt consumer | Draft PR88 head99aec97; SOURCE/QUALITY approve, aligned-main17-module1926 passed83.25s after independent alignment review | CI36253262488 queued at publication; no merge until fresh exact-head gates |
+| Reverse receipt consumer | PR88 MERGED fb62f53 after CI36253262488 success8/8; reviewed/landed tree dd2de4c4 equal; aligned1926 passed | Later load-free current-source hooks remain separate |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally complete: SOURCE/QUALITY approve, worker865 passed67.60s and independent865 passed65.61s; no activation | Task5 same-socket continuation released after commit; Tasks6–8 still pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d: SOURCE/QUALITY approve, worker865 passed67.60s and independent865 passed65.61s; no activation | Linnaeus implements Task5 same-socket continuation and owns sole local scientific test slot; Tasks6–8 still pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -23,6 +23,16 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+2026-09-27: PR88 reviewed99aec97 CI36253262488 passed8/8; Agent9801 passed,
+1 skipped,23858 warnings575.08s; root2873 passed,75 skipped,5 warnings237.74s.
+Parent rechecked exact head/base/main and all required checks, complete review
+pagination with zero threads/changes requests, marked ready and SHA-guarded squash
+merged fb62f5322e1e299e6e871970476e46379817fc23. Fresh fetch verifies tree
+dd2de4c47702e4f4db0e08972245ff0158122c9e equals reviewed head. No direct main
+commit/deployment/model activation. CI successes are not performance-root-cause
+proof or final P8 evidence. Task4 locally committed f887f6d; fresh Task5 worker
+Linnaeus owns three allowed seams/additive continuation tests and the local slot.
 
 Task4 final SOURCE Beauvoir and fresh QUALITY Arendt approve seven-file freeze.
 Independent5223/3e9a73 exactsixunion passed865/7 warnings65.61s,exit0; all hashes
