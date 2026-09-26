@@ -31,7 +31,7 @@ also lose distinct PDE subtype identities. Neither is acceptable.
 ## Selected design
 
 Add a small positional recognizer to `src/agent/contracts/target_request.py`.
-It identifies ADME/ADMET spans only within a wholly consumed assessment clause.
+It identifies wholly consumed assessment-clause intervals with analytical roles.
 It does not alter original query bytes, target mentions, explicit-label scans,
 qualification scans, molecular parsing, obligations, journal or prefix seals.
 
@@ -55,12 +55,17 @@ Recognized clauses must:
    the recognizer decline the entire clause. It never searches forward past
    unknown text to manufacture a recognized clause.
 
-Use a deterministic forward scanner: action, item, join, item, end. Collect
-ADME/ADMET offsets provisionally and publish them only after full clause success.
-An unlabelled-list start at one of those exact offsets is not target inference.
+Use a deterministic forward scanner: action, item, join, item, end. Publish a
+clause interval only after full success. Exclude only inferred unlabelled-list
+starts (`list_matches`) inside that interval, never the combined `starts` list.
+This preserves analytical QED/LOGP items before or after ADMET as well as ADMET
+itself; excluding ADMET starts alone leaves false unknowns from sibling items.
 Never remove a word globally or filter `unknown` by value. Explicit target/for/
-against labels and their coordinated values keep precedence. The existing target
-enumeration and qualified checks continue to use the original text.
+against labels and their coordinated values keep precedence. `_LABEL`, `_FOR`,
+`TARGET_PATTERN` and qualification detection traverse the original text unchanged.
+Compute intervals once and consume them with an ordered cursor; do not check
+every token against every interval. An actual label alone may still supply the
+`explicit` flag; suppressing this redundant heuristic need not manufacture it.
 
 Negation/switching/selectivity remain visible and existing entry points reject
 them. Multiple complete activity items must retain all target identities, so
@@ -100,7 +105,8 @@ Task6. Its two native-wire receive timeouts remain independently unresolved.
 
 - TDD: exact positive request and bounded spelling/order/spacing variants fail
   before the correction; assert original query unchanged, PDE5A retained and no
-  false ADMET unknown. Include both ordering directions for analytical items.
+  false analytical unknown. Include QED before/after ADMET, LOGP/LogP case variants,
+  longer analytical lists, and both ordering directions for analytical items.
 - Explicit target:ADMET/against ADMET/for ADMET and PDE5A remain unknown, including
   a second explicit occurrence beside a valid analytical clause.
 - Preserve unknown identifiers before/after a target, ADMET2, two PDE subtypes or
@@ -118,3 +124,10 @@ Task6. Its two native-wire receive timeouts remain independently unresolved.
 
 This design is subject to independent source review before TDD release. Package7
 and package8 stay incomplete; deployment is excluded.
+
+## Source review correction
+
+Banach source review confirmed that exempting only ADMET starts is insufficient:
+QED can itself start a list containing ADMET and PDE5A. The selected whole-clause
+`list_matches` exclusion above corrects the design, while explicit/known-target
+traversal remains unchanged. This is source reasoning, not runtime evidence.
