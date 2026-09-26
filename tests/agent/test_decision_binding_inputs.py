@@ -686,16 +686,14 @@ def test_incidental_selection_does_not_gate_nonmolecular_inputs(
 
 @pytest.mark.parametrize('kind', ['rag', 'user_target'])
 @pytest.mark.parametrize('invalidity', ['expired', 'unavailable'])
-def test_task4b_gap_same_context_dispatch_still_rejects_incidental_selection(
+def test_task4b_same_context_dispatch_allows_incidental_selection(
         build, sources, selections, monkeypatch, kind, invalidity):
-    """Known integration gap, NOT desired behavior or an xfail/skip.
-
-    Preserve the original failing-success repro at the actual Session boundary:
-    resolver admission succeeds, but the unchanged global dispatch guard blocks
-    a non-consuming tool. Task4B must intentionally replace this gap assertion
-    with same-context successful dispatch coverage, without weakening molecular
-    reference checks. No Session guard is disabled or mocked here.
-    """
+    """Actual graph/Session with unchanged raw selection, no disabled guard."""
+    import asyncio
+    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.tooling.factory import build_tool_registry
+    from src.agent.runtime.worker_ownership import WorkerOwner
+    from test_decision_loop import ScriptedModel, tool as choose, finish, last_observation
     store, selected = selections
     if kind == 'rag':
         source = sources('rag')
@@ -705,20 +703,30 @@ def test_task4b_gap_same_context_dispatch_still_rejects_incidental_selection(
         from test_target_tool_contract import Service
         tool, query = TargetDatabaseTool(), '查找 EGFR 的结构'
         tool._service = Service('not_found')
-    case = attach(build(query, tools=[tool], store=store, selected=selected[0]))
+    context = AgentContext(query, 'incidental-loop', session_id='owner',
+        metadata={'browser_selection': 'retained'}, resolved_molecule=selected[0])
+    before = context_value(context, query_content_bytes=True)
     if invalidity == 'expired':
         import src.agent.persistence.scientific_references as references
         later = references.time.time() + 90000
         monkeypatch.setattr(references, 'time', SimpleNamespace(time=lambda: later))
     else:
         store.update_run_status(selected[0].trace_id, 'failed')
-    assert not owned(case, lambda: selected[0].revalidate(store, 'owner'))
-    assert owned(case, lambda: case.resolver.resolve(decision(tool.name))).input_data == {'query': query}
-    blocked = execute(case, decision(tool.name))
-    assert blocked.success is False
-    assert blocked.error.details['reason'] == 'scientific_reference_unavailable'
-    assert not case.calls[tool.name] and case.session.tool_attempt_count == 0
-    assert case.session.context.resolved_molecule == selected[0] and case.journal.head_turn == 0
+    registry = build_tool_registry([tool])
+    model = ScriptedModel([choose(tool.name), lambda messages: finish([
+        last_observation(messages)['quality']['evidence_id']])])
+    try:
+        loop = ModelDecisionLoop(model, registry, store, binding_profile=bindings.B1_PROFILE_REVISION)
+        result = asyncio.run(loop.run(context, request_kind='scientific', allowed_tools={tool.name},
+            required_tools={tool.name}, requirements=dict(version='2', profile=bindings.B1_PROFILE_REVISION),
+            worker_owner=WorkerOwner()))
+        assert result.success, result.metadata
+        assert result.metadata['tool_attempt_count'] == 1
+        assert result.tool_results[0].quality['binding_proof']['roles'] == []
+        assert context_value(context, query_content_bytes=True) == before
+        assert context.resolved_molecule == selected[0]
+    finally:
+        registry.close()
 
 
 @pytest.mark.parametrize('origin', ['obligation', 'observation'])

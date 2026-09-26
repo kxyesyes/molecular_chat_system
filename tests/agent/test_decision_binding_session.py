@@ -30,6 +30,54 @@ def proof():
             configuration_sha256='e' * 64, source_identity_sha256='f' * 64))
 
 
+@pytest.mark.parametrize('dynamic,guard', [(False, lambda *_: None), (True, False), (True, {})])
+def test_reference_guard_requires_dynamic_callable(build, dynamic, guard):
+    old, *_ = build()
+    with pytest.raises(SessionLifecycleError):
+        WorkflowRunSession(old.orchestrator, old.context, [], {}, dynamic=dynamic,
+                           reference_guard=guard)
+
+
+@pytest.mark.parametrize('value', [True, False, {}, [], 0, 'ok'])
+def test_reference_guard_requires_exact_none_and_journals_denial(build, value):
+    old, tool, *_ = build()
+    seen = []
+    def guard(step, input_data):
+        seen.append((step, input_data))
+        return value
+    session = WorkflowRunSession(old.orchestrator, AgentContext('fixture', 'guard-denial'),
+        [], {tool.name: tool}, dynamic=True, reference_guard=guard)
+    session.start()
+    original = old.steps[0]
+    session.append_step(original)
+    asyncio.run(decision_execution.settle_action(session))
+    assert len(seen) == 1 and seen[0][0] is session.steps[0]
+    assert seen[0][0] is not original
+    assert not tool.calls and session.tool_attempt_count == 0
+    assert not session.results[0].success
+    assert not session._step_journals[0].checkpoint_reused
+
+
+def test_reference_guard_replaces_provisional_checkpoint_before_reentry(build, monkeypatch):
+    old, tool, *_ = build()
+    calls = []
+    def guard(step, input_data):
+        calls.append(1)
+        raise DecisionBoundaryError('invalid_dynamic_binding')
+    session = WorkflowRunSession(old.orchestrator, AgentContext('fixture', 'guard-checkpoint'),
+        [], {tool.name: tool}, dynamic=True, reference_guard=guard)
+    session.start()
+    session.append_step(old.steps[0])
+    monkeypatch.setattr(session.orchestrator, '_compatible_checkpoint', lambda *a, **k: {'fixture': True})
+    monkeypatch.setattr(session.orchestrator, '_result_from_checkpoint',
+        lambda *a: ToolResult.success_result(tool.name, {'must_not_reuse': True}))
+    asyncio.run(decision_execution.settle_action(session))
+    assert calls == [1] and not tool.calls and session.tool_attempt_count == 0
+    assert not session.results[0].success and session.results[0].data is None
+    assert session.results[0].error.details['reason'] == 'invalid_dynamic_binding'
+    assert not session.reused_steps and not session._step_journals[0].checkpoint_reused
+
+
 BASE = dict(request_input_digest='request', input_evidence_ids=[], operation_key='initial')
 
 
