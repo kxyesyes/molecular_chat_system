@@ -142,3 +142,24 @@ The458-pass run remains valid for its actual assertions, not proof of those two
 properties. A bounded test-only worker is strengthening these controls; production
 changes are not authorized by that review. Corrected SOURCE and fresh QUALITY
 remain mandatory before Task5 implementation commit/publication.
+
+Lorentz strengthened the designated test file only. Controlled-clock assertions
+now separately prove pre-finalization credit/reserve and exact268 ->236 ->202
+balances. A synthetic embedding503 traverses the real RAG/adapter/Session/SQLite
+path to a genuinely failed persisted observation. The restoration test changes
+only existing error.details.reason and requires exact full-comparison rejection
+before fresh sealing; unchanged-failure controls must continue successfully while
+retaining the failed scientific observation.
+
+Focused changed controls54407/ef433b:4 passed7 warnings31.94s,exit0. Both full
+strengthened nodes87500/130fbe:6 passed7 warnings54.29s, process/runner exit0:
+
+```text
+python -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_b1_normal_web_continuation.py::test_b1_same_socket_original_smiles_target_new_loops tests/agent/test_b1_normal_web_continuation.py::test_b1_web_error_details_restore
+```
+
+Test SHA256 `A20167A52D67AC99889BB19FB567A7C9DCF539FD31129DBC2FDEF9059D68B434`;
+all three production hashes and runner above unchanged. Curie corrected SOURCE
+approves both sufficiency corrections. Harvey fresh QUALITY owns the sole local
+test slot for the exact four-module union U; no union terminal is claimed yet.
+No production mutation experiment was run or represented as evidence.

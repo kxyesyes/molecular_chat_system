@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | Independent SOURCE/QUALITY approve; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 head3d6a872 | CI36255095764 failed: Agent exit124 at600s/~97%, six other partitions passed. No merge; independent CI capacity partition under review |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 reverse-only correction458 passed490.55s; fresh SOURCE found elapsed-credit/error-details test sufficiency gaps | Lorentz strengthens only those tests; corrected SOURCE/fresh QUALITY and Tasks6–8 pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 corrected SOURCE approves stronger exact-credit/details-only controls; focused6 passed54.29s | Harvey fresh QUALITY owns exact4-module union test slot; final union and Tasks6–8 pending |
 | CI complete Agent capacity partition | Corrected SOURCE/QUALITY approve; parent34 passed2 skips23.77s and independent34 passed2 skips22.63s; draft PR90 headfdd7680, CI36260272170 running | Actual Linux collection equality and nine CI checks; not a performance fix |
 | Target execution guard integration | SOURCE/QUALITY approve; parent437 passed26.25s and independent437 passed57.02s; committed b706d25 | Align CI prerequisite before publication; not yet pushed or merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -36,8 +36,8 @@ No merge yet. Original PR89 remains open/draft at3d6a872 and main remainsfb62f53
 
 Target guard localb706d253888039c51fc99681f3626c6f1c5982eb is committed after
 independent437-pass QUALITY and parent compile/diff/credential checks. Publication
-waits for CI prerequisite alignment. Next foundation plan is independently
-reviewed from local5a4a237 on a separate worktree; no foundation code is copied
+waits for CI prerequisite alignment. Next foundation plan is under independent
+review from local5a4a237 on a separate worktree; no foundation code is copied
 yet, and the source-hook/target prerequisites must actually land before release.
 
 Parent correction follow-up: Task5 final union85833/045e64 terminated with
