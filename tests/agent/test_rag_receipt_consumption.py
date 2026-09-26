@@ -609,6 +609,33 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
     assert baseline['success']
     requests.clear()
     monkeypatch.setattr(index_type, 'search', search)
+    # Bounded failure diagnostics for native SWIG variants. Never include
+    # exception messages, retrieved records or full machine paths.
+    diagnostics = []
+    strict_search = service.search_similar_molecules_sync_with_receipt
+
+    def traced_search(*args, **kwargs):
+        index = service._generation.index
+        bound = index.search
+        diagnostics.append({
+            'index_type': type(index).__name__,
+            'same_class': type(index) is index_type,
+            'class_hook': type(index).search is search,
+            'bound_hook': getattr(bound, '__func__', None) is search,
+            'instance_shadow': 'search' in vars(index),
+        })
+        try:
+            return strict_search(*args, **kwargs)
+        except Exception as exc:
+            frames, trace = [], exc.__traceback__
+            while trace is not None:
+                frames.append((Path(trace.tb_frame.f_code.co_filename).name,
+                               trace.tb_frame.f_code.co_name, trace.tb_lineno))
+                trace = trace.tb_next
+            diagnostics.append({'exception_type': type(exc).__name__, 'frames': frames[-8:]})
+            raise
+
+    monkeypatch.setattr(service, 'search_similar_molecules_sync_with_receipt', traced_search)
     registry = build_tool_registry([RAGSearchTool(service)])
     store = SQLiteAgentStateStore(tmp_path / 'session.sqlite')
     bus = AgentEventBus(state_store=store)
@@ -628,7 +655,10 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
         session.execute_step(0)
         observed = session.results[0]
         assert len(requests) == 1
-        assert searches == ([] if mode == 'empty' else [2])
+        assert searches == ([] if mode == 'empty' else [2]), {
+            'diagnostics': diagnostics, 'success': observed.success,
+            'error_code': observed.error.code.value if observed.error else None,
+        }
         assert observed.success is (mode != 'partial')
         receipt = observed.evidence[0]['retrieval_receipt']
         assert receipt['diagnostics']['status'] == {'hits': 'valid_hits', 'empty': 'valid_empty',
