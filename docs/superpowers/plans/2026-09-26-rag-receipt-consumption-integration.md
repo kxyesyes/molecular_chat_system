@@ -10,7 +10,7 @@
 
 ## Base and scope
 
-Preparation starts at reviewed PR83 head `950880a95ae138dcc07452d53da2f2020b1edc70` while that PR's CI runs. Do not publish this dependent branch before PR83 merges. After merge, require identical parent trees and transplant only this branch's committed delta onto the actual main squash; no edits to the original mixed checkout or accumulated B1 branch.
+Preparation started at reviewed PR83 head `950880a95ae138dcc07452d53da2f2020b1edc70` while that PR's CI ran. Its subsequent test-only repair43ea6fd is now fully incorporated with exact upstream blobs. PR83 merged as29502ca560ae1844f98290f84d85f2ab6b6fc750; reviewed/landed tree equality was verified. After R3 gates, commit its complete scoped delta, then transplant the clean branch onto that actual squash and require identical complete source trees. No edits to the original mixed checkout or accumulated B1 production files.
 
 Pre-extraction source-parent comparison is empty for the existing tool/adapter, three modified compatibility test files, Session, generic adapter and test conftests. `src/rag/service.py` intentionally differs because of PR83's two integration repairs.
 
@@ -32,16 +32,16 @@ Documents are this plan and the exact historical R3 specification. Its initial d
 
 ## Task 1: Exact extraction with repair preservation
 
-- [ ] Copy the seven non-service source/test files from commit `2d9fbdc` through apply_patch, checking Git blobs. Copy no accumulated handoff or unrelated runtime modules.
-- [ ] Apply only the service delta: remove its local `_canonical_digest` and `json` import, import `canonical_digest as _canonical_digest` from `src.rag.receipt`, and change receipt `source_path` from `str(config.source)` to captured `manifest.source_path`.
-- [ ] Verify `_copy_frame` still explicitly constructs object Series with their original dtype; `_legacy_candidate` still hashes/parses same CSV bytes and rejects mismatched detached frame before load/build/transport. Keep all PR83 tests byte-identical.
-- [ ] Repin only the existing isolated launcher's REPO path to this new worktree using apply_patch. Record its hash; no host environment/configuration/model/asset reads by tests.
+- [x] Copy the seven non-service source/test files from commit `2d9fbdc` through apply_patch, checking Git blobs. Copy no accumulated handoff or unrelated runtime modules. New review-driven corrections are separately recorded below.
+- [x] Apply only the service delta: remove its local `_canonical_digest` and `json` import, import `canonical_digest as _canonical_digest` from `src.rag.receipt`, and change receipt `source_path` from `str(config.source)` to captured `manifest.source_path`.
+- [x] Verify `_copy_frame` still explicitly constructs object Series with their original dtype; `_legacy_candidate` still hashes/parses same CSV bytes and rejects mismatched detached frame before load/build/transport. Keep all PR83 tests byte-identical to its final43ea6fd.
+- [x] Repin only the existing isolated launcher's REPO path to this new worktree using apply_patch. SHA256220D8B2D07BE845898ED495ACE8474D5B6F9390A93FA3530373263275C3EEDFA; no host environment/configuration/model/asset reads by tests.
 
 ## Task 2: Fresh integration review and regression
 
-- [ ] Independent SOURCE/SPEC review against the approved R3 spec and this base. For any new defect, reproduce RED before minimal repair; preserve failures and do not weaken contracts, assertions or deadlines.
-- [ ] After explicit sole-slot handover, execute the actual-tool focused positives and the ten-module union below. Existing source TDD is historical evidence, not a reason to fabricate a new RED for unchanged integration.
-- [ ] Independent fresh QUALITY reviewer checks the frozen scope and reruns the same union; report exact counts, skips/warnings, durations and terminal handles.
+- [x] Independent SOURCE/SPEC review against the approved R3 spec and this base. For any new defect, reproduce RED before minimal repair; preserve failures and do not weaken contracts, assertions or deadlines. Huygens approves the final ten Python hashes; no actionable findings. This is not an independently executed union.
+- [x] After explicit sole-slot handover, execute the actual-tool focused positives and the ten-module union below. Existing source TDD is historical evidence, not a reason to fabricate a new RED for unchanged integration. Final union59479:1138 passed/7 warnings/61.92s, exit0, chunk4f5452; includes strict positives and expanded fault controls.
+- [x] Independent fresh QUALITY reviewer checks the frozen scope and reruns the same union; report exact counts, skips/warnings, durations and terminal handles. Epicurus APPROVE:1138 passed/0 skipped/7 warnings/60.31s, exit0, handle18301 terminal chunk5e7757; no rerun.
 
 ```powershell
 & C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_rag_receipt_consumption.py::test_actual_tool_refuses_list_only_service tests/agent/test_rag_receipt_consumption.py::test_actual_empty_tool_retains_receipt
@@ -53,7 +53,7 @@ Historical R3 source evidence: initial two behavioral RED nodes failed because l
 ## Task 3: Focused publication
 
 - [ ] In-memory compile the eight Python files, diff-check, original-worktree preservation check, exact staging and filename-only credential pattern check. Never stage scratch launchers or runtime assets.
-- [ ] Require PR83 actual merged tree equals preparation base, then rebase only clean new commits onto that squash and reconfirm identical complete source tree. If base changed beyond that equality, re-review/retest affected integration instead.
+- [ ] Require PR83 actual merged tree equals final43ea6fd, then rebase only clean new commits onto that squash and reconfirm identical complete source tree. Parent verified this prerequisite equality; the R3 clean transplant is still pending. If base changed beyond that equality, re-review/retest affected integration instead.
 - [ ] Create one draft PR to main, attach it, require latest complete CI and no unresolved review findings, then delegated squash merge and verify reviewed/merged tree equality.
 
 ## Non-goals and remaining work
@@ -61,3 +61,103 @@ Historical R3 source evidence: initial two behavioral RED nodes failed because l
 No current-source eligibility activation in this slice; no B dispatch/reuse/resume, normal Web generation/ranking or final live P8 acceptance. Pure receipt validation is not producer authentication, does not verify embedding weights and does not retroactively authenticate old index files. Missing capability or invalid proof must remain unavailable/failed/partial, not successful fallback.
 
 The sole local test slot is currently held by the B1 continuation implementer. Preparation/review may proceed without tests; wait for explicit handover before starting pytest.
+
+## Integration finding: evidence-only security transformation
+
+Independent SOURCE/SPEC Hypatia found an evidence-only gap: an actual empty
+index can produce a valid receipt whose source_path contains credential-like
+synthetic text. Generic adapter normalization redacts data only; with data=[]
+the proof digest remains unchanged, but SQLite later redacts evidence, changing
+the receipt after the Session seal. Zero-accepted partials have the same risk.
+Parent traced adapter and SQLite redaction and selected a minimal proof-bearing
+RAG check: compare the existing security transformation of complete data/evidence
+against their original canonical digest, honoring spec sensitive_fields. Reject
+changes as invalid_output without repairing receipt/hash or weakening redaction.
+Generic receipt-free contracts remain unchanged. Add actual service-to-adapter-
+Session/SQLite RED/GREEN tests for empty and zero-accepted partial outcomes, with
+clean-name positive controls. Source findings are not executed test results yet.
+
+Parent holds the local test slot after B1's final union78513 (2041 passed532.36s)
+and subsequent expected RED96990 reached terminal. B1 is source-only until slot
+return. PR83's first Linux CI has16 fault-injection failures; its test-only fix
+and new CI are required before this dependent branch can publish. Later rebase
+must carry that exact owned-generation test fixture too, not restore950880a's
+older presumed FAISS class interception.
+
+Actual new four-node service/Session test:2 failed/2 passed/3 SWIG warnings/2.36s,
+exit1, chunk5597d5. The sensitive empty result remained success=true; sensitive
+zero-accepted partial retained data=[] and its mutable evidence. Minimal adapter
+check now rejects a changed canonical data/evidence digest under the unchanged
+security transform and passes spec sensitive_fields at every proof boundary.
+Focused GREEN:4 passed/3 SWIG warnings/1.79s, exit0, chunk04c545. Clean controls
+verify complete receipt equality apart from the expected fresh invocation_id;
+ledger, live seals, events and actual SQLite output agree. Full union and
+corrected independent review remain pending. Slot returned to B1 afterwards.
+
+Corrected SOURCE/SPEC confirms the original evidence-only P2 is fixed at source
+level. Its P3 requested a successful actual strict-tool baseline before injecting
+the new partial FAISS fault; parent added that baseline with valid_empty/valid_hits
+checks. That final added assertion is not yet rerun. The existing Session test
+and index-manifest strict-fault test also presume IndexFlatIP.search; scope the
+same proven PR83 concrete-class repair and variant reproduction before the full
+R3 union. No passing integration is claimed until these gates complete.
+
+Hypatia's final SOURCE/SPEC approves the bounded security correction including
+the pre-fault positive baseline (adapter blob69245d3, new-test blobc62a7e4), with
+no remaining P2/P3 finding in that correction. This is source-only approval;
+concrete-class follow-up, final delta review, ten-module union and fresh QUALITY
+remain open. Reviewer ran no tests and did not count the prior four-node GREEN
+as covering the subsequently added baseline.
+
+### Concrete-class test follow-up
+
+Use one opt-in, lazy-import fixture in tests/conftest.py for the two R3 test
+modules. Its default native branch has no loader mutation. Explicit parametrized
+tests also load an equivalent actual base IndexFlat with IP metric, checking
+dimension, vector count and exact reconstructed vectors. This follows the
+already reviewed PR83 reproduction, without editing PR83's owned-generation
+tests or production code. The actual Session receipt/tamper test and strict
+manifest fault test retain their original assertions; also repeat the four
+security-transformation controls under both loader variants. First run the
+expanded tests with the old IndexFlatIP interception to reproduce the blind
+spot, then patch only the actual owned index class and rerun. No pytest is
+started while the B1 worker holds the sole local test slot.
+
+After B1 union79040 reached terminal (2072 passed590.44s) and its next two-node
+RED completed, parent received the slot explicitly. Expanded R3 RED with old
+class interception:8 failed/22 passed/3 SWIG warnings/6.26s, exit1, chunk636a31.
+Six actual Session nonempty searches were not intercepted and two strict
+manifest faults still returned success. Native controls and empty/security
+controls passed. Changing only the two interceptions to the concrete owned
+index class produced30 passed/3 warnings/5.91s, exit0, chunk068337. The final
+security-test positive baseline is therefore now exercised, not merely reviewed.
+Slot returned to B1 immediately; full union and independent QUALITY still pending.
+
+The exact upstream43ea6fd owned-generation test patch has also been carried
+forward (Git blobb83b25f1f5b0799e9285331cb967292abded6518, identical to PR83).
+This is inherited prerequisite work, not a new R3 source repair. Publication
+must compare against the actual updated PR83 squash, not obsolete950880a.
+
+Focused command (RED and GREEN used the same targets):
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_rag_receipt_consumption.py::test_real_dynamic_session_receipt_ledger_seal_and_persistence tests/test_rag_index_manifest.py::test_shared_search_skips_invalid_labels_and_empty_hits tests/agent/test_rag_receipt_consumption.py::test_evidence_only_redaction_rejected_before_session_seal
+```
+
+Final implementer ten-module union (exact command above) completed1138 passed,
+zero failures/skips,7 warnings in61.92s, exit0, handle59479 terminal chunk4f5452.
+Warnings are three SWIG and four FastAPI on_event deprecations. Parent compiled
+all ten reviewed Python files in memory and checked diffs without application
+imports or bytecode writes. Epicurus's independent source-quality inspection
+found no actionable issues and verified all hashes, but its runtime approval
+remains pending: sole local slot explicitly transferred to it for one repeat.
+
+Independent QUALITY is now complete: Epicurus APPROVE with no actionable
+findings, exact ten-module repeat1138 passed/0 failed/0 skipped/7 warnings/60.31s,
+exit0, handle18301 terminal chunk5e7757. All ten source/test SHA256 values and
+launcher hash matched before/after and final rechecka65066; scoped diff check
+passed. Reviewer made no edits or commits. Slot returned to parent then B1.
+The prior source-only statements above are historical, not outstanding gates.
+Parent's scoped filename-only credential pattern scan found no matches; this
+is not a whole-history security audit. Clean commit/transplant and new exact-head
+CI remain required before publication can be merged.

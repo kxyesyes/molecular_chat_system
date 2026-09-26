@@ -2,6 +2,7 @@
 import logging
 from typing import Any, Dict
 
+from src.rag.receipt import validate_retrieval_envelope
 from src.web.rag_presentation import format_rag_context
 from .base_tool import BaseMolecularTool
 
@@ -26,7 +27,8 @@ class RAGSearchTool(BaseMolecularTool):
         """Local readiness only; never initialize an index or contact a model."""
         ready = bool(self.rag_system is not None
                      and getattr(self.rag_system, "is_initialized", False)
-                     and getattr(self.rag_system, "vector_index", None) is not None)
+                     and getattr(self.rag_system, "vector_index", None) is not None
+                     and callable(getattr(self.rag_system, "search_similar_molecules_sync_with_receipt", None)))
         return {"available": ready, "message": "ready" if ready else "RAG index is not initialized"}
 
     def should_use(self, query: str) -> bool:
@@ -35,26 +37,52 @@ class RAGSearchTool(BaseMolecularTool):
         return any(word in query.lower() for word in keywords)
 
     def execute(self, query: str, **kwargs) -> Dict[str, Any]:
-        if self.rag_system is None:
-            return {"success": False, "data": [], "error": "RAG service has not been injected"}
+        unavailable = "RAG retrieval unavailable: initialization, source/index compatibility or embedding failure"
+        strict_search = getattr(self.rag_system, "search_similar_molecules_sync_with_receipt", None)
+        if not callable(strict_search) or not getattr(self.rag_system, "is_initialized", False):
+            return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
+        k = kwargs.get("k", 3)
         try:
-            results = self.rag_system.search_similar_molecules_sync(query, k=kwargs.get("k", 3))
+            envelope = strict_search(query, k=k)
         except Exception:
             logger.warning("RAG tool retrieval failed; no unverified records returned")
-            return {"success": False, "data": [],
-                    "error": "RAG retrieval unavailable: initialization, source/index compatibility or embedding failure"}
-        return {
-            "success": True,
+            return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
+        try:
+            # None means "not supplied" only in the pure validation API, not
+            # for an explicit legacy execute(k=None) request.
+            if type(k) is not int or k < 1:
+                raise ValueError("Invalid RAG result count")
+            envelope = validate_retrieval_envelope(envelope, query=query, k=k)
+        except ValueError:
+            return self._failure("invalid_output", "RAG output validation failed", "invalid_receipt")
+        results, receipt = envelope['records'], envelope['receipt']
+        retrieval_status = receipt['diagnostics']['status']
+        partial = retrieval_status == 'invalid_discard'
+        result = {
+            "success": not partial,
             "data": results,
-            "summary": format_rag_context(results),
-            "message": (f"Found {len(results)} similar molecules." if results
-                        else "No similar molecules found in the local database."),
             "evidence": [{
                 "source": "local_rag_vector_index",
                 "record_count": len(results),
-                "embedding_model": self.rag_system.embedding_model_name,
+                "embedding_model": receipt['embedding_model'],
                 "records": [dict(row["provenance"], source_index=row["source_index"]) for row in results],
+                "retrieval_receipt": receipt,
             }],
             "quality": {"tool_name": "rag_search", "alias": "rag_database_search",
-                        "database_initialized": True},
+                        "database_initialized": True, "retrieval_status": retrieval_status},
         }
+        if partial:
+            message = "RAG retrieval contained invalid results; accepted rows are diagnostic partial data only."
+            result.update(status="partial", message=message, warnings=[message],
+                          error={"code": "invalid_output", "message": message,
+                                 "details": {"reason": "invalid_discard"}})
+        else:
+            result.update(summary=format_rag_context(results),
+                          message=(f"Found {len(results)} similar molecules." if results else
+                                   "The verified vector index has no searchable vectors."))
+        return result
+
+    @staticmethod
+    def _failure(code, message, reason):
+        return {"success": False, "data": [],
+                "error": {"code": code, "message": message, "details": {"reason": reason}}}

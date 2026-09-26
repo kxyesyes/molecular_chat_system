@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
-import json
 import logging
 from pathlib import Path
 from threading import RLock
@@ -18,6 +17,7 @@ import pandas as pd
 import numpy as np
 
 from src.rag.retrieval import search_molecular_index, search_molecular_index_outcome
+from src.rag.receipt import canonical_digest as _canonical_digest
 from src.rag.index import (
     CURRENT_SCHEMA_VERSION,
     RAGIndexCompatibilityError,
@@ -67,27 +67,6 @@ def _copy_frame(frame):
             index=frame.index, dtype=frame[column].dtype,
         )
     return result
-
-
-def _canonical_digest(value):
-    """Receipt codec, deliberately distinct from downstream ledger codecs."""
-    def require_plain_json(item):
-        if type(item) in (str, int, float, bool, type(None)):
-            return
-        if type(item) is list:
-            for child in item:
-                require_plain_json(child)
-            return
-        if type(item) is dict and all(type(key) is str for key in item):
-            for child in item.values():
-                require_plain_json(child)
-            return
-        raise TypeError('RAG receipt requires native JSON values and string keys')
-
-    require_plain_json(value)
-    body = json.dumps(value, ensure_ascii=False, sort_keys=True,
-                      separators=(',', ':'), allow_nan=False).encode('utf-8')
-    return hashlib.sha256(body).hexdigest()
 
 
 @asynccontextmanager
@@ -544,7 +523,7 @@ class RAGSystem:
             'schema_version': '1', 'validation_revision': 'rag-owned-generation-v1',
             'invocation_id': invocation, 'generation_id': generation.identity,
             'input_sha256': hashlib.sha256(query.encode('utf-8')).hexdigest(),
-            'source_path': str(config.source), 'source_sha256': generation.source_digest,
+            'source_path': manifest.source_path, 'source_sha256': generation.source_digest,
             'source_row_count': len(generation.frame), 'index_sha256': generation.index_digest,
             'row_mapping_sha256': _canonical_digest(manifest.row_mapping),
             'vector_dimension': int(generation.index.d), 'vector_count': int(generation.index.ntotal),

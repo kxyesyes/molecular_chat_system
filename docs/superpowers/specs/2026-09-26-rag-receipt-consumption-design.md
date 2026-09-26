@@ -136,6 +136,16 @@ rescue success. Preservation of CSV/provenance extensions applies only when
 unchanged under the native JSON codec after normalization. Include a token_count
 extension and actual redaction-mutation regression, not just mocked normalization.
 
+Integration clarification: generic adapter normalization currently transforms
+data but not every evidence field. Therefore proof-bearing RAG must also compare
+the full proof-covered data/evidence against the existing redact_sensitive
+transformation (including tool sensitive_fields) before accepting its digest.
+Empty-record and zero-accepted-partial receipts can carry sensitive source names
+only in evidence; reject those as invalid_output before Session sealing and
+SQLite redaction can diverge. Do not change the security transformer, repair the
+receipt, or tighten unrelated receipt-free outputs. Test actual service/adapter/
+Session/SQLite with clean-source positive controls and synthetic sensitive paths.
+
 This does not retroactively certify generic synthetic ResultTool outputs without
 receipts. Actual production RAGSearchTool requires proof; future B dispatch and
 finish/reuse rules must independently require that proof, not trust canonical

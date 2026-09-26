@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import httpx
 import pandas as pd
 import pytest
 
@@ -47,6 +48,19 @@ def _make_index(dimension: int, vectors: list[list[float]]):
     if vectors:
         index.add(np.asarray(vectors, dtype=np.float32))
     return index
+
+
+def _synthetic_http(monkeypatch, vector):
+    """Keep real clients and methods; substitute only the HTTP transport."""
+    def response(request):
+        return httpx.Response(200, content=json.dumps({'embedding': vector}).encode('utf-8'),
+                              headers={'content-type': 'application/json'})
+    transport = httpx.MockTransport(response)
+    monkeypatch.setattr(httpx.HTTPTransport, 'handle_request',
+                        lambda self, request: transport.handle_request(request))
+    async def async_response(self, request):
+        return await transport.handle_async_request(request)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', async_response)
 
 
 def _make_manifest(
@@ -137,13 +151,12 @@ def test_index_records_source_row_mapping_and_search_resolves_faiss_label(tmp_pa
     assert results[0]["provenance"]["vector_label"] == 1
     assert results[0]["provenance"]["source_sha256"] == file_sha256(source_path)
 
-    # Exercise the real Agent tool, not a copied iloc/mapping expression.
-    from types import SimpleNamespace
-    from src.agent.tools.rag_search_tool import RAGSearchTool
-    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SimpleNamespace(
-        status_code=200, json=lambda: {"embedding": [0.0, 1.0]},
-    ))
-    monkeypatch.setattr(rag, "get_embedding_sync", lambda text: np.asarray([0.0, 1.0]), raising=False)
+    # Legacy helper/public readiness is not an owned generation. Load the actual
+    # saved pair through initialize before the positive production-tool check.
+    assert RAGSearchTool(rag).execute('third molecule', k=2)['success'] is False
+    _synthetic_http(monkeypatch, [0., 1.])
+    asyncio.run(rag.initialize())
+    assert rag.is_initialized and rag.index_status == 'loaded'
     tool_result = RAGSearchTool(rag_system=rag).execute("third molecule", k=2)
     assert tool_result["success"] is True
     assert tool_result["data"][0]["SMILES"] == "CCC"
@@ -501,26 +514,20 @@ def test_atomic_pair_fsyncs_both_temps_before_replacing_index_then_manifest(
 
 
 @pytest.fixture
-def retrieval_service(tmp_path, monkeypatch):
+def retrieval_service(tmp_path, monkeypatch, rag_ip_loader):
     source = tmp_path / "molecules.csv"
-    frame = _write_source(source)
+    _write_source(source)
     store = tmp_path / "vectors"
     atomic_save_index_pair(_make_index(2, [[1., 0.], [0., 1.]]),
                           Path(f"{store}.index"), _make_manifest(source), faiss_module=faiss)
     rag = RAGSystem({"rag": {"csv_path": str(source), "embedding_model": "model-a",
+                            "vector_store_path": str(store),
                             "embedding_endpoint": "http://embedding.test/api/embeddings"}})
-    rag.molecules_df = frame
-    asyncio.run(rag._load_or_create_index(str(store)))
+    _synthetic_http(monkeypatch, [0., 1.])
+    asyncio.run(rag.initialize())
     assert rag.index_status == "loaded"
-    rag.is_initialized = True
-    async def embedding(text):
-        return np.asarray([0., 1.])
-    monkeypatch.setattr(rag, "get_embedding", embedding)
-    monkeypatch.setattr(rag, "get_embedding_sync", lambda text: np.asarray([0., 1.]), raising=False)
-    # Legacy transport only: prevents real I/O while reproducing the old tool.
-    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SimpleNamespace(
-        status_code=200, json=lambda: {"embedding": [0., 1.]},
-    ))
+    assert rag.is_initialized
+    assert RAGSearchTool(rag).execute('baseline')['success'] is True
     return rag
 
 
@@ -531,14 +538,24 @@ def retrieval_service(tmp_path, monkeypatch):
     {"index_sha256": "0" * 64}, {"source_sha256": "0" * 64},
     {"embedding_model": "other-model"}, {"builder_version": "unknown"},
 ])
-def test_both_retrieval_entries_reject_untrusted_manifest(retrieval_service, mutation):
+def test_legacy_manifest_rejection_does_not_revoke_owned_source(retrieval_service, monkeypatch, mutation):
     rag = retrieval_service
+    baseline = RAGSearchTool(rag).execute('query')
+    assert baseline['success']
     rag.manifest = replace(rag.manifest, **mutation)
     assert asyncio.run(rag.search_similar_molecules("query")) == []
     result = RAGSearchTool(rag).execute("query")
-    assert result["success"] is False
-    assert not result.get("data")
-    assert result.get("error")
+    assert result['success'] is True
+    assert result['data'] == baseline['data']
+    assert result['evidence'][0]['retrieval_receipt']['generation_id'] == baseline['evidence'][0]['retrieval_receipt']['generation_id']
+    # The authoritative load boundary must reject the same invalid manifest.
+    # Rebuilding is unavailable via synthetic empty embeddings, not a legacy stub.
+    index_path = Path(rag.config['rag']['vector_store_path'] + '.index')
+    manifest_path(index_path).write_text(rag.manifest.to_json(), encoding='utf-8')
+    _synthetic_http(monkeypatch, [])
+    asyncio.run(rag.initialize())
+    assert not rag.is_initialized
+    assert RAGSearchTool(rag).execute('query')['error']['code'] == 'tool_unavailable'
 
 
 @pytest.mark.parametrize("state", ["uninitialized", "missing_manifest", "source_changed", "source_missing"])
@@ -553,10 +570,12 @@ def test_tool_cannot_bypass_unavailable_service(retrieval_service, state):
     else:
         rag.source_path.unlink()
     assert asyncio.run(rag.search_similar_molecules("query")) == []
-    assert RAGSearchTool(rag).execute("query")["success"] is False
+    # Removing the detached public manifest only breaks the legacy API.
+    assert RAGSearchTool(rag).execute("query")["success"] is (state == 'missing_manifest')
 
 
 @pytest.mark.parametrize("labels", [[1, -1, 99, -2], []])
+@pytest.mark.parametrize('rag_ip_loader', ['native', 'base-flat-ip'], indirect=True)
 def test_shared_search_skips_invalid_labels_and_empty_hits(retrieval_service, monkeypatch, labels):
     rag = retrieval_service
     monkeypatch.setattr(rag.vector_index, "search", lambda vector, k: (
@@ -564,8 +583,16 @@ def test_shared_search_skips_invalid_labels_and_empty_hits(retrieval_service, mo
     ordinary = asyncio.run(rag.search_similar_molecules("query", k=20))
     result = RAGSearchTool(rag).execute("query", k=20)
     assert result["success"] is True
-    assert result["data"] == ordinary
+    assert [row['source_index'] for row in result['data']] == [2, 0]
     assert [row["SMILES"] for row in ordinary] == (["CCC"] if labels else [])
+    # Fault the actual strict FAISS search only after its initialized baseline.
+    monkeypatch.setattr(type(rag._generation.index), 'search', lambda self, vector, k: (
+        np.ones((1, len(labels)), dtype=np.float32), np.asarray([labels], dtype=np.int64)))
+    strict = RAGSearchTool(rag).execute('query', k=20)
+    assert strict['success'] is False and strict['status'] == 'partial'
+    assert strict['error']['code'] == 'invalid_output'
+    assert strict['data'] == []
+    assert strict['evidence'][0]['retrieval_receipt']['diagnostics']['reason_codes'] == ['invalid_result_shape']
 
 
 def test_large_k_returns_only_available_vectors(retrieval_service):
@@ -579,12 +606,7 @@ def test_large_k_returns_only_available_vectors(retrieval_service):
 @pytest.mark.parametrize("vector", [[1., 2., 3.], [float("nan"), 1.], [0., 0.], []])
 def test_invalid_query_vectors_do_not_produce_records(retrieval_service, monkeypatch, vector):
     rag = retrieval_service
-    async def embedding(query):
-        return np.asarray(vector)
-    monkeypatch.setattr(rag, "get_embedding", embedding)
-    monkeypatch.setattr(rag, "get_embedding_sync", lambda query: np.asarray(vector), raising=False)
-    monkeypatch.setattr("requests.post", lambda *args, **kwargs: SimpleNamespace(
-        status_code=200, json=lambda: {"embedding": vector}))
+    _synthetic_http(monkeypatch, vector)
     assert asyncio.run(rag.search_similar_molecules("query")) == []
     assert RAGSearchTool(rag).execute("query")["success"] is False
 
