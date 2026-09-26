@@ -30,6 +30,15 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Ampere SOURCE approves only the Task6 metadata-validation boundary amendment;
+worker41pass evidence is not an independent repeat or fullTask6approval. Parent
+authorizes test-only supervisedawaitdiagnostics: exact sourcecode childidentity,
+64taskscan/4chains20frames/16tags bounds, no locals/payload/tasknames, unchanged
+3sreceive/5scleanup and exceptionidentity. Wegener owns solelocal scientificslot
+for deterministic helpercontrols and one six-case diagnostic command. PR95
+run36270253852/head3610b4d core108482954319 andactivity108482954304 confirmedlive;
+other six nonaggregate checks passed at latest observation. No restart/merge.
+
 Task6 diagnostic44365/46ffe3:5passed1failed7warnings54.83s exit1; restoredRAG
 fourcases and nativeconfirmedreference passed, JSONconfirmedreference turn2 hit
 original3sreceive. Bounded snapshot lacks supervisedchildoperation; causeUNKNOWN.
