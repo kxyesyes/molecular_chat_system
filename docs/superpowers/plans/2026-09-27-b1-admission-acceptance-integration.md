@@ -417,3 +417,59 @@ GitHub read-only check found main still82322c3 and no existing open PR for this
 branch before publication. Commit, draft PR, exact-head all9 CI, complete Agent
 collection accounting and final paginated reviews/tree equality remain required
 before merging. No production entry, model, weights or deployment is enabled.
+# Current-main alignment and genuine empty-journal regression
+
+PR93 originala84aa9 run36268575293 failed core600s/exit124 after progress94%;
+collection10742=10518+224 passed, not remaining execution. Preserve this failure.
+PR94 parser landed3182617 and PR95 CI-capacity landed4d896b6 after exact9checks,
+review/guard audits and full reviewed/landed tree equality. Main4d896b6 tree is
+0127ba7b9c1783f705a9c7188423cc3d6b15f065. Capacity1200 applies only core suite.
+
+Parent approved one added test file `tests/agent/test_binding_analysis_clause_integration.py`
+to cover the actual initial empty-science-state journal boundary, not only the
+standalone parser. Explicit four-tool whole-batch obligations, original unchanged
+Task6 request plus QED/ADMET permutations, both CCO/CCN inputs, zero dispatch,
+zero evidence/registered actions, and preserved explicit unknown/multiple-target
+guards. Synthetic ADMET/activity fixture envelopes are never executed.
+
+New test SHA2567A5E11F3616638EFE70096158F60310CC6865E22A8C58316A3B355C8AE7C1863.
+Authorized isolated runner unchanged. Parent exclusively owned local science slot.
+Before alignment532d93:3failed4passed3SWIGwarnings4.90s exit1, all three real
+`invalid_dynamic_binding` failures inside `_journal_inputs` during empty closure.
+No collection/setup failure or simulated RED. Then inspected clean main merge
+a06e5ffbbd6d719b815926756d98d6769b64be22; only the seven already-reviewed upstream
+paths changed; all six original scientific integration files are untouched.
+Same test, same hash4c1bc0:7passed3warnings4.19s, runner/process exit0.
+This is resolver/Session input proof, not actual Web or live scientific success.
+
+Current regression selection is exactly the earlier ordered38 plus, in order:
+`tests/agent/test_binding_analysis_clause_integration.py`,
+`tests/agent/test_target_analysis_phrase.py` (40 unique modules total).
+Fresh SOURCE reviews new-test/current-main coupling, then expanded local and fresh
+QUALITY repeats; no publication until these finish. No new scientific threshold,
+no query rewrite, no model/prod activation, no deletion of original failures.
+
+## Current-main expanded regression and independent QUALITY
+
+Anscombe independently SOURCE-reviewed the new empty-journal test, current-main
+alignment, unchanged six integration blobs and ordered40 selection: approved,
+no actionable findings. Parent then ran exactly that ordered40 once with the
+unchanged isolated runner: session19064, retained result chunk11aa4e,
+reported by the process owner: **4254 passed,0 failed/errors/skipped,3 SWIG
+warnings,429.82s**, process0 and ORDINARY_PYTEST_EXIT=0. The session was polled
+to terminal without restarting; post-run source/test/runner hashes were unchanged.
+
+Fresh independent Zeno QUALITY ran the identical ordered40 once only after
+explicit exclusive local scientific-slot transfer. Actual session16511,
+shellPID41824, terminal0b32e4: **4254 passed,0 failed/errors/skipped,3 warnings,
+309.43s pytest,317.707s wall**, process0, ORDINARY_PYTEST_EXIT=0 and
+QUALITY_PROCESS_EXIT=0. Warnings are the existing SwigPyPacked, SwigPyObject
+and swigvarlink missing-__module__ deprecations. All68 before/after SHA-256
+values agree, including this plan, the new test and runner. All six original
+integration files remain identical to a84aa9; current producer code is unchanged.
+QUALITY approved without actionable findings and explicitly released the slot.
+
+These are offline integration passes, not complete Web or live-science proof.
+The original core600s/exit124 CI failure remains above. New exact-head CI,
+complete collection accounting, paginated reviews and guarded merge/tree
+verification are still required. No production entry or real model is activated.
