@@ -4,6 +4,25 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+R3 publication checkpoint: final parent ten-module union1138 passed/7 warnings/
+61.92s (59479 terminal), independent Epicurus QUALITY1138 passed/0 skipped/
+7 warnings/60.31s (18301 terminal5e7757). SOURCE/SPEC and QUALITY approve with
+all ten Python hashes and isolated runner unchanged. Parent in-memory compile,
+scoped filename-only secret-pattern scan and diff checks passed. Clean two-commit
+transplant onto actual PR83 squash29502ca preserved complete tree
+3687a275f07fc1840c36d6501aa13ecef7a14f74, producing focused headf050c5ae975069f22840b78071c557964243c507.
+Draft PR84 is open and attached; workflow36240117332 is queued, not passed or
+merged. Original13 dirty paths untouched, no real-model/deployment. The first
+PR-existence request returned an empty-array/null projection; parent checked
+again and created exactly one PR84, not a duplicate.
+
+Task5 new P2 correction/reentry RED actually failed6 nodes10.83s (2 None and4
+stale-positive fallbacks); minimal fix passed all6 in10.12s, handle9439 terminal,
+3 SWIG warnings. Updated six-file freeze sent to Locke for corrected SOURCE/SPEC;
+worker owns final25-module union and sole local test slot. Session/eventbus/
+decision-execution dependencies unchanged. Fresh QUALITY still required before
+Task5 commit. Packages7/8 and normal Web/B2/C/final real acceptance remain open.
+
 PR83 is now MERGED, not merely CI-green. Same-head bounded retry of workflow
 36238246328 attempt2 passed all8 gates; Agent9345 passed/1 skipped/23858 warnings
 in555.93s, normal exit. Earlier16-failure injection run and600s timeout attempt
