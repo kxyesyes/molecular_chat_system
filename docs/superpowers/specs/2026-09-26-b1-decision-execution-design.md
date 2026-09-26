@@ -453,6 +453,43 @@ but must reject subsequent work rather than pretending the CAS never happened.
 
 ## Acceptance and continuation
 
+### Frozen terminal delivery dependency (2026-09-26)
+
+Source review found the existing stable-ID AgentEventBus caches a mutable
+TaskEvent whose to_dict payload aliases the cache. A failing append_event callback
+can change that payload before retry, defeating the Session's frozen correction
+request. Do not rewrite cached historical events, add a second event engine, or
+globally change legacy identity semantics. Compared with global detachment or a
+separate delivery implementation, choose an explicit keyword-only frozen=False
+option on existing AgentEventBus.emit; the user delegated recommended choices.
+Independent QUALITY Darwin reviewed this bounded design before implementation.
+
+Require an exact boolean; frozen=True requires a stable event_id. Record the mode
+on the existing delivery journal and reject frozen/non-frozen reuse of the same
+ID before side effects. A frozen first call deep-copies the complete event into
+the private cache, preserving one ID and timestamp. Supply independent detached
+copies to bus.events, each append_event attempt, the at-most-once callback and
+each return value. Never use those exposed objects to reconstruct the cache.
+Same-ID retries keep the original private event, not replacement arguments.
+The RLock, delivery flags and retry count remain the existing mechanisms.
+Default false retains legacy return identity and aliases; TaskEvent.to_dict is
+unchanged. Frozen copy isolation is not proof of storage durability.
+
+Only B terminal projection and publication correction opt in. Projection precedes
+copying so the incoming scientific candidate is never traversed. DecisionEvents
+uses frozen=True on both existing terminal attempts; correction uses it once,
+with retries still owned by Session. A raw AgentEventBus correction also uses
+frozen=True; an unsupported bus fails unconfirmed, never silently falls back to
+mutable delivery. Nonterminal and legacy paths pass no new keyword.
+
+Regression gates: mutation through original input, append_event argument,
+callback, bus.events and return value; append mutation-then-raise retries original
+content with identical ID/timestamp; callback commit-then-raise stays at-most-once;
+mode mismatch rejects; raw Session correction is frozen; legacy identity remains.
+For new B tests, duplicate return-object identity becomes exact content/time
+equality plus non-aliasing, preserving single persisted event/callback checks.
+No new source work, retry allowance, continuation schema or historical rewrite.
+
 B acceptance checks actual property/likeness metrics; ADMET method/endpoint data
 and exact batch subjects without unknown-as-low-risk; activity real provenance
 and existing validator (family disagreements remain partial/review, not success);

@@ -728,6 +728,105 @@ prerequisites and full recovery/publication gates; no Task5/6 completion yet.
 
 ## Task 6: Final publication and worker lifetime
 
+### Publication prerequisite implementation checkpoint (review pending)
+
+Four-file local implementation now provides opt-in B provisional terminal
+events, failure-only Session correction, and outer-run release after owner drain
+and final clock check. It keeps B continuation disabled; revision8 replay,
+fixed reserve, actual snapshot-publication barrier and reader marker rejection
+are still Task5/full-Task6 work. Independent SPEC then fresh QUALITY are required
+before this prerequisite is locally released. The separate four-case continuation
+RED module is deliberately not counted as passing or included in this union.
+
+All following runs use the approved isolated runner. Hex identifiers are command
+chunks; numeric identifiers are terminal process handles. Failures were retained,
+not hidden by weakening existing scientific or legacy assertions.
+
+| Run | Result | Seconds | Cause or scope |
+|---|---|---:|---|
+| 780d9a |14 failed,1 passed,18 setup errors|2.56|Missing opt-in publication APIs.|
+| 46e912 |33 passed|2.31|Initial Session/event prerequisites.|
+| 69850 |10 failed,33 passed|16.70|Actual loop barriers and post-drain protection missing.|
+| 43063 |8 failed,35 passed|16.52|New tests expected the wrong established reason code.|
+| 67556 |4 failed,45 passed|16.81|Reentrant finish, cancellation skipping correction writes, and memory-only event durability gaps.|
+| 76909 |49 passed|16.73|Corrections verified.|
+| 8b8188 |2 failed,1 passed|6.77|Mutable correction destination and waiting-status overwrite after invalidation.|
+| 44887 |52 passed|18.09|Final focused module.|
+| 52342 |621 passed|236.91|Eleven-module union below; exit0,0 failed/errors/skipped,3 SWIG warnings.|
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_publication.py tests/agent/test_decision_binding_loop.py tests/agent/test_decision_binding_session.py tests/agent/test_decision_loop.py tests/agent/test_decision_continuation.py tests/agent/test_worker_ownership.py tests/agent/test_workflow_run_session.py tests/agent/test_dynamic_run_session.py tests/agent/test_run_session_ownership.py tests/agent/test_delegated_session_lifecycle.py tests/agent/test_delegated_session_parity.py
+```
+
+Runner SHA256 before/after remains
+F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+Frozen files submitted for independent SPEC Ohm review:
+
+| File | SHA256 |
+|---|---|
+| src/agent/harness/decision_loop.py |E2ED5E31999860D114A207E123DA4F554BE495F52AC6B61D2E43F685D23DEE12|
+| src/agent/harness/decision_execution.py |275F8BF32C7091B804BAD5BE20E2D4996463AE8183E18AA5F89DBD4D5B69B6DC|
+| src/agent/runtime/run_session.py |973A04DBB7D85CA9F821760BC1AD54FBEE4FF322A0FDCC704D486ADC8CF46A16|
+| tests/agent/test_decision_binding_publication.py |FB07383292537637BFFF79D20DC52690C5DDA2F2CB3D9B98CC821E31A6C44E07|
+
+### Remaining full-publication obligations
+
+Fresh QUALITY Darwin withheld approval for a frozen-event retry alias: a first
+append_event callback can mutate the cached TaskEvent payload and raise; the
+stable-ID retry ignores a newly reconstructed correction payload. The marker
+and result remain original while the altered event can be reported durable.
+Parent confirmed the shallow TaskEvent.to_dict path. Worker must reproduce the
+exact mutation-before-commit case before changing production code.
+
+The reviewed bounded design is in the spec's Frozen terminal delivery dependency.
+TDD implementation steps (parent-approved additional write scope):
+
+1. Add RED tests in test_decision_binding_publication.py for the actual correction
+   retry and independently detached input/store/callback/memory/return surfaces,
+   frozen mode mismatch and unchanged legacy identity.
+2. Extend only existing runtime/event_bus.py delivery/emit with keyword-only
+   frozen=False and its native-bool/stable-ID checks. Do not change TaskEvent or
+   the legacy emit engine. Preserve lock, original timestamp and at-most-once
+   callback; copies protect the private cache without creating new retries.
+3. Opt in only B terminal/correction calls in decision_execution.py and the raw
+   Session correction fallback. Unsupported buses fail unconfirmed.
+4. Run focused RED/GREEN, then the11-module prerequisite union plus
+   test_agent_event_stream.py. Recheck independent SPEC/QUALITY on changed hashes;
+   previous approvals do not cover this additional dependency automatically.
+
+No Task5 positive claim, publication, merge or production activation follows
+from this design. Scope grows by one existing event-bus module, not a new engine.
+
+Independent SPEC Ohm requested four corrections to the prerequisite freeze;
+these initial findings are source-derived, not executed reproductions:
+
+1. Invalidation while outer owner drain is paused can leave the old successful
+   local result eligible for return because only clock expiry is checked afterward.
+2. Invalidation inside a status callback before its original positive write can
+   be overwritten by that still-in-flight write, despite confirmed correction.
+3. Cancellation during terminal acceptance precedes installation of correction
+   authority and can leave a started run nonterminal.
+4. A memory-only correction event callback can restore the bus's store afterward,
+   making the post-callback destination check falsely report durability.
+
+Parent verified the call sites and assigned four actual-loop/Session RED tests
+and bounded corrections to the implementer. No release or independent QUALITY
+approval follows from the621-pass run. Correction retries remain bounded; do not
+reset retry counters indefinitely to mask an in-flight positive-write conflict.
+
+Corrected SPEC Ohm approves source at the following freeze after the implementer
+added focused regressions. Failure settlement is deferred until the outermost
+positive writer exits (also commit-then-raise), not implemented with unlimited
+retries. Post-drain release adopts already-latched invalidation; terminal acceptance
+has correction authority before its await; event destination checks cannot gain
+durability from a callback restoring a previously absent store. Source review
+ran no tests. Fresh QUALITY Darwin and independent union remain required.
+
+- decision_loop.py:261AB968B7555A398CC2C9F749DDCBF0EA2BD3714420D971B415A2EBF8F4AC30
+- decision_execution.py:275F8BF32C7091B804BAD5BE20E2D4996463AE8183E18AA5F89DBD4D5B69B6DC
+- run_session.py:A733E10F7A0C33AB88AB4A34E984091D55030A442DDF9FD688FECB4CF552909A
+- test_decision_binding_publication.py:B18492ABFC4CF154C2912ADB89A8B3081FE2AA8C82AC756CA134F11B174680D0
+
 Parent source audit at0064c30 confirms why this remains a separate incomplete
 gate: outer run returns _run's candidate before its finally settles the owner;
 finish_dynamic caches an immutable finish request, and finish emits a full
@@ -779,6 +878,23 @@ status, event or production entrypoint was changed by this audit.
   after the final check; do not claim an atomic file/database transaction.
 
 ## Task 7: Integration review and commit gate
+
+Read-only integration inventory after0064c30: shared Session changes also affect
+test_workflow_run_session.py, test_dynamic_run_session.py,
+test_run_session_ownership.py, test_delegated_session_lifecycle.py and
+test_delegated_session_parity.py. Include those existing modules when releasing
+publication prerequisites, not only new B helper tests. The new revision8 RED
+module remains explicitly open until its full positive path is implemented.
+
+Normal Web is still not B-wired: decision_runtime constructs ModelDecisionLoop
+without binding_profile and its semantic path supplies ordinary admission carry
+and exchange; current B rejects that pair. ordinary_capabilities can describe B
+but a capability description does not activate execution. Later normal-Web work
+must connect the actual admission, shared budget and same-socket waiting path,
+then verify test_web_decision_runtime/lifecycle/references, ordinary_web_runtime/
+lifecycle, ordinary_continuation, ordinary_admission_budget and
+ordinary_app_assembly. These are source-selected future regression targets,
+not executed tests or evidence that Web integration is already complete.
 
 - [ ] Run new modules and all existing decision*, ordinary semantic and Web decision
   tests relevant to modified call paths through the isolated runner, one heavy
