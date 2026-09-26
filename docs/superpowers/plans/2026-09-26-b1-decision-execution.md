@@ -237,6 +237,107 @@ evidence. Task4/5/6 were explicitly outside this interim review.
 
 ## Task 4: Actual seven-tool dynamic execution and acceptance
 
+### Task4A-acceptance first worker checkpoint (not released)
+
+Worker Nietzsche added only decision_binding_acceptance.py and its focused test
+module. These files are not yet committed or independently approved. The first
+source hash was675DF636633CC69F90E1D74DA7B848E9F3EFA27FAEEBE6C2BE056FEA484C9C5D;
+the test hash was9EE2DD541AAAA2A7B13A4FA72EE1E6E4AB9458A2D4CC39B05C783B44B8D5D553.
+
+All runs below used MedChat Python with `-I -S -B
+scratch/ordinary_chat_offline_runner.py`; wrapper SHA256 remained
+F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+M means tests/agent/test_decision_binding_acceptance.py.
+
+| Run | Observed result | Terminal handle |
+|---|---|---|
+| M::test_independent_rag_citation_does_not_complete_successful_property |1 failed4.72s, missing API after both actual tools succeeded|immediate|
+| M initial RED |56 failed24.40s:54 missing API,2 new target-not-found fixture mistakes (`[]` vs actual None)|8730|
+| M::test_target_not_found_execution_only corrected fixture |2 failed4.07s, missing API|immediate|
+| M initial implementation |55 passed1 failed16.59s, family fixture used legacy rather than canonical envelope|90529|
+| M::test_family_disagreement_cited_raw_data_is_partial_never_success corrected canonical fixture |1 passed3.52s|immediate|
+| M expanded |71 passed1 failed20.34s, an earlier not_found incorrectly blocked a later qualifying resolved lookup|40811|
+| M corrected |72 passed19.60s|56367|
+| Ten-module union below |1908 passed122.41s|31960|
+
+Every run reported3 SWIG warnings, no skips; failures exit1 and passes exit0.
+All handles reached terminal without restart. Union targets, under tests/agent:
+test_decision_binding_acceptance.py, test_decision_binding_inputs.py,
+test_decision_dynamic_bindings.py, test_decision_binding_requirements.py,
+test_decision_binding_session.py, test_analysis_contract.py,
+test_activity_tool_contract.py, test_target_tool_contract.py,
+test_rag_receipt_consumption.py, test_reverse_receipt_consumption.py.
+
+Before SPEC review the worker explicitly raised the legacy single-model target
+proof gap: model_provenance.target_id is currently only an opaque extra field.
+Parent selected fail-closed insufficient_target_evidence even when that extra
+is supplied, pending a formal target-proof contract; no expansion of legacy
+producer schemas is authorized here. Validated family model targets remain
+supported. The worker is adding RED/GREEN for this and checking preservation of
+safe provenance/artifacts/warnings in deterministic rendering. The1908 pass
+count precedes those changes and is not final acceptance or independent review.
+Actual seven-tool model decisions, revision8, publication, normal Web/B2/C and
+P8 real/UI repeat gates remain required. No real API/model/service was used.
+
+Worker follow-up freeze (independent SPEC pending): source now
+203F3341A3F080C4F612B2D724EB5D1C63CF6FF0AEB9A64F70173DDB8F83EB9D,
+test ADDD49DD35EE7675C19F83B7D28B11E5F6D1FD50F263FD0AE2B6BDC86B6ADFB1.
+Existing load-free model_registry.validate_endpoint_metadata supplies a full
+endpoint-ready target contract; parent approved reusing it without assets or
+schema expansion. Opaque target_id/readiness markers alone still fail closed.
+The renderer now projects scoped provenance/artifacts and safe warnings.
+
+Follow-up RED/GREEN with the same wrapper, each3 SWIG warnings/no skips:
+
+- Five new node groups (legacy_extra_target_id, complete_endpoint_target_contract,
+  cited_typed_provenance_artifacts_and_warnings, safe_uncited_failure_warnings,
+  cited_family_review; exact names in M):15 failed8.93s, handle29387, exit1.
+- M:87 passed37.68s, handle13970, exit0.
+- M::test_single_model_untyped_family_extras_do_not_become_display_diagnostics
+  and M::test_optional_untyped_family_source_metadata_never_copies_debug_containers:
+  2 failed6.09s, immediate chunk50b75c, exit1. An opaque row error caused an
+  AttributeError; optional nested metadata leaked into display. Neither was
+  accepted as a successful scientific result; projection was corrected.
+- M:89 passed23.44s, handle59528, exit0.
+- Same ten-module union:1925 passed130.29s, handle39628, exit0.
+
+All handles are terminal, no restarts. Source is frozen for independent Peirce
+SPEC review, followed by a fresh independent QUALITY review/repeat if approved.
+These counts do not satisfy Task4B, recovery/publication or final live gates.
+
+Independent Peirce SPEC returned one concrete blocker at this freeze: renderer
+unconditionally reads family provenance.models for every row. A valid review
+batch can include a disagreement plus an unsupported-structure failed sibling
+with provenance={}; the existing predictor and family_review_observation permit
+that diagnostic shape. Source inspection confirms it, but the review itself ran
+no tests. Nietzsche is reproducing the exact canonical mixed batch before a
+minimal projection correction; final SPEC and fresh QUALITY remain open.
+
+SPEC correction: the exact focused node
+M::test_cited_family_conflict_with_unsupported_sibling_preserves_empty_provenance
+failed with KeyError('models') in4.18s (chunk09b1cc, exit1). Minimal conditional
+models projection preserves the authentic empty provenance; no synthetic model
+evidence is filled in. M then90 passed22.48s (handle41583), and the unchanged
+ten-module union1926 passed127.38s (handle27865), exit0,3 SWIG warnings/no skips.
+The fixture traverses actual family canonicalization/service/tool/Session with
+explicitly synthetic stages, not post-seal mutation. Peirce re-reviewed and
+APPROVED this two-file SPEC slice; source-only, no independent test execution.
+
+Corrected source hash E95A6B53AC99364F3EBC8B1C644AFA482A1B192F548AC91CD7E04D516AD09B84;
+test hash7973D217A8E59AE4B5F1B53AB872A81ADC6E33D013324A4A71376882E236E5A3.
+Fresh Laplace QUALITY owns the only test slot for independent repeat of the ten
+modules plus test_family_activity_tool.py, test_decision_requirements.py,
+test_decision_loop.py and test_decision_continuation.py. Release remains pending.
+
+Final local release: Laplace independently APPROVED source quality and repeated
+exactly those14 modules once:2224 passed161.87s,0 failed/errors/skipped,3 SWIG
+deprecation warnings, ORDINARY_PYTEST_EXIT=0 and process exit0. Handle49059 reached
+terminal chunkfe3e85 without restart. No independent failures; earlier REDs above
+are retained. Corrected source/test and wrapper hashes matched before and after.
+This closes Task4A-acceptance, not Task4B/5/6 or P7/P8. Parent two-file in-memory
+compile and diff checks passed on the same frozen hashes; no real API,
+production assets, deployment or push was part of this release.
+
 ### Task4A/4B implementation order after Task3 review
 
 Read the source-grounded input-admission clarification appended to the core
@@ -279,7 +380,7 @@ trusted-store/pre-CAS candidate/post-CAS installation rules in that resolution.
   Test B UTF-8 content boundary plus unchanged legacy JSON limit and64KiB context.
 - [x] Run new input module plus Task3/requirements/Session/receipt regression;
   independent SPEC then fresh QUALITY before the 4A-input checkpoint.
-- [ ] 4A-acceptance RED/GREEN: implement the existing seven-tool/group checks and
+- [x] 4A-acceptance RED/GREEN: implement the existing seven-tool/group checks and
   citation closure specified below in the focused acceptance module. Use actual
   sealed Session observations, not dictionaries standing in for evidence. Domain
   failures/demo/fallback/family disagreement remain unusable or partial/review;

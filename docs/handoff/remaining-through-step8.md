@@ -385,6 +385,35 @@ retaining molecular-reference protection. Task5 revision8 authenticated restore,
 Task6 publication, normal Web/B2/C, focused PR gates and P8 integrated repeated
 real/UI acceptance remain required. Packages7/8 remain incomplete; no step9.
 
+Task4A-acceptance local release (2026-09-26): deterministic seven-tool scientific
+checks and explicit citation ancestry are implemented in the new acceptance
+module, with90 focused cases. It validates actual sealed Session results against
+whole action inputs; independent unrelated citations do not satisfy missing
+scientific obligations. Sparse empty ADMET, unknown model target proof, demo,
+fallback, failed and family-review results cannot claim successful completion.
+Existing complete endpoint metadata validation is reused without loading assets;
+opaque target_id/readiness extras alone are insufficient. Scoped rendering keeps
+provenance/artifacts/safe warnings, and exposes partials without invented values.
+
+Independent SPEC Peirce found a real mixed-family display defect: an unsupported
+input sibling legitimately had empty provenance. The new test reproduced
+KeyError('models'); the minimal fix preserves that empty provenance and the other
+row's review data. SPEC re-review and fresh QUALITY Laplace both approve.
+Worker ten-module union1926 passed127.38s; independent14-module union2224 passed
+161.87s,0 failed/errors/skipped,3 SWIG warnings, exit0. All failed-run chronology,
+exact runner/target sequence and frozen hashes are in the B1 implementation plan.
+These are offline actual RDKit/temporary retrieval sources and explicit synthetic
+prediction fixtures, not final live scientific acceptance.
+
+Next is Task4B: actual model-selected seven-tool decisions through the existing
+loop/Session, including same-context independent retrieval with an expired unused
+molecule. The source-grounded guard design was independently reviewed and locally
+committed55865c6; its checkpoint-denial journal and first-error latch requirements
+must survive integration. The four current gap characterizations still prove
+the old rejection, not desired success. Task5 revision8, Task6 terminal publication,
+normal Web/B2/C, focused PR gates and P8 repeated real/UI acceptance remain open.
+Packages7/8 are NOT complete. Original dirty checkout is untouched; no step9.
+
 - Each independently reviewed package gets its own branch/PR; sub-increments may be used but do not redefine the end state.
 - Preserve main; merge only through reviewed PRs with passing required checks and no unresolved findings.
 - The original checkout remains at its existing dirty state. Do not stage its unrelated changes.
