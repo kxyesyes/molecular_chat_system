@@ -49,7 +49,8 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
     return EvidenceLedger.output_digest({
         'schema': 1, 'decision_protocol_revision': (
             SEMANTIC_PROTOCOL_REVISION if admission_binding is not None else PROTOCOL_REVISION),
-        'request': context_value(context), 'kind': request_kind,
+        'request': context_value(context, query_content_bytes=getattr(loop, 'binding_profile', None) is not None), 'kind': request_kind,
+        **({'binding_profile': loop.binding_profile} if getattr(loop, 'binding_profile', None) is not None else {}),
         'allowed': sorted(allowed), 'required': sorted(required),
         'mode': loop.mode, 'limits': [loop.max_model_requests, loop.max_tool_attempts, loop.timeout_seconds],
         'specs': {n: spec_value(s) for n, s in specs.items()},
@@ -63,6 +64,8 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
 
 
 def snapshot_payload(state, session, fingerprint, *, created_at=None):
+    if getattr(session, '_decision_binding_profile', None) is not None:
+        raise DecisionBoundaryError('continuation_rejected')
     from .decision_inputs import verify_observation_integrity
     for result in session.results:
         verify_observation_integrity(result, session)
@@ -127,6 +130,8 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
                        system_message=None, requirements=None, required_tools=(), request_kind='scientific',
                        admission_carry=None):
     """Validate without writes, then atomically consume the waiting nonce once."""
+    if getattr(loop, 'binding_profile', None) is not None:
+        raise DecisionBoundaryError('continuation_rejected')
     context = session.context
     try:
         if admission_carry is not None:
