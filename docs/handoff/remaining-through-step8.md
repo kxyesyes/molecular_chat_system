@@ -4,6 +4,28 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+New exact-head CI gate: PR84 aligned3ddafd6 run36247412305 attempt1 is terminal
+failure. Agent108419063990 reached about77% then exited124 at the unchanged600s
+command deadline; no completed suite summary exists. Other six jobs passed and
+offline-quality failed. Cause beyond observed budget exhaustion is not uniquely
+established. Parent verified terminal status, unchanged head and attempt1 before
+requesting ONE failed-job retry. No timeout/assertion/code changes or merge; retain
+the failed attempt even if attempt2 passes. This is not a performance fix.
+
+Normal-Web Task3 SOURCE Hooke found a P2: semantic resume TTL can expire during
+live source restoration after the post-claim check and before first dispatch.
+Parent inspected the later source callbacks and retained full-B section11.3;
+worker must reproduce late-callback expiry with no further HTTP/science and a
+truthful consumed-claim failure before a bounded correction. Task3 is not approved.
+Tesla owns its sole local test slot; existing live union must reach terminal
+before edits/retests, never restarted on observation timeout.
+
+R4 five-hook RED actually failed24/3 warnings3.50s; exact-instance correction
+passed same24/3 warnings3.38s, both terminal before slot returned to Tesla. Erdos
+corrected SOURCE approves frozen9ABBFD2A873A38224AF108860A05F71C17355F3C480DB8D388ACA5CF54776651;
+Herschel source-only QUALITY has no findings but independent full repeat is NOT
+run. Parent twelve-module union and fresh independent repeat remain required.
+
 Latest integration checkpoint: PR84 sixthCI36246714194 at518be62 is terminal
 SUCCESS8/8. Agent9548 passed/1 skipped/23858 warnings577.57s; root2643 passed/
 75 skipped/5 warnings230.09s. Earlier missed-hook failures remain recorded; this
