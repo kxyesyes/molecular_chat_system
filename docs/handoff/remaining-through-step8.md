@@ -30,6 +30,22 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Parent follow-up source audit: the publication donor `2c7fd00` is NOT a blind
+replacement for the current loop. It replaces the old tail boundary and adds an
+outer failure-only publication correction; its cancellation tests expect a
+sanitized `failed` run with reason `cancelled`, whereas the newly reproduced
+pre-publication P2 regression requires one `cancelled` terminal after real worker
+drain. Before the next slice, explicitly reconcile these different boundaries
+and retain actual worker-barrier regressions; do not drop tests or overwrite the
+new cancellation fix to obtain donor equality. This is an integration risk found
+by reading the exact donor, not an observed failure on integrated publication code.
+
+Current loop source (including the P2 fix) passed parent stdlib-only in-memory
+compilation of all347 src/scripts files and `git diff --check`. Author expanded58
+has an observed live runner PID56480; no result or slot release is inferred from
+elapsed time. Fresh QUALITY remains source-ready, not executed. Generation strict
+error design/test preparation is proceeding separately without a scientific slot.
+
 Next-loop3module GREEN31449/b0c4a3:327passed3SWIGwarnings212.98s,8files+runner
 hashes unchanged. Hume SOURCE then identified real P2 at two new post-graph
 awaits: cancellation bypassed finish_dynamic. Controlled real owned workers
