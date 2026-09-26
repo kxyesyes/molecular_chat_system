@@ -4,6 +4,26 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest checkpoint: PR84 controlled follow-up7f8e4cd is published, exact-head
+CI36242795132 live (Agent108406355064). Parent1209pass66.88s and independent
+Hooke1209pass66.68s,4 FastAPI warnings each; testwrapped/unwrappedcontrols are
+reviewed, not a root-cause claim for original six native failures. PR85c7bd67d
+CI36242554838 is also live (Agent108405669353); six other gates passed at last
+check. Neither PR is merged; do not infer success from completed local tests.
+
+R4 inherited the two reviewed R3 test follow-ups as271c363/41391c6; production
+hashes unchanged. Expanded12-module parent union1323pass/4warnings71.63s,
+terminal97574/chunk907834. Meitner source-only re-review is active; independent
+repeat awaits the local test slot. Publication still waits for actual PR84
+landing and clean-transplant verification.
+
+Normal-Web B1 written design/plan approved and committed4b2ba38 after correcting
+three independent P2s: intent query JSON/content limits, failed-retrieval display,
+and implicit count persistence through unrelated UI saves. Mendel Task1 owns
+only new runtime/fixture tests and additive existing fixture seams; no production
+changes or later-task release. It now owns the sole local test slot for actual
+normal/ws native/JSON gap RED and unchanged fixture baseline. Parent owns docs.
+
 Current integration update: R4 frozen source is locally committeda35c9c4 after
 Meitner independent exact1252-pass repeat69.12s/7 warnings, terminal55939. It is
 not published; PR84 prerequisite and inherited changes remain a release gate.
