@@ -45,6 +45,73 @@ only additive boundary cases in existing consumer/Session tests when necessary.
 
 ## Explicit v2 requirements, never inferred from model actions
 
+### Task4B consumed-reference dispatch seam (source-grounded clarification)
+
+The four Task4A-input incidental-selection characterization tests preserve an
+actual integration gap: `WorkflowRunSession._reject_unavailable_reference`
+unconditionally revalidates `context.resolved_molecule`, both for checkpoint
+reuse and immediately before dispatch. The legacy loop also checks that raw
+selection before catalog construction and around model calls. These checks must
+not reject B-only RAG or user-target lookup solely because an unused selection
+expired. Do not clear or replace the admitted context to obtain a passing test.
+
+Use a server-only optional dynamic Session reference guard, not a browser flag,
+tool-name bypass list, or globally weakened reference validation. Default None
+keeps the existing behavior. A supplied guard must be callable and requires a
+dynamic Session; it receives the step and resolved input, returns exactly None
+on success, and raises on invalid authority. Unexpected return values reject.
+The existing two Session reference-check locations invoke this guard instead
+of the raw-selection check. Exceptions fail the action without dispatch; they
+must not be converted into successful checkpoint reuse or silently retried as
+tool execution. Before propagating a guard rejection, journal a denial, replace
+any provisional checkpoint result and clear checkpoint_reused: settlement may
+re-enter execute_step, whose existing-result shortcut would otherwise retain
+the provisional success. Preserve the first boundary-error reason in the guard
+latch through normal and exceptional settlement, then at the loop boundary.
+
+The B guard belongs to the request-local harness, not the shared adapter. It
+must authenticate the registered server-issued action for that exact step,
+verify current closure, and re-resolve its original tool/arguments against the
+unchanged admitted journal head. Compare the complete bounded action/input and
+step binding metadata, not only tool name, equivalent SMILES or a supplied hash.
+Validate the actual Session-owned step copy (append_step deep-copies its input),
+not merely the harness's pre-append object.
+It therefore validates selected molecules and upstream sources when consumed,
+while independent lookups have no fabricated molecular dependency. Check the
+root deadline before and after this owned validation. Also use the existing
+request-local `SingleAttemptTool.dispatch_guard` at adapter dispatch, since
+callbacks, persistence and concurrency admission can invalidate earlier checks.
+The request-local guard must latch its first boundary failure: an exception
+inside the adapter's submitted worker can otherwise be normalized into a generic
+tool error. Recheck that latch after settlement and before any subsequent model,
+tool or answer; retain its safe reason code, never provider text. A later
+successful revalidation cannot undo the failure. No extra predictor/search
+invocation or source repair is allowed.
+
+For B only, replace the loop's unconditional raw-selection gates with owned
+resolver closure checks at the already specified pre/post-callback boundaries.
+Keep the full admitted context and journal identity; do not inherit legacy
+`effective_molecule` mutation as authority. Legacy callers retain their current
+selection checks. Source/clock failures still use the Task6 publication barrier;
+this seam does not by itself authorize an answer or a continuation nonce.
+
+Task4B tests must replace, not delete, all four named gap characterizations with
+same-context successful actual loop/Session dispatch. Add controls for consumed
+expired/foreign selections, molecular ancestors behind target lookups, tampered
+step/input/action metadata, expiry during callbacks/persistence/adapter admission,
+non-callable/static guards, unexpected returns, unchanged legacy rejection and
+zero physical tool invocations on denial. Pre-Session-dispatch denial has zero
+Session attempts; an adapter-stage denial may already consume one conservative
+Session/budget attempt and must not refund it or replay the tool. Both native
+and JSON decision modes remain required.
+This paragraph is a reviewed implementation choice to be checked before coding,
+not evidence that the integration gap has already been repaired.
+
+Independent source review by Sartre approved this choice on2026-09-26 without
+tests or production edits. Its checkpoint-reentry and Session-owned-copy checks
+are made explicit above. Actual Task4B implementation still requires RED/GREEN
+and independent specification/quality review.
+
 `BindingRequirements` is frozen strict extra-forbid, version literal '2', profile
 literal B1 revision, forbidden_tools unique tuple max32, with these optional
 obligation groups:

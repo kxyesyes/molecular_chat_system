@@ -317,6 +317,17 @@ explicit structured group still undergo the corresponding tool-specific checks.
   with legacy defaults and molecular/ancestor freshness protections unchanged.
   A separate cleared-selection follow-up test is not proof of this original case.
 
+  Implementation detail is pinned in the spec's Task4B consumed-reference
+  dispatch seam (independent source review Sartre,2026-09-26). Use the optional
+  trusted dynamic Session guard with unchanged legacy default; validate the
+  Session-owned step, registered full action/input/metadata and admitted head.
+  Journal denial before settlement re-entry (including provisional checkpoint
+  replacement), latch the first safe guard error across adapter normalization,
+  and distinguish zero physical calls from conservatively consumed attempts.
+  Required new regressions include checkpoint-success -> guard-denial ->
+  settlement re-entry, Session-copy tampering, and descendant guard failure
+  followed by an otherwise valid source check. None is claimed passed yet.
+
 Source inspection after Task1: context_value still enforces the legacy16KiB
 JSON-encoded query limit, and the loop calls it before requirements preparation.
 Task1's UTF-8 retrieval-content regression alone therefore does not establish the
