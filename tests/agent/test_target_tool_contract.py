@@ -7,6 +7,7 @@ from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.tooling.factory import build_tool_registry
 from src.agent.tools.target_database_tool import TargetDatabaseTool
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
+from tests.agent.test_reverse_receipt_consumption import strict_source_factory
 
 
 TARGET = 'target_database_search'
@@ -115,25 +116,29 @@ def test_bad_input_stops_producer(name, payload):
     assert tool.calls == []
 
 
-@pytest.mark.parametrize('rows', [[], [reverse_row()]])
-def test_actual_reverse_wrapper_counted_predictor(rows):
-    class Predictor:
-        calls = []
-
-        def predict(self, smiles, **kwargs):
-            self.calls.append((smiles, kwargs))
-            return rows
-
-    tool = ReverseTargetTool()
-    predictor = Predictor()
-    tool._predictor = predictor
+@pytest.mark.parametrize('source', [(), ('CCO',)])
+def test_actual_reverse_wrapper_counted_predictor(source, strict_source_factory, monkeypatch):
+    predictor = strict_source_factory(source)
+    strict = predictor.predict_with_receipt
+    calls = []
+    def counted(smiles, **kwargs):
+        assert 0 < kwargs['timeout_seconds'] <= 180
+        assert kwargs['cancelled']() is False
+        calls.append((smiles, {k: v for k, v in kwargs.items() if k not in ('timeout_seconds', 'cancelled')}))
+        return strict(smiles, **kwargs)
+    monkeypatch.setattr(predictor, 'predict_with_receipt', counted)
+    monkeypatch.setattr(predictor, 'predict', lambda *a, **kw: pytest.fail('legacy predict'))
+    monkeypatch.setattr(predictor, 'load', lambda *a, **kw: pytest.fail('legacy load'))
+    tool = ReverseTargetTool(predictor)
     seen = []
     result = adapter(tool).execute({'query': 'CCO'}, raw_validator=seen.append)
     assert result.success
-    assert len(predictor.calls) == 1
-    assert predictor.calls[0] == ('CCO', {'threshold': 0.6, 'top_k': 10, 'combine_by_target': True})
+    assert len(calls) == 1
+    assert calls[0] == ('CCO', {'threshold': 0.6, 'top_k': 10, 'combine_by_target': True, 'organism_filter': ''})
     assert result.data == seen[0]['data']
     assert result.formatted == seen[0]['formatted']
+    assert result.evidence == seen[0]['evidence']
+    assert result.evidence[0]['prediction_receipt']['status'] == ('verified_hits' if source else 'verified_empty')
 
 
 BAD_ROWS = [

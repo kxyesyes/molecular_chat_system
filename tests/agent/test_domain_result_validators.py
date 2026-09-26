@@ -14,6 +14,7 @@ from src.agent.contracts import (
 )
 from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
+from tests.agent.test_reverse_receipt_consumption import strict_source_factory
 from src.agent.tools.target_database_tool import TargetDatabaseTool
 from src.agent.validators import AgentResultValidator
 
@@ -476,10 +477,8 @@ def test_adme_py_success_records_backend_method_and_package_version(monkeypatch)
 
 
 def test_reverse_target_tool_preserves_stable_identifier_and_assay_evidence():
-    tool = ReverseTargetTool()
-    tool._predictor = SimpleNamespace(
-        predict=lambda *_args, **_kwargs: [
-            {
+    # Generic helper extensions remain supported; they are not producer fields.
+    record = ReverseTargetTool._normalize_target_record({
                 "target_name": "Epidermal growth factor receptor",
                 "organism": "Human",
                 "target_chembl_id": "CHEMBL203",
@@ -490,14 +489,7 @@ def test_reverse_target_tool_preserves_stable_identifier_and_assay_evidence():
                 "morgan_similarity": 0.82,
                 "maccs_similarity": 0.76,
                 "final_similarity": 0.79,
-            }
-        ]
-    )
-
-    result = tool.execute("reverse target for CCO")
-
-    assert result["success"] is True
-    record = result["data"][0]
+    })
     assert record["target_identifier"] == "CHEMBL203"
     assert record["assay"] == {
         "type": "IC50",
@@ -505,6 +497,18 @@ def test_reverse_target_tool_preserves_stable_identifier_and_assay_evidence():
         "value": 12.5,
         "units": "nM",
     }
+
+
+def test_actual_reverse_target_proof_does_not_invent_assay_extensions(strict_source_factory):
+    result = ReverseTargetTool(strict_source_factory()).execute('CCO')
+    assert result['success']
+    record = result['data'][0]
+    assert record['target_identifier'].startswith('name-sha256:')
+    assert record['assay'] == {'type': 'IC50', 'value': 1.0}
+    assert 'target_chembl_id' not in record and 'standard_units' not in record
+    entry = result['evidence'][0]
+    assert len(entry['records'][0]) == 13
+    assert entry['prediction_receipt']['record_count'] == len(result['data'])
 
 
 def test_reverse_target_tool_derives_stable_identifier_when_database_id_missing():
