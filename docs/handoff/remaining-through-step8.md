@@ -4,6 +4,25 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest publication-prerequisite release (2026-09-26): opt-in B terminal events
+are provisional summaries; Session failure correction is separately frozen and
+bounded; outward release follows worker drain and final clock checks. Independent
+review reproduced and fixed reentrant positive-status overwrite, invalidation
+during drain, final-acceptance cancellation, false memory-only durability and
+cached event payload mutation on retry. Existing AgentEventBus has opt-in frozen
+delivery; legacy alias/identity behavior remains unchanged. This is not a new
+event or execution engine.
+
+Corrected SPEC Erdos and fresh QUALITY Darwin approve five source/test files.
+Worker12-module union661 passed213.62s; independent661 passed209.75s,0 failed/
+errors/skipped,3 SWIG warnings, handle51484 terminal exit0. Hashes, in-memory
+compile and diff checks match; exact commands and every RED remain in the B1
+plan. No push/deployment/live model use. Original13 dirty paths remain untouched.
+Task5 continuation has four explicitly open RED tests, not committed with this
+prerequisite. Next: revision8 authenticated replay/restore, fixed credit reserve,
+reader invalidation rejection and actual waiting-publication barriers, followed
+by normal Web/B2/C/focused PRs and final real/UI acceptance. Packages7/8 remain open.
+
 Newest checkpoint (2026-09-26): Task4B seven-tool decision-loop integration has
 corrected independent SPEC Hilbert and fresh QUALITY Linnaeus approval.
 Implementer final union1115 passed284.83s; independent union1115 passed303.10s,

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 from collections.abc import Mapping
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Callable
@@ -100,6 +103,18 @@ class _StepJournal:
     advance: StepAdvance | None = None
 
 
+@dataclass
+class _PublicationInvalidation:
+    request_json: str
+    store: Any
+    bus: Any
+    attempts: dict[str, int] = field(default_factory=lambda: dict(marker=0, status=0, event=0))
+    confirmed: dict[str, bool] = field(default_factory=lambda: dict(marker=False, status=False, event=False))
+    writing: bool = False
+    event_bus: Any = _UNSET
+    event_store: Any = _UNSET
+
+
 class WorkflowRunSession:
     """Incrementally execute one workflow while preserving legacy behavior."""
 
@@ -116,6 +131,7 @@ class WorkflowRunSession:
         observation_capture: Callable[[ToolResult], None] | None = None,
         observation_prepare: Callable[[ToolResult, WorkflowStep], None] | None = None,
         reference_guard: Callable[[WorkflowStep, Any], None] | None = None,
+        dynamic_publication: bool = False,
     ) -> None:
         self.orchestrator = orchestrator
         self.context = context
@@ -126,6 +142,17 @@ class WorkflowRunSession:
         if dynamic and (self.steps or idempotency_key is not None):
             raise SessionLifecycleError("dynamic sessions require an empty new run")
         self.dynamic = dynamic
+        if type(dynamic_publication) is not bool or (dynamic_publication and not dynamic):
+            raise SessionLifecycleError("publication correction requires an explicit dynamic session")
+        if dynamic_publication and (
+                type(context.trace_id) is not str or not 1 <= len(context.trace_id) <= 128
+                or (context.active_skill is not None and
+                    (type(context.active_skill) is not str or len(context.active_skill) > 128))):
+            raise SessionLifecycleError("invalid publication identity")
+        self._dynamic_publication = dynamic_publication
+        self._publication_identity = (context.trace_id, context.active_skill) if dynamic_publication else None
+        self._publication_invalidation: _PublicationInvalidation | None = None
+        self._publication_write_depth = 0
         if observation_capture is not None and (not dynamic or not callable(observation_capture)):
             raise SessionLifecycleError("observation capture requires a dynamic session and callable")
         self._observation_capture = observation_capture
@@ -175,6 +202,10 @@ class WorkflowRunSession:
     @property
     def finished(self) -> bool:
         return self._finished
+
+    @property
+    def publication_invalidated(self) -> bool:
+        return self._publication_invalidation is not None
 
     @property
     def tool_attempt_count(self) -> int:
@@ -1107,6 +1138,9 @@ class WorkflowRunSession:
         self._terminal_reached = True
 
     def finish(self) -> AgentResult:
+        if self._publication_invalidation is not None:
+            # Never resume the ordinary finish journal's positive writes.
+            return self._invalidated_publication_result()
         self._require_active()
         if not self._terminal_reached:
             raise SessionLifecycleError(
@@ -1141,21 +1175,178 @@ class WorkflowRunSession:
                 raise
             else:
                 self._terminal_event_emitted = True
+        if self._publication_invalidation is not None:
+            return self._invalidated_publication_result()
         if self.orchestrator.state_store and not self._run_status_updated:
             status = (
                 "succeeded"
                 if agent_result.outcome == RunOutcome.COMPLETED
                 else agent_result.outcome.value
             )
-            self.orchestrator.state_store.update_run_status(
-                self.context.trace_id,
-                status,
-            )
+            # A callback can invalidate BEFORE its positive writer commits.
+            # Defer correction until that entire in-flight write has unwound;
+            # never spend/reset its bounded status attempts prematurely.
+            with self._dynamic_publication_write() if self._dynamic_publication else nullcontext():
+                self.orchestrator.state_store.update_run_status(
+                    self.context.trace_id,
+                    status,
+                )
+            if self._publication_invalidation is not None:
+                return self._invalidated_publication_result()
             self._run_status_updated = True
         elif not self.orchestrator.state_store:
             self._run_status_updated = True
         self._finished = True
         return agent_result
+
+    @contextmanager
+    def _dynamic_publication_write(self):
+        """B-only synchronous terminal callback scope, not a store protocol.
+
+        Nested scopes cover finish's own status write and the loop's enclosing
+        metadata/finish/waiting callback. Invalidation latches immediately, but
+        its one frozen correction journal runs only after the outermost writer
+        returns or raises. No positive retry or correction budget is reset.
+        """
+        if not self._dynamic_publication or self.publication_invalidated:
+            raise SessionLifecycleError("publication cannot begin another positive write")
+        self._publication_write_depth += 1
+        try:
+            yield
+        finally:
+            self._publication_write_depth -= 1
+            if self._publication_write_depth == 0 and self.publication_invalidated:
+                self._settle_publication_invalidation()
+
+    def invalidate_dynamic_publication(
+        self, *, reason: str, boundary: str,
+        invalidated_evidence_ids: list[str] | None = None,
+        counters: dict[str, int] | None = None,
+    ) -> AgentResult:
+        """Seal B publication with a separate, bounded failure-only journal.
+
+        Legal before or after terminal callbacks, including commit-then-raise.
+        The caller establishes source/deadline failure. This method never checks
+        sources, reopens actions, rewrites observations, or retries normal finish.
+        Each frozen write gets at most two attempts across all invocations.
+        """
+        if not self._dynamic_publication or not self.dynamic or not self._started:
+            raise SessionLifecycleError("publication correction is not enabled")
+        if self._next_index != len(self.steps) and self._runtime_error is None:
+            raise SessionLifecycleError("publication correction requires settled actions")
+        ids = [] if invalidated_evidence_ids is None else invalidated_evidence_ids
+        counts = {} if counters is None else counters
+        limits = dict(model_requests=16, protocol_repairs=1, tool_budget_reserved=12,
+                      reused_decisions=16, tool_attempt_count=12)
+        if (any(type(v) is not str or re.fullmatch(r'[a-z][a-z0-9_]{0,95}', v) is None
+                for v in (reason, boundary))
+                or type(ids) is not list or len(ids) > 12
+                or any(type(v) is not str or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', v) is None for v in ids)
+                or len(set(ids)) != len(ids) or type(counts) is not dict or len(counts) > len(limits)
+                or any(type(k) is not str or k not in limits or type(v) is not int
+                       or not 0 <= v <= limits[k] for k, v in counts.items())):
+            raise SessionLifecycleError("invalid publication correction")
+        trace_id, skill = self._publication_identity
+        terminal_id = self._stable_id('event', trace_id, self._session_attempt_id, 'finish:terminal')
+        request = dict(terminal_attempt_id=terminal_id, reason=reason, boundary=boundary,
+                       invalidated_evidence_ids=ids, counters=counts)
+        wire = json.dumps(request, sort_keys=True, ensure_ascii=False, allow_nan=False)
+        journal = self._publication_invalidation
+        if journal is None:
+            journal = self._publication_invalidation = _PublicationInvalidation(
+                wire, self.orchestrator.state_store, self.orchestrator.event_bus)
+            # Irreversible before the first callback, including reentrant ones.
+            self._terminal_reached = True
+        elif journal.request_json != wire:
+            raise SessionLifecycleError("publication correction cannot change on retry")
+        return self._settle_publication_invalidation()
+
+    def _settle_publication_invalidation(self) -> AgentResult:
+        journal = self._publication_invalidation
+        assert journal is not None
+        if journal.writing or self._publication_write_depth:
+            return self._invalidated_publication_result()
+        trace_id, skill = self._publication_identity
+        correction_id = self._stable_id('event', trace_id,
+                                        self._session_attempt_id, 'publication:invalidated')
+        store, bus = journal.store, journal.bus
+
+        def marker():
+            if store is None:
+                raise SessionLifecycleError("publication correction has no durable store")
+            store.update_run_metadata(trace_id,
+                {'decision_publication_invalidation': json.loads(journal.request_json)})
+
+        def status():
+            if store is None:
+                raise SessionLifecycleError("publication correction has no durable store")
+            store.update_run_status(trace_id, 'failed')
+
+        def event():
+            if bus is None:
+                raise SessionLifecycleError("publication correction has no event bus")
+            durable_bus = getattr(bus, 'bus', bus)
+            destination = getattr(durable_bus, 'state_store', None)
+            if journal.event_bus is _UNSET:
+                # AgentEventBus can cache a memory-only delivery as persisted.
+                # A retry after its callback restores state_store is NOT proof
+                # that this event ever reached SQLite. Bind the first actual
+                # emission destination across the entire frozen event journal.
+                journal.event_bus, journal.event_store = durable_bus, destination
+            durable_before = (store is not None and journal.event_bus is durable_bus
+                              and journal.event_store is store and destination is store)
+            payload = json.loads(journal.request_json)
+            payload['supersedes_terminal_attempt_id'] = payload.pop('terminal_attempt_id')
+            payload.update(terminal_attempt_id=correction_id, observed_outcome='failed',
+                           publication_stage='invalidated', answer_released=False)
+            emit = getattr(bus, 'emit_publication_correction', None)
+            options = {}
+            if emit is None:
+                # A raw bus must provide the same frozen delivery guarantee.
+                # Unsupported buses fail this bounded write, never downgrade.
+                emit = bus.emit
+                options['frozen'] = True
+            emit(trace_id=trace_id, event=TaskEventType.TASK_FAILED,
+                 message='Decision publication invalidated', skill=skill,
+                 payload=payload, event_id=correction_id, **options)
+            if (not durable_before or getattr(bus, 'bus', bus) is not durable_bus
+                    or getattr(durable_bus, 'state_store', None) is not store):
+                raise SessionLifecycleError("correction event durability is unconfirmed")
+
+        journal.writing = True
+        try:
+            for name, write in (('marker', marker), ('status', status), ('event', event)):
+                while not journal.confirmed[name] and journal.attempts[name] < 2:
+                    journal.attempts[name] += 1
+                    try:
+                        write()
+                    except (Exception, asyncio.CancelledError):
+                        # A raised callback may have committed. Keep history;
+                        # unknown durability is not success or a reason to skip
+                        # the other independent failure-only writes.
+                        continue
+                    journal.confirmed[name] = True
+        finally:
+            journal.writing = False
+        self._final_result = self._invalidated_publication_result()
+        self._final_message = self._final_result.message
+        return deepcopy(self._final_result)
+
+    def _invalidated_publication_result(self) -> AgentResult:
+        journal = self._publication_invalidation
+        assert journal is not None
+        request = json.loads(journal.request_json)
+        trace_id, skill = self._publication_identity
+        return AgentResult(trace_id, False, 'Decision publication invalidated',
+            skill_name=skill, outcome=RunOutcome.FAILED,
+            error=AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Decision publication invalidated',
+                {'reason': request['reason'], 'boundary': request['boundary']}),
+            metadata={**request['counters'], 'publication_invalidated': True,
+                'stop_reason': request['reason'], 'failed_boundary': request['boundary'],
+                'invalidated_evidence_ids': request['invalidated_evidence_ids'],
+                'terminal_attempt_id': request['terminal_attempt_id'],
+                'correction_durability': 'confirmed' if all(journal.confirmed.values()) else 'unconfirmed',
+                'correction_writes': dict(journal.confirmed)})
 
     def _build_final_result(self) -> tuple[AgentResult, str]:
         final_answer = "\n\n".join(
@@ -1275,6 +1466,8 @@ class WorkflowRunSession:
         return f"{namespace}-{digest}"
 
     def _require_active(self) -> None:
+        if self._publication_invalidation is not None:
+            raise SessionLifecycleError("workflow publication was invalidated")
         if not self._started:
             raise SessionLifecycleError("workflow session has not started")
         if self._finished:

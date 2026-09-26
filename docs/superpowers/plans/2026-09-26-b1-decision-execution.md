@@ -797,6 +797,51 @@ TDD implementation steps (parent-approved additional write scope):
 No Task5 positive claim, publication, merge or production activation follows
 from this design. Scope grows by one existing event-bus module, not a new engine.
 
+Corrective TDD evidence, same approved runner and no overlapping test processes:
+
+| Run | Result | Seconds | Scope/finding |
+|---|---|---:|---|
+| 98032 |7 failed|11.48|SPEC drain latch, pre-writer invalidation and destination proof; cancellation fixture initially blocked the wrong await.|
+| 9fa70a |1 failed|6.31|Corrected final-acceptance cancellation reproduction.|
+| 8322c4 |2 passed|6.70|Drain latch and final-acceptance cancellation.|
+| 79079 |4 passed|8.23|Pre-writer invalidation including callback failure order.|
+| 897796 |2 passed|5.77|Destination proof and memory-only control.|
+| 37268 |62 passed|24.84|Publication module before frozen delivery.|
+| 60188 |631 passed|220.51|Previous11-module union, before new dependency.|
+| a7362b |1 failed|4.90|Darwin reproduction fixture initially mishandled a nullable payload.|
+| 671d57 |1 failed|4.66|Corrected reproduction persisted a mutated cached correction.|
+| 9567 |25 failed,59 passed|36.40|Frozen API/isolation/opt-in not implemented and unsupported-bus downgrade.|
+| 55544 |92 passed|27.91|Corrected publication and event-stream modules.|
+| 89622 |661 passed|213.62|Final12-module worker union, exit0,0 failed/errors/skipped,3 SWIG warnings.|
+
+The final command is exactly the11-module command above with
+tests/agent/test_agent_event_stream.py appended. Every listed process is terminal;
+the four continuation REDs are still excluded/open. Frozen delivery now isolates
+all five outward surfaces, keeps a private original timestamp/event, and retains
+legacy aliases/default behavior. No existing historical event is rewritten.
+
+Independent SPEC Erdos approves the following five-file freeze (source-only).
+Fresh QUALITY Darwin is repeating the12-module command independently before
+release; its prior mutation finding and the failing reproductions remain recorded.
+
+- decision_loop.py:261AB968B7555A398CC2C9F749DDCBF0EA2BD3714420D971B415A2EBF8F4AC30
+- decision_execution.py:D8C66637F9A6BBC744F69791F8E96CE0382719D8026AE8A61B757B1196C815A8
+- event_bus.py:FC0E167F1D9C8324EBE0A13FC6E67382AB979827609B7C1BC9EC65A833749E30
+- run_session.py:5F606B9F97A95A01BEDC667951A6C343F1C7B62770E12138C06FCE7AEF76105B
+- test_decision_binding_publication.py:548238F7F49CE6E95304FACA40821AADCFAFA0EB12D38315AC2C08401CE50D5B
+
+Publication-prerequisite local release: corrected SPEC Erdos and fresh QUALITY
+Darwin approve this exact five-file freeze. Darwin independently ran the12-module
+command above once:661 passed209.75s,0 failed/errors/skipped,3 SWIG deprecation
+warnings (SwigPyPacked, SwigPyObject, swigvarlink), terminal handle51484 exit0.
+All five source/test hashes and runner hash matched before/after, and scoped
+diff check passed. Parent in-memory compilation of all five Python files passed
+without imports/bytecode; original checkout retains its13 unrelated status paths.
+No original file was reverted, no external provider/model or host data was used.
+The new continuation test file stays untracked/uncommitted with four known REDs
+for the subsequent Task5 implementation, not hidden as a passing prerequisite.
+Full revision8/fixed-reserve/reader/waiting-publication and P7/P8 remain incomplete.
+
 Independent SPEC Ohm requested four corrections to the prerequisite freeze;
 these initial findings are source-derived, not executed reproductions:
 
