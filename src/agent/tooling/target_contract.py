@@ -14,8 +14,11 @@ from src.agent.contracts import (
     AgentErrorCode, AgentExecutionError, ObservationStatus, ToolProvenance,
     ToolResult, WorkflowArtifact,
 )
-from src.agent.tools.base_tool import execute_tool_compat
+from src.agent.persistence.redaction import redact_sensitive
+from src.agent.tools.base_tool import BaseMolecularTool, execute_tool_compat
+from src.agent.tools.molecular_input import MolecularInputUnavailable, parse_molecular_smiles
 from src.agent.validators.domain_validators import TargetEvidenceValidator
+from src.reverse_target.receipt import validate_prediction_observation
 
 from .adapters import LegacyPythonToolAdapter
 
@@ -313,6 +316,43 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
             raw = details["raw_result"]
         raise ValueError("Target snapshot depth exceeded")
 
+    def _reverse_proof_digests(self, raw, payload):
+        """Opt-in binding at every already-validated diagnostic snapshot."""
+        if self.spec.name != 'reverse_target_predictor':
+            return []
+        proofs, seen, smiles = [], set(), None
+        for _ in range(17):
+            if id(raw) in seen:
+                raise ValueError('Cyclic target snapshot')
+            seen.add(id(raw))
+            fields = vars(raw) if isinstance(raw, ToolResult) else raw
+            evidence = fields.get('evidence')
+            if isinstance(evidence, list) and any(
+                isinstance(entry, dict) and 'prediction_receipt' in entry for entry in evidence
+            ):
+                if smiles is None:
+                    # Never depend on arbitrary RawTool implementations for
+                    # lexical policy or proof-bearing whole-input validation.
+                    smiles = parse_molecular_smiles(payload, BaseMolecularTool(self.spec.name, ''))[0]
+                if (fields.get('success') is not True or fields.get('error') is not None
+                        or fields.get('status') not in (None, 'succeeded', ObservationStatus.SUCCEEDED)):
+                    raise ValueError('Invalid reverse proof outcome')
+                digest = validate_prediction_observation(fields.get('data'), evidence, smiles=smiles)
+                from src.reverse_target.owned_source import json_sha256
+                # SQLite redacts evidence too, after Session has accepted/sealed
+                # it. Reject any covered change here; never repair receipt hashes.
+                covered = {'data': fields.get('data'), 'evidence': evidence}
+                if json_sha256(redact_sensitive(covered, self.spec.sensitive_fields)) != digest:
+                    raise ValueError('Reverse proof changes under security normalization')
+                proofs.append(digest)
+            error = fields.get('error')
+            details = (error.details if isinstance(error, AgentExecutionError) else
+                       error.get('details') if isinstance(error, dict) else None)
+            if not isinstance(details, dict) or 'raw_result' not in details:
+                return proofs
+            raw = details['raw_result']
+        raise ValueError('Target snapshot depth exceeded')
+
     def _map_lookup(self, raw):
         if not isinstance(raw, dict) or self.spec.name != "target_database_search":
             return raw
@@ -333,6 +373,7 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
             raw_validator(raw)
         try:
             self._validate_observation(raw)
+            proofs = self._reverse_proof_digests(raw, payload)
             mapped = self._map_lookup(raw)
             name = self.spec.name
 
@@ -357,8 +398,13 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
             # worker/deadline, then validate the actual returned observation.
             result = super()._normalize(result, None)
             self._validate_observation(result)
+            if self._reverse_proof_digests(result, payload) != proofs:
+                return self._invalid_output()
             return result
-        except (ValidationError, ValueError, TypeError, AttributeError, OverflowError):
+        except MolecularInputUnavailable:
+            return ToolResult.error_result(self.spec.name, AgentErrorCode.TOOL_UNAVAILABLE,
+                                           'Reverse-target input validation unavailable')
+        except (ValidationError, ValueError, TypeError, AttributeError, OverflowError, RecursionError):
             return self._invalid_output()
 
     def _normalize(self, raw: ToolResult, elapsed_ms: int) -> ToolResult:
