@@ -31,6 +31,18 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Strict-generation migrated exact17 selection terminal22276/ce7ecd:752passed,
+162subtests passed,7warnings,19.63s,0failures/errors/skips;17unique frozen hashes
+unchanged, HEADaa3cddd. This is new compatibility evidence, separate from445GREEN.
+Fresh Bohr QUALITY has source review and conditional sole-slot authorization;
+no fresh QUALITY outcome or PR publication is yet claimed.
+
+Publication tests received independent Lovelace SOURCE approval; original34
+donor functions/barriers and four loop-cancellation cases remain. Initial run
+40590/fce405 is terminal5failed8passed20.10s; exact cause classification is
+being recorded before any production grant. Do not treat all five as scientific
+failures or claim an explicit source-close/restore test that is not present.
+
 Parent test-only ASCII prototype terminal dfe89f:30passed2.88s,0failures/warnings/
 skips; reference/test/plan/runner hashes unchanged. Fixed40-pair AB p50 reference
 versus prototype:66bytes22.8us/3.5us;2476bytes859.85us/70.3us;
