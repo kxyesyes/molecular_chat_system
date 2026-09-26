@@ -211,3 +211,29 @@ exit0. Both test hashes and runner match before/after; no production edits.
 The unresolved six Linux native failures remain a merge blocker. Parent will
 publish only these two reviewed test changes and this evidence record to PR84,
 then inspect the new exact-head CI diagnostics rather than waive the failures.
+
+## Instrumentation independence control
+
+Second workflow36241771811 at a4c1a61 completed all8 gates successfully. Agent
+9530 passed/1 skipped/23858 warnings in589.78s, normal exit, job108403522987.
+The six native failures did not recur, so no exception diagnostics were emitted.
+This is an actual passing run, not proof of the earlier six failures' root cause.
+Do not claim a production FAISS repair or erase the first failed run.
+
+Before release, parameterize the actual Session receipt/ledger/seal/persistence
+family with trace_search=False/True. False retains the unwrapped production
+service method; True retains the bounded pass-through diagnostic. Both run the
+same native/base-IP, hits/empty/partial and tamper controls with every existing
+HTTP/search/status/proof/SQLite assertion. This controlled comparison tests whether
+the diagnostic wrapper is necessary for success, rather than blindly retrying.
+Parent focused36 passed/3 SWIG warnings/6.87s,exit0,terminala81ac8. Independent
+review/repeat and new exact-head Linux CI are required. The original failure
+remains unattributed; no stronger reliability claim is justified by local passes.
+
+Tesla independent SOURCE/SPEC approves the control-only change. Parent full
+11-module union1209 passed/4 FastAPI warnings66.88s,terminal97422/chunk56b1e1.
+Hooke fresh QUALITY repeated exactly once:1209 passed/0 failed/0 skipped/4
+FastAPI warnings66.68s,terminal35522/chunk19d9d2,exit0. Receipt test SHA256
+C2F748F8D9D3D27E53F177284C6B4C25259A6DA246CAAD60A053EB1A01614C27 and runner
+hash match before/after; no scoped actionable findings. Approval supports the
+controlled new Linux CI publication, not a root-cause fix or merge claim.
