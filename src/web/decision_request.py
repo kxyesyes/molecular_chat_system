@@ -12,6 +12,7 @@ from dataclasses import dataclass, fields, replace
 
 from src.agent.contracts import AgentContext
 from src.agent.contracts.task_requirements import MolecularRequirement, TaskRequirements
+from src.agent.contracts.binding_requirements import BindingRequirements
 from src.agent.contracts.target_request import analyze_target_request
 from src.agent.contracts.generation_request import has_generation_intent, validate_generation_count
 from src.agent.harness.decision_bounds import context_value, validate_json, configuration_generation
@@ -105,7 +106,7 @@ class PreparedDecision:
     request_kind: str
     allowed_tools: frozenset[str]
     required_tools: frozenset[str]
-    requirements: TaskRequirements
+    requirements: TaskRequirements | BindingRequirements
     config_generation: str | None
 
     @property
@@ -401,7 +402,8 @@ def _require_phrase_connections(nodes):
         raise DecisionAdmissionError('request_clarification_required')
 
 
-def prepare_decision_request(payload, *, session_id, trace_id, references=None, config_generation=None):
+def prepare_decision_request(payload, *, session_id, trace_id, references=None, config_generation=None,
+                             binding_profile=None):
     """Prepare a detached initial request. Identity/config/service are server args.
 
     Browser reference/selection are only hints to the existing owner/ACK service.
@@ -409,13 +411,25 @@ def prepare_decision_request(payload, *, session_id, trace_id, references=None, 
     intent is rejected here as a whole request, never partially reclassified chat.
     """
     envelope = validate_request_envelope(payload, session_id=session_id, trace_id=trace_id,
-        config_generation=config_generation)
+        config_generation=config_generation, binding_profile=binding_profile)
+    if _binding_profile(binding_profile):
+        from .decision_binding_request import prepare
+        return prepare(envelope, references=references)
     return _prepare_validated_science(envelope, references=references)
 
 
-def validate_request_envelope(payload, *, session_id, trace_id, config_generation=None):
+def _binding_profile(value):
+    from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
+    if value is not None and (type(value) is not str or value != B1_PROFILE_REVISION):
+        raise DecisionAdmissionError('invalid_binding_profile')
+    return value is not None
+
+
+def validate_request_envelope(payload, *, session_id, trace_id, config_generation=None,
+                              binding_profile=None):
     """Original validation and order, before any semantic or scientific analysis."""
     try:
+        b_profile = _binding_profile(binding_profile)
         validate_json(payload, max_bytes=24 * 1024, reason='invalid_request')
         if type(payload) is not dict:
             raise DecisionAdmissionError('invalid_request')
@@ -428,13 +442,19 @@ def validate_request_envelope(payload, *, session_id, trace_id, config_generatio
         query = payload.get('message')
         if type(query) is not str or not query.strip() or payload.get('type', 'chat') != 'chat':
             raise DecisionAdmissionError('invalid_request')
-        validate_json(query, max_bytes=16 * 1024, reason='invalid_request')
+        if b_profile:
+            # The envelope walk already rejected surrogates/non-native values.
+            # B's content bound must not count JSON quotes/escapes as content.
+            if len(query.encode('utf-8')) > 16 * 1024:
+                raise DecisionAdmissionError('invalid_request')
+        else:
+            validate_json(query, max_bytes=16 * 1024, reason='invalid_request')
         if contains_secret_material(payload):
             raise DecisionAdmissionError('sensitive_input_rejected')
         enable_tools, enable_rag = payload.get('enable_tools', True), payload.get('enable_rag', True)
         if type(enable_tools) is not bool or type(enable_rag) is not bool:
             raise DecisionAdmissionError('invalid_options')
-        mol_count, rag_count = payload.get('mol_count'), payload.get('rag_count', 5)
+        mol_count, rag_count = payload.get('mol_count'), payload.get('rag_count', 3 if b_profile else 5)
         mol_count = 5 if mol_count is None else validate_generation_count(mol_count, field='mol_count')
         if type(rag_count) is not int or not 1 <= rag_count <= 20:
             raise DecisionAdmissionError('invalid_options')
@@ -551,8 +571,9 @@ _PROHIBITION = re.compile(
     r'(?:(?:any|scientific|computation|calculation|compute|research|tools?|models?)\s*){1,12}$')
 
 
-def _validated_envelope(envelope):
+def _validated_envelope(envelope, *, binding_profile=None):
     """Recheck server records too; frozen values are not cryptographic provenance."""
+    b_profile = _binding_profile(binding_profile)
     if (type(envelope) is not ValidatedRequest
             or set(vars(envelope)) != {field.name for field in fields(ValidatedRequest)}):
         raise DecisionAdmissionError('invalid_request')
@@ -564,7 +585,7 @@ def _validated_envelope(envelope):
         # Exact types matter: e.g. 5.0/True must not disappear as an int default.
         payload = {'message': envelope.query}
         for name, default in (('enable_tools', True), ('enable_rag', True),
-                              ('temperature', 0.7), ('mol_count', 5), ('rag_count', 5)):
+                              ('temperature', 0.7), ('mol_count', 5), ('rag_count', 3 if b_profile else 5)):
             value = getattr(envelope, name)
             if type(value) is not type(default) or value != default:
                 payload[name] = value
@@ -573,7 +594,7 @@ def _validated_envelope(envelope):
                 payload[name] = value
         checked = validate_request_envelope(payload,
             session_id=envelope.session_id, trace_id=envelope.trace_id,
-            config_generation=envelope.config_generation)
+            config_generation=envelope.config_generation, binding_profile=binding_profile)
         if checked != envelope:
             raise DecisionAdmissionError('invalid_request')
         return checked
@@ -621,10 +642,13 @@ def _whole_risk(query):
     return 'ambiguous' if demand and negative else 'demand' if demand else 'clear'
 
 
-def assess_whole_request(envelope):
+def assess_whole_request(envelope, *, binding_profile=None):
     """Only known complete science/chat bypass intent; a candidate is NOT chat."""
     from src.agent.evidence.ledger import EvidenceLedger
-    envelope = _validated_envelope(envelope)
+    envelope = _validated_envelope(envelope, binding_profile=binding_profile)
+    if _binding_profile(binding_profile):
+        from .decision_binding_request import assess
+        return assess(envelope)
     digest = EvidenceLedger.output_digest(envelope.query)
     risk = _whole_risk(envelope.query)
     def result(kind, reason):
@@ -652,11 +676,14 @@ def assess_whole_request(envelope):
     return result('known_chat', 'closed_chat_request')
 
 
-def _current_capability_snapshot(value, envelope):
+def _current_capability_snapshot(value, envelope, *, binding_profile=None):
     from src.agent.contracts.ordinary_admission import (
         CapabilitySnapshot, capability_digest, parse_capability_snapshot,
     )
     from src.web.ordinary_capabilities import CATALOG_REVISION, PROFILE_REVISION, PRODUCT_CATALOG
+    if _binding_profile(binding_profile):
+        from src.web.ordinary_capabilities import B_CATALOG_REVISION, B_PRODUCT_CATALOG
+        CATALOG_REVISION, PROFILE_REVISION, PRODUCT_CATALOG = B_CATALOG_REVISION, binding_profile, B_PRODUCT_CATALOG
     if type(value) is not CapabilitySnapshot:
         raise DecisionAdmissionError('ordinary_capabilities_unavailable')
     # Strict Task3 validation precedes serialization; no attribute discovery/hooks.
@@ -670,7 +697,10 @@ def _current_capability_snapshot(value, envelope):
     return current
 
 
-def _ordinary_prepared(envelope):
+def _ordinary_prepared(envelope, *, binding_profile=None):
+    if _binding_profile(binding_profile):
+        from .decision_binding_request import prepare
+        return prepare(envelope, ordinary=True)
     empty = frozenset()
     requirements = prepare_requirements(TaskRequirements(), request_kind='chat',
         allowed_tools=empty, required_tools=empty)
@@ -680,7 +710,7 @@ def _ordinary_prepared(envelope):
 
 
 def prepare_with_intent(envelope, assessment, intent, *, history, capability_snapshot,
-                        intent_requests, references=None):
+                        intent_requests, references=None, binding_profile=None):
     """Use an untrusted proposal only after server whole-query/history/view checks.
 
     history is already eligible ordinary history captured by the server caller,
@@ -692,23 +722,32 @@ def prepare_with_intent(envelope, assessment, intent, *, history, capability_sna
     from src.agent.contracts.ordinary_admission import build_admission_binding
     from src.agent.harness.decision_history import history_pairs
     try:
-        envelope = _validated_envelope(envelope)
-        fresh = assess_whole_request(envelope)
+        envelope = _validated_envelope(envelope, binding_profile=binding_profile)
+        fresh = assess_whole_request(envelope, binding_profile=binding_profile)
         if (type(assessment) is not WholeRequestAssessment
                 or set(vars(assessment)) != {field.name for field in fields(WholeRequestAssessment)}
                 or assessment != fresh):
             raise DecisionAdmissionError('request_clarification_required')
         if fresh.kind == 'blocked':
+            if _binding_profile(binding_profile):
+                from .decision_binding_request import rejection
+                raise rejection(envelope, fresh.reason)
             raise DecisionAdmissionError(fresh.reason)
         # Task3's 32KiB checksum limit is NOT the existing 20-pair/16KiB policy.
         kept = history_pairs(history)
-        current = _current_capability_snapshot(capability_snapshot, envelope)
+        current = (_current_capability_snapshot(capability_snapshot, envelope, binding_profile=binding_profile)
+            if binding_profile is not None else _current_capability_snapshot(capability_snapshot, envelope))
+        b_profile = _binding_profile(binding_profile)
+        prepare_science = _prepare_validated_science
+        assessment_revision = ASSESSMENT_REVISION
+        if b_profile:
+            from .decision_binding_request import prepare as prepare_science, ASSESSMENT_REVISION as assessment_revision
         if type(intent_requests) is not int:
             raise DecisionAdmissionError('request_clarification_required')
         if fresh.kind in {'known_chat', 'known_scientific'}:
             if intent is not None or intent_requests != 0:
                 raise DecisionAdmissionError('request_clarification_required')
-            prepared = _prepare_validated_science(envelope, references=references)
+            prepared = prepare_science(envelope, references=references)
             intent_kind = fresh.kind
         else:
             if (intent_requests != 1 or type(intent) is not OrdinaryIntent
@@ -723,16 +762,23 @@ def prepare_with_intent(envelope, assessment, intent, *, history, capability_sna
                 raise DecisionAdmissionError('request_clarification_required')
             intent_kind = proposal.kind
             if intent_kind in {'scientific_execution', 'retrieval'}:
-                prepared = _prepare_validated_science(envelope, references=references)
+                prepared = prepare_science(envelope, references=references)
                 if prepared.request_kind != 'scientific':
                     raise DecisionAdmissionError('request_clarification_required')
             else:
                 feature = current.features[0]
                 if not feature.wired or not feature.permitted:
                     raise DecisionAdmissionError('ordinary_capabilities_unavailable')
-                prepared = _ordinary_prepared(envelope)
+                prepared = _ordinary_prepared(envelope, binding_profile=binding_profile)
+        if b_profile:
+            from src.agent.contracts.decision_bindings import TOOL_FEATURE_PAIRS
+            features = {feature.id: feature for feature in current.features}
+            mapping = dict(TOOL_FEATURE_PAIRS)
+            if any(not features[mapping[name]].wired or not features[mapping[name]].permitted
+                   for name in prepared.required_tools):
+                raise DecisionAdmissionError('ordinary_capabilities_unavailable')
         binding = build_admission_binding(current, query=envelope.query, history=kept,
-            assessment_revision=ASSESSMENT_REVISION, intent_kind=intent_kind,
+            assessment_revision=assessment_revision, intent_kind=intent_kind,
             intent_requests=intent_requests)
         return prepared, json.dumps(binding, ensure_ascii=False, allow_nan=False)
     except DecisionAdmissionError:

@@ -181,6 +181,38 @@ Files: `src/web/decision_request.py`, new `src/web/decision_binding_request.py`,
 
 ## Task 3 — compose B carry/root budget and B8 before exposing Web assembly
 
+### Task2 implementation checkpoint (2026-09-26; QUALITY pending)
+
+Worker Kuhn implemented only the three authorized Task2 files. Initial behavioral
+RED3 failed/1 passed1.04s established missing B admission; fixture parameter-ID
+errors and a browser/server profile helper confusion were corrected separately,
+not counted as behavioral RED. First union744 passed42.85s was followed by
+additional whole-suffix/count/description regressions, not treated as final.
+
+Independent Carson SOURCE/SPEC identified two P2s: same-family distinct authored
+PDE5A/PDE4A targets collapsed to the first identity, and fully descriptive reverse
+target questions remained blocked. Actual focused RED4 failed/6 passed1.63s;
+bounded canonical-identity rejection and complete-description grammar passed10
+in1.38s. Unknown/appended scientific clauses remain blocked, not reclassified chat.
+Carson corrected SOURCE/SPEC approves; final worker new-file123 passed2.33s and
+exact four-file union775 passed42.40s (session18868 terminal), normal exit0, no
+reported warnings/skips. Frozen files:
+
+- decision_request.py332C18250B45F73E36D1FE88472E571CA82A59160EFC850994F738F5CF56FA99
+- decision_binding_request.pyB080B428F8DCF2F91253223FFE8B7995C401D68935B694BE02AF46FDB052CD9F
+- test_b1_normal_web_admission.pyCE30444A69AC157DBE5A2801664EA79DB8E286CDF1E8138D13119187B83EC0F8
+
+Task1 fixture/test and approved runner hashes remain unchanged; its two mounted
+route REDs are retained. Fresh Carver QUALITY review/repeat is pending. Task3 is
+NOT released by this checkpoint, nor is normal B Web execution or activation
+claimed. Parent owns documentation and commits; original dirty tree is untouched.
+
+Fresh Carver QUALITY now approves Task2 after an independent exact four-module
+repeat775 passed41.71s, session97543 terminal, process/wrapper exit0, no reported
+warnings/skips. All three frozen hashes, Task1 files and approved runner matched
+before/after. Parent in-memory compile/diff checks pass. This is a reviewed local
+admission checkpoint; Task1 route gaps and normal-Web assembly are still pending.
+
 Files: `src/agent/contracts/ordinary_admission.py`,
 `src/agent/harness/decision_loop.py`, `decision_continuation.py`,
 `decision_binding_continuation.py`; new continuation tests.
