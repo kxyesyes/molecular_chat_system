@@ -25,8 +25,11 @@ scientific assets, no original-checkout changes, no publication/deployment.
 Next core design and implementation plan now name seven-tool execution,
 source-aware reuse/finish/revision8 restore, B-only final-publication correction,
 mandatory citation closure and conservatively debited continuation finalization.
-Written core review is still pending; implementation is not released merely by
-these hooks. Normal Web B, B2 generation/ranking/root budgets, C cleanup and P8
+Zeno independently approved the written core spec/plan after two protocol gaps
+were closed: outgoing finalization-credit debit and mandatory citation closure.
+Core TDD implementation release is open; code is not implemented merely by these
+documents or hooks (hook implementation commit435ae32). Normal Web B, B2
+generation/ranking/root budgets, C cleanup and P8
 real/UI gates remain open. Packages1–6 DONE,7–8 incomplete; no step9.
 
 Latest reverse consumer update (2026-09-26): approved design/plan `9cabb11` is

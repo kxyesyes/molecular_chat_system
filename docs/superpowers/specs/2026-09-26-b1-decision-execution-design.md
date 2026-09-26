@@ -230,6 +230,49 @@ answer or continuation; persist an explicit failed correction through the
 existing terminal metadata/result boundary and retain cleanup ownership. Test
 the returned result AND stored terminal status, not just an exception.
 
+B terminal publication is a separate explicit contract, never a change to legacy
+terminal events. The B-only DecisionEvents view projects terminal attempts into
+detached allowlisted summaries: terminal attempt ID, observed outcome,
+publication_stage='pending_source_check', answer_released=false. Do not put
+scientific answer/data/evidence/artifacts/claims or continuation ID into this
+provisional event. Task-completed here names the observed execution outcome,
+not answer authorization. Before enabling B on normal Web, its consumer must
+honor this flag and not display overall completion before the verified result;
+the unchanged legacy frontend must not receive B provisionals as final success.
+
+Use three fixed barriers: terminal metadata write then owned verification;
+finish_dynamic/event/status callbacks then owned verification; waiting snapshot
+publication (or waiting-status fallback) then owned verification. Only after the
+last successful check release the result/checkpoint. No additional positive
+publication callback follows that check. Eligibility is established at this
+boundary, not atomic with later external source changes.
+
+If a callback raises after committing, post-callback validation still runs; an
+exception does not prove no state changed. Detected invalidation irreversibly
+latches failure for this segment. Add an opt-in Session method
+invalidate_dynamic_publication with a separate immutable correction request and
+per-write journal, allowed after finish began/ended but never reopening actions.
+Build a new sanitized FAILED result, not a mutation of old event/result objects.
+The new result contains no scientific answer, tool results, source evidence,
+artifacts, claims, ledger/outputs, satisfied acceptance or continuation IDs.
+Keep only bounded diagnostic counters, invalidated evidence IDs and reason.
+Persist an invalidation marker, failed status, then one distinct stable TASK_FAILED
+correction identifying the superseded attempt and failing boundary. Preserve
+historical observation/terminal-attempt records; do not rewrite their payloads or
+reset the ordinary finish journal. Once invalidated, ordinary finish retries
+cannot resume successful writes. Retry each idempotent frozen write at most once;
+a failed write does not skip the other failure-only writes. Correction callbacks
+need no source recheck: failure cannot be reversed even if they restore the source.
+Persistent storage failures suppress success and report correction durability as
+unconfirmed rather than claiming the database was corrected.
+
+If waiting publication committed before invalidation, retain the historical
+snapshot, return no nonce and leave admission_exchange.checkpoint unset. Revision8
+claims reject the invalidation marker as well as non-waiting status. Pre-CAS
+rejection still writes nothing; post-CAS or uncertain-claim failure never dispatches.
+This is not a new crash-recovery protocol. Source checks of historical successful
+tool events do not retrospectively change what was valid when they were observed.
+
 Establish a monotonic B segment start and deadline before any continuation
 read/decode/source verification. After validating the saved numeric credit,
 cap that deadline at segment_start + saved_remaining_seconds (and any existing
@@ -239,6 +282,30 @@ same deadline before/after owned verification and immediately before CAS;
 exhaustion before CAS leaves waiting unchanged. Restore state with this exact
 deadline, never a newly started allowance. Test a controlled clock advanced by
 source validation and by storage callbacks, including post-CAS exhaustion.
+
+Outgoing revision8 checkpoints conservatively debit finalization work; merely
+checking the root deadline after publishing a snapshot is insufficient. At
+snapshot start t, let R=deadline-t. Require R>0, reserve F=min(30.0,R/4), and save
+remaining_seconds=R-F, pre_finalization_remaining_seconds=R,
+finalization_reserve_seconds=F. These are finite native numbers, not bools;
+revision8 replay verifies this exact policy/relation within the original root
+limit. Define the tail deadline min(root_deadline,t+F). All subsequent finish,
+publication, owned checks and final owner drain must complete within this tail
+credit. The reserved amount is spent even if actual work is faster; never refund
+it, recompute a fresh R at resume or rewrite the snapshot to manufacture credit.
+Exhaustion suppresses checkpoint release and latches the failure correction.
+This fixed reservation avoids an unbounded publish/recalculate/revalidate loop.
+
+For B, actual outward result/checkpoint release belongs to outer run after owner
+drain and a final clock check, not to _run's candidate return. Pass a private
+request-local finalization record between those two existing methods; it is not
+a new wire/store DTO. Only then set admission_exchange.checkpoint and return.
+If drain overruns the reservation, correction is failure-only, requires no new
+source work/owner action, and releases no nonce. Tests advance clock by30s after
+a snapshot with R=100/F=25: it must fail, not grant100s or75s to a resumed task.
+A successful20s tail retains at most75s on the next segment. Human think time
+between finished segments is not charged by this policy. The new maximum30s
+reservation applies only to B continuation finalization, not legacy/A2 budgets.
 
 Before any downstream action, duplicate reuse, successful finish and continuation
 claim, validate supporting source closure. Validate again after store callbacks
@@ -258,6 +325,21 @@ and no forbidden tools executed. LLM self-evaluation never decides acceptance.
 Scientific final prose remains deterministic observed results; failed/partial
 steps and method limitations remain visible. Do not leak provisional scientific
 data on source/proof failure or silently complete a known subset.
+
+Successful scientific finish additionally requires citation closure. Validate
+explicit cited IDs, then deterministically expand their validated role ancestors
+in original observation order. For each immutable obligation and explicit
+required tool, select the earliest qualifying observation inside this expanded
+closure. If a group is fulfilled elsewhere but not inside the cited closure,
+report missing_required_citation and reject completion; unrelated-only citations
+must not pass just because all tools happened to run. Publish cited_closure_ids
+and required_evidence_ids (selected observations plus ancestors) in acceptance.
+Explicitly listing every ancestor is unnecessary; the server expands only sealed
+roles, never equal inputs or model-authored IDs. The final successful scientific
+prose renders only this verified cited closure. Uncited failures can still have
+safe diagnostic messages/warnings, not uncited numeric claims. Partial/error
+reporting keeps existing scientific-state distinctions and cannot use the citation
+gate to promote failed/fallback/family-review data to successful evidence.
 
 Use B continuation protocol revision8, preserve legacy6 and ordinary7 defaults.
 Fingerprint binds profile/v2 obligations/current server configuration. Persist
