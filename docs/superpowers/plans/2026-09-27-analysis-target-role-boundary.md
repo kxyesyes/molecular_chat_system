@@ -74,12 +74,12 @@ positive query or an existing assertion.
 
 **Files:** Create `tests/agent/test_target_analysis_phrase.py` only, after release.
 
-- [ ] Recheck branch/HEAD and final design approval. Confirm no other scientific
+- [x] Recheck branch/HEAD and final design approval. Confirm no other scientific
   process is running through parent coordination; an observation timeout is not
   permission to start a second run. Require the approved local launcher with only
   its `REPO` literal substituted for this independent tree. Parent must provision
   and verify that copy; do not run the Task6-tree launcher against this checkout.
-- [ ] Write this complete first section of the new test file. These tests call
+- [x] Write this complete first section of the new test file. These tests call
   real parser/Router/Planner APIs; no mocked target extraction or changed query.
 
 ```python
@@ -167,7 +167,7 @@ def test_ambiguity_survives_parser_router_and_planner(clause, unknown, targets, 
         assert plan.metadata['reason'] == 'target_clarification_required'
 ```
 
-- [ ] Run the public positive node BEFORE editing production. Require observed
+- [x] Run the public positive node BEFORE editing production. Require observed
   RED for `exact-reproducer` and only variants demonstrated to fail: analytical
   ADMET/QED/LOGP appears in `request.unknown` on the relevant anchored lists.
   Already-green spelling/order variants are compatibility controls, not required
@@ -178,14 +178,14 @@ def test_ambiguity_survives_parser_router_and_planner(clause, unknown, targets, 
 & C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_target_analysis_phrase.py::test_complete_analysis_retains_target_without_analytical_unknown
 ```
 
-- [ ] Record exact command, handle, terminal counts, duration, warnings/skips and
+- [x] Record exact command, handle, terminal counts, duration, warnings/skips and
   both runner/process exits. Wait for terminal before proceeding; retain failures.
 
 ## Task 2 — minimal positional recognizer and list-only exclusion
 
 **Files:** Modify `src/agent/contracts/target_request.py` only.
 
-- [ ] After confirmed behavioral RED, add these constants and three helpers
+- [x] After confirmed behavioral RED, add these constants and three helpers
   before `analyze_target_request`; keep all existing definitions byte-for-byte.
   The algorithm is action → item → (join → item)* → optional punctuation → end.
   A failed clause publishes no partial interval and never seeks another action
@@ -265,7 +265,7 @@ def _analysis_clause_intervals(query: str) -> tuple[tuple[int, int], ...]:
     return tuple(intervals)
 ```
 
-- [ ] Replace ONLY the following preamble of the existing `_IDENTIFIER` loop.
+- [x] Replace ONLY the following preamble of the existing `_IDENTIFIER` loop.
   Keep `members = [match[1]]` and all existing code after it unchanged, including
   the combined `starts` tuple and its full `_FOLLOWING` traversal.
 
@@ -295,7 +295,7 @@ Intervals cost O(query length) time and space; each item advances its cursor;
 the consumer cursor advances at most once per interval. No suffix slicing,
 rescan from a later action, or token-by-interval nested search is introduced.
 
-- [ ] Run the complete new test file, using the same authorized launcher. Expect
+- [x] Run the complete new test file, using the same authorized launcher. Expect
   all public tests to pass. Investigate mismatches before altering any expectation;
   a new grammar need requires design approval, not broader cleanup.
 
@@ -307,7 +307,7 @@ rescan from a later action, or token-by-interval nested search is introduced.
 
 **Files:** Append to `tests/agent/test_target_analysis_phrase.py` only.
 
-- [ ] Add the following negative recognition, exact-span and growth tests. These
+- [x] Add the following negative recognition, exact-span and growth tests. These
   are strengthened regression guards, not claimed historical RED for new helpers.
   Public behavior RED remains Task 1. Deliberately malformed analytical text
   declining recognition does not imply every such text is a journal rejection.
@@ -422,7 +422,7 @@ review must additionally inspect regexes for bounded alternatives and absence of
 nested unbounded repetition; operation counts alone are not a proof of regex
 complexity. Existing `_FOLLOWING` operation-bound tests remain unchanged.
 
-- [ ] Run the new file again, then the exact ordered regression union below.
+- [x] Run the new file again, then the exact ordered regression union below.
   Preserve each existing test's assertions. Expected: all pass without skips;
   report actual counts rather than inventing totals. Wait for each terminal before
   the next run. No live models, service discovery or changed timeout is required.
@@ -436,11 +436,11 @@ complexity. Existing `_FOLLOWING` operation-bound tests remain unchanged.
 
 **Files:** Evidence in this plan only; no other implementation file is authorized.
 
-- [ ] Inspect the production diff: only the new private recognizer and the
+- [x] Inspect the production diff: only the new private recognizer and the
   `list_matches` preamble changed. Check the actual query is never reassigned,
   analytical words were not added to `_ACTION_WORDS`, and all existing scans,
   target vocabulary, identities and candidate-selection code are intact.
-- [ ] Record production/test/runner SHA256 before and after the exact union,
+- [x] Record production/test/runner SHA256 before and after the exact union,
   terminal handles, durations, exit statuses, warnings and every intermediate
   failure. Confirm the approved runner differs from its donor only at literal
   `REPO`; retain its parent-approved normalized-source comparison. An absent
@@ -491,8 +491,180 @@ admission rejection and journal rejection require distinct evidence.
   runner change, implementation-source approval, CI success or live capability claimed.
 - [x] Banach design SOURCE approval reported by parent; final validation wording
   read at `804be52`, requiring only actual failing variants to supply RED.
-- [ ] Parent implementation-plan approval and implementation/slot release.
+- [x] Parent implementation-plan approval and implementation/slot release.
 
 Recommended execution is inline with `executing-plans` after parent release,
 using the existing review checkpoints. This recommendation is not a dispatch or
 permission to start. Package7/package8 and deployment remain incomplete/closed.
+
+## Test preparation checkpoint — no execution authorization (2026-09-27)
+
+Parent reviewed and committed this plan at `7072ca6`, then authorized TEST
+PREPARATION ONLY. Added exactly the Task1 code block above to
+`tests/agent/test_target_analysis_phrase.py` with `apply_patch`; no Task3 tests or
+production implementation added. Static text comparison2115f3 confirms equality
+to the approved block after line-ending normalization. Static enumeration is
+16 analytical cases, 6 explicit-label cases and 10 ambiguity cases; this is not
+pytest collection or a passing test count.
+
+Read-only source inspection2f21ca confirms expected canonical identities remain
+PDE5A/PDE4A/BCHE, qualification detection is unchanged, and the ambiguity tests
+explicitly supply generation intent required by the existing Router guard.
+Planner guards retain the three selected workflows and
+`target_clarification_required` reason. The exact reproducer and QED/ADMET orders
+are unchanged. No expectation was weakened or changed after a test result.
+
+Parent reports provisioning the ignored launcher through `apply_patch` and
+checking normalized full-byte equality with REPO-only substitution. This worker
+only read its SHA256; did not create, edit or execute it. Current hashes:
+
+| File | SHA256 |
+|---|---|
+| New Task1 test | `034D5BC7C4E4D8DBA1CCD47558EBBF29A8C107A25579FA4D871FA72DDF3EF1B4` |
+| Unchanged `src/agent/contracts/target_request.py` | `5FE60002CF0C20862266B524F0CE6D202DFC8EA1F2C7B8AB4C1595CA3E717DC0` |
+| Approved ignored launcher | `4F466A172C2A9C86586A98844B29CC3BAAEFCD7E8BEF1607B126748E81DEB6D2` |
+
+Static whitespace checks reported no issues. No Python, import, application
+probe, test, model, process manipulation or runner invocation occurred. No
+behavioral RED/GREEN is claimed. Laplace retains the slot for the38 run, with
+Dewey's independent repeat queued; this worker must wait for explicit re-grant.
+The Task1 focused command above is pending. Only this evidence appendix and the
+new Task1 test are changed; design, production, existing tests, parent ledgers
+and dirty Task6 tree are untouched. Nothing committed or pushed by this worker.
+
+### Deferred parent inspection candidate — Task6 only
+
+Parent flagged a potential, NOT reproduced, bridge-contract issue for later
+Task6 review: B `result.metadata.update(_b1_retrieval_metadata(...))` is placed
+before the existing `try` / `_result_frame` validation boundary. On future
+Task6 authorization, inspect whether malformed B result objects, `metadata` or
+`tool_results` retain the existing controlled failure and cleanup behavior,
+rather than escaping as an unhandled attribute/type error. Establish the actual
+contract and, if needed, a bounded behavioral RED before any correction; retain
+cleanup/deadline/profiler guarantees and original-profile behavior.
+
+This is only a preserved review candidate, not a confirmed bug, test result,
+fix instruction or expansion of the parser task. No bridge inspection probe,
+Python/test execution or Task6 file/ledger edit was performed for this note.
+Parser preparation remains the only current implementation-file authority;
+scientific execution still requires explicit slot grant.
+
+## Authorized parser TDD — initial behavioral RED (2026-09-27)
+
+Parent explicitly granted this independent tree the exclusive scientific slot
+after Dewey exact38 terminal63336/548fcf:4176 passed,0 failed/skipped,384.20s.
+Verified current HEAD7072ca6 and launcher SHA256
+`4F466A172C2A9C86586A98844B29CC3BAAEFCD7E8BEF1607B126748E81DEB6D2` before running.
+No Task6 tests or dirty-tree edits are included in this grant.
+
+Exact initial command:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_target_analysis_phrase.py::test_complete_analysis_retains_target_without_analytical_unknown
+```
+
+Terminal109225 (completed in initial call, no ongoing session): **12 failed,
+4 passed in2.86s**, `ORDINARY_PYTEST_EXIT=1`, process exit1; no warnings/skips
+reported. All12 fail at `request.unknown == ()`, not imports or fixtures. Source
+is still unchanged at this RED checkpoint. Per-case disposition follows Task1
+parameter order (all targets were PDE5A; failing cases reached the unknown check):
+
+| Case | Observed disposition / unknown |
+|---|---|
+| Exact unchanged reproducer | RED `('ADMET',)` |
+| QED → ADMET → PDE5A activity | RED `('QED', 'ADMET')` |
+| ADMET → QED → PDE5A activity | RED `('ADMET', 'QED')` |
+| LOGP → ADMET → PDE5A activity | RED `('LOGP', 'ADMET')` |
+| ADMET → LogP → PDE5A activity | GREEN compatibility |
+| PDE5A activity → QED → ADMET | GREEN compatibility |
+| PDE5A activity → ADMET → QED | GREEN compatibility |
+| 请预测 ADME、PDE5A 的活性。 | RED `('ADME',)` |
+| Please ASSESS QED and admet and pde5a activity! | GREEN compatibility |
+| calculate molecular weight, properties, ADMET, PDE5A potency | RED `('ADMET',)` |
+| compute drug-likeness and ADME and PDE5A pIC50 | RED `('ADME',)` |
+| analyse drug likeness and ADMET and PDE5A IC50 | RED `('ADMET',)` |
+| analyze Lipinski and ADMET and PDE5A activity | RED `('ADMET',)` |
+| evaluate TPSA/HBD/HBA/ADMET/PDE5A activity (original tabs/joins) | RED four unknowns; pytest abbreviates middle of displayed tuple |
+| Long Chinese analytical list → ADMET → PDE5A activity | RED `('ADMET',)` |
+| Valid clause after unrelated prose, before newline/SMILES | RED `('QED', 'ADMET')` |
+
+These are actual observed outcomes, not a requirement that already-green cases
+fail. No assertions or query bytes have been changed. Next authorized step is
+the Task2 bounded production implementation after this completed behavioral RED.
+
+### Bounded implementation and source freeze
+
+After initial terminal109225, implemented the planned constants and three private
+helpers only in `src/agent/contracts/target_request.py`, plus the ordered interval
+cursor in the existing inferred-list preamble. Added one explanatory docstring
+and one exclusion comment; algorithm and helper signatures follow Task2.
+Original label/for/known-target scans, target vocabulary, qualification detection,
+selection grammar, action-word set and unknown deduplication are untouched. No
+Web/journal dependency or query mutation was introduced.
+
+| Exact command after the approved launcher prefix | Terminal | Actual outcome |
+|---|---|---|
+| `tests/agent/test_target_analysis_phrase.py` (Task1 public cases) | 959cea | 32 passed,1.87s; runner/process0; no warnings/skips reported |
+| `tests/agent/test_target_analysis_phrase.py` (Task3 controls appended) | d7e056 | 71 passed,1.85s; runner/process0; no warnings/skips reported |
+
+Both commands used exactly
+`& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py`.
+Both completed in their initial call; no ongoing sessions or restarts. The test
+file retains Task1 byte-for-byte, with the Task3 code appended unchanged from the
+plan. No assertion weakening or further production correction was needed.
+
+Before final union, checkpoint1b482a froze these SHA256 values and diff check
+passed. Parent notified that SOURCE may review this exact production/test freeze:
+
+| File | SHA256 |
+|---|---|
+| `src/agent/contracts/target_request.py` | `E9083A1520D2FEC6537BBE2ACC43EB2C89161C699A5ED332B695CFDA9C496793` |
+| `tests/agent/test_target_analysis_phrase.py` | `94321B9FCE3A5C43272CFC09211D122CCB32B525BD1DBE85C65DB5283EFB4A10` |
+| Approved ignored launcher | `4F466A172C2A9C86586A98844B29CC3BAAEFCD7E8BEF1607B126748E81DEB6D2` |
+
+Exact11 ordered union started as session87965/initiale945f4 after all earlier
+runs were terminal. Actual command:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_target_analysis_phrase.py tests/agent/test_target_identity_alignment.py tests/agent/test_target_selection_phrase.py tests/agent/test_target_selection_execution.py tests/agent/test_hybrid_router.py tests/agent/test_routing_prompt_matrix.py tests/agent/test_task_planner.py tests/agent/test_planner_responsibilities.py tests/agent/test_planner_step_templates.py tests/agent/test_planner_template_execution.py tests/agent/test_react_agent_workflow_routing.py
+```
+
+Terminal87965/459dfb: **844 passed in16.65s**, `ORDINARY_PYTEST_EXIT=0`, process
+exit0; no warnings/skips reported. One serial run, no restart. Post-run
+checkpoint26e610 confirms all three frozen hashes above unchanged, diff check
+clean, and the test source equals the approved Task1 plus Task3 blocks after
+line-ending normalization. Production diff inspection shows only83 added lines
+in the permitted contract; no existing parser statements or other production
+files changed. Existing ten regression test modules remain untouched.
+
+**Scientific slot RELEASED after terminal.** All four execution calls are
+terminal. No further Python is authorized without re-grant. Worker implementation
+is ready for parent-coordinated SOURCE/fresh QUALITY review at this freeze;
+independent current-source approval/repeat, exact-head CI, inspected integration,
+later empty-journal closure and actual Task6 Web gates remain outstanding. Parser
+GREEN does not close Task6 or explain either historical receive timeout.
+Only the parser production file, new tests and this plan are dirty. No commit,
+push, merge, deployment, live asset/model access or Task6-tree edit occurred.
+
+## Independent gate and scoped commit authorization (2026-09-27)
+
+Parent reports parser SOURCE and fresh QUALITY approval of the exact frozen
+production/test source above. Independent exact11 repeat **32869/1f6fcc:844
+passed in8.48s**, with **all78 hashes unchanged**. This is parent-supplied
+independent evidence, not an additional worker run. It completes the local
+independent review/repeat gate; exact-head CI and later inspected integration,
+empty-journal closure and Task6 Web gates remain separate and mandatory.
+
+Parent authorized this evidence append and final scoped commit only, with no
+push. The sole eligible tracked paths are this plan, the corresponding design
+spec, `src/agent/contracts/target_request.py` and the new
+`tests/agent/test_target_analysis_phrase.py`. The spec is already committed and
+unchanged; do not manufacture a spec diff. Read-only checkpointc4fd08 verifies
+the production, test and ignored-launcher SHA256 still equal the reviewed freeze.
+Unchanged spec SHA256 is
+`1FAC82DC8D4D17B6460C77DC8478B4C53DA2FB6DB1EBE646CF040682A37350AA`.
+
+The scientific slot is free but NOT granted to this worker; no tests or Python
+were run for this append/commit step. Parent is separately diagnosing PR93's
+600-second exit124; this parser evidence does not explain or resolve that CI
+timeout. Task6's dirty tree remains untouched. No push/merge is authorized.
