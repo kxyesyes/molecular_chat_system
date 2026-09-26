@@ -4,6 +4,20 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest verified CI update: PR84 first workflow36240117332 failed Agent10 tests
+(9520 passed/1 skipped/571.57s); six other independent gates passed and dependent
+offline-quality failed. No merge. Four failures use a retired legacy embedding
+spy in chat input-budget tests; six native actual-Session FAISS search-counter
+failures need further diagnosis. Parent is investigating, not retrying blindly.
+
+Task5 final worker union79030 passed2078/3 SWIG warnings/603.85s with six hashes
+unchanged and corrected SOURCE/SPEC approved. Jason independent QUALITY22518
+is live and owns the sole local test slot. R4 focused integration has actual
+17 failed35 passed RED then52 passed GREEN4.75s, correcting concrete-FAISS test
+interception and ordinary formatter-exception containment. Corrected Kepler
+SOURCE/SPEC approves; R4 full union/QUALITY and prerequisite PR84 remain pending.
+These are P7 component checks, not P7/P8 completion or real-model acceptance.
+
 R3 publication checkpoint: final parent ten-module union1138 passed/7 warnings/
 61.92s (59479 terminal), independent Epicurus QUALITY1138 passed/0 skipped/
 7 warnings/60.31s (18301 terminal5e7757). SOURCE/SPEC and QUALITY approve with

@@ -10,6 +10,44 @@
 
 ## Release boundary
 
+### Task5 worker final freeze
+
+Final25-module worker run79030 is terminal:2078 passed/3 SWIG warnings/603.85s,
+exit0, chunk887883. Corrected Locke SOURCE/SPEC approves; fresh independent
+Jason QUALITY union22518 is running on the same six hashes below. Do not confuse
+worker completion with independent approval or ordinary Web integration.
+
+| File (relative to src/agent/harness or tests/agent) | SHA256 |
+|---|---|
+| decision_loop.py | 9CF9BD9C1223C93C1F8F85A7BD4A81A8DEF86838A2888D616FE9E5FF50339BFC |
+| decision_continuation.py | 528E0D9ED2B9B74891CBC42686E245AFD76CB2E0EDF0827BB2A0F10F6C75F259 |
+| decision_binding_continuation.py | 8DBEF1367EDCE3D6B4EE526405CD243059116570C6703496EA44153B00654C05 |
+| test_decision_binding_continuation.py | 095548D58FBAA8A33FB260DEC2DDC3813EF88A415A37A5251CEE4B3EA8EEF925 |
+| test_decision_binding_loop.py | A1123B53702BF04C8B9F5967197754BF5C3AF580780B43BA42C0568215ABBE23 |
+| test_decision_binding_publication.py | 7C7777B94862361FBD4986360A4D60DEB45F8F599B4B1CF54CB93E90CABB1607 |
+
+Reconciled worker chronology (all terminal, not release gates independently):
+52504/56940 each4 missing-nonce failures39.55/39.18s;83621 history2 failed2
+passed37.36s;2910 transport-order1 failed17.72s;46749 eight failures72 passed
+132.33s included two incorrect fixture budget expectations and six real
+metadata/config defects. Union45735 passed264/316.93s. Callback marker/start
+27090 four failed4 passed19.31s; e00975 two failed2 passed7.60s;59458 ten
+passed18.51s; ffc6ed one preCAS-marker failure2 passed6.03s;18773 passed93
+198.99s. Metadata fc2567 three failed6.48s then f1ecb5 three passed5.66s;
+72888 union2039 passed528.76s. Claim-clock/whole-snapshot90cb65 two failed5.53s
+then05f768 two passed5.12s;78513 union2041 passed532.36s.
+
+Review counterexamples: db0b58 two warning-mutation failures7.61s;34359 fourteen
+failed47.94s included twelve genuine cases and two frozen-provenance fixture
+errors. Corrected native-boolean96990 two failed12.28s;25400 two malformed-
+container fixture errors19 passed140.04s;6727 six actual native-details failures
+9 passed18.01s;645930 two compare/seal scheduling failures7.44s. Final P1 focus
+12518 passed35/152.85s;79040 union2072 passed590.44s. P2 c52c95 two outward-None
+failures5.82s;48990 six failed10.83s (two None,four stale positive);9439 all6
+passed10.12s after private failed fallback/frozen correction/reentry repair.
+Session, eventbus and decision-execution files remain unchanged. No real model,
+source asset or production entry was enabled by these synthetic offline tests.
+
 ### Task5 final regression command (current evidence, not release approval)
 
 The ordered 25-module union referred to by current worker/reviewer handoffs is
