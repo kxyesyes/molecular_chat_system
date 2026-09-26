@@ -264,3 +264,31 @@ and isolated launcher220D8B2D07BE845898ED495ACE8474D5B6F9390A93FA3530373263275C3
 were verified unchanged. In-memory compilation and diff checks passed. No full
 suite rerun is claimed here; new exact-head Linux CI is still required. The
 post-dispatch flags cannot by themselves prove dispatch-time state/root cause.
+
+## Fourth CI: native root fault-injection mismatch
+
+Workflow36244230995 atc49ccdd completed with Agent9548 passed/1 skipped/23858
+warnings413.52s (job108410296069), but root5 failed/2638 passed/75 skipped/5
+warnings223.43s (job108410296208). The five failures are native extra/short/
+duplicate/label/score cases of test_strict_preserves_r1_invalid_discard: expected
+invalid_discard, observed valid_hits. No Agent mismatch diagnostic was emitted.
+This is not a successful complete CI or proof of repaired native dispatch.
+
+Extend failure-only identity diagnostics to the exact root assertion, retaining
+the real loaded index, concrete class patch, HTTP transport and every existing
+scientific assertion. Capture index/generation before dispatch but inspect the
+bound/class dictionary hook only in the failed assertion message; add no wrapper
+or second search. Include call count and FAISS version, never source rows or
+machine paths. Parent diff check passes; local execution and independent review
+are still pending the single test slot. Root cause remains unknown; no production
+change, dependency adjustment, weakened assertion or same-head blind retry.
+
+Root diagnostic SOURCE/SPEC Turing and fresh QUALITY Faraday approve publication
+only. Parent actual owned-generation module plus all36 Session variants passed
+223/3 SWIG warnings12.38s, handle57156 terminal6df5b5. Independent exact repeat
+passed223/3 SWIG warnings11.92s, handle86222 terminalb0f8f5; both exit0. Test hash
+C745FA0201B6FF37EDB3EE2A9B636CE3A73F19F20A074E5DB5132B9FCD90F2A7 and runner
+220D8B2D07BE845898ED495ACE8474D5B6F9390A93FA3530373263275C3EEDFA stayed unchanged.
+Parent in-memory compilation and diff checks passed. The failure-only message
+was not exercised by these local passes. New exact-head Linux diagnostics are
+still necessary; this is not root-cause attribution or merge approval.
