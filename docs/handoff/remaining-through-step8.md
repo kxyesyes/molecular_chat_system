@@ -17,8 +17,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata RED reproduced and focused controls passed, but mixed ADMET/PDE5A input still rejected | Task6 parser correction and two timeout investigations remain; scientific slot released to admission integration; Tasks6–8 not complete |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 admitted-input/acceptance local SOURCE and fresh QUALITY4176 passed | PR93 CI36268575293 core exited124 at600s, not mergeable; seven other checks passed, aggregate correctly failed |
-| Analytical clause / target roles | PR94 draft1fa84b2; SOURCE and independent QUALITY844 passed | Exact-head CI and merge pending; subsequent empty-journal and normal-Web integration still required |
-| Core CI suite budget amendment | PR95 draft5bee46f; SOURCE and fresh QUALITY35passed2platformskips approved | Actual9-check CI pending. Core1200/Web600 proposal changes suite capacity, not science/performance |
+| Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal | Subsequent empty-journal and normal-Web integration still required |
+| Core CI suite budget amendment | PR95 aligned3610b4d to actualPR94landing; SOURCE and fresh QUALITY35passed2platformskips approved | New exact-head9-check CI pending. Core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -29,6 +29,17 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR94 head1fa84b2 completedrun36269748170 all9success. Actualcollection10561
+=10337core+224Web; core10336passed1skipped17238warnings337.77s, Web224passed
+6628warnings188.09s, activity1855passed6skipped5569warnings369.61s. Parent
+checked exacthead/base/main and fullypaginatedreviews/threads(all0), markedready,
+freshchecked again then SHA-squashed3182617f18b5d4d54f3ce7a047511436c90cfb31.
+Merge55002/3fcf00terminal; fetchedcomplete reviewed/landed tree both
+eaa8ac678514beff3f223a093d82c366b700b708. One read-only log extraction initially
+failed due incorrect Select-Object parameter; corrected bounded extraction gave
+the evidence above. No job restart. PR95 cleanly aligned3610b4d with unchanged
+CI two-file patch; pushed for newCI. No deployment or production activation.
 
 CI amendment5bee46f is published separately as draftPR95. IndependentMendel
 14555/0c0b28:35passed2skipped7warnings21.48s;20hashes unchanged, slotreleased.
