@@ -17,8 +17,19 @@ scratch/ordinary_chat_offline_runner.py tests/agent/test_reverse_receipt_consump
 ```
 
 PR87 has now landed as b33e2c044e4866a9f6228b28f4c734c22565eda9. Its current-source
-changes must be aligned and reviewed before publication/new CI. Earlier staging
-statements below are historical, not current unperformed-test claims.
+changes were aligned by conflict-free merge70816d21a5c30386aedd1b2b758673ebaa844fb8.
+Noether independent SOURCE integration review approves: all10 consumer blobs and
+all11 upstream blobs plus their complete raw path/mode/OID deltas remain exact.
+No unexpected interactions or extra changes; shared Session is unchanged.
+
+Aligned regression20682/766f5d passed1926 tests,7 warnings,2 subtests in83.25s,
+exit0. Command is the15-module command above plus
+tests/agent/test_rag_current_eligibility.py and tests/test_quality_workflow_contract.py.
+Approved launcher unchanged. Parent in-memory compile of seven Python files and
+diff checks pass. Filename-only long sk-/ghp_/github_pat_ pattern scan found no
+matches; that narrow scan is not universal secret detection. Scope is ten files.
+Fresh remote exact-head CI and review gates remain required before merging.
+Earlier staging statements below are historical, not current unperformed-test claims.
 
 ## Scope and prior evidence
 
