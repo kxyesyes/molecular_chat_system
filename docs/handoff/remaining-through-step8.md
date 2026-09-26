@@ -4,6 +4,25 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+### Current release gates (update this table before older checkpoint prose)
+
+| Work package / component | Current verified state | Next required evidence |
+|---|---|---|
+| Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
+| PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
+| PR86 reverse owned source | OPEN bbc498e; actual-main alignment independently reviewed | CI36248942747 completion, fresh head/base/review check before merge |
+| PR87 RAG current source | DRAFT d976422; clean eight-file transplant; independent1323 passed | CI36249184214 completion, actual latest-main alignment and review before merge |
+| Normal-Web B1 Task3 | Both corrected source reviews approved; latest focus22 passed | Tesla final five-module union, then independent Nietzsche repeat; no Task4 release yet |
+| Normal-Web B1 Tasks4–8 | PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
+| B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
+| Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
+| Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
+
+Original mixed checkout remains untouched. Local component passes, source reviews,
+and synthetic transport tests are not final live/model or normal-Web acceptance.
+
+### Historical checkpoints (newest first; superseded staging states retained)
+
 Latest publication: R4 clean transplantd976422 passed independent Copernicus
 SOURCE integration review (eight-file raw delta/modes/blobs identical, source and
 upstream popcount files preserved). Published as draft PR87, attached to this
