@@ -37,3 +37,29 @@ def isolated_user_llm_configuration(tmp_path, monkeypatch):
     monkeypatch.setenv("MEDCHAT_LLM_LOCK_DIR", str(tmp_path / "llm-locks"))
     monkeypatch.setenv("MEDCHAT_ENV_FILE", str(tmp_path / "not-loaded.env"))
     monkeypatch.setenv("MEDCHAT_AGENT_SESSION_DB", str(tmp_path / "agent-sessions.sqlite"))
+
+
+@pytest.fixture
+def rag_ip_loader(request, monkeypatch):
+    """Opt-in real IP loader variants; never assume a FAISS Python subclass."""
+    variant = getattr(request, "param", "native")
+    assert variant in {"native", "base-flat-ip"}
+    if variant == "base-flat-ip":
+        import faiss
+        import numpy as np
+
+        read = faiss.read_index
+
+        def load(path):
+            loaded = read(path)
+            assert loaded.metric_type == faiss.METRIC_INNER_PRODUCT
+            base = faiss.IndexFlat(loaded.d, faiss.METRIC_INNER_PRODUCT)
+            if loaded.ntotal:
+                vectors = loaded.reconstruct_n(0, loaded.ntotal)
+                base.add(vectors)
+                np.testing.assert_array_equal(base.reconstruct_n(0, base.ntotal), vectors)
+            assert base.ntotal == loaded.ntotal and base.d == loaded.d
+            return base
+
+        monkeypatch.setattr(faiss, "read_index", load)
+    return variant
