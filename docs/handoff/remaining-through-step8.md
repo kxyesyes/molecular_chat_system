@@ -18,6 +18,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
+| B1 terminal publication | Independent SOURCE-approved test preparation; actual4 behavioral RED+1 API RED,8 controls passed | Four-production implementation in progress; revision8 separate |
+| Strict generation transport | Draft PR97 head1053951; SOURCE/fresh QUALITY passed, both migrated exact17 runs752 passed+162 subtests; CI36279601921 in progress | Latest-head CI/review/merge gates pending; not full B2 closure |
+| Native ASCII validation optimization | Test-only equivalence30 passed; permanent actual2 RED/45 passed; minimal source frozen0D26E2 | Focused GREEN/49-module regression/independent review and original Web deadlines still pending |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -30,6 +33,31 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Strict-generation fresh Bohr QUALITY terminal55688/3cc36b:752passed,
+162subtests passed,7warnings,17.61s,0failures/skips,17hashes unchanged. Parent
+compiled347src/scripts in memory and checked whitespace. Scoped credential-pattern
+scan matched two unchanged pre-existing rejection-fixture strings; no new match,
+not an absolute secret-free proof. Exact13-file commit105395187fae2812984b410f41ee5a2e561cedb9
+is pushed as draftPR97. Creation first stopped at a pre-POST empty-array guard;
+read-only confirmed0PRs before corrected flattened check/create, no duplicate.
+Fresh remote main remainsaa3cddd. Actual CI36279601921 is in progress at1053951;
+static-quality passed, remaining checks pending. No merge/deployment/activation.
+
+ASCII permanent module actualREDa24a8e:2failed45passed3.48s,0warnings/skips;
+both native-ASCII mechanism assertions reached real2509/2505ordcalls. Fivehashes
+unchanged. Parent apply_patch archived temporary prototype unchanged44321E40
+to ignored scratch/test_json_boundary_ascii_fast_path.py, outside collection.
+Minimal production0D26E2 adds two fixed regexes and the approved native branch;
+all permanent assertions remainD43AAB. FocusedGREEN only is now explicitly
+released; no benchmark or source-only result is called a Web timeout fix.
+
+Publication §8 records exact4behaviorRED: terminal callback receives scientific
+payload; RAG source closed by terminal callback still returnsCOMPLETED (normal
+and commit-then-raise); postattempt cancellation drains but escapesCancelledError
+with durable succeeded. Fifth failure is missingAPI only;8cancel/latecancel
+controls pass,3SWIGwarnings. Four-production implementation is now released,
+preserving preterminalCANCELLED and failure-only postattempt semantics.
 
 Strict-generation migrated exact17 selection terminal22276/ce7ecd:752passed,
 162subtests passed,7warnings,19.63s,0failures/errors/skips;17unique frozen hashes
