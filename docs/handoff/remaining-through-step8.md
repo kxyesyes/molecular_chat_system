@@ -30,6 +30,34 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Next-loop integration atf99cf7e reproduced actual checkpoint-guard gap:
+legacy3passed8.97s (90652/84d326); reviewed test-only constructor bootstrap
+a3402a call-phase1failed1.77s because guard calls[] !=[1]. Final Sessiontest
+restored54b12b4. Five production donor files then integrated source-exact;
+eight-file manifest bcd07dabc6f7330a6b88e73ee022bc518ceeda03fec088329dd44eeb66c7cf96.
+No Web entry activation. Hume independent SOURCE running; exact3 GREEN command
+released to Mencius only after Wegener diagnostics terminated. Parent in-memory
+compile347src/scripts passed, whitespace clean, scoped credential scan no matches.
+Expanded58 and freshQUALITY/CI/publication still required; no result inferred.
+
+Task6 timing8486/23c317:2failed78.69s. Actual silence native3116ms/JSON3031.04ms,
+mostly overlapping closure validation. Subsequent fixed-three-bucket controls
+556b2f9failed(scaffolding)/d95c9531passed3.70s; unique diagnostic42865/dfb617:
+2failed43.95s,7warnings. Complete silence-contained closures: native10 measured
+224auth calls1368.85ms,86journal266.20ms,76resolve578.61ms; JSON13 measured
+288auth1286.18ms,111journal257.01ms,98resolve569.27ms. Inclusive times cannot be
+added, incomplete spans excluded, no span overflow. Authentication dominates
+these buckets but its inner cost remains UNKNOWN; no production fix/cache/guard
+relaxation. Sole slot released before next-loop run; further source diagnosis
+targets existing ledger lookup/copy semantics, not skipping source validation.
+
+Independent B2 source review identified missing true helper/transport-count
+coverage: existing count10 test replaces internal retry. Separate clean branch
+codex/b2-generation-transport-probe atmain5d36eee prepares only test/shortplan,
+real generator/helper/client with synthetic lowest HTTP transport, no execution
+slot or production edits. Numeric token grant/backend proof still unestablished;
+offline transport counting must not claim live generation or finish B2/P8.
+
 PR93 head0d6f40c CI36272209579 completed9/9success. Core108488189672 collected
 10820=10596core+224Web, then10595passed1skipped17238warnings467.02s. Web
 108488189639:224passed6628warnings180.48s; root2892passed75skipped184.89s;
