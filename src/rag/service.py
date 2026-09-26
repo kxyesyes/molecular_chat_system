@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
 import logging
+import re
 from pathlib import Path
 from threading import RLock
 from typing import List, Dict, Any, Optional
@@ -18,6 +19,7 @@ import numpy as np
 
 from src.rag.retrieval import search_molecular_index, search_molecular_index_outcome
 from src.rag.receipt import canonical_digest as _canonical_digest
+from src.rag.receipt import validate_retrieval_envelope
 from src.rag.index import (
     CURRENT_SCHEMA_VERSION,
     RAGIndexCompatibilityError,
@@ -56,6 +58,20 @@ class _Generation:
     manifest: RAGIndexManifest
     source_digest: str
     index_digest: str
+
+
+@dataclass(frozen=True)
+class RetrievalEligibility:
+    """Detached current-source state, not an invocation authorization token."""
+    generation_id: str
+    epoch: int
+    configuration_sha256: str
+    source_identity_sha256: str
+
+
+def _receipt_source_projection(receipt):
+    return {key: value for key, value in receipt.items() if key not in {
+        'invocation_id', 'input_sha256', 'diagnostics', 'result_sha256'}}
 
 
 def _copy_frame(frame):
@@ -490,6 +506,55 @@ class RAGSystem:
         with self._query_guard(generation):
             return self._query_receipt(generation, query, k, invocation)
 
+    def capture_retrieval_eligibility(self):
+        """Check the owned generation and current CSV, without scientific work.
+
+        Persisted index replacement is adopted only by explicit initialize().
+        This boundary check is not a filesystem transaction or a model probe.
+        """
+        with self._generation_lock:
+            try:
+                generation = self._generation
+                if generation is None or self._closed or self.is_initialized is not True:
+                    raise RAGIndexCompatibilityError('RAG source unavailable')
+                config = generation.config
+                self._check_operation(generation.epoch, config, generation.source_digest)
+                return RetrievalEligibility(
+                    generation_id=generation.identity, epoch=generation.epoch,
+                    configuration_sha256=_canonical_digest({
+                        'source': str(config.source), 'store': config.store, 'model': config.model,
+                        'endpoint_sha256': hashlib.sha256(config.endpoint.encode('utf-8')).hexdigest(),
+                    }),
+                    source_identity_sha256=_canonical_digest(self._generation_source_projection(generation)),
+                )
+            except Exception:
+                raise RAGIndexCompatibilityError('RAG source unavailable') from None
+
+    def validate_retrieval_source(self, envelope, *, query, k, expected):
+        """Validate a detached R3 proof against fresh loaded-source eligibility.
+
+        Matching snapshots/receipts do not authenticate invocation or ownership;
+        trusted dispatch and Session seals remain necessary for consumers.
+        """
+        if (type(query) is not str or not query.strip()
+                or type(k) is not int or k < 1
+                or type(expected) is not RetrievalEligibility
+                or type(getattr(expected, 'epoch', None)) is not int or expected.epoch < 0
+                or any(type(value) is not str or re.fullmatch(pattern, value) is None
+                       for value, pattern in (
+                           (getattr(expected, 'generation_id', None), '[0-9a-f]{32}'),
+                           (getattr(expected, 'configuration_sha256', None), '[0-9a-f]{64}'),
+                           (getattr(expected, 'source_identity_sha256', None), '[0-9a-f]{64}')))):
+            raise ValueError('Invalid RAG retrieval source inputs')
+        validated = validate_retrieval_envelope(envelope, query=query, k=k)
+        with self._generation_lock:
+            current = self.capture_retrieval_eligibility()
+            if (expected != current or _canonical_digest(_receipt_source_projection(validated['receipt']))
+                    != current.source_identity_sha256):
+                # A stale caller must not revoke a healthy newer generation.
+                raise RAGIndexCompatibilityError('RAG source unavailable')
+        return validated
+
     @contextmanager
     def _query_guard(self, generation):
         """Revoke observed changes even on failure, preserving the original error."""
@@ -518,11 +583,20 @@ class RAGSystem:
             embedding_model=config.model, embedding=embedding, k=k,
         )
         records = outcome['records']
-        manifest = generation.manifest
         receipt = {
-            'schema_version': '1', 'validation_revision': 'rag-owned-generation-v1',
-            'invocation_id': invocation, 'generation_id': generation.identity,
+            **self._generation_source_projection(generation),
+            'invocation_id': invocation,
             'input_sha256': hashlib.sha256(query.encode('utf-8')).hexdigest(),
+            'diagnostics': outcome['diagnostics'], 'result_sha256': _canonical_digest(records),
+        }
+        return deepcopy({'records': records, 'receipt': receipt})
+
+    @staticmethod
+    def _generation_source_projection(generation):
+        manifest, config = generation.manifest, generation.config
+        return {
+            'schema_version': '1', 'validation_revision': 'rag-owned-generation-v1',
+            'generation_id': generation.identity,
             'source_path': manifest.source_path, 'source_sha256': generation.source_digest,
             'source_row_count': len(generation.frame), 'index_sha256': generation.index_digest,
             'row_mapping_sha256': _canonical_digest(manifest.row_mapping),
@@ -531,9 +605,7 @@ class RAGSystem:
             'embedding_model': config.model,
             'embedding_endpoint_sha256': hashlib.sha256(config.endpoint.encode('utf-8')).hexdigest(),
             'embedding_weights_verified': False, 'index_embedding_endpoint_sha256': None,
-            'diagnostics': outcome['diagnostics'], 'result_sha256': _canonical_digest(records),
         }
-        return deepcopy({'records': records, 'receipt': receipt})
 
     def _search_embedding(self, embedding, k):
         self._require_retrieval_ready()

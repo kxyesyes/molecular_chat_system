@@ -67,7 +67,77 @@ or unavailable source is tool_unavailable. Stale snapshots cannot revoke healthy
 new generations; formatting must not bypass the final source check. A boundary
 freshness check is not filesystem atomicity or remote-weight verification.
 
-## Current state
+## Initial extraction checkpoint (superseded by RED/GREEN below)
 
-Preparation only. No R4 implementation/test result is claimed on this branch.
+Historical five-file implementation is now extracted through narrow apply_patch
+diffs. Tool and old contract-test blobs equal1e9bb34 exactly; service differs only
+by the preserved PR83 dtype/coherence guards. R3 receipt validator/adapter and
+its conftest/owned-generation tests remain byte-identical to preparation base.
+New eligibility-test original blob58a0337b0bfec8c90cbde6f6ca05b1618443ff19 was
+verified before adding native/base-IP variants and guard-reachability controls.
+These controls are prepared for RED: the old five constructor-class interception
+sites are intentionally still unchanged. No R4 test has run on this branch yet.
+
+Repinned isolated launcher SHA256
+8C044090FB83203EC756C1C99A975BA9505E6E3B3422D930E9484A1EFA2C3703.
 Task5 worker currently owns the sole local test slot; do not start a competing run.
+Initial SOURCE/SPEC reviewed production and the bounded fixture plan;
+final test freeze, runtime results and QUALITY are separate pending gates.
+
+## Additional integration finding: formatter exception safety
+
+Kepler SOURCE/SPEC found format_rag_context outside the ordinary-exception guard.
+An exception can escape direct execute and be stringified by the generic adapter,
+leaking provider-like details. This was initially source-derived; the runtime
+failure and subsequent correction are recorded below.
+Selected minimal repair: keep a working actual-tool baseline, inject synthetic
+RuntimeError/ValueError/compatibility formatter failures through direct and real
+adapter paths, and retain BaseException cancellation propagation. After observed
+RED, contain ordinary formatting failures locally with the existing generic
+unavailable result (empty data/evidence). Successful formatting must still reach
+the final freshness validator; malformed proof classification stays invalid_output.
+Do not change generic adapter error handling or conceal malformed proof by
+rewriting it. No real secret is used in these diagnostic fixtures.
+
+## Integration RED/GREEN checkpoint
+
+The seven focused families actually ran under the isolated launcher:17 failed,
+35 passed/3 SWIG warnings in5.65s (terminal chunk aed7c1). Eleven failures exposed
+the missed base-IP interceptions; six exposed ordinary formatter exceptions via
+direct and adapter execution. The adapter assertion failed on its error code
+before checking raw text; do not claim a runtime leak assertion was reached there.
+After concrete-owned-class interception and the local formatting Exception guard,
+all52 passed/3 SWIG warnings in4.75s (terminal338368). BaseException controls and
+successful-format final freshness validation remain. The original RED is retained.
+
+Current five-file hashes are frozen for corrected SOURCE/SPEC; full eleven-module
+union and fresh QUALITY remain outstanding. Sole local test slot is now Jason's
+Task5 independent union22518; no competing pytest. PR84's first CI subsequently
+failed10 tests (9520 passed/1 skipped), so it remains unmerged and R4 publication
+is blocked on correcting that prerequisite, not waived by the52 local passes.
+
+Kepler corrected SOURCE/SPEC now APPROVES all five hashes with no actionable
+findings; the formatter P2 is closed and protected R2/R3/Session/security paths
+are unchanged. This reviewer performed source-only verification, not a runtime
+repeat. Final tool SHA256 C1957C09712FB879231E9E385B87F6DB75A9D3B702A9A1EE9DE94223F032CAF9;
+service7168B1FF0FD37FDE1E1C42A476DC2E7CEC2D8B175CB7D2E3DA1CE5ED32327809;
+receipt-testC7D7975E4494EDCB95C8717E7DBF3E6527B835F35AB71D59E6C95C36295FD395;
+tool-contract6E6573520080CBC34DA4B4F49C3C9F105A40B7F2AC260C313981C523C54474C5;
+new-test2D917EC4AE739EB6AAD96EB26FD0233F039A4181CE83826E8DA2EFA02DAC4ADA.
+
+Parent exact eleven-module union58842 is terminal:1252 passed/7 warnings/70.28s,
+exit0, chunk1a1ef6. Warnings are three SWIG and four FastAPI deprecations.
+Fresh Meitner QUALITY source inspection has no actionable findings and confirms
+the five hashes; explicit sole test slot transferred for its independent repeat.
+R4's base is stillf050c5a. Prerequisite PR84 now has diagnostic follow-upa4c1a61
+with new live CI36241771811; not merged. Native Linux search failures remain
+unresolved, and any resulting prerequisite changes must be carried/re-reviewed
+before this dependent branch can be published. No positive CI claim from local
+1252 passes and no production-entry/model switch.
+
+Independent Meitner exact eleven-module repeat is terminal55939/chunk12fbfc:
+1252 passed,0 failed,0 skipped,7 warnings in69.12s,exit0. Three SWIG and four
+FastAPI deprecations; no edits and all five code/test hashes plus runner match
+before/after. QUALITY approves this frozen offline snapshot and released the
+sole local test slot. This snapshot can be committed locally; publication still
+requires PR84 correction/landing and fresh verification of inherited changes.

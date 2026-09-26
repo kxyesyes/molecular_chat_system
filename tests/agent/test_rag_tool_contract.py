@@ -12,6 +12,7 @@ from src.agent.contracts import (
 from src.agent.tooling.adapters import LegacyPythonToolAdapter
 from src.agent.tooling.factory import build_tool_registry, LegacyQueryInput
 from src.agent.tools.rag_search_tool import RAGSearchTool
+from test_rag_receipt_consumption import SyntheticSourceContract
 
 
 def record():
@@ -27,7 +28,7 @@ def record():
     }
 
 
-class InjectedService:
+class InjectedService(SyntheticSourceContract):
     """Synthetic strict-envelope fixture only, never scientific ownership proof."""
     is_initialized = True
     vector_index = object()
@@ -38,11 +39,15 @@ class InjectedService:
         for row in self.rows:
             row['provenance'].update(manifest_schema_version=2, builder_version='1')
         self.calls = []
+        self.set_synthetic_source(self._synthetic_envelope('', 3)['receipt'])
 
     def search_similar_molecules_sync_with_receipt(self, query, k=3):
+        self.calls.append((query, k))
+        return self._synthetic_envelope(query, k)
+
+    def _synthetic_envelope(self, query, k):
         import hashlib
         from src.rag.receipt import canonical_digest
-        self.calls.append((query, k))
         count = len(self.rows)
         return {'records': self.rows, 'receipt': {
             'schema_version': '1', 'validation_revision': 'rag-owned-generation-v1',

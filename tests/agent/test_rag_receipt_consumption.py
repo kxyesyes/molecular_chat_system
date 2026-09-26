@@ -393,7 +393,36 @@ def test_actual_relative_configuration_absolute_manifest(tmp_path, monkeypatch):
     assert validate(value, query='synthetic query', k=3) == value
 
 
-class EnvelopeService:
+class SyntheticSourceContract:
+    """Synthetic identity agreement only; actual freshness tests use RAGSystem."""
+
+    @staticmethod
+    def source_digest(receipt):
+        from src.rag.receipt import canonical_digest
+        return canonical_digest({key: value for key, value in receipt.items() if key not in {
+            'invocation_id', 'input_sha256', 'diagnostics', 'result_sha256'}})
+
+    def set_synthetic_source(self, receipt):
+        from src.rag.service import RetrievalEligibility
+        self.synthetic_source = RetrievalEligibility(
+            receipt['generation_id'], 0, '0' * 64, self.source_digest(receipt))
+
+    def capture_retrieval_eligibility(self):
+        return deepcopy(self.synthetic_source)
+
+    def validate_retrieval_source(self, envelope, *, query, k, expected):
+        from src.rag.index import RAGIndexCompatibilityError
+        from src.rag.service import RetrievalEligibility
+        if type(query) is not str or not query.strip() or type(k) is not int or k < 1:
+            raise ValueError('Invalid synthetic source inputs')
+        validated = validate(envelope, query=query, k=k)
+        if (type(expected) is not RetrievalEligibility or expected != self.synthetic_source
+                or self.source_digest(validated['receipt']) != expected.source_identity_sha256):
+            raise RAGIndexCompatibilityError('Synthetic source mismatch')
+        return validated
+
+
+class EnvelopeService(SyntheticSourceContract):
     """Synthetic transport/tamper boundary; not an ownership or scientific proof."""
     is_initialized = True
     vector_index = object()
@@ -402,6 +431,7 @@ class EnvelopeService:
     def __init__(self, value):
         self.value = value
         self.calls = []
+        self.set_synthetic_source(value['receipt'])
 
     def search_similar_molecules_sync_with_receipt(self, query, k=3):
         self.calls.append((query, k))
