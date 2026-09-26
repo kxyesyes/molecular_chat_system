@@ -11,7 +11,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| PR87 RAG current source | DRAFT9f44b78; independent1323 passed; newCI36249902754 TERMINAL Agent timeout600s at76% | Source-reviewed bounded case/duration diagnostics before new CI; old36249184214 timeout at98% also retained; no merge |
+| PR87 RAG current source | DRAFT7187099; bounded diagnostic SOURCE/QUALITY approved; workflow contracts10 passed; CI36251616084 live | Retain old600s timeouts at76%/98%; inspect named progress; no performance-fix or merge claim |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 RELEASED; Tasks5–8 PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -22,6 +22,16 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR87 diagnostic7187099 is published after Epicurus SOURCE and fresh Ptolemy
+QUALITY source approvals. Actual workflow-contract RED1 failed0.17s/547193,
+then all10 passed1.27s/987f2a. Only Agent arguments gain named progress/durations;
+all selection/deadlines/assertions/gates unchanged. NewCI36251616084 confirmed
+in_progress at exacthead7187099, not assumed complete. No deployment/model use.
+Task4 assembly worker reports RED5/4.34s +RED8/5.96s -> focused15 passed2.55s,
+not full Task4. Its prefix/display query boundary has a scoped amendment under
+independent review. Pascal now owns the sole test slot for reverse evidence-only
+redaction reproduction; neither worker may start a competing union.
 
 PR87 new exact-head run36249902754 is terminal failure: Agent108425852094
 hit600s/exit124 at76%; six other jobs passed and aggregate failed. Old run

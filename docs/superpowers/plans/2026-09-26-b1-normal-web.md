@@ -333,6 +333,40 @@ This completes Task3 locally, not P7 integration or P8 live acceptance.
 Files: `src/web/app.py`, `ordinary_capabilities.py`, `decision_runtime.py`;
 new runtime/lifecycle tests.
 
+### Task4 scoped display-context amendment (design review pending)
+
+Actual assembly TDD has initial RED5/4.34s and RED8/5.96s, then focused GREEN15/
+2.55s. These worker-reported terminal results establish assembly only; prefix
+RED and the full union remain pending. Rawls explicitly released the local slot.
+
+Source inspection exposes a second independent query limit after intent/decision:
+decision_loop.validate_ordinary_display -> ordinary_chat_policy._session_facts
+calls context_value twice with its legacy serialized-query16KiB default, although
+B ingress/loop already admit16KiB UTF-8 query content within bounded envelopes.
+That can reject an otherwise admitted B ordinary answer as chat_output_unsafe.
+Do not weaken the real native/JSON positive or replace it with a stubbed answer.
+
+Recommended minimal amendment: additionally allow ONLY
+src/agent/harness/ordinary_chat_policy.py and
+tests/agent/test_ordinary_chat_policy.py. After strict snapshot validation, exact
+profile ordinary-semantic-b1-v1 plus catalog ordinary-product-b-v1 selects the
+existing context_value(query_content_bytes=True) for BOTH compared live/replay
+contexts. No new public API/caller parameter; keep private helper default false.
+Preserve the original-profile query/context/error guards, all text risk checks,
+32768-byte _view JSON bound,64KiB whole-context bound, empty scientific ledger,
+and context identity/equality. Unknown/mismatched profiles must not gain the B
+content policy. Normal-Web24KiB envelope remains stricter than _view's32KiB;
+no global default, output limit, historical v6/v7 or decoder change.
+
+TDD before correction: actual normal-Web native/JSON escaped/Unicode query
+positives must reach both transports unchanged and the actual display boundary;
+direct display tests cover B content16KiB positive, one-byte-over rejection,
+original-profile serialized-limit rejection and mismatched session context.
+Run unchanged original display tests plus the Task4 five-module union. Independent
+source/design approval is required before this extra production-file edit; no
+change has been granted yet. This fulfills the existing positive requirement,
+not additional model/scientific capability or default activation.
+
 - [ ] RED `test_b1_server_profile_assembly_is_closed`: B requires async
   decision_a2/semantic_v1, exact seven reviewed canonical adapters, distinct feature
   inverse mapping. B2/unknown/missing wiring rejects before publication; constructor
