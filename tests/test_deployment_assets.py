@@ -95,7 +95,8 @@ docking:
         source = workflow_path.read_text(encoding="utf-8")
         required_commands = [
             "timeout ${{ matrix.command_timeout }}s python -m pytest ${{ matrix.pytest_target }} -q -p no:cacheprovider ${{ matrix.pytest_args }}",
-            'pytest_target: "tests/agent"',
+            'pytest_target: "tests/agent --ignore=tests/agent/test_ordinary_web_lifecycle.py --ignore=tests/agent/test_ordinary_web_runtime.py --ignore=tests/agent/test_web_decision_runtime_lifecycle.py"',
+            'pytest_target: "tests/agent/test_ordinary_web_lifecycle.py tests/agent/test_ordinary_web_runtime.py tests/agent/test_web_decision_runtime_lifecycle.py"',
             'pytest_target: "tests/sandbox_broker/test_api.py"',
             'pytest_target: "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py"',
             'pytest_target: "tests/task_runtime"',
@@ -111,7 +112,7 @@ docking:
         self.assertIn('python-version: "3.10"', source)
         self.assertEqual(source.count("--timeout=60"), 2)
         self.assertEqual(source.count('pytest_args: "--timeout=60"'), 2)
-        self.assertEqual(source.count("command_timeout:"), 6)
+        self.assertEqual(source.count("command_timeout:"), 7)
         self.assertIn("command_timeout: 180", source)
         self.assertIn("git grep -IlE", source)
         self.assertNotIn("git grep -nE", source)

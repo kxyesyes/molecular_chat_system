@@ -26,7 +26,11 @@ jobs:
       matrix:
         include:
           - name: agent
-            pytest_target: "tests/agent"
+            pytest_target: "tests/agent --ignore=tests/agent/test_ordinary_web_lifecycle.py --ignore=tests/agent/test_ordinary_web_runtime.py --ignore=tests/agent/test_web_decision_runtime_lifecycle.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 600
+          - name: agent-web-lifecycle
+            pytest_target: "tests/agent/test_ordinary_web_lifecycle.py tests/agent/test_ordinary_web_runtime.py tests/agent/test_web_decision_runtime_lifecycle.py"
             pytest_args: "-vv --durations=25"
             command_timeout: 600
           - name: sandbox-api
@@ -73,6 +77,127 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-ci.txt
+
+      - name: Verify complete Agent partition collection
+        if: matrix.name == 'agent'
+        shell: bash
+        run: |
+          timeout --signal=KILL 180s python - <<'PY'
+          import json, os, shlex, shutil, subprocess, sys, tempfile, time
+          from pathlib import Path
+          import yaml
+
+          COLLECTION_TOTAL_SECONDS = 180
+          COLLECTION_CHILD_SECONDS = 60
+          repo = Path.cwd().resolve()
+          child = r'''
+          import sys, socket, json
+          native_connect = socket.socket.connect
+          def blocked(*args, **kwargs):
+              raise RuntimeError('offline_network_forbidden')
+          def guarded_connect(self, address):
+              caller = sys._getframe(1)
+              if (caller.f_code.co_name == '_fallback_socketpair'
+                      and caller.f_code.co_filename == socket.__file__):
+                  return native_connect(self, address)
+              return blocked()
+          socket.socket.connect = guarded_connect
+          socket.socket.connect_ex = blocked
+          socket.create_connection = blocked
+          socket.socket.sendto = blocked
+          if hasattr(socket.socket, 'sendmsg'):
+              socket.socket.sendmsg = blocked
+          for name in ('getaddrinfo', 'gethostbyname', 'gethostbyname_ex', 'gethostbyaddr', 'getnameinfo'):
+              setattr(socket, name, blocked)
+          import site
+          site.main()
+          from pathlib import Path
+          repo = Path(sys.argv[1])
+          sys.path[:0] = [str(repo), str(repo / 'tests/agent')]
+          import pytest
+          class Capture:
+              def pytest_collection_finish(self, session):
+                  print('AGENT_IDS_JSON=' + json.dumps([item.nodeid for item in session.items]), flush=True)
+          raise SystemExit(pytest.main(sys.argv[2:], plugins=[Capture()]))
+          '''
+
+          def verify():
+              deadline = time.monotonic() + COLLECTION_TOTAL_SECONDS
+              workflow = yaml.safe_load((repo / '.github/workflows/quality.yml').read_text('utf-8'))
+              rows = workflow['jobs']['python-tests']['strategy']['matrix']['include']
+              matrix = {row['name']: row for row in rows}
+              if len(rows) != len(matrix):
+                  raise ValueError('duplicate matrix row')
+              selections = [('tests/agent', matrix['agent']['pytest_args'])]
+              selections += [(matrix[name]['pytest_target'], matrix[name]['pytest_args'])
+                             for name in ('agent', 'agent-web-lifecycle')]
+              safe = {key: os.environ[key] for key in ('SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'COMSPEC')
+                      if key in os.environ}
+              collected = []
+              for target, options in selections:
+                  with tempfile.TemporaryDirectory(prefix='agent-collection-') as directory:
+                      root = Path(directory)
+                      env = dict(safe, TEMP=directory, TMP=directory, TMPDIR=directory,
+                          HOME=directory, USERPROFILE=directory, PYTHONNOUSERSITE='1',
+                          PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8',
+                          PYTHONPATH=str(repo), AGENT_HARNESS_MODE='legacy',
+                          MOLECULAR_CHAT_CONFIG=str(root / 'missing.yaml'),
+                          MEDCHAT_ENV_FILE=str(root / 'not-loaded.env'),
+                          MEDCHAT_USER_CONFIG_DIR=str(root / 'user-config'),
+                          MEDCHAT_LLM_LOCK_DIR=str(root / 'locks'),
+                          MEDCHAT_AGENT_SESSION_DB=str(root / 'sessions.sqlite'),
+                          AGENT_STATE_DB=str(root / 'agent.sqlite'),
+                          MEDCHAT_TASK_DB_PATH=str(root / 'tasks.sqlite'),
+                          TARGET_DB_PATH=str(root / 'targets.sqlite'),
+                          TARGET_CACHE_DIR=str(root / 'target-cache'),
+                          MEDCHAT_FRAGMENT_DB_PATH=directory, MEDCHAT_TASK_BACKEND='local',
+                          MEDCHAT_TEMPORAL_CANARY_PERCENT='0', AGENT_LANGGRAPH_CANARY_PERCENT='0',
+                          MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE='0', MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE='0',
+                          MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK='0', RUN_REAL_TARGET_SEARCH='0')
+                      fixtures = root / 'data/agent_evals'
+                      fixtures.mkdir(parents=True)
+                      for name in ('real_agent_cases.jsonl', 'golden_scientific_cases.jsonl', 'diverse_scientific_cases.jsonl'):
+                          source = repo / 'data/agent_evals' / name
+                          if source.is_file() and source.resolve().is_relative_to(repo):
+                              shutil.copy2(source, fixtures / name)
+                      args = []
+                      for arg in shlex.split(target):
+                          if arg.startswith('--ignore='):
+                              args.append('--ignore=' + str(repo / arg.split('=', 1)[1]))
+                          elif arg.startswith('-'):
+                              raise ValueError('unsupported selection option')
+                          else:
+                              args.append(str(repo / arg))
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          raise TimeoutError('collection deadline')
+                      result = subprocess.run([sys.executable, '-I', '-S', '-B', '-X', 'utf8', '-c', child,
+                          str(repo), *args, *shlex.split(options), '--collect-only', '-q', '-p', 'no:cacheprovider',
+                          '--rootdir=' + str(repo)], cwd=root, env=env, capture_output=True, text=True,
+                          encoding='utf-8', timeout=min(COLLECTION_CHILD_SECONDS, remaining), check=False)
+                      if result.returncode or time.monotonic() > deadline:
+                          raise ValueError('collection did not complete')
+                      captures = [line[len('AGENT_IDS_JSON='):] for line in result.stdout.splitlines()
+                                  if line.startswith('AGENT_IDS_JSON=')]
+                      if len(captures) != 1:
+                          raise ValueError('invalid collection capture')
+                      ids = json.loads(captures[0])
+                      if (type(ids) is not list or not ids or any(type(value) is not str for value in ids)
+                              or len(ids) != len(set(ids))):
+                          raise ValueError('invalid collection ids')
+                      collected.append(set(ids))
+              original, core, web = collected
+              if core & web or core | web != original:
+                  raise ValueError('partition differs from original collection')
+              if time.monotonic() > deadline:
+                  raise TimeoutError('collection deadline after cleanup')
+              print(f'AGENT_COLLECTION_OK baseline={len(original)} agent={len(core)} web={len(web)}')
+          try:
+              verify()
+          except Exception:
+              print('AGENT_COLLECTION_FAILED')
+              raise SystemExit(1) from None
+          PY
 
       - name: Run Python tests
         shell: bash
