@@ -3,10 +3,11 @@
 Handles (including identifier-shaped CCO) require a future same-run resolver to
 verify existence, ownership, producer roles and receipts. No chemistry or I/O.
 """
+import json
 import re
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from .decision import EvidenceId
 
@@ -126,3 +127,134 @@ def parse_binding_arguments(tool_name, arguments, *, profile_revision=None):
         return model.model_validate(arguments, strict=True)
     except (ValueError, TypeError, RecursionError):
         raise ValueError(_ERROR) from None
+
+
+class _ProofView(BaseModel):
+    model_config = ConfigDict(strict=True, frozen=True, extra='forbid', revalidate_instances='always')
+
+
+Sha256 = Annotated[str, StringConstraints(pattern=r'^[a-f0-9]{64}$', min_length=64, max_length=64)]
+GenerationId = Annotated[str, StringConstraints(pattern=r'^[a-f0-9]{32}$', min_length=32, max_length=32)]
+
+
+class RagBindingSource(_ProofView):
+    kind: Literal['rag']
+    generation_id: GenerationId
+    epoch: Annotated[int, Field(ge=0)]
+    configuration_sha256: Sha256
+    source_identity_sha256: Sha256
+
+
+class ReverseBindingSource(_ProofView):
+    kind: Literal['reverse']
+    generation_id: GenerationId
+    source_sha256: Sha256
+    configuration_sha256: Sha256
+
+
+class BindingRole(_ProofView):
+    role: Literal['molecules', 'reverse_record']
+    evidence_id: EvidenceId
+    output_sha256: Sha256
+
+    @field_validator('evidence_id')
+    @classmethod
+    def whole_evidence_id(cls, value):
+        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', value) is None:
+            raise ValueError('invalid_binding_proof')
+        return value
+
+
+class BindingProof(_ProofView):
+    """Syntax/consistency only; source eligibility belongs to the future resolver.
+
+    Future binding hashes use EvidenceLedger.output_digest's default-separator
+    representation. Producer receipt codecs and observation ceilings are unchanged.
+    """
+    version: Literal['1']
+    profile: Literal['ordinary-semantic-b1-v1']
+    requirements_sha256: Sha256
+    action_sha256: Sha256
+    input_sha256: Sha256
+    roles: Annotated[tuple[BindingRole, ...], Field(max_length=5)]
+    own_source: Annotated[RagBindingSource | ReverseBindingSource, Field(discriminator='kind')] | None
+    selection_sha256: Sha256 | None
+    policy: Literal['b1-v1']
+
+    @model_validator(mode='after')
+    def b1_roles(self):
+        # Five is a wire ceiling, never B1 permission to combine sources.
+        if len(self.roles) > 1 or ((self.selection_sha256 is not None) !=
+                bool(self.roles and self.roles[0].role == 'reverse_record')):
+            raise ValueError('invalid_binding_proof')
+        return self
+
+
+def _bounded_model_payload(value, *, models, max_bytes, reason):
+    """Explicit known-model projection, never model_dump on unvalidated data.
+
+    Raw callers get native JSON only. For server models only named tuple fields
+    become arrays; arbitrary tuples/Enums/bytes or serializer hooks cannot enter.
+    Depth/work are bounded even for model_construct cycles before any JSON dump.
+    The native walk then bounds the complete default-separator representation.
+    """
+    from src.agent.harness.decision_bounds import validate_json
+
+    if type(value) is dict:
+        validate_json(value, max_bytes=max_bytes, reason=reason)
+        return value
+    if type(value) not in models:
+        raise ValueError(reason)
+    active = set()
+    nodes = 0
+
+    def project(item, depth=0, tuple_field=False):
+        nonlocal nodes
+        nodes += 1
+        if depth > 32 or nodes > 16384:
+            raise ValueError(reason)
+        kind = type(item)
+        if kind in models or kind in (dict, list, tuple):
+            identity = id(item)
+            if identity in active:
+                raise ValueError(reason)
+            active.add(identity)
+            try:
+                if kind in models:
+                    fields = kind.model_fields
+                    values = vars(item)
+                    if (set(values) != set(fields) or item.__pydantic_extra__):
+                        raise ValueError(reason)
+                    return {name: project(values[name], depth + 1, name in models[kind])
+                            for name in fields}
+                if len(item) > 16384 - nodes:
+                    raise ValueError(reason)
+                if kind is dict:
+                    if any(type(key) is not str for key in item):
+                        raise ValueError(reason)
+                    return {key: project(child, depth + 1) for key, child in item.items()}
+                if kind is tuple and not tuple_field:
+                    raise ValueError(reason)
+                return [project(child, depth + 1) for child in item]
+            finally:
+                active.remove(identity)
+        # Native validation below rejects invalid scalars without coercing them.
+        return item
+
+    projected = project(value)
+    validate_json(projected, max_bytes=max_bytes, reason=reason)
+    return projected
+
+
+def parse_binding_proof(value) -> BindingProof:
+    """Return a bounded detached proof, including revalidation of constructed views."""
+    error = 'invalid_binding_proof'
+    models = {BindingProof: {'roles'}, BindingRole: set(),
+              RagBindingSource: set(), ReverseBindingSource: set()}
+    try:
+        raw = _bounded_model_payload(value, models=models, max_bytes=8192, reason=error)
+        result = BindingProof.model_validate_json(json.dumps(raw, ensure_ascii=False, allow_nan=False), strict=True)
+        _bounded_model_payload(result, models=models, max_bytes=8192, reason=error)
+        return result
+    except (TypeError, ValueError, RecursionError):
+        raise ValueError(error) from None

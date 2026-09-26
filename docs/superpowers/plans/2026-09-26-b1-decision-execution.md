@@ -50,7 +50,7 @@ generic rule language or JSONPath evaluator; B1 supports only the named roles.
 
 ## Task 1: Closed requirements and proof inputs
 
-- [ ] Add failing parser tests for version2/profile-required, strict native types,
+- [x] Add failing parser tests for version2/profile-required, strict native types,
   forbid-required conflicts, duplicate tools/subjects, invalid constructed models,
   bounds before serialization/default expansion, and exact source/role fields.
   Assert v1 parser still rejects v2 and the old argument parser stays closed.
@@ -67,21 +67,21 @@ with pytest.raises(ValueError, match='^invalid_binding_requirements$'):
     parse_binding_requirements(payload)
 ```
 
-- [ ] Run `tests/agent/test_decision_binding_requirements.py` and record RED.
-- [ ] Implement the exact design's frozen/strict/extra-forbid types, use existing
+- [x] Run `tests/agent/test_decision_binding_requirements.py` and record RED.
+- [x] Implement the exact design's frozen/strict/extra-forbid types, use existing
   MolecularRequirement unchanged. Parser `parse_binding_requirements(value)`
   returns BindingRequirements; absent value rejects. Validate native dict before
   JSON serialization; only exact known constructed models may be projected with
   primitive fields preserved and then revalidated. No bytes/tuple/Enum coercion
   from raw JSON callers. Persisted tuples become arrays via validated model dump.
-- [ ] Add `prepare_binding_requirements(value, *, context, request_kind,
+- [x] Add `prepare_binding_requirements(value, *, context, request_kind,
   allowed_tools, required_tools)` in the resolver: whole-SMILES validation and
   canonical-equivalent duplicate rejection occur here, never import-time.
   Retrieval query equals original context query; target query must equal original
   query or a field extracted by the existing user-input target parser. Compare
   activity target to original user target, not the model proposal. Inconsistent
   obligations fail before a model, tool or trace creation.
-- [ ] Re-run new module plus existing `test_decision_requirements.py` and
+- [x] Re-run new module plus existing `test_decision_requirements.py` and
   `test_decision_binding_arguments.py`; preserve all old tests unchanged.
 
 ## Task 2: Owned-call settlement and pre-ledger proof hook
@@ -326,3 +326,85 @@ activation or a scientific acceptance claim. Source-hook independent SPEC and
 QUALITY plus repeat1217 passed are recorded at435ae32. Tasks1–7 here remain
 unchecked until actual implementation/test/review evidence exists. Preserve the
 original eight-package objective and pending B2/C/P8 boundaries.
+
+## Task1 implementation evidence (review pending)
+
+Task1 implementer changed only the four contract/preparation/test files in this
+plan. No resolver, execution, continuation or Web activation is implemented by
+this slice. Parent verified the four file hashes against the implementer freeze.
+Existing argument/v1/profile tests remain unchanged. No scientific source access,
+external models, credentials or services were used.
+
+All commands used the isolated runner prefix documented above. Argument sets:
+
+```text
+A: tests/agent/test_decision_binding_requirements.py
+B: tests/agent/test_decision_binding_requirements.py::test_explicit_v2_and_detached_frozen_roundtrip tests/agent/test_decision_binding_requirements.py::test_valid_whole_batch_and_missing_input_preserve_obligations tests/agent/test_decision_binding_requirements.py::test_closed_proof_sources_roles_and_detachment
+C: tests/agent/test_decision_binding_requirements.py tests/agent/test_decision_requirements.py tests/agent/test_decision_binding_arguments.py tests/agent/test_decision_binding_profiles.py
+D: tests/agent/test_decision_binding_requirements.py::test_preparation_rag_query_uses_utf8_content_not_json_escape_budget
+```
+
+| Run | Arguments | Observed result | Pytest duration |
+|---|---|---|---|
+| 1 | A | Missing-module/API RED:98 failed,1 passed | 6.07s |
+| 2 | B | Callable-entry behavioral RED:3 failed | 2.72s |
+| 3 | A | 98 passed,1 failed | 3.00s |
+| 4 | A | 111 passed | 10.67s |
+| 5 | C | 245 passed | 26.05s |
+| 6 | D | 2 failed,2 setup/teardown errors | 1.64s |
+| 7 | D | Clean behavioral RED:3 failed | 3.37s |
+| 8 | D | 3 passed | 1.72s |
+| 9 | C | 249 passed | 24.19s |
+
+Run3 corrected an undersized default-expansion test fixture to a verified
+32,760-byte input. Runs6–8 distinguish UTF-8 query content size from JSON escape
+size; run6 also hit oversized parameter IDs, shortened before clean RED. Runs1
+and6 had truncated output but visible final summaries. Final union reported no
+skips/warnings, exit0. Sessions37719/51545/63443 were polled to completion, not
+restarted; no test process remains live at this checkpoint. Runner SHA256:
+F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+
+Frozen SHA256 (before independent review):
+
+- contracts/binding_requirements.py: 7C27697B3158461729774AB1E36A697D834505BA272A4BC0D74F2D75B2ECBC29
+- contracts/decision_bindings.py: 4683C6CFA60156AD6D2576086F2E4ABAE1FC71862402B42A2DCB40E65D2A3A56
+- harness/decision_bindings.py: 013B88E9826CDBA49D230ABEE9D017F999647F49196505A1CB0D77339182862E
+- tests/agent/test_decision_binding_requirements.py: 6FFF3F7181904A213A23CBC1C6329F3A982D1E4179D8B9D8778C59C0388E0D62
+
+Independent SPEC then fresh QUALITY review/repeat are pending. Checkboxes remain
+open until those gates close; passing these contracts is not seven-tool execution
+or current real scientific acceptance.
+
+### Task1 SPEC correction: exact activity target authorship
+
+Fermat's first SPEC review rejected family-only comparison: an obligation such
+as `BuChE KRAS` matched the original BuChE family despite the unauthored extra
+identifier. Source inspection confirmed the family helper intentionally ignores
+unrelated identifiers. The fix reuses canonical_target_identifier for the whole
+field, preserving genuine aliases and distinct PDE subtypes; no router changes.
+
+The same runner prefix executed these exact focused targets twice:
+
+```text
+tests/agent/test_decision_binding_requirements.py::test_activity_obligation_rejects_nonwhole_target_identifier
+tests/agent/test_decision_binding_requirements.py::test_activity_obligation_preserves_exact_buche_aliases
+tests/agent/test_decision_binding_requirements.py::test_activity_obligation_does_not_collapse_distinct_pde_subtypes
+```
+
+RED7 failed/12 passed8.71s (47076,exit1), GREEN19 passed6.05s (8405,exit0), then
+the unchanged four-module C command268 passed51.69s (68963,exit0). No restarts,
+truncation or reported skips/warnings. All handles completed. Corrected hashes:
+harness/decision_bindings.py D5DBF020EE5B95DA2FDF164479B2B8CE57FB99230D19D7A78AFF74DEAA05EAB7;
+test_decision_binding_requirements.py 8E9906D54CADBF42425706E17E06559F1AF93B8F2D44B38B1031B0C607B24A64.
+Other two hashes unchanged. SPEC re-review and fresh QUALITY remain gates.
+
+### Task1 release
+
+Fermat's re-review APPROVES the corrected Task1; fresh QUALITY reviewer Volta
+APPROVES the same four hashes and independently ran command C:268 passed12.05s,
+exit0, no reported skips/warnings or truncated test output. Handle56149 finished,
+no restart. Runner and code hashes matched before/after. Parent's four-file
+in-memory compile (stdlib compile, no application imports or bytecode) and diff
+check passed; original checkout still has the same13 status paths. Task1 is
+complete locally; Tasks2–7, normal Web B, B2/C and P8 remain pending. The
+preparation callback retry clarification is committed separately as e10df12.

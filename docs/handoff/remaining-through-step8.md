@@ -284,6 +284,22 @@ This inventory is not implementation or test evidence. Reconfirm each boundary i
 
 ## Work boundaries
 
+### B1 core Task1 local checkpoint — 2026-09-26
+
+Immutable v2 scientific requirements, closed binding-proof types and original
+input/permission preparation are implemented on codex/dynamic-bindings-b1.
+Independent SPEC found the BuChE-plus-extra-identifier acceptance defect; TDD
+reproduced and corrected it using whole canonical target identifiers. Corrected
+SPEC and fresh QUALITY approve: worker268 passed51.69s, independent268
+passed12.05s, no reported skips/warnings. Original failed runs and hashes are
+retained in the B1 decision-execution plan. Legacy tests were not weakened.
+
+This proves Task1 contracts/preparation only, not actual seven-tool execution.
+Next is Task2 owned-call/pre-ledger proof and separate preparation retry journal;
+then action/dataflow, immutable acceptance/citations, revision8 recovery,
+terminal publication, normal Web integration, B2/C and current real/UI acceptance.
+Packages7/8 remain incomplete; no provider activation, deployment or push.
+
 - Each independently reviewed package gets its own branch/PR; sub-increments may be used but do not redefine the end state.
 - Preserve main; merge only through reviewed PRs with passing required checks and no unresolved findings.
 - The original checkout remains at its existing dirty state. Do not stage its unrelated changes.
