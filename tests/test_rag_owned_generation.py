@@ -483,6 +483,9 @@ def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation
     rag, _, _, _, _ = make_loaded_source(tmp_path)
     http = SyntheticHTTP(monkeypatch)
     asyncio.run(rag.initialize())
+    owned_index = rag._generation.index
+    owned_generation = rag._generation.identity
+    index_type = type(owned_index)
     calls = []
     def malformed(index, vector, k):
         calls.append(k)
@@ -495,10 +498,25 @@ def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation
         if malformation == 'label':
             return np.asarray([[1., .5]]), np.asarray([[0, -1]])
         return np.asarray([[1., np.nan]]), np.asarray([[0, 1]])
-    monkeypatch.setattr(type(rag._generation.index), 'search', malformed)
+    monkeypatch.setattr(index_type, 'search', malformed)
     result = strict(rag)
     diagnostics = result['receipt']['diagnostics']
-    assert diagnostics['status'] == 'invalid_discard'
+    assert diagnostics['status'] == 'invalid_discard', {
+        # Failure-only inspection: do not bind/read the method before dispatch,
+        # introduce another search, or weaken any result/transport assertion.
+        'calls': calls,
+        'same_index': rag._generation.index is owned_index,
+        'same_generation': rag._generation.identity == owned_generation,
+        'returned_same_generation': result['receipt']['generation_id'] == owned_generation,
+        'class_hook': index_type.search is malformed,
+        'class_dict_hook': vars(index_type).get('search') is malformed,
+        'bound_hook': getattr(owned_index.search, '__func__', None) is malformed,
+        'instance_shadow': 'search' in vars(owned_index),
+        'index_type': index_type.__name__,
+        'index_module': index_type.__module__,
+        'metaclass': type(index_type).__name__,
+        'faiss_version': faiss.__version__,
+    }
     assert diagnostics['reason_codes'] == [{'extra': 'invalid_result_shape', 'short': 'invalid_result_shape',
                                            'duplicate': 'duplicate_hit', 'label': 'invalid_label',
                                            'score': 'invalid_score'}[malformation]]
