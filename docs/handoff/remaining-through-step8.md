@@ -11,10 +11,10 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| Reverse receipt consumer | Clean-main extraction; evidence-only redaction P2 reproduced24 failures then32 focused passes; corrected SOURCE approved | Fresh QUALITY and15-module current-main/independent regression, scoped publication and CI |
+| Reverse receipt consumer | Clean-main extraction; evidence-only redaction P2 reproduced24 failures then32 focused passes; corrected SOURCE and fresh QUALITY source approved | Parent-first and independent15-module current-main regression, scoped publication and CI |
 | PR87 RAG current source | DRAFT7187099; bounded diagnostic SOURCE/QUALITY approved; workflow contracts10 passed; CI36251616084 live | Retain old600s timeouts at76%/98%; inspect named progress; no performance-fix or merge claim |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 RELEASED; Tasks5–8 PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
+| Normal-Web B1 Tasks4–8 | Task4 in progress with approved display-context amendment; focused assembly15 passed; Rawls owns sole local slot | Prefix/display actual RED/GREEN and six-module final union; Tasks5–8 still pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
