@@ -99,8 +99,10 @@ git show 0d6c6e9d8627916714f087bc02269e9f08d8d5b6:src/agent/harness/decision_bin
   admitted-input path without weakening whole-context validation.
 - [ ] Preserve complete-input scientific checks and mandatory cited ancestry
   for all seven tools. No disconnected RAG citation may discharge a missing
-  property result; demo/fallback, missing model, sparse ADMET or unsupported
-  family results stay scientifically unsatisfied. Rendering preserves truthful
+  property result; demo/fallback, missing model, empty/no-observation sparse
+  ADMET or unsupported family results stay scientifically unsatisfied. Sparse
+  ADMET with valid observed values remains acceptable; unknown alerts stay
+  unknown, never become low-risk observations. Rendering preserves truthful
   partial/failure, warnings, evidence and artifacts without fabricating values.
 - [ ] Keep acceptance load-free and ownership-neutral: callers still owe owned
   execution, deadlines and final source/publication barriers. Do not activate
@@ -178,3 +180,23 @@ tests/test_reverse_target_invocation_receipts.py
 P7 remains incomplete until loop/continuation/publication and normal-Web/B2/C
 integration; P8 still requires current repeated real-provider/scientific/UI
 acceptance. This plan neither narrows that objective nor authorizes live assets.
+
+## Source audit and landed prerequisite
+
+Banach SOURCE approves the six-file grouping and dependencies after checking all
+six donor blobs/parents, helper compatibility and the exact38 ordered targets.
+The requested wording correction above distinguishes valid sparse ADMET from
+empty/no-observation output; no code or test is changed to enforce a stricter
+claim than the existing scientific contract. Missing API/journal assertions and
+the absent bounds keyword's call-phase TypeError can demonstrate pre-integration
+RED; collection/setup errors cannot. Importing family_row from
+test_family_activity_tool.py does not execute that module's suite.
+
+PR92 actually landed82322c3d0098d44082e732b41084c71b4d73c230 after9/9CI36265829338
+and fresh paginatedreviews/threads (0/0), SHA-guard squash. Reviewed/landed tree
+e37261afe8525e80838c66c185d837cc5bd37a23 is identical. Parent aligned this branch
+as58c2fd31b923d930f8e4f94045003b1b6393fef7; complete tree before/after alignment
+is unchanged and only this plan differs from actual main. This satisfies the
+prerequisite, not execution evidence. Authoring exact donor tests and the REPO-only
+launcher is released; scientific RED awaits explicit slot transfer, and no
+production implementation may precede the corresponding observed behavioral RED.
