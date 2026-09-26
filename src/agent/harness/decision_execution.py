@@ -68,11 +68,19 @@ async def settle_action(session, *, worker_owner=None):
             # attempted outcomes. Stable record/event IDs handle commit-then-error.
             return session.execute_step(index)
 
+    return await settle_owned_call(advance, worker_owner=worker_owner)
+
+
+async def settle_owned_call(callable, *, worker_owner=None):
+    """Run one synchronous call and retain ownership until workers settle.
+
+    No callback retry: only settle_action's named advance journals a retry.
+    """
     root = worker_owner.start_action() if worker_owner is not None else None
     cancelled = False
     try:
-        call = (asyncio.to_thread(advance) if root is None else
-                asyncio.to_thread(root.run, advance))
+        call = (asyncio.to_thread(callable) if root is None else
+                asyncio.to_thread(root.run, callable))
         try:
             worker = asyncio.create_task(call)
         except BaseException:

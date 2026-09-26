@@ -175,12 +175,22 @@ Add optional trusted `observation_prepare(result, step)` Session callback after
 domain validation/alignment and before final provenance/output digest/ledger.
 It attaches proof/final key to actual copied step metadata and quality. It runs
 in the existing owned action, not event loop. No extra scientific execution.
-Existing journal normalized flag protects completed preparation; retrying an
-uncommitted normalization may revalidate but cannot rerun the tool. Failure yields
+Preparation has a separate journal boundary before registration: cache the
+accepted result, detached validated proof and completion flag. A registration
+retry cannot repeat validation/preparation against mutated state or rerun the
+tool. The normalized/captured flags protect the subsequent persistence stages.
+Failure yields
 safe rejected/invalid output with no certifiable scientific data; no unsafe raw
 payload written first. Preserve existing observation_capture write-once seal.
-Extend ledger input_binding and verify_observation_integrity together, only when
-the new proof is present, so legacy evidence IDs/serialization stay unchanged.
+Extend ledger input_binding and verify_observation_integrity together only under
+explicit server proof authority, not the presence of a raw quality key. The
+ledger's optional binding_proof argument defaults to unchanged legacy behavior;
+when supplied, both closed native projections must validate and agree. The
+verifier follows the authoritative ledger binding. Revision8 decode and Session
+restoration each explicitly propagate proof; revision6/7 calls stay unchanged.
+Callback failure/proof mismatch caches a fresh sanitized invalid result, without
+provisional payload or proof/source metadata. See the independently approved
+Task2 clarification at e10df12 for retry and restoration boundary tests.
 
 ## Live source checks, lifecycle and budgets
 

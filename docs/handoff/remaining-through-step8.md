@@ -300,6 +300,17 @@ then action/dataflow, immutable acceptance/citations, revision8 recovery,
 terminal publication, normal Web integration, B2/C and current real/UI acceptance.
 Packages7/8 remain incomplete; no provider activation, deployment or push.
 
+Task2 is now implemented locally: owned-call settlement, pre-ledger server proof,
+separate preparation journal, safe failure caching, ledger-aware integrity and
+explicit staged restore authority. SPEC and fresh QUALITY approve after TDD
+closed malformed callback output and replaced-metadata cleanup gaps. Worker
+union501 passed68.02s; independent cumulative Task1/2 union769 passed82.45s,
+zero skips/failures and3 SWIG warnings. Full failed-run chronology and hashes are
+in the B1 decision-execution plan. Revision8 reader/loop and source closure are
+not enabled by this slice. Next: actual role/input resolution and current-source
+closure, then loop/acceptance/recovery/publication and the remaining Web/B2/C/P8
+gates. No narrowing of the eight-package completion requirement.
+
 - Each independently reviewed package gets its own branch/PR; sub-increments may be used but do not redefine the end state.
 - Preserve main; merge only through reviewed PRs with passing required checks and no unresolved findings.
 - The original checkout remains at its existing dirty state. Do not stage its unrelated changes.

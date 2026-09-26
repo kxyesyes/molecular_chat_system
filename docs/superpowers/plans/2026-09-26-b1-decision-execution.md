@@ -86,27 +86,27 @@ with pytest.raises(ValueError, match='^invalid_binding_requirements$'):
 
 ## Task 2: Owned-call settlement and pre-ledger proof hook
 
-- [ ] Add real Session tests with a prepare callback that observes domain-validated
+- [x] Add real Session tests with a prepare callback that observes domain-validated
   results, modifies the copied step metadata, and deliberately raises or encounters
   a persistence retry. Count tool calls and callback calls. Assert no provisional
   scientific data is registered or persisted on preparation failure.
-- [ ] Extract `settle_owned_call(callable, *, worker_owner=None)` from existing
+- [x] Extract `settle_owned_call(callable, *, worker_owner=None)` from existing
   settle_action, preserving Task creation failure, repeated cancellation, root
   abort_unstarted/settle and worker.result semantics. `settle_action` retains its
   existing execute_step journal retry inside the callable and delegates settlement.
-- [ ] Add optional `observation_prepare` to Session constructor, allowed only for
+- [x] Add optional `observation_prepare` to Session constructor, allowed only for
   dynamic sessions and a callable. Invoke after domain validation/alignment but
   before final provenance/output digest and ledger registration. Pass the actual
   copied WorkflowStep, not the append_step caller's object. The hook returns no
   replacement result; it mutates the accepted result/step under server authority.
   Convert failure into a safe invalid-output result with no scientific data,
   artifacts or source evidence; never store the unsafe intermediate.
-- [ ] Conditional proof propagation adds binding_proof to ledger input_binding and
+- [x] Conditional proof propagation adds binding_proof to ledger input_binding and
   the corresponding integrity comparison only when present. Preserve the three
   legacy fields and old evidence hashes when absent. The existing capture hook
   remains once-after-ledger; normalized/captured journal flags prevent tool replay
   and resealing on commit-then-error.
-- [ ] Run targeted new Session cases then `test_decision_loop.py`,
+- [x] Run targeted new Session cases then `test_decision_loop.py`,
   `test_decision_inputs.py`, `test_decision_adapter_retry.py` and existing receipt
   consumer Session cases. Record each result, not only the final green run.
 
@@ -186,6 +186,15 @@ legacy calling convention when no explicit proof authority is supplied.
   operation key/source; stale evidence is not rerun or relabelled.
 
 ## Task 4: Actual seven-tool dynamic execution and acceptance
+
+Source inspection after Task1: context_value still enforces the legacy16KiB
+JSON-encoded query limit, and the loop calls it before requirements preparation.
+Task1's UTF-8 retrieval-content regression alone therefore does not establish the
+same behavior through B's actual loop. Add an actual B-loop quoted/backslash and
+non-ASCII near-limit retrieval case before wiring. Preserve legacy context bounds
+and the whole64KiB context boundary; only the explicit B path may use the approved
+16KiB UTF-8 query-content limit. This is an integration test requirement, not a
+claim that the existing loop has already been repaired or exercised.
 
 - [ ] Baseline actual-loop test must demonstrate that registered RAG/ADMET/reverse
   are currently unauthorized, not merely that a new constructor keyword is absent.
@@ -408,3 +417,103 @@ in-memory compile (stdlib compile, no application imports or bytecode) and diff
 check passed; original checkout still has the same13 status paths. Task1 is
 complete locally; Tasks2–7, normal Web B, B2/C and P8 remain pending. The
 preparation callback retry clarification is committed separately as e10df12.
+
+## Task2 implementation evidence (independent review pending)
+
+Implementation is limited to decision_execution.py, run_session.py, ledger.py,
+decision_inputs.py and new test_decision_binding_session.py. No loop/continuation
+activation; revision8 readers remain Task5. Parent reconciled the old spec's
+normalized-only sentence with e10df12's approved preparation journal and recorded
+the actual-loop UTF-8 integration gate for Task4. Neither documentation change is
+a claim of full B execution.
+
+All tests used the isolated runner prefix in this plan, from this worktree.
+
+```text
+M: tests/agent/test_decision_binding_session.py
+N: tests/agent/test_decision_binding_session.py::test_preparation_journal_precedes_registration_and_capture[none]
+D: tests/agent/test_decision_binding_session.py::test_cached_proof_detaches_callback_projection_before_register_retry
+P: tests/agent/test_decision_binding_session.py::test_no_throw_malformed_preparation_is_cached_safe_before_copy_hash
+U: tests/agent/test_decision_binding_session.py tests/agent/test_decision_loop.py tests/agent/test_decision_inputs.py tests/agent/test_decision_adapter_retry.py tests/agent/test_workflow_run_session.py tests/agent/test_rag_receipt_consumption.py tests/agent/test_reverse_receipt_consumption.py
+```
+
+| Run | Targets | Passed | Failed | Errors | Warnings | Seconds | Exit |
+|---|---|---:|---:|---:|---:|---:|---:|
+|1|M initial RED|2|41|27|0|4.51|1|
+|2|N fixture diagnosis|0|1|1|0|1.33|1|
+|3|M corrected RED|2|41|0|0|8.82|1|
+|4|M initial GREEN|43|0|0|0|10.58|0|
+|5|M resurrection RED|48|1|0|0|3.62|1|
+|6|M GREEN|49|0|0|0|3.55|0|
+|7|U union|487|0|0|3|42.64|0|
+|8|D equality probe|1|0|0|0|1.14|0|
+|9|D strict-type RED|0|1|0|0|1.26|1|
+|10|M GREEN|49|0|0|0|6.75|0|
+|11|U first freeze|487|0|0|3|41.47|0|
+|12|P post-callback RED|0|8|0|0|2.38|1|
+|13|P correction GREEN|8|0|0|0|1.66|0|
+|14|M module GREEN|57|0|0|0|4.24|0|
+|15|U final union|495|0|0|3|42.01|0|
+
+All runs had zero skips. Run1 output was truncated; all other test output was
+not truncated. Initial fixture teardown called nonexistent store.close(), fixed
+before production implementation. Run8 equality missed True==1; run9's stricter
+type assertion exposed the proof-alias defect before repair. Parent identified
+the post-callback malformed-data/digest exception gap before independent review;
+eight unchanged RED/GREEN cases now prove safe caching and no unsafe copy hook.
+Warnings are the three SWIG __module__ deprecations. Handles45330/28050/89789/
+68696/43363 all completed by polling, no restart or live test process remaining.
+Runner hash remains F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+
+Parent verified frozen hashes before independent SPEC:
+
+- decision_execution.py: 0649A3ED41305A435FA5EECDD8DB984BD0FE95846D74A52423C435ACAFCD905B
+- run_session.py: 9D10601DE9FADC33979FFA8C51BD4842308F7FEFF2A07E77F41812D92E1D48B2
+- ledger.py: 43EBACE472B2BDAEA00B721E922057770EA93CA1BD34450B9592640BD2C3C1C6
+- decision_inputs.py: 8BEF78D5AF6AFBE9932241383B9C40E975CDF51ED4C8478122D20890BF82E56C
+- test_decision_binding_session.py: 87FAD197678AA44AEC19FB2C3C93A93DE5E90BBA9F9C49FA79CC245C4412E9C2
+
+### Task2 SPEC correction: replaced metadata container
+
+Poincare's SPEC review found cleanup invoked clear/update on callback-mutated
+step.metadata. Replacement with None made cleanup raise before caching the safe
+rejection. Source inspection confirmed the gap. The fix restores the saved slot
+directly via object.__setattr__, without invoking replacement-container methods.
+Six tests cover None/list/hostile-dict replacements, each returning or raising;
+they count one tool/validator/prepare/capture and verify safe SQLite persistence
+under commit-then-error retry.
+
+Using the same isolated runner prefix, the focused target was:
+tests/agent/test_decision_binding_session.py::test_replaced_metadata_cleanup_never_invokes_mutated_container.
+RED6 failed3.71s(exit1), GREEN6 passed4.30s(exit0), followed by command U:
+501 passed68.02s,3 SWIG warnings,exit0. All runs zero errors/skips, no output
+truncation. Handle93850 reached terminal by polling; no restart/live handles.
+Corrected run_session.py SHA256 EB307774A3EB48CE03E5DF07DA7EB4D00FBF1E1FB1CB56151E3432E067BAED72;
+test SHA256 CDBC26F3105C64DF41E2340AE19A7DAE6EE4B1CD57A0F05FC1A2ED1C46895018.
+Other three source hashes and runner unchanged. Independent re-review remains.
+
+### Task2 release and cumulative review
+
+Poincare's corrected SPEC re-review APPROVES; fresh QUALITY reviewer Bernoulli
+APPROVES the frozen five files and independently executed command U plus all
+four Task1 command-C modules in the same invocation:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_session.py tests/agent/test_decision_loop.py tests/agent/test_decision_inputs.py tests/agent/test_decision_adapter_retry.py tests/agent/test_workflow_run_session.py tests/agent/test_rag_receipt_consumption.py tests/agent/test_reverse_receipt_consumption.py tests/agent/test_decision_binding_requirements.py tests/agent/test_decision_requirements.py tests/agent/test_decision_binding_arguments.py tests/agent/test_decision_binding_profiles.py
+```
+
+Result769 passed82.45s, zero failed/errors/skips, three SWIG deprecation warnings,
+runner/process exit0. Handle81182 polled to terminal, no restart/live tests.
+Test output was not truncated; truncated source reads were reread in targeted
+ranges. Runner/five-source hashes matched before and after. Parent compiled five
+files in memory (stdlib only, no imports/bytecode) and checked the diff. Original
+checkout still has the same13 status paths; no production assets were touched.
+
+Public seams for next tasks: settle_owned_call(callable,worker_owner=...),
+Session observation_prepare(result,copied_step), explicit ledger binding_proof,
+and restore_observations(...,binding_proofs={evidence_id: native_proof}). The last
+is caller-PREVALIDATED authority, not revision8 decoding or source authentication.
+The generic Session proof-map cap128 does not supersede B's12-action/512KiB limits;
+Task5 must enforce those existing bounds before invoking restoration. No default
+profile change, seven-tool loop integration, v8 activation or normal-Web release
+is claimed. Task3 is the next implementation increment.
