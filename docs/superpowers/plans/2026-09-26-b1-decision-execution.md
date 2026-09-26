@@ -686,6 +686,25 @@ Parent owns documentation and the next Task6 source audit; one worker owns the
 Task5 source/tests and the sole isolated-test slot. No implementation/test result
 for revision8 is claimed by this start record.
 
+Task5 first actual-loop RED: new test_decision_binding_continuation.py through
+the same isolated wrapper returned4 failed39.55s,3 SWIG warnings, handle52504
+terminal exit1. Both native/JSON six-tool scientific chains and no-action human
+clarification reached the expected waiting state but lacked a B nonce. All six
+initial scientific observations/call counts passed; resume assertions were not
+reached and are not evidence of working recovery. Tests SHA256:
+A34A7F1C9B4C3A68656E0F196F602C0CF13810D356AC28EC6FC70760C3300CDF.
+
+The worker then correctly identified an ordering dependency: an outer candidate
+alone cannot retract the full terminal event already emitted by finish(), or
+replace its frozen success after drain expiry. Parent source audit confirms it.
+Using the already-approved Task6 design, bring forward two narrow prerequisites:
+opt-in B provisional terminal projection in decision_execution.py and failure-only
+invalidate_dynamic_publication in run_session.py, with their own RED/GREEN tests
+in test_decision_binding_publication.py. Legacy defaults/finish journals and store
+APIs remain unchanged. This is sequencing within approved scope, not authorization
+for a new lifecycle or weakening the end-state. Require independent review of the
+prerequisites and full recovery/publication gates; no Task5/6 completion yet.
+
 - [ ] Add actual SQLite tests: clarify→new loop instance→restore/reuse; count zero
   repeated scientific calls. Assert old revision6/7 snapshots retain old readers.
   Mutate every proof, role/input, producer version and obligation independently.
