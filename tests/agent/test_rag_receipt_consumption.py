@@ -118,9 +118,9 @@ def test_evidence_only_redaction_rejected_before_session_seal(tmp_path, monkeypa
     assert intact['evidence'][0]['retrieval_receipt']['diagnostics']['status'] == (
         'valid_empty' if mode == 'empty' else 'valid_hits')
     if mode != 'empty':
-        def malformed(index, vector, k):
+        def malformed(vector, k):
             return np.asarray([[1.]]), np.asarray([[0]])
-        monkeypatch.setattr(type(service._generation.index), 'search', malformed)
+        monkeypatch.setattr(service._generation.index, 'search', malformed)
     baseline = RAGSearchTool(service).execute('synthetic query')
     assert baseline['data'] == []
     receipt = baseline['evidence'][0]['retrieval_receipt']
@@ -600,10 +600,10 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
     owned_index = service._generation.index
     owned_generation = service._generation.identity
     index_type = type(service._generation.index)
-    original_search = index_type.search
-    def search(index, vector, k, *args, **kwargs):
+    original_search = owned_index.search
+    def search(vector, k, *args, **kwargs):
         searches.append(k)
-        scores, labels = original_search(index, vector, k, *args, **kwargs)
+        scores, labels = original_search(vector, k, *args, **kwargs)
         if mode == 'partial':
             labels[0, -1] = -1
         return scores, labels
@@ -611,7 +611,7 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
     baseline = RAGSearchTool(service).execute('synthetic query')
     assert baseline['success']
     requests.clear()
-    monkeypatch.setattr(index_type, 'search', search)
+    monkeypatch.setattr(owned_index, 'search', search)
     # Bounded failure diagnostics for native SWIG variants. Never include
     # exception messages, retrieved records or full machine paths.
     diagnostics = []
@@ -623,9 +623,8 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
         diagnostics.append({
             'index_type': type(index).__name__,
             'same_class': type(index) is index_type,
-            'class_hook': type(index).search is search,
-            'bound_hook': getattr(bound, '__func__', None) is search,
-            'instance_shadow': 'search' in vars(index),
+            'instance_hook': bound is search,
+            'instance_dict_hook': vars(index).get('search') is search,
         })
         try:
             return strict_search(*args, **kwargs)
@@ -666,14 +665,13 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
             'error_code': observed.error.code.value if observed.error else None,
             # Evaluated only after a count mismatch, leaving the unwrapped
             # dispatch untouched. These flags distinguish a replaced index,
-            # an instance shadow and a lost class hook without logging records.
+            # a lost instance hook without logging records.
             'post_dispatch': {
                 'same_index': service._generation.index is owned_index,
                 'same_generation': service._generation.identity == owned_generation,
                 'same_class': type(owned_index) is index_type,
-                'class_hook': index_type.search is search,
-                'bound_hook': getattr(owned_index.search, '__func__', None) is search,
-                'instance_shadow': 'search' in vars(owned_index),
+                'instance_hook': owned_index.search is search,
+                'instance_dict_hook': vars(owned_index).get('search') is search,
                 'index_type': index_type.__name__,
                 'index_module': index_type.__module__,
                 'original_search_name': getattr(original_search, '__qualname__', None),
