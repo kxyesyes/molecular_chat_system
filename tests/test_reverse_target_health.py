@@ -12,6 +12,7 @@ import sys
 from unittest.mock import patch
 import numpy as np
 import pandas as pd
+import pytest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -459,6 +460,11 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
 class FingerprintConversionCompatibilityTest(unittest.TestCase):
     def setUp(self):
+        import src.reverse_target as package
+
+        self._predictor_package = package
+        self._missing_predictor = object()
+        self._previous_predictor_attribute = vars(package).get("predictor", self._missing_predictor)
         self._previous_modules = {
             name: sys.modules.get(name)
             for name in (
@@ -477,6 +483,11 @@ class FingerprintConversionCompatibilityTest(unittest.TestCase):
                 sys.modules.pop(name, None)
             else:
                 sys.modules[name] = module
+        # Reimport also binds the child on its parent, independently of sys.modules.
+        if self._previous_predictor_attribute is self._missing_predictor:
+            vars(self._predictor_package).pop("predictor", None)
+        else:
+            self._predictor_package.predictor = self._previous_predictor_attribute
 
     def test_bitvect_conversion_falls_back_when_rdkit_numpy_bridge_rejects_array(self):
         rdkit_module = types.ModuleType("rdkit")
@@ -517,6 +528,72 @@ class FingerprintConversionCompatibilityTest(unittest.TestCase):
 
         self.assertEqual(converted.dtype, np.uint8)
         self.assertEqual(converted.tolist(), [1, 0, 1, 1])
+
+
+@pytest.mark.parametrize("initially_present", [True, False], ids=["present", "absent"])
+@pytest.mark.parametrize("fail_after_conversion", [False, True], ids=["success", "failure"])
+def test_fingerprint_compatibility_restores_import_state(initially_present, fail_after_conversion):
+    import src.reverse_target as package
+
+    missing = object()
+    module_names = (
+        "rdkit",
+        "rdkit.Chem",
+        "rdkit.DataStructs",
+        "rdkit.Chem.AllChem",
+        "rdkit.Chem.MACCSkeys",
+        "src.reverse_target.predictor",
+    )
+    outer_modules = {name: sys.modules.get(name, missing) for name in module_names}
+    outer_attribute = vars(package).get("predictor", missing)
+    method_name = "test_bitvect_conversion_falls_back_when_rdkit_numpy_bridge_rejects_array"
+    case = FingerprintConversionCompatibilityTest(methodName=method_name)
+    conversion_test = getattr(case, method_name)
+    conversion_completed = []
+
+    def exercise_conversion():
+        conversion_test()
+        conversion_completed.append(True)
+        if fail_after_conversion:
+            case.fail("synthetic failure after fallback conversion")
+
+    setattr(case, method_name, exercise_conversion)
+    try:
+        if initially_present:
+            previous_predictor = sys.modules.get("src.reverse_target.predictor")
+            if previous_predictor is None:
+                previous_predictor = types.ModuleType("src.reverse_target.predictor")
+            sys.modules["src.reverse_target.predictor"] = previous_predictor
+            package.predictor = previous_predictor
+        else:
+            sys.modules.pop("src.reverse_target.predictor", None)
+            vars(package).pop("predictor", None)
+        expected_modules = {name: sys.modules.get(name, missing) for name in module_names}
+        expected_attribute = vars(package).get("predictor", missing)
+
+        result = unittest.TestResult()
+        case.run(result)
+
+        assert conversion_completed == [True]
+        assert result.testsRun == 1
+        assert not result.errors and not result.skipped
+        assert len(result.failures) == int(fail_after_conversion)
+        if fail_after_conversion:
+            assert "synthetic failure after fallback conversion" in result.failures[0][1]
+        for name, module in expected_modules.items():
+            assert sys.modules.get(name, missing) is module, name
+        assert vars(package).get("predictor", missing) is expected_attribute
+    finally:
+        # A failing isolation regression must not itself contaminate later tests.
+        for name, module in outer_modules.items():
+            if module is missing:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+        if outer_attribute is missing:
+            vars(package).pop("predictor", None)
+        else:
+            package.predictor = outer_attribute
 
 
 if __name__ == "__main__":
