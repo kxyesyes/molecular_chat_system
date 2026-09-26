@@ -17,6 +17,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
+| B1 model-selected loop | Draft PR96 head4197237; SOURCE/freshQUALITY approved; author6107 passed916.84s and independent6107 passed971.91s | CI36277170168 running; not merged; dormant/offline only |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -29,6 +30,22 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Fresh Halley QUALITY session77863 terminalbd9896 exit0:6107passed7warnings
+971.91s, no failures/skips,75frozen hashes unchanged; wrapper40244/child56340
+observed exited before sole-slot release. Parent staged exactly eight code/test
+files plus ownplan, committed41972379a993b57ae7859bd3bd3d607e06824378, and created
+draft PR96. CI36277170168 confirmed in_progress at that exact head; no merge
+claim. Original13-path mixed checkout remains unchanged. Publication next-slice
+plan in its clean main-based tree is SOURCE-approved but implementation held until
+actual loop landing/alignment. The cancellation boundary distinction is explicit.
+
+Wegener test-only profiler controls RED00137d:17failed3SWIG6.77s, all phase=call
+at missing collector assertion,15hashes unchanged. This is scaffolding RED,
+NOT a new explanation of the two-wire timeout. Only minimal test-helper writing
+is released next, no production/timeout change or scientific run. Strict
+generation desired-behavior design has SOURCE approval; compatibility tests are
+being prepared before its separate actual RED. No provider activation.
 
 Model-loop expanded58 is now terminal: author session89924, terminal58e614,
 exit0, **6107 passed, 7 warnings, 916.84s**, no failures/skips. All75 unique
