@@ -74,3 +74,71 @@ This foundation alone cannot satisfy package7 or8. Normal-Web clarification,
 dataflow/presentation/resources, generation/ranking, docking consent/cleanup and
 the full repeated real-model/scientific/UI acceptance remain required. No live
 provider, host key/config/model lookup or deployment is part of this extraction.
+
+## Independent source plan audit
+
+Goodall approves the seven-production/five-test boundary and confirms no hidden
+extra module extraction. This is plan approval only; implementation stays HOLD
+until the source-hook and target prerequisites actually land and align.
+PR90 CI prerequisite has now landed as35b82705e76b504e329d43b4cee6c5a8b5d37101;
+its reviewedfdd7680 and landed trees both equal8d3c4a92462752d2f0be9e792ec52ec99df9428e.
+CI36260272170 passed all9 gates, actual collection9802 =9578 +224 with no overlap.
+
+The four existing production starting blobs match the donor parents. Preserve
+execution blobbd06d6ce already supplied by target prerequisite; do not copy it
+again. PR89 supplies both validate_current_observation and the dynamic suite's
+sources/forbid_work fixtures. Its candidate test blobdce02d84 matches the donor.
+Fourteen imported helper definitions match by AST; current initialized_service
+adds a compatible optional source_name and must remain current.
+
+Selected donor parents are6bc6dfc,78675e4,e10df12,62e32aa,5bf3344 respectively.
+Final expected production blob prefixes in the seven-file order above:
+82bf4f6b6f1a,8265f19ca5cb,9d651e5e0d61,23ad07ccdfab,b92b0880e62f,
+893f3cd40dbf,488994ce2784. Verify full identities from Git before copying.
+The five duplicate definitions' ASTs including Boolean decorators match the
+prerequisite; remove exactly those, not the intervening Session tests or imports.
+
+Exact ordered verification targets (all test filenames gain .py):
+
+```text
+tests/agent/test_decision_binding_profiles
+tests/agent/test_decision_binding_arguments
+tests/agent/test_decision_binding_requirements
+tests/agent/test_decision_binding_session
+tests/agent/test_decision_dynamic_bindings
+tests/agent/test_decision_owned_call
+tests/agent/test_decision_target_status
+tests/agent/test_ordinary_capabilities
+tests/agent/test_evidence_ledger
+tests/agent/test_decision_contract
+tests/agent/test_decision_requirements
+tests/agent/test_decision_inputs
+tests/agent/test_binding_resolver
+tests/agent/test_candidate_alignment
+tests/agent/test_activity_tool_contract
+tests/agent/test_analysis_contract
+tests/agent/test_scientific_reference_store
+tests/agent/test_workflow_run_session
+tests/agent/test_dynamic_run_session
+tests/agent/test_run_session_ownership
+tests/agent/test_worker_ownership
+tests/agent/test_delegated_session_lifecycle
+tests/agent/test_delegated_session_parity
+tests/agent/test_decision_adapter_retry
+tests/agent/test_decision_loop
+tests/agent/test_target_tool_contract
+tests/agent/test_domain_result_validators
+tests/agent/test_reverse_target_complete_input
+tests/agent/test_current_source_tool_hooks
+tests/agent/test_rag_receipt_consumption
+tests/agent/test_reverse_receipt_consumption
+tests/agent/test_rag_tool_contract
+tests/agent/test_rag_current_eligibility
+tests/test_rag_retrieval_outcome
+tests/test_rag_owned_generation
+tests/test_reverse_target_invocation_receipts
+```
+
+This is future execution scope, not a run or permission to edit existing
+regressions. Current landed pins, full blobs and approved-launcher equality still
+must be checked at release; no local candidate is substituted for main.
