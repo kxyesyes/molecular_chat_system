@@ -11,8 +11,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| PR87 RAG current source | DRAFT aligned/pushed9f44b78; Feynman integration review approved; independent1323 passed | New exact-head CI36249902754 still running; old36249184214 Agent timeout600s retained |
-| Normal-Web B1 Task3 | LOCAL COMPLETE; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Include only reviewed freeze in scoped commit; not yet integrated into main |
+| PR87 RAG current source | DRAFT9f44b78; independent1323 passed; newCI36249902754 TERMINAL Agent timeout600s at76% | Source-reviewed bounded case/duration diagnostics before new CI; old36249184214 timeout at98% also retained; no merge |
+| Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 RELEASED; Tasks5–8 PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
@@ -22,6 +22,15 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR87 new exact-head run36249902754 is terminal failure: Agent108425852094
+hit600s/exit124 at76%; six other jobs passed and aggregate failed. Old run
+36249184214 timeout at98% remains. Quiet progress does not identify slow tests;
+bounded verbosity/duration diagnostics are under independent design review,
+without changing selection/deadlines/assertions. No unchanged retry or merge.
+Reverse consumer slice66039eb has been extracted as nine exact historical blobs
+on clean-main72ce2bf in its own worktree. Helmholtz SOURCE integration review is
+active; no current-main tests yet, since Rawls owns the local slot for Task4.
 
 Task3 independent QUALITY91646/f03c4c is terminal:380 passed/3 SWIG warnings
 338.97s, exit0, five hashes and runner unchanged. Parent revalidated terminal
