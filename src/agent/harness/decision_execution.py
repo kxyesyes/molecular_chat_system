@@ -46,8 +46,27 @@ class SingleAttemptTool:
         # on this request-local view, never on the shared adapter.
         guarded = ({'dispatch_guard': self._dispatch_guard}
                    if self._dispatch_guard is not None else {})
+        raw_validator = validate_raw_observation
+        from src.agent.tooling.target_contract import TargetToolAdapter, LOOKUP_STATUS
+        if type(self.adapter) is TargetToolAdapter and self.name == 'target_database_search':
+            def raw_validator(raw):
+                if type(raw) is not dict:
+                    return validate_raw_observation(raw)
+                from copy import deepcopy
+                from .decision_bounds import validate_json
+                # Bound the ENTIRE untouched producer envelope before reading
+                # status or copying. Only this check-view translates lookup
+                # success; the typed adapter still receives/validates raw, then
+                # performs its own mapping and canonical output validation.
+                validate_json(raw, max_bytes=64 * 1024, reason='observation_too_large')
+                view = deepcopy(raw)
+                status = view.get('status')
+                if (view.get('success') is True and type(status) is str
+                        and LOOKUP_STATUS.get(status) == 'succeeded'):
+                    view['status'] = 'succeeded'
+                validate_raw_observation(view)
         result = self.adapter.execute(input_data, allow_retry=False,
-                                      raw_validator=validate_raw_observation, **guarded)
+                                      raw_validator=raw_validator, **guarded)
         try:
             validate_raw_observation(result)
         except DecisionBoundaryError:
