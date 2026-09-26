@@ -93,3 +93,39 @@ The reviewer released the sole local test slot. This completes local independent
 review/repeat, not remote CI or merge. Before publishing, align the separately
 reviewed CI capacity partition once landed and require all nine resulting checks;
 the older eight-check gate is not sufficient after that change.
+
+## Landed source-hook alignment
+
+PR89 landed as7a3309e3bbe90d5f52f6953e959b8a357205b0ec. Localac34413 merges
+it into previously reviewedf1fc421. Confucius independent SOURCE approves the
+composition: first-parent delta is exactly PR89's five files, and all three
+theme blobs above remain identical. No new source-hook caller or production
+activation is introduced. Old remote CI36261062523 passed9/9 onf1fc421 only;
+it is not evidence for this aligned head.
+
+Current ordered union is the eight modules above followed by:
+
+```text
+tests/agent/test_current_source_tool_hooks.py
+tests/agent/test_rag_receipt_consumption.py
+tests/agent/test_reverse_receipt_consumption.py
+tests/test_reverse_target_invocation_receipts.py
+tests/agent/test_rag_tool_contract.py
+tests/test_rag_retrieval_outcome.py
+tests/agent/test_rag_current_eligibility.py
+tests/test_rag_owned_generation.py
+```
+
+Parent used the same approved MedChat Python -I -S -B launcher with these exact
+16 ordered paths. Run54858 (summary814338, terminalf9dfb8) completed2031 passed,
+3 SWIG deprecation warnings203.63s; runner/process exit0. Launcher hash above is
+unchanged, working tree clean before this evidence addition, diff check passed.
+Fresh independent QUALITY/repeat is now released to McClintock; no result is
+claimed yet. Current-head CI, paginated review audit and merge gates remain.
+
+Fresh McClintock QUALITY approves the exact aligned composition. Independent
+ordered16 run97501/62a661 completed2031 passed,3 SWIG warnings163.97s with runner
+and process exit0. All three pinned Git blobs and launcher hash unchanged;
+diff check passed. Only this parent-authored plan evidence changed. The reviewer
+released the sole local scientific slot. Both local runs are offline integration
+evidence, not live-model acceptance. Fresh remote CI remains mandatory.
