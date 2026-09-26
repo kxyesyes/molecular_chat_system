@@ -178,3 +178,11 @@ not assumed environment noise. A bounded one-run native/JSON reproduction and
 source diagnosis is delegated to Raman, with sole local scientific slot and no
 test/production edits, new probe imports, live providers or timeout changes.
 Task6 remains unreleased until this quality gap is honestly resolved.
+
+Raman's unchanged focused native/JSON node86410/a42586 passed2 cases7 warnings
+23.56s, runner/process exit0, unchanged hashes. This does not identify or repair
+the union failure. Source inspection shows receive timeout cancels queue.get,
+not the ASGI server directly; disconnect cleanup follows the lost diagnostic
+frame history. Parent authorizes only bounded test-local stage/frame timing and
+pre-disconnect flags/stacks (no values/secrets), keeping3s/5s and all assertions.
+One instrumented focused run is allowed; no repeated-until-green or wider fix.

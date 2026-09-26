@@ -12,12 +12,12 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
 | Reverse receipt consumer | PR88 MERGED fb62f53 after CI36253262488 success8/8; reviewed/landed tree dd2de4c4 equal; aligned1926 passed | Later load-free current-source hooks remain separate |
-| Attached-source hooks | Independent SOURCE/QUALITY and CI-only alignment audit approve; draft PR89 updatedcee8701, CI36261000462 running | Original CI36255095764 failed600s retained; fresh9-check CI and merge gates pending |
+| Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 corrected SOURCE approves stronger controls; independent union461 passed1 failed624.40s | JSON RAG resume hit fixture3s receive timeout, cause UNKNOWN; Raman owns bounded diagnostic slot. Task5 QUALITY and Tasks6–8 remain pending |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
-| Target execution guard integration | SOURCE/QUALITY and CI-only alignment audit approve; draftPR91 headf1fc421, CI36261062523 running | Fresh9-check CI/collection proof and merge gates; not yet merged |
+| Target execution guard integration | PR91 oldheadf1fc421 CI36261062523 passed9/9; localac34413 now aligned to actual PR89 landing | New composition review/joint regression/current-head9CI required; not yet merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -26,6 +26,21 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR89 exactcee8701 passed9/9 CI36261000462. Parent repeated freshhead/base/main,
+allchecks and fully paginated reviews (0reviews/0unresolved), markedready and
+SHA-guard squash merged7a3309e3bbe90d5f52f6953e959b8a357205b0ec. Freshfetch
+verifies reviewed/landed tree62d52453ff9daef635f001151234791747c57a36 equal.
+Actualcollection10020=9796+224; Agentcore9795 passed1 skipped17238 warnings
+402.27s; Web224 passed6628 warnings186.01s. Prior600s timeout remains failure
+evidence, not erased by this capacity-partition pass.
+
+PR91 f1fc421 passed9/9 CI36261062523 (collection9840=9616+224; core9615 passed
+1 skipped17238 warnings411.46s). Because main advanced, parent merged actual
+7a3309e into that branch asac3441341f09e6e65fa52d4d5171feff4004492f; only the
+five PR89 files entered. Confucius independently audits composition before push.
+Current-head joint source/target regression and fresh9CI still required. Raman
+owns only local test slot for bounded Task5 diagnostics; no competing run starts.
 
 Task5 QUALITY is NOT approved: independent exact4-module union24652/f03a9f
 terminated461 passed1 failed7 warnings624.40s, runner/process exit1. Failure is
