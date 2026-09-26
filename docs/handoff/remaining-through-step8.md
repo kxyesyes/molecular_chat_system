@@ -17,7 +17,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
-| B1 model-selected loop | Draft PR96 head4197237; SOURCE/freshQUALITY approved; author6107 passed916.84s and independent6107 passed971.91s | CI36277170168 running; not merged; dormant/offline only |
+| B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -30,6 +30,33 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR96 SHA-squash terminal58832/95fa1a mergedaa3cdddbc1bcdf964ae95384c1a8740e44ff4205.
+Exacthead4197237 CI36277170168 all9success: collection10934=10710core+224Web,
+core10709passed1skipped20468warnings571.29s; Web224passed7166warnings127.09s;
+root2892passed75skipped257.01s; activity1855passed6skipped354.33s. Fresh paginated
+head/main/check/review/thread guards before ready and SHA-merge had unresolved0;
+fetch confirmed full reviewed/landed tree3931f512e6c013c1117f9ec38ca146c93fc45515.
+Publication plan SOURCE-approved/committed4c5768d; parent aligned its independent
+tree to real landing at7a041807, only ownplan differs from main. Test preparation
+and re-pin released, not production extraction or model/Web activation.
+
+Strict generation actual full RED84090/587bf9:445 total,268failed177passed20.45s,
+no warnings/skips/setup failures.74API-missing and194behavior/preflight failures
+are distinguished; previously unentered state/executor checks were not falsely
+claimed reproduced. Minimal two-production-file implementation then actual full
+GREEN2168/6f181a:445passed13.07s,0failed/warnings/skips,9hashes unchanged. SOURCE
+review and nine-file fixture compatibility migration/regression remain pending;
+this is not live science or B2 completion. No unsafe binding fallback is permitted.
+
+Temporary profiler17controls GREEN5f587c:17passed3SWIG3.28s. Actualtwo-wire
+26212/fb9b51 still2failed7warnings45.74s; native receive3s timeout observed, JSON
+details partially truncated and not inferred. Four fully contained native closure
+profiles show validate_json2735calls/self462.412ms/inclusive553.609ms within
+closure inclusive918.229ms; nested inclusive times are not additive, profiling
+overhead unmeasured. This identifies a bounded hotspot, not a root-cause fix or
+permission to cache/skip checks. Only source-only equivalent-validation analysis
+is next; deadlines and production remain unchanged.
 
 Fresh Halley QUALITY session77863 terminalbd9896 exit0:6107passed7warnings
 971.91s, no failures/skips,75frozen hashes unchanged; wrapper40244/child56340
