@@ -141,3 +141,20 @@ FastAPI deprecations; no edits and all five code/test hashes plus runner match
 before/after. QUALITY approves this frozen offline snapshot and released the
 sole local test slot. This snapshot can be committed locally; publication still
 requires PR84 correction/landing and fresh verification of inherited changes.
+
+## Reviewed prerequisite test follow-ups integrated
+
+After local R4 commita35c9c4, cleanly cherry-picked PR84 test-only follow-ups
+a4c1a61 and7f8e4cd as271c363 and41391c6. No production source changed; the receipt
+test retains all R4 current-source fixtures and adds wrapped/unwrapped actual
+Session controls. Receipt-test SHA256 now
+B7D9F417D926680099818E2E2C48A5CCACFAD7E8940F723ED834E1F24454C75E.
+
+Expanded regression is the exact eleven-module command above with
+tests/agent/test_chat_input_budget.py inserted first. Parent terminal97574,
+chunk907834:1323 passed/0 failed/0 skipped/4 FastAPI warnings71.63s,exit0.
+Meitner is re-reviewing inherited changes; independent repeat remains pending.
+PR84 latest controlled CI36242795132 is still live. Its prior8/8 passing run does
+not explain the first six native failures; no false root-cause fix claim.
+R4 remains unpublished until actual prerequisite landing, clean transplant and
+final affected-change verification.
