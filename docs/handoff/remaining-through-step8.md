@@ -31,6 +31,22 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Strict generation SOURCE re-review now APPROVES the same two-production freeze
+independently of445GREEN. Parent released only the exact nine test-fixture
+migrations, preserving successful generation/ranking/temperature/target assertions
+with actual Ollama bound methods and synthetic HTTP transport. No unsafe fake
+allowlist, positive-to-unavailable substitution or extra production edit. Expanded
+compatibility and fresh QUALITY/CI/publication remain pending.
+
+The current validate_json is already one iterative walk; source audit found no
+redundant internal encode to delete. An independent main-aa3cddd-based
+codex/json-boundary-ascii-fast-path tree is preparing a test-only no-escape ASCII
+candidate and bounded equivalence/performance controls. All native type/budget/
+depth/node/cycle/nonfinite/surrogate checks remain, nonstandard flag/budget inputs
+retain the original fallback. No production optimization or benchmark is yet
+authorized; no claimed timeout fix. Temporary diagnostic collectors will not be
+automatically retained in the final published Web diff.
+
 PR96 SHA-squash terminal58832/95fa1a mergedaa3cdddbc1bcdf964ae95384c1a8740e44ff4205.
 Exacthead4197237 CI36277170168 all9success: collection10934=10710core+224Web,
 core10709passed1skipped20468warnings571.29s; Web224passed7166warnings127.09s;
