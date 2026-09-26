@@ -581,7 +581,8 @@ def test_adapter_post_normalization_proof_is_immutable(producer_envelope, monkey
 @pytest.mark.parametrize('mode', ['hits', 'empty', 'partial'])
 @pytest.mark.parametrize('tamper', [None, 'receipt', 'record'])
 @pytest.mark.parametrize('rag_ip_loader', ['native', 'base-flat-ip'], indirect=True)
-def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monkeypatch, mode, tamper, rag_ip_loader):
+@pytest.mark.parametrize('trace_search', [False, True])
+def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monkeypatch, mode, tamper, rag_ip_loader, trace_search):
     from types import MappingProxyType
     from src.agent.contracts import AgentContext, ObservationStatus, RunOutcome
     from src.agent.evidence import EvidenceLedger
@@ -635,7 +636,10 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
             diagnostics.append({'exception_type': type(exc).__name__, 'frames': frames[-8:]})
             raise
 
-    monkeypatch.setattr(service, 'search_similar_molecules_sync_with_receipt', traced_search)
+    # Keep the unwrapped production method in half the cases: diagnostic
+    # instrumentation must not be required for native FAISS dispatch to pass.
+    if trace_search:
+        monkeypatch.setattr(service, 'search_similar_molecules_sync_with_receipt', traced_search)
     registry = build_tool_registry([RAGSearchTool(service)])
     store = SQLiteAgentStateStore(tmp_path / 'session.sqlite')
     bus = AgentEventBus(state_store=store)
