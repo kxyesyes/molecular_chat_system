@@ -10,9 +10,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 |---|---|---|
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
-| PR86 reverse owned source | OPEN bbc498e; actual-main alignment independently reviewed | CI36248942747 completion, fresh head/base/review check before merge |
-| PR87 RAG current source | DRAFT d976422; clean eight-file transplant; independent1323 passed | CI36249184214 completion, actual latest-main alignment and review before merge |
-| Normal-Web B1 Task3 | Both corrected source reviews approved; latest focus22 passed | Tesla final five-module union, then independent Nietzsche repeat; no Task4 release yet |
+| PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
+| PR87 RAG current source | DRAFT publishedd976422; local aligned9f44b78; independent1323 passed | Old CI36249184214 completion; alignment review, push and new exact-head CI before merge |
+| Normal-Web B1 Task3 | Both corrected source reviews approved; final worker380 passed334.58s | Independent Nietzsche five-module repeat has sole local slot; no Task4 release yet |
 | Normal-Web B1 Tasks4–8 | PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
@@ -22,6 +22,21 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR86 exactbbc498e run36248942747 passed8/8: Agent9548 passed/1 skipped/23858
+warnings581.85s; root2872 passed/75 skipped/5 warnings226.97s. Parent freshly
+checked head/base/main, required checks and complete review pagination with zero
+threads/changes requests, then marked ready and squash merged72ce2bf0f990a382bb16d9fdb35a14b53c69ef00.
+Fresh fetch proves reviewed/landed tree17a2d7ae41c7a1cd02d8eea535a0ef127864a9b6.
+PR87 local main alignment9f44b78 is conflict-free, tree746afdcc3f35becf8be35ed3815618b2d4a81791;
+Feynman reviews the exact upstream seven-file addition/eight-file R4 preservation.
+Do not cancel old CI on observation timeout; let it terminate before new push.
+
+Task3 FINAL worker union42625 is terminalf68ddc:380 passed/3 SWIG warnings334.58s,
+exit0, five hashes plus launcher unchanged. Corrected SOURCE/QUALITY source gates
+already approve this exact2FC675AC/24B5CE67 freeze. Tesla released the slot and
+closed; Nietzsche received it explicitly for independent exact five-module repeat.
+This is not yet Task3 commit, Task4 release, normal-entry activation or P7/P8 final.
 
 Latest publication: R4 clean transplantd976422 passed independent Copernicus
 SOURCE integration review (eight-file raw delta/modes/blobs identical, source and
