@@ -15,8 +15,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 Maxwell SOURCE/Galileo QUALITY approve; worker463 passed504.39s, independent463 passed608.04s | Parent releases Task6 bounded Web dataflow/presentation TDD; original JSON RAG resume3s timeout cause UNKNOWN; Tasks6–8 pending |
-| B1 binding foundation | Prerequisites landed; branch729d986 aligned to actual main82bb6c7; only foundation plan differs before extraction | Euler implementing approved seven-production/five-test extraction; no tests until slot grant; no new production entry |
+| Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226 after Maxwell SOURCE/Galileo QUALITY; worker463 passed504.39s, independent463 passed608.04s | Wegener released for approved Task6 TDD; pure Node allowed, Python waits for slot; original resume timeout cause UNKNOWN; Tasks6–8 pending |
+| B1 binding foundation | Seven-production/five-test extraction complete on729d986; Averroes SOURCE approves; parent compile12/scoped scan passed | Euler owns sole scientific slot for ordered36-module union; fresh QUALITY source audit in parallel; no new production entry |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -27,6 +27,18 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Task5 is locally committed5c2e2268a26e6cc3549e186f974756b753aaa0f7 after exact-file
+staging and parent checks. Its full historical failure chronology remains intact.
+Wegener receives only approved Task6 file scope and TDD: may author tests/run pure
+Node controls, but Python/scientific executions require a later explicit slot.
+No backend behavior changes before corresponding RED. Task7/8/B2/C stay unreleased.
+
+Foundation SOURCE Averroes approves all12 file hashes/15 donor transitions and
+scientific/ownership compatibility on actual main82bb6c7. Euler now owns sole
+local scientific slot for one exact36-module run through launcher8822EA04.
+Fresh QUALITY source review proceeds without tests until that slot is released.
+No foundation commit/push, production entry activation or real acceptance yet.
 
 Galileo fresh QUALITY approves current Task5 freeze after exact4 run85221/afe598:
 463 passed,0 failures/skips,7 warnings608.04s, runner/process exit0. Six hashes
