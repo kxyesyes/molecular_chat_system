@@ -357,6 +357,34 @@ RAG/source receipts, reverse-source receipts, then B execution along their actua
 dependencies on clean main-based branches, preserving tests and rechecking CI.
 These are local Git observations only, not a fresh remote PR/CI audit or a push.
 
+Task4A-input local release checkpoint (2026-09-26): approved clarification9360c7b
+is implemented with a bounded server-admitted input journal, frozen full context,
+sequential scientific input validation, historical prefix commitments and unchanged
+eligible property reuse. No-action SMILES -> target clarification now reaches
+real Session/adapter/ledger execution using explicitly synthetic activity output.
+Human input is not scientific evidence and trusted journal restore is not itself
+storage authentication. Two review findings were reproduced and corrected:
+pure retrieval was incorrectly gated by molecular/target reduction, and valid
+`for CCO` activity prose was incorrectly frozen as a target. Whole-input and
+explicit-target rejection tests remain intact.
+
+SPEC Pasteur and fresh QUALITY Dalton approve; final independent13-module union
+1386 passed157.41s,0 failures/errors/skips,3 SWIG warnings, exit0. Worker union
+1018 passed89.34s. Four reviewed hashes match; parent in-memory compilation/diff
+checks pass. Exact commands and failed-run chronology remain in the core plan.
+Original13-path dirty checkout is unchanged; no code push, real provider/model
+activation or deployment occurred.
+
+Next is Task4A-acceptance: deterministic checks for all seven tool groups and
+mandatory citation ancestry, then Task4B actual model-decision loop integration.
+An actual Session dispatch gap remains explicit: its global raw-selection check
+rejects pure RAG/user-target lookup when an unrelated selected molecule is expired.
+Four characterization tests retain that rejection; they are NOT successful target
+behavior. Task4B must achieve same-context non-consuming-tool execution while
+retaining molecular-reference protection. Task5 revision8 authenticated restore,
+Task6 publication, normal Web/B2/C, focused PR gates and P8 integrated repeated
+real/UI acceptance remain required. Packages7/8 remain incomplete; no step9.
+
 - Each independently reviewed package gets its own branch/PR; sub-increments may be used but do not redefine the end state.
 - Preserve main; merge only through reviewed PRs with passing required checks and no unresolved findings.
 - The original checkout remains at its existing dirty state. Do not stage its unrelated changes.

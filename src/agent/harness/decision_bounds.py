@@ -7,7 +7,7 @@ import math
 import re
 
 
-def context_value(context):
+def context_value(context, *, query_content_bytes=False):
     """Project only the two known server contracts, before copy/hash/privacy.
 
     This is not a browser deserializer. All other nested values remain plain
@@ -17,6 +17,9 @@ def context_value(context):
     from src.agent.contracts import AgentContext
     from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
     from .decision_policy import DecisionBoundaryError
+
+    if type(query_content_bytes) is not bool:
+        raise DecisionBoundaryError('invalid_context')
 
     def shallow(value, cls):
         names = {f.name for f in fields(cls)}
@@ -44,7 +47,13 @@ def context_value(context):
             or type(context.stream) is not bool or type(context.temperature) not in (int, float)
             or type(context.mol_count) is not int):
         raise DecisionBoundaryError('invalid_context')
-    validate_json(context.query, max_bytes=16 * 1024, reason='invalid_context')
+    if query_content_bytes:
+        # Whole-context validation above already rejects surrogates/non-native
+        # strings and bounds allocation before encoding the content itself.
+        if len(context.query.encode('utf-8')) > 16 * 1024:
+            raise DecisionBoundaryError('invalid_context')
+    else:
+        validate_json(context.query, max_bytes=16 * 1024, reason='invalid_context')
     return value
 
 

@@ -252,44 +252,70 @@ Default/legacy behavior remains unchanged. Follow the full-context freeze,
 one-based proposal/zero-based journal mapping, exclusive journal authority and
 trusted-store/pre-CAS candidate/post-CAS installation rules in that resolution.
 
-- [ ] 4A-input RED: original missing both inputs, admit SMILES, then target,
+- [x] 4A-input RED: original missing both inputs, admit SMILES, then target,
   without executing a tool between replies. Resolve correct molecule/target;
   model/session history alone still cannot supply them. Verify native turn index,
   owner/fixed metadata, exact retry vs rewrite, gaps, prefix digest, detached
   projections,16-turn/16KiB-query/64KiB-context/512KiB-total boundaries.
-- [ ] Implement BindingInputJournal original freeze, explicit admit_context,
+- [x] Implement BindingInputJournal original freeze, explicit admit_context,
   bounded prefix export/restore and context projection. Restore requires explicit
   caller validation; do not infer authority from a raw dict or checksum. Actual
   revision8 claim integration remains Task5 and must validate every saved turn.
-- [ ] Extend resolver only with explicit optional journal injection. Normal B
+- [x] Extend resolver only with explicit optional journal injection. Normal B
   loop will require it; direct Task3 API retains its current behavior. Commit each
   action's input_turn/prefix digest in the full original record, not logical
   action hash. Resolve historical actions from their own prefixes and current
   reuse from current constraints. Preserve malformed-input rejection, original
   requirements, target changes/new subjects, and selected-reference identity.
-- [ ] Cover sequential-prefix negatives: valid -> malformed -> omitted input,
+- [x] Cover sequential-prefix negatives: valid -> malformed -> omitted input,
   conflict -> continue, omitted reference retention, equal-SMILES foreign
   reference and sticky explicit-SMILES selection clearing. No later reply erases
   a prior conflict; unknown activity families do not block property parsing.
-- [ ] Cover all frozen AgentContext fields and journal-head mismatch at resolve,
+- [x] Cover all frozen AgentContext fields and journal-head mismatch at resolve,
   prepare, reuse and closure. Restore trial resolver must retain explicit journal
   authority; historical actions use their own prefix, not the latest context.
-- [ ] Keep proposal input_turn one-based and record/journal turn zero-based;
+- [x] Keep proposal input_turn one-based and record/journal turn zero-based;
   test 0/1/2 journal against 1/2/3 proposals and unchanged earlier reuse records.
   Test B UTF-8 content boundary plus unchanged legacy JSON limit and64KiB context.
-- [ ] Run new input module plus Task3/requirements/Session/receipt regression;
+- [x] Run new input module plus Task3/requirements/Session/receipt regression;
   independent SPEC then fresh QUALITY before the 4A-input checkpoint.
 - [ ] 4A-acceptance RED/GREEN: implement the existing seven-tool/group checks and
   citation closure specified below in the focused acceptance module. Use actual
   sealed Session observations, not dictionaries standing in for evidence. Domain
   failures/demo/fallback/family disagreement remain unusable or partial/review;
   no-hit differs from requested hits. Required tools include all explicit groups.
+
+Source-only acceptance audit at9360c7b (Parfit, no execution) pins the following
+reuse points for that implementation; these are not passing test results:
+`decision_requirements._check_batch` for properties/likeness; typed
+`analysis_contract.ADMETOutput` plus `ADMETPredictor._has_observations` for
+available methods (an empty sparse adme_py payload is typed-valid but does not
+meet acceptance); `ActivityPredictOutput` and `ActivityResultValidator` for
+whole-batch activity; resolver current-source closure plus receipt validators
+for reverse/RAG; `TargetSearchOutput` and quality.lookup_status for target lookup.
+`usable` alone is insufficient; family_review_observation never supplies success.
+Do not mutate sealed results with ResultValidator.validate_tool_result or reuse
+the legacy active_results-based evaluate_requirements/verify_finish wholesale.
+Required RED vectors: independent property success omitted by RAG-only citation;
+downstream target citation including reverse/property ancestors; verified empty
+RAG with require_hits false/true; empty sparse ADMET; family disagreement;
+not_found target with require_resolved false/true. Required tools without an
+explicit structured group still undergo the corresponding tool-specific checks.
+
 - [ ] 4B actual loop: implement the catalog and execution tests below. Readonly
   source evidence shows legacy preparation only includes molecular groups and
   legacy context limits; do not reuse those paths accidentally for explicit B.
   Until revision8 is implemented, B must not mint or claim a revision6/7 nonce.
   Task4 alone cannot be published as complete B1 or enabled in normal Web; Task5/6
   and full integration gates remain required in this same core effort.
+- [ ] Preserve the actual incidental-selection integration gate: existing
+  WorkflowRunSession._reject_unavailable_reference and initial loop checks apply
+  to every tool, even pure RAG/user-target lookup. Task4A resolver acceptance does
+  not remove that dispatch restriction. Test an expired, scientifically irrelevant
+  raw selection through actual B loop/Session without a user clearing it first;
+  apply reference checks to the authority actually consumed by each B action,
+  with legacy defaults and molecular/ancestor freshness protections unchanged.
+  A separate cleared-selection follow-up test is not proof of this original case.
 
 Source inspection after Task1: context_value still enforces the legacy16KiB
 JSON-encoded query limit, and the loop calls it before requirements preparation.
@@ -342,6 +368,95 @@ def consume_actual_reverse(messages):
   negative and downstream-only citation positive with ancestor expansion. Render
   successful scientific prose only from that verified closure; uncited failure
   diagnostics remain visible without adding ungrounded numeric claims.
+
+### Task4A input implementation review checkpoint (not released)
+
+Written clarification approved by Parfit and committed9360c7b. First implementation
+RED:47 failed/4 setup errors8.47s, corrected missing-implementation RED49 failed
+10.84s; expanded RED80 passed/2 failed14.29s found empty-closure validation and
+an over-narrow test exception assertion. Subsequent focused96 passed23.77s and
+eight-module union952 passed127.88s (terminal94145/exit0,3 SWIG warnings).
+These runs used the isolated runner below, not real services or model assets.
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_inputs.py
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_inputs.py tests/agent/test_decision_dynamic_bindings.py tests/agent/test_decision_binding_requirements.py tests/agent/test_decision_binding_session.py tests/agent/test_current_source_tool_hooks.py tests/agent/test_decision_inputs.py tests/agent/test_rag_receipt_consumption.py tests/agent/test_reverse_receipt_consumption.py
+```
+
+Independent SPEC Pasteur withheld approval: unconditional scientific prefix
+reduction incorrectly gates pure RAG comparison text and irrelevant selected
+molecules on RAG/user-target lookup. Reproduce and scope reduction to applicable
+molecular actions/obligations/ancestors, retaining universal journal-head/owner
+checks and scientific conflict retention. This is original-query compatibility,
+not new multi-target inference. The952-pass run does not close that finding.
+Parent in-memory compilation/diff check passed and original13-path dirty checkout
+remains untouched; no code commit, publication or full Task4 completion yet.
+
+Corrective scope RED10 failed/31 passed26.12s; expanded RED18 failed/31 passed
+62.70s; first implementation run4 failed/140 passed142.74s. The four failures
+were actual Session dispatch rejection for expired/unavailable raw selections
+on RAG/user-target lookup after successful resolver admission. This existing
+Session gate is not fixed in4A. Intermediate145 passed102.16s used a separately
+cleared selection and did NOT establish the original same-context success.
+Final tests remove that ambiguity: resolver admission is tested separately from
+valid initial execution/post-execution expiry, and four named Task4B gap tests
+preserve actual unchanged rejection without xfail/skip. Task4B must replace those
+gap assertions with the required same-context successful execution tests.
+
+Revised focused20 passed9.46s; final eight-module command above1005 passed89.94s,
+exit0,3 SWIG warnings, no skips (149 input tests plus856 unchanged baseline).
+Terminal handle60163/chunk99486c. Corrected SPEC Pasteur approves the four-file
+helper checkpoint; independent QUALITY/expanded regression is still pending.
+Final implementation SHA256 values at this checkpoint:
+
+```text
+decision_binding_inputs.py D4D3EA40F0A6C5B02859704D3350B02E271645BFD90B848E2B0CC07562B7C5FF
+decision_bindings.py C96CD40064B87CD3647932A833D1941182FCBCE10A134BFA2AFE2DFAD815C296
+decision_bounds.py 2B4BAC3EA35187C887312EA4A37EF3270A41A08FCB5246922EB3A92269BB142C
+test_decision_binding_inputs.py 258CA39A3B949B5B4E2A532DA2BEB4B6EF22DAA8815A9A7F7DA3FE5A58EA6467
+```
+
+Fresh QUALITY Dalton repeated the eight-module command plus
+test_decision_target_status.py, test_target_tool_contract.py,
+test_decision_adapter_retry.py, test_decision_loop.py and
+test_decision_continuation.py (all under tests/agent):1373 passed185.63s,
+exit0,3 SWIG warnings,0 skips, terminal handle85612. Four hashes above match
+before/after. Approval withheld for a source-derived grammar regression:
+`predict activity for CCO` then `target: PDE5A` freezes CCO as a target via
+the generic target parser, unlike the existing activity parser's valid-molecule
+exception in the for position. Reproduce and repair without weakening explicit
+target labels or unknown/conflicting-target checks. The1373 pass run is retained
+as regression evidence, not proof this finding is closed.
+
+The grammar reproduction used the same isolated runner with three node IDs:
+test_decision_binding_inputs.py::test_for_molecule_no_action_then_target_and_sealed_activity,
+::test_for_molecule_target_grammar_rejections_persist and
+::test_for_molecule_property_target_is_not_activity_family_validation (all under
+tests/agent; repeat the full module filename for each node argument). RED5 failed/
+8 passed32.59s; initial fix1 failed/12 passed5.69s exposed `for CCO invalid`
+fragment acceptance. That negative remains and now passes with whole-field parsing.
+Focused13 passed6.17s; module162 passed33.57s; eight-module union1018 passed89.34s,
+exit0,3 SWIG warnings,0 skips, terminal54639/chunk0e3730.
+Only the target-analysis projection masks whole valid molecular `for` occurrences,
+using existing activity positional grammar; original input/commitments remain
+unchanged. Explicit target labels, unknown identifiers, malformed structures,
+conflicts and non-activity property context retain their checks. New resolver
+hash BD0DF638874D56EAB15DC4BBCED764AC55F8EB63D32D145883A1EDB1F7BB42C2;
+input-test hash46593180D244A2C5448CFBC48447112B2AAB0AA1C40B29C68F39998C50F5BB04.
+Input helper/bounds hashes unchanged. Final independent rereviews remain pending.
+
+Final review supersedes that pending status: SPEC Pasteur and QUALITY Dalton
+approve the final four-file freeze. Independent13-module repeat1386 passed157.41s,
+exit0,0 failures/errors/skips,3 SWIG warnings; terminal53969; hashes unchanged
+before/after. Command is the eight-module union above with the five additional
+test modules named in the1373-run paragraph. Parent in-memory compilation of
+all four changed Python files and diff checks pass. Filename-only credential
+pattern scan over this code/test/plan slice had no matches (limited pattern scan,
+not a repository security audit). Original checkout still has its same13 paths.
+Task4A-input is locally implemented/reviewed; Task4A-acceptance and Task4B remain
+unchecked. No real API/model, remote publication, production activation or
+deployment was performed. The four Task4B gap tests are characterization of
+existing rejection, not satisfaction of the original successful-dispatch goal.
 
 ## Task 5: Revision8 restore and charged verification time
 
