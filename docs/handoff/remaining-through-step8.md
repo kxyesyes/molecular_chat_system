@@ -4,6 +4,23 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest integration checkpoint: PR84 sixthCI36246714194 at518be62 is terminal
+SUCCESS8/8. Agent9548 passed/1 skipped/23858 warnings577.57s; root2643 passed/
+75 skipped/5 warnings230.09s. Earlier missed-hook failures remain recorded; this
+does not establish a unique CPython/SWIG cause. Conflict-free alignment to actual
+main d05dec2 produced3ddafd6, tree d10c1429adfc93864fd508cad43178c2608d91bd.
+Independent Descartes SOURCE/SPEC verifies all13 RAG blobs unchanged and exactly
+five upstream popcount files added, with no actionable interaction findings.
+The aligned head is pushed; NEW exact-head CI is required. PR84 is not merged.
+
+R4 inherited reviewed PR84 test-only follow-ups as2f47457/0909b36/600947a;
+production hashes are unchanged and receipt-test delta retains only R4's explicit
+synthetic source fixture. Independent Erdos approved bounded isolation controls
+for the five remaining R4 class hooks. Those new controls are prepared but NOT
+run or corrected yet: Tesla still owns the sole local test slot for normal-Web
+Task3. No competing local scientific process, real model or deployment started.
+PR86 remains gated on corrected-main alignment and new CI; P7/P8 stay incomplete.
+
 Current authoritative checkpoint: normal-Web B1 Task2 is committed954e4f4 after
 corrected SOURCE/SPEC Carson and fresh QUALITY Carver. Two reviewed P2s were
 actually reproduced/fixed (distinct same-family target obligations and complete
