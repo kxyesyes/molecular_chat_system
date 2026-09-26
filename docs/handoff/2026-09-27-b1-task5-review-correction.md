@@ -124,3 +124,21 @@ Freeze hashes:
 - runtime:E7880DEA8FEFC88921D2D61A33519D2AC18FD388F25F55F4F4DFF0C23ECE16E0
 - tests:1503FEBD4E122DBF040771BBE762B3CC9E7FB225EAE7B48FC5E0A1D2EE9FDC54
 - runner:F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183
+
+Updated terminal evidence:85833/045e64 completed458 passed,7 warnings490.55s,
+process and runner exit0. The same exact U command and corrected freeze were used;
+no restart or overlapping local tests. This supersedes the running checkpoint,
+not the outstanding corrected SOURCE and fresh QUALITY gates. Parent can continue
+offline CI work, but unavailable independent reviewers must not be counted as
+approval and Task5 implementation is not committed or merged.
+
+## Fresh corrected SOURCE review
+
+Curie found no remaining production defect in the narrow reverse-only correction,
+but did not approve two test-sufficiency gaps: the 30-second finalization reserve
+can mask the elapsed-credit inequalities, and injecting a complete error into a
+successful observation does not isolate existing error.details comparison.
+The458-pass run remains valid for its actual assertions, not proof of those two
+properties. A bounded test-only worker is strengthening these controls; production
+changes are not authorized by that review. Corrected SOURCE and fresh QUALITY
+remain mandatory before Task5 implementation commit/publication.

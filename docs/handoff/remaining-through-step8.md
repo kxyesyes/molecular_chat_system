@@ -15,7 +15,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | Independent SOURCE/QUALITY approve; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 head3d6a872 | CI36255095764 failed: Agent exit124 at600s/~97%, six other partitions passed. No merge; independent CI capacity partition under review |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 worker447 passed304.29s, but SOURCE found reverse-only missing-subject pre-CAS gap | Popper reproduces/corrects this gap via TDD and owns sole local test slot; corrected SOURCE/fresh QUALITY and Tasks6–8 pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 reverse-only correction458 passed490.55s; fresh SOURCE found elapsed-credit/error-details test sufficiency gaps | Lorentz strengthens only those tests; corrected SOURCE/fresh QUALITY and Tasks6–8 pending |
+| CI complete Agent capacity partition | Corrected SOURCE/QUALITY approve; parent34 passed2 skips23.77s and independent34 passed2 skips22.63s; draft PR90 headfdd7680, CI36260272170 running | Actual Linux collection equality and nine CI checks; not a performance fix |
+| Target execution guard integration | SOURCE/QUALITY approve; parent437 passed26.25s and independent437 passed57.02s; committed b706d25 | Align CI prerequisite before publication; not yet pushed or merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -24,6 +26,33 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR90 published after corrected Gibbs SOURCE and independent Hilbert QUALITY;
+exactheadfdd76801040cb2f9abfa8da24ae143fef9cb870e, remoteCI36260272170 is
+in_progress at the last check. Static quality succeeded; seven executable
+partitions were running. The aggregate ninth check is still required. Both
+Windows skips (Linux watchdog/native sendmsg) must actually run in Linux CI.
+No merge yet. Original PR89 remains open/draft at3d6a872 and main remainsfb62f53.
+
+Target guard localb706d253888039c51fc99681f3626c6f1c5982eb is committed after
+independent437-pass QUALITY and parent compile/diff/credential checks. Publication
+waits for CI prerequisite alignment. Next foundation plan is independently
+reviewed from local5a4a237 on a separate worktree; no foundation code is copied
+yet, and the source-hook/target prerequisites must actually land before release.
+
+Parent correction follow-up: Task5 final union85833/045e64 terminated with
+458 passed,7 warnings490.55s, process/runner exit0. The invalid reverse-only
+reply now receives sequential journal validation before CAS. Earlier447 passes
+and the source rejection remain recorded in the dedicated correction handoff.
+The former worker test-slot ownership below is historical, not a live process.
+Fresh corrected SOURCE and QUALITY are still required; no implementation merge.
+
+CI partition local RED37524/1e1a8a was12 failed14 passed7 warnings10.25s;
+GREEN9122/09bf1d was26 passed7 warnings16.04s,exit0. Tests exercise the exact
+inline verifier using synthetic repositories, not actual full CI collection.
+Current source freeze is under independent SOURCE review. Per-partition600s
+remains; combined Agent capacity becomes1200s. This does not fix or erase PR89's
+original600s timeout. No deployment, live-model use or P7/P8 completion claimed.
 
 PR89 CI36255095764 is terminal failure: Agent108440253195 exit124 at600s/~97%;
 six other partitions pass, aggregate fails. Named logs report zero FAILED test
