@@ -30,6 +30,96 @@ host model/data discovery. No credentials, real APIs/models, deployment or push.
 
 ## File responsibilities
 
+### Task4B implementation checkpoint — independent review pending
+
+At parent HEAD ce47c82, the eight-file uncommitted Task4B implementation wires
+explicit B1 decisions into the existing loop and Session. This is not a release:
+independent SPEC and fresh QUALITY are still required. Default legacy behavior
+remains covered; B continuation is explicitly rejected until Task5 revision8.
+Task6 final-publication barriers, normal Web/B2/C and P8 remain incomplete.
+
+Implementer final serial command (no live models or host assets):
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_binding_loop.py tests/agent/test_decision_binding_inputs.py tests/agent/test_decision_binding_acceptance.py tests/agent/test_decision_dynamic_bindings.py tests/agent/test_decision_binding_requirements.py tests/agent/test_decision_binding_session.py tests/agent/test_current_source_tool_hooks.py tests/agent/test_decision_loop.py tests/agent/test_decision_continuation.py tests/agent/test_decision_requirements.py tests/agent/test_decision_inputs.py tests/agent/test_decision_adapter_retry.py tests/agent/test_worker_ownership.py
+```
+
+Result:1105 passed, zero failed/errors/skipped, three SWIG deprecation warnings,
+259.34s, handle68582 terminal exit0. Wrapper SHA256 before/after:
+F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+This is implementer evidence, not independent review or live scientific acceptance.
+
+The implementer retained these RED runs; hexadecimal IDs are command chunks,
+numeric IDs are terminal process handles. Intermediate timings were not supplied
+in the handoff and are not inferred. The final union covers the corrected cases.
+
+| Run | Original result | Reproduced issue and correction |
+|---|---|---|
+| 379b50 | 5 failed | Three legacy unauthorized tools and two missing B constructor cases; explicit profile added, legacy denials retained. |
+| 77c4b5 | 10 failed,63 passed | Session guard contracts and checkpoint-denial journaling missing. |
+| 67139 | 5 failed,23 passed,4 errors | Observation-name/metadata gaps; oversized escaped fixture and overly long parameter IDs corrected. |
+| 79017 | 7 failed,27 passed | Legacy history query ceiling, incomplete metadata comparison and missing observation name. |
+| 39145 | 2 failed,28 passed | Activity fixture lacked target evidence; replaced with existing labelled synthetic family fixture, not weaker acceptance. |
+| 49406 | 2 failed,28 passed | Consumed expired/unavailable selection raised outside protected graph handling. |
+| 81220 | 3 failed,10 passed | Native admission errors, invalid-owner cleanup and late admission freeze. |
+| 7a8c57 | 1 failed,7 passed | Legacy continuation helpers did not explicitly reject B. |
+| 86469 | 6 failed,2 passed | Unexpected guard return not latched, extra legacy clock call and lost preparation deadline reason. |
+| 83f05b | 1 failed | Pydantic normalized non-native proposal arguments before native bounds. |
+
+Frozen eight-file SHA256 values supplied for independent comparison:
+
+| Repository-relative path | SHA256 |
+|---|---|
+| src/agent/harness/decision_loop.py | E023E8C403D5AD3D3086A3EA91217F79F7DD46D66485A8251009383BE5CA81DE |
+| src/agent/harness/decision_policy.py | 939FEF5C3F7EFD797EC7C52F16D56C2AE63347E839BFF8D3BEA51D41A82B638B |
+| src/agent/harness/decision_bindings.py | D9490F70E8389163668852E2A65F59FE57A42872B84E94D88D96C8EF0A3C9A15 |
+| src/agent/harness/decision_continuation.py | CA2506DFC83D8294A51255907C34A9D525B826B60A9D8AED50C3745171B1DC8C |
+| src/agent/runtime/run_session.py | 7324C9BEB5240F0AB75A866705642F5671C18FA8E55B8B21907A804535DBA734 |
+| tests/agent/test_decision_binding_loop.py | 66EA586D45331D7334778437EA4125DBEB5CB109BBA8A5A4FCA7F44FAC733197 |
+| tests/agent/test_decision_binding_inputs.py | 1F8092007DD9C2132435D47ABB507865F32799784835A1C537726E238A031D30 |
+| tests/agent/test_decision_binding_session.py | E78E88C41BF9D8E0C274A60EB178ABC1AA83F2454566FF7CC75A0659DBEF1CFD |
+
+### Planned ownership
+
+Independent SPEC Hilbert requested one correction to this freeze: a valid
+16KiB retrieval query made entirely of `<` passes B input bounds, but the
+requirements prompt uses the HTML-safe scientific-observation serializer and
+expands beyond its64KiB limit. Prompt construction is outside graph handling.
+This was initially source-only evidence, not an executed failure. Parent
+confirmed the policy/loop call chain and assigned native/JSON actual-loop RED
+tests and a B-only prompt-serialization correction, without changing legacy
+serialization or enlarging scientific-observation limits. Release remains open.
+
+P2 correction evidence: actual-RAG RED handle90809 returned2 failed/4 passed,
+both modes raising observation_too_large. Boundary RED chunke55efe returned
+7 failed/1 passed before the explicit prompt profile parameter existed. Focused
+GREEN handle62248 returned14 passed54.73s. The unchanged13-module command above
+then returned1115 passed284.83s,0 failed/errors/skipped,3 SWIG warnings,
+handle71234 terminal exit0. Each process ended before starting the next.
+The tests preserve exact admitted-query roundtrip and validate actual messages
+using the existing transport snapshot validator. Additional cases retain native
+size/type/cycle checks before redaction, repeated alias values, unknown-profile
+rejection and unchanged legacy/scientific-observation serialization limits.
+
+Corrected SPEC Hilbert APPROVES source and test coverage, without executing
+tests. Fresh QUALITY Linnaeus owns the next independent serial union; no release
+is implied before that result. Only three hashes changed from the table above:
+
+- decision_loop.py:D36A80B28C8F95F78787C971F6FDCBC91125CC3CB314AE3AFD4A525694A60DA8
+- decision_policy.py:ADD42F61EB883554D846BAC84A26EE4D6297E17E7C5E2D7050C83CBEB6CC3B78
+- test_decision_binding_loop.py:1721C3D2E6B72C844017E0D6959347D98E08D3652F4C41A646AE51DE018B3923
+
+Task4B local release verification: fresh QUALITY Linnaeus APPROVES the corrected
+eight-file freeze after independent inspection and exactly one invocation of
+the13-module command above. Result1115 passed303.10s,0 failed/errors/skipped,
+3 SWIG __module__ warnings, handle10417 terminal exit0 and
+ORDINARY_PYTEST_EXIT=0. All eight hashes and wrapper hash matched before review,
+immediately before testing and after testing. No additional probe/import/live
+calls were used. Parent in-memory compilation of all eight Python files and
+git diff --check passed; original checkout retains its13 unrelated status paths.
+This closes Task4B only. Task5 revision8, Task6 final publication and the later
+normal Web/B2/C/focused-PR/P8 gates remain open; production is not activated.
+
 | Files | Responsibility |
 |---|---|
 | new `src/agent/contracts/binding_requirements.py` | Frozen strict v2 obligation types/parser; no scientific I/O |
@@ -403,13 +493,13 @@ RAG with require_hits false/true; empty sparse ADMET; family disagreement;
 not_found target with require_resolved false/true. Required tools without an
 explicit structured group still undergo the corresponding tool-specific checks.
 
-- [ ] 4B actual loop: implement the catalog and execution tests below. Readonly
+- [x] 4B actual loop: implement the catalog and execution tests below. Readonly
   source evidence shows legacy preparation only includes molecular groups and
   legacy context limits; do not reuse those paths accidentally for explicit B.
   Until revision8 is implemented, B must not mint or claim a revision6/7 nonce.
   Task4 alone cannot be published as complete B1 or enabled in normal Web; Task5/6
   and full integration gates remain required in this same core effort.
-- [ ] Preserve the actual incidental-selection integration gate: existing
+- [x] Preserve the actual incidental-selection integration gate: existing
   WorkflowRunSession._reject_unavailable_reference and initial loop checks apply
   to every tool, even pure RAG/user-target lookup. Task4A resolver acceptance does
   not remove that dispatch restriction. Test an expired, scientifically irrelevant
@@ -427,7 +517,8 @@ explicit structured group still undergo the corresponding tool-specific checks.
   and distinguish zero physical calls from conservatively consumed attempts.
   Required new regressions include checkpoint-success -> guard-denial ->
   settlement re-entry, Session-copy tampering, and descendant guard failure
-  followed by an otherwise valid source check. None is claimed passed yet.
+  followed by an otherwise valid source check. These now pass in the reviewed
+  Task4B union recorded above; this does not complete the later publication gate.
 
 Source inspection after Task1: context_value still enforces the legacy16KiB
 JSON-encoded query limit, and the loop calls it before requirements preparation.
@@ -438,19 +529,19 @@ and the whole64KiB context boundary; only the explicit B path may use the approv
 16KiB UTF-8 query-content limit. This is an integration test requirement, not a
 claim that the existing loop has already been repaired or exercised.
 
-- [ ] Baseline actual-loop test must demonstrate that registered RAG/ADMET/reverse
+- [x] Baseline actual-loop test must demonstrate that registered RAG/ADMET/reverse
   are currently unauthorized, not merely that a new constructor keyword is absent.
   Keep a failing new opt-in test and a passing unchanged legacy negative.
-- [ ] Add server constructor binding_profile; None retains old behavior, exact B1
+- [x] Add server constructor binding_profile; None retains old behavior, exact B1
   selects the reviewed implementation, B2/unknown reject. B requires a WorkerOwner
   and explicit v2 requirements. Catalog intersects B1, allowed/required permissions,
   actual registry ownership, idempotence and side-effect policy. Scientific and
   RAG flags are independent strict bools. Chat has no tools even if both flags true.
-- [ ] Use existing decide/tool graph. The model chooses every next tool from actual
+- [x] Use existing decide/tool graph. The model chooses every next tool from actual
   observations. Add B-only resolver, action hash index, source preparation and
   acceptance branches; no ordered list of tools or keyword workflow templates.
   Every post-callback boundary before model/tool/answer validates source closure.
-- [ ] Require actual temporary-source RAG and reverse, actual RDKit properties/
+- [x] Require actual temporary-source RAG and reverse, actual RDKit properties/
   likeness, typed ADMET/activity fixtures where dependencies are synthetic and
   explicitly labelled, and test-owned target database. Both native and JSON
   modes must exercise next-decision selection from prior result, reverse→target,
@@ -466,13 +557,13 @@ def consume_actual_reverse(messages):
     })
 ```
 
-- [ ] Acceptance reuses existing molecular metric checks and domain validators.
+- [x] Acceptance reuses existing molecular metric checks and domain validators.
   Check exact input subjects/count, ADMET method availability vs unknown, real
   activity provenance/status (family disagreement stays partial), reverse proof,
   RAG valid no-hit vs discarded/unavailable, target status/evidence and required
   tools. Use no LLM self-evaluation. Final scientific text is deterministic tool
   evidence with visible limitations; never hide failed optional steps.
-- [ ] Add mandatory citation closure: expand each explicitly cited sealed
+- [x] Add mandatory citation closure: expand each explicitly cited sealed
   observation's ancestors in observation order; for every obligation/required
   tool select the earliest satisfying observation within that closure. Return
   cited_closure_ids and required_evidence_ids. A fulfilled-but-uncited group gives

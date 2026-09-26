@@ -115,6 +115,7 @@ class WorkflowRunSession:
         dynamic: bool = False,
         observation_capture: Callable[[ToolResult], None] | None = None,
         observation_prepare: Callable[[ToolResult, WorkflowStep], None] | None = None,
+        reference_guard: Callable[[WorkflowStep, Any], None] | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.context = context
@@ -131,6 +132,9 @@ class WorkflowRunSession:
         if observation_prepare is not None and (not dynamic or not callable(observation_prepare)):
             raise SessionLifecycleError("observation preparation requires a dynamic session and callable")
         self._observation_prepare = observation_prepare
+        if reference_guard is not None and (not dynamic or not callable(reference_guard)):
+            raise SessionLifecycleError("reference guard requires a dynamic session and callable")
+        self._reference_guard = reference_guard
         self._resume_claimed = False
         self._observations_restored = False
         self._restored_step_ids: set[str] = set()
@@ -966,6 +970,22 @@ class WorkflowRunSession:
         )
 
     def _reject_unavailable_reference(self, step, journal) -> bool:
+        if self._reference_guard is not None:
+            from src.agent.harness.decision_policy import DecisionBoundaryError
+            try:
+                if self._reference_guard(step, journal.input_data) is not None:
+                    raise DecisionBoundaryError('invalid_dynamic_binding')
+            except Exception as exc:
+                # Cache denial BEFORE raising: settle_action may reenter through
+                # execute_step's existing-result shortcut, even for a provisional
+                # checkpoint success. It must never restore that success.
+                reason = str(exc) if isinstance(exc, DecisionBoundaryError) else 'invalid_dynamic_binding'
+                journal.result = ToolResult.error_result(
+                    step.tool_name, AgentErrorCode.INVALID_INPUT,
+                    'Scientific input authority rejected', details={'reason': reason})
+                journal.checkpoint_reused = False
+                raise DecisionBoundaryError(reason) from None
+            return False
         reference = self.context.resolved_molecule
         if reference is None or reference.revalidate(
             self.orchestrator.state_store, self.context.session_id

@@ -151,8 +151,7 @@ def prepare_binding_requirements(value, *, context, request_kind, allowed_tools,
         raise ValueError(_ERROR) from None
 
 
-# These APIs are deliberately unconnected to ModelDecisionLoop. A caller owns
-# admission, deadlines, workers, Session creation and explicit restore authority.
+# The opt-in loop owns admission, deadlines, workers and Session creation.
 import json
 from dataclasses import dataclass, replace
 
@@ -682,6 +681,39 @@ class B1BindingResolver:
 
     def export_records(self):
         return json.loads(_wire({key: json.loads(value) for key, value in self._records.items()}, 512 * 1024))
+
+    def guard_dispatch(self, step, input_data):
+        """Authenticate the actual Session copy against an issued initial action.
+
+        Runs inside the Session/adapter owned worker. No tool execution or
+        checkpoint authority can replace this full current-input comparison.
+        """
+        self._check_owner()
+        try:
+            raw = self._records[step.name]
+            if raw not in self._issued:
+                raise DecisionBoundaryError(_BINDING_ERROR)
+            record = json.loads(raw)
+            expected = dict(request_input_digest=record['request_input_digest'],
+                input_evidence_ids=[r['evidence_id'] for r in record['proof']['roles']],
+                operation_key=_initial_operation_key(record))
+            _native(step.metadata)
+            if (step.tool_name != record['tool_name'] or step.output_key != step.name
+                    or step.input_from is not None or step.input_binding is not None
+                    or step.input_template is not None or step.input_transform != 'identity'
+                    or _wire(step.input_data) != _wire(record['input_data'])
+                    or _wire(input_data) != _wire(record['input_data'])
+                    or any(key not in step.metadata for key in expected)
+                    or _wire({key: step.metadata[key] for key in expected}) != _wire(expected)
+                    or 'binding_proof' in step.metadata):
+                raise DecisionBoundaryError(_BINDING_ERROR)
+            self.verify_binding_closure()
+            action = self.resolve(ToolDecision(version='1', action='tool',
+                tool_name=record['tool_name'], arguments=record['arguments'], purpose='revalidate'))
+            if action.record_json != raw:
+                raise DecisionBoundaryError(_BINDING_ERROR)
+        except (KeyError, TypeError, AttributeError):
+            raise DecisionBoundaryError(_BINDING_ERROR) from None
 
     def restore_records(self, records):
         """Explicit caller-owned inputs only, after Session proof/seal restoration.

@@ -4,6 +4,23 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Newest checkpoint (2026-09-26): Task4B seven-tool decision-loop integration has
+corrected independent SPEC Hilbert and fresh QUALITY Linnaeus approval.
+Implementer final union1115 passed284.83s; independent union1115 passed303.10s,
+zero failed/errors/skipped, three SWIG warnings, handle10417 terminal exit0.
+All eight source/test hashes match before/after; exact command and original RED
+history are in the B1 decision-execution plan. Review reproduced and corrected
+a valid long HTML-sensitive query being rejected by the observation serializer;
+B prompt encoding is separate, scientific-result limits and legacy behavior
+remain unchanged. It uses the existing model-decides-next-action loop,
+consumed-reference dispatch protection, action reuse and citation-bound acceptance.
+No static scientific workflow replaces model decisions. B continuation is
+explicitly unavailable until revision8; final-publication barriers and normal Web
+admission are not delivered by this checkpoint. No push, real-model test or deployment.
+Next is Task5 authenticated revision8 restore with charged validation time,
+then Task6 result publication, normal Web/B2/C and final real/UI acceptance.
+Packages7/8 remain incomplete. Older next-step paragraphs below are historical.
+
 Latest B1 source-check update (2026-09-26): both actual RAGSearchTool and
 ReverseTargetTool now expose a bounded load-free current-observation validator.
 It binds unchanged original receipt/data to the currently attached source and
