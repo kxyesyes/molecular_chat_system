@@ -7,9 +7,13 @@ RDKit validation and evidence handling are the production implementations.
 from copy import deepcopy
 from types import SimpleNamespace
 import asyncio
+import _socket
 import socket
+import sys
 
 import pytest
+
+from tests.agent.test_generation_transport_characterization import offline_models
 
 import src.agent.agent_executor as adapter_module
 
@@ -93,8 +97,16 @@ def rig(monkeypatch):
     def no_network(*args, **kwargs):
         raise AssertionError("Adapter science tests must not connect to services")
 
+    def guarded_connect(sock, address):
+        caller = sys._getframe(1)
+        # Only stdlib loop self-pipe creation; keep backend connections blocked.
+        if (caller.f_code.co_name == "_fallback_socketpair"
+                and caller.f_code.co_filename == socket.__file__):
+            return _socket.socket.connect(sock, address)
+        return no_network()
+
     monkeypatch.setattr(socket, "create_connection", no_network)
-    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", no_network)
     monkeypatch.setenv("AGENT_HARNESS_MODE", "legacy")
     core = [
@@ -385,21 +397,11 @@ def test_main_model_does_not_replace_generator_or_rewrite_science(rig):
 
 
 @pytest.mark.parametrize("method", ["execute", "execute_tools", "supervisor"])
-def test_nondefault_temperature_reaches_generator(rig, method):
+def test_nondefault_temperature_reaches_generator(rig, method, offline_models):
     from src.agent.supervisor import SupervisorAgent
     from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 
-    class RecordingModel:
-        model_name = "gmm-llama:latest"
-
-        def __init__(self):
-            self.temperatures = []
-
-        def generate(self, prompt, *, temperature, max_tokens):
-            self.temperatures.append(temperature)
-            return "CCO"
-
-    model = RecordingModel()
+    model = offline_models("CCO", max_calls=2)
     generator = LLMMolecularGenerator(llm_model=model)
     rig.core[:] = [generator if tool.name == generator.name else tool for tool in rig.core]
     agent = (SupervisorAgent(tools={tool.name: tool for tool in rig.core})

@@ -3,6 +3,8 @@ from copy import deepcopy
 
 import pytest
 
+from tests.agent.test_generation_transport_characterization import offline_models
+
 from src.agent.contracts import AgentContext
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
@@ -12,24 +14,15 @@ from src.agent.runtime.delegated_executor import SpecialistDispatch
 from src.agent.specialists import build_default_specialists
 
 
-class RecordingModel:
-    model_name = "gmm-llama:latest"
-
-    def __init__(self):
-        self.calls = []
-
-    def generate(self, prompt, *, temperature, max_tokens):
-        self.calls.append(temperature)
-        return "CCO"
-
-
 @pytest.mark.parametrize("timeout", [None, 5])
 @pytest.mark.parametrize("dispatch", [False, True])
-def test_temperature_survives_direct_threaded_and_registered_dispatch(timeout, dispatch):
-    model = RecordingModel()
+def test_temperature_survives_direct_threaded_and_registered_dispatch(timeout, dispatch, offline_models, request):
+    model = offline_models("CCO", max_calls=2)
     tool = LLMMolecularGenerator(model)
     orchestrator = WorkflowOrchestrator()
     registry = build_tool_registry([tool]) if dispatch else None
+    if registry is not None:
+        request.addfinalizer(registry.close)
     step = WorkflowStep("generate", tool.name, timeout_seconds=timeout)
     original = deepcopy(step)
     digests = []
@@ -48,8 +41,8 @@ def test_temperature_survives_direct_threaded_and_registered_dispatch(timeout, d
     assert step == original
 
 
-def test_legacy_string_temperature_and_default_still_work():
-    model = RecordingModel()
+def test_legacy_string_temperature_and_default_still_work(offline_models):
+    model = offline_models("CCO", max_calls=2)
     tool = LLMMolecularGenerator(model)
     assert tool.execute("生成 1 个分子", temperature=0.23)["success"]
     assert tool.execute("生成 1 个分子")["success"]
@@ -57,8 +50,8 @@ def test_legacy_string_temperature_and_default_still_work():
 
 
 @pytest.mark.parametrize("temperature", [None, True, "hot", float("nan"), float("inf")])
-def test_invalid_structured_temperature_fails_before_model(temperature):
-    model = RecordingModel()
+def test_invalid_structured_temperature_fails_before_model(temperature, offline_models):
+    model = offline_models("CCO", max_calls=0)
     result = LLMMolecularGenerator(model).execute({
         "query": "生成 1 个分子",
         "metadata": {"requested_count": 1, "temperature": temperature},

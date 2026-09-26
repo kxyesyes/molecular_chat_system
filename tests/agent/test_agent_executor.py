@@ -1,19 +1,10 @@
 import src.agent.tools.llm_molecular_generator as generator_module
 import pytest
 
+from tests.agent.test_generation_transport_characterization import offline_models
+
 from src.agent.agent_executor import MolecularAgent
 from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
-
-
-class CapturingLocalModel:
-    model_name = "gmm-llama:latest"
-
-    def __init__(self):
-        self.prompts = []
-
-    def generate(self, prompt, temperature=0.7, max_tokens=1000):
-        self.prompts.append(prompt)
-        return "\n".join("C" * length for length in range(1, 11))
 
 
 class RecordingMixedTool:
@@ -36,8 +27,8 @@ class RecordingMixedTool:
         }
 
 
-def _build_agent(monkeypatch):
-    model = CapturingLocalModel()
+def _build_agent(monkeypatch, offline_models):
+    model = offline_models("\n".join("C" * length for length in range(1, 11)), max_calls=1)
     generator = LLMMolecularGenerator(llm_model=model)
     monkeypatch.setattr(generator, "validate_smiles", lambda _smiles: True)
     monkeypatch.setattr(generator, "_check_rdkit", lambda _result: True)
@@ -49,8 +40,8 @@ def _build_agent(monkeypatch):
     return agent, model
 
 
-def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute("Generate 11 molecules")
 
@@ -66,9 +57,9 @@ def test_agent_executor_omitted_count_rejects_invalid_text_before_model(monkeypa
 
 
 def test_agent_executor_oversized_numeric_token_is_canonical_invalid_input(
-    monkeypatch,
+    monkeypatch, offline_models,
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute(f"Generate {'9' * 5000} molecules")
 
@@ -80,8 +71,8 @@ def test_agent_executor_oversized_numeric_token_is_canonical_invalid_input(
     assert model.prompts == []
 
 
-def test_execute_tools_rejects_malformed_count_before_any_tool_boundary(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_execute_tools_rejects_malformed_count_before_any_tool_boundary(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
     generator = agent.core_tools[0]
     should_use_calls = []
     original_should_use = generator.should_use
@@ -104,9 +95,9 @@ def test_execute_tools_rejects_malformed_count_before_any_tool_boundary(monkeypa
     "query", ["Generate 11 candidates", "Generate 11 for PDE5A"]
 )
 def test_agent_executor_canonical_generation_intent_returns_invalid_input(
-    monkeypatch, query
+    monkeypatch, offline_models, query
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute(query)
 
@@ -116,8 +107,8 @@ def test_agent_executor_canonical_generation_intent_returns_invalid_input(
     assert model.prompts == []
 
 
-def test_agent_executor_omitted_count_preserves_valid_text_count(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_omitted_count_preserves_valid_text_count(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute("Generate 7 molecules")
 
@@ -125,8 +116,8 @@ def test_agent_executor_omitted_count_preserves_valid_text_count(monkeypatch):
     assert "Task: provide 7 valid" in model.prompts[0]
 
 
-def test_agent_executor_explicit_count_remains_authoritative(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_explicit_count_remains_authoritative(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute("Generate 7.5 molecules", mol_count=3)
 
@@ -134,8 +125,8 @@ def test_agent_executor_explicit_count_remains_authoritative(monkeypatch):
     assert "Task: provide 3 valid" in model.prompts[0]
 
 
-def test_agent_executor_supports_synthesize_through_shared_grammar(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_supports_synthesize_through_shared_grammar(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute("Synthesize 3 molecules")
 
@@ -144,9 +135,9 @@ def test_agent_executor_supports_synthesize_through_shared_grammar(monkeypatch):
 
 
 def test_agent_execute_rejects_invalid_mol_count_before_non_generation_tools(
-    monkeypatch,
+    monkeypatch, offline_models,
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -159,8 +150,8 @@ def test_agent_execute_rejects_invalid_mol_count_before_non_generation_tools(
     assert model.prompts == []
 
 
-def test_execute_tools_rejects_invalid_mol_count_before_any_tool(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_execute_tools_rejects_invalid_mol_count_before_any_tool(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -174,9 +165,9 @@ def test_execute_tools_rejects_invalid_mol_count_before_any_tool(monkeypatch):
 
 
 def test_valid_mol_count_does_not_force_generation_for_non_generation_query(
-    monkeypatch,
+    monkeypatch, offline_models,
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -190,9 +181,9 @@ def test_valid_mol_count_does_not_force_generation_for_non_generation_query(
 
 
 def test_agent_executor_prevalidates_invalid_mixed_generation_before_all_tools(
-    monkeypatch,
+    monkeypatch, offline_models,
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -205,8 +196,8 @@ def test_agent_executor_prevalidates_invalid_mixed_generation_before_all_tools(
     assert model.prompts == []
 
 
-def test_agent_executor_valid_mixed_generation_uses_canonical_selection(monkeypatch):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_valid_mixed_generation_uses_canonical_selection(monkeypatch, offline_models):
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -227,9 +218,9 @@ def test_agent_executor_valid_mixed_generation_uses_canonical_selection(monkeypa
     ],
 )
 def test_agent_executor_does_not_generate_within_explanation_scope(
-    monkeypatch, query
+    monkeypatch, offline_models, query
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -249,9 +240,9 @@ def test_agent_executor_does_not_generate_within_explanation_scope(
     ],
 )
 def test_agent_executor_uses_only_actionable_generation_occurrence(
-    monkeypatch, query
+    monkeypatch, offline_models, query
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute(query)
 
@@ -266,8 +257,8 @@ def test_agent_executor_uses_only_actionable_generation_occurrence(
         "Generate 3 molecules and as an example generate 11 molecules",
     ],
 )
-def test_agent_executor_occurrence_scope_is_bounded(monkeypatch, query):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_occurrence_scope_is_bounded(monkeypatch, offline_models, query):
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute(query)
 
@@ -293,9 +284,9 @@ def test_agent_executor_occurrence_scope_is_bounded(monkeypatch, query):
     ],
 )
 def test_agent_executor_validates_all_generation_occurrences_before_tools(
-    monkeypatch, query
+    monkeypatch, offline_models, query
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -313,9 +304,9 @@ def test_agent_executor_validates_all_generation_occurrences_before_tools(
     [" then ", ". ", "; ", ", ", " but ", " instead "],
 )
 def test_agent_executor_aggregates_nounless_counts_before_model(
-    monkeypatch, separator
+    monkeypatch, offline_models, separator
 ):
-    agent, model = _build_agent(monkeypatch)
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -341,8 +332,8 @@ def test_agent_executor_aggregates_nounless_counts_before_model(
         "生成1一个分子",
     ],
 )
-def test_agent_executor_rejects_grouped_counts_before_all_tools(monkeypatch, query):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_rejects_grouped_counts_before_all_tools(monkeypatch, offline_models, query):
+    agent, model = _build_agent(monkeypatch, offline_models)
     other_tool = RecordingMixedTool()
     agent.core_tools.insert(0, other_tool)
 
@@ -372,8 +363,8 @@ def test_agent_executor_rejects_grouped_counts_before_all_tools(monkeypatch, que
         "不生成三个分子；解释语法",
     ],
 )
-def test_agent_executor_masks_non_actionable_generation_examples(monkeypatch, query):
-    agent, model = _build_agent(monkeypatch)
+def test_agent_executor_masks_non_actionable_generation_examples(monkeypatch, offline_models, query):
+    agent, model = _build_agent(monkeypatch, offline_models)
 
     result = agent.execute(query)
 

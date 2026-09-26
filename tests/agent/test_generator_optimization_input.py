@@ -1,8 +1,9 @@
 """Real input chemistry at generator execution; model outputs are test doubles."""
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+
+from tests.agent.test_generation_transport_characterization import offline_models
 
 from src.agent.tools import base_tool
 from src.agent.tools import llm_molecular_generator as generator_module
@@ -11,11 +12,11 @@ from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
 
 
 @pytest.fixture
-def boundary(monkeypatch):
+def boundary(monkeypatch, offline_models):
     from rdkit import Chem
 
     assert Chem.MolFromSmiles('CCO') is not None
-    llm = SimpleNamespace(model_name='test-only', generate=Mock(return_value=''))
+    llm = offline_models('', max_calls=0, model_name='test-only')
     tool = LLMMolecularGenerator(llm_model=llm)
     dispatch = Mock(return_value=[])
     monkeypatch.setattr(tool, '_generate_with_retry', dispatch)
@@ -53,7 +54,7 @@ def test_invalid_input_never_dispatches(boundary, query, structured):
                if structured else query)
     result = tool.execute(request)
     dispatch.assert_not_called()
-    llm.generate.assert_not_called()
+    assert llm.transport_calls == []
     assert result['success'] is False
     assert result['data'] is None and result['formatted'] == ''
     assert result['error']['code'] == 'invalid_input'
@@ -97,18 +98,18 @@ def test_supported_legacy_prose(boundary):
     assert dispatch.call_args.args[0]['count'] == 1
 
 
-def test_seed_spelling_reaches_real_prompt():
-    llm = SimpleNamespace(model_name='test-only', generate=Mock(return_value='CCN'))
+def test_seed_spelling_reaches_real_prompt(offline_models):
+    llm = offline_models('CCN', max_calls=1, model_name='test-only')
     tool = LLMMolecularGenerator(llm_model=llm)
     result = tool.execute('optimize SMILES: [13CH3][C@@H](O)C(=O)[O-]', mol_count=1)
     assert result['success'] is True  # Pipeline contract, not scientific evidence.
-    llm.generate.assert_called_once()
-    assert 'Original SMILES: [13CH3][C@@H](O)C(=O)[O-]\n' in llm.generate.call_args.args[0]
+    assert len(llm.transport_calls) == 1
+    assert 'Original SMILES: [13CH3][C@@H](O)C(=O)[O-]\n' in llm.prompts[0]
 
 
 @pytest.mark.parametrize('structured', [False, True])
-def test_seedless_optimization_word_keeps_description_dispatch(monkeypatch, structured):
-    tool = LLMMolecularGenerator(llm_model=object())
+def test_seedless_optimization_word_keeps_description_dispatch(monkeypatch, structured, offline_models):
+    tool = LLMMolecularGenerator(llm_model=offline_models('', max_calls=0))
     description = Mock(return_value=['CCO'])
     optimization = Mock(side_effect=AssertionError('No optimization seed'))
     monkeypatch.setattr(tool, '_generate_with_llm', description)
@@ -155,7 +156,7 @@ def test_parser_unavailable_is_not_invalid_structure(boundary, monkeypatch):
     monkeypatch.setattr(generator_module, 'parse_molecular_smiles', parser, raising=False)
     result = tool.execute('optimize SMILES: CCO')
     dispatch.assert_not_called()
-    llm.generate.assert_not_called()
+    assert llm.transport_calls == []
     assert result['success'] is False
     assert result['data'] is None and result['formatted'] == ''
     assert result['error']['code'] == 'tool_unavailable'
@@ -171,15 +172,24 @@ def test_missing_rdkit_preserves_existing_preflight(boundary, monkeypatch):
     assert 'RDKit' in result['message']
     assert result.get('error', {}).get('code') != 'invalid_input'
     dispatch.assert_not_called()
-    llm.generate.assert_not_called()
+    assert llm.transport_calls == []
 
 
 def test_missing_llm_preserves_existing_preflight(boundary):
-    tool, dispatch, _ = boundary
+    tool, dispatch, llm = boundary
     tool.llm = None
     result = tool.execute('optimize SMILES: CCO')
-    assert result['success'] is False and 'LLM' in result['message']
+    assert result['success'] is False
+    assert result['message'] == 'Strict molecular generation unavailable'
+    assert result['error'] == {
+        'code': 'tool_unavailable',
+        'message': 'Strict molecular generation unavailable',
+        'details': {'reason': 'generation_strict_unavailable'},
+    }
+    assert result['data'] is None and result['formatted'] == ''
+    assert 'quality' not in result
     dispatch.assert_not_called()
+    assert llm.transport_calls == []
 
 
 def test_should_use_does_not_call_new_parser_or_generator(boundary, monkeypatch):
@@ -190,7 +200,7 @@ def test_should_use_does_not_call_new_parser_or_generator(boundary, monkeypatch)
     assert not tool.should_use('Please analyze SMILES: CCO')
     parser.assert_not_called()
     dispatch.assert_not_called()
-    llm.generate.assert_not_called()
+    assert llm.transport_calls == []
 
 
 def test_parser_missing_is_distinct_from_explicit_empty(boundary):
@@ -230,4 +240,4 @@ def test_parser_import_failure_is_unavailable(boundary, monkeypatch):
     assert result['error']['code'] == 'tool_unavailable'
     assert 'private dependency diagnostic' not in str(result)
     dispatch.assert_not_called()
-    llm.generate.assert_not_called()
+    assert llm.transport_calls == []

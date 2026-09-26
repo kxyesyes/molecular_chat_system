@@ -23,6 +23,34 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class OllamaGenerationError(Exception):
+    """Strict generation failure without provider diagnostics or request objects."""
+
+    def __init__(self, reason: str):
+        self.reason = reason if type(reason) is str and reason in {
+            "http_error", "transport_error", "invalid_response", "client_error"
+        } else "client_error"
+        super().__init__("Ollama generation failed")
+
+
+def _strict_generation_text(response: httpx.Response) -> str:
+    reason = "http_error"
+    if response.status_code == 200:
+        reason = "invalid_response"
+        try:
+            result = response.json()
+        except (ValueError, UnicodeError):
+            pass
+        else:
+            if (type(result) is dict and "error" not in result
+                    and result.get("done") is True
+                    and type(result.get("response")) is str):
+                return result["response"]
+    # Outside the decoding except: neither cause nor context retains raw data.
+    logger.error("Ollama strict generation failed")
+    raise OllamaGenerationError(reason)
+
+
 class OllamaModel:
     """
     Ollama模型接口
@@ -57,7 +85,7 @@ class OllamaModel:
             raise
 
     def generate(self, prompt: str, temperature: float = 0.7, 
-                 max_tokens: int = 1500) -> str:
+                 max_tokens: int = 1500, *, strict_errors: bool = False) -> str:
         """
         同步生成响应（用于工具调用）
         
@@ -69,6 +97,8 @@ class OllamaModel:
         Returns:
             str: 生成的文本响应
         """
+        if type(strict_errors) is not bool:
+            raise ValueError("invalid_strict_errors")
         try:
             response = self.sync_client.post(
                 f"{self.base_url}/api/generate",
@@ -83,6 +113,8 @@ class OllamaModel:
                 }
             )
 
+            if strict_errors:
+                return _strict_generation_text(response)
             if response.status_code == 200:
                 result = response.json()
                 return result.get("response", "")
@@ -90,12 +122,22 @@ class OllamaModel:
                 logger.error(f"Ollama API error: {response.status_code}")
                 return "I apologize, but I'm having trouble generating a response right now."
 
-        except Exception as e:
-            logger.error(f"Error calling Ollama: {e}")
+        except OllamaGenerationError:
+            if strict_errors:
+                raise
+            logger.error("Error calling Ollama: Ollama generation failed")
             return "I apologize, but I'm experiencing technical difficulties."
+        except Exception as e:
+            if strict_errors:
+                reason = "transport_error" if isinstance(e, httpx.TransportError) else "client_error"
+            else:
+                logger.error(f"Error calling Ollama: {e}")
+                return "I apologize, but I'm experiencing technical difficulties."
+        logger.error("Ollama strict generation failed")
+        raise OllamaGenerationError(reason)
 
     async def generate_async(self, prompt: str, temperature: float = 0.7, 
-                            max_tokens: int = 1500) -> str:
+                            max_tokens: int = 1500, *, strict_errors: bool = False) -> str:
         """
         异步生成响应（用于主聊天）
         
@@ -107,6 +149,8 @@ class OllamaModel:
         Returns:
             str: 生成的文本响应
         """
+        if type(strict_errors) is not bool:
+            raise ValueError("invalid_strict_errors")
         try:
             response = await self.client.post(
                 f"{self.base_url}/api/generate",
@@ -121,6 +165,8 @@ class OllamaModel:
                 }
             )
 
+            if strict_errors:
+                return _strict_generation_text(response)
             if response.status_code == 200:
                 result = response.json()
                 return result.get("response", "")
@@ -128,9 +174,19 @@ class OllamaModel:
                 logger.error(f"Ollama API error: {response.status_code}")
                 return "I apologize, but I'm having trouble generating a response right now."
 
-        except Exception as e:
-            logger.error(f"Error calling Ollama: {e}")
+        except OllamaGenerationError:
+            if strict_errors:
+                raise
+            logger.error("Error calling Ollama: Ollama generation failed")
             return "I apologize, but I'm experiencing technical difficulties."
+        except Exception as e:
+            if strict_errors:
+                reason = "transport_error" if isinstance(e, httpx.TransportError) else "client_error"
+            else:
+                logger.error(f"Error calling Ollama: {e}")
+                return "I apologize, but I'm experiencing technical difficulties."
+        logger.error("Ollama strict generation failed")
+        raise OllamaGenerationError(reason)
 
     async def stream_generate(self, prompt: str, temperature: float = 0.7, 
                              max_tokens: int = 1500):
