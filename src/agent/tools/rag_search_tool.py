@@ -1,12 +1,10 @@
 """Agent adapter for the injected, manifest-validated RAG service."""
-import logging
 from typing import Any, Dict
 
 from src.rag.receipt import validate_retrieval_envelope
+from src.rag.index import RAGIndexCompatibilityError
 from src.web.rag_presentation import format_rag_context
 from .base_tool import BaseMolecularTool
-
-logger = logging.getLogger(__name__)
 
 
 class RAGSearchTool(BaseMolecularTool):
@@ -28,7 +26,9 @@ class RAGSearchTool(BaseMolecularTool):
         ready = bool(self.rag_system is not None
                      and getattr(self.rag_system, "is_initialized", False)
                      and getattr(self.rag_system, "vector_index", None) is not None
-                     and callable(getattr(self.rag_system, "search_similar_molecules_sync_with_receipt", None)))
+                     and all(callable(getattr(self.rag_system, name, None)) for name in (
+                         "capture_retrieval_eligibility", "search_similar_molecules_sync_with_receipt",
+                         "validate_retrieval_source")))
         return {"available": ready, "message": "ready" if ready else "RAG index is not initialized"}
 
     def should_use(self, query: str) -> bool:
@@ -38,21 +38,26 @@ class RAGSearchTool(BaseMolecularTool):
 
     def execute(self, query: str, **kwargs) -> Dict[str, Any]:
         unavailable = "RAG retrieval unavailable: initialization, source/index compatibility or embedding failure"
-        strict_search = getattr(self.rag_system, "search_similar_molecules_sync_with_receipt", None)
-        if not callable(strict_search) or not getattr(self.rag_system, "is_initialized", False):
-            return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
         k = kwargs.get("k", 3)
         try:
+            capture = getattr(self.rag_system, "capture_retrieval_eligibility", None)
+            strict_search = getattr(self.rag_system, "search_similar_molecules_sync_with_receipt", None)
+            validate_source = getattr(self.rag_system, "validate_retrieval_source", None)
+            if (not all(callable(method) for method in (capture, strict_search, validate_source))
+                    or not getattr(self.rag_system, "is_initialized", False)):
+                return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
+            expected = capture()
             envelope = strict_search(query, k=k)
         except Exception:
-            logger.warning("RAG tool retrieval failed; no unverified records returned")
             return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
         try:
             # None means "not supplied" only in the pure validation API, not
             # for an explicit legacy execute(k=None) request.
-            if type(k) is not int or k < 1:
+            if type(query) is not str or not query.strip() or type(k) is not int or k < 1:
                 raise ValueError("Invalid RAG result count")
             envelope = validate_retrieval_envelope(envelope, query=query, k=k)
+        except RAGIndexCompatibilityError:
+            return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
         except ValueError:
             return self._failure("invalid_output", "RAG output validation failed", "invalid_receipt")
         results, receipt = envelope['records'], envelope['receipt']
@@ -77,9 +82,22 @@ class RAGSearchTool(BaseMolecularTool):
                           error={"code": "invalid_output", "message": message,
                                  "details": {"reason": "invalid_discard"}})
         else:
-            result.update(summary=format_rag_context(results),
+            try:
+                summary = format_rag_context(results)
+            except Exception:
+                return self._failure("tool_unavailable", unavailable, "formatting_unavailable")
+            result.update(summary=summary,
                           message=(f"Found {len(results)} similar molecules." if results else
                                    "The verified vector index has no searchable vectors."))
+        try:
+            # Formatting grants no authority: check once more at publication.
+            validate_source(envelope, query=query, k=k, expected=expected)
+        except RAGIndexCompatibilityError:
+            return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
+        except ValueError:
+            return self._failure("invalid_output", "RAG output validation failed", "invalid_receipt")
+        except Exception:
+            return self._failure("tool_unavailable", unavailable, "strict_source_unavailable")
         return result
 
     @staticmethod
