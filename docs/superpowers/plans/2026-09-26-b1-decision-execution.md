@@ -676,6 +676,16 @@ requested those last two clarifications; they are now explicit, not implemented.
 Beauvoir independently re-reviewed and approved the corrected written choice;
 this is source-only evidence. Task4B implementation proceeds first.
 
+Task4B is now locally committed as0064c30 after corrected SPEC and fresh QUALITY.
+Task5 implementation has started from that clean checkpoint. To keep the6/7
+reader unchanged and avoid further enlarging its history parser, a bounded
+version-specific decision_binding_continuation.py module may hold revision8
+codec/replay helpers; existing continuation/loop entrypoints remain the callers.
+This decomposition adds no engine or storage protocol beyond approved revision8.
+Parent owns documentation and the next Task6 source audit; one worker owns the
+Task5 source/tests and the sole isolated-test slot. No implementation/test result
+for revision8 is claimed by this start record.
+
 - [ ] Add actual SQLite tests: clarify→new loop instance→restore/reuse; count zero
   repeated scientific calls. Assert old revision6/7 snapshots retain old readers.
   Mutate every proof, role/input, producer version and obligation independently.
@@ -698,6 +708,19 @@ this is source-only evidence. Task4B implementation proceeds first.
   with20s tail resumes with at most75; a30s tail exposes no continuation.
 
 ## Task 6: Final publication and worker lifetime
+
+Parent source audit at0064c30 confirms why this remains a separate incomplete
+gate: outer run returns _run's candidate before its finally settles the owner;
+finish_dynamic caches an immutable finish request, and finish emits a full
+terminal payload before updating status. The B correction must therefore use
+the approved separate failure journal, not rewrite/retry a different ordinary
+finish request or reopen a finished Session. DecisionEvents lives in
+decision_execution.py, not a separate events module. Existing SQLite
+update_run_metadata refuses direct decision_continuation writes; use the existing
+CAS publisher and retain any committed snapshot on invalidation. A separate
+ordinary metadata invalidation marker is compatible with the current merge API.
+These are read-only source findings, not tested Task6 implementation. No marker,
+status, event or production entrypoint was changed by this audit.
 
 - [ ] Keep B WorkerOwner open through all needed terminal checks; settle each
   action root as before, but close owner only in outer finally after callbacks.
