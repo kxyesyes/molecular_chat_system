@@ -30,6 +30,29 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+PR93 downstreamintegration test authored/source-reviewed with four explicit
+wholebatch obligations. Beforemainalignment532d93:3failed4passed4.90s, genuine
+emptyjournal invalid_dynamic_binding; after inspectedmainmergea06e5ff samehash
+4c1bc0:7passed4.19s. Both3SWIGwarnings. Anscombe SOURCE approves; parentexact40
+regression currentlylive19064/a57451, freshQUALITYZeno source-only pending slot.
+Do not claim completion from the seven binding-phase tests (no tools executed).
+
+Parent integrated only exactlandedparser+test blobs intoTask6tree, commit9fc2813;
+no otherdirtyfiles staged. Actual unchanged scientificdataflow two-wire test
+95068/9c7c73 now fails on3sreceiveTimeout (2failed7warnings48.59s), not the earlier
+parserexception. No Webpass claimed; more diagnostics required. Earlier6case
+44545/daf19c:5passed1failed58.71s showed JSON historicalreference timeout at
+terminalmetadata postwrite bindingclosure awaiting shield(worker); worker queue
+versus execution/delivery cause remainsUNKNOWN. Its newdiagnosticcontrols13pass
+and source/test hashes are preserved inTask6plan; no timeoutfix inferred.
+
+B2 readonlyinventory confirms producer/ranker/typedadapter primitives exist,
+but no executableB2 modelselectedloop/wholecandidateproof/reportbinding yet.
+Next source-grounded slice afterB1 is generation invocationcontrol/receipts using
+existing ownership; exact backend/tokenizer/template token-bound proof remains
+required, not replaced with inventedceilings or one-call fallback. NoB2code or
+assets loaded. C and repeatedrealP8 acceptance remain mandatory.
+
 PR95 reviewedhead3610b4d CI36270253852 completedall9success. Actualcollection
 10561=10337+224; core10336passed1skipped17238warnings443.32s, Web224passed
 6628warnings165.10s; activity1855passed6skipped5569warnings392.94s; root2892
