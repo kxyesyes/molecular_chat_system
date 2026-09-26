@@ -254,6 +254,40 @@ Files: `src/agent/contracts/ordinary_admission.py`,
 - [ ] Run `python -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_b1_normal_web_continuation.py tests/agent/test_ordinary_admission_budget.py tests/agent/test_ordinary_continuation.py tests/agent/test_decision_binding_continuation.py tests/agent/test_decision_binding_publication.py`.
   Do not open normal B entry until this composition passes source review.
 
+### Task3 first union and late-source TTL review correction
+
+Tesla's first frozen five-module union reached terminal13606:376 passed,
+3 SWIG warnings340.25s, exit0, with all five hashes and approved launcher unchanged.
+This is PRE-CORRECTION evidence, not final Task3 approval. Earlier parameter-ID,
+checksum-fixture and callback-keyword mistakes are not behavioral RED evidence.
+
+Independent Hooke SOURCE/SPEC found a P2 after that freeze: a resume can pass
+post-CAS validation while later live source restoration consumes its TTL, with
+remaining active credit still allowing a model dispatch. Full-B section11.3
+requires TTL again before first dispatch. Actual RAG/SQLite native/JSON controls
+reproduced two failures in8.06s: CAS at400, TTL401, live source completion402,
+active deadline475, and four model HTTP calls instead of the expected two.
+
+Bounded correction: the existing owned-call guard invokes existing check_deadline
+before/after callbacks while keeping the separate terminal-tail cap. No new
+engine, snapshot write, Session change or production activation. The late-source
+regression asserts no extra model/tool/embedding dispatch, settled owner, no
+checkpoint/nonce, and truthful failed state with the claim still consumed.
+Corrected focus plus adjacent controls passed20/3 warnings24.99s, terminal30495.
+Updated hashes:
+
+- ordinary_admission.py0068B42F9377465EAD4AB2261F9D335431E27DA181EF64659B38479EE358A88B
+- decision_loop.pyCEB3E0011E3C36A2A78FB032285829B8DFC0C468F636D0EE6E0B29E05F6EEBC1
+- decision_continuation.py4E945678CE35F5409A67FE3DC9956C0FC25FE9CA642EEE7F3BF6E8F162DDC520
+- decision_binding_continuation.py5ADF48EA1514D029EB8539D35BF33685AB3F5D8B11C78C97B5CFE79FD54EBE56
+- test_b1_normal_web_continuation.py027C589A3F2A67391A83D9DC556E153C3CC553126270FC4B04FF5DFB0DAD3A86
+
+Corrected SOURCE re-review and the updated full union are pending. Tesla explicitly
+released the sole test slot after terminal runs; parent uses it for R4 regression.
+Fresh independent QUALITY follows corrected SOURCE and worker final union.
+Task4, mounted refresh/queued-reader integration and end-to-end display remain
+unreleased/unproven. Task1's two original normal-route REDs remain unchanged.
+
 ## Task 4 — atomic server assembly and actual normal entry
 
 Files: `src/web/app.py`, `ordinary_capabilities.py`, `decision_runtime.py`;
