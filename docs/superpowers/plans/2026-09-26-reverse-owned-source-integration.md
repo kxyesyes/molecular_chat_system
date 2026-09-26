@@ -203,3 +203,37 @@ all source/test/runner hashes match before/after. No skips/warnings reported.
 The review made no edits or publication changes. Local test slot released to
 the separate normal-Web Task2 worker. Parent will publish only these six files,
 not accumulated B code; new exact-head Linux CI remains a required merge gate.
+
+## First Linux CI and reproduced import-isolation fault
+
+PR86 head1d4dd928 workflow36244742726 failed root job108411744213:
+4 failed/2862 passed/75 skipped/5 warnings233.82s. The failures were the three
+loading variants of final_callback_mutations_cannot_publish (close/path/cancel)
+and failed_acquisition_exception_releases_owned_arrays[late-candidate]. No merge.
+
+Source tracing found FingerprintConversionCompatibilityTest restores sys.modules
+after a fake-RDKit predictor reimport, but not the parent package's predictor
+attribute. Collected receipt tests keep the original predictor class, whereas
+their later package imports patch the replacement module. The earlier local
+union placed receipts before health and therefore did not expose that ordering.
+
+Raman reproduced the exact existing four failures by running health compatibility
+first:4 failed/6 passed1.22s, terminal28b4d7. Four new actual-TestCase lifecycle
+regressions then failed0.66s, terminal48437a, specifically on stale package
+identity. The minimal test-fixture cleanup restores the exact prior parent
+attribute or removes it when absent. No producer code or fault/scientific
+assertion changed. Present/absent and success/failure controls passed14/1.01s,
+terminal50399c. Health-first six-module union passed632/2 subtests20.24s,
+session10412 terminal448db0 exit0. New health test hash:
+704BF1733E42DF0724B414A075C97AB870386D1DDD7D5C1E1206AA82490001EF.
+The approved runner and producer hashes remain unchanged. Independent SPEC/
+QUALITY and new Linux CI are still required; this bounded attribution does not
+claim a full-root pass or resolve PR84's separate FAISS probe mismatch.
+
+Independent SOURCE/SPEC Lorentz approves the fixture-only correction; fresh
+QUALITY Sagan inspected it and repeated the exact health-first six-module union:
+632 passed/2 subtests19.04s, session37257 terminalf87c4d, process and wrapper exit0.
+No warnings/skips were reported. Health/source/predictor/runner hashes matched
+before/after; no actionable findings. Parent diff checks and in-memory compilation
+passed. This follow-up is eligible for publication and fresh exact-head Linux CI,
+not merge before the eight gates pass. First CI failure remains recorded above.
