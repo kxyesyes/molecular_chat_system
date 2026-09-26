@@ -161,3 +161,53 @@ The prior source-only statements above are historical, not outstanding gates.
 Parent's scoped filename-only credential pattern scan found no matches; this
 is not a whole-history security audit. Clean commit/transplant and new exact-head
 CI remain required before publication can be merged.
+
+## First published CI: failed, not eligible to merge
+
+Workflow36240117332 at f050c5a is terminal. Agent job108398908120 reported
+10 failed/9520 passed/1 skipped/23858 warnings in571.57s, exit1. Six other
+independent gates passed; dependent offline-quality failed. Do not rerun the
+same known-failing head or claim that the local1138 union covered the full suite.
+
+Four failures are the two non-legacy entries and two prompt budgets in
+test_chat_input_budget::test_shared_retrieval_and_ui_provenance_survive_prompt_budget:
+they count the legacy get_embedding_sync hook which the approved strict receipt
+producer deliberately does not call. Inspect and reproduce at the actual HTTP
+boundary; preserve the original UI/provenance/prompt-budget assertions.
+Six failures are native nonempty variants of the actual Session receipt/seal test:
+HTTP count is1 but the search interceptor saw0. Concrete class interception passed
+local and base-IP controls; the Linux native difference is not yet attributed.
+Investigate before changing tests or scientific implementation. The source runtime
+is pinned FAISS1.7.4 in CI; current local version differs. No waived counts,
+timeout changes or weakened source proof are authorized by this diagnostic entry.
+
+Local focused reproduction (same two families,24 nodes) first reproduced4 failed,
+20 passed5.07s, chunk1b0b5e. HTTP-boundary instrumentation confirmed one actual
+request with correct query/model/endpoint; this revealed the next four stale
+assertions: receipt-bearing status metadata exceeds the existing2048-char reserve,
+so ChatHandler correctly emits interpretation_budget_exceeded instead of sending
+an incomplete proof to a summary model (4 failed20 passed4.97s,43f975).
+Tests now preserve the full receipt/UI data/original summary and explicitly
+assert no model call plus the budget error; both legacy prompt-budget tests keep
+their original assertions. Current focus24 passed4.83s, chunk0e519c.
+
+The six native Session failures do not reproduce locally. A bounded pass-through
+diagnostic records class/bound-hook identity and exception type/source basename/
+function/line, never exception text, records or full paths; all original search,
+HTTP, status, receipt, ledger, seal and persistence assertions remain. Production
+is unchanged. Pascal SOURCE/SPEC approves these two test hashes for diagnostic
+publication, not merge: chat-budgetD52A657F9F19E9196813EB0F70F73EC5DCD0C64A2569FD210417DFF736C5CADF;
+receipt-consumptionD433BF188B5DBCC3F64229AF19662B807F43FE0F14CF8880EFA4FD6FF4722951.
+
+Expanded11-module union adds tests/agent/test_chat_input_budget.py before the
+ten-module command above:1191 passed/4 FastAPI deprecation warnings/63.59s,
+handle98579 terminal exit0 (summary8833d6, wrapper exitdf0843). Fresh independent
+QUALITY repeats the same ordered command. Full Linux CI remains failed; the new
+diagnostic follow-up must gather actual cause before the PR is eligible to merge.
+
+Gibbs independent QUALITY approves diagnostic publication only: exact11-module
+repeat1191 passed/4 FastAPI warnings/64.56s, handle40833 terminal, wrapper/process
+exit0. Both test hashes and runner match before/after; no production edits.
+The unresolved six Linux native failures remain a merge blocker. Parent will
+publish only these two reviewed test changes and this evidence record to PR84,
+then inspect the new exact-head CI diagnostics rather than waive the failures.

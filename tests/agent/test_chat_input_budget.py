@@ -341,6 +341,7 @@ def test_budgeted_rag_preflights_records_before_shared_formatter(monkeypatch):
 def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
     retrieval_service, monkeypatch, entry, rag_cap,
 ):
+    import httpx
     from src.agent.tools.rag_search_tool import RAGSearchTool
 
     rag = retrieval_service
@@ -357,7 +358,24 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
 
     monkeypatch.setattr(rag, "get_embedding", embed_async)
     monkeypatch.setattr(rag, "get_embedding_sync", embed_sync)
+    # Observe the real transport boundary: strict receipts intentionally bypass
+    # the legacy overridable embedding helper. Both paths still embed once.
+    requests = []
+    sync_transport = httpx.HTTPTransport.handle_request
+    async_transport = httpx.AsyncHTTPTransport.handle_async_request
+
+    def send_sync(transport, request):
+        requests.append(("sync", str(request.url), json.loads(request.content)))
+        return sync_transport(transport, request)
+
+    async def send_async(transport, request):
+        requests.append(("async", str(request.url), json.loads(request.content)))
+        return await async_transport(transport, request)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", send_sync)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", send_async)
     tool = RAGSearchTool(rag)
+    observations = []
 
     class Agent:
         def should_use_tools(self, message):
@@ -365,6 +383,7 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
 
         def execute(self, message, **kwargs):
             result = tool.execute(message, k=1)
+            observations.append(result)
             return {"success": result["success"], "final_answer": result["summary"],
                     "tools_used": [entry], "tool_results": {entry: result},
                     "workflow_plan": {"name": "rag_search"}}
@@ -377,7 +396,11 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
     asyncio.run(handler._process_message(
         socket, "检索知识库中类似分子", True, entry != "legacy", rag_count=1,
     ))
-    assert calls == (["async"] if entry == "legacy" else ["sync"])
+    assert calls == (["async"] if entry == "legacy" else [])
+    assert requests == [(
+        "async" if entry == "legacy" else "sync", rag.embedding_endpoint,
+        {"model": rag.embedding_model_name, "prompt": "检索知识库中类似分子"},
+    )]
     cards = [item for item in socket.messages if item["type"] == "rag_info"]
     assert len(cards) == 1
     record = cards[0]["molecules"][0]
@@ -387,6 +410,22 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
     assert record["provenance"]["index_sha256"] == rag.manifest.index_sha256
     assert "provenance" not in record["properties"]
     assert "source_index" not in record["properties"]
+    if entry != "legacy":
+        # A complete strict receipt no longer fits the fixed status reserve.
+        # Preserve it, the original answer and UI evidence; do not trim proof
+        # just to make a model-summary prompt fit (or call the model anyway).
+        from src.web.prompt_budget import STATUS_RESERVE, bounded_record
+        observation = observations[0]
+        assert observation["success"]
+        assert observation["evidence"][0]["retrieval_receipt"]["diagnostics"]["status"] == "valid_hits"
+        assert bounded_record({"tool_results": {entry: observation}}, STATUS_RESERVE - 80) is None
+        complete = [item for item in socket.messages if item["type"] == "complete"]
+        assert len(complete) == 1
+        assert complete[0]["error"]["code"] == "interpretation_budget_exceeded"
+        assert complete[0]["content"].startswith(observation["summary"] + "\n\n")
+        assert "未进行模型总结" in complete[0]["content"]
+        assert model.prompts == []
+        return
     assert len(model.prompts) == 1
     assert "检索知识库中类似分子" in model.prompts[0]
     if rag_cap:
