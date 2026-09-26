@@ -18,7 +18,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata RED reproduced and focused controls passed, but mixed ADMET/PDE5A input still rejected | Task6 parser correction and two timeout investigations remain; scientific slot released to admission integration; Tasks6–8 not complete |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 admitted-input/acceptance local SOURCE and fresh QUALITY4176 passed | PR93 CI36268575293 core exited124 at600s, not mergeable; seven other checks passed, aggregate correctly failed |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal | Subsequent empty-journal and normal-Web integration still required |
-| Core CI suite budget amendment | PR95 aligned3610b4d to actualPR94landing; SOURCE and fresh QUALITY35passed2platformskips approved | New exact-head9-check CI pending. Core1200/Web600 changes suite capacity, not science/performance |
+| Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | PR93 must align and rerun; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -29,6 +29,17 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR95 reviewedhead3610b4d CI36270253852 completedall9success. Actualcollection
+10561=10337+224; core10336passed1skipped17238warnings443.32s, Web224passed
+6628warnings165.10s; activity1855passed6skipped5569warnings392.94s; root2892
+passed75skipped5warnings247.49s. Fresh exacthead/base/main and fullypaginated
+reviews/threads(all0) checked before ready and again before SHA-squash.
+Merge40473/bffb68terminal4d896b69515cddc7fbaeffe7b7f2fb0fedf83b9a; fetchedfull
+reviewed/landed trees equal0127ba7b9c1783f705a9c7188423cc3d6b15f065.
+PR93 old600sfailedrun remains failed; no inference it nowpasses. Parentholds
+alignment until new empty-journal wholebatch integration test can establish
+behavioralRED on its still-old parser, then same test after actualmainalignment.
 
 Ampere SOURCE approves only the Task6 metadata-validation boundary amendment;
 worker41pass evidence is not an independent repeat or fullTask6approval. Parent
