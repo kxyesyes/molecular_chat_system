@@ -110,6 +110,55 @@ with pytest.raises(ValueError, match='^invalid_binding_requirements$'):
   `test_decision_inputs.py`, `test_decision_adapter_retry.py` and existing receipt
   consumer Session cases. Record each result, not only the final green run.
 
+### Task2 source-inspection clarification: explicit ledger authority
+
+The existing ledger copies three quality fields when request_input_digest is
+present; arbitrary legacy quality extensions are not authority. Do not infer B
+enrollment just because a raw tool includes a key named binding_proof. Add an
+optional keyword-only `binding_proof=None` to `register_tool_result`, defaulting
+to the unchanged three-field legacy behavior. A non-None proof must be the
+revalidated, closed native projection returned by the server's B preparation,
+match result.quality and be bounded before copy/hash; reject missing base input
+binding when proof is supplied. The dynamic Session passes this argument only
+after its explicit observation_prepare callback completed and the copied step
+metadata/proof agree. A raw binding_proof quality extension with no callback
+does not change legacy ledger identity or enroll a result in B.
+
+The integrity verifier reconstructs the fourth binding field only when the
+authoritative ledger record contains it, then requires exact equality with the
+sealed result quality; it must not add a fourth field to old records based on
+untrusted extras. Validate both proof projections before comparison (Python
+equality alone accepts True == 1). Revision8 decode and the separate
+Session.restore_observations ledger rebuild pass validated proof through an
+explicit B authority parameter; neither discovers authority from quality keys.
+Revision6/7 remain unchanged. Add three boundary tests:
+legacy raw proof-shaped extension does not alter ledger binding, explicit proof
+appears in both ledger and sealed quality, and dropping/replacing a recorded
+proof causes integrity failure.
+
+Preparation has its own journal boundary before registration. Cache the accepted
+prepared result, detached validated proof and completion flag before calling
+register_tool_result. A failure after preparation must retry registration without
+repeating domain validation or the preparation callback against mutated state.
+On callback failure or proof mismatch, cache a fresh sanitized INVALID_OUTPUT,
+discard provisional proof/source metadata and never resurrect the provisional
+result; diagnostics contain neither callback exception text nor mutated payload.
+Existing normalized/captured flags continue to govern subsequent persistence,
+but are not sufficient for this earlier boundary. Add injected registration
+failure/retry and callback-mutation/failure tests with exact tool, validator and
+prepare-call counts. Generic owned-call settlement never retries arbitrary
+callbacks; the execute_step retry stays inside settle_action.
+
+Godel's source review at756c26a approves the explicit-proof authority interface
+and identified the separate preparation-journal requirement recorded above.
+The independent follow-up review approves the amended clarification with no
+remaining bounded design defect. This is an implementation requirement, not
+evidence of completed code or tests. Task2 source review also confirms existing
+dispatch-failure tests inspect settle_action.<locals>.advance: keep that closure
+inside settle_action when extracting settlement, rather than weakening those
+tests. Session restoration and continuation decoding must both retain their
+legacy calling convention when no explicit proof authority is supplied.
+
 ## Task 3: Inputs, action identity and live closure
 
 - [ ] Add negative role/identity tests before resolver code: unknown/foreign IDs,
