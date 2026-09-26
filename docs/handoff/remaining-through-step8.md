@@ -12,12 +12,12 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
 | Reverse receipt consumer | PR88 MERGED fb62f53 after CI36253262488 success8/8; reviewed/landed tree dd2de4c4 equal; aligned1926 passed | Later load-free current-source hooks remain separate |
-| Attached-source hooks | Independent SOURCE/QUALITY approve; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 head3d6a872 | CI36255095764 failed: Agent exit124 at600s/~97%, six other partitions passed. No merge; independent CI capacity partition under review |
+| Attached-source hooks | Independent SOURCE/QUALITY approve; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 remote3d6a872, local alignment cee8701 | Original CI36255095764 failed600s; alignment review and fresh9-check CI still pending |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 corrected SOURCE approves stronger exact-credit/details-only controls; focused6 passed54.29s | Harvey fresh QUALITY owns exact4-module union test slot; final union and Tasks6–8 pending |
-| CI complete Agent capacity partition | Corrected SOURCE/QUALITY approve; parent34 passed2 skips23.77s and independent34 passed2 skips22.63s; draft PR90 headfdd7680, CI36260272170 running | Actual Linux collection equality and nine CI checks; not a performance fix |
-| Target execution guard integration | SOURCE/QUALITY approve; parent437 passed26.25s and independent437 passed57.02s; committed b706d25 | Align CI prerequisite before publication; not yet pushed or merged |
+| CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
+| Target execution guard integration | SOURCE/QUALITY approve; parent437 passed26.25s and independent437 passed57.02s; committed b706d25, local CI alignment f1fc421 | Alignment review then draftPR/fresh9-check CI; not yet pushed or merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -26,6 +26,23 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR90 exactheadfdd7680 passed all9 CI36260272170 checks. Parent repeated head/base/
+main and fully paginated review audits (0reviews/0threads/0unresolved), transitioned
+ready, SHA-guarded squash merged35b82705e76b504e329d43b4cee6c5a8b5d37101, then
+fetched. Reviewed/landed trees equal8d3c4a92462752d2f0be9e792ec52ec99df9428e.
+Actual collection baseline9802/core9578/web224 is exact disjoint union. CI Agent
+core9577 passed1 skipped17238 warnings279.78s; Web224 passed6628 warnings186.07s.
+Root2891 passed75 skipped5 warnings238.93s; activity1855 passed6 skipped5569
+warnings391.62s; task-runtime1569 passed7 skipped1 warning72.26s; sandbox API153
+passed8.54s; sandboxcore1973 passed4 skipped1 warning50.81s. Warnings/skips remain
+honest limitations, not new scientific passes. No actual provider was activated.
+
+PR89 localcee8701 and target localf1fc421 now merge the actual landed CI-only
+five-file upstream change; independent alignment audit is pending before push.
+Prior production/test source freezes remain unchanged. Goodall approved the next
+foundation extraction plan (not code); it still waits for actual prerequisite
+landings, with precise donor blobs and36-module verification union recorded.
 
 PR90 published after corrected Gibbs SOURCE and independent Hilbert QUALITY;
 exactheadfdd76801040cb2f9abfa8da24ae143fef9cb870e, remoteCI36260272170 is
