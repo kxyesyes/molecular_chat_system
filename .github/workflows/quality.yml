@@ -27,7 +27,7 @@ jobs:
         include:
           - name: agent
             pytest_target: "tests/agent"
-            pytest_args: ""
+            pytest_args: "-vv --durations=25"
             command_timeout: 600
           - name: sandbox-api
             pytest_target: "tests/sandbox_broker/test_api.py"
