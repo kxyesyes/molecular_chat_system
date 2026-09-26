@@ -10,6 +10,7 @@ import json
 import math
 import re
 from types import MappingProxyType
+from typing import Callable
 from uuid import uuid4
 
 from src.agent.contracts import (
@@ -20,6 +21,7 @@ from src.agent.contracts.decision import (
     ToolDecision, ClarifyDecision, parse_decision_json, decode_protocol_json, public_schema_issues,
 )
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
+from src.agent.contracts.ordinary_admission import loop_admission, admission_metadata
 from src.agent.evidence import EvidenceLedger
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.persistence.redaction import contains_secret_material
@@ -91,6 +93,7 @@ def snapshot_payload(state, session, fingerprint, *, resolver, journal, created_
     for result in session.results:
         verify_observation_integrity(result, session)
     snapshot = dict(decision_protocol_revision=REVISION, binding_profile=B1_PROFILE_REVISION,
+        **({'ordinary_admission': state.ordinary_admission} if state.ordinary_admission is not None else {}),
         task_requirements=resolver.requirements.model_dump(mode='json'),
         binding_input_journal=journal.export(), binding_records=resolver.export_records(),
         observation_seals=dict(session._decision_observation_seals),
@@ -119,6 +122,8 @@ class ValidatedReplay:
     records: dict
     _resolver: B1BindingResolver
     _original_observations: tuple[str, ...]
+    _ordinary_metadata: str | None = None
+    _check_admission: Callable | None = None
 
     def verify_current(self):
         self._resolver.verify_binding_closure()
@@ -140,13 +145,21 @@ class ValidatedReplay:
 
     def verify_claim(self, claimed_payload):
         """Reauthenticate the existing claim after callback boundaries, read-only."""
+        if self._check_admission is not None:
+            self._check_admission()
         self.verify_current()
         self._verify_store(claimed_payload, 'running')
+        if self._check_admission is not None:
+            self._check_admission()
 
     def verify_waiting(self):
         """Source callbacks cannot silently invalidate a not-yet-claimed nonce."""
+        if self._check_admission is not None:
+            self._check_admission()
         self.verify_current()
         self._verify_store(self.payload, 'waiting_for_input')
+        if self._check_admission is not None:
+            self._check_admission()
 
     def _verify_store(self, expected_payload, status):
         session = self._resolver.session
@@ -163,6 +176,15 @@ class ValidatedReplay:
         validate_json(current, max_bytes=LIMIT, reason='continuation_rejected')
         if not _equal(current, expected_payload):
             raise ValueError('continuation claim changed')
+        if self._ordinary_metadata is not None and _ordinary_metadata(record) != self._ordinary_metadata:
+            raise ValueError('ordinary continuation metadata changed')
+
+
+def _ordinary_metadata(record):
+    view = {key: record['metadata'].get(key) for key in (
+        'ordinary_admission', 'decision_loop', 'task_requirements', 'task_acceptance')}
+    validate_json(view, max_bytes=LIMIT, reason='continuation_rejected')
+    return _wire(view)
 
 
 def _decode(raw, session, specs):
@@ -191,9 +213,14 @@ def _decode(raw, session, specs):
 
 
 def validate_continuation(loop, session, fingerprint, nonce, reply, *, requirements,
-                          adapters, required_tools, prefix, cap_deadline, check_deadline):
+                          adapters, required_tools, prefix, cap_deadline, check_deadline,
+                          admission_carry=None, request_kind='scientific'):
     """Read/authenticate/replay without live lifecycle effects; never CAS here."""
     context = session.context
+    if admission_carry is not None:
+        admission_carry = loop_admission(admission_carry, context=context,
+            request_kind=request_kind, timeout_seconds=loop.timeout_seconds,
+            binding_profile=loop.binding_profile)
     record = loop.store.get_run(context.trace_id)
     if (not record or not context.user_id or not context.session_id
             or record['status'] != 'waiting_for_input' or record['user_id'] != context.user_id
@@ -221,6 +248,8 @@ def validate_continuation(loop, session, fingerprint, nonce, reply, *, requireme
         'binding_records', 'observation_seals', *_COUNTERS, 'messages', 'proposals', 'call_ids',
         'current_query', 'input_queries', 'remaining_seconds', 'pre_finalization_remaining_seconds',
         'finalization_reserve_seconds', 'tool_attempt_count', 'task_acceptance', 'results'}
+    if admission_carry is not None:
+        keys |= {'ordinary_admission', 'intent_requests', 'total_model_requests'}
     if (type(saved) is not dict or set(saved) != keys
             or type(saved['decision_protocol_revision']) is not int or saved['decision_protocol_revision'] != REVISION
             or saved['binding_profile'] != B1_PROFILE_REVISION
@@ -242,13 +271,25 @@ def validate_continuation(loop, session, fingerprint, nonce, reply, *, requireme
             raise ValueError('invalid snapshot counters')
     if saved['model_requests'] >= loop.max_model_requests:
         raise ValueError('exhausted model budget')
+    if admission_carry is not None:
+        expected = admission_metadata(admission_carry, decision_requests=saved['model_requests'])
+        if (type(saved['intent_requests']) is not int or type(saved['total_model_requests']) is not int
+                or saved['intent_requests'] != admission_carry.intent_requests
+                or saved['total_model_requests'] != expected['total_model_requests']
+                or saved['total_model_requests'] >= loop.max_model_requests
+                or not _equal(saved['ordinary_admission'], expected)
+                or not _equal(record['metadata'].get('ordinary_admission'), expected)):
+            raise ValueError('invalid ordinary admission history')
     current = record['metadata']['decision_loop']
+    counters = _COUNTERS + (('intent_requests', 'total_model_requests') if admission_carry is not None else ())
     if (current['phase'] != 'waiting_for_input'
-            or any(not _equal(current[k], saved[k]) for k in _COUNTERS)
+            or any(not _equal(current[k], saved[k]) for k in counters)
+            or (admission_carry is not None and current['request_kind'] != request_kind)
             or current['required_tools'] != sorted(required_tools)
             or current['allowed_tools'] != sorted(adapters)
             or not _equal(record['metadata']['task_acceptance'], saved['task_acceptance'])):
         raise ValueError('waiting metadata does not reconcile')
+    ordinary_metadata = _ordinary_metadata(record) if admission_carry is not None else None
     journal = BindingInputJournal.restore_trusted(saved['binding_input_journal'], original_context=context)
     queries = [journal.context(t).query for t in range(journal.head_turn + 1)]
     if saved['input_queries'] != queries or saved['current_query'] != queries[-1]:
@@ -267,15 +308,19 @@ def validate_continuation(loop, session, fingerprint, nonce, reply, *, requireme
     historical = BindingInputJournal(journal.context(0))
     resolver = B1BindingResolver(session=projection, requirements=requirements,
         original_context=journal.context(0), adapters=adapters, input_journal=historical)
-    proofs = _replay(saved, loop, projection, resolver, historical, journal, adapters, required_tools, prefix)
+    proofs = _replay(saved, loop, projection, resolver, historical, journal, adapters, required_tools, prefix,
+        capability_snapshot=(admission_carry.capability_snapshot()
+            if admission_carry is not None and request_kind == 'chat' else None))
     check_deadline()
     resolver.verify_binding_closure()
     check_deadline()
     originals = tuple(_observation_wire(result) for result in projection.results)
-    return ValidatedReplay(payload, saved, journal, projection.results, proofs, resolver.export_records(), resolver, originals)
+    return ValidatedReplay(payload, saved, journal, projection.results, proofs, resolver.export_records(), resolver,
+        originals, ordinary_metadata, check_deadline if admission_carry is not None else None)
 
 
-def _replay(saved, loop, projection, resolver, historical, journal, adapters, required_tools, prefix):
+def _replay(saved, loop, projection, resolver, historical, journal, adapters, required_tools, prefix,
+            *, capability_snapshot=None):
     """Incremental historical prefixes; future observations never resolve inputs."""
     calls, proposals = saved['model_calls'], saved['proposals']
     if type(calls) is not list or len(calls) != saved['model_requests'] or not calls:
@@ -331,6 +376,10 @@ def _replay(saved, loop, projection, resolver, historical, journal, adapters, re
         elif call_id is not None:
             raise ValueError('unexpected native call identity')
         if isinstance(decision, ClarifyDecision):
+            if capability_snapshot is not None:
+                from .ordinary_chat_policy import validate_ordinary_display
+                validate_ordinary_display(decision.question, query=projection.context.query,
+                    context=projection.context, session=projection, capability_snapshot=capability_snapshot)
             if index == len(proposals) - 1:
                 if turn != journal.head_turn:
                     raise ValueError('unconsumed admitted inputs')

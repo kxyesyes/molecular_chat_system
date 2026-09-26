@@ -185,11 +185,18 @@ def binding_digest(binding):
 
 def build_admission_binding(capability_snapshot, *, query, history,
                             assessment_revision, intent_kind, intent_requests):
+    from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
     snapshot = _snapshot(capability_snapshot)
     if type(query) is not str or type(history) is not list:
         raise ValueError(ADMISSION_ERROR)
+    query_limit = 16384
+    if snapshot.profile_revision == B1_PROFILE_REVISION:
+        if len(query) > 16384 or len(query.encode('utf-8')) > 16384:
+            raise ValueError(ADMISSION_ERROR)
+        bounded_view(dict(query=query, memory=history), max_bytes=65536)
+        query_limit = 65536
     return _binding(dict(version="1", profile_revision=snapshot.profile_revision,
-        assessment_revision=assessment_revision, query_digest=_digest(query, 16384),
+        assessment_revision=assessment_revision, query_digest=_digest(query, query_limit),
         history_digest=_digest(history, 32768), capability_digest=capability_digest(snapshot),
         model_generation=snapshot.model_generation, capability_generation=snapshot.capability_generation,
         intent_kind=intent_kind, intent_requests=intent_requests))
@@ -343,20 +350,28 @@ def validate_carry_in(carry, *, capability_snapshot, query, history, assessment_
     return fresh
 
 
-def loop_admission(carry, *, context, request_kind, timeout_seconds):
+def loop_admission(carry, *, context, request_kind, timeout_seconds, binding_profile=None):
     """Validate trusted server carry, not browser metadata or a durable snapshot.
 
     The runtime owns current generations and preparation. This seam verifies
     its immutable projection; it never discovers a new configuration/view.
     """
+    from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
+    if binding_profile is not None and (type(binding_profile) is not str
+            or binding_profile != B1_PROFILE_REVISION):
+        raise ValueError(ADMISSION_ERROR)
+    profile, catalog, assessment = (
+        (B1_PROFILE_REVISION, 'ordinary-product-b-v1', 'whole-request-b-v1')
+        if binding_profile is not None else
+        ('ordinary-semantic-original-four-v1', 'ordinary-product-v1', 'whole-request-v1'))
     fresh = AdmissionCarryIn(**_plain_record(carry, AdmissionCarryIn))
     snapshot = fresh.capability_snapshot()
     fresh = validate_carry_in(fresh, capability_snapshot=snapshot, query=context.query,
-        history=context.memory, assessment_revision='whole-request-v1')
+        history=context.memory, assessment_revision=assessment)
     binding = fresh.binding()
     kind = binding['intent_kind']
-    if (snapshot.profile_revision != 'ordinary-semantic-original-four-v1'
-            or snapshot.catalog_revision != 'ordinary-product-v1'
+    if (snapshot.profile_revision != profile
+            or snapshot.catalog_revision != catalog
             or fresh.segment.allowance > timeout_seconds
             or request_kind not in {'chat', 'scientific'}
             or (request_kind == 'scientific' and kind != 'known_scientific')

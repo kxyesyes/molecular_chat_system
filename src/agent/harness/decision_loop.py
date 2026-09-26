@@ -131,6 +131,7 @@ class _BindingFinalization:
     counters: dict = field(default_factory=dict)
     failure: tuple[str, str] | None = None
     candidate: Any = None
+    checkpoint: WaitingCheckpoint | None = None
     _correction_request: str | None = None
     _correcting: bool = False
 
@@ -250,6 +251,8 @@ class ModelDecisionLoop:
                     result = finalization.invalidate('binding_publication_failed', 'owner_drain')
                 elif finalization.expired():
                     result = finalization.invalidate('task_deadline_exceeded', 'owner_drain')
+                elif admission_exchange is not None and finalization.checkpoint is not None:
+                    admission_exchange.checkpoint = finalization.checkpoint
             return result
         try:
             return await self._run(context, request_kind=request_kind, allowed_tools=allowed_tools,
@@ -271,7 +274,7 @@ class ModelDecisionLoop:
         if binding:
             from src.agent.runtime.worker_ownership import WorkerOwner
             reason = ('invalid_binding_admission' if type(worker_owner) is not WorkerOwner
-                      or admission_carry is not None or admission_exchange is not None else None)
+                      or (admission_carry is None) != (admission_exchange is None) else None)
             if reason:
                 return AgentResult('invalid-binding-admission', False, 'Binding admission rejected',
                     error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Binding admission rejected'),
@@ -289,12 +292,12 @@ class ModelDecisionLoop:
                 outcome=RunOutcome.REJECTED,
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'invalid_context'})
         context = deepcopy(context)
-        journal = BindingInputJournal(context) if binding else None
         ordinary_capabilities = None
         try:
             if admission_carry is not None:
                 admission_carry = loop_admission(admission_carry, context=context,
-                    request_kind=request_kind, timeout_seconds=self.timeout_seconds)
+                    request_kind=request_kind, timeout_seconds=self.timeout_seconds,
+                    binding_profile=self.binding_profile)
                 ordinary_capabilities = admission_carry.capability_snapshot()
                 # A resume's transport turn is not the original intent receipt.
                 receipt = admission_carry.intent_record()
@@ -311,6 +314,10 @@ class ModelDecisionLoop:
                 metadata={'backend': 'model_decision_loop', 'stop_reason': 'ordinary_admission_invalid'})
         # Legacy clock seams/behavior are deliberately unchanged for no-carry callers.
         clock = _now if admission_carry is not None else lambda: time.monotonic()
+        # Freeze the original journal only after trusted intent turn normalization.
+        journal = BindingInputJournal(context) if binding else None
+        if binding and admission_carry is not None:
+            segment_start = admission_carry.segment.started_at
         if contains_secret_material(projected):
             return AgentResult(context.trace_id, False, 'Input contains credential material',
                 error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Remove credentials from the request'),
@@ -331,6 +338,8 @@ class ModelDecisionLoop:
         required_tools = frozenset(required_tools)
         allowed_tools = frozenset(allowed_tools)
         root_deadline = segment_start + self.timeout_seconds if binding else None
+        if binding and admission_carry is not None:
+            root_deadline = min(root_deadline, admission_carry.segment.deadline)
         latch_lock, failures = threading.Lock(), []
         verify_configuration = None
 
@@ -342,14 +351,14 @@ class ModelDecisionLoop:
         def guarded(call):
             check_latch()
             try:
-                if verify_configuration is not None:
-                    verify_configuration()
+                # Live restore/source callbacks can outlast resume authority
+                # after verify_claim; bracket them with the same TTL check.
+                check_deadline()
                 cap = min(root_deadline, _finalization.tail_deadline) if _finalization.tail_deadline is not None else root_deadline
                 if clock() >= cap:
                     raise DecisionBoundaryError('task_deadline_exceeded')
                 value = call()
-                if verify_configuration is not None:
-                    verify_configuration()
+                check_deadline()
                 cap = min(root_deadline, _finalization.tail_deadline) if _finalization.tail_deadline is not None else root_deadline
                 if clock() >= cap:
                     raise DecisionBoundaryError('task_deadline_exceeded')
@@ -377,6 +386,10 @@ class ModelDecisionLoop:
             check_latch()
             if verify_configuration is not None:
                 verify_configuration()
+            if admission_carry is not None and (continuation_id is not None or clarified_query is not None):
+                if (admission_carry.resume_expires_at is None
+                        or clock() >= admission_carry.resume_expires_at):
+                    raise DecisionBoundaryError('continuation_rejected')
             if clock() >= root_deadline:
                 raise DecisionBoundaryError('task_deadline_exceeded')
 
@@ -447,7 +460,8 @@ class ModelDecisionLoop:
             def verify_configuration():
                 current = configuration_digest(self, configuration_context, request_kind, allowed_tools,
                     required_tools, {name: adapter.spec for name, adapter in adapters.items()}, adapters,
-                    requirements=requirement_payload)
+                    requirements=requirement_payload,
+                    admission_binding=admission_carry.binding() if admission_carry is not None else None)
                 if current != fingerprint:
                     raise DecisionBoundaryError('tool_configuration_changed')
         restored, prior_payload = None, None
@@ -484,7 +498,7 @@ class ModelDecisionLoop:
                 replay = await owned(lambda: validate_continuation(self, session, fingerprint,
                     continuation_id, clarified_query, requirements=requirements, adapters=adapters,
                     required_tools=required_tools, prefix=prefix, cap_deadline=cap_restored_deadline,
-                    check_deadline=check_deadline))
+                    check_deadline=check_deadline, admission_carry=admission_carry, request_kind=request_kind))
                 # Recheck current closure on the original saved head immediately
                 # before the sole claim. No live lifecycle authority exists yet.
                 await owned(replay.verify_waiting)
@@ -677,12 +691,19 @@ class ModelDecisionLoop:
                 messages.insert(1, {'role': 'system', 'content': state.protocol_feedback})
                 state.protocol_feedback = None
             if admission_carry is not None:
-                remaining = state.deadline - clock()
-                if remaining <= 0:
+                try:
+                    # A settled worker may hand control back after resume TTL.
+                    # Recheck synchronously, with no await before dispatch.
+                    if binding:
+                        check_deadline()
+                    remaining = state.deadline - clock()
+                    if remaining <= 0:
+                        raise DecisionBoundaryError('task_deadline_exceeded')
+                except DecisionBoundaryError:
                     # No decision transport request was dispatched. Do not
                     # manufacture a call or spend its slot for a callback delay.
                     state.model_requests -= 1
-                    raise DecisionBoundaryError('task_deadline_exceeded')
+                    raise
             response = await asyncio.wait_for(self.model.decide(
                 messages, mode=self.mode, timeout_seconds=min(60, remaining)),
                 timeout=min(60, remaining))
@@ -1082,6 +1103,13 @@ class ModelDecisionLoop:
                 if not valid:
                     return correction
             _finalization.candidate = result
+            if waiting_payload is not None and admission_exchange is not None:
+                saved = waiting_payload['snapshot']
+                _finalization.checkpoint = WaitingCheckpoint(
+                    trace_id=context.trace_id, continuation_id=waiting_payload['id'],
+                    remaining_seconds=float(saved['remaining_seconds']), created_at=checkpoint_created_at,
+                    intent_requests=saved['intent_requests'], decision_requests=saved['model_requests'],
+                    binding_digest=binding_digest(saved['ordinary_admission']['binding']))
             return result
         try:
             result = session.finish_dynamic(state.answer, outcome=state.outcome, error=error, metadata=metadata)

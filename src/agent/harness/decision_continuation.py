@@ -52,6 +52,8 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
             SEMANTIC_PROTOCOL_REVISION if admission_binding is not None else PROTOCOL_REVISION),
         'request': context_value(context, query_content_bytes=getattr(loop, 'binding_profile', None) is not None), 'kind': request_kind,
         **({'binding_profile': loop.binding_profile} if getattr(loop, 'binding_profile', None) is not None else {}),
+        **({'budget_policy': 'b-root-inclusive-16-v1'}
+           if getattr(loop, 'binding_profile', None) is not None and admission_binding is not None else {}),
         'allowed': sorted(allowed), 'required': sorted(required),
         'mode': loop.mode, 'limits': [loop.max_model_requests, loop.max_tool_attempts, loop.timeout_seconds],
         'specs': {n: spec_value(s) for n, s in specs.items()},

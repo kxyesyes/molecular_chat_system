@@ -312,6 +312,22 @@ corrected QUALITY source review approves this freeze; fresh Huygens SOURCE
 checks the amendment before worker final union and independent repeat. No Task4
 assembly/activation, normal-route success or P7/P8 completion is claimed.
 
+### Task3 final independent gate and Task4 release
+
+Corrected Huygens SOURCE and Nietzsche QUALITY approve the five-file freeze.
+Worker final union42625/f68ddc passed380 with3 SWIG warnings334.58s. Independent
+exact same five-module union91646/f03c4c passed380 with3 SWIG warnings338.97s;
+pytest/Python/shell exits0, five file hashes and approved launcher unchanged.
+Parent rechecked all hashes and exact dirty-file scope before this checkpoint.
+Earlier376/378-pass results and both reproduced TTL defects remain historical,
+not substituted for these corrected final runs. Independent test slot is released.
+
+Task4 is now released ONLY for its three production files and runtime/lifecycle
+tests below. Reuse existing Task1 actual-app fixture seams; no Task5 continuation
+Web changes, frontend flag work, settings selectors or default activation. Parent
+owns documentation/commits; the fresh worker receives the sole local test slot.
+This completes Task3 locally, not P7 integration or P8 live acceptance.
+
 ## Task 4 — atomic server assembly and actual normal entry
 
 Files: `src/web/app.py`, `ordinary_capabilities.py`, `decision_runtime.py`;

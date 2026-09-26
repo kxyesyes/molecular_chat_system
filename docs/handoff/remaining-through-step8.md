@@ -11,9 +11,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| PR87 RAG current source | DRAFT publishedd976422; local aligned9f44b78; independent1323 passed | Old CI36249184214 completion; alignment review, push and new exact-head CI before merge |
-| Normal-Web B1 Task3 | Both corrected source reviews approved; final worker380 passed334.58s | Independent Nietzsche five-module repeat has sole local slot; no Task4 release yet |
-| Normal-Web B1 Tasks4–8 | PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
+| PR87 RAG current source | DRAFT aligned/pushed9f44b78; Feynman integration review approved; independent1323 passed | New exact-head CI36249902754 still running; old36249184214 Agent timeout600s retained |
+| Normal-Web B1 Task3 | LOCAL COMPLETE; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Include only reviewed freeze in scoped commit; not yet integrated into main |
+| Normal-Web B1 Tasks4–8 | Task4 RELEASED; Tasks5–8 PENDING | Actual entry assembly, same-socket restore, display/dataflow, cleanup and independent integration |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -22,6 +22,14 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Task3 independent QUALITY91646/f03c4c is terminal:380 passed/3 SWIG warnings
+338.97s, exit0, five hashes and runner unchanged. Parent revalidated terminal
+review and exact current hashes, then released bounded Task4 under the existing
+approved plan. No ordinary-entry success, model activation or P7/P8 completion.
+PR87 aligned9f44b78 was independently reviewed/pushed; latest read-only check
+shows six successful checks and Agent in progress. Earlier head's Agent timeout
+at600s is retained, not declared fixed by a new run or local regression.
 
 PR86 exactbbc498e run36248942747 passed8/8: Agent9548 passed/1 skipped/23858
 warnings581.85s; root2872 passed/75 skipped/5 warnings226.97s. Parent freshly
