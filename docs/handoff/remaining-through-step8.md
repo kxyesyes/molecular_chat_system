@@ -4,6 +4,31 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Focused P7 publication update (2026-09-26): RAG core diagnostics are now landed
+through PR82, not by merging the accumulated B1 branch. Clean-base branch
+`codex/rag-retrieval-diagnostics-integration` extracted exactly the two reviewed
+production/test blobs from25c6a51 plus a focused integration record. Independent
+Heisenberg SPEC and Pauli QUALITY approve; fresh four-module regression573
+passed/7 deprecation warnings/15.19s, handle47238 terminal exit0. Parent in-memory
+compile, exact blob comparison, staged credential-pattern scan and diff checks
+passed. The sole local test slot was explicitly handed back to the B1 worker.
+
+PR82 reviewed head0d0d8fc615ad248fb9f7916f2afcd0825994b618, CI run36235257250
+all8 success, unresolved review threads0, no changes-requested review. Parent
+rechecked the unchanged head/base and marked ready before the delegated squash
+merge:959860eb014c371ca9974a460d0902e0840c02f2. Fresh fetch and GitHub state
+confirm the merge; reviewed and landed trees both equal
+98f3eedd3f5c91c95ad41ea62d78501febe53f17. An earlier anonymous HTTP403
+was not treated as a passed gate; authenticated GitHub checks succeeded using
+the local Git credential helper without exposing credentials. No deployment or
+model activation occurred; original13 dirty paths were untouched.
+
+This only lands strict core diagnostics, not loaded-source receipts or the
+complete Agent retrieval path. Next clean publication slices are RAG owned
+generation, receipt consumption/current eligibility, then reverse-source and B
+execution dependencies. Task5 continuation remains in active implementation;
+normal Web/B2/C and final P8 real/UI gates remain open. Packages7/8 are incomplete.
+
 Latest publication-prerequisite release (2026-09-26): opt-in B terminal events
 are provisional summaries; Session failure correction is separately frozen and
 bounded; outward release follows worker drain and final clock checks. Independent
