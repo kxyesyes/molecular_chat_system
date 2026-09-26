@@ -205,3 +205,48 @@ Parent in-memory compilation of both Python files and diff checks also passed.
 No existing test, deadline or scientific assertion was relaxed. Fresh remote
 base/PR checks, publication and all CI gates remain required before merge; this
 approval is not retrospective index authentication or complete Agent acceptance.
+
+### First remote CI failure: FAISS fault-injection boundary
+
+PR83 head950880a, workflow36237526916, root job108391912320 failed with
+16 failed/2463 passed/75 skipped/5 warnings/218.62s. All16 failed nodes patch
+faiss.IndexFlatIP.search but loaded-index search did not enter that interception:
+one expected call count was0, nine projection-time drift injections did not run,
+five malformed-result injections yielded ordinary valid hits, and one backend
+exception injection did not raise. The built-index positive passed. These are
+actual Linux CI failures, not waived as flaky. requirements.txt pins faiss1.7.4;
+the precise runtime concrete-class identity was not printed by the failed tests.
+
+Parent is investigating the read-index concrete-class boundary before changing
+code. Minimal test-only design under delegated choice: exercise both native
+loading and an actual equivalent faiss.IndexFlat(dim,METRIC_INNER_PRODUCT) load
+fixture, retaining disk-backed initialization, actual vectors/search and all
+original assertions. First run the old injection against both representations
+to reproduce bypass; then bind the four injection sites to the actual owned
+index's type rather than a presumed constructor subclass. Require injections
+to be observed and preserve existing result/count/drift/cleanup checks. Do not
+alter production index loading, algorithm, dependency pins, deadlines or CI.
+Require independent review, local repeat and new exact-head CI before merge.
+R3 preparation is held until this prerequisite is corrected and landed.
+
+The expanded four-family test reproduced the same16 failures locally with the
+real base IndexFlat IP representation:16 failed/58 passed/3 SWIG warnings/3.37s,
+exit1, chunk6583d0. Its output was partially truncated by the observation budget;
+the terminal count and representative failure sites are visible. This establishes
+the constructor-class interception bug without asserting the CI object's unseen
+class name. No production edit was made. Binding interception to the actual
+private index class made all74 cases pass/3 warnings/2.77s, chunkafdb7f. The
+unchanged six-module command then passed797/0 skipped/7 warnings/19.60s, handle6238
+terminal exit0. The37 extra cases retain the native variants and test equivalent
+base-IP objects. Independent review and fresh CI are still required.
+
+Independent Ramanujan SOURCE/SPEC approves the two-file fixture repair; fresh
+Bohr QUALITY independently reran the exact six-module command once:
+797 passed/0 failed/0 skipped/7 warnings/20.03s, exit0, handle44634 terminal
+chunk72d4e7, no restart. Test SHA98145D09B4565254ECF452A0AD5131B6E706E90B15E0C09229989317162B900E;
+service remains6B7EE819B3327FD9338C159D242C9A11B3A73416FD70D1C842D4EB8DF4348F9B.
+Both hashes and runner45A04659D7CC97AA94564E273C7D3924CE81BBE5076D17DDF1FD8EB9DA3E00C7
+matched before/after. No remaining actionable local findings. First CI overall
+remains failed (root and its dependent offline-quality failed; six other gates
+passed). Publish this correction on the same focused PR and require a new full
+exact-head CI; do not rerun/erase the original failure or claim Linux recovery yet.

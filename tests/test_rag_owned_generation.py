@@ -257,8 +257,27 @@ def strict(rag, query=' 查询 CCO ', k=2):
     return rag.search_similar_molecules_sync_with_receipt(query, k=k)
 
 
+@pytest.fixture(params=['native', 'base-flat-ip'])
+def loaded_faiss_class(request, monkeypatch):
+    """Exercise real IP search without assuming the loader's Python subclass."""
+    if request.param == 'base-flat-ip':
+        read = faiss.read_index
+        def load(path):
+            loaded = read(path)
+            assert loaded.metric_type == faiss.METRIC_INNER_PRODUCT
+            base = faiss.IndexFlat(loaded.d, faiss.METRIC_INNER_PRODUCT)
+            if loaded.ntotal:
+                vectors = loaded.reconstruct_n(0, loaded.ntotal)
+                base.add(vectors)
+                np.testing.assert_array_equal(base.reconstruct_n(0, base.ntotal), vectors)
+            assert base.ntotal == loaded.ntotal and base.d == loaded.d
+            return base
+        monkeypatch.setattr(faiss, 'read_index', load)
+    return request.param
+
+
 @pytest.mark.parametrize('build,empty', [(False, False), (True, False), (False, True)])
-def test_strict_actual_initialize_receipt_and_single_search(tmp_path, monkeypatch, build, empty):
+def test_strict_actual_initialize_receipt_and_single_search(tmp_path, monkeypatch, build, empty, loaded_faiss_class):
     rag, source, store, _, _ = make_loaded_source(tmp_path, vectors=not empty)
     if build:
         remove_index(store)
@@ -266,11 +285,12 @@ def test_strict_actual_initialize_receipt_and_single_search(tmp_path, monkeypatc
     asyncio.run(rag.initialize())
     request_start = len(http.requests)
     searches = []
-    original = faiss.IndexFlatIP.search
+    index_type = type(rag._generation.index)
+    original = index_type.search
     def counted(index, vector, k):
         searches.append((vector.copy(), k))
         return original(index, vector, k)
-    monkeypatch.setattr(faiss.IndexFlatIP, 'search', counted)
+    monkeypatch.setattr(index_type, 'search', counted)
     # Legacy public overrides are not evidence of the strict request identity.
     monkeypatch.setattr(rag, 'get_embedding_sync', lambda query: pytest.fail('legacy override used'))
     result = strict(rag)
@@ -339,7 +359,7 @@ def test_only_owned_initialize_can_certify(tmp_path, monkeypatch, state):
 @pytest.mark.parametrize('when', ['before', 'transport', 'projection'])
 @pytest.mark.parametrize('field', ['source', 'model', 'endpoint', 'source_path', 'csv_path',
                                   'config_source', 'config_model', 'config_endpoint', 'config_store'])
-def test_strict_changes_invalidate_without_resurrection(tmp_path, monkeypatch, when, field):
+def test_strict_changes_invalidate_without_resurrection(tmp_path, monkeypatch, when, field, loaded_faiss_class):
     rag, source, _, _, _ = make_loaded_source(tmp_path)
     http = SyntheticHTTP(monkeypatch)
     asyncio.run(rag.initialize())
@@ -367,12 +387,13 @@ def test_strict_changes_invalidate_without_resurrection(tmp_path, monkeypatch, w
             return httpx.Response(200, json={'embedding': [1., 0.]})
         http.handler = embed
     else:
-        original = faiss.IndexFlatIP.search
+        index_type = type(rag._generation.index)
+        original = index_type.search
         def search(index, vector, k):
             answer = original(index, vector, k)
             mutate()
             return answer
-        monkeypatch.setattr(faiss.IndexFlatIP, 'search', search)
+        monkeypatch.setattr(index_type, 'search', search)
     with pytest.raises(RAGIndexCompatibilityError):
         strict(rag)
     assert len(http.requests) == (0 if when == 'before' else 1)
@@ -458,7 +479,7 @@ def test_invalid_query_does_not_call_transport(tmp_path, monkeypatch, query):
 
 
 @pytest.mark.parametrize('malformation', ['extra', 'short', 'duplicate', 'label', 'score'])
-def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation):
+def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation, loaded_faiss_class):
     rag, _, _, _, _ = make_loaded_source(tmp_path)
     http = SyntheticHTTP(monkeypatch)
     asyncio.run(rag.initialize())
@@ -474,7 +495,7 @@ def test_strict_preserves_r1_invalid_discard(tmp_path, monkeypatch, malformation
         if malformation == 'label':
             return np.asarray([[1., .5]]), np.asarray([[0, -1]])
         return np.asarray([[1., np.nan]]), np.asarray([[0, 1]])
-    monkeypatch.setattr(faiss.IndexFlatIP, 'search', malformed)
+    monkeypatch.setattr(type(rag._generation.index), 'search', malformed)
     result = strict(rag)
     diagnostics = result['receipt']['diagnostics']
     assert diagnostics['status'] == 'invalid_discard'
@@ -781,7 +802,7 @@ def test_owned_load_uses_snapshot_digest_not_replaced_index_path(tmp_path, monke
 
 
 @pytest.mark.parametrize('phase', ['backend', 'projection'])
-def test_failed_search_still_invalidates_changed_configuration(tmp_path, monkeypatch, phase):
+def test_failed_search_still_invalidates_changed_configuration(tmp_path, monkeypatch, phase, loaded_faiss_class):
     rag, _, _, _, _ = make_loaded_source(tmp_path)
     http = SyntheticHTTP(monkeypatch)
     asyncio.run(rag.initialize())
@@ -790,7 +811,7 @@ def test_failed_search_still_invalidates_changed_configuration(tmp_path, monkeyp
         rag.embedding_endpoint = 'http://synthetic-other.invalid/embeddings'
         raise RuntimeError('synthetic failed search or projection')
     if phase == 'backend':
-        monkeypatch.setattr(faiss.IndexFlatIP, 'search', fail)
+        monkeypatch.setattr(type(rag._generation.index), 'search', fail)
     else:
         monkeypatch.setattr('src.rag.retrieval._project_record', fail)
     with pytest.raises(RuntimeError, match='synthetic failed'):
