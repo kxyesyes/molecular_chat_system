@@ -20,7 +20,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | Independent SOURCE-approved test preparation; actual4 behavioral RED+1 API RED,8 controls passed | Four-production implementation in progress; revision8 separate |
 | Strict generation transport | Draft PR97 head1053951; SOURCE/fresh QUALITY passed, both migrated exact17 runs752 passed+162 subtests; CI36279601921 in progress | Latest-head CI/review/merge gates pending; not full B2 closure |
-| Native ASCII validation optimization | Test-only equivalence30 passed; permanent actual2 RED/45 passed; minimal source frozen0D26E2 | Focused GREEN/49-module regression/independent review and original Web deadlines still pending |
+| Native ASCII validation optimization | Test-only equivalence30 passed; permanent actual2 RED/45 passed then47 GREEN; implementation SOURCE-approved0D26E2 | Exact49 released, fresh QUALITY and original Web deadlines still pending |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -33,6 +33,13 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+ASCII focusedGREEN1b123f:47passed1.72s,0warnings/skips,5hashes unchanged.
+Plato independent implementationSOURCE approves0D26E2/D43AAB/08E40D without
+P1/P2. Exact49 union released to Wegener once; fresh Kant QUALITY is read-only
+preparing, no result yet. Publication four-source freeze is ready: three donor
+blobs exact582a6fb/d3c580b/bf162d1; adapted loopbeb9ce7, unchangedtestf2628b6,
+ownplan653b1fa. Lovelace implementationSOURCE is in progress; no GREEN yet.
 
 Strict-generation fresh Bohr QUALITY terminal55688/3cc36b:752passed,
 162subtests passed,7warnings,17.61s,0failures/skips,17hashes unchanged. Parent
