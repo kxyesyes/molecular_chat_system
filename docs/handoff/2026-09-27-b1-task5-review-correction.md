@@ -186,3 +186,19 @@ not the ASGI server directly; disconnect cleanup follows the lost diagnostic
 frame history. Parent authorizes only bounded test-local stage/frame timing and
 pre-disconnect flags/stacks (no values/secrets), keeping3s/5s and all assertions.
 One instrumented focused run is allowed; no repeated-until-green or wider fix.
+
+Instrumented focused run27446/1c7a92 completed2 passed,7 warnings29.48s,
+runner/process exit0. Test freeze25328B8F5EBC0D7808CD6657DF87151DB79E20DD2A3CAB72F13B1F2AE9B295AC;
+production, shared ActualSocket and launcher stayed unchanged. No failure snapshot
+was exercised, so this is neither attribution nor repair of the original timeout.
+
+Before releasing a diagnostic union, parent inspection found that snapshot/JSON
+emission in DiagnosticSocket.__aexit__ could raise before original cleanup. The
+approved test-only correction must always await original cleanup in finally,
+without returning from finally; ordinary diagnostic exceptions get only a fixed
+sentinel. A deliberate diagnostic-emission-failure control must retain the
+original body exception, prove exactly one cleanup/disconnect and actual server
+termination, and leave no owners. Genuine cancellation/cleanup failures stay
+visible. No production changes or relaxation of3s/5s deadlines are authorized.
+Raman is implementing this control; tests await explicit slot transfer after the
+separate PR91 integration regression. Task5 quality and Task6 remain pending.

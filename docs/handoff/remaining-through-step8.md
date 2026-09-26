@@ -17,7 +17,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 corrected SOURCE approves stronger controls; independent union461 passed1 failed624.40s | JSON RAG resume hit fixture3s receive timeout, cause UNKNOWN; Raman owns bounded diagnostic slot. Task5 QUALITY and Tasks6–8 remain pending |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
-| Target execution guard integration | PR91 oldheadf1fc421 CI36261062523 passed9/9; localac34413 now aligned to actual PR89 landing | New composition review/joint regression/current-head9CI required; not yet merged |
+| Target execution guard integration | PR91 oldheadf1fc421 CI36261062523 passed9/9; localac34413 aligned to actual PR89 landing; Confucius SOURCE approves; parent joint16 running54858 | Current regression/fresh QUALITY/current-head9CI required; not yet merged |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -26,6 +26,20 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Current-state recheck: GitHub main is7a3309e; PR91 is open/draft at remote
+f1fc421, while local reviewed alignment isac34413. Initial GitHub request failed;
+a later bounded read succeeded, without credentials/output. Confucius approves
+exact PR89 five-file composition and unchanged target/owned-call blobs. Parent
+started the exact ordered16-module union54858 with the approved isolated launcher;
+no result is claimed yet. Fresh QUALITY McClintock is source-only until slot grant.
+
+Task5 instrumented focused run27446 passed2 cases29.48s but did not exercise the
+failure snapshot. Parent found a diagnostic-only cleanup hazard (snapshot failure
+could bypass super.__aexit__), not a demonstrated production root cause. Raman
+is implementing the approved finally-cleanup guard and deliberate diagnostic
+failure control; no concurrent test is authorized. Original461-pass/1-failure
+union remains unresolved; Task6 is not released.
 
 PR89 exactcee8701 passed9/9 CI36261000462. Parent repeated freshhead/base/main,
 allchecks and fully paginated reviews (0reviews/0unresolved), markedready and
