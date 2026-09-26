@@ -93,7 +93,7 @@ and labeled HTTPX transport fixtures are not evidence of real-model quality.
 The ignored launcher isolates environment/cwd and blocks parent-test sockets;
 it is not a universal descendant-process sandbox.
 
-## Current status
+## Initial extraction checkpoint
 
 Extraction and exact three-blob identity checks passed. Fresh source review,
 runtime regression, quality review and remote CI are pending. No push, merge,
@@ -140,3 +140,68 @@ are intentionally rejected; historical disk pairs are not retroactively proven.
 All local runtime tests remain subject to the current B1 worker's explicit
 heavy-slot handover. Parent in-memory compilation and diff checks already pass;
 they do not reproduce the finding or certify the repair.
+
+## Actual integration repair evidence
+
+The approved isolated runner was repinned only to this worktree. Parent obtained
+the sole local test slot after B1 handle72888 terminated; no parallel pytest.
+All following runs used the command template above, never raw pytest.
+
+| Stage | Targets/result | Seconds | Exit |
+|---|---|---:|---:|
+| Original finding RED | Three new nodes/six cases:5 failed,1 passed,3 warnings |1.23|1|
+| Minimal coherence/detachment GREEN | Same six cases:6 passed,3 warnings |0.95|0|
+| First six-module regression |752 passed,7 warnings; handle45458 terminal |19.64|0|
+| Expanded no-coercion/capture coverage |758 passed,7 warnings; handle75134 terminal |18.75|0|
+| Object-dtype review RED |`test_legacy_frame_coherence_does_not_sort_or_coerce[object_dtype]`:1 failed,3 warnings |0.83|1|
+| Numeric-copy RED |`test_frame_detachment_preserves_object_numbers_and_missing_values`:1 failed,3 warnings |0.81|1|
+| Corrected six-module regression |760 passed,7 warnings; handle69476 terminal |18.67|0|
+
+First RED cases used both legacy helpers and default/injected transports. They
+actually persisted old `CCO`/`CCC` vectors under the replacement CSV digest;
+subsequent initialize reported `loaded` and the strict CCN-query returned top
+`CCCC`. The in-flight public-frame mutation separately changed the second
+embedding prompt to CCN. These are synthetic transport results that reproduce
+the source-identity bug, not real model or chemistry accuracy claims.
+
+The minimal guard reads/hash/parses the same CSV bytes, compares a detached
+positional frame before transport/load/build, and invalidates with the explicit
+incompatibility status before the generic legacy catch can replace it. Existing
+freshness checks remain; the prior disk pair survives rejection. Successful
+recovery now checks actual B embedding prompts and persisted vectors/mapping.
+
+Rawls re-review confirmed that repair but found object-column copying could
+infer/coerce dtypes through `Series.map`. Both new RED tests reproduced this:
+an object-typed numeric column incorrectly passed coherence, and a large integer
+plus None became float64. `_copy_frame` now constructs a Series from individually
+deep-copied values with the original explicit dtype and index. No infer-then-cast
+path, sorting or value coercion is used. Nested-object isolation remains tested.
+
+Current frozen SHA256:
+
+- service: `6B7EE819B3327FD9338C159D242C9A11B3A73416FD70D1C842D4EB8DF4348F9B`.
+- tests: `218794656C292DEE655C50A16C158CCF0DC410549ED0B8A76281A89C89B9957A`.
+
+Warnings remain3 SWIG plus4 FastAPI deprecations. No skips or weakened existing
+tests. All runs are terminal; the test slot was explicitly returned to B1 after
+handle69476. Corrected SPEC re-review and independent QUALITY/runtime repeat
+were pending at that test checkpoint. Rawls subsequently approved the corrected
+SOURCE/SPEC snapshot (service blob27a318810292d010e7e50a1f6e72b1aaa38323ba,
+test blob26e90c68c8fd2c7378979ed08be02cf60a0b7d30). Independent QUALITY/runtime
+repeat remains pending; no implementation commit, PR or merge yet. Later dependent slices
+must preserve this repair as a delta rather than overwrite service.py with an
+older whole-file snapshot. The B1 development tree has not been changed here.
+
+### Final independent integration approval
+
+The pending quality gate above is now satisfied for the frozen four-file scope.
+Halley independently reviewed the implementation and ran exactly the authorized
+six-module command once: **760 passed,0 skipped,7 warnings,18.59s,exit0**.
+Handle40915 was polled to terminal completion without retries; source/test and
+launcher SHA256 matched before/after. Final QUALITY: APPROVE, no actionable
+findings. The test slot was returned to B1 immediately; no local RAG test remains.
+
+Parent in-memory compilation of both Python files and diff checks also passed.
+No existing test, deadline or scientific assertion was relaxed. Fresh remote
+base/PR checks, publication and all CI gates remain required before merge; this
+approval is not retrospective index authentication or complete Agent acceptance.
