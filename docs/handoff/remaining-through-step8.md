@@ -20,7 +20,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | Actual4 behavioral RED+1 API RED,8 controls passed; four-production implementation independently SOURCE-approved | Focused GREEN/expanded regression/fresh QUALITY pending; revision8 separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
-| Native ASCII validation optimization | Test-only equivalence30 passed; permanent actual2 RED/45 passed then47 GREEN; implementation SOURCE-approved0D26E2 | Exact49 released, fresh QUALITY and original Web deadlines still pending |
+| Native ASCII validation optimization | Permanent2 RED/45 passed then47 GREEN; SOURCE-approved0D26E2; author exact49 actual4774 passed1 skipped | Fresh QUALITY and original3s/5s Web deadlines still pending |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -33,6 +33,34 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+ASCII author exact49 terminal5934/47f5a8 exit0:4774passed1skipped7warnings
+982.51s;53unique controlled hashes unchanged before/after (d55fd3/28bbe7).
+Skip is directory-symlink unavailability at test_decision_chat_acceptance.py:149;
+warnings are3SWIG+4FastAPI deprecations. Parent observed both child30164 and
+wrapper50400 absent before transferring sole local Python slot to publication
+focused GREEN. Fresh Kant QUALITY remains queued, no permission to overlap.
+Parent independently rechecked0D26/D43/08E40/D523 in566c37.
+
+Publication aligned to mainc612c98 through disjoint merge3d3c43a; all seven
+owned plan/source/test/runner hashes unchanged (fc3ff5). Focused release is the
+entire publication test module plus the unchanged four PR96 tail-cancel cases,
+not the expanded60 yet. No focused result is claimed at this checkpoint.
+
+Plato's next-revision source audit found two unexecuted integration risks in donor
+a5189a5: snapshot cancellation may retain stale waiting payload/nonce before
+terminal attempt; restore postclaim first error may be replaced by start failure.
+Next revision8 plan must reproduce/adapt those boundaries, preserve exact live
+observation sealing and bounded correction, and state durable-restart limits:
+same-byte newly loaded RAG/reverse generation is not eligible old evidence.
+This is source evidence, not an executed failure or completed revision8.
+
+B2 read-only audit confirms strict transport does not supply root logical-slot,
+per-POST reservation/settlement, token bound or physical inner-thread drainage.
+A clean c612c98-based codex/b2-generator-control tree is authorized for its own
+written implementation plan only. Existing five-round and all-candidate/ranker/
+report positive requirements remain; missing trusted token-bound proof remains
+an explicit production gate, not a reason to replace real acceptance with mocks.
 
 PR97 SHA-squash terminal29241/6fa048 merged
 `c612c9873a04823c936d710861bf890ad30b844a`. Fresh paginated guards on
