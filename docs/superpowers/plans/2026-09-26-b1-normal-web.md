@@ -122,6 +122,31 @@ def test_normal_entry_b1_retrieval_gap(actual_app, wire):
 
 ## Task 2 — B-only whole-request admission, no execution authority from intent
 
+### Task1 checkpoint and Task2 release (2026-09-26)
+
+Task1 is complete as a RED/fixture checkpoint, not B functionality. Worker
+original native/JSON mounted `/ws` probes failed2 at the exact unsupported-science
+assertion before any intent/model request. Final new-file run retained those2
+ordinary failing tests and passed13 fixture controls. Existing/new union passed
+207 in111.07s. Meitner SOURCE/SPEC and fresh Ampere QUALITY found no actionable
+issues. Ampere independently ran the complete new file:2 intended failures and13
+passes7.74s, then the exact existing/fixture union207 passes111.49s (terminal73367).
+Each final run reports7 SWIG/FastAPI deprecation warnings. No skipped/xfail
+conversion, fake scientific evidence or production edit occurred.
+
+Frozen tests: runtimeA8305EDA63C8815F7206F9E3D123E750D82CD3ED41E047CECF1639A55769DCC8;
+sourcesC6B6D0CC3FE3B7015787FE7019DB5E7636403429AA20D41BB098160385497BBE;
+shared fixture889B4DE1EA751335B7E52A81E680F9DD8C89163CBF67A860BD57B695687ACEBE.
+Approved runnerF2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183
+matches before/after. Intermediate fixture wiring/registration/JSON role failures
+were repaired only in tests and are not counted as behavioral RED.
+
+Parent accepts this reviewed checkpoint and releases Task2 only, using the
+existing written design and exact three-file allowlist below. Retain Task1's
+two REDs until Task4/6 assembly; do not claim Task2 alone fixes the normal route.
+Task3+ production work and default activation are not released. Test execution
+still requires an explicit sole-slot grant after the reverse-source regression.
+
 Files: `src/web/decision_request.py`, new `src/web/decision_binding_request.py`,
 `tests/agent/test_b1_normal_web_admission.py`.
 

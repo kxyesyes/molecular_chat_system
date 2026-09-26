@@ -5,7 +5,7 @@ registry, store, references, adapter, decision loop and Session remain real.
 No lifespan, real provider, model asset or RAG index is started/read.
 """
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 import importlib
 import json
 import sys
@@ -52,7 +52,8 @@ def actual_app(tmp_path, monkeypatch):
 
     @asynccontextmanager
     async def build(*, mode=None, wire='native', respond=None, optional_tools=False,
-                    ordinary_policy=None):
+                    ordinary_policy=None, binding_profile=None, tool_factory=None,
+                    rag_service=None):
         if mode == 'decision_a2':
             importlib.import_module('langgraph.graph')
         if optional_tools:
@@ -95,7 +96,16 @@ def actual_app(tmp_path, monkeypatch):
                 return decision
             return protocol_response(decision, wire, call_id=f'protocol-call-{len(calls)}')
 
-        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+        async with AsyncExitStack() as injections, httpx.AsyncClient(
+                transport=httpx.MockTransport(transport)) as client:
+            # Explicit per-build overrides only; restore even on assembly failure.
+            # Defaults retain all existing fixture construction and assertions.
+            scoped = injections.enter_context(monkeypatch.context())
+            selected_rag = rag if rag_service is None else rag_service
+            if rag_service is not None:
+                scoped.setattr(module, 'RAGSystem', lambda config: selected_rag)
+            if tool_factory is not None:
+                scoped.setattr('src.agent.tools.get_all_tools', tool_factory)
             model = OpenAICompatibleModel('synthetic-protocol-key', 'protocol-only',
                 'https://example.invalid/v1', client=client)
             monkeypatch.setattr(module.MolecularChatApp, '_create_model_from_llm_config',
@@ -103,17 +113,19 @@ def actual_app(tmp_path, monkeypatch):
             kwargs = {} if mode is None else dict(normal_chat_mode=mode, decision_wire_mode=wire)
             if ordinary_policy is not None:
                 kwargs['ordinary_chat_policy'] = ordinary_policy
+            if binding_profile is not None:
+                kwargs['binding_profile'] = binding_profile
             if ordinary_policy == 'semantic_v1':
                 application = await module.MolecularChatApp.create_async(str(tmp_path / 'missing.yaml'), **kwargs)
             else:
                 application = module.MolecularChatApp(str(tmp_path / 'missing.yaml'), **kwargs)
-            assert application.chat_handler is not None
-            assert application.agent_system is not None
-            assert application.chat_handler.scientific_references.store is application.agent_state_store
-            assert application.agent_system.state_store is application.agent_state_store
-            sys.setprofile(observe_call)
             try:
-                yield SimpleNamespace(app=application, calls=calls, model=model, rag=rag,
+                assert application.chat_handler is not None
+                assert application.agent_system is not None
+                assert application.chat_handler.scientific_references.store is application.agent_state_store
+                assert application.agent_system.state_store is application.agent_state_store
+                sys.setprofile(observe_call)
+                yield SimpleNamespace(app=application, calls=calls, model=model, rag=selected_rag,
                                       admission_calls=admission_calls, admissions=admissions,
                                       claims=claims, protocol_errors=protocol_errors)
             finally:
