@@ -30,6 +30,16 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Model-loop expanded58 is now terminal: author session89924, terminal58e614,
+exit0, **6107 passed, 7 warnings, 916.84s**, no failures/skips. All75 unique
+source/test/preservation/runner hashes match before/after; manifest remains
+`a676a81cc3096e09dc5dbd5d8836ad02909fa5be416a4c077d5a50db1e7b8be0`.
+The original four cancellation failures remain in the own plan. Parent released
+the author slot and explicitly transferred it to fresh Halley QUALITY for the
+identical ordered58, with all code and own plan frozen. This transfer is not a
+claimed fresh test result. Remote read-only audit confirms main still5d36eee and
+zero open PRs at this checkpoint; the current loop is not committed/published.
+
 Parent follow-up source audit: the publication donor `2c7fd00` is NOT a blind
 replacement for the current loop. It replaces the old tail boundary and adds an
 outer failure-only publication correction; its cancellation tests expect a
