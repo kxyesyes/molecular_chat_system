@@ -46,6 +46,32 @@ B_PRODUCT_CATALOG = tuple(
 )
 
 
+def reviewed_b1_wiring(adapters):
+    """Validate installed canonical adapters only; never probe scientific assets."""
+    from src.agent.tooling.analysis_contract import AnalysisToolAdapter
+    from src.agent.tooling.activity_contract import ActivityToolAdapter
+    from src.agent.tooling.target_contract import TargetToolAdapter
+    from src.agent.tooling.rag_contract import RAGToolAdapter
+    from src.agent.tooling.factory import TOOL_AGENT_OWNERS
+    expected = {
+        'property_calculator': AnalysisToolAdapter,
+        'drug_likeness_assessment': AnalysisToolAdapter,
+        'admet_predictor': AnalysisToolAdapter,
+        'activity_predictor': ActivityToolAdapter,
+        'target_database_search': TargetToolAdapter,
+        'reverse_target_predictor': TargetToolAdapter,
+        'rag_search': RAGToolAdapter,
+    }
+    for name, cls in expected.items():
+        adapter = adapters.get(name)
+        if (type(adapter) is not cls or adapter.spec.name != name
+                or adapter.tool.name != name
+                or adapter.spec.owner_agents != {TOOL_AGENT_OWNERS[name]}
+                or adapter.spec.side_effects != 'none' or adapter.spec.idempotent is not True):
+            raise ValueError(CAPABILITY_ERROR)
+    return B1_TOOLS
+
+
 def _names(value):
     if type(value) is not frozenset or len(value) > 256:
         raise ValueError(CAPABILITY_ERROR)

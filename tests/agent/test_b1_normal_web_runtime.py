@@ -1,5 +1,6 @@
-"""Task1 normal-entry behavioral RED; offline HTTP is not live inference."""
+"""Task1 gap regressions and Task4 mounted B1 entry; HTTP is offline, not live inference."""
 import asyncio
+from copy import deepcopy
 from contextlib import nullcontext
 import json
 import sys
@@ -9,21 +10,290 @@ import pytest
 from ordinary_chat_fixtures import actual_app, ActualSocket, cookie_for, result_of
 from src.rag.service import RAGSystem as ActualRAGSystem
 from b1_normal_web_fixtures import temporary_b1_sources
+from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION, B1_TOOLS
+
+
+def actual_b1_factory(sources):
+    def factory(model, *, rag_system):
+        from src.agent.tools import get_core_tools
+        from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
+        from src.agent.tools.target_database_tool import TargetDatabaseTool
+        assert rag_system is sources.rag
+        return [*get_core_tools(model), ActivityPredictorTool(), TargetDatabaseTool(),
+                sources.rag_tool, sources.reverse_tool]
+    return factory
 
 
 @pytest.mark.parametrize('wire', ['native', 'json'])
-def test_normal_entry_b1_retrieval_gap(actual_app, wire):
-    """Exercise today's mounted /ws without a not-yet-existing B profile."""
-    async def scenario():
-        async with actual_app(mode='decision_a2', wire=wire,
-                              ordinary_policy='semantic_v1') as b:
+def test_b1_ready_advertises_installed_not_ready(actual_app, tmp_path, monkeypatch, wire):
+    with temporary_b1_sources(tmp_path / 'sources', monkeypatch) as sources:
+        async def run():
+            async with actual_app(mode='decision_a2', wire=wire, ordinary_policy='semantic_v1',
+                    binding_profile=B1_PROFILE_REVISION, tool_factory=actual_b1_factory(sources),
+                    rag_service=sources.rag) as b:
+                async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                    ready = await socket.ready()
+                    assert ready['normal_chat_mode'] == 'decision_a2'
+                    assert ready['capabilities']['rag_retrieval'] is True
+                    assert ready['capabilities']['rag_count'] == 3
+                    assert set(ready['capabilities']['scientific_tools']) == B1_TOOLS
+                assert all(f.readiness == 'unknown' for f in b.app.ordinary_capability_base.features)
+                assert not b.calls and not sources.embedding_requests
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize('wire', ['native', 'json'])
+@pytest.mark.parametrize('kind', ['property', 'rag', 'chat'])
+def test_b1_actual_mounted_entry(actual_app, tmp_path, monkeypatch, wire, kind):
+    query = {'property': '计算性质；SMILES: CCO',
+             'rag': '使用 RAG 检索本地分子库中与乙醇相关的分子',
+             'chat': '你好，我想了解一下这个系统能做什么？'}[kind]
+    _actual_entry_scenario(actual_app, tmp_path, monkeypatch, wire, kind, query)
+
+
+def _actual_entry_scenario(actual_app, tmp_path, monkeypatch, wire, kind, query):
+    from ordinary_chat_fixtures import intent_http_response, chat_decision
+    from test_decision_loop import tool, finish
+    with temporary_b1_sources(tmp_path / 'sources', monkeypatch) as sources:
+        rag_invocations = []
+        rag_outputs = []
+        execute_rag = sources.rag_tool.execute
+
+        def observe_rag(*args, **kwargs):
+            rag_invocations.append((args, kwargs))
+            output = execute_rag(*args, **kwargs)
+            rag_outputs.append(deepcopy(output))
+            return output
+
+        monkeypatch.setattr(sources.rag_tool, 'execute', observe_rag)
+        async def run():
+            count = 0
+            async def respond(payload):
+                nonlocal count
+                count += 1
+                if kind == 'chat':
+                    return (intent_http_response(wire=wire) if count == 1 else
+                            chat_decision('本系统支持分子性质等功能；分子性质可用性未知。'))
+                role = 'tool' if wire == 'native' else 'user'
+                observations = [json.loads(m['content']) for m in payload['messages']
+                                if m['role'] == role and m['content'].startswith('{')]
+                if not observations:
+                    decision = tool().model_dump()
+                    decision['tool_name'] = 'rag_search' if kind == 'rag' else 'property_calculator'
+                    return decision
+                return finish([o['quality']['evidence_id'] for o in observations]).model_dump()
+            async with actual_app(mode='decision_a2', wire=wire, ordinary_policy='semantic_v1',
+                    binding_profile=B1_PROFILE_REVISION, tool_factory=actual_b1_factory(sources),
+                    rag_service=sources.rag, respond=respond) as b:
+                async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                    await socket.ready()
+                    result = result_of(await socket.turn(dict(message=query,
+                        enable_tools=kind == 'property', enable_rag=kind != 'property', rag_count=3)))
+                    if b.protocol_errors:
+                        raise b.protocol_errors[0]
+                    assert result['success'] is True, result['metadata']
+                    assert result['status'] == 'completed'
+                    assert len(b.calls) == 2
+                    executions = b.app.agent_state_store.get_tool_executions(result['trace_id'])
+                    assert len(executions) == (0 if kind == 'chat' else 1)
+                    durable = b.app.agent_state_store.get_run(result['trace_id'])
+                    binding = durable['metadata']['ordinary_admission']['binding']
+                    assert binding['profile_revision'] == B1_PROFILE_REVISION
+                    if kind == 'rag':
+                        assert len(rag_invocations) == 1
+                        assert len(sources.embedding_requests) == 1
+                        assert sources.embedding_requests[0]['prompt'] == query
+                        assert executions[0]['tool_name'] == 'rag_search'
+                        assert executions[0]['input'] == {'query': query}
+                        observed, = result['tool_result_sequence']
+                        assert observed['tool_name'] == 'rag_search'
+                        assert observed['quality']['validated'] is True
+                        receipt = observed['evidence'][0]['retrieval_receipt']
+                        assert receipt['diagnostics']['status'] == 'valid_hits'
+                        assert receipt['diagnostics']['index_search_executed'] is True
+                        assert receipt['diagnostics']['requested_k'] == 3
+                        assert observed['data']
+                        # SQLite retains full producer evidence independently of
+                        # the Web transport's existing display sanitization.
+                        persisted = executions[0]['output']
+                        produced, = rag_outputs
+                        assert produced['success'] is True
+                        for field in ('data', 'evidence'):
+                            assert persisted[field] == produced[field]
+                        assert persisted['quality']['validated'] is True
+                        assert persisted['quality']['evidence_id'] == observed['quality']['evidence_id']
+                    else:
+                        assert not rag_invocations
+                        assert not sources.embedding_requests
+                    return result
+        return asyncio.run(run())
+
+
+@pytest.mark.parametrize('wire', ['native', 'json'])
+@pytest.mark.parametrize('shape', ['unicode', 'escaped', 'exact', 'over'])
+def test_b1_intent_prefix_preserves_validated_content(actual_app, tmp_path, monkeypatch, wire, shape):
+    from ordinary_chat_fixtures import intent_http_response, chat_decision
+    from src.web import decision_runtime
+    from src.agent.harness.decision_policy import DecisionBoundaryError
+    original_prefix = decision_runtime.history_prefix
+    prefix_errors = []
+    def observe_prefix(*args, **kwargs):
+        try:
+            return original_prefix(*args, **kwargs)
+        except DecisionBoundaryError as exc:
+            prefix_errors.append(str(exc))
+            raise
+    monkeypatch.setattr(decision_runtime, 'history_prefix', observe_prefix)
+    queries = {'unicode': '你' * 5461, 'escaped': '\\' * 9000,
+               'exact': 'a' * 16384, 'over': 'a' * 16385}
+    query = queries[shape]
+    assert len(json.dumps({'message': query}, ensure_ascii=False).encode()) < 24 * 1024
+    if shape != 'over':
+        assert len(query.encode()) <= 16 * 1024
+        assert len(json.dumps(query).encode()) > 16 * 1024
+    with temporary_b1_sources(tmp_path / 'sources', monkeypatch) as sources:
+        async def run():
+            async def respond(payload):
+                if any('Classify the entire unchanged user request' in m['content']
+                       for m in payload['messages'] if m['role'] == 'system'):
+                    return intent_http_response('conversation', wire=wire)
+                return chat_decision('你好，很高兴与你交流。')
+            async with actual_app(mode='decision_a2', wire=wire, ordinary_policy='semantic_v1',
+                    binding_profile=B1_PROFILE_REVISION, tool_factory=actual_b1_factory(sources),
+                    rag_service=sources.rag, respond=respond) as b:
+                async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                    await socket.ready()
+                    prior = result_of(await socket.turn({'message': '你好'}))
+                    assert prior['success'] is True, prior['metadata']
+                    before = len(b.calls)
+                    result = result_of(await socket.turn({'message': query}))
+                    if shape == 'over':
+                        assert result['status'] == 'rejected'
+                        assert len(b.calls) == before
+                    else:
+                        assert prefix_errors == [], {'prefix_errors': prefix_errors,
+                                                      'new_http_requests': len(b.calls) - before}
+                        assert len(b.calls) == before + 2
+                        for call in b.calls[before:]:
+                            assert [m for m in call['messages'] if m['role'] != 'system'] == [
+                                {'role': 'user', 'content': '你好'},
+                                {'role': 'assistant', 'content': prior['final_answer']},
+                                {'role': 'user', 'content': query}]
+                        assert not any(m['content'] == '' for call in b.calls for m in call['messages'])
+                        assert result['success'] is True, {
+                            'stop_reason': result['metadata'].get('stop_reason'),
+                            'new_http_requests': len(b.calls) - before}
+                    assert not sources.embedding_requests
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize('wire', ['native', 'json'])
+def test_b1_unavailable_sources_do_not_block_ordinary_chat(actual_app, tmp_path, monkeypatch, wire):
+    from ordinary_chat_fixtures import intent_http_response, chat_decision
+    from test_b1_normal_web_lifecycle import b1_pool
+    source = ActualRAGSystem({'rag': {'csv_path': str(tmp_path / 'absent.csv'),
+                                   'vector_store_path': str(tmp_path / 'absent-index')}})
+    async def run():
+        async def respond(payload):
+            if any('Classify the entire unchanged user request' in m['content']
+                   for m in payload['messages'] if m['role'] == 'system'):
+                return intent_http_response('capability', wire=wire)
+            return chat_decision('本系统支持分子性质等功能；分子性质可用性未知。')
+        async with actual_app(mode='decision_a2', wire=wire, ordinary_policy='semantic_v1',
+                binding_profile=B1_PROFILE_REVISION, tool_factory=b1_pool,
+                rag_service=source, respond=respond) as b:
+            assert not source.is_initialized
             async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                 await socket.ready()
-                result = result_of(await socket.turn({
-                    'message': '使用 RAG 检索本地分子库中与乙醇相关的分子',
-                    'enable_tools': False, 'enable_rag': True, 'rag_count': 3}))
-                assert result['metadata'].get('stop_reason') != 'unsupported_scientific_request'
-    asyncio.run(scenario())
+                result = result_of(await socket.turn({'message': '你好，我想了解一下这个系统能做什么？',
+                                                      'enable_rag': True, 'enable_tools': False}))
+                assert result['success'] is True, result['metadata']
+                assert len(b.calls) == 2
+                assert not source.is_initialized
+                assert b.app.agent_system.tools['activity_predictor']._predictor is None
+                assert b.app.agent_system.tools['reverse_target_predictor']._predictor is None
+                assert b.app.agent_state_store.get_tool_executions(result['trace_id']) == []
+        assert source.index_status == 'closed'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('wire', ['native', 'json'])
+def test_b1_one_captured_view_survives_queued_writer(actual_app, tmp_path, monkeypatch, wire):
+    from ordinary_chat_fixtures import intent_http_response, chat_decision
+    from src.agent.contracts.ordinary_admission import capability_digest
+    from src.web import decision_request, decision_runtime
+    from src.agent.harness import decision_loop
+    with temporary_b1_sources(tmp_path / 'sources', monkeypatch) as sources:
+        async def run():
+            entered, release = asyncio.Event(), asyncio.Event()
+            async def respond(payload):
+                if any('Classify the entire unchanged user request' in m['content']
+                       for m in payload['messages'] if m['role'] == 'system'):
+                    entered.set()
+                    await release.wait()
+                    return intent_http_response(wire=wire)
+                return chat_decision('本系统支持分子性质等功能；分子性质可用性未知。')
+            async with actual_app(mode='decision_a2', wire=wire, ordinary_policy='semantic_v1',
+                    binding_profile=B1_PROFILE_REVISION, tool_factory=actual_b1_factory(sources),
+                    rag_service=sources.rag, respond=respond) as b:
+                old = b.app.ordinary_capability_base
+                snapshots, preparations, loops = [], [], []
+                previous = sys.getprofile()
+                def observe(frame, event, value):
+                    if event == 'return' and frame.f_code is decision_runtime.WebDecisionRuntime._snapshot.__code__:
+                        snapshots.append(value)
+                    if event == 'call' and frame.f_code is decision_request.prepare_with_intent.__code__:
+                        preparations.append(frame.f_locals['capability_snapshot'])
+                    if event == 'call' and frame.f_code is decision_loop.ModelDecisionLoop.__init__.__code__:
+                        loops.append(frame.f_locals['binding_profile'])
+                    if previous:
+                        previous(frame, event, value)
+                sys.setprofile(observe)
+                writer = turn = None
+                try:
+                    async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                        await socket.ready()
+                        turn = asyncio.create_task(socket.turn({'message': '你好，我想了解一下这个系统能做什么？',
+                                                               'enable_tools': False, 'enable_rag': True}))
+                        await asyncio.wait_for(entered.wait(), 3)
+                        writer = asyncio.create_task(b.app._replace_ordinary_capability_base(old))
+                        await asyncio.sleep(0)
+                        assert b.app.model_request_gate._writers == 1
+                        assert b.app.model_request_gate._readers == 1
+                        assert not writer.done()
+                        release.set()
+                        result = result_of(await turn)
+                        assert result['success'] is True, result['metadata']
+                        await asyncio.wait_for(writer, 3)
+                        assert len(snapshots) == len(preparations) == 1
+                        view = snapshots[0]
+                        assert preparations[0] is view and loops == [B1_PROFILE_REVISION]
+                        assert view.capability_generation == old.capability_generation
+                        assert b.app.capability_generation != old.capability_generation
+                        assert {f.id for f in view.features if f.permitted} == {'ordinary_chat', 'rag_retrieval'}
+                        for call, marker in zip(b.calls, [
+                                'Trusted product/runtime facts (registration is not readiness): ',
+                                'Frozen ordinary capabilities: ']):
+                            content = next(m['content'] for m in call['messages']
+                                           if m['role'] == 'system' and marker in m['content']).split(marker, 1)[1]
+                            encoded, _ = json.JSONDecoder().raw_decode(content)
+                            assert encoded == view.model_dump(mode='json')
+                        saved = b.app.agent_state_store.get_run(result['trace_id'])
+                        assert saved['metadata']['ordinary_admission']['binding']['capability_digest'] == capability_digest(view)
+                finally:
+                    release.set()
+                    await asyncio.gather(*(t for t in (writer, turn) if t), return_exceptions=True)
+                    sys.setprofile(previous)
+        asyncio.run(run())
+
+
+@pytest.mark.parametrize('wire', ['native', 'json'])
+def test_normal_entry_b1_retrieval_gap(actual_app, tmp_path, monkeypatch, wire):
+    """The original gap expectation now uses the approved explicit B1 assembly."""
+    result = _actual_entry_scenario(
+        actual_app, tmp_path, monkeypatch, wire, 'rag',
+        '使用 RAG 检索本地分子库中与乙醇相关的分子')
+    assert result['metadata'].get('stop_reason') != 'unsupported_scientific_request'
 
 
 @pytest.mark.parametrize('empty', [False, True])

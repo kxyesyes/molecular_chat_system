@@ -14,7 +14,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Reverse receipt consumer | Draft PR88 head99aec97; SOURCE/QUALITY approve, aligned-main17-module1926 passed83.25s after independent alignment review | CI36253262488 queued at publication; no merge until fresh exact-head gates |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 corrected final865 passed67.60s; SOURCE approves current seven-file freeze; Arendt owns sole local slot for QUALITY/independent repeat | Fresh QUALITY and independent six-module union; Tasks5–8 still pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally complete: SOURCE/QUALITY approve, worker865 passed67.60s and independent865 passed65.61s; no activation | Task5 same-socket continuation released after commit; Tasks6–8 still pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -23,6 +23,13 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Task4 final SOURCE Beauvoir and fresh QUALITY Arendt approve seven-file freeze.
+Independent5223/3e9a73 exactsixunion passed865/7 warnings65.61s,exit0; all hashes
+and runner unchanged. Parent seven-file in-memory compile/diff passes. Local
+Task4 complete; fresh worker may take Task5 same-socket original-journal resume
+under existing approved plan. No current-source/production/default activation or
+P7/P8 completion claim. PR88 exact99aec97 CI36253262488 remains in progress.
 
 Reverse consumer49a74b1 aligned actualmainb33e2c0 as70816d2, with Noether's
 independent raw-delta/blob/interaction approval. Parent17 union20682/766f5d passed

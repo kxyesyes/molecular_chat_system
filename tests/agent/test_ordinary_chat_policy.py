@@ -50,6 +50,159 @@ def facts(query='请介绍这个平台', *, replay=False):
     return dict(query=query, context=context, capability_snapshot=snapshot(), session=session)
 
 
+def b1_display_facts(query, *, replay=False):
+    from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION, B1_TOOLS
+    args = facts(query, replay=replay)
+    args['capability_snapshot'] = snapshot(binding_profile=B1_PROFILE_REVISION,
+        registered_names=B1_TOOLS, wired_names=B1_TOOLS, permitted_names=B1_TOOLS,
+        original_four_profile=False, rag_enabled=True)
+    return args
+
+
+@pytest.mark.parametrize('replay', [False, True])
+@pytest.mark.parametrize('query', ['a' * 16384, '你' * 5461 + 'a', '\\' * 9000],
+                         ids=['ascii-exact', 'unicode-exact', 'escaped'])
+def test_b1_display_accepts_content_bound_not_legacy_json_bound(query, replay):
+    assert len(query.encode('utf-8')) <= 16384
+    assert 16384 < len(json.dumps(query, ensure_ascii=False).encode('utf-8')) < 24576
+    text = '你好，可以继续讨论一般概念。'
+    assert policy().validate_ordinary_display(text, **b1_display_facts(query, replay=replay)) is text
+
+
+@pytest.mark.parametrize('replay', [False, True])
+@pytest.mark.parametrize('query', ['a' * 16385, '你' * 5461 + 'aa'],
+                         ids=['ascii-over', 'unicode-over'])
+def test_b1_display_rejects_one_byte_over_content_bound(query, replay):
+    assert len(query.encode('utf-8')) == 16385
+    p = policy()
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display('你好。', **b1_display_facts(query, replay=replay))
+    assert caught.value.code == 'chat_output_unsafe'
+
+
+@pytest.mark.parametrize('replay', [False, True])
+@pytest.mark.parametrize('query', ['a' * 16384, '你' * 5461 + 'a', '\\' * 9000],
+                         ids=['ascii-exact', 'unicode-exact', 'escaped'])
+def test_original_display_keeps_serialized_query_limit(query, replay):
+    p = policy()
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display('你好。', **facts(query, replay=replay))
+    assert caught.value.code == 'chat_output_unsafe'
+
+
+@pytest.mark.parametrize('profile,catalog', [
+    ('ordinary-semantic-b1-v1', 'ordinary-product-v1'),
+    ('ordinary-semantic-b1-v1', 'unknown-catalog'),
+    ('ordinary-semantic-b2-v1', 'ordinary-product-b-v1'),
+    ('unknown-profile', 'ordinary-product-b-v1'),
+    ('ordinary-semantic-original-four-v1', 'ordinary-product-b-v1'),
+])
+def test_display_content_policy_requires_exact_b1_profile_catalog(profile, catalog):
+    p = policy()
+    args = b1_display_facts('a' * 16384)
+    args['capability_snapshot'] = args['capability_snapshot'].model_copy(update={
+        'profile_revision': profile, 'catalog_revision': catalog})
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display('你好。', **args)
+    assert caught.value.code == 'chat_output_unsafe'
+
+
+@pytest.mark.parametrize('bad', ['native_type', 'version', 'subclass', 'dict'])
+def test_b1_display_validates_snapshot_before_selecting_content_policy(monkeypatch, bad):
+    p = policy()
+    args = b1_display_facts('a' * 16384)
+    view = args['capability_snapshot']
+    if bad == 'native_type':
+        feature = view.features[0].model_copy(update={'wired': 1})
+        view = view.model_copy(update={'features': (feature, *view.features[1:])})
+    elif bad == 'version':
+        view = view.model_copy(update={'version': '2'})
+    elif bad == 'subclass':
+        class UntrustedSnapshot(CapabilitySnapshot):
+            pass
+        view = UntrustedSnapshot(**view.model_dump())
+    else:
+        view = view.model_dump()
+    args['capability_snapshot'] = view
+    calls = []
+    original = p.context_value
+    def observe(*positional, **keywords):
+        calls.append(keywords)
+        return original(*positional, **keywords)
+    monkeypatch.setattr(p, 'context_value', observe)
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display('你好。', **args)
+    assert caught.value.code == 'chat_capability_conflict'
+    assert calls == []
+
+
+@pytest.mark.parametrize('case,expected', [
+    ('invalid_text', 'chat_output_unsafe'),
+    ('invalid_query', 'chat_output_unsafe'),
+    ('invalid_snapshot_and_context', 'chat_capability_conflict'),
+    ('invalid_context_and_claim', 'chat_output_unsafe'),
+])
+@pytest.mark.parametrize('b1', [False, True])
+def test_display_preserves_existing_error_priority(case, expected, b1):
+    p = policy()
+    args = b1_display_facts('你好') if b1 else facts('你好')
+    text = '你好。'
+    if case in {'invalid_text', 'invalid_query', 'invalid_snapshot_and_context'}:
+        args['capability_snapshot'] = None
+    if case == 'invalid_text':
+        text = ''
+    elif case == 'invalid_query':
+        args['query'] = ''
+    else:
+        args['session'].context = replace(args['context'], user_id='different-owner')
+        if case == 'invalid_context_and_claim':
+            text = 'logP = 3.2'
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display(text, **args)
+    assert caught.value.code == expected
+
+
+@pytest.mark.parametrize('replay', [False, True])
+@pytest.mark.parametrize('mutation', ['query', 'owner', 'whole_context', 'ledger'])
+def test_b1_display_content_policy_preserves_all_context_guards(replay, mutation):
+    p = policy()
+    args = b1_display_facts('a' * 16384, replay=replay)
+    if mutation == 'query':
+        args['session'].context = replace(args['context'], query='b' * 16384)
+    elif mutation == 'owner':
+        args['session'].context = replace(args['context'], user_id='different-owner')
+    elif mutation == 'whole_context':
+        args['context'].metadata = {'padding': 'x' * 65536}
+        args['session'].context = replace(args['context'])
+    else:
+        args['session'].ledger._records['unaccepted'] = {}
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display('你好。', **args)
+    assert caught.value.code == ('chat_claim_not_grounded' if mutation == 'ledger' else 'chat_output_unsafe')
+
+
+def test_b1_display_keeps_view_json_limit_outside_web_envelope():
+    p = policy()
+    query = '\\' * 16384
+    assert len(query.encode('utf-8')) == 16384
+    assert len(json.dumps(query).encode('utf-8')) > 32768
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display('你好。', **b1_display_facts(query))
+    assert caught.value.code == 'chat_output_unsafe'
+
+
+@pytest.mark.parametrize('text,expected', [
+    ('logP = 3.2', 'chat_claim_not_grounded'),
+    ('活性预测模型当前可用。', 'chat_capability_conflict'),
+    ('<script>run()</script>', 'chat_output_unsafe'),
+])
+def test_b1_content_policy_does_not_relax_output_guards(text, expected):
+    p = policy()
+    with pytest.raises(p.OrdinaryChatOutputError) as caught:
+        p.validate_ordinary_display(text, **b1_display_facts('a' * 16384))
+    assert caught.value.code == expected
+
+
 def parsed_text(action, text):
     fields = (dict(text=text, response_kind='chat', evidence_ids=[]) if action == 'finish'
               else dict(question=text, missing_fields=['topic']))

@@ -434,30 +434,46 @@ failed run exited1; passing runs exited0. Earlier failures remain evidence, not
 reclassified successes. Final independent reviewer receives the fresh runtime
 hash rather than the pre-correction hash. No real external provider was invoked.
 
-- [ ] RED `test_b1_server_profile_assembly_is_closed`: B requires async
+- [x] RED `test_b1_server_profile_assembly_is_closed`: B requires async
   decision_a2/semantic_v1, exact seven reviewed canonical adapters, distinct feature
   inverse mapping. B2/unknown/missing wiring rejects before publication; constructor
   failure does not leak any acquired owner. Registration/readiness are not consent.
-- [ ] Add the optional server assembly/profile projection seams in design §3.
+- [x] Add the optional server assembly/profile projection seams in design §3.
   `_prepare_semantic` captures one base/history under existing reader; project
   tools/RAG flags independently. Thread this exact view through assessment,
   prepare_with_intent, carry, loop constructor and display/fingerprint. No settings
   endpoint/CLI/env selector or default activation. Keep direct legacy dispatch closed.
-- [ ] B intent-prefix RED must expose current history_prefix serialized-query
+- [x] B intent-prefix RED must expose current history_prefix serialized-query
   rejection, not a stubbed transport success. After actual B content/envelope
   validation, obtain unchanged bounded system/history from history_prefix with an
   empty current-query slot and replace only that slot with the exact validated
   query before actual transport validation. Assert no empty placeholder escapes.
   Original-profile helper calls and all historical limits remain unchanged.
-- [ ] RED then GREEN `test_b1_partial_assembly_and_writer_rollback`: fail after each
+- [x] RED then GREEN `test_b1_partial_assembly_and_writer_rollback`: fail after each
   acquired owner, fail/cancel close, deduplicate tool pool, fail after partial main
   consumer setter. Assert exactly-once attempted owned cleanup, unchanged old
   model/capability pair on failed publication, untouched gmm and no nested writer.
   Old model closes only after physical consumers settle.
-- [ ] Ready frame remains normal_chat_mode=decision_a2; B advertises installed
+- [x] Ready frame remains normal_chat_mode=decision_a2; B advertises installed
   seven-tool wiring, local retrieval and fixed rag_count3, not runtime readiness.
   Source unavailable must not prevent ordinary capability/general conversation.
-- [ ] Run `python -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_b1_normal_web_runtime.py tests/agent/test_b1_normal_web_lifecycle.py tests/agent/test_ordinary_app_assembly.py tests/agent/test_decision_binding_profiles.py tests/agent/test_ordinary_capabilities.py`.
+- [x] Run `python -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_b1_normal_web_runtime.py tests/agent/test_b1_normal_web_lifecycle.py tests/agent/test_ordinary_app_assembly.py tests/agent/test_decision_binding_profiles.py tests/agent/test_ordinary_capabilities.py tests/agent/test_ordinary_chat_policy.py`.
+
+### Task4 independent final gate and Task5 release
+
+Beauvoir independent SOURCE/SPEC approves the final seven-file freeze, including
+the corrected original-probe migration. Arendt fresh QUALITY approves and ran the
+exact six-module command independently:865 passed,7 warnings65.61s,exit0,
+session5223/terminal3e9a73. All seven code/test hashes and launcher hash match
+before/after. Parent source inspection, in-memory compilation of seven files and
+diff check pass. Documentation-only HEAD advancement does not alter that freeze.
+Earlier actual failures above remain recorded; no timeout/assertion relaxation.
+
+Task4 is locally complete, not yet a published normal-Web release. Release only
+Task5's three existing production seams and additive continuation tests to a fresh
+worker after this commit. Preserve Task3 core tests and use the actual mounted
+socket/temporary-source fixtures; no Task6 frontend, default activation, external
+provider/science assets or changed runner. Independent test slot is released.
 
 ## Task 5 — same-socket original-journal resume and pre-CAS rejection
 

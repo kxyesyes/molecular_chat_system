@@ -119,7 +119,12 @@ class MolecularChatApp:
                        decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
 
     @staticmethod
-    def _validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy):
+    def _validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy, binding_profile=None):
+        from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
+        if binding_profile is not None and (
+                type(binding_profile) is not str or binding_profile != B1_PROFILE_REVISION
+                or normal_chat_mode != 'decision_a2' or ordinary_chat_policy != 'semantic_v1'):
+            raise ValueError('Invalid server binding profile')
         if (type(normal_chat_mode) is not str or normal_chat_mode not in {'legacy', 'decision_a2'}
                 or type(decision_wire_mode) is not str or decision_wire_mode not in {'native', 'json'}
                 or type(ordinary_chat_policy) is not str or ordinary_chat_policy not in {'a1_closed', 'semantic_v1'}):
@@ -130,9 +135,9 @@ class MolecularChatApp:
     @classmethod
     async def create_async(cls, config_path: str = "config/ollama_config.yaml", *,
                            normal_chat_mode='legacy', decision_wire_mode='native',
-                           ordinary_chat_policy='a1_closed'):
+                           ordinary_chat_policy='a1_closed', binding_profile=None):
         """Assemble only; never start initialize/watcher/index or preload work."""
-        cls._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
+        cls._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy, binding_profile)
         instance = cls.__new__(cls)
         stack = AsyncExitStack()
         instance._assembly_stack = stack
@@ -140,7 +145,8 @@ class MolecularChatApp:
         instance._ordinary_owned_tools = ()
         try:
             instance._assemble(config_path, normal_chat_mode=normal_chat_mode,
-                               decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
+                               decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy,
+                               binding_profile=binding_profile)
         except BaseException:
             try:
                 await finish_on_cancel(stack.aclose())
@@ -185,7 +191,10 @@ class MolecularChatApp:
                     ('propose_ordinary_intent', 'decide', 'generate', 'stream_generate', 'close'))):
                 raise ValueError('Semantic assembly requires the approved intent adapter')
 
-    def _assemble(self, config_path, *, normal_chat_mode, decision_wire_mode, ordinary_chat_policy):
+    def _assemble(self, config_path, *, normal_chat_mode, decision_wire_mode, ordinary_chat_policy,
+                  binding_profile=None):
+        self._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy, binding_profile)
+        self.binding_profile = binding_profile
         self.ordinary_chat_policy = ordinary_chat_policy
         self.capability_generation = uuid4().hex
         self.ordinary_capability_base = None
@@ -299,6 +308,17 @@ class MolecularChatApp:
         """Reviewed assembly facts only, never runtime readiness or authority."""
         from .ordinary_capabilities import ORIGINAL_FOUR, build_capability_snapshot
         self._validate_ordinary_adapter(config, model)
+        if self.binding_profile is not None:
+            from .ordinary_capabilities import reviewed_b1_wiring
+            names = reviewed_b1_wiring(self.agent_tool_registry.as_mapping())
+            return build_capability_snapshot(
+                registered_names=frozenset(self.agent_tool_registry.as_mapping()),
+                provider_descriptor={'provider': config.get('provider'), 'model': model.model_name,
+                                     'mode': self.decision_wire_mode},
+                semantic_profile=True, intent_capable=True, original_four_profile=False,
+                scientific_tools=True, rag_enabled=True, permitted_names=names, wired_names=names,
+                binding_profile=self.binding_profile, model_generation=model_generation,
+                capability_generation=capability_generation)
         return build_capability_snapshot(
             registered_names=frozenset(self.agent_tool_registry.as_mapping()),
             provider_descriptor={'provider': config.get('provider'), 'model': model.model_name,
@@ -308,7 +328,7 @@ class MolecularChatApp:
             model_generation=model_generation, capability_generation=capability_generation)
 
     @staticmethod
-    def project_ordinary_capabilities(base, *, scientific_tools, permitted_names):
+    def project_ordinary_capabilities(base, *, scientific_tools, permitted_names, rag_enabled=False):
         """Project a base captured ONCE under the caller's request lease.
 
         This method never rereads the app/model/registry. Task7B must retain this
@@ -319,6 +339,22 @@ class MolecularChatApp:
         if type(base) is not CapabilitySnapshot:
             raise ValueError(CAPABILITY_ERROR)
         base = CapabilitySnapshot.model_validate(base, strict=True)
+        from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION, B1_TOOLS, TOOL_FEATURE_PAIRS
+        if base.profile_revision == B1_PROFILE_REVISION:
+            inverse = {feature: tool for tool, feature in TOOL_FEATURE_PAIRS}
+            names = frozenset(inverse[f.id] for f in base.features if f.wired and f.id in inverse)
+            if names != B1_TOOLS:
+                raise ValueError(CAPABILITY_ERROR)
+            facts = dict(registered_names=names, wired_names=names,
+                provider_descriptor=base.provider_descriptor.model_dump(),
+                semantic_profile=True, intent_capable=True, original_four_profile=False,
+                binding_profile=B1_PROFILE_REVISION, model_generation=base.model_generation,
+                capability_generation=base.capability_generation)
+            if base != build_capability_snapshot(**facts, scientific_tools=True,
+                    rag_enabled=True, permitted_names=B1_TOOLS):
+                raise ValueError(CAPABILITY_ERROR)
+            return build_capability_snapshot(**facts, scientific_tools=scientific_tools,
+                rag_enabled=rag_enabled, permitted_names=permitted_names)
         facts = dict(registered_names=frozenset(f.id for f in base.features if f.wired),
                      provider_descriptor=base.provider_descriptor.model_dump(),
                      semantic_profile=True, intent_capable=True, original_four_profile=True,
@@ -327,7 +363,8 @@ class MolecularChatApp:
         # as a base. Reuse the reviewed contract/builder, not a second catalog.
         if base != build_capability_snapshot(**facts, scientific_tools=True, permitted_names=ORIGINAL_FOUR):
             raise ValueError(CAPABILITY_ERROR)
-        return build_capability_snapshot(**facts, scientific_tools=scientific_tools, permitted_names=permitted_names)
+        return build_capability_snapshot(**facts, scientific_tools=scientific_tools,
+            permitted_names=permitted_names, rag_enabled=rag_enabled)
 
     async def _replace_ordinary_capability_base(self, base):
         """The only independent base publisher; a pending writer bars readers."""
@@ -356,11 +393,14 @@ class MolecularChatApp:
         acquired_tools = get_all_tools(self.molecular_generator_model, rag_system=self.rag_system)
         # Retain the returned pool before Supervisor or registry construction.
         # Tools borrow the injected generator/RAG; those owners close separately.
-        unique_tools = tuple({id(tool): tool for tool in acquired_tools}.values())
+        owned = {}
+        for tool in acquired_tools:
+            # Register each transfer before advancing a possibly partial iterable.
+            self._register_assembly_owner(tool)
+            owned[id(tool)] = tool
+        unique_tools = tuple(owned.values())
         if getattr(self, '_assembly_stack', None) is not None:
             self._ordinary_owned_tools = unique_tools
-        for tool in unique_tools:
-            self._register_assembly_owner(tool)
         tools = {tool.name: tool for tool in unique_tools}
         return SupervisorAgent(
             tools=tools,

@@ -12,6 +12,7 @@ import re
 import unicodedata
 
 from src.agent.contracts.ordinary_admission import _snapshot, bounded_view
+from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
 from src.agent.evidence import EvidenceLedger
 from .decision_bounds import context_value
 
@@ -297,7 +298,7 @@ def _capability_conflict(view, snapshot):
     return False
 
 
-def _session_facts(query, context, session):
+def _session_facts(query, context, session, *, query_content_bytes=False):
     """Reviewed live/replay interface: context/results/outputs/ledger only.
 
     Plain fields are read, never Session callbacks. The empty EvidenceLedger's
@@ -306,10 +307,10 @@ def _session_facts(query, context, session):
     No .tools/.dynamic/.started projection is required for continuation replay.
     """
     try:
-        value = context_value(context)
+        value = context_value(context, query_content_bytes=query_content_bytes)
         bounded_view(value, max_bytes=65536, reason=_UNSAFE)
         fields = vars(session)
-        session_context = context_value(fields['context'])
+        session_context = context_value(fields['context'], query_content_bytes=query_content_bytes)
         bounded_view(session_context, max_bytes=65536, reason=_UNSAFE)
         if value != session_context or query != context.query:
             raise OrdinaryChatOutputError(_UNSAFE)
@@ -344,7 +345,11 @@ def validate_ordinary_display(text, *, query, context, capability_snapshot, sess
     view = _view(text)
     _view(query, maximum=16384)
     snapshot = _capability_snapshot(capability_snapshot)
-    _session_facts(query, context, session)
+    # Select only from the validated server view, never context/model fields.
+    # Every other profile retains the historical serialized-query ceiling.
+    b1_content = (snapshot.profile_revision == B1_PROFILE_REVISION
+                  and snapshot.catalog_revision == 'ordinary-product-b-v1')
+    _session_facts(query, context, session, query_content_bytes=b1_content)
     risk = _scan(view)
     if risk:
         raise OrdinaryChatOutputError(risk)

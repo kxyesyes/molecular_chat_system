@@ -16,6 +16,7 @@ from fastapi import WebSocketDisconnect
 
 from src.agent.contracts import AgentResult, RunOutcome
 from src.agent.contracts.decision import decode_protocol_json, DecisionProtocolError
+from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION, B1_TOOLS
 from src.agent.contracts.ordinary_admission import (
     AdmissionCarryIn, AdmissionExchange, begin_segment, remaining_credit,
     settled_waiting_credit, binding_digest, validate_carry_in,
@@ -219,6 +220,7 @@ class WebDecisionRuntime:
         self.sockets = set()
         self.closing = False
         self.semantic = getattr(application, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1'
+        self.binding_profile = getattr(application, 'binding_profile', None)
         self.timeout_seconds = 300.0
         self.max_model_requests = 16
 
@@ -243,10 +245,12 @@ class WebDecisionRuntime:
         except (ValueError, TypeError):
             raise DecisionAdmissionError('continuation_rejected') from None
 
-    def _snapshot(self, base, generation, capability_generation, enabled):
+    def _snapshot(self, base, generation, capability_generation, enabled, rag_enabled=False):
         try:
             snapshot = self.application.project_ordinary_capabilities(base,
-                scientific_tools=enabled, permitted_names=ORIGINAL_FOUR)
+                scientific_tools=enabled,
+                permitted_names=B1_TOOLS if self.binding_profile == B1_PROFILE_REVISION else ORIGINAL_FOUR,
+                **({'rag_enabled': rag_enabled} if self.binding_profile is not None else {}))
             if (snapshot.model_generation != generation
                     or snapshot.capability_generation != capability_generation):
                 raise ValueError('incoherent captured view')
@@ -278,11 +282,12 @@ class WebDecisionRuntime:
         frozen_history = history_pairs(sender.memory)
         envelope = validate_request_envelope(turn.payload,
             session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id,
-            config_generation=generation)
-        assessment = assess_whole_request(envelope)
+            config_generation=generation, binding_profile=self.binding_profile)
+        assessment = assess_whole_request(envelope, binding_profile=self.binding_profile)
         if assessment.kind == 'blocked':
             raise DecisionAdmissionError(assessment.reason)
-        snapshot = self._snapshot(base, generation, capability_generation, envelope.enable_tools)
+        snapshot = self._snapshot(base, generation, capability_generation,
+                                  envelope.enable_tools, envelope.enable_rag)
         intent = None
         if assessment.kind == 'semantic_candidate':
             self._credit(turn)
@@ -296,7 +301,14 @@ class WebDecisionRuntime:
             turn.intent_requests += 1
             intent_system = {'role': 'system', 'content': _INTENT_INSTRUCTION
                              + encode_observation(snapshot.model_dump(mode='json'))}
-            messages = history_prefix(intent_system, envelope.query, frozen_history, request_kind='chat')
+            # B already validates UTF-8 content and the complete request envelope.
+            # Keep the existing system/history bounds, replacing only the empty
+            # current slot before actual transport validation and dispatch.
+            messages = history_prefix(intent_system,
+                '' if self.binding_profile == B1_PROFILE_REVISION else envelope.query,
+                frozen_history, request_kind='chat')
+            if self.binding_profile == B1_PROFILE_REVISION:
+                messages[-1]['content'] = envelope.query
             self._credit(turn)
             remaining = remaining_credit(turn.segment, now=_now())
             try:
@@ -317,7 +329,8 @@ class WebDecisionRuntime:
             intent = response.intent
         prepared, binding = prepare_with_intent(envelope, assessment, intent,
             history=frozen_history, capability_snapshot=snapshot,
-            intent_requests=turn.intent_requests, references=self.references)
+            intent_requests=turn.intent_requests, references=self.references,
+            binding_profile=self.binding_profile)
         context = prepared.context
         context.memory = frozen_history
         turn.admission_carry = AdmissionCarryIn(turn.segment, turn.intent_requests,
@@ -448,6 +461,7 @@ class WebDecisionRuntime:
                 frozen_context = deepcopy(context)
                 loop = ModelDecisionLoop(model, self.registry, self.store,
                     mode=self.wire_mode, config_generation=generation,
+                    **({'binding_profile': self.binding_profile} if self.binding_profile is not None else {}),
                     **({'timeout_seconds': self.timeout_seconds, 'max_model_requests': self.max_model_requests}
                        if self.semantic else {}))
                 self._credit(turn)
@@ -616,11 +630,14 @@ class WebDecisionRuntime:
                 receiver.cancel()
 
         try:
+            capabilities = {'cancel': True, 'rag_retrieval': False,
+                'scientific_tools': sorted(set(self.registry.as_mapping()) & ORIGINAL_FOUR)}
+            if self.binding_profile == B1_PROFILE_REVISION:
+                # Assembly validates these adapters. This describes installed
+                # wiring, not health, asset readiness or request authorization.
+                capabilities.update(rag_retrieval=True, rag_count=3, scientific_tools=sorted(B1_TOOLS))
             await sender.send({'type': 'connection_ready', 'normal_chat_mode': 'decision_a2',
-                'capabilities': {'cancel': True, 'rag_retrieval': False,
-                                 'scientific_tools': sorted(set(self.registry.as_mapping()) & {
-                                     'property_calculator', 'drug_likeness_assessment',
-                                     'activity_predictor', 'target_database_search'})}})
+                               'capabilities': capabilities})
             while not self.closing:
                 raw = await websocket.receive_text()
                 if not sender.writable:
