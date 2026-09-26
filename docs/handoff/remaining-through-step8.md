@@ -4,6 +4,27 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Task5 latest terminal evidence: union79040 completed2072 passed/3 SWIG warnings
+in590.44s, exit0. Corrected SOURCE/SPEC Locke closed the prior warning-mutation
+P1 but identified a distinct P2: after restore a malformed quality=None correctly
+fails comparison, yet invalidate() reads rejected quality while its failure latch
+is already set; subsequent correction can return None and leave the claimed run
+running. Worker actually reproduced both native/JSON nodes:2 failed5.82s,
+chunkc52c95. Minimal correction must use a sanitized private failed fallback,
+freeze first-error correction arguments, and never depend on rejected live
+observations for diagnostics. Existing Session journal/marker/status/event retries
+remain authoritative; no Session refactor, new authority or repeated CAS. The
+passing union is pre-P2 evidence, not final release approval.
+
+R3's FAISS portability follow-up has actual RED/GREEN: expanded old-class faults
+8 failed/22 passed6.26s (chunk636a31), then concrete owned-class interception
+30 passed5.91s (chunk068337), three SWIG warnings, no skips. This also verifies
+the security test's added pre-fault strict positive baseline. The inherited
+owned-generation test is now exact PR83 head43ea6fd. Fresh R3 SOURCE/SPEC is in
+progress; ten-module regression and independent QUALITY still outstanding. PR83
+attempt2 remains live, not a merged prerequisite. Sole local test slot returned
+to Task5 worker after both R3 runs completed. Packages7/8 remain incomplete.
+
 PR83 follow-up: second workflow36238246328 at43ea6fd cleared root and the other
 five non-Agent/dependent gates. Agent job108393878491 printed9345 passed,
 1 skipped,23858 warnings in598.64s, but the process hit the unchanged600s command
