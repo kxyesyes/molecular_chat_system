@@ -12,6 +12,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
 | Reverse receipt consumer | PR88 MERGED fb62f53 after CI36253262488 success8/8; reviewed/landed tree dd2de4c4 equal; aligned1926 passed | Later load-free current-source hooks remain separate |
+| Attached-source hooks | Independent SOURCE/QUALITY approve current-main extraction; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 head3d6a872 published | CI36255095764 in progress at latest observation; fresh remote gates and merge pending |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d: SOURCE/QUALITY approve, worker865 passed67.60s and independent865 passed65.61s; no activation | Linnaeus implements Task5 same-socket continuation and owns sole local scientific test slot; Tasks6–8 still pending |
@@ -23,6 +24,22 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Source hooks committed3d6a872184c6b4e76b408943ee956440654d108f and published as
+draft PR89. Independent Peirce exact nine-module run96270 terminated exit0 with
+1813 passed,zero failures/errors/skips,3 SWIG warnings67.91s; all hashes unchanged.
+Parent1813 passed69.72s and independent SOURCE/QUALITY approve the same code/test
+freeze. CI36255095764 is confirmed in_progress, not a pass. Linnaeus explicitly
+received the released sole local scientific test slot for full Task5 verification.
+No live models, activation, deployment, or P7/P8 completion is inferred.
+
+Load-free source-hook integration is extracted into current-source-hook-integration,
+not copied as whole historical tool files. Parent verified435ae32 production hunks
+and exact historical test/plan blobs, preserving PR87/88 source/consumer guards.
+Three Python files compile in memory; new approved-launcher copy differs only in
+literal REPO. Archimedes independently reviews source; no current-main tests yet,
+since normal-Web Task5 still owns the local slot. No execution/activation change
+is inferred from adding these future caller hooks.
 
 2026-09-27: PR88 reviewed99aec97 CI36253262488 passed8/8; Agent9801 passed,
 1 skipped,23858 warnings575.08s; root2873 passed,75 skipped,5 warnings237.74s.
