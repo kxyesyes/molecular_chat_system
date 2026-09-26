@@ -17,7 +17,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 corrected SOURCE approves stronger controls; independent union461 passed1 failed624.40s | JSON RAG resume hit fixture3s receive timeout, cause UNKNOWN; Raman owns bounded diagnostic slot. Task5 QUALITY and Tasks6–8 remain pending |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
-| Target execution guard integration | PR91 oldheadf1fc421 CI36261062523 passed9/9; localac34413 aligned to actual PR89 landing; Confucius SOURCE approves; parent joint16 running54858 | Current regression/fresh QUALITY/current-head9CI required; not yet merged |
+| Target execution guard integration | PR91 currentheadc2125a6 published; Confucius SOURCE/McClintock QUALITY approve; parent2031 passed203.63s, independent2031 passed163.97s | Exact-head CI36262868730 in_progress; all9checks/review/merge gates pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -26,6 +26,16 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR91 aligned source passed the exact16-module union twice: parent54858 completed
+2031 passed3 warnings203.63s, independent97501/62a661 completed2031 passed3
+warnings163.97s; runner/process exit0 for both, fixed source/launcher hashes.
+McClintock QUALITY approves. Evidence-only commitc2125a67b05c839b59054ceb89699df002da1132
+is pushed and confirmed on PR91. Exact-head CI36262868730 is actually in_progress.
+All9checks and a fresh fullreview/head/main audit are still required; no merge yet.
+The local scientific slot transferred to Raman for the three-case diagnostic
+control at test928B2C (native/json/deliberate diagnostic-emission failure), not
+the full union. Original timeout root cause is still unknown.
 
 Current-state recheck: GitHub main is7a3309e; PR91 is open/draft at remote
 f1fc421, while local reviewed alignment isac34413. Initial GitHub request failed;

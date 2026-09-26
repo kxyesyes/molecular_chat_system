@@ -202,3 +202,17 @@ termination, and leave no owners. Genuine cancellation/cleanup failures stay
 visible. No production changes or relaxation of3s/5s deadlines are authorized.
 Raman is implementing this control; tests await explicit slot transfer after the
 separate PR91 integration regression. Task5 quality and Task6 remain pending.
+
+Corrected diagnostic freeze928B2C56FB97EF5EE1CF01C49740AF0226752894639CA6707545AB1FC19CA51E
+passed all three native/json/diagnostic-failure cases in one focused run86442,
+terminal746554:3 passed7 warnings35.17s, runner/process exit0. The deliberately
+broken diagnostic emission occurs after a JSON-safe bounded snapshot; assertions
+prove original exception identity, exactly one diagnostic/emission/disconnect/
+cleanup, actual server termination and no remaining owners/tasks/sockets. All
+three production, shared fixture and runner hashes are unchanged before/after.
+This validates cleanup of the diagnostic, not the original timeout cause.
+
+Parent now authorizes one exact ordered four-module U on the corrected diagnostic
+freeze, including the additional deliberate failure control. No timeout changes,
+retries or science relaxation. Raman owns the sole local scientific slot; result
+pending. Original461-pass/1-failure evidence and unknown cause remain preserved.
