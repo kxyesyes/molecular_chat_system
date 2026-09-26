@@ -4,6 +4,22 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+PR83 is now MERGED, not merely CI-green. Same-head bounded retry of workflow
+36238246328 attempt2 passed all8 gates; Agent9345 passed/1 skipped/23858 warnings
+in555.93s, normal exit. Earlier16-failure injection run and600s timeout attempt
+remain recorded; this does not claim a CI performance fix. Parent verified exact
+head43ea6fd, base959860e, MERGEABLE/CLEAN, zero review threads/changes-requested
+reviews, and eight successful exact-head checks; marked ready then delegated
+squash merged29502ca560ae1844f98290f84d85f2ab6b6fc750. Fresh fetch confirmed
+reviewed and landed trees bothf0cb81f733297d8ac123547a84c2ec0e64ba1694.
+
+R3 corrected independent Huygens SOURCE/SPEC approves the ten frozen Python
+files including security normalization and concrete FAISS tests, no actionable
+findings. This remains source-only; parent full union and fresh QUALITY pending.
+Inherited PR83 tests/doc now exactly match43ea6fd; remaining R3 delta must be
+committed/rebased cleanly onto actual29502ca after gates. No live model/deployment,
+original13 dirty paths remain untouched; packages7/8 still incomplete.
+
 Task5 latest terminal evidence: union79040 completed2072 passed/3 SWIG warnings
 in590.44s, exit0. Corrected SOURCE/SPEC Locke closed the prior warning-mutation
 P1 but identified a distinct P2: after restore a malformed quality=None correctly
