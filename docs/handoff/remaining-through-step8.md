@@ -4,6 +4,24 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Task5 offline core is now locally committeda5189a5: independent Jason exact
+25-module QUALITY union22518 passed2078/3 SWIG warnings/592.33s, hashes unchanged,
+no actionable findings. It is not a normal-Web activation or complete P7/P8.
+Parent is preparing the actual normal-Web B1 integration design from current
+admission/budget/continuation interfaces, not adding a second execution engine.
+
+PR84 diagnostic follow-upa4c1a61 is pushed; new workflow36241771811 is live
+(Agent job108403522987), not passed/merged. Two test-only changes retain actual
+HTTP/search/provenance/receipt assertions, fix obsolete embedding-hook/summary
+expectations and add bounded native-failure diagnostics. Parent1191 passed63.59s,
+independent Gibbs1191 passed64.56s, four FastAPI warnings each. First Linux ten
+failures remain recorded; six native search cases are still unresolved.
+
+R4 current-source integration parent11-module union58842 passed1252/7 warnings/
+70.28s, corrected SOURCE/SPEC approved. Fresh Meitner QUALITY owns the only local
+test slot for independent repeat. R4 is uncommitted and dependent on PR84; no
+publication before prerequisite fix/landing and affected changes re-verification.
+
 Latest verified CI update: PR84 first workflow36240117332 failed Agent10 tests
 (9520 passed/1 skipped/571.57s); six other independent gates passed and dependent
 offline-quality failed. No merge. Four failures use a retired legacy embedding
