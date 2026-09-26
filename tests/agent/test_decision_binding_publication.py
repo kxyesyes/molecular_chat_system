@@ -622,12 +622,12 @@ def test_repeated_cancellation_retains_drain_then_failure_only_correction(loop_c
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize('boundary', ['terminal_metadata', 'terminal_event', 'terminal_status', 'waiting_status'])
+@pytest.mark.parametrize('boundary', ['terminal_metadata', 'terminal_event', 'terminal_status', 'waiting_publication'])
 @pytest.mark.parametrize('raises', [False, True])
 def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_raises(
         loop_case, sources, monkeypatch, boundary, raises):
     source = sources('rag')
-    case = loop_case([tool('rag_search'), clarify() if boundary == 'waiting_status' else finish_last],
+    case = loop_case([tool('rag_search'), clarify() if boundary == 'waiting_publication' else finish_last],
                      [source.tool])
     changed = []
     def invalidate_source():
@@ -643,14 +643,20 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
             invalidate_source()
     def status(trace, value):
         original_status(trace, value)
-        if (boundary == 'terminal_status' and value == 'succeeded'
-                or boundary == 'waiting_status' and value == 'waiting_for_input'):
+        if boundary == 'terminal_status' and value == 'succeeded':
             invalidate_source()
+    original_publish = case.store.transition_decision_continuation
+    def publish(*args, **kwargs):
+        value = original_publish(*args, **kwargs)
+        if boundary == 'waiting_publication' and not kwargs['claim']:
+            invalidate_source()
+        return value
     def event(value):
         if boundary == 'terminal_event' and value.event == TaskEventType.TASK_COMPLETED:
             invalidate_source()
     monkeypatch.setattr(case.store, 'update_run_metadata', metadata)
     monkeypatch.setattr(case.store, 'update_run_status', status)
+    monkeypatch.setattr(case.store, 'transition_decision_continuation', publish)
     case.bus.on_event = event
     result = run(case, source.query, required={'rag_search'})
     assert changed and len(case.calls['rag_search']) == 1 and len(case.model.messages) == 2
@@ -659,6 +665,9 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
     assert_sanitized(result, reason='invalid_dynamic_binding')
     saved = case.store.get_run('actual-b1')
     assert saved['status'] == 'failed' and MARKER in saved['metadata']
+    if boundary == 'waiting_publication':
+        assert saved['metadata']['decision_continuation']['snapshot']['decision_protocol_revision'] == 8
+        assert 'continuation_id' not in result.metadata
     terminals = [event for event in case.bus.events if event.event in TERMINALS]
     assert terminals[-1].payload['publication_stage'] == 'invalidated'
     assert all(event.payload.get('answer_released') is False for event in terminals)
@@ -922,7 +931,9 @@ def test_waiting_status_callback_cannot_commit_over_its_reentrant_failure(loop_c
             assert pending.metadata['correction_durability'] == 'unconfirmed'
         original(trace, value)
     monkeypatch.setattr(case.store, 'update_run_status', status)
-    result = run(case)
+    # No owner identity means no nonce publication; retain explicit coverage of
+    # the waiting-status fallback now that owner-bound B uses revision8 CAS.
+    result = run(case, context=AgentContext('SMILES: CCO', 'actual-b1'))
     assert_sanitized(result)
     assert result.metadata['correction_durability'] == 'confirmed'
     assert case.store.get_run('actual-b1')['status'] == 'failed'

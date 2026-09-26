@@ -258,7 +258,8 @@ def test_initial_clarification_never_mints_legacy_nonce(loop_case, mode):
     result = run(case, '请计算性质', required={'property_calculator'})
     assert result.metadata['waiting_for_input']
     assert result.metadata['stop_reason'] == 'clarification_required'
-    assert 'continuation_id' not in result.metadata and not any(case.calls.values())
+    assert 'continuation_id' in result.metadata and not any(case.calls.values())
+    assert case.store.get_run('actual-b1')['metadata']['decision_continuation']['snapshot']['decision_protocol_revision'] == 8
     rejected = run(case, continuation_id='legacy-nonce', clarified_query='SMILES: CCO')
     assert rejected.metadata['stop_reason'] == 'continuation_rejected'
     assert len(case.model.messages) == 1
