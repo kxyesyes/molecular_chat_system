@@ -15,7 +15,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 diagnostic/control freeze928B2C union463 passed504.39s; prior independent461 passed1 failed retained | Original JSON RAG resume3s timeout cause UNKNOWN; current diagnostic SOURCE/fresh QUALITY and Tasks6–8 remain pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d. Task5 diagnostic/control freeze928B2C union463 passed504.39s; Maxwell SOURCE approves | Galileo fresh QUALITY owns sole local test slot; original JSON RAG resume3s timeout cause UNKNOWN; Tasks6–8 pending |
+| B1 binding foundation | Prerequisites landed; branch729d986 aligned to actual main82bb6c7; only foundation plan differs before extraction | Euler implementing approved seven-production/five-test extraction; no tests until slot grant; no new production entry |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -26,6 +27,19 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Foundation729d986 aligns actual main82bb6c7. Only add/add conflict was the target
+integration plan's empty local tail versus main's appended36 evidence lines;
+parent removed markers with apply_patch retaining exact main content. Final diff
+against main contained only foundation plan144lines, no production differences.
+Euler now implements its previously reviewed seven-production/five-test boundary;
+no tests or production activation permitted before explicit slot transfer.
+
+Maxwell SOURCE approves diagnostic/control928B2C, confirming original paths,
+scientific assertions, profiler identity, privacy and3s/5s deadlines. Galileo is
+fresh QUALITY reviewer and sole local test owner for the exact four-module union.
+The original461-pass/1-failure timeout remains UNKNOWN; current463-pass evidence
+does not erase it or establish a production fix. No Task6 release yet.
 
 PR91 exactc2125a6 passed all9 CI36262868730 gates. Actual collection10058 =9834
 core +224 Web; core9833 passed1 skipped17238 warnings417.96s, Web224 passed6628

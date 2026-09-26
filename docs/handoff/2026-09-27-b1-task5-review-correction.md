@@ -223,3 +223,9 @@ diagnostic-failure control. All six hashes unchanged, no retries or edits during
 execution; slot released. Current full verification passes, but original timeout
 was not reproduced and its cause is still UNKNOWN. Fresh diagnostic source/quality
 review remains required before deciding Task5 release; no root-cause repair claim.
+
+Maxwell independent SOURCE approves the diagnostic/control freeze928B2C. It
+preserves scientific assertions, actual execution paths/profiler, bounded safe
+diagnostics and original deadlines. Galileo fresh QUALITY now owns the sole
+scientific test slot for one exact U repeat; no result claimed yet. Original
+timeout cause remains UNKNOWN regardless of this review's source approval.
