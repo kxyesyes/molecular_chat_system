@@ -161,29 +161,79 @@ legacy calling convention when no explicit proof authority is supplied.
 
 ## Task 3: Inputs, action identity and live closure
 
-- [ ] Add negative role/identity tests before resolver code: unknown/foreign IDs,
+Dependency reproduced during Task3: the actual TargetDatabaseTool returns
+success=True/status=not_found for a completed empty lookup. TargetToolAdapter
+validates/maps domain lookup statuses, but SingleAttemptTool's earlier generic
+raw guard rejects this before the typed validator runs. The actual reverse-to-
+target Session test remains failing; do not replace it with a fake success.
+
+Allow a narrow prerequisite in decision_execution.py plus a separate new
+test_decision_target_status.py: for the actual typed target-search adapter only,
+bound the untouched native raw envelope first; apply the existing LOOKUP_STATUS
+mapping to a detached status-check view for recognized successful lookup states.
+Run the existing generic guard on that view. The adapter must still receive and
+validate the original raw status/data/evidence/quality, including contradictory
+resolved/not_found counts. All other tools/adapters retain the existing strict
+guard, and no raw envelope is modified. Ambiguous/error/partial states must not
+be promoted. Cover real empty lookup and resolved rows, non-bool success, errors,
+unknown/conflicting statuses, misleading tool names and preserved metadata.
+This is a bounded execution-wrapper compatibility fix, not broad status
+normalization or a relaxation of typed scientific checks. Record independent
+review and test evidence before publishing it as a prerequisite change.
+
+- [x] Add negative role/identity tests before resolver code: unknown/foreign IDs,
   wrong producer, wrong whole subject set, duplicate/forward/cyclic parents,
   modified selected reverse row, sealed nested tamper and valid-equal SMILES from
   a different source. Reject with zero downstream tool calls.
-- [ ] Implement pure binding resolution over current session observations and
+- [x] Implement pure binding resolution over current session observations and
   explicit requirements. User input is whole parsed current input or authorized
   selected structure; reverse enforces exactly one. Upstream molecules preserve
   the full batch, activity target stays in the structured query wrapper. Use
   existing BindingResolver rendering/whole parsing instead of regex fragments.
-- [ ] Issue deterministic reverse record handles beside encoded observations.
+- [x] Issue deterministic reverse record handles beside encoded observations.
   Hash the original raw row, its position and observation evidence ID; lookup
   reconstructs all values. Project only source-backed TargetSearchInput fields,
   never normalized name hashes/CHEMBL molecule IDs as gene identifiers. Empty or
   contradictory fields fail; a protein name is only a lookup hypothesis.
-- [ ] Resolve logical action hash from the design's closed payload and adapter
+- [x] Resolve logical action hash from the design's closed payload and adapter
   version. Pre-ledger preparation validates attached source through the new hooks,
   records exact own_source and finalizes operation_key. Failed source has null
   own_source and cannot satisfy requirements. Strip tool-authored reserved fields.
-- [ ] `verify_binding_closure` reconstructs and checks all prior ancestors,
+- [x] `verify_binding_closure` reconstructs and checks all prior ancestors,
   whole-observation seals, ledger proof, original obligation hash and current
   source. Caller executes this via owned-call settlement with the same deadline
   checked before/after. Reuse searches logical action identity then checks final
   operation key/source; stale evidence is not rerun or relabelled.
+
+### Task3 interim source review (not approval)
+
+James's independent read-only SPEC review inspected an unchanged four-file
+snapshot at HEAD b907e8c: resolver SHA256
+136D8AE00A2F0057A23D8EE68959FF2F6DD67A56E8CE832892C1AD157F98BADF,
+dynamic test 44ACE8A45379A4F3A6328F4C0046B8828A0AE8BE4616C0021369A22133727879,
+execution wrapper E1A648747E69EF58818CF23B5217F0D76E320B06D45FE10423440036A0E199AA,
+target-status test DDC529ED251A95C67AED7FF4AC4825A2F776A129B8B79E8E49B026648AB42CF6.
+No tests were run by the reviewer. Three findings require reproduction/correction:
+
+- Original input without SMILES, followed by an admitted SMILES clarification
+  and then a target-only clarification, must retain the prior independent
+  property result. Original-only fallback is insufficient. Any retained input
+  authority must come from explicit bounded server-admitted records, not model
+  history or an unvalidated query list; reference identity remains mandatory.
+- Original action records duplicate context and input. Use their appropriate
+  bounded record/snapshot budget consistently through issuance/reconstruction/
+  restore, without relaxing the separate64KiB scientific-observation boundary.
+  The long escaped-query test was present but is not presumed passing.
+- Non-activity molecular tools must not inherit activity-family target rejection
+  merely to extract complete SMILES. Property-only EGFR plus a valid SMILES must
+  remain executable; activity authorization and invalid whole-input rejection
+  remain strict.
+
+Parent source inspection confirmed these are relevant boundaries and requested
+TDD from the existing implementer. No SPEC approval, final regression result or
+Task3 completion is claimed. The narrow typed-target status prerequisite had no
+source defect identified in this review; it still requires final test/quality
+evidence. Task4/5/6 were explicitly outside this interim review.
 
 ## Task 4: Actual seven-tool dynamic execution and acceptance
 
@@ -517,3 +567,257 @@ The generic Session proof-map cap128 does not supersede B's12-action/512KiB limi
 Task5 must enforce those existing bounds before invoking restoration. No default
 profile change, seven-tool loop integration, v8 activation or normal-Web release
 is claimed. Task3 is the next implementation increment.
+
+### Task3 implementation chronology (awaiting corrected independent reviews)
+
+Worker Banach reports the following serial runs, all through the exact isolated
+runner prefix above, cwd dynamic-bindings-b1. Labels below define the complete
+ordered target list; prefix plus each list is the executed command. All targets
+are under tests/agent/. No existing test file or contract was edited.
+
+- M: test_decision_dynamic_bindings.py.
+- C: M::test_target_only_clarification_preserves_property_closure_and_reuse,
+  M::test_clarification_cannot_change_subject_or_original_activity_target.
+- C+: C then M::test_current_authority_change_cannot_reuse_equal_structure,
+  M::test_equal_smiles_different_confirmed_reference_never_substitutes.
+- T: test_decision_target_status.py.
+- R: M::test_tampered_reuse_index_never_becomes_a_cache_miss,
+  M::test_failed_recorded_action_is_not_a_new_dispatch_cache_miss.
+- MT: M then T.
+- Q: M::test_long_escaped_rag_query_original_input_record_uses_snapshot_not_observation_ceiling.
+- S: M::test_intermediate_admitted_molecule_survives_target_clarification_and_restore,
+  M::test_near_limit_escaped_action_record_exceeds_observation_ceiling,
+  M::test_property_molecular_parsing_does_not_require_supported_activity_target.
+- N: M::test_intermediate_subject_cannot_be_replaced_by_later_explicit_input,
+  M::test_intermediate_subject_restore_requires_same_owner_sealed_original_input,
+  M::test_input_history_without_sealed_molecular_action_is_not_subject_authority,
+  M::test_unknown_activity_target_does_not_block_properties_or_authorize_activity,
+  M::test_unknown_activity_context_never_drops_malformed_molecular_fields,
+  M::test_large_record_allowance_does_not_widen_scientific_payload_hashes.
+- A: M::test_prior_admitted_action_target_cannot_be_retargeted,
+  M::test_prior_admitted_target_is_retained_when_current_reply_omits_it,
+  M::test_restore_cannot_rewrite_prior_property_target_into_new_admitted_authority.
+- U: M, T, test_decision_binding_requirements.py,
+  test_decision_binding_session.py, test_current_source_tool_hooks.py,
+  test_decision_inputs.py, test_rag_receipt_consumption.py,
+  test_reverse_receipt_consumption.py.
+
+| Run | Targets | Passed | Failed | pytest seconds | Handle, terminal |
+|---|---|---:|---:|---:|---|
+| 1 | M | 0 | 20 | 2.54 | direct |
+| 2 | M | 0 | 20 | 2.85 | direct |
+| 3 | M | 0 | 20 | 8.92 | 18695 |
+| 4 | M | 20 | 0 | 11.69 | 27949 |
+| 5 | M | 45 | 8 | 25.86 | 10258 |
+| 6 | M | 52 | 1 | 21.69 | 10067 |
+| 7 | M | 63 | 3 | 40.53 | 86721 |
+| 8 | M | 66 | 1 | 36.71 | 70711 |
+| 9 | C | 3 | 1 | 4.92 | direct |
+| 10 | C+ | 9 | 0 | 11.09 | 74139 |
+| 11 | M | 77 | 1 | 17.19 | 89808 |
+| 12 | T | 27 | 3 | 1.97 | direct |
+| 13 | T | 30 | 0 | 3.46 | direct |
+| 14 | M | 77 | 1 | 57.98 | 69027 |
+| 15 | M | 78 | 0 | 46.26 | 9138 |
+| 16 | U | 819 | 0 | 91.63 | 35406 |
+| 17 | R | 0 | 4 | 5.21 | direct |
+| 18 | MT | 112 | 0 | 19.22 | 10742 |
+| 19 | Q | 1 | 0 | 2.33 | direct |
+| 20 | MT | 113 | 0 | 15.58 | 85294 |
+| 21 | U | 824 | 0 | 294.31 | 28042 |
+| 22 | S | 0 | 3 | 2.87 | direct |
+| 23 | S | 3 | 0 | 2.75 | direct |
+| 24 | M | 84 | 2 | 13.95 | 33361 |
+| 25 | M | 86 | 0 | 13.08 | 16129 |
+| 26 | N | 11 | 3 | 3.27 | direct |
+| 27 | N | 14 | 0 | 2.99 | direct |
+| 28 | MT | 130 | 0 | 14.99 | 46939 |
+| 29 | A | 0 | 6 | 2.78 | direct |
+| 30 | A | 6 | 0 | 2.57 | direct |
+| 31 | MT | 138 | 0 | 15.94 | 58703 |
+| 32 | U | 849 | 0 | 52.41 | 59757 |
+
+All runs: zero skips/collection errors. T has zero warnings; others have three
+SWIG DeprecationWarnings. Failing runs exit1, passing runs exit0. Run1 missing-API
+RED output was3898 tokens truncated at3500; summary retained. Other test output
+was not truncated. Runs2/3 lacked fixture trace/store and are not functional RED.
+Run12 includes the actual wrapper RED and a subsequently corrected partial-state
+test expectation. Run14 was an incorrect positive expectation that target inputs
+would include schema None defaults; the real adapter deliberately preserves the
+non-projected dictionary. Negative tests were unchanged. Run24 overchecked source
+diagnostics before authority was needed; correction narrowed that precheck, not
+receipt validation. Run26 reproduced restore owner/trace omissions. Some failed
+source tests captured MorganGenerator deprecation stderr separately from pytest
+warnings. All handles reached terminal by polling; no restarted/live test remains.
+
+Corrected source also rejects tampered reuse indexes and failed-cache reruns.
+Complete original action records have a separate sealed binding_record_sha256
+quality field; this prevents rewriting prior property-action target prose while
+retaining a logical action hash based on consumed inputs. Intermediate subjects,
+targets and selected-reference identity derive only from reconstructed sealed
+records, never from a model transcript or arbitrary session.input_queries.
+Pure clarification turns with no recorded action still need an explicit server
+admission interface in Task4/5; do not silently count them as authenticated input.
+
+Final worker and parent-read hashes before corrected SPEC:
+
+| File | SHA256 |
+|---|---|
+| harness/decision_bindings.py | E27F46738EF3AED46635C5C324D348AC2377CFEA0F620CD62095695B91DD25CF |
+| test_decision_dynamic_bindings.py | B9D42B0E9F3ECEEFA0C5E7CB280C2354DD1667A8B330372756CFC8D4A693E7D0 |
+| harness/decision_execution.py | E1A648747E69EF58818CF23B5217F0D76E320B06D45FE10423440036A0E199AA |
+| test_decision_target_status.py | DDC529ED251A95C67AED7FF4AC4825A2F776A129B8B79E8E49B026648AB42CF6 |
+
+contracts/decision_bindings.py remains unchanged at
+4683C6CFA60156AD6D2576086F2E4ABAE1FC71862402B42A2DCB40E65D2A3A56;
+runner remains F2DAB87A0C1648D8059E6104DC5EB460BE44C018363F8E0AB507D1F081ACC183.
+Corrected SPEC and fresh QUALITY are required before commit/release. No actual
+ModelDecisionLoop B1 integration, revision8 or final live acceptance is claimed.
+
+Corrected SPEC at the four hashes above confirmed the original three fixes but
+requested two more bounded reproductions before approval: find_reusable must
+validate the stored record against its sealed record digest before using its
+action hash even to skip an index entry; and authority reconstruction must
+verify observation integrity before filtering on mutable usability flags.
+Counterexamples are a changed private record action hash yielding a cache miss,
+and a changed published demo flag hiding a previously admitted PDE5A constraint
+before a user-bound BuChE activity action. These are source findings, not executed
+results yet. The existing implementation worker owns the sole test slot for
+RED/GREEN and the unchanged eight-module union; no approval/commit is claimed.
+
+Both counterexamples were reproduced and corrected by the same worker. The
+following targets also use the same isolated prefix and tests/agent/M expansion:
+P2 = M::test_server_record_action_hash_tamper_cannot_become_reuse_cache_miss,
+M::test_target_authority_is_verified_before_usability_filtering,
+M::test_subject_authority_is_verified_before_usability_filtering,
+M::test_intact_missing_receipt_diagnostic_is_not_required_as_target_authority.
+Bounds = M::test_reuse_record_is_bounded_native_before_index_skip.
+
+| Run | Targets | Passed | Failed | pytest seconds | Handle, terminal |
+|---|---|---:|---:|---:|---|
+| 33 | P2 | 2 | 6 | 31.56 | 94401 |
+| 34 | Bounds | 0 | 4 | 3.84 | direct |
+| 35 | P2 then Bounds | 12 | 0 | 3.19 | direct |
+| 36 | U | 861 | 0 | 60.18 | 69868 |
+
+All four runs: three SWIG warnings, zero skips/collection errors, no truncation;
+failed runs exit1, passing runs exit0. All handles terminal, no restart/parallel
+test. The reuse index now checks bounded native records and their sealed digest
+before any match/skip; subject/target authority checks seals before usability
+filtering. Intact failed diagnostics are still excluded without requiring a
+successful receipt. API/proof fields and target prerequisite files unchanged.
+Resolver SHA256 now548AABD2E6B8F631661CCA726B4D30BE0260BB78F1D87419587490D2EC52ED61;
+dynamic test BE50370572D0301E71246C48659AEEDB9F71C0DF45E7D68D48B302BD7C7A4675.
+Independent corrected SPEC remains the next gate, followed by fresh QUALITY.
+
+Next SPEC re-review confirmed both corrections but found a legitimate diagnostic
+case: source validation may throw during preparation, so Session intentionally
+seals a sanitized failure with only the original three input-binding fields and
+no prepared proof/record digest. Such a failure must prevent repeating that same
+action, without blocking an unrelated permissible action or later restoration.
+The old diagnostic test stopped after resolve; extend it through reuse lookup,
+actual unrelated execution, closure and restoration before claiming success.
+
+Parent inspected Session's existing rollback and base-binding path. A narrow
+resolver-only solution is authorized for TDD: initial operation_key commits the
+bounded original action record; successful preparation still replaces it with
+the unchanged hash(action_sha256, own_source). On a precisely identified sealed
+sanitized preparation failure, validate that initial record identity plus the
+request/input/provenance/owner before treating it as non-scientific diagnostics.
+No invented scientific proof/receipt, source retry or success promotion; same
+failed-action rerun and modified record/seal/owner/input must still reject.
+No Session or legacy ledger change is authorized by this clarification. The
+independent reviewer is checking this bounded dependency, and the implementer
+must reproduce and verify it. Task3 is still not approved or committed.
+
+James's independent source/design review approves this bounded mechanism, not
+implementation. The initial commitment must use a distinct deterministic domain
+tag and full bounded record digest; success retains its existing final-key codec.
+Recognize the exact Session failure shape by status/error/empty scientific fields
+and absent proof, not message text alone. Seal/ledger, owner/tool/request/input IDs
+and provenance remain mandatory before index use. No scientific-source refresh
+is needed merely to preserve this unusable diagnostic, and it contributes no
+subject/target/reference authority. No Session/ledger code expansion is needed.
+
+The worker implemented that resolver-only boundary; exact new targets, using
+the same prefix and M expansion:
+
+- P: M::test_sanitized_preparation_failure_allows_unrelated_execution_closure_and_restore,
+  M::test_preparation_failure_retains_domain_tagged_original_record_commitment,
+  M::test_preparation_failure_original_record_or_seal_tamper_is_not_skippable.
+- Diagnostic-N: M::test_same_message_non_sanitized_sealed_failure_cannot_use_diagnostic_exception,
+  M::test_sanitized_failed_action_supplies_neither_subject_nor_scientific_role,
+  M::test_sanitized_failed_action_does_not_supply_target_authority_after_restore.
+- J: M::test_preparation_diagnostic_json_roundtrip_actual_session_restore_and_continue.
+
+| Run | Targets | Passed | Failed | pytest seconds | Handle, terminal |
+|---|---|---:|---:|---:|---|
+| 37 | P | 8 | 6 | 25.66 | 37546 |
+| 38 | P | 14 | 0 | 25.25 | 13338 |
+| 39 | Diagnostic-N | 9 | 0 | 17.64 | 66620 |
+| 40 | J | 0 | 2 | 6.90 | 37344 |
+| 41 | J | 2 | 0 | 6.05 | 68207 |
+| 42 | U | 886 | 0 | 59.87 | 92095 |
+
+All runs: three SWIG warnings, zero skips/collection errors, no truncation;
+failure exit1 and success exit0, all handles polled terminal. Initial key is
+EvidenceLedger.output_digest({'kind': 'b1-preparation-input',
+'record_sha256': EvidenceLedger.output_digest(full_bounded_record)}).
+Successful preparation's final key is unchanged. Exact sealed sanitized failures
+authenticate their original input but supply no scientific or user-subject/target
+authority; unrelated execution and restoration work without retrying failed source
+hooks. J performs a real JSON roundtrip and new Session.restore_observations with
+explicit proof authority, then actual activity execution. The JSON failure fixed
+compatibility of empty error details None versus the existing serialized {} only.
+
+Latest frozen resolver SHA256
+7CEAF74DAB637B43453E4A6EB0599E9CD2EBD6889B471B33C36F79F765A385AC;
+dynamic test80644F2846CD51B14075AD0E3375E69CDC1152C085C4B8F5407F14E8976B7E22.
+Wrapper, target-status test, contracts and runner remain at their recorded hashes.
+Corrected implementation SPEC and fresh QUALITY remain required before commit.
+
+James's corrected implementation SPEC APPROVES the final four-file freeze above.
+This is source review, not an independent test run. No remaining actionable SPEC
+finding; no Task4/5/6 approval is implied. Fresh QUALITY reviewer Kierkegaard now
+owns the sole heavy test slot for U plus test_target_tool_contract.py,
+test_decision_adapter_retry.py and test_decision_loop.py in one serial invocation.
+Parent in-memory compilation of the four final files passed with no application
+imports or bytecode writes, and git diff --check passed. No commit/publication
+until the fresh review and terminal test evidence are returned.
+
+### Task3 release and independent cumulative verification
+
+Fresh QUALITY reviewer Kierkegaard APPROVES the final four-file freeze after
+independent source inspection and this exact serial command:
+
+```powershell
+& C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_decision_dynamic_bindings.py tests/agent/test_decision_target_status.py tests/agent/test_decision_binding_requirements.py tests/agent/test_decision_binding_session.py tests/agent/test_current_source_tool_hooks.py tests/agent/test_decision_inputs.py tests/agent/test_rag_receipt_consumption.py tests/agent/test_reverse_receipt_consumption.py tests/agent/test_target_tool_contract.py tests/agent/test_decision_adapter_retry.py tests/agent/test_decision_loop.py
+```
+
+Result1201 passed85.21s, zero failed/errors/skips, three SWIG __module__ warnings
+(SwigPyPacked, SwigPyObject, swigvarlink), runner/process exit0. Handle63640 was
+polled terminal without restart, no live handles. Test output untruncated;
+truncated source/document reads were followed by targeted ranges. Four final
+file hashes and the isolated-runner hash matched before/after; scoped diff check
+passed. Parent reconfirmed the same hashes, compiled all four files in memory
+without application imports/bytecode, and retained the original checkout's13
+status paths. A filename-only credential-pattern scan of the six task files
+returned no matches; this is a limited static check, not a whole-history audit.
+
+The target-status prerequisite was explicitly staged alone and committed locally
+as5bf3344. Resolver, new dynamic tests and parent-owned evidence documents form
+the following Task3 checkpoint. No push/PR/deployment/provider activation here.
+
+Public integration contract: instantiate B1BindingResolver with actual dynamic
+Session, prepared v2 requirements, original admitted context and real adapters;
+resolve gives an immutable ResolvedBindingAction; register_action commits initial
+record identity; prepare_observation supplies accepted proof/final key before
+ledger capture; verify_binding_closure and find_reusable check source/authority;
+record_descriptors exposes original-row handles; export_records/restore_records
+use bounded original server records plus actual restored Session seals/ledger.
+Task4 must call scientific resolution/source checks through owned settlement and
+root deadlines; Task5 must preserve full sealed quality and enforce whole512KiB
+snapshot/12-action budgets. Explicit admission of pure human clarification turns
+without prior actions still needs a reviewed Task4/5 interface. Task3 does not
+read model history or arbitrary session.input_queries as authority. Full P7/P8
+and actual seven-tool loop/normal-Web/live end states remain unfulfilled.

@@ -311,6 +311,52 @@ not enabled by this slice. Next: actual role/input resolution and current-source
 closure, then loop/acceptance/recovery/publication and the remaining Web/B2/C/P8
 gates. No narrowing of the eight-package completion requirement.
 
+Historical Task3 in-progress checkpoint (superseded by the release below):
+Task3 was in implementation and independent source review, not a completed gate.
+The actual reverse-to-target Session path reproduced a pre-existing boundary
+conflict: a completed empty lookup returns success=True/status=not_found, while
+the generic single-attempt raw guard rejects that domain status before the typed
+target adapter can validate it. A narrow prerequisite is being tested: only the
+exact typed target adapter gets a detached status-check view, after native raw
+bounds; the original envelope still undergoes full typed validation. No other
+tool gains a status exception, and no empty lookup becomes evidence of a target
+match. Preserve the original failing integration case and require regression
+and independent review before claiming this slice complete. Task4 loop wiring,
+revision8 restore, publication barriers and the normal Web/B2/C/P8 gates remain
+pending. The status response to the user counts two unfinished top-level
+packages (7 and8), not merely two remaining code changes.
+
+Task3 now has corrected SPEC and fresh QUALITY approval. It implements actual
+Session-bound whole-input resolution, raw reverse-record handles, sealed action
+identity, current attached-source closure and bounded original-record restoration.
+Review reproduced and closed clarification-loss, incorrect record ceilings,
+activity-family leakage into property parsing, mutable index/authority filtering
+and sanitized-failure diagnostic issues. The target-status prerequisite is kept
+as a separate local commit5bf3344 for later focused publication.
+
+Worker union886 passed59.87s; independent cumulative union1201 passed85.21s,
+zero failures/errors/skips, three SWIG warnings. Four frozen source/test hashes
+match before/after review; in-memory compilation and diff checks pass. All failed
+runs, exact targets and diagnostic JSON/new-Session recovery tests are retained
+in the B1 implementation plan. This is offline evidence, not a real API/model run.
+
+Next is Task4's actual seven-tool model-decision loop and immutable acceptance.
+Before implementation, resolve its explicit server-admission seam for human
+clarifications that have not yet produced an action: model text or an arbitrary
+query list cannot substitute for admitted input. Task5 revision8 and Task6 final
+publication, normal Web/B2/C integration, focused PR publication and P8 current
+real/UI repeated acceptance remain mandatory. Packages7/8 are still incomplete;
+no deployment, production activation or push occurred in this checkpoint.
+
+Local publication inventory at b907e8c: origin/main and merge-base both point to
+PR81 squash a1258d9; the branch tree differs in54 files (16,445 additions,
+547 deletions). Older ordinary-chat commits also appear in the branch log because
+PR81 was squashed; they are not additional unmerged functionality. Do not publish
+this entire accumulated branch as one cleanup PR. Package the already reviewed
+RAG/source receipts, reverse-source receipts, then B execution along their actual
+dependencies on clean main-based branches, preserving tests and rechecking CI.
+These are local Git observations only, not a fresh remote PR/CI audit or a push.
+
 - Each independently reviewed package gets its own branch/PR; sub-increments may be used but do not redefine the end state.
 - Preserve main; merge only through reviewed PRs with passing required checks and no unresolved findings.
 - The original checkout remains at its existing dirty state. Do not stage its unrelated changes.
