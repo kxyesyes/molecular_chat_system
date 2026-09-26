@@ -30,6 +30,17 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Task6 diagnostic44365/46ffe3:5passed1failed7warnings54.83s exit1; restoredRAG
+fourcases and nativeconfirmedreference passed, JSONconfirmedreference turn2 hit
+original3sreceive. Bounded snapshot lacks supervisedchildoperation; causeUNKNOWN.
+Parent-approved defensive metadata amendment reproduced B1malformedmetadata
+AttributeError (1failed7passed), then moved only metadata update inside existing
+displaytry;8focusedpassed and fulltransport89969/de659b41passed14.25s,7warnings.
+No receive timeout fix inferred. SOURCEreview pending, slotreleased.
+Next integration test is being authored separately on PR93 for actual empty
+journal/four-wholebatchobligations against the exactmixedADMET/PDE5Arequest;
+author has no execution authority. No parser transfer intoTask6yet.
+
 PR94 head1fa84b2 completedrun36269748170 all9success. Actualcollection10561
 =10337core+224Web; core10336passed1skipped17238warnings337.77s, Web224passed
 6628warnings188.09s, activity1855passed6skipped5569warnings369.61s. Parent
