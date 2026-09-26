@@ -16,9 +16,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
-| B1 binding foundation | PR92 MERGED82322c3; aligned PR93 head0d6f40c SOURCE and fresh QUALITY approved; two exact40 runs4254 passed each | Current-head nine-check CI running; original36268575293 core600s/exit124 failure retained; not yet merged |
+| B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
-| Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | PR93 aligned and new CI running; core1200/Web600 changes suite capacity, not science/performance |
+| Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
@@ -29,6 +29,26 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR93 head0d6f40c CI36272209579 completed9/9success. Core108488189672 collected
+10820=10596core+224Web, then10595passed1skipped17238warnings467.02s. Web
+108488189639:224passed6628warnings180.48s; root2892passed75skipped184.89s;
+activity1855passed6skipped388.45s. Fresh paginated guards before ready and
+before SHA-squash confirmed head/base/main,9checks,0reviews/threads/unresolved.
+Actual merge86313/33649a:5d36eee2977152fe5047dc21e260500d6c965c4b. Fetched
+reviewed/landed full trees equal a3ebb7b758df36daad66197928a2700c7b79a6c6.
+Next-loop tree aligned f99cf7e; only admission-plan additive conflict resolved
+to exact main33cde996 blob. Versus main only the reviewed next-loop plan differs.
+Plan re-pin and three-test preparation released; no production/test execution
+until behavioral RED slot. Original failures and P7/P8 requirements remain.
+
+Task6 one-shot timing25817/6472d1:1failed1passed79.99s; native3sreceive timeout,
+JSONtwo-batch passed. Last measured callback started after0.1579ms and closure
+finished246.6306ms, but callback finish/delivery not yet recorded. This excludes
+queue-not-started for that sample, NOT a complete silence-window diagnosis.
+Root cause UNKNOWN. Further bounded test-only receive/snapshot timestamps and
+configuration-digest spans approved with deterministic controls and one actual
+diagnostic, unchanged3s/5s/science assertions/production. Wegener owns slot.
 
 PR93 aligned publication0d6f40c3030467032bdae007d1c68e61fe477f9a includes only
 the scoped empty-journal test and verification plan on inspected current main.
