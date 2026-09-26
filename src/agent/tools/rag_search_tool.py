@@ -1,4 +1,6 @@
 """Agent adapter for the injected, manifest-validated RAG service."""
+from copy import deepcopy
+import re
 from typing import Any, Dict
 
 from src.rag.receipt import validate_retrieval_envelope
@@ -35,6 +37,72 @@ class RAGSearchTool(BaseMolecularTool):
         keywords = ["database", "knowledge base", "similar molecule", "search in database",
                     "数据库", "库里", "类似分子", "检索", "查一下"]
         return any(word in query.lower() for word in keywords)
+
+    @staticmethod
+    def _validate_current_projection(value):
+        fields = {'kind', 'generation_id', 'epoch', 'configuration_sha256',
+                  'source_identity_sha256'}
+        if (type(value) is not dict or set(value) != fields
+                or type(value['kind']) is not str or value['kind'] != 'rag'
+                or type(value['epoch']) is not int or value['epoch'] < 0):
+            raise ValueError('current_source_unavailable')
+        for field in fields - {'kind', 'epoch'}:
+            size = 32 if field == 'generation_id' else 64
+            if (type(value[field]) is not str
+                    or re.fullmatch('[0-9a-f]{%d}' % size, value[field]) is None):
+                raise ValueError('current_source_unavailable')
+
+    def validate_current_observation(self, data, evidence, *, input_data,
+                                     expected_source=None) -> dict:
+        """Revalidate original proof/current source, not result authority or seals.
+
+        Uses only the attached service. Its full CSV freshness checks may do I/O;
+        callers must schedule this hook as owned work, not on the event loop.
+        """
+        try:
+            from src.agent.harness.decision_bounds import validate_json
+
+            value = dict(data=data, evidence=evidence, input_data=input_data,
+                         expected_source=expected_source)
+            validate_json(value, max_bytes=64 * 1024, reason='current_source_unavailable')
+            if expected_source is not None:
+                self._validate_current_projection(expected_source)
+            if (type(input_data) is not str or not input_data.strip()
+                    or len(input_data.encode('utf-8')) > 16 * 1024
+                    or type(evidence) is not list):
+                raise ValueError('current_source_unavailable')
+            # No caller-owned records or receipt are exposed to provider calls.
+            value = deepcopy(value)
+            expected_source = value['expected_source']
+            service = self.rag_system
+            if service is None or getattr(service, 'is_initialized', False) is not True:
+                raise ValueError('current_source_unavailable')
+            capture = getattr(service, 'capture_retrieval_eligibility', None)
+            validate_source = getattr(service, 'validate_retrieval_source', None)
+            if not callable(capture) or not callable(validate_source):
+                raise ValueError('current_source_unavailable')
+            entries = [entry for entry in value['evidence']
+                       if type(entry) is dict and 'retrieval_receipt' in entry]
+            if len(entries) != 1:
+                raise ValueError('current_source_unavailable')
+            envelope = validate_retrieval_envelope(
+                dict(records=value['data'], receipt=entries[0]['retrieval_receipt']),
+                query=input_data, k=3)
+            if envelope['receipt']['diagnostics']['status'] not in ('valid_hits', 'valid_empty'):
+                raise ValueError('current_source_unavailable')
+            fresh = capture()
+            validate_source(envelope, query=input_data, k=3, expected=fresh)
+            projection = dict(kind='rag', generation_id=fresh.generation_id, epoch=fresh.epoch,
+                              configuration_sha256=fresh.configuration_sha256,
+                              source_identity_sha256=fresh.source_identity_sha256)
+            self._validate_current_projection(projection)
+            if expected_source is not None and expected_source != projection:
+                raise ValueError('current_source_unavailable')
+            if self.rag_system is not service or service.is_initialized is not True:
+                raise ValueError('current_source_unavailable')
+            return projection
+        except Exception:
+            raise ValueError('current_source_unavailable') from None
 
     def execute(self, query: str, **kwargs) -> Dict[str, Any]:
         unavailable = "RAG retrieval unavailable: initialization, source/index compatibility or embedding failure"

@@ -4,6 +4,31 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 
 ## Completion ledger
 
+Latest B1 source-check update (2026-09-26): both actual RAGSearchTool and
+ReverseTargetTool now expose a bounded load-free current-observation validator.
+It binds unchanged original receipt/data to the currently attached source and
+an optional exact closed source projection; stale generation/configuration,
+closed/replaced attachment, invalid proof and malformed input fail safely.
+No search, prediction, embedding, initialization, receipt repair or borrowed
+source closure occurs in verification. Reverse producer callbacks run outside
+the tool state lock; RAG retains full CSV-byte freshness. These methods do not
+grant trace/owner/seal authority; the actual decision resolver still must wire it.
+
+TDD:4 initial missing-method failures,218 expanded RED failures,218 GREEN.
+Six-module union1217 passed/3 SWIG warnings in42.82s; fresh independent QUALITY
+repeat1217 passed/0 skipped/3 warnings in40.84s, exit0. Independent SPEC and
+QUALITY approve unchanged source hashes. Parent three-file in-memory compile
+and diff checks passed. Full commands, output truncation caveat on expanded RED,
+hashes and reviews:2026-09-26-b1-source-revalidation plan. No real models or host
+scientific assets, no original-checkout changes, no publication/deployment.
+
+Next core design and implementation plan now name seven-tool execution,
+source-aware reuse/finish/revision8 restore, B-only final-publication correction,
+mandatory citation closure and conservatively debited continuation finalization.
+Written core review is still pending; implementation is not released merely by
+these hooks. Normal Web B, B2 generation/ranking/root budgets, C cleanup and P8
+real/UI gates remain open. Packages1–6 DONE,7–8 incomplete; no step9.
+
 Latest reverse consumer update (2026-09-26): approved design/plan `9cabb11` is
 implemented on `codex/dynamic-bindings-b1`. Existing ReverseTargetTool now uses
 lazy owned strict prediction, rejects list-only providers, and preserves the
