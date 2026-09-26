@@ -572,6 +572,19 @@ existing rejection, not satisfaction of the original successful-dispatch goal.
 
 ## Task 5: Revision8 restore and charged verification time
 
+Source-grounded pre-claim staging choice is documented in the spec's Task5
+pre-claim replay isolation section. Legacy SimpleNamespace replay cannot be
+passed to the exact-type B resolver, while calling start/restore on the live
+Session before CAS would publish events and confer lifecycle authority early.
+Use an unstarted private Session as a bounded in-memory evidence projection,
+without toggling its lifecycle flags or calling execution/persistence methods.
+Preserve proofless sanitized preparation diagnostics. After confirmed CAS,
+actual restore requires fresh write-once live seals before record restoration;
+restore_observations does not invoke the capture hook. Independent source review
+requested those last two clarifications; they are now explicit, not implemented.
+Beauvoir independently re-reviewed and approved the corrected written choice;
+this is source-only evidence. Task4B implementation proceeds first.
+
 - [ ] Add actual SQLite tests: clarify→new loop instance→restore/reuse; count zero
   repeated scientific calls. Assert old revision6/7 snapshots retain old readers.
   Mutate every proof, role/input, producer version and obligation independently.

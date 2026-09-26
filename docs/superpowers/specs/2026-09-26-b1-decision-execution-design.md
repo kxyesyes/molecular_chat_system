@@ -43,6 +43,66 @@ Tests: new tests/agent/test_decision_dynamic_bindings.py,
 test_decision_binding_requirements.py, test_decision_binding_continuation.py;
 only additive boundary cases in existing consumer/Session tests when necessary.
 
+## Task5 pre-claim replay isolation (source-grounded clarification)
+
+The current v6/v7 history reader uses a SimpleNamespace replay view. B's resolver
+requires an actual dynamic WorkflowRunSession. Its public restore_observations
+method correctly requires an already started, successfully claimed Session and
+therefore must NOT be used to validate a waiting checkpoint before CAS. Calling
+start(resume_claimed=True) on the live Session before claim would also publish
+events and falsely confer lifecycle authority. Keep those guards unchanged.
+
+Use a private, unstarted dynamic Session only as the revision8 decoder's bounded
+in-memory evidence projection. Construct it with the authenticated original
+context and existing orchestrator/store authority, but never start, execute,
+append steps, emit events, persist, or set lifecycle/claim flags. A fresh local
+EvidenceLedger, detached decoded observations and write-once seals supply the
+resolver's existing integrity checks. Register each observation with explicit
+validated binding-proof authority where applicable, not a proof inferred from
+arbitrary quality. Sanitized preparation failures intentionally have no proof:
+authenticate their exact failed envelope and original action commitment through
+the existing diagnostic path, retaining diagnostics without manufacturing proof
+or scientific input authority.
+The caller still authenticates the waiting owner/configuration/nonce and bounded
+snapshot before any proof gets this provisional interpretation. This projection
+is not returned as execution authority or saved in a snapshot.
+
+Replay admitted journal prefixes and proposals in order against this projection;
+only historical observations available at that point may supply action inputs.
+Rebuild original action records, record handles, accepted observation text and
+progress acceptance, including failed diagnostics and reused decisions. Final
+closure must verify current sources and the complete proposed journal head before
+CAS, under the original segment deadline. No tool/model/search execution, source
+repair, or event/store write is part of this validation. Do not copy the sealed
+projection into the live Session on a failed or uncertain CAS.
+
+After a confirmed successful claim, start the actual Session using its existing
+claimed path and install detached prevalidated observations via its existing
+restore_observations(binding_proofs=...) API. Install the validated input journal
+only then; the new reply is admitted exactly once. Start a fresh live seal map
+and write-once seal the actual detached restored results before restore_records
+and closure validation: restore_observations does not install seals or invoke
+observation capture. Do not adopt the staging map or infer authority from a
+supplied seal. Install the validated action records after those live seals.
+Revalidate
+closure/deadline after claim and after any subsequent start/restore callback,
+before model/tool/result release. Failure after an uncertain/committed claim may
+consume the nonce but must never confer dispatch authority. Legacy readers retain
+their existing replay representation and revision semantics.
+
+Required tests spy on the real SQLite writer/event methods: corrupted, stale,
+expired or inconsistent pre-CAS input leaves nonce, live Session and durable
+state unchanged with zero publications. Constructor-only staging must fail
+normal append/execute lifecycle checks. Cover commit-then-raise CAS and a source
+change in the claim callback: no model/tool call, no replacement nonce or old
+scientific answer. This is a source-grounded Task5 choice, not a passing restore
+test or permission to bypass the trusted-storage boundary.
+
+Independent Beauvoir source review approved after the proofless-diagnostic and
+fresh-live-seal corrections above. No tests, lifecycle changes or Task5 code
+were executed by that review. The user-delegated recommended choice is pinned;
+Task4B remains the current implementation before revision8 work starts.
+
 ## Explicit v2 requirements, never inferred from model actions
 
 ### Task4B consumed-reference dispatch seam (source-grounded clarification)
