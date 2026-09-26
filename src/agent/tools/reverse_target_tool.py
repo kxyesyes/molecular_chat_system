@@ -1,4 +1,6 @@
 """Lazy strict reverse-target consumer; legacy predictor lists are uncertified."""
+from copy import deepcopy
+import re
 import threading
 import time
 from typing import Any, Dict, Mapping
@@ -107,6 +109,69 @@ class ReverseTargetTool(BaseMolecularTool):
     @staticmethod
     def _normalize_target_record(record: Mapping[str, Any]) -> Dict[str, Any]:
         return normalize_target_record(record)
+
+    @staticmethod
+    def _validate_current_projection(value):
+        fields = {'kind', 'generation_id', 'source_sha256', 'configuration_sha256'}
+        if (type(value) is not dict or set(value) != fields
+                or type(value['kind']) is not str or value['kind'] != 'reverse'):
+            raise ValueError('current_source_unavailable')
+        for field in fields - {'kind'}:
+            size = 32 if field == 'generation_id' else 64
+            if (type(value[field]) is not str
+                    or re.fullmatch('[0-9a-f]{%d}' % size, value[field]) is None):
+                raise ValueError('current_source_unavailable')
+
+    def validate_current_observation(self, data, evidence, *, input_data,
+                                     expected_source=None) -> dict:
+        """Bind unchanged raw/normalized proof to the already attached predictor.
+
+        This does not authorize a ToolResult or acquire a source. All producer
+        calls stay outside the tool lock; borrowed predictors remain borrowed.
+        """
+        try:
+            from src.agent.harness.decision_bounds import validate_json
+
+            value = dict(data=data, evidence=evidence, input_data=input_data,
+                         expected_source=expected_source)
+            validate_json(value, max_bytes=64 * 1024, reason='current_source_unavailable')
+            if expected_source is not None:
+                self._validate_current_projection(expected_source)
+            if (type(input_data) is not str or not input_data.strip()
+                    or type(evidence) is not list):
+                raise ValueError('current_source_unavailable')
+            value = deepcopy(value)
+            expected_source = value['expected_source']
+            with self._state_lock:
+                if self._closed or self._loading or self._predictor is None:
+                    raise ValueError('current_source_unavailable')
+                predictor = self._predictor
+            if validate_prediction_observation(
+                    value['data'], value['evidence'], smiles=input_data) is None:
+                raise ValueError('current_source_unavailable')
+            entries = [entry for entry in value['evidence']
+                       if type(entry) is dict and 'prediction_receipt' in entry]
+            if len(entries) != 1:
+                raise ValueError('current_source_unavailable')
+            envelope = dict(records=entries[0]['records'], receipt=entries[0]['prediction_receipt'])
+            capture = getattr(predictor, 'capture_prediction_source', None)
+            validate_source = getattr(predictor, 'validate_prediction_source', None)
+            if not callable(capture) or not callable(validate_source):
+                raise ValueError('current_source_unavailable')
+            fresh = capture()
+            validate_source(envelope, smiles=input_data, expected=fresh, **CONTROLS)
+            projection = dict(kind='reverse', generation_id=fresh.generation_id,
+                              source_sha256=fresh.source_sha256,
+                              configuration_sha256=fresh.configuration_sha256)
+            self._validate_current_projection(projection)
+            if expected_source is not None and expected_source != projection:
+                raise ValueError('current_source_unavailable')
+            with self._state_lock:
+                if self._closed or self._loading or self._predictor is not predictor:
+                    raise ValueError('current_source_unavailable')
+            return projection
+        except Exception:
+            raise ValueError('current_source_unavailable') from None
 
     @staticmethod
     def _failure(result, code, message):
