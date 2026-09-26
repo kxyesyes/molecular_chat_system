@@ -12,10 +12,10 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
 | Reverse receipt consumer | PR88 MERGED fb62f53 after CI36253262488 success8/8; reviewed/landed tree dd2de4c4 equal; aligned1926 passed | Later load-free current-source hooks remain separate |
-| Attached-source hooks | Independent SOURCE/QUALITY approve current-main extraction; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 head3d6a872 published | CI36255095764 in progress at latest observation; fresh remote gates and merge pending |
+| Attached-source hooks | Independent SOURCE/QUALITY approve; parent1813 passed69.72s and independent1813 passed67.91s; draft PR89 head3d6a872 | CI36255095764 failed: Agent exit124 at600s/~97%, six other partitions passed. No merge; independent CI capacity partition under review |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d: SOURCE/QUALITY approve, worker865 passed67.60s and independent865 passed65.61s; no activation | Linnaeus implements Task5 same-socket continuation and owns sole local scientific test slot; Tasks6–8 still pending |
+| Normal-Web B1 Tasks4–8 | Task4 locally committed f887f6d with two865-pass runs. Task5 worker447 passed304.29s, but SOURCE found reverse-only missing-subject pre-CAS gap | Popper reproduces/corrects this gap via TDD and owns sole local test slot; corrected SOURCE/fresh QUALITY and Tasks6–8 pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -24,6 +24,24 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR89 CI36255095764 is terminal failure: Agent108440253195 exit124 at600s/~97%;
+six other partitions pass, aggregate fails. Named logs report zero FAILED test
+lines before termination, not proof of unrun cases. New218 hook cases span6.05s;
+three existing Web runtime/lifecycle modules account for substantial duration.
+OldPR88 Agent575.08s already approached the cap. Parent investigates a separately
+reviewed deterministic CI partition, not timeout relaxation or unchanged retries.
+Capacity redistribution changes aggregate available Agent budget, not production
+performance; final same-head coverage and all new gates will remain mandatory.
+
+Task5 worker35808/5446ff reached447 passed7 warnings304.29s,exit0, unchanged
+hashes. Dirac SOURCE rejects a specific missing-subject reverse-only resume:
+explicit required_tools contains reverse, but no typed reverse_result exists yet;
+trial closure may omit sequential molecular validation before CAS. Parent verified
+source risk; Popper now has sole slot to reproduce native/JSON malformed replies,
+correct bounded existing reduction and fill permission/observation/credit probes.
+Previous447 passes do not certify the correction. Target-execution prerequisite
+extracted separately, SOURCE approved, parent437 passed26.25s; QUALITY pending.
 
 Source hooks committed3d6a872184c6b4e76b408943ee956440654d108f and published as
 draft PR89. Independent Peirce exact nine-module run96270 terminated exit0 with
