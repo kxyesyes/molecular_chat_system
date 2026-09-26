@@ -11,10 +11,10 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Packages1–6 | DONE; per-package merge evidence remains in the inventory below | No new work or wholesale original-tree merge |
 | PR84 RAG receipts | MERGED f115261; reviewed/landed tree equal; CI8/8 | Retain earlier failures; no claim that timeout performance is fixed |
 | PR86 reverse owned source | MERGED72ce2bf; reviewed/landed tree equal; CI8/8 | Preserve first import-isolation and inherited RAG failures |
-| Reverse receipt consumer | Corrected SOURCE/QUALITY approve; parent1802 passed74.96s and independent1802 passed75.07s, each7 warnings/2 subtests | Align landed PR87, scoped publication and fresh exact-head CI |
+| Reverse receipt consumer | Draft PR88 head99aec97; SOURCE/QUALITY approve, aligned-main17-module1926 passed83.25s after independent alignment review | CI36253262488 queued at publication; no merge until fresh exact-head gates |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task4 union863 passed/2 failed; original default-profile probes require approved explicit-B1 setup migration, preserving original assertions and adding actual RAG/SQLite checks; Rawls owns sole local slot | Migrated probes and final six-module union, independent reviews; Tasks5–8 still pending |
+| Normal-Web B1 Tasks4–8 | Task4 corrected final865 passed67.60s; SOURCE approves current seven-file freeze; Arendt owns sole local slot for QUALITY/independent repeat | Fresh QUALITY and independent six-module union; Tasks5–8 still pending |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -23,6 +23,19 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Reverse consumer49a74b1 aligned actualmainb33e2c0 as70816d2, with Noether's
+independent raw-delta/blob/interaction approval. Parent17 union20682/766f5d passed
+1926 tests,7 warnings,2 subtests83.25s,exit0. Docs-only99aec97 published as draft
+PR88; CI36253262488 queued at observation. No merge yet. Seven Python files compile
+in memory, diff clean, corrected hashes unchanged. Arendt now has the test slot.
+
+Task4 migrated probes exposed two test expectation mistakes (structured SQLite
+input versus bare string; full producer evidence versus sanitized Web projection),
+retained as2774/affa99 and3531/f75e82. Source-corrected assertions compare actual
+producer with SQLite, retaining Web receipt/evidence-ID checks. Focused2 passed
+8.57s then final865 passed/7 warnings67.60s (44524/8b8164). Beauvoir SOURCE approves
+fresh runtime hash285F3B2E; independent QUALITY/repeat pending. No activation.
 
 PR87 exact7187099 CI36251616084 passed8/8: Agent9662 passed/1 skipped/23858
 warnings596.81s; root2873 passed/75 skipped/5 warnings209.78s. Fresh head/base/main

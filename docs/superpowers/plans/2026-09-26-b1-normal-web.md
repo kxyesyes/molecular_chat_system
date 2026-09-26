@@ -399,6 +399,41 @@ the slot, Rawls is granted the two original probes followed by the final six-mod
 union (the five listed below plus tests/agent/test_ordinary_chat_policy.py).
 Independent full Task4 SOURCE and fresh QUALITY remain required after passing.
 
+### Task4 worker final evidence (independent final review pending)
+
+Actual six-module final44524/8b8164:865 passed,7 warnings67.60s,exit0; source
+hashes before/after agree. Runtime test SHA285F3B2E2EA2F62764D3887662CF2346273C9CB4FC39E66FCEC3A6663532B0AE.
+Runner and shared fixtures unchanged; slot released. No Task5 or activation.
+
+All commands used MedChat Python -I -S -B and the approved scratch launcher.
+For exact argument reconstruction, R=tests/agent/test_b1_normal_web_runtime.py,
+L=tests/agent/test_b1_normal_web_lifecycle.py,
+P=tests/agent/test_ordinary_chat_policy.py. Prior command/result evidence:
+
+| Arguments after launcher (expand R/L/P) | Terminal | Observed result |
+|---|---|---|
+| L::test_b1_inverse_projection_independent_flags_and_unprojected_base L::test_b1_partial_iterable_pool_is_owned_before_next_acquisition R::test_normal_entry_b1_retrieval_gap | d3057d |5 failed4.34s |
+| L |9fece6 |15 passed2.55s |
+| R::test_b1_ready_advertises_installed_not_ready R::test_b1_actual_mounted_entry |0b6b40 |8 failed5.96s |
+| R::test_b1_intent_prefix_preserves_validated_content P::test_b1_display_accepts_content_bound_not_legacy_json_bound |1902/32f2ca |12 failed,2 passed11.93s |
+| R::test_b1_intent_prefix_preserves_validated_content[unicode-native] R::test_b1_intent_prefix_preserves_validated_content[escaped-json] |0618f6 |2 failed5.54s; invalid_history_prefix, zero new HTTP |
+| R::test_b1_intent_prefix_preserves_validated_content |80304/192f67 |6 failed,2 passed11.67s; responder selected wrong system-message position |
+| R::test_b1_intent_prefix_preserves_validated_content |26773/308b18 |6 failed,2 passed18.91s; actual display rejection |
+| Same two explicit Unicode/native and escaped/JSON nodes |b15622 |2 failed7.65s; chat_output_unsafe after two HTTP calls, unchanged-query checks passed |
+| R::test_b1_intent_prefix_preserves_validated_content P L |53153/c50077 |644 passed31.09s |
+| R L tests/agent/test_ordinary_app_assembly.py tests/agent/test_decision_binding_profiles.py tests/agent/test_ordinary_capabilities.py P |9277/b5dba1 |863 passed,2 failed60.68s |
+| R::test_normal_entry_b1_retrieval_gap |2774/affa99 |2 failed9.52s; added assertion expected bare-string instead of structured SQLite input |
+| Same original probe |3531/f75e82 |2 failed12.75s; added assertion compared full persisted evidence to sanitized Web projection |
+| Same original probe |5768/48481c |2 passed8.57s |
+| Exact six modules above |44524/8b8164 |865 passed,7 warnings67.60s |
+
+The last two test-only assertion corrections compare SQLite to captured actual
+producer output and retain Web evidence-ID/receipt checks. They do not alter
+production, original positive assertions or scientific truth criteria. Every
+failed run exited1; passing runs exited0. Earlier failures remain evidence, not
+reclassified successes. Final independent reviewer receives the fresh runtime
+hash rather than the pre-correction hash. No real external provider was invoked.
+
 - [ ] RED `test_b1_server_profile_assembly_is_closed`: B requires async
   decision_a2/semantic_v1, exact seven reviewed canonical adapters, distinct feature
   inverse mapping. B2/unknown/missing wiring rejects before publication; constructor
