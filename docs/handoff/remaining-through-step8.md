@@ -18,7 +18,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
-| B1 terminal publication | Actual4 behavioral RED+1 API RED,8 controls passed; four-production implementation independently SOURCE-approved | Focused GREEN/expanded regression/fresh QUALITY pending; revision8 separate |
+| B1 terminal publication | Four-production SOURCE-approved; actual focused97 passed after4behavior+1API RED | Expanded60 and fresh QUALITY pending; revision8 separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | Permanent2 RED/45 passed then47 GREEN; SOURCE-approved0D26E2; author exact49 actual4774 passed1 skipped | Fresh QUALITY and original3s/5s Web deadlines still pending |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
@@ -33,6 +33,22 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Publication focused GREEN72548/64eab6 exit0:97passed3SWIGwarnings43.81s,
+25/25 before/after Git blobs and SHA256 unchanged, alignedHEAD3d3c43a.
+Author released the slot at terminal; parent transferred it to Kant for fresh
+ASCII exact49, same original0D26/D43/08E40/D523 freeze. Process observation82b102
+confirms fresh wrapper39796/child9568 created07:54:22/23. No fresh result yet.
+Socrates fresh publication QUALITY is source-only preparing; no overlapping
+Python/test run is authorized. Publication author may update only own plan's
+execution record, not source/tests or expand to60 automatically.
+
+Wegener read-only Web-transfer preflight confirms original bounds079b2315/
+2B4BAC3E, runnerF2DAB and testD334 unchanged, all12 profiler production hashes
+unchanged; no src/tests commits since parser9fc2813 and no overlap with10dirty
+Task6 paths. Original3s receive/5s cleanup remain. Temporary profiler is still
+enabled, so a later test must disclose its overhead; current results do not prove
+unprobed Web latency. Transfer/execution waits for fresh QUALITY.
 
 ASCII author exact49 terminal5934/47f5a8 exit0:4774passed1skipped7warnings
 982.51s;53unique controlled hashes unchanged before/after (d55fd3/28bbe7).
