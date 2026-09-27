@@ -39,6 +39,25 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Web first16 independent QUALITY44957/11b4f5 completed16passed,7warnings,21.92s,
+exit0,32pins plus continuation unchanged. Author is preparing the next approved
+30-case worker/validation/projection matrix; permanent failed-join ownership
+needs a separate isolated OS case and is not silently covered by that matrix.
+
+Parent G3 supervisor policy4AC16C4A implements the approved injected-owner seam
+only. Independent SOURCE approved; exact four functions e6655d completed10passed
+0.43s,exit0,657pins unchanged. Concrete Windows owner, sterile child bootstrap,
+bounded child-report channel and actual Windows qualification remain mandatory;
+there is no live launcher/main or scientific-success claim from these fact tests.
+OS test-first preparation reuses the existing private WindowsJob/CommandAdapter
+and qualified B1 ownership ordering; no new process framework is authorized.
+
+C1 test-first preparation now has a separate local worktree/branch
+codex/docking-consent-preparation based on reviewed but unpublished ebb2093.
+This is a stacked local dependency, not a merged main release. Source inspection
+and exact test/API scope are assigned before implementation. No real docking,
+models, deployment, push or production activation occurred.
+
 G3 independent fresh QUALITY1f48a4 completed76passed1.94s,exit0,656pins
 unchanged and no warnings/skips reported. Slot released; launcher10 cases remain
 outside this selection, not passed or skipped. Web first16 fresh independent
