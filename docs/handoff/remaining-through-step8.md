@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Fresh independent owner/control94passed8.86s; native diagnostic34962/bd6341 failed at retained_check/snapshot171, then720s watchdog; raw rc1/settled/slot_released,35pins unchanged. Node decision UI54passed and completion checks passed | Failed assertion is zero model-close/result/complete counts; source shows B1 cleanup-error conversion can bypass bridge exception guard. Bounded real-loop regression design under review; Task8 union/publication/live acceptance remain open |
+| Normal-Web B1 Tasks4–8 | Bounded actual-loop bridge RED45817/652c5f:2failed2passed; minimal pre-display owner settlement passed independent SOURCE and parent96882/bff750:4passed7warnings50.50s,36pins unchanged | Broader compatibility regression in progress; native/JSON owned Web gates, Task8 union/publication/live acceptance remain open. Original native720s failure is retained, not yet superseded by a mounted-Web pass |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -40,6 +40,31 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Parent bounded bridge GREEN96882/bff750 completed **4passed,7warnings,50.50s**,
+exit0,36pins unchanged (bridge8820DC7A, testED974267, plan6A726122).
+The real B1 loop/Session/SQLite/property path's two failed-join cases now emit
+zero agent_result and complete frames, propagate WorkerCleanupError and retain
+the actual persisted failed/invalidation state. The two settled-owner controls
+still emit one result and one completion. Local provider responses are fixtures;
+this is not a real external-model or mounted-Web acceptance claim. Original RED
+45817/652c5f had2failed2passed,7warnings,53.09s with result1/complete1 in both
+unresolved cases. The minimal guard is after task/watcher cleanup and outside
+display-error handling; no core result or persistence semantics were changed.
+
+G3 report-deadline regression9026F208 passed independent SOURCE and parent
+70691/7e4741 completed **2failed,6.91s**,exit1,332pins unchanged. Both actual
+decoder-return variants cross the original deadline after confirmed physical
+cleanup and still publish bootstrap_ready. This is behavioral RED, not a missing
+API. Minimal fresh-clock checking after the final real decode is released;
+physical release facts must remain truthful. No cold import or real generation
+has been accepted by this test.
+
+C2 API-only parent45834/772b09 completed **1failed,13.71s**,exit1,10pins
+unchanged: call-phase TaskRuntime.approve_docking_consent is missing. This does
+not prove the full execution contract. The separate C2 worktree now contains
+test-only behavioral matrixE31F7A9F/plan17197B87 under independent source review;
+no C2 production implementation or docking execution is claimed.
 
 Web diagnostic34962/bd6341 is physically terminal,exit1,35pins unchanged.
 Fixed marker identifies retained_check/assertion/snapshot171 without truncation.
