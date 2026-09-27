@@ -570,3 +570,55 @@ Historical evidence is preserved: section14's author exact61 **41731/ca935c rema
 Parent now authorizes a **local checkpoint commit only**, explicitly limited to the three production paths, three tests and this ownplan in section2. Pre-append read-only hashes matched all six code/test pins and the approved runner; production remains codec6d500e27, reader18c6714b, loopffa8883. This append alone changes the reviewed plan hash. No Python/imports/tests, runner edits, other code changes or push are authorized or performed by this worker for the checkpoint. The commit message must state the earlier full61 failure and focused-only GREEN, not claim full integration acceptance.
 
 HEAD before checkpoint is still `b4252801cbf2396957de445ec563dcfc815e953e` on `codex/b1-continuation-integration`. Parent will align actual latest main `18ad4f9` before separately granting fresh full61; this worker does not merge/rebase/fetch or align during the checkpoint. Local commit does not grant publication or execution authority.
+
+## 17. Actual parent alignment and one aligned author exact61 release
+
+Parent aligned the local checkpoint to actual main and reports Lovelace alignment SOURCE READY. Read-only verification finds clean merge HEAD **`1bd76e6e4a0585443122b6b4da6c36e035a4e50e`**, parents **`efa2da335588d5c86895bf32ae13cc2ddf763974`** and **`18ad4f93732439d020d9387b1437b09c76358270`**. All seven owned files are unchanged relative to efa2da3 before this documentation append; no production/test edits or alignment operation were performed by this worker. Runner SHA256 remains **`EA3B05E05F0F39A23D0056F9CC051B4653708F4E4ECD5335E42B7E469E7298A8`**.
+
+Parent explicitly grants the sole Python slot for **one aligned author exact61 invocation**, using `C:/Users/xkx52/.conda/envs/MedChat/python.exe -I -S -B scratch/ordinary_chat_offline_runner.py` followed by all61 section5 paths as individual arguments in that exact order. Read-only selection checks found61 unique existing paths. No `-k`, directory substitution, narrowed selection, added test, retry, concurrent Python, source edit, push or merge is authorized. The actual launch handle must be reported promptly and polled unchanged through the runner's authoritative terminal; observation timeouts do not stop the run or release its slot.
+
+The new before/after freeze covers **all658 tracked Python files plus this ownplan and the ignored approved runner:660 unique paths**. The earlier parent scope's656 tracked Python files now includes the two committed codec/continuation-test paths, explaining658; do not silently omit either. Record actual SHA256s after this append, before launch, then compare every same path at terminal and separately verify the tracked-path set. Production/test pins remain ffa8883/1B56E632, BBB6BBEF,5C6394,F40680 and the two donor-exact codec/reader pins. This plan's hash alone changes for this release record.
+
+Historical results remain distinct: author41731/ca935c **6370 passed,2 failed,7 warnings,1418.28s, exit1** was not GREEN; parent52575/8c1ce5 **8 passed,3 SWIG warnings,14.96s** was focused validation only. Neither is evidence for this new aligned full61. This section records authorization/preflight, not a launch or passing result. At actual terminal, preserve failures/counts/warnings/time/handle and all before/after pins, explicitly release the slot and stop. Independent fresh QUALITY still requires its own subsequent parent grant; no automatic rerun follows.
+
+## 18. Actual aligned author exact61 GREEN — authoritative terminal and pin receipt
+
+Executed section17's single approved invocation on HEAD `1bd76e6e4a0585443122b6b4da6c36e035a4e50e`, using the exact MedChat `-I -S -B` runner prefix and all61 section5 paths explicitly in their unchanged order. Preflight established61 unique existing targets, runner EA3B05, and660 SHA256 pins (all658 tracked Python files plus plan and runner). The run-time plan was blob **`2f716adb24188aa36dce446b6a5b069cab397f42`**, SHA256 **`4A4FC3F106CA1ABDBFF4401BCBCD4DFFB03736735227B617339038A59ADF4611`**.
+
+Actual exec session **73095**, launch chunk **af260f**; the same handle was polled throughout without restart, retries, extra tests or edits. Authoritative terminal chunk **9e510a** returned process exit **0**, `ORDINARY_PYTEST_EXIT=0`, and **6376 passed,7 warnings in816.85s (13:36)**. No failures or skips were reported. The seven warnings were three SWIG missing-`__module__` and four FastAPI on_event deprecations. This is an actual tool-returned runner terminal, not an inference from observation timeout, progress dots or parent/child PID disappearance.
+
+The worker explicitly **RELEASED the sole Python slot immediately at authoritative terminal**, then verified **660/660 before/after SHA256s identical** and the complete658 tracked-Python path set unchanged. HEAD remained1bd76e6; only the pre-run section17 documentation append was dirty. A further read-only check before this authorized evidence append again matched all660 terminal pins. Parent's later process-absence check7f738c is supplementary only; it is not the source of the exit/result evidence.
+
+Historical section14's 6370-pass/2-failure author run and section16's parent8-case focus remain unchanged and separately attributed. This new result is the aligned **author full61** evidence, not independent fresh QUALITY, real-model/scientific-services or normal-Web activation acceptance. No new run, source/test/runner change, commit, push or merge followed. This authorized result append changes only ownplan after final pins were confirmed; parent controls the next slot sequence and any independent fresh QUALITY grant.
+
+## 19. Independent exact61 verification and publication checkpoint
+
+Independent reviewer Kant completed SOURCE review without blocking findings and
+one fresh exact61 run on HEAD `1bd76e6e4a0585443122b6b4da6c36e035a4e50e`.
+The reviewed plan was SHA256 `6DF8CDCD72135138FDA7C4A7E07E750952A5966045D0FF42DB9D18D6BB0EF279`;
+the approved isolated runner remained EA3B05. Session **37290**, launch **35d120**,
+authoritative terminal **bc9113**: **6376 passed, 7 warnings in811.40s**, exit0
+and ORDINARY_PYTEST_EXIT=0. No failures or skips. The warnings were three SWIG
+and four FastAPI deprecations. All **660/660** before/after hashes, the658
+tracked-Python path set and HEAD were unchanged. Preflight manifest SHA256 was
+`CF73BB1B2ECACEA279EA47C17299405B405B11D318FA5E1D2884843D45B1A9D8`.
+The reviewer explicitly released the sole Python slot after the actual terminal.
+This is independently executed QUALITY evidence, not a reclassification of the
+earlier failed run or the author's run. The reviewer reconfirmed this receipt
+without rerunning tests when the parent resumed publication work.
+
+Parent separately tested the two newly incoming shared modules in explicit order:
+`tests/agent/test_generator_control_contracts.py` and
+`tests/agent/test_json_boundary_ascii_accounting.py`, using the approved isolated
+runner. Terminal **beb95e**: **462 passed in3.15s**, exit0, no warnings/skips and
+five pins unchanged. This is supplementary shared-module evidence, not an extra
+continuation full-suite run.
+
+Only this evidence documentation changes after verification; the three production
+and three test files remain at their reviewed hashes. Publication is restricted
+to the seven section2 paths. GitHub connector access has become available and
+reported no existing PR for this head branch; no credentials were extracted.
+Exact-head remote CI, unresolved-review checks and reviewed/merged-tree equality
+remain required before merge. No production entry, model, dataset, service or
+deployment is enabled. Normal Web, B2 generation/ranking, C docking integration
+and package8 live acceptance remain unfinished.
