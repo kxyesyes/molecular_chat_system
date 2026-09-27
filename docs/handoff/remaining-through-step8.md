@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Prior25 controls and native/JSON outer-owner checks passed; source/reference/home10passed; source-swap16passed independently; worker/projection30passed independently; remaining-credit/TTL11533/ccf77d14passed20.85s,7warnings,32pins unchanged | Offline actual-Web evidence only. Independent14 review, storage failure and permanent failed-join coverage, Task8 union/review/publication and real acceptance remain open |
+| Normal-Web B1 Tasks4–8 | Prior25 controls and native/JSON outer-owner checks passed; source/reference/home10passed; source-swap16passed independently; worker/projection30passed independently; remaining-credit/TTL14passed parent20.85s and independent20.52s,7warnings,32pins unchanged | Offline actual-Web evidence only. Storage failure and permanent failed-join coverage, Task8 union/review/publication and real acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -39,6 +39,12 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Independent Web14 QUALITY79362/adf30e completed **14passed20.52s**,exit0,
+seven warnings,zero skips,32pins plus continuation unchanged. The plan update
+was receipt-only; no production/test changes or retries. Slot physically released.
+Next is the approved Task7 storage-failure matrix source scope, then its actual
+tests and the retained permanent-failed-join case, not an early full-Web release.
 
 Web14 remaining-credit/TTL SOURCE GO9614/949F preceded actual11533/ccf77d:
 **14passed20.85s**,exit0,seven warnings,32pins unchanged. Slow projection/send,
