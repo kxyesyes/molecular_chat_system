@@ -39,6 +39,24 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+G3 scriptAB2F4C5E/plan7A355005 received independent SOURCE HOLD: task cancellation
+is latched only after settle_owned_call finishes physical drain, so a generator
+may delegate another round while the external cancellation predicate stays false.
+Parent source inspection confirms the delayed catch boundary. Author is preparing
+one finite actual-task-cancel regression, script frozen, before any implementation
+change. This is not yet an executed behavior failure. No live generation occurred;
+launcher containment and full B2 remain mandatory separate gates.
+
+Web author is preparing the approved Task7 first16 terminal-source-swap cases
+(two wires, four actual publication boundaries, return/commit-then-raise), only
+in the lifecycle test plus ownplan. Existing production/test assertions stay
+unchanged. Worker/projection drain, remaining-credit delivery and persistent
+storage failure matrices remain pending, not counted as covered by the10 passes.
+
+C aligned independent SOURCE approves ebb2093 exact four-file scope and clean
+main-based branch; old branch preserved, all reviewed source/test bytes identical.
+This is local release readiness, not remote CI or a merged PR.
+
 C independent fresh QUALITY95857/97deb4 completed855passed13.02s,exit0,
 zero warnings/skips,9pins unchanged. Author appended only receipts, planCE31C2E0.
 Parent committed the exact four reviewed files as7d3bb52, preserved that branch,
