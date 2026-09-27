@@ -39,6 +39,12 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+G3 independent fresh QUALITY1f48a4 completed76passed1.94s,exit0,656pins
+unchanged and no warnings/skips reported. Slot released; launcher10 cases remain
+outside this selection, not passed or skipped. Web first16 fresh independent
+QUALITY is now assigned against lifecycle70523D54 and receipt-only plan0F07643E;
+the following30-case worker/projection matrix is still source-scoped preparation.
+
 Corrected Web Task7 exact16 run9804/ab7073 completed16passed,7warnings,21.81s,
 exit0,32pins unchanged after independent SOURCE of the two-import correction.
 All four actual publication boundaries now retain failed/corrected state when
