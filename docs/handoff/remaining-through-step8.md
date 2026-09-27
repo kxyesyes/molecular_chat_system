@@ -27,7 +27,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
-| B2 generator contracts | DraftPR101 c0c4f9c aligned to actual mainc463dd2; prior author/fresh/aligned exact2 each479passed; owned code/test unchanged | Fresh aligned-head CI pending; pure contract is not runtime/backend proof |
+| B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -35,6 +35,26 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR101 merged after repeated exact head/main/check/review guards:9successful checks,
+zero unresolved threads, squashc90c180c341c1f3da86281f2bd2b7feb08285353. Reviewed
+and landed full trees bothc78e0b0683a3d953e2472d283cf91a3654a83c2b. CI36287476020
+collection11934=11710core+224web; core11709passed1skipped21142warnings543.68s;
+Web224passed7167warnings182.90s; sandbox1976passed4skipped1warning50.90s.
+This closes only pure generator-contract publication, not generated-candidate
+analysis/ranking closure, backend token enforcement or actual local generation.
+
+C0a independent fresh QUALITY79902/49fe72:733passed15.79s,exit0,no warnings/skips,
+498pins unchanged, APPROVE; slot RELEASED. Author may now append actual evidence
+before parent baseline alignment/publication. The existing five-module tests do
+not establish C0b transport, ordinary-chat consent, cancellation or real Vina.
+
+Continuation P2 regressions are test-only prepared (73E5C0E/test,5E067F82/plan),
+covering real drain cancellation and a secondary receipt error after actual drain.
+Independent SOURCE requested; production remains the reviewed-but-blocked e7b46ef.
+G3 test sentinels were corrected to E4E5F7D/plan7CE20B90 and await independent
+SOURCE re-review; no Python/script/live request there. No slot is currently held
+after C fresh QUALITY; next execution requires explicit assignment.
 
 C0a pure protocol implementation FD13F3/testE4C8/planC2BDF passed parent SOURCE.
 Author exact five-module GREEN18256/fe8a6e:733passed16.46s,exit0,498 frozen inputs
