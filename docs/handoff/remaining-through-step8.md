@@ -32,7 +32,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
 | G3 concrete Windows owner | Initial API/fixture failures retained; five additional real Windows fault cases af886c passed0.88s after test rescue-observer correction; independent full module ea1838:95passed2.55s,zero warnings/skips,329 hash comparisons unchanged | Scoped process/capture/close qualification passed; bootstrap/report integration, remaining qualification and real generation/B2 still open |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
-| C1 preparation cancellation | Actual blocked-SQL RED reproduced; runtime/store fix returns local cancellation without awaiting SQL while retaining real cleanup. Corrected full module11878/0f5e81:83passed99.17s,eightpins unchanged | Fresh full-source/legacy regression, receipt-fault coverage and integration/publication remain; prepare-only is not executable docking consent |
+| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; staging/snapshot184passed1failed11skipped43.76s,10pins unchanged | Legacy100-byte basename positive hits practical-path guard; diagnose before correction. Fresh full-source review, receipt-fault coverage and integration/publication remain; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -40,6 +40,23 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C1 parent legacy regression9076/7fc675 completed **419passed,2skipped,35.93s**,
+exit0,10pins unchanged,zero warnings (task_store and local_backend). Skips remain
+Windows symlink privilege and opt-in wall-clock offload performance, respectively;
+the latter is not performance verification. Then30874/2121a3 completed staging
+and secure_snapshot_boundary: **184passed,1failed,11skipped,43.76s**,exit1,
+10pins unchanged. The original portable100-byte basename positive reached the
+real temporary-input practical-path guard and raised manifest_invalid_input_name.
+Numeric path diagnosis/correction has not yet run; do not mark legacy regression
+green. Six symlink,one open-file replacement and four POSIX-specific cases were
+skipped. Both processes are physically terminal, with no automatic retries.
+
+G3 source-only bootstrap manifestAEB1182 and proposal191FB9 now describe1246
+pinned files and971 static PE edges. Independent SOURCE review is pending. These
+are not cold-import/native-load, report-channel or live-generation evidence.
+Normal-Web failed-join test preparation remains in progress under design6DA598.
+P7/P8 and publication gates remain open; original dirty checkout is untouched.
 
 C1 path diagnostic313448 reached the actual guard: final input241chars with
 100-byte basename failed the existing240char practical-path limit. The
