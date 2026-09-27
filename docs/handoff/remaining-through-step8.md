@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
+| Normal-Web B1 Tasks4–8 | Task6 metadata41 passed; plain-native still3s timeout/plain-json passed; profiled pair both timeout | Tasks6–8 not complete; profiling is not the sole cause; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | Four-production SOURCE-approved; author exact60 terminal6208 passed7 warnings after focused97 GREEN | Independent fresh60 QUALITY pending; revision8 separate |
@@ -33,6 +33,28 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Web plain/profiled contrast completed without changing26 controlled inputs per
+run. Plain15394/493ccc exit1:1failed(native receive3s TimeoutError),1passed(json),
+7warnings62.78s. Profiled81561/3399f8 exit1:2failed(receive3s),7warnings51.17s.
+Both diagnostic records parsed completely: native/json silence3017.8331/3017.7045ms,
+12/10 completed whole-window closures, outer totals2453.8606/2544.2736ms;
+validate_json8205/6948 calls, self871.3201/890.5337ms. Native was at publication_write
+and JSON at acceptance; each had one unfinished unattributed closure. Nested
+inclusive times are not additive. One unprofiled pass and native failure cannot
+establish a production latency guarantee or uniquely attribute the original failures.
+Worker released at actual terminal; only ownplan append/read-only callgraph work
+is allowed next. No retry, deadline increase, validation removal or caching released.
+
+Socrates now owns sole Python slot for publication fresh exact60, D9BB ownplan,
+unchanged6567 runner and78-input freeze. Actualprocess47428/27292 created08:49:18/19
+confirmedlive in c31ed9. No fresh result yet; do not start competing Python work.
+
+PR98 run36282797393 is terminalfailure. Core11201passed1skipped20468warnings546.27s;
+Web224passed7166warnings168.49s; actualcollected11202+224. Activity1855passed6skipped
+6075warnings375.98s. Seven component checks pass, sandbox-core and aggregate fail.
+PR body now preserves the failed run and UNKNOWN first-timeout cause; no merge
+or CI rerun. Separate cleanup design CA2079 is awaiting SOURCE, no implementation.
 
 Publication author exact60 terminal46845/4a5ecf exit0:6208passed7warnings1015.62s,
 78/78 Git/SHA256 inputs unchanged, manifestBA37B05826BE3B82A4F338BFB4B5EC0B08DCCAA96CF3D4FBBEDA4620C9C7EA76.
