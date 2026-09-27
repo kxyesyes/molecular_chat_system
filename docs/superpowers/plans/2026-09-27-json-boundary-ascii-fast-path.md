@@ -359,3 +359,27 @@ changed. New test SHA256 is
 The two expanded local results above remain evidence for D43, not a new run on
 FCF. Independent final SOURCE approved functionality and required this formatting
 correction. Latest-head full CI is still required; no Web-fix claim follows.
+
+### Retained CI failure and landed cleanup alignment
+
+PR98 head3e5e219 CI36282797393 failed sandbox-core and its aggregate gate.
+Core Agent11201passed1skipped, Web224passed; sandbox-core1failed1972passed4skipped.
+The existing hung-create test first timed out at its original0.5s observer and
+then failed to release its cancellation-resistant fixture during error cleanup.
+The initial timeout cause remains UNKNOWN; neither ASCII causation nor a
+production performance fix is established. The failed run is retained.
+
+The independently reviewed two-file test-cleanup PR100 subsequently landed as
+4280b7a7a41506698a35f31e1d882f8724d58c4e after CI36285626423 passed9/9, including
+sandbox1976passed4skipped. Its focused4 and independent full-module187 passed
+without changing production or the original timeouts. This is evidence for the
+secondary cleanup fix, not proof that the original0.5s trigger is fixed.
+
+Parent merged actual main4280b7a (including publication PR99) into this branch as
+40741b3697559510c22a0323fd47a4894d7bd1f0. All three ASCII-owned source/test/plan
+files were byte-identical across alignment. Boundary SHA0D26E2F1 and permanent
+test SHAFCF8346F remain unchanged; this append alone changes the plan afterwards.
+Incoming8 paths have no overlap with this PR's3-file scope. Prior local49 results
+remain prior-revision evidence; the newly aligned head requires full fresh CI.
+No old failed run is reclassified, no timeout increased, no source guard removed,
+and normal-Web3s, full B2/C and P8 acceptance remain incomplete.
