@@ -991,9 +991,17 @@ def test_input_names_reject_windows_ambiguous_or_overlong_basenames(
     _assert_safe_error(caught.value, forbidden=(name, str(tmp_path.resolve())))
 
 
-def test_portable_100_byte_input_basename_is_accepted(tmp_path: Path) -> None:
-    stager = DockingInputStager(tmp_path)
+def test_portable_100_byte_input_basename_is_accepted(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    root = tmp_path_factory.mktemp("stage-name")
+    stager = DockingInputStager(root)
     receptor_name = f"{'r' * 96}.pdb"
+    # Test the basename boundary without colliding with the independent path
+    # limit, including the longer temporary component used by the real stager.
+    for directory in ("task-1", staging_module._STAGE_PREFIX + "0" * 16):
+        path_chars = len(str(root / directory / "inputs" / receptor_name))
+        assert path_chars <= staging_module._MAX_WINDOWS_PATH_CHARS
 
     path = stager.stage(
         "task-1",

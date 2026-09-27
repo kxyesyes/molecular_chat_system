@@ -7,7 +7,7 @@ import re
 import sqlite3
 import stat
 import tempfile
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,6 +23,10 @@ from .config import (
 )
 from .database import PROJECT_ROOT, connection, dict_factory, init_db
 from .errors import TaskErrorCode
+from .docking_consent import (
+    CONSENT_TTL_MS, MAX_PENDING_CONSENTS, DockingConsentError,
+    DockingConsentPolicy, canonical_json, validate_clocks, validate_identity,
+)
 from .models import (
     ResultProjectionPolicy,
     TaskEvent,
@@ -617,6 +621,197 @@ class TaskStore:
 
     def __init__(self, db_path: str | Path | None = None):
         self.db_path = init_db(db_path)
+
+    def reserve_docking_consent_draft(
+        self, *, identity, policy, now_ms, monotonic_now,
+    ) -> dict[str, Any]:
+        """Trusted admission only: reserve metadata, never a runnable task."""
+        identity = validate_identity(identity)
+        if type(policy) is not DockingConsentPolicy:
+            raise DockingConsentError("consent_policy_unavailable")
+        validate_clocks(now_ms, monotonic_now)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_consents(conn, now_ms, monotonic_now,
+                                  policy.runtime_generation, policy.policy_generation)
+            collision = conn.execute(
+                "SELECT 1 FROM docking_consents WHERE preparation_id=? OR task_id=?",
+                (identity["preparation_id"], identity["task_id"]),
+            ).fetchone()
+            legacy = conn.execute("SELECT 1 FROM tasks WHERE task_id=?",
+                                  (identity["task_id"],)).fetchone()
+            if collision or legacy:
+                raise DockingConsentError("consent_identity_conflict")
+            occupied = "(state IN ('AWAITING_INPUT','PREPARING','READY') OR cleanup_state != 'settled')"
+            if conn.execute(
+                f"SELECT 1 FROM docking_consents WHERE owner_session_id=? AND {occupied}",
+                (identity["owner_session_id"],),
+            ).fetchone():
+                raise DockingConsentError("consent_owner_busy")
+            count = conn.execute(
+                f"SELECT COUNT(*) AS n FROM docking_consents WHERE {occupied}",
+            ).fetchone()["n"]
+            if count >= MAX_PENDING_CONSENTS:
+                raise DockingConsentError("consent_capacity_full")
+            conn.execute(
+                """INSERT INTO docking_consents (
+                    preparation_id,task_id,owner_session_id,identity_json,policy_json,
+                    runtime_generation,policy_generation,expires_at_ms,monotonic_expires
+                ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                (identity["preparation_id"], identity["task_id"], identity["owner_session_id"],
+                 canonical_json(identity).decode("ascii"), canonical_json(asdict(policy)).decode("ascii"),
+                 policy.runtime_generation, policy.policy_generation,
+                 now_ms + CONSENT_TTL_MS, monotonic_now + CONSENT_TTL_MS / 1000),
+            )
+        return self.get_docking_consent(identity["preparation_id"])
+
+    def get_docking_consent(self, preparation_id: str) -> dict[str, Any]:
+        """Private detached facts; not a public view or nonce recovery API."""
+        with connection(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM docking_consents WHERE preparation_id=?",
+                               (preparation_id,)).fetchone()
+        if row is None:
+            raise DockingConsentError("consent_not_found")
+        return self._consent_record(row)
+
+    @staticmethod
+    def _consent_record(row) -> dict[str, Any]:
+        return {
+            "identity": json.loads(row["identity_json"]), "state": row["state"],
+            "version": row["version"],
+            "binding": json.loads(row["binding_json"]) if row["binding_json"] else None,
+            "binding_digest": row["binding_digest"],
+            "approval_nonce_hash": row["approval_nonce_hash"],
+            "manifest_locator": row["manifest_locator"],
+            "expires_at_ms": row["expires_at_ms"], "cleanup_state": row["cleanup_state"],
+        }
+
+    @staticmethod
+    def _expire_consents(conn, now_ms, monotonic_now, runtime_generation, policy_generation):
+        conn.execute(
+            """UPDATE docking_consents SET state='EXPIRED',version=version+1
+            WHERE state IN ('AWAITING_INPUT','PREPARING','READY') AND
+            (expires_at_ms<=? OR monotonic_expires<=? OR runtime_generation!=?
+             OR policy_generation!=?)""",
+            (now_ms, monotonic_now, runtime_generation, policy_generation),
+        )
+
+    def expire_docking_consents(self, *, now_ms, monotonic_now,
+                               runtime_generation, policy_generation) -> None:
+        validate_clocks(now_ms, monotonic_now)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._expire_consents(conn, now_ms, monotonic_now,
+                                  runtime_generation, policy_generation)
+
+    def _begin_docking_preparation(self, *, preparation_id, owner_session_id,
+                                   revision, policy, now_ms, monotonic_now, token,
+                                   still_current):
+        self.expire_docking_consents(
+            now_ms=now_ms, monotonic_now=monotonic_now,
+            runtime_generation=policy.runtime_generation, policy_generation=policy.policy_generation,
+        )
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if not still_current():
+                raise DockingConsentError("consent_preparation_timeout")
+            row = conn.execute("SELECT * FROM docking_consents WHERE preparation_id=?",
+                               (preparation_id,)).fetchone()
+            if row is None or row["owner_session_id"] != owner_session_id:
+                raise DockingConsentError("consent_not_found")
+            identity = json.loads(row["identity_json"])
+            if type(revision) is not int or revision != identity["refinement_revision"]:
+                raise DockingConsentError("consent_revision_conflict")
+            if row["state"] == "EXPIRED":
+                raise DockingConsentError("consent_expired")
+            if row["state"] != "AWAITING_INPUT":
+                raise DockingConsentError("consent_not_waiting")
+            if row["policy_json"] != canonical_json(asdict(policy)).decode("ascii"):
+                raise DockingConsentError("consent_policy_unavailable")
+            conn.execute(
+                """UPDATE docking_consents SET state='PREPARING',version=version+1,
+                operation_token=?,cleanup_state='pending' WHERE preparation_id=? AND version=?""",
+                (token, preparation_id, row["version"]),
+            )
+        return identity
+
+    def _seal_docking_preparation(self, preparation_id, token, binding, digest,
+                                  nonce_hash, *, now_ms, monotonic_now,
+                                  still_current, wall_time_ms, monotonic) -> None:
+        validate_clocks(now_ms, monotonic_now)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # Recheck after SQLite lock acquisition, not only before queued I/O.
+            if not still_current():
+                raise DockingConsentError("consent_preparation_timeout")
+            current_ms, current_mono = wall_time_ms(), monotonic()
+            validate_clocks(current_ms, current_mono)
+            if (current_ms >= binding["expires_at_ms"]
+                    or current_mono >= monotonic_now + CONSENT_TTL_MS / 1000):
+                raise DockingConsentError("consent_expired")
+            changed = conn.execute(
+                """UPDATE docking_consents SET state='READY',version=version+1,
+                binding_json=?,binding_digest=?,approval_nonce_hash=?,
+                manifest_locator='input_manifest.json',expires_at_ms=?,monotonic_expires=?
+                WHERE preparation_id=? AND operation_token=? AND state='PREPARING'
+                AND expires_at_ms>? AND monotonic_expires>?""",
+                (canonical_json(binding).decode("ascii"), digest, nonce_hash,
+                 binding["expires_at_ms"], monotonic_now + CONSENT_TTL_MS / 1000,
+                 preparation_id, token, current_ms, current_mono),
+            ).rowcount
+            if changed != 1:
+                raise DockingConsentError("consent_expired")
+
+    def _revoke_docking_preparation(self, preparation_id, token) -> bool:
+        # The token belongs to one physical writer; a rejected duplicate cannot
+        # revoke that writer. No reverse transition or renewed consent exists.
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                """UPDATE docking_consents SET
+                state=CASE WHEN state='EXPIRED' THEN 'EXPIRED' ELSE 'REVOKED' END,
+                version=version+1,
+                approval_nonce_hash=NULL WHERE preparation_id=? AND operation_token=?
+                AND state IN ('PREPARING','READY','REVOKED','EXPIRED')""",
+                (preparation_id, token),
+            ).rowcount
+            terminal = conn.execute(
+                """SELECT 1 FROM docking_consents WHERE preparation_id=? AND operation_token=?
+                AND state IN ('REVOKED','EXPIRED') AND approval_nonce_hash IS NULL""",
+                (preparation_id, token),
+            ).fetchone()
+            confirmed = changed == 1 and terminal is not None
+        # connection() must have committed successfully before confirmation.
+        # Zero-match and exceptions (including commit uncertainty) are not receipts.
+        return confirmed
+
+    def _finish_docking_cleanup(self, preparation_id, token, *, settled: bool) -> None:
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """UPDATE docking_consents SET cleanup_state=?,version=version+1
+                WHERE preparation_id=? AND operation_token=? AND state IN ('REVOKED','EXPIRED')""",
+                ("settled" if settled else "unresolved", preparation_id, token),
+            )
+
+    def _docking_stage_protected(self, task_id: str, *, cleanup_token=None) -> bool:
+        """Fail-closed orphan seam; only the settled writer's cleanup gets bypass."""
+        with connection(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM docking_consents WHERE task_id=?", (task_id,)).fetchone()
+        if row is None:
+            return False
+        if (cleanup_token is not None and row["operation_token"] == cleanup_token
+                and row["state"] in {"REVOKED", "EXPIRED"}):
+            return False
+        return row["state"] in {"PREPARING", "READY"} or row["cleanup_state"] != "settled"
+
+    def _docking_preparation_task(self, preparation_id, token) -> str | None:
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT task_id FROM docking_consents WHERE preparation_id=? AND operation_token=?",
+                (preparation_id, token),
+            ).fetchone()
+        return row["task_id"] if row is not None else None
 
     @staticmethod
     def _next_sequence(conn, task_id: str) -> int:
