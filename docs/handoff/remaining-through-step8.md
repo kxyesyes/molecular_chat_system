@@ -32,6 +32,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
 | G3 concrete Windows owner | Initial API/fixture failures retained; five additional real Windows fault cases af886c passed0.88s after test rescue-observer correction; independent full module ea1838:95passed2.55s,zero warnings/skips,329 hash comparisons unchanged | Scoped process/capture/close qualification passed; bootstrap/report integration, remaining qualification and real generation/B2 still open |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
+| C1 preparation cancellation | Actual blocked-SQL RED reproduced; runtime/store fix returns local cancellation without awaiting SQL while retaining real cleanup. Corrected full module11878/0f5e81:83passed99.17s,eightpins unchanged | Fresh full-source/legacy regression, receipt-fault coverage and integration/publication remain; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -39,6 +40,20 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C1 path diagnostic313448 reached the actual guard: final input241chars with
+100-byte basename failed the existing240char practical-path limit. The
+diagnostic printed only fixed codes and numeric lengths, not paths or raw errors.
+It remained **1failed,1.14s**,exit1,eightpins unchanged. Independently reviewed
+fixture436EAD8C removes those diagnostic wrappers and uses a shorter test-owned
+root, explicitly checking both final and temporary paths fit the unchanged cap.
+It preserves the100-positive/101-negative basename assertions; production and
+staging remain unchanged. Targeted a8eb0a: **2passed,1.04s**,exit0. Then full
+11878/0f5e81: **83passed,99.17s**,exit0,zero warnings/skips,eightpins unchanged.
+All actual processes are terminal and the Python slot is free. Fresh full C1
+SOURCE/QUALITY and legacy regression are assigned but not claimed complete.
+Remaining receipt-fault tests must distinguish real physical settlement from
+an uncertain database acknowledgement, not invent cross-process atomicity.
 
 C1 minimal runtime/store fix1B6D6D74/105E265C passed independent SOURCE before
 full-module50394/7e1596: **82passed,1failed,99.88s**,exit1,eightpins unchanged.
