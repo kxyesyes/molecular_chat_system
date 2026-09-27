@@ -6,6 +6,9 @@ serializing it. Repeated aliases count each time (as on the wire); cycles fail.
 import math
 import re
 
+_ASCII_ESCAPE = re.compile(r'[\x00-\x1f"\\]')
+_HTML_ESCAPE = re.compile(r'[<>&`]')
+
 
 def context_value(context, *, query_content_bytes=False):
     """Project only the two known server contracts, before copy/hash/privacy.
@@ -144,18 +147,23 @@ def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, ht
         if kind is str:
             if len(item) + 2 > remaining:
                 reject()
-            remaining -= 2
-            for char in item:
-                code = ord(char)
-                if 0xD800 <= code <= 0xDFFF:
-                    reject()
-                remaining -= (6 if html_safe and char in '<>&`' else
-                              2 if char in '"\\\b\f\n\r\t' else
-                              6 if code < 32 else
-                              1 if code < 128 else 2 if code < 2048 else
-                              3 if code < 65536 else 4)
-                if remaining < 0:
-                    reject()
+            if (type(html_safe) is bool and type(remaining) is int
+                    and item.isascii() and _ASCII_ESCAPE.search(item) is None
+                    and (not html_safe or _HTML_ESCAPE.search(item) is None)):
+                remaining -= len(item) + 2
+            else:
+                remaining -= 2
+                for char in item:
+                    code = ord(char)
+                    if 0xD800 <= code <= 0xDFFF:
+                        reject()
+                    remaining -= (6 if html_safe and char in '<>&`' else
+                                  2 if char in '"\\\b\f\n\r\t' else
+                                  6 if code < 32 else
+                                  1 if code < 128 else 2 if code < 2048 else
+                                  3 if code < 65536 else 4)
+                    if remaining < 0:
+                        reject()
         elif item is None:
             remaining -= 4
         elif kind is bool:
