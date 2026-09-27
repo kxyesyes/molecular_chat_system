@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; reviewed/landed tree equal; C0b pre-return physical-close gap reproduced cf929d:8failed2passed2.95s. First-guard implementation041699FC/plan4F3F82B8 now frozen for independent SOURCE | No implementation GREEN yet; construction guard, borrowed opt-in and physical close/isolation regression must pass before wider consent/cancel integration |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused local integration ebb2093 on main73379a1; aligned855passed13.33s,9pins unchanged | Local only: no push/PR/CI/merge yet. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -38,6 +38,20 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C independent fresh QUALITY95857/97deb4 completed855passed13.02s,exit0,
+zero warnings/skips,9pins unchanged. Author appended only receipts, planCE31C2E0.
+Parent committed the exact four reviewed files as7d3bb52, preserved that branch,
+then created codex/docking-preparation-transport-integration at origin/main73379a1
+and cherry-picked only this commit as ebb2093. The four files had no baseline
+diff between the original C0a head and current main. Aligned parent run61137/6af411
+completed855passed13.33s,exit0,9pins unchanged. Working tree is clean; production
+transport041699FC/model7F36FF02/test4E42157B are byte-identical to the reviewed
+snapshot. No PR publication/remote CI/merge or full C acceptance is claimed.
+
+The current available-tool inventory has no GitHub connector (unlike the earlier
+PR103 checkpoint); no credential extraction or workaround was attempted. Local
+integration and Web/G3 work continue; publication is still an explicit gate.
 
 Parent actual-Web source/reference/home follow-up13510/0c809c completed:
 10passed,7warnings,44.99s,exit0;31pins unchanged. Explicit nodes cover restored
