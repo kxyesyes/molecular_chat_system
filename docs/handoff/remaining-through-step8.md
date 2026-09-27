@@ -20,7 +20,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | Four-production SOURCE-approved; actual focused97 passed after4behavior+1API RED | Expanded60 and fresh QUALITY pending; revision8 separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
-| Native ASCII validation optimization | Author/fresh exact49 each4774 passed1 skipped; SOURCE/QUALITY approve0D26E2; profiled original Web gate still2failed | Original3s receive timeout remains; uninstrumented control pending; no Web-fix claim |
+| Native ASCII validation optimization | Draft PR98 head3e5e219; author/fresh exact49 each4774 passed1 skipped; reviewed EOF-only correction; latest-head CI running | Original3s receive timeout remains; uninstrumented control pending; no Web-fix claim |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -33,6 +33,23 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+ASCII publication: exact three-file commit3e5e2195c0e4910295283b3822b9e1609db7aa85
+pushed as draftPR98 (804e8e), based on c612c987. Staged inspection found an extra
+EOF empty line in the previously untracked permanent test; only that line was
+removed, newSHA FCF8346F6C2B042DDC3B4A4F862AF34151083CFA918F9265575785A4AC4E3A62.
+Kant independently reconstructed D43 by appending one LF, confirming no behavioral
+change. Historical49 runs remain D43 evidence, not a fresh FCF run. Staged diff
+check and added-line credential-pattern scan pass; latest-head CI started, static
+quality passed, remaining jobs running (3fa36b). No merge or Web fix claimed.
+
+Web plain/profiled test preparation is frozen: runtime263DF6/fixture8AB913/planA0ADEA.
+Only four explicit comparison parameters/setup and six fixture opt-out controls
+were added; observe_calls implementation remains absent for actual API RED.
+Lovelace independent SOURCE review is pending. Parent confirmed publication
+author60 processes55052/37228 still live (58266f); no competing Python run starts.
+B2 contract plan was corrected for the existing4096-bit integer guard and bounded
+overflow facts (F75B352); independent re-review pending, no code/test release yet.
 
 Original Web two-wire gate after exact0D26 transfer: session46743 initial9a6d3f
 terminalcdcd65 exit1,2failed7warnings63.47s; both call-phase3s receive TimeoutError,
