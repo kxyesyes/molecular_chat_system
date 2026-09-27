@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Independent91291/4a5e54:265passed7warnings0skips504.95s; native/JSON outer proofs pass. Task8 fixed-map/continuation controls78089/f75c58:55passed11.47s,37pins unchanged | Full supervisor regressions and multitarget real-Windows qualification precede full47-module campaign; publication/live acceptance remain open. Fault-child raw receipts remain supervisor_error/rc1, not scientific success |
+| Normal-Web B1 Tasks4–8 | Supervisor/multitarget independent56717/13a0d5:152passed40.78s,40pins unchanged. Actual57-row/47-module campaign64628/15dbd0 stopped on row1 at720s watchdog; remaining56rows NOT_RUN,676pins unchanged | Diagnose actual first-module stall before another execution; no pytest terminal summary/counts available. Keep original deadline and all47 modules. Publication/live acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,10 +30,10 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Stage-B independent224passed44.66s; Stage-C limited7-helper matrix82175/22195e:24passed18.78s,332pins unchanged | Cold P2 HOLD: process-safe DLL search and all loaded non-system DLL provenance still required. Full helper regression and actual cold/generation/B2 remain open; finite fixtures are not scientific execution |
+| G3 concrete Windows owner | Independent89474/af8560 full current helper module:248passed63.28s,0warnings/skips,332pins unchanged. DLL P2 API RED37255/9f2757:1failed6.55s,332pins unchanged, two missing APIs | Minimal DLL P2 implementation released for source review; actual cold/generation/B2 remain open. Helper fixtures and missing-API RED are not real cold/scientific execution |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
-| C2 consent execution | Additional uncertain-claim close fix3539: focused59644/7a9787 1passed11.11s; full66210/a09542 42passed85.96s,exit0,11pins unchanged | Independent exact8-module broader QUALITY authorized after B1 terminal; actual result/publication remain pending. Not real Vina/C4/P8 |
+| C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a isolated branch based on07e751a is at plan review; no production changes/real Vina/C4/P8 completion |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -41,6 +41,38 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+2026-09-28 fresh receipts: C2's independent eight-module run physically ended
+26566/8c3e0b with **1148passed15skipped0warnings773.33s**, exit0. Skips are
+9 symlink privilege,1 Windows open-file replacement,4 POSIX and1 opt-in performance.
+Commit07e751a875b94ebdaf3a4adc7399003977febddc contains exactly the approved seven
+paths, treeb0dfa5e95ef0c78930ca45795d457638678dc37e. Final plan66AA only appends
+the receipt; other15 QUALITY pins match. This is local offline verification,
+not real docking or remote CI. New C4a worktree docking-physical-settlement is
+based on that commit. Its source-grounded plan review found a third receptor
+adapter constructor and a Job acquisition/configuration-failure ownership gap;
+plan clarification is required before test/production implementation.
+
+B1 supervisor qualification56717/13a0d5 completed **152passed40.78s**, no warnings
+or skips,40pins unchanged. The subsequent actual fixed57-row/47-module campaign
+64628/15dbd0 ran ONCE and stopped at its first module,
+tests/agent/test_decision_binding_continuation.py, on the original720s watchdog.
+Raw receipt is test_watchdog_timeout/rc1/settled/slot_released=true; outerexit1,
+may_continue=false and all remaining56rows NOT_RUN. Captured progress is not a
+pytest summary: test counts and exact campaign duration remain unconfirmed.
+All676 input paths/hashes and HEAD97892cf stayed unchanged. The parent wrapper
+and its direct child were observed live before the same original session ended;
+no early kill/retry/split or budget increase occurred. Last test/root cause are
+UNKNOWN; source-grounded diagnostic preparation, not a speculative fix, is next.
+
+G3 independent full helper module89474/af8560 completed **248passed63.28s**, no
+warnings/skips,332pins unchanged. New DLL P2 test source9E5D/planCFCF preserved
+the old141324-byte test prefix exactly. Parent API-only RED37255/9f2757 completed
+**1failed6.55s**,exit1,332pins unchanged: the call-phase assertion identified the
+missing _establish_bootstrap_dll_policy and _verify_bootstrap_loaded_modules.
+No native factory/process/cold preflight was reached by that node. Only minimal
+existing-launcher implementation is released, with SOURCE review before further
+execution; no true cold/generation or B2/P8 pass is claimed.
 
 C2 minimal uncertainty marker3539/planB74 passed SOURCE. Parent59644/7a9787
 completed **1passed11.11s**, then full42 cases66210/a09542 completed
