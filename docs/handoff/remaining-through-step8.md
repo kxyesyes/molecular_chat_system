@@ -18,7 +18,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task6 metadata41 passed; plain-native still3s timeout/plain-json passed; profiled pair both timeout | Tasks6–8 not complete; profiling is not the sole cause; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
-| B1 terminal publication | Four-production SOURCE-approved; author exact60 terminal6208 passed7 warnings after focused97 GREEN | Independent fresh60 QUALITY pending; revision8 separate |
+| B1 terminal publication | DraftPR99 head3658416; SOURCE and fresh QUALITY approve; author/fresh exact60 each6208 passed7 warnings | Latest-head CI/merge pending; revision8 separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | Draft PR98 head3e5e219; two local49 runs passed; latest CI sandbox-core failed hung-create cleanup test | Do not merge; preserve CI failure and investigate separately; original Web3s issue not fixed |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
@@ -33,6 +33,41 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Publication fresh QUALITY terminal42930/0f32a0 exit0:6208passed0skipped7warnings
+1061.14s,78/78 Git/SHA256 unchanged; manifestD19F819BD5D2A7D00C3306E80553CAEB8654D8DAF132752D4FDB86C966A99969.
+Independent APPROVE, no P1/P2. Parent rechecked four production/test identities,
+appended only execution documentation, staged exactly6paths and checked diff and
+added-line credential patterns. Commit3658416a04f4626d80fdd879c15e3c9e2aa72fc2
+pushed as draftPR99 (5fc72d), based on c612c987. Latest CI required; no merge yet.
+The direct source-close→restore coverage caveat and other P7/P8 gaps remain.
+
+Sandbox cleanup preparation: independent SOURCE required preserving original
+errors through controller snapshot/rescue/repeated-cancel faults; corrected
+304E78 test/AF081 plan passed re-review. Actual safe RED terminal6fff87 exit1:
+two call-phase failures before.released==False, one cleanup-only control passed,
+2.24s,6/6 input hashes unchanged. Outer rescue proved one create/destroy, zero
+scientific run calls and no remaining owned tasks, so no60s hang is used as RED.
+Only original helper finally/first-error GREEN implementation is now released;
+controller/assertions/timeouts/production unchanged. Initial CI0.5s cause UNKNOWN.
+
+B2 A-contract testsABAF610 and plan5A8E8BA passed independent SOURCE. Parent
+prepared ignoredrunner45567D with only REPO literal changed from approved6D490,
+complete forward/reverse byte comparison passed. Zeno now owns sole Python slot
+for exactly the new contract module plus existing binding-arguments module;
+no result claimed yet and no production implementation released.
+
+Web failure-only awaiter snapshot proposal and implementation passed independent
+SOURCE (test74208CB/plan9D1D93), preserving all scientific assertions and3s/5s.
+It samples only after original plain-native timeout, before cleanup, without
+profilers/observers/extra awaits and rethrows the original error. Single-node
+diagnostic is queued, not run. Production3s-frame liveness is not an established
+contract; root/send deadlines differ. No heartbeat or timeout change authorized.
+
+C written designC074F274 now includes mandatory ordinary-chat request→missing-input
+clarification→server consent card→same authorized task→original-message result/
+artifact flow. A separate manual form cannot substitute for C completion.
+Socrates independent source review pending; design-only, no implementation.
 
 Web plain/profiled contrast completed without changing26 controlled inputs per
 run. Plain15394/493ccc exit1:1failed(native receive3s TimeoutError),1passed(json),
