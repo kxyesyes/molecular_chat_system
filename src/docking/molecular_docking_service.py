@@ -19,6 +19,7 @@ from .adapters import ADFRAdapter, MeekoAdapter, OpenBabelAdapter, VinaAdapter
 from .adapters.base import (
     CommandAdapter,
     CommandCancelledError,
+    CommandOwnershipScope,
     CommandOwnershipUncertainError,
 )
 
@@ -62,7 +63,12 @@ class DockingConfig:
 class MolecularDockingService:
     """分子对接服务类"""
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, *,
+                 command_scope=None, allowed_output_root=None):
+        self._command_scope = command_scope
+        self._allowed_output_root = CommandOwnershipScope._bound_output_root(
+            command_scope, allowed_output_root,
+        )
         # ===== 软件路径配置（根据实际安装位置修改）=====
         # AutoDock Vina 可执行文件
         self.vina_exe = ""
@@ -76,21 +82,51 @@ class MolecularDockingService:
         self.python_exe = sys.executable
 
         # 创建临时工作目录
-        self.work_dir = os.path.abspath(os.path.join(os.getcwd(), "temp_docking"))
+        self.work_dir = self._allowed_output_root or os.path.abspath(
+            os.path.join(os.getcwd(), "temp_docking")
+        )
         os.makedirs(self.work_dir, exist_ok=True)
-        self.vina_adapter = VinaAdapter()
-        self.receptor_adapter = ADFRAdapter()
-        self.ligand_adapter = MeekoAdapter()
-        self.openbabel_adapter = OpenBabelAdapter()
+        ownership = self._adapter_ownership()
+        self.vina_adapter = VinaAdapter(**ownership)
+        self.receptor_adapter = ADFRAdapter(**ownership)
+        self.ligand_adapter = MeekoAdapter(**ownership)
+        self.openbabel_adapter = OpenBabelAdapter(**ownership)
+        self._require_command_scope()
         self.configure(config)
 
         logger.info(f"分子对接服务初始化完成，工作目录: {self.work_dir}")
 
     def _refresh_adapters(self) -> None:
-        self.vina_adapter = VinaAdapter(self.vina_exe)
-        self.receptor_adapter = ADFRAdapter(self.prepare_receptor_cmd)
-        self.ligand_adapter = MeekoAdapter(self.prepare_ligand_cmd)
-        self.openbabel_adapter = OpenBabelAdapter(shutil.which("obabel") or "")
+        ownership = self._adapter_ownership()
+        self.vina_adapter = VinaAdapter(self.vina_exe, **ownership)
+        self.receptor_adapter = ADFRAdapter(self.prepare_receptor_cmd, **ownership)
+        self.ligand_adapter = MeekoAdapter(self.prepare_ligand_cmd, **ownership)
+        self.openbabel_adapter = OpenBabelAdapter(shutil.which("obabel") or "", **ownership)
+        self._require_command_scope()
+
+    def _adapter_ownership(self):
+        return {} if self._command_scope is None else {"ownership_scope": self._command_scope}
+
+    def _require_command_scope(self):
+        scope = self._command_scope
+        if scope is None:
+            return
+        if os.path.normcase(os.path.abspath(self.work_dir)) != os.path.normcase(self._allowed_output_root):
+            raise CommandOwnershipUncertainError()
+        if any(getattr(adapter, "_ownership_scope", None) is not scope for adapter in (
+            self.vina_adapter, self.receptor_adapter, self.ligand_adapter, self.openbabel_adapter,
+        )):
+            raise CommandOwnershipUncertainError()
+
+    def _require_finished_commands(self):
+        self._require_command_scope()
+        scope = self._command_scope
+        if scope is not None:
+            with scope._condition:
+                if scope._sealed or scope._own_job_cleanup is not None:
+                    raise CommandOwnershipUncertainError()
+            if not scope._settle_finished_commands():
+                raise CommandOwnershipUncertainError()
 
     def _first_existing_path(self, *candidates: Optional[str]) -> str:
         for candidate in candidates:
@@ -210,6 +246,7 @@ class MolecularDockingService:
                                log_on_failure: bool = True, *,
                                cancel_event=None) -> Tuple[bool, str]:
         """Run ligand preparation and return success flag plus CLI output."""
+        self._require_finished_commands()
         input_path = os.path.abspath(input_path)
         output_path = os.path.abspath(output_path)
         job_dir = os.path.abspath(job_dir)
@@ -394,6 +431,7 @@ class MolecularDockingService:
         """
         try:
             self._raise_if_cancelled(cancel_event)
+            self._require_finished_commands()
             # 如果传入的本身是PDBQT，直接复制
             if protein_path.lower().endswith('.pdbqt'):
                 self._copy_file_cooperatively(
@@ -409,7 +447,8 @@ class MolecularDockingService:
             prepare_receptor_cmd = next((p for p in adfr_candidates if os.path.exists(p)), None)
 
             if prepare_receptor_cmd:
-                self.receptor_adapter = ADFRAdapter(prepare_receptor_cmd)
+                self.receptor_adapter = ADFRAdapter(prepare_receptor_cmd, **self._adapter_ownership())
+                self._require_command_scope()
                 logger.info("Executing receptor preparation command")
                 adapter_control = {}
                 if cancel_event is not None:
@@ -453,6 +492,7 @@ class MolecularDockingService:
         流程：SMILES -> SDF (RDKit，在当前进程内) -> PDBQT (mk_prepare_ligand.exe)
         """
         try:
+            self._require_finished_commands()
             from rdkit import Chem
             from rdkit.Chem import AllChem
 
@@ -511,6 +551,7 @@ class MolecularDockingService:
         """
         try:
             self._raise_if_cancelled(cancel_event)
+            self._require_finished_commands()
             src_ext = os.path.splitext(ligand_path)[1].lower()
             job_dir = os.path.dirname(output_path)
 
@@ -537,6 +578,7 @@ class MolecularDockingService:
 
             # Meeko 对部分文件要求显式氢，这里在失败后做一次 RDKit 归一化再重试
             if "implicit Hs" in error_output:
+                self._require_finished_commands()
                 logger.warning("检测到配体含隐式氢，将先用 RDKit 补显式氢后再次尝试")
                 return self._prepare_ligand_file_with_explicit_hs(
                     ligand_path,
@@ -568,6 +610,7 @@ class MolecularDockingService:
         运行AutoDock Vina对接计算
         """
         try:
+            self._require_finished_commands()
             # 如果未提供中心坐标（默认为0,0,0），则自动从受体估算网格框
             def _auto_box_from_receptor(pdbqt_path: str) -> Tuple[float, float, float, float, float, float]:
                 min_x = min_y = min_z = float('inf')
@@ -836,13 +879,15 @@ class MolecularDockingService:
         job_dir: str,
         error_code: str,
         error: str,
+        *,
+        cleanup=None,
     ) -> Dict[str, Any]:
         response: Dict[str, Any] = {
             "success": False,
             "error_code": error_code,
             "error": error,
         }
-        warnings = cls._discard_partial_job(job_dir)
+        warnings = cls._discard_partial_job(job_dir) if cleanup is None else cleanup()
         if warnings:
             response["warnings"] = warnings
         return response
@@ -861,9 +906,14 @@ class MolecularDockingService:
         """Run a traceable docking workflow with cooperative cancellation."""
         import uuid
 
-        resolved_job_id = str(uuid.uuid4()) if job_id is None else job_id
+        scope = self._command_scope
+        resolved_job_id = (scope._task_id if scope is not None else str(uuid.uuid4())) if job_id is None else job_id
+        if scope is not None and cancel_event is None:
+            cancel_event = scope._cancel_event
         try:
             CommandAdapter._validate_cancel_event(cancel_event)
+            if scope is not None and scope._cancel_event is not None and cancel_event is not scope._cancel_event:
+                raise TypeError("Command cancellation owner mismatch")
         except TypeError:
             return {
                 "success": False,
@@ -888,6 +938,22 @@ class MolecularDockingService:
                 "error": "Docking job id is invalid",
             }
 
+        if scope is not None:
+            try:
+                self._require_command_scope()
+                if resolved_job_id != scope._task_id:
+                    raise CommandOwnershipUncertainError()
+                with scope._condition:
+                    if scope._own_job_cleanup is not None:
+                        return {"success": False, "error_code": "job_conflict",
+                                "error": "Docking job already exists"}
+                    if scope._sealed:
+                        raise CommandOwnershipUncertainError()
+                self._require_finished_commands()
+            except CommandOwnershipUncertainError:
+                return {"success": False, "error_code": "process_ownership_uncertain",
+                        "error": "Docking process ownership could not be verified"}
+
         job_dir = os.path.join(self.work_dir, f"docking_{resolved_job_id}")
         try:
             os.mkdir(job_dir)
@@ -903,6 +969,42 @@ class MolecularDockingService:
                 "error_code": "job_directory_failed",
                 "error": "Docking job directory could not be created",
             }
+
+        # Capture only the directory created above. No conflicting invocation,
+        # mutable service root or neighbor can acquire this cleanup obligation.
+        owned_root = self.work_dir
+        history_attempted = False
+        owned_cleanup_warnings: List[str] = []
+        pending_warning = "Docking physical cleanup is pending or unconfirmed."
+
+        def cleanup_owned_job():
+            if pending_warning in owned_cleanup_warnings:
+                owned_cleanup_warnings.remove(pending_warning)
+            cleaned = True
+            if history_attempted:
+                try:
+                    from src.docking.history_index import remove_history_record
+
+                    remove_history_record(owned_root, resolved_job_id)
+                except Exception:
+                    owned_cleanup_warnings.append("Docking history cleanup could not be confirmed.")
+                    cleaned = False
+            try:
+                warnings = self._discard_partial_job(job_dir)
+            except Exception:
+                warnings = ["Partial docking artifacts could not be fully removed."]
+            owned_cleanup_warnings.extend(warnings)
+            # Quarantine is truthful preservation, not confirmed deletion. Keep
+            # it unresolved for the existing caller's cleanup accounting.
+            return cleaned and warnings in ([], ["Partial docking artifacts were removed."])
+
+        def defer_owned_cleanup():
+            scope._defer_own_job_cleanup(resolved_job_id, cleanup_owned_job)
+            if not scope._run_own_job_cleanup() and not owned_cleanup_warnings:
+                owned_cleanup_warnings.append(pending_warning)
+            return owned_cleanup_warnings
+
+        cleanup_control = {} if scope is None else {"cleanup": defer_owned_cleanup}
 
         try:
             history_written = False
@@ -946,8 +1048,10 @@ class MolecularDockingService:
                     job_dir,
                     "receptor_preparation_failed",
                     "Receptor preparation failed",
+                    **cleanup_control,
                 )
             self._raise_if_cancelled(cancel_event)
+            self._require_finished_commands()
 
             self._emit_phase(*_DOCKING_PHASES[1], progress_callback, cancel_event)
             if input_type == "smiles":
@@ -967,8 +1071,10 @@ class MolecularDockingService:
                     job_dir,
                     "ligand_preparation_failed",
                     "Ligand preparation failed",
+                    **cleanup_control,
                 )
             self._raise_if_cancelled(cancel_event)
+            self._require_finished_commands()
 
             self._emit_phase(*_DOCKING_PHASES[2], progress_callback, cancel_event)
             docking_succeeded = self.run_vina_docking(
@@ -985,8 +1091,10 @@ class MolecularDockingService:
                     job_dir,
                     "docking_failed",
                     "AutoDock Vina execution failed",
+                    **cleanup_control,
                 )
 
+            self._require_finished_commands()
             self._emit_phase(*_DOCKING_PHASES[3], progress_callback, cancel_event)
             results = self.parse_vina_results(output_pdbqt)
             self._raise_if_cancelled(cancel_event)
@@ -995,7 +1103,9 @@ class MolecularDockingService:
                     job_dir,
                     "scientific_validation_failed",
                     "Docking result validation failed",
+                    **cleanup_control,
                 )
+            self._require_finished_commands()
 
             heavy_atom_count = 0
             try:
@@ -1036,6 +1146,7 @@ class MolecularDockingService:
             best_pose = dict(formatted_results[0])
             best_pose["pose_file"] = resolved_pose_file
             history_warnings = []
+            self._require_finished_commands()
             try:
                 from src.docking.history_index import (
                     build_history_record,
@@ -1044,6 +1155,8 @@ class MolecularDockingService:
                 )
 
                 self._raise_if_cancelled(cancel_event)
+                if scope is not None:
+                    history_attempted = True  # commit-then-raise still owns this one entry
                 upsert_history_record(
                     self.work_dir,
                     build_history_record(
@@ -1054,11 +1167,12 @@ class MolecularDockingService:
                 )
                 history_written = True
                 if self._cancel_requested(cancel_event):
-                    remove_history_record(self.work_dir, resolved_job_id)
-                    history_written = False
+                    if scope is None:
+                        remove_history_record(self.work_dir, resolved_job_id)
+                        history_written = False
                     raise CommandCancelledError()
             except CommandCancelledError:
-                if history_written:
+                if history_written and scope is None:
                     try:
                         remove_history_record(self.work_dir, resolved_job_id)
                     except Exception:
@@ -1086,6 +1200,9 @@ class MolecularDockingService:
             return response
 
         except CommandCancelledError:
+            if scope is not None:
+                return {"success": False, "error_code": "cancelled",
+                        "error": "Docking was cancelled", "warnings": defer_owned_cleanup()}
             if history_written:
                 try:
                     from src.docking.history_index import remove_history_record
@@ -1104,6 +1221,10 @@ class MolecularDockingService:
                 "warnings": cancellation_warnings,
             }
         except CommandOwnershipUncertainError:
+            if scope is not None:
+                return {"success": False, "error_code": "process_ownership_uncertain",
+                        "error": "Docking process ownership could not be verified",
+                        "warnings": defer_owned_cleanup()}
             self._discard_partial_job(job_dir)
             return {
                 "success": False,
@@ -1111,6 +1232,9 @@ class MolecularDockingService:
                 "error": "Docking process ownership could not be verified",
             }
         except subprocess.TimeoutExpired:
+            if scope is not None:
+                return {"success": False, "error_code": "timeout",
+                        "error": "AutoDock Vina timed out", "warnings": defer_owned_cleanup()}
             self._discard_partial_job(job_dir)
             return {
                 "success": False,
@@ -1118,6 +1242,9 @@ class MolecularDockingService:
                 "error": "AutoDock Vina timed out",
             }
         except _ProgressCallbackError:
+            if scope is not None:
+                return {"success": False, "error_code": "progress_callback_failed",
+                        "error": "Docking progress reporting failed", "warnings": defer_owned_cleanup()}
             self._discard_partial_job(job_dir)
             return {
                 "success": False,
@@ -1125,7 +1252,8 @@ class MolecularDockingService:
                 "error": "Docking progress reporting failed",
             }
         except Exception as error:
-            cleanup_warnings = self._discard_partial_job(job_dir)
+            cleanup_warnings = (self._discard_partial_job(job_dir) if scope is None
+                                else defer_owned_cleanup())
             logger.error(
                 "Docking workflow failed (%s)",
                 type(error).__name__,
@@ -1141,6 +1269,8 @@ class MolecularDockingService:
 
     def cleanup(self):
         """清理临时文件"""
+        if self._command_scope is not None:
+            raise CommandOwnershipUncertainError()  # C never owns the whole output root
         try:
             if os.path.exists(self.work_dir):
                 shutil.rmtree(self.work_dir)
