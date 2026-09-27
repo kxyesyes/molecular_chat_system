@@ -39,6 +39,12 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Independent Web30 QUALITY18574/f808c5 completed **30passed,7warnings,37.42s**,
+exit0,32pins plus continuation928B unchanged; physical run terminal and slot
+released. This corroborates parent38951 without rerouting or weakening cases.
+Task7 remaining-credit/TTL and storage failures, isolated permanent failed-join
+ownership, Task8 union/review/publication and P8 live acceptance remain open.
+
 Parent Web Task7 worker/projection matrix38951/d5f176 completed **30passed,
 7warnings,30.77s**, exit0,32pins unchanged. Independent SOURCE approved the
 projection-control/deadline fixture corrections0F9C/31711 before execution;
