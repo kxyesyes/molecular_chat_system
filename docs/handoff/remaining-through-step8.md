@@ -20,7 +20,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | Four-production SOURCE-approved; actual focused97 passed after4behavior+1API RED | Expanded60 and fresh QUALITY pending; revision8 separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
-| Native ASCII validation optimization | Permanent2 RED/45 passed then47 GREEN; SOURCE-approved0D26E2; author exact49 actual4774 passed1 skipped | Fresh QUALITY and original3s/5s Web deadlines still pending |
+| Native ASCII validation optimization | Author and fresh QUALITY exact49 each4774 passed1 skipped; SOURCE/QUALITY approve0D26E2 | Exact source transferred into Web tree; original3s/5s two-wire gate released, result pending |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -33,6 +33,23 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Fresh Kant exact49 session9511/47a1be exit0:4774passed1skipped7warnings995.69s;
+53hashes unchanged (4b688b/35c457), exact original order and aa3cddd baseline.
+No independent blocking findings. Skip remains directory-symlink unavailable;
+warnings3SWIG+4FastAPI. Parent prechecked original bounds/test/runner and absent
+old PIDs, then applied only the reviewed bounds patch into this Web tree.
+Transferb55b3d verifies exact0D26E2 source, unchangedD334 test/F2DAB runner.
+Wegener now owns sole Python slot for one original complete two-wire node with
+3s receive/5s cleanup and original profiler. No result yet, no broad Web claim.
+
+Socrates publication QUALITY source review is ready without P1/P2; author97GREEN
+is not fresh execution approval. Both author/fresh exact60 remain queued.
+B2 written review found3interface gaps in first draft2b78098: exact receipt/budget
+schema, parser/transition contract and actual control construction/injection
+example. Ownplan-only correction is in progress; no test or production release.
+B1 continuation independent planf1d6c38 is drafted in a clean c612c98-based tree;
+actual publication landing/re-pin and written review precede code preparation.
 
 Publication focused GREEN72548/64eab6 exit0:97passed3SWIGwarnings43.81s,
 25/25 before/after Git blobs and SHA256 unchanged, alignedHEAD3d3c43a.
