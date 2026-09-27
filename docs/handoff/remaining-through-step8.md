@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Bounded bridge4passed plus parent compatibility14651/025d8d:171passed7warnings473.51s,38pins unchanged; minimal pre-display settlement passed independent SOURCE | Native outer65995 now running after receipt-only plan review; JSON, Task8 union/publication/live acceptance remain open. Original native720s failure retained until stronger mounted-Web evidence |
+| Normal-Web B1 Tasks4–8 | Bounded bridge4passed plus compatibility171passed; actual native65995/5828bb and JSON72393/c502c6 outer drivers both exit0 with verified retention/forced-cleanup proofs and unchanged36/37pins | Fresh independent compatibility/owner-control verification underway; Task8 full union/publication/live acceptance remain open. Both raw child receipts remain supervisor_error/rc1, not scientific success |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Stage-B writer/control/report plus deadline fix SOURCE approved; focused2passed5.86s and parent complete module57933/3a96a7:224passed44.31s,332pins unchanged | Fresh independent verification, actual cold imports and real generation/B2 still open; actual Windows finite-process fixtures are not scientific execution |
+| G3 concrete Windows owner | Stage-B SOURCE and fresh QUALITY approved: parent224passed44.31s; independent27198/77324c224passed44.66s,zero warnings/skips,332pins and1246manifest identities unchanged | Stage-C cold-import guard/report tests being prepared; actual cold imports and real generation/B2 still open. Finite-process fixtures are not scientific execution |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
@@ -40,6 +40,26 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Actual native65995/5828bb and JSON72393/c502c6 expected-fault outer drivers
+each completed **exit0**, preserving36/37pins respectively. In retained,
+shutdown and repeated-cancel stages, each actual Web task retains its original
+owner/read lease and unresolved worker roots, HTTP count1, with zero final
+result/completion/model-close frames. Strict proof parsing and actual forced Job
+termination, process reaping, thread joining, stream/handle closing and slot
+release assertions all passed. Raw child receipts remain supervisor_error/rc1;
+driver exit0 proves fault containment, not natural shutdown or scientific success.
+The earlier720s failing runs remain recorded. Fresh independent finite bridge/
+compatibility and owner-control validation is the next checkpoint, not P8.
+
+Independent G3 Stage-B27198/77324c completed **224passed,44.66s**,exit0,
+zero warnings/skips, then physical wrapper and postflight processes terminated.
+All332 comparisons/331 unique files,323-source inventory and1246 manifest file
+identities match. PlanC464 is receipt-only; implementation8C192/manifestD673/
+testD622 remain unchanged. Independent SOURCE/fresh QUALITY approve only this
+finite owner/report scope. Actual cold guard/report wiring, genuine native path
+identity observation and subsequent generation/tool-consumer integration remain
+mandatory. No unexplained or unrelated host processes were terminated.
 
 Parent compatibility14651/025d8d completed **171passed,7warnings,473.51s**,
 exit0,38pins unchanged: complete decision_chat_transport, web_decision_runtime,
