@@ -21,6 +21,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | Draft PR98 head3e5e219; two local49 runs passed; latest CI sandbox-core failed hung-create cleanup test | Do not merge; preserve CI failure and investigate separately; original Web3s issue not fixed |
+| Hung-create test cleanup | DraftPR100 head27589a7; focused4passed and independent wholemodule187passed; SOURCE/QUALITY approve | Latest-head CI and merge guards pending; first0.5s cause remains UNKNOWN |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -33,6 +34,19 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Sandbox independent full-module QUALITY session55971/3c1ee6 exit0:
+187passed96.46s,zero failed/warnings/skipped;6/6 hashes unchanged, no selection
+exclusion. Parent aligned to108df5d with all frozen inputs preserved, appended
+evidence only, staged exact test+plan, checked diff/credential candidates and
+committed27589a7e01ce334f9c75bb1bb9228542f7930f35. DraftPR100 created and attached;
+latest-head CI pending, no merge. No production/timeouts/science changes.
+
+B2 A-contract sourceD4A56E/plan8878D4 is prepared, testsABAF remain frozen;
+independent SOURCE is in progress before GREEN. C design9D0B63 revision addresses
+the two identified seams and is under re-review, not implementation. Normal-Web
+next diagnostic design is being reduced to existing owned timing plus closure
+spans only, avoiding a separate guard/drain/cancel instrumentation framework.
 
 PR99 landed after fresh exact-head/main, nine successful checks, paginated review
 and unresolved-thread guards (zero reviews/threads/unresolved), ready transition
