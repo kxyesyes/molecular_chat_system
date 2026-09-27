@@ -18,7 +18,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task6 metadata41 passed; plain-native still3s timeout/plain-json passed; profiled pair both timeout | Tasks6–8 not complete; profiling is not the sole cause; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
-| B1 terminal publication | DraftPR99 head3658416; SOURCE and fresh QUALITY approve; author/fresh exact60 each6208 passed7 warnings | Latest-head CI/merge pending; revision8 separate |
+| B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | Draft PR98 head3e5e219; two local49 runs passed; latest CI sandbox-core failed hung-create cleanup test | Do not merge; preserve CI failure and investigate separately; original Web3s issue not fixed |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
@@ -33,6 +33,29 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR99 landed after fresh exact-head/main, nine successful checks, paginated review
+and unresolved-thread guards (zero reviews/threads/unresolved), ready transition
+and repeated pre-squash guard. Squash108df5d8acbdc1881a8f09c31b8b450acdfb247b;
+reviewed3658416 and landed full trees both9ddfae2dc26cefb2a14f584328e696a0f4477cb4.
+Actual CI36284700147 collection11472=11248core+224web; core11247passed1skipped
+21140warnings616.70s, Web224passed7166warnings195.98s. Full CI nine checks passed.
+Sandbox1973passed4skipped65.73s on this PR does not resolve PR98's retained cause.
+Continuation tree safely aligned to b4252801 with landing as ancestor; only
+re-pin/test preparation is released, not implementation or Python execution.
+
+Web plain-native diagnostic terminal30754/e23c59 again failed the original3s
+receive guard:1failed7warnings40.05s,26/26 pins unchanged. Bounded snapshot places
+bridge at finish publication PRE-write boundary awaiting owned source validation;
+it is an async awaiter, not a worker stack or deadlock/root-expiry proof. Further
+read-only diagnostic design must separate scheduling from actual work, not repeat
+the same unexplained failure or weaken scientific assertions.
+
+Sandbox helper GREEN terminalbc6991 exit0: original plus two new nodes produced
+4passed1.78s with6/6 pins unchanged. Slot released; Socrates now owns the sole
+Python slot for independent full test_service.py QUALITY. Initial CI0.5s cause
+remains UNKNOWN; original failure cleanup is fixed only as far as focused evidence
+shows. Production and deadlines remain unchanged; no sandbox PR publication yet.
 
 B2 actual API RED is terminal: session84529/chunk54bb08, exit1,
 415call-phase missing-API failures and64passed,34.27s,zero warnings/skips;
