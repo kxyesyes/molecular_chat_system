@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | New phase controls82847/3ab820:25passed4.84s; complete supervisor qualification42236/ecc474:177passed44.09s. One whole-firstmodule diagnostic58204/c93379->fc9ebd again reached720s watchdog,676pins unchanged; visible tail continued completing calls before deadline | Tail supports cumulative cost, not a proven single-node deadlock. Ordinal47 metadata_acceptance entered at712.797s; inner cost remains UNKNOWN. Original campaign56remaining rows NOT_RUN; no full-module summary or live success |
+| Normal-Web B1 Tasks4–8 | Six-stage controls26094/24ed07:25passed6.23s; full qualification59511/4b6a48:202passed46.52s. Whole-module19841/a4d35f still hit720s,676pins unchanged; complete945 marker sequence captured without gaps/truncation | First two full-chain calls took230.922/220.547s;46 completed preclaim cases spent4.656–5.281s in initial invoke versus0.141–0.516s in resume. Internal cause remains UNKNOWN; no full-module summary, original56 campaign rows still NOT_RUN |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,11 +30,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | DLL P2 focused36passed and full284passed retained. First actual fixed-child cold27800/d8836d:1failed7.26s,332pins unchanged; physical checks completed before readiness failure | Closed failed frame: cold_import/import_failed, imports_checked0/client0/POST0/guard0. Import cause UNKNOWN; no repeat, manifest bypass or generation success. B2/P8 remain open |
+| G3 concrete Windows owner | Actual cold27800/d8836d failed7.26s. Fixed-enum diagnostic API87864/de0a85 now reached intended missing-three-helper RED:1failed7.98s,332pins unchanged; minimal implementation released | Earliest cold failure boundary remains UNKNOWN. Diagnostic controls/implementation are not a corrected cold start or generation success; no repeat/manifest bypass/provider call |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Base-only implementation SOURCE found two P1 acquisition/registration gaps; two real-resource regressions prepared, not yet executed. Outer-owner API RED91378/44390d->bb20de:1failed1.28s,10pins unchanged, missing wrapper | Derived existing-owner wrapper implementation released after TEST/SOURCE; genuine platform qualification and P1 reproduction still pending. Service/tool/lease consumers and later C batches remain open |
+| C4a physical command settlement | Two actual P1 GREENs3567/afcbee and85036/f73c0c; original13 campaign66565/d2d845 completed21passed5POSIX-skipped, all339pins unchanged after each invocation and outer physical exit0 | Full legacy-module mapping at TEST-first review; C-only false-termination wording TEST preparation; service/tool/lease consumers remain open. Windows resource tests do not prove POSIX or scientific docking |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,76 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C4a original13 selector campaign66565/d2d845 is now physically terminal:21passed,
+5skipped in genuinely POSIX-specific branches, all outer receipts rc0/settled/
+slottrue and339pins unchanged per invocation. Together with the two separately
+reported P1 GREEN nodes this is23passed5skipped, NOT full legacy or POSIX proof.
+The owner's passed receipt for skipped-only selectors is process-run success,
+not coverage. Full legacy module requires the independently proposed single
+closed selector amendment; parent has authored its TEST-first controls, not
+executed the full module. P2 truthful startup reporting is separately TEST-first.
+
+G3 fixed-enum diagnostic API87864/de0a85 reached CALL-phase missing helpers
+_new_bootstrap_diagnostics/_record_bootstrap_failure/_bootstrap_reject:
+1failed7.98s,exit1,332pins unchanged. This is intended new API RED, not another
+actual cold failure. Minimal existing-launcher diagnostic implementation is
+released; trusted @2 wire, first/secondary error slots, unchanged manifest
+membership and all original ownership/deadline conditions remain required.
+No actual cold retry, scientific import success, model client or generation call.
+
+Six-stage B1 diagnostics are now actual evidence:26094/24ed07 completed25passed
+6.23s, then59511/4b6a48 completed full202passed46.52s, both exit0 with41pins
+unchanged and no reported warnings/skips. The separately granted whole-module
+19841/a4d35f returned test_watchdog_timeout/rc1/ownershipsettled/slottrue.
+All676 inputs and HEAD5270a12 matched; inverse of the four reviewed updates
+restored the previous9C07 digest. Current digest is74543DA389FBC650812DC833C3A24FE713DEF400A7178D85C913455968A18BFF.
+
+This time the full tool return was retained before summarizing:181487characters,
+945markers with continuous sequence1..945, no truncated marker/tool truncation,
+135 collected nodes. Calls1/2 (full six-tool scientific-chain continuation)
+took230.922/220.547s;46 completed preclaim cases had call5.046–5.672s,
+initial invoke4.656–5.281s (median4.844), resume0.141–0.516s (median0.219),
+and reopening0.015–0.032s. Ordinal49 entered at715.390s, case_ready715.453s,
+without a waiting-return marker before timeout. Internal scientific-chain
+cost is NOT yet attributed. There is no pytest terminal summary; markers do
+not establish full-module or full-campaign success. Ignored structured timing
+artifact: scratch/b1-cost-diagnostic-2026-09-28.json. No automatic retry.
+
+C4a minimal source489D/planA8CD passed independent SOURCE. Both original real
+resource regressions now pass through the qualified08682/10435 owner:
+3567/afcbee1passed7.04s;85036/f73c0c1passed7.36s, both rc0/settled/slottrue,
+339pins unchanged. This fixes the two reproduced false-settlement verdicts;
+it does not prove unknown resources were actually recovered. A separate P2
+in inherited startup error wording remains: it claims a suspended child was
+terminated when its acquisition outcome is unknown. Keep no-scope compatibility;
+add a C-only truthful-error regression before changing that message. Original13
+selector regression66565 is in progress, with stop-on-first-failure ownership.
+
+C4a further actual evidence: original13-selector outer passed46finite controls
+(8015/50585e,5.30s) and3Windows qualification cases(95575/0f51d4,2.28s).
+The independently reviewed two-selector TEST amendment first failed3finite
+controls34462/bd6185 in1.75s as intended. The wrapper's two-line mapping change
+then passed48finite controls27948/6d6536 in5.71s and the same3Windows cases
+11901/9baa4a in2.24s. All qualification runs had zero warnings/skips and12pins
+unchanged. Lifecycles,720/+5 and the trusted C2 primitives stayed unchanged.
+
+Actual feature23278/d8a2bb failed at scope.settle() returning True after genuine
+Job acquisition/attachment failure (1failed8.11s);61945/122347 failed similarly
+after genuine suspended-child creation followed by a Popen return-path error
+(1failed8.18s). Both required physical prerequisites were reached before verdict,
+both finally cleanups completed without reported failure,339pins matched, and
+outer receipts were test_failed/rc1/settled/slottrue with physical exit1. This
+reproduces bugs in the unmerged C4a implementation; it does not claim the main
+branch already uses it. Minimal base-only fixes are released, pending SOURCE
+and GREEN. Later tool/service/lease propagation remains required.
+
+B1 six-stage cost diagnostic design was independently reviewed without changing
+the original scope/timeouts. Its finite API90903/7ce21c reproduced the missing
+b1_continuation_stage method:1failed3.64s,exit1,41pins unchanged. Only test/runner
+instrumentation is released; no second whole-module run or bottleneck fix is
+claimed. G3 fixed-enum first-error diagnostics are at design/TEST preparation;
+the actual cold failure remains UNKNOWN and uncorrected.
 
 2026-09-28 diagnostic follow-up: parent phase controls82847/3ab820 completed
 **25passed4.84s**,exit0,37pins unchanged. The full two supervisor modules then
@@ -75,8 +145,12 @@ The first real G3 fixed--child cold baseline27800/d8836d completed
 owner settlement before readiness validation. The decoded closed frame reported
 phase cold_import, code import_failed, imports_checked0, client_constructions0,
 post_attempts0, guard_violations0. This is a genuine failed cold execution, not
-model inference or successful molecular generation. The first-import cause is
-UNKNOWN; a suspected DLL spelling alone is not proof and no manifest was changed.
+model inference or successful molecular generation. Independent source review
+clarifies that this generic code can originate in preflight identity/inventory,
+root bindings, context establishment or final inventory, not only a scientific
+import. Zero verified context reads does not establish that an import was
+reached. The first failed boundary and cause remain UNKNOWN; a suspected DLL
+spelling alone is not proof and no manifest was changed.
 
 C4a independent SOURCE found two candidate P1 paths in base2A664: an acquired
 Job whose attachment raises before receipt registration, and a real suspended
