@@ -35,6 +35,17 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+PR100 CI36285626423 is confirmed live at27589a7; static, sandbox-core,
+sandbox-api and task-runtime succeeded; remaining partitions/aggregate pending.
+No merge or successful full-CI claim yet. PR98 is still blocked on its failed run.
+
+B2 D4A56E/8878D4 received independent SOURCE READY, no P1/P2; original260
+source lines and nine other production pins remain unchanged. Sole Python slot
+is now Zeno's for the exact original two modules GREEN, not broad regression or
+runtime activation. No GREEN result yet. C design9D0B63 received independent
+SOURCE READY; isolated C tree is fast-forwarded to108df5d, with only a five-field
+wording correction and concrete C0-C8 implementation-plan drafting authorized.
+
 Sandbox independent full-module QUALITY session55971/3c1ee6 exit0:
 187passed96.46s,zero failed/warnings/skipped;6/6 hashes unchanged, no selection
 exclusion. Parent aligned to108df5d with all frozen inputs preserved, appended
