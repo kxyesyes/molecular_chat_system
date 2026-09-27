@@ -40,6 +40,29 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Corrected Web36 synchronization188036AA/1766035A passed independent SOURCE:
+seven added lines await shielded actual retained tasks after first/resume frames,
+keeping all business assertions, immediate owner/reader checks and the original
+5s bound. Parent33369/01dbaf then completed **36passed,7warnings,43.31s**,exit0,
+32pins unchanged. Initial36 failures remain below. Fresh independent QUALITY is
+running separately; this is not a complete normal-Web or live-model release.
+
+G3 fault observer separationD23C611D/557E2A00 passed independent SOURCE. Parent
+af886c executed all five approved real Windows faults: **5passed,0.88s**,exit0,
+zero warnings/skips,329hash comparisons unchanged. Fault observations survive
+test rescue without rewriting failed owner receipts. Full-module independent
+regression remains pending; no bootstrap or real generation occurred.
+
+C1 boundary regression B4FEA807/FC6C8022 passed independent SOURCE, then actual
+e87933 reached the expected blocked-revocation assertion: **1failed,1passed,
+6.59s**,exit1,eightpins unchanged. The failing SQL-first/cancel caller remains
+pending while durable revocation is held; the normal-success control passed.
+Actual worker/SQL cleanup completed before process exit. Minimal runtime/store
+correction is now released: return local cancellation without awaiting SQL,
+retain exactly one real revoke operation, and require a committed token-matched
+receipt before claiming confirmed revocation. Implementation and GREEN remain
+pending; this does not establish seal-in-flight or cross-process admission.
+
 Web36 SOURCE approved7DCAA59A/D63941FD before actual parent run8193/6dfc6c:
 **36failed,7warnings,47.69s**,exit1,32pins unchanged. Visible failures reach the
 new immediate `runtime.tasks` assertion after the completion frame; actual
