@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from threading import RLock
 from typing import Any
@@ -12,6 +13,7 @@ from src.agent.runtime.task_state import TaskEvent, TaskEventType
 @dataclass
 class _EventDelivery:
     event: TaskEvent
+    frozen: bool = False
     memory_appended: bool = False
     persisted: bool = False
     callback_attempted: bool = False
@@ -42,7 +44,13 @@ class AgentEventBus:
         progress: float | None = None,
         payload: Any = None,
         event_id: str | None = None,
+        *,
+        frozen: bool = False,
     ) -> TaskEvent:
+        if type(frozen) is not bool:
+            raise ValueError("frozen delivery requires an exact boolean")
+        if frozen and (type(event_id) is not str or not event_id.strip()):
+            raise ValueError("frozen delivery requires a stable event ID")
         if event_id is None:
             return self._emit_legacy(
                 trace_id=trace_id,
@@ -55,27 +63,34 @@ class AgentEventBus:
             )
         with self._lock:
             delivery = self._deliveries.get(event_id)
+            if delivery is not None and delivery.frozen != frozen:
+                raise ValueError("event delivery mode cannot change on retry")
             if delivery is None:
+                task_event = TaskEvent(
+                    trace_id=trace_id,
+                    event=event,
+                    message=message,
+                    skill=skill,
+                    tool=tool,
+                    progress=progress,
+                    payload=payload,
+                )
+                # Freeze once, before exposure. Retried arguments and outward
+                # copies never become authority for this stable delivery.
                 delivery = _EventDelivery(
-                    event=TaskEvent(
-                        trace_id=trace_id,
-                        event=event,
-                        message=message,
-                        skill=skill,
-                        tool=tool,
-                        progress=progress,
-                        payload=payload,
-                    )
+                    event=deepcopy(task_event) if frozen else task_event,
+                    frozen=frozen,
                 )
                 self._deliveries[event_id] = delivery
             task_event = delivery.event
             if not delivery.memory_appended:
-                self.events.append(task_event)
+                self.events.append(deepcopy(task_event) if frozen else task_event)
                 delivery.memory_appended = True
             if not delivery.persisted:
                 if self.state_store:
+                    value = {**task_event.to_dict(), "id": event_id}
                     self.state_store.append_event(
-                        {**task_event.to_dict(), "id": event_id}
+                        deepcopy(value) if frozen else value
                     )
                 delivery.persisted = True
             if self.on_event and not delivery.callback_attempted:
@@ -83,9 +98,9 @@ class AgentEventBus:
                 # a callback that performs its side effect and then raises is not
                 # invoked again. The original error still reaches the caller.
                 delivery.callback_attempted = True
-                self.on_event(task_event)
+                self.on_event(deepcopy(task_event) if frozen else task_event)
                 delivery.callback_committed = True
-            return task_event
+            return deepcopy(task_event) if frozen else task_event
 
     def _emit_legacy(
         self,
