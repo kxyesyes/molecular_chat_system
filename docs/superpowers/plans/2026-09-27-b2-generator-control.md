@@ -1844,3 +1844,20 @@ Earlier actual479 results are not newly rerun results on4280b7a. Latest-head
 full CI/review/merge guards remain required. Publication is exactly the contract
 source, new contract test and this plan; no generator/client/runtime integration,
 environment probe, model activation, real inference or deployment is included.
+
+## 16. Landed ASCII-boundary alignment
+
+PR98 landed as c463dd2824265fbe1015ea5cf0564c804a4e3cf6 after exact-head
+8ce19a5 CI36286487041 passed all nine checks and review guards found no unresolved
+threads. Reviewed and landed trees both791e4617. Its actual collection was11519
+=11295core+224web; core11294passed1skipped, Web224passed. Historical Web3s and
+sandbox initial0.5s causes are not declared fixed by that success.
+
+Parent merged this landed main into the contract branch as7a1a70d. The incoming
+three ASCII paths do not overlap this PR's three owned paths, whose SHA256s were
+unchanged before/after alignment. Shared decision_bounds is intentionally now the
+landed implementation; do not claim all earlier regression inputs are unchanged.
+The previous479 local results remain previous-revision evidence. This aligned
+head requires fresh complete CI; no additional local run or runtime proof is
+claimed. At the last observation the prior-head CI36286571814 had not yet yielded
+a final aggregate; its outcome remains separate from this new head.
