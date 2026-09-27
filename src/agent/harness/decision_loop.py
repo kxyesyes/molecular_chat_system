@@ -121,9 +121,8 @@ class _Run:
 class _BindingFinalization:
     """One request's private candidate, never a stored or wire DTO.
 
-    Task5 will cap tail_deadline when reserving outgoing snapshot credit. Until
-    then B cannot mint a nonce; the root cap still covers terminal callbacks and
-    the outer drain. Failure correction performs no source/owned work.
+    The reserved tail caps outgoing checkpoint construction, publication and
+    outer drain. Failure correction performs no source/owned work.
     """
     session: Any = None
     clock: Any = None
@@ -132,9 +131,14 @@ class _BindingFinalization:
     counters: dict = field(default_factory=dict)
     failure: tuple[str, str] | None = None
     candidate: Any = None
+    # An unstarted Session grants no correction authority. Retain only its
+    # detached first failure across the mandatory outer owner drain.
+    detached_failure: AgentResult | None = None
     phase: str = 'preterminal'
     ordinary_cancelled: bool = False
     cancelled_metadata: bool = False
+    _correction_request: str | None = None
+    _correcting: bool = False
 
     def expired(self):
         cap = self.deadline if self.tail_deadline is None else min(self.deadline, self.tail_deadline)
@@ -142,21 +146,57 @@ class _BindingFinalization:
 
     def invalidate(self, reason, boundary):
         if self.session.publication_invalidated:
-            # A reentrant terminal callback can already have committed the
-            # failure. Adopt it, never change its reason or start positive work.
-            self.candidate = self.session.finish()
+            # Read only the Session's frozen failure journal, never rejected
+            # observations. Its earlier reason also owns the detached fallback
+            # if a subsequent correction/finish callback raises.
+            self.candidate = self.session._invalidated_publication_result()
             self.failure = (self.candidate.metadata['stop_reason'], self.candidate.metadata['failed_boundary'])
-            return self.candidate
         if self.failure is None:
-            if type(reason) is not str or re.fullmatch(r'[a-z][a-z0-9_]{0,95}', reason) is None:
+            if (type(reason) is not str or len(reason) > 96
+                    or re.fullmatch(r'[a-z][a-z0-9_]{0,95}', reason) is None):
                 reason = 'binding_publication_failed'
+            if (type(boundary) is not str or len(boundary) > 96
+                    or re.fullmatch(r'[a-z][a-z0-9_]{0,95}', boundary) is None):
+                boundary = 'terminal_publication'
             self.failure = (reason, boundary)
-            ids = list(dict.fromkeys(r.quality.get('evidence_id') for r in self.session.results
-                if type(r.quality.get('evidence_id')) is str
-                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', r.quality['evidence_id'])))[:12]
-            self.candidate = self.session.invalidate_dynamic_publication(reason=reason,
-                boundary=boundary, invalidated_evidence_ids=ids, counters=self.counters)
-        return self.candidate
+            # Replace even an already-positive candidate before diagnostics or
+            # callbacks. Rejected observations are not safe diagnostic inputs;
+            # omit optional IDs instead of traversing that object graph.
+            trace_id, skill = self.session._publication_identity
+            self.candidate = AgentResult(trace_id, False, 'Decision publication invalidated',
+                skill_name=skill, outcome=RunOutcome.FAILED,
+                error=AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Decision publication invalidated'),
+                metadata={'publication_invalidated': True, 'stop_reason': reason,
+                    'failed_boundary': boundary, 'correction_durability': 'unconfirmed',
+                    'invalidated_evidence_ids': []})
+            limits = dict(model_requests=16, protocol_repairs=1, tool_budget_reserved=12,
+                          reused_decisions=16, tool_attempt_count=12)
+            counts = {}
+            if type(self.counters) is dict and len(self.counters) <= len(limits):
+                counts = {k: v for k, v in self.counters.items()
+                    if type(k) is str and k in limits and type(v) is int and 0 <= v <= limits[k]}
+            self.candidate.metadata.update(counts)
+            self._correction_request = json.dumps(dict(reason=reason, boundary=boundary,
+                invalidated_evidence_ids=[], counters=counts), sort_keys=True, allow_nan=False)
+        if self._correcting:
+            return deepcopy(self.candidate)
+        self._correcting = True
+        try:
+            if self.session.publication_invalidated:
+                # Session owns first-error authority and all per-write retry
+                # limits, including a correction that committed then raised.
+                self.candidate = self.session.finish()
+                self.failure = (self.candidate.metadata['stop_reason'], self.candidate.metadata['failed_boundary'])
+            else:
+                self.candidate = self.session.invalidate_dynamic_publication(
+                    **json.loads(self._correction_request))
+        except (Exception, asyncio.CancelledError):
+            # A latch is not proof that correction ran. The outer drain barrier
+            # can retry this same frozen request; never restore a positive result.
+            pass
+        finally:
+            self._correcting = False
+        return deepcopy(self.candidate)
 
 
 class ModelDecisionLoop:
@@ -212,8 +252,10 @@ class ModelDecisionLoop:
                         await worker_owner.settle()
                     except asyncio.CancelledError:
                         if finalization.session is None:
-                            raise
-                        if (finalization.phase == 'cancelled_attempt'
+                            if finalization.detached_failure is None:
+                                raise
+                            result = finalization.detached_failure
+                        elif (finalization.phase == 'cancelled_attempt'
                                 and finalization.failure is None
                                 and not finalization.session.publication_invalidated
                                 and finalization.candidate is not None
@@ -226,14 +268,17 @@ class ModelDecisionLoop:
                             result = finalization.invalidate('cancelled', 'owner_drain')
                     except Exception:
                         if finalization.session is None:
-                            raise
-                        result = finalization.invalidate('worker_cleanup_unconfirmed', 'owner_drain')
+                            if finalization.detached_failure is None:
+                                raise
+                            result = finalization.detached_failure
+                        else:
+                            result = finalization.invalidate('worker_cleanup_unconfirmed', 'owner_drain')
             # The owner is sealed. Only the clock and failure-only correction
             # may run here, never a source check or another owned action.
             if finalization.session is not None:
-                if finalization.session.publication_invalidated:
+                if finalization.failure is not None or finalization.session.publication_invalidated:
                     result = finalization.invalidate('binding_publication_failed', 'owner_drain')
-                if finalization.expired():
+                elif finalization.expired():
                     result = finalization.invalidate('task_deadline_exceeded', 'owner_drain')
                 finalization.phase = 'released'
             return result
@@ -253,10 +298,10 @@ class ModelDecisionLoop:
         from langgraph.graph import END, StateGraph
 
         binding = self.binding_profile is not None
+        segment_start = time.monotonic() if binding else None
         if binding:
             from src.agent.runtime.worker_ownership import WorkerOwner
-            reason = ('continuation_rejected' if continuation_id is not None or clarified_query is not None else
-                      'invalid_binding_admission' if type(worker_owner) is not WorkerOwner
+            reason = ('invalid_binding_admission' if type(worker_owner) is not WorkerOwner
                       or admission_carry is not None or admission_exchange is not None else None)
             if reason:
                 return AgentResult('invalid-binding-admission', False, 'Binding admission rejected',
@@ -316,8 +361,9 @@ class ModelDecisionLoop:
             raise ValueError('request_kind must be explicit')
         required_tools = frozenset(required_tools)
         allowed_tools = frozenset(allowed_tools)
-        root_deadline = clock() + self.timeout_seconds if binding else None
+        root_deadline = segment_start + self.timeout_seconds if binding else None
         latch_lock, failures = threading.Lock(), []
+        verify_configuration = None
 
         def check_latch():
             with latch_lock:
@@ -327,10 +373,16 @@ class ModelDecisionLoop:
         def guarded(call):
             check_latch()
             try:
-                if clock() >= root_deadline:
+                if verify_configuration is not None:
+                    verify_configuration()
+                cap = min(root_deadline, _finalization.tail_deadline) if _finalization.tail_deadline is not None else root_deadline
+                if clock() >= cap:
                     raise DecisionBoundaryError('task_deadline_exceeded')
                 value = call()
-                if clock() >= root_deadline:
+                if verify_configuration is not None:
+                    verify_configuration()
+                cap = min(root_deadline, _finalization.tail_deadline) if _finalization.tail_deadline is not None else root_deadline
+                if clock() >= cap:
                     raise DecisionBoundaryError('task_deadline_exceeded')
                 check_latch()
                 return value
@@ -347,6 +399,17 @@ class ModelDecisionLoop:
                 return await settle_owned_call(lambda: guarded(call), worker_owner=worker_owner)
             finally:
                 check_latch()
+
+        def cap_restored_deadline(remaining):
+            nonlocal root_deadline
+            root_deadline = min(root_deadline, segment_start + remaining)
+
+        def check_deadline():
+            check_latch()
+            if verify_configuration is not None:
+                verify_configuration()
+            if clock() >= root_deadline:
+                raise DecisionBoundaryError('task_deadline_exceeded')
 
         try:
             if binding:
@@ -410,6 +473,14 @@ class ModelDecisionLoop:
         fingerprint = configuration_digest(self, context, request_kind, allowed_tools, required_tools, specs, adapters,
             requirements=requirement_payload if binding or requirements.molecular_results or requirements.forbidden_tools else None,
             admission_binding=admission_carry.binding() if admission_carry is not None else None)
+        if binding:
+            configuration_context = deepcopy(context)
+            def verify_configuration():
+                current = configuration_digest(self, configuration_context, request_kind, allowed_tools,
+                    required_tools, {name: adapter.spec for name, adapter in adapters.items()}, adapters,
+                    requirements=requirement_payload)
+                if current != fingerprint:
+                    raise DecisionBoundaryError('tool_configuration_changed')
         restored, prior_payload = None, None
         session.input_queries = [context.query]
         session._decision_observation_seals = MappingProxyType({})
@@ -437,7 +508,38 @@ class ModelDecisionLoop:
                                 context.memory, request_kind=request_kind)
         if binding:
             prefix[-1]['content'] = context.query
-        if continuation_id is not None or clarified_query is not None:
+        replay = None
+        if binding and (continuation_id is not None or clarified_query is not None):
+            from .decision_binding_continuation import validate_continuation, LIMIT as binding_snapshot_limit
+            try:
+                replay = await owned(lambda: validate_continuation(self, session, fingerprint,
+                    continuation_id, clarified_query, requirements=requirements, adapters=adapters,
+                    required_tools=required_tools, prefix=prefix, cap_deadline=cap_restored_deadline,
+                    check_deadline=check_deadline))
+                # Recheck current closure on the original saved head immediately
+                # before the sole claim. No live lifecycle authority exists yet.
+                await owned(replay.verify_waiting)
+                check_deadline()
+                prior_payload = {**deepcopy(replay.payload), 'claimed_by': uuid4().hex}
+                expected, replacement = deepcopy(replay.payload), deepcopy(prior_payload)
+                # Account for the entire stored claim, not only the waiting
+                # snapshot. All allocation/validation time precedes the final
+                # clock check and the sole CAS, so rejection still writes zero.
+                validate_json(replacement, max_bytes=binding_snapshot_limit, reason='continuation_rejected')
+                check_deadline()
+                if self.store.transition_decision_continuation(context.trace_id,
+                        user_id=context.user_id, session_id=context.session_id,
+                        expected=expected, replacement=replacement, claim=True) is not True:
+                    raise DecisionBoundaryError('continuation_rejected')
+                restored = replay.snapshot
+            except Exception:
+                # False/uncertain CAS never installs the projection, starts the
+                # live Session or authorizes old science/new dispatch.
+                return AgentResult(context.trace_id, False, 'Continuation request rejected',
+                    error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Continuation request rejected'),
+                    outcome=RunOutcome.REJECTED,
+                    metadata={'backend': 'model_decision_loop', 'stop_reason': 'continuation_rejected'})
+        elif continuation_id is not None or clarified_query is not None:
             try:
                 restored, previous_results, prior_payload = claim_continuation(
                     self, session, fingerprint, continuation_id, clarified_query,
@@ -457,21 +559,94 @@ class ModelDecisionLoop:
                 context.resolved_molecule = None
             context.resolved_molecule = effective_molecule(context)
             session.input_queries = list(restored['input_queries']) + [clarified_query]
+        postclaim_failure = None
+        if replay is not None:
+            try:
+                await owned(lambda: replay.verify_claim(prior_payload))
+            except (Exception, asyncio.CancelledError) as exc:
+                # Freeze the first observed reason BEFORE start can commit or
+                # raise. A later lifecycle error cannot replace this authority.
+                reason = failures[0] if failures else (
+                    'cancelled' if isinstance(exc, asyncio.CancelledError) else
+                    str(exc) if isinstance(exc, DecisionBoundaryError) else 'continuation_restore_failed')
+                if (type(reason) is not str or len(reason) > 96
+                        or re.fullmatch(r'[a-z][a-z0-9_]{0,95}', reason) is None):
+                    reason = 'continuation_restore_failed'
+                postclaim_failure = (reason, 'continuation_postclaim')
+
+        def bind_restored_finalization():
+            _finalization.session, _finalization.clock = session, clock
+            _finalization.deadline = root_deadline
+            _finalization.counters = {k: restored[k] for k in (
+                'model_requests', 'protocol_repairs', 'tool_budget_reserved', 'reused_decisions', 'tool_attempt_count')}
+
         try:
             session.start(resume_claimed=restored is not None)
-        except sqlite3.IntegrityError:
+        except (Exception, asyncio.CancelledError) as exc:
+            if replay is not None:
+                if session.started:
+                    bind_restored_finalization()
+                    return _finalization.invalidate(*(postclaim_failure or
+                        ('continuation_start_failed', 'continuation_start')))
+                # A confirmed claim is not permission to manufacture started
+                # Session authority or retry a callback with unknown effects.
+                _finalization.detached_failure = AgentResult(context.trace_id, False, 'Continuation start unconfirmed',
+                    error=AgentExecutionError(AgentErrorCode.INVALID_INPUT, 'Continuation start unconfirmed'),
+                    outcome=RunOutcome.FAILED,
+                    metadata={'backend': 'model_decision_loop',
+                              'stop_reason': postclaim_failure[0] if postclaim_failure else 'continuation_start_unconfirmed',
+                              'failed_boundary': postclaim_failure[1] if postclaim_failure else 'continuation_start',
+                              'correction_durability': 'unconfirmed'})
+                return _finalization.detached_failure
+            if not isinstance(exc, sqlite3.IntegrityError):
+                raise
             return AgentResult(context.trace_id, False, 'Existing trace requires explicit recovery',
                                error=AgentExecutionError(AgentErrorCode.INVALID_INPUT,
                                                          'Existing trace cannot be replayed'),
                                outcome=RunOutcome.REJECTED,
                                metadata={'backend': 'model_decision_loop', 'stop_reason': 'trace_exists'})
         state = _Run(prefix, root_deadline if binding else clock() + self.timeout_seconds)
+        if replay is not None:
+            # Confirmed CAS alone permits the failure-only started Session.
+            # No old observations or reply are installed until post-start checks.
+            bind_restored_finalization()
+            if postclaim_failure is not None:
+                return _finalization.invalidate(*postclaim_failure)
+            try:
+                await owned(lambda: replay.verify_claim(prior_payload))
+                session.restore_observations(replay.results, restored['tool_attempt_count'], binding_proofs=replay.proofs)
+                await owned(lambda: replay.verify_claim(prior_payload))
+                # Bounded native comparison and fresh sealing are one
+                # synchronous block: no callback scheduling gap between them.
+                replay.verify_restored(session.results)
+                session._decision_observation_seals = MappingProxyType({})
+                for observed in session.results:
+                    seal_observation(observed, session)
+                journal = BindingInputJournal.restore_trusted(replay.journal.export(), original_context=context)
+                session.context = journal.context()
+                resolver = await owned(lambda: B1BindingResolver(session=session, requirements=requirements,
+                    original_context=journal.context(0), adapters=adapters, input_journal=journal))
+                await owned(lambda: resolver.restore_records(replay.records))
+                await owned(lambda: resolver.verify_binding_closure())
+                context = journal.context()
+                context.query = clarified_query
+                # Raw omission is not effective selection clearing. The journal
+                # reducer retains/revalidates the original scientific identity.
+                context.resolved_molecule = None
+                journal.admit_context(context, input_turn=journal.head_turn + 1)
+                session.context = context
+                session.input_queries = list(restored['input_queries']) + [clarified_query]
+                await owned(lambda: resolver.verify_binding_closure())
+            except (Exception, asyncio.CancelledError) as exc:
+                return _finalization.invalidate('cancelled' if isinstance(exc, asyncio.CancelledError) else
+                    str(exc) if isinstance(exc, DecisionBoundaryError) else 'continuation_restore_failed', 'continuation_restore')
         if admission_carry is not None:
             state.deadline = min(state.deadline, admission_carry.segment.deadline)
             state.intent_requests = admission_carry.intent_requests
             state.ordinary_admission = admission_metadata(admission_carry, decision_requests=0)
         if restored is not None:
-            session.restore_observations(previous_results, restored['tool_attempt_count'])
+            if not binding:
+                session.restore_observations(previous_results, restored['tool_attempt_count'])
             # claim_continuation validated the decoded observations and their
             # complete semantic history before sealing them, before the CAS.
             for observed in session.results:
@@ -480,7 +655,7 @@ class ModelDecisionLoop:
                 {'role': 'assistant', 'content': '需要用户补充完整输入；尚未完成任务。'},
                 {'role': 'user', 'content': clarified_query},
             ]
-            state.deadline = clock() + restored['remaining_seconds']
+            state.deadline = root_deadline if binding else clock() + restored['remaining_seconds']
             if admission_carry is not None:
                 state.deadline = min(state.deadline, restored_deadline(admission_carry.segment,
                     snapshot_remaining=restored['remaining_seconds']))
@@ -488,7 +663,7 @@ class ModelDecisionLoop:
                 setattr(state, key, deepcopy(restored[key]))
             state.call_ids = set(restored['call_ids'])
             state.proposals = deepcopy(restored['proposals'])
-            state.observed = {r.quality['operation_key']: r for r in active_results(session)}
+            state.observed = {r.quality['operation_key']: r for r in (session.results if binding else active_results(session))}
         async def boundary():
             if binding:
                 await owned(lambda: resolver.verify_binding_closure())
@@ -837,8 +1012,13 @@ class ModelDecisionLoop:
                 'model_requests', 'protocol_repairs', 'tool_budget_reserved', 'reused_decisions')}
             _finalization.counters['tool_attempt_count'] = session.tool_attempt_count
 
+        # Only this segment's pending snapshot is disposable. A consumed prior
+        # claim and an established finalization reservation are never refunded.
+        waiting_payload = None
+        checkpoint_created_at = None
+
         def cancel_terminal():
-            nonlocal error
+            nonlocal error, waiting_payload, checkpoint_created_at
             if (session.publication_invalidated or _finalization.failure is not None
                     or failures or session._runtime_error is not None):
                 return False
@@ -848,6 +1028,7 @@ class ModelDecisionLoop:
                 return False
             # PR96: no finish attempt yet. Preserve actual observations but
             # remove success/waiting claims, including stored acceptance.
+            waiting_payload, checkpoint_created_at = None, None
             state.answer, state.waiting_for_input = '', False
             state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
             state.task_acceptance = {'version': '2', 'profile': self.binding_profile,
@@ -964,13 +1145,32 @@ class ModelDecisionLoop:
             state.outcome = RunOutcome.FAILED
         if not state.answer:
             state.answer = '本次任务未完成，未生成未经验证的科研结论。'
-        waiting_payload = None
-        checkpoint_created_at = None
-        if state.waiting_for_input and context.user_id and context.session_id and not binding:
+        if state.waiting_for_input and context.user_id and context.session_id:
             try:
                 checkpoint_created_at = clock()
-                waiting_payload = snapshot_payload(state, session, fingerprint, created_at=checkpoint_created_at)
+                if binding:
+                    from .decision_binding_continuation import snapshot_payload as binding_snapshot
+                    # Set the tail BEFORE source verification/copy/encoding so
+                    # checkpoint preparation consumes its fixed reservation.
+                    remaining = state.deadline - checkpoint_created_at
+                    _finalization.tail_deadline = min(state.deadline,
+                        checkpoint_created_at + min(30.0, remaining / 4))
+                    waiting_payload, tail = await owned(lambda: binding_snapshot(state, session, fingerprint,
+                        resolver=resolver, journal=journal, created_at=checkpoint_created_at))
+                    assert tail == _finalization.tail_deadline
+                else:
+                    waiting_payload = snapshot_payload(state, session, fingerprint, created_at=checkpoint_created_at)
+            except asyncio.CancelledError as exc:
+                if not binding:
+                    raise
+                # owned() has retained/drained the physical snapshot worker;
+                # its first-error latch wins over a pure cancellation.
+                if not cancel_terminal():
+                    return publication_failure(exc, 'waiting_snapshot')
             except DecisionBoundaryError:
+                if binding:
+                    return _finalization.invalidate(failures[0] if failures else 'continuation_snapshot_not_persistable',
+                        'waiting_snapshot')
                 state.waiting_for_input = False
                 state.stop_reason = 'continuation_snapshot_not_persistable'
         metadata = {**state.counters(), 'backend': 'model_decision_loop',
@@ -988,6 +1188,9 @@ class ModelDecisionLoop:
                 # after metadata was assembled. Freeze only the current request.
                 current_metadata = {**metadata, 'task_acceptance': state.task_acceptance,
                     'stop_reason': state.stop_reason, 'waiting_for_input': state.waiting_for_input}
+                if (_finalization.ordinary_cancelled or not state.waiting_for_input
+                        or waiting_payload is None):
+                    current_metadata.pop('continuation_id', None)
                 answer = state.answer or '本次任务未完成，未生成未经验证的科研结论。'
                 return session.finish_dynamic(answer, outcome=state.outcome, error=error,
                                               metadata=current_metadata)
@@ -995,11 +1198,13 @@ class ModelDecisionLoop:
             valid, result = await publication_write(finish_binding, 'finish', retry=session.finish)
             if not valid:
                 return result
-            # B nonce publication remains disabled until Task5's authenticated
-            # revision8 replay and reserved-tail protocol are implemented.
-            if state.waiting_for_input:
-                valid, correction = await publication_write(
-                    lambda: self.store.update_run_status(context.trace_id, 'waiting_for_input'), 'waiting_status')
+            if state.waiting_for_input and not _finalization.ordinary_cancelled:
+                if waiting_payload is not None:
+                    valid, correction = await publication_write(lambda: publish_continuation(
+                        self.store, context, deepcopy(waiting_payload), deepcopy(prior_payload)), 'waiting_publication')
+                else:
+                    valid, correction = await publication_write(
+                        lambda: self.store.update_run_status(context.trace_id, 'waiting_for_input'), 'waiting_status')
                 if not valid:
                     return correction
             _finalization.candidate = result

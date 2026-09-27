@@ -622,12 +622,13 @@ def test_repeated_cancellation_retains_drain_then_failure_only_correction(loop_c
     asyncio.run(exercise())
 
 
-@pytest.mark.parametrize('boundary', ['terminal_metadata', 'terminal_event', 'terminal_status', 'waiting_status'])
+@pytest.mark.parametrize('boundary', ['terminal_metadata', 'terminal_event', 'terminal_status',
+    'waiting_status', 'waiting_publication'])
 @pytest.mark.parametrize('raises', [False, True])
 def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_raises(
         loop_case, sources, monkeypatch, boundary, raises):
     source = sources('rag')
-    case = loop_case([tool('rag_search'), clarify() if boundary == 'waiting_status' else finish_last],
+    case = loop_case([tool('rag_search'), clarify() if boundary.startswith('waiting_') else finish_last],
                      [source.tool])
     changed = []
     def invalidate_source():
@@ -637,6 +638,15 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
         if raises:
             raise RuntimeError('synthetic callback committed before raising')
     original_metadata, original_status = case.store.update_run_metadata, case.store.update_run_status
+    original_transition = case.store.transition_decision_continuation
+    published = []
+    def transition(*args, **kwargs):
+        value = original_transition(*args, **kwargs)
+        if boundary == 'waiting_publication' and not kwargs.get('claim', False):
+            assert value is True
+            published.append(deepcopy(case.store.get_run('actual-b1')['metadata']['decision_continuation']))
+            invalidate_source()
+        return value
     def metadata(trace, value):
         original_metadata(trace, value)
         if boundary == 'terminal_metadata' and value.get('decision_loop', {}).get('phase') == 'terminal':
@@ -651,8 +661,12 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
             invalidate_source()
     monkeypatch.setattr(case.store, 'update_run_metadata', metadata)
     monkeypatch.setattr(case.store, 'update_run_status', status)
+    monkeypatch.setattr(case.store, 'transition_decision_continuation', transition)
     case.bus.on_event = event
-    result = run(case, source.query, required={'rag_search'})
+    # Ownerless clarification retains the existing status-writer barrier;
+    # authenticated clarification exercises the distinct real revision8 CAS.
+    context = AgentContext(source.query, 'actual-b1') if boundary == 'waiting_status' else None
+    result = run(case, source.query, required={'rag_search'}, context=context)
     assert changed and len(case.calls['rag_search']) == 1 and len(case.model.messages) == 2
     # Existing guarded() intentionally maps provider ValueError to this safe
     # reason. Publication must preserve that first latch, not recategorize it.
@@ -664,6 +678,18 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
     assert all(event.payload.get('answer_released') is False for event in terminals)
     assert all(set(event.payload) == {'terminal_attempt_id', 'observed_outcome',
         'publication_stage', 'answer_released'} for event in terminals[:-1])
+    if boundary == 'waiting_publication':
+        assert len(published) == 1
+        assert published[0]['snapshot']['decision_protocol_revision'] == 8
+        assert saved['metadata']['decision_continuation'] == published[0]
+        assert 'continuation_id' not in result.metadata
+        history = case.store.get_events('actual-b1')
+        rejected = run(case, source.query, required={'rag_search'},
+            continuation_id=published[0]['id'], clarified_query='继续')
+        assert rejected.metadata['stop_reason'] == 'continuation_rejected'
+        assert case.store.get_run('actual-b1') == saved
+        assert case.store.get_events('actual-b1') == history
+        assert len(case.calls['rag_search']) == 1 and len(case.model.messages) == 2
 
 
 @pytest.mark.parametrize('overrun', [False, True])
@@ -922,7 +948,7 @@ def test_waiting_status_callback_cannot_commit_over_its_reentrant_failure(loop_c
             assert pending.metadata['correction_durability'] == 'unconfirmed'
         original(trace, value)
     monkeypatch.setattr(case.store, 'update_run_status', status)
-    result = run(case)
+    result = run(case, context=AgentContext('SMILES: CCO', 'actual-b1'))
     assert_sanitized(result)
     assert result.metadata['correction_durability'] == 'confirmed'
     assert case.store.get_run('actual-b1')['status'] == 'failed'

@@ -48,6 +48,7 @@ def configuration_digest(loop, context, request_kind, allowed, required, specs, 
         binding_digest(admission_binding)
     return EvidenceLedger.output_digest({
         'schema': 1, 'decision_protocol_revision': (
+            8 if getattr(loop, 'binding_profile', None) is not None else
             SEMANTIC_PROTOCOL_REVISION if admission_binding is not None else PROTOCOL_REVISION),
         'request': context_value(context, query_content_bytes=getattr(loop, 'binding_profile', None) is not None), 'kind': request_kind,
         **({'binding_profile': loop.binding_profile} if getattr(loop, 'binding_profile', None) is not None else {}),
