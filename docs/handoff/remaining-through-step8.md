@@ -36,6 +36,40 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+C0a pure protocol implementation FD13F3/testE4C8/planC2BDF passed parent SOURCE.
+Author exact five-module GREEN18256/fe8a6e:733passed16.46s,exit0,498 frozen inputs
+unchanged. Slot released then granted to independent Mencius for the same five
+modules plus fresh QUALITY. This is schema/parser evidence only, not ordinary
+chat consent, transport or real docking. No production activation occurred.
+
+Continuation initial implementation is frozen (codec6d500e, reader18c6714,
+loope7b46ef). Independent SOURCE found one P2: unstarted detached postclaim
+failure is overwritten by an outer owner-drain cancellation/error when no Session
+correction authority exists. Author is preparing regression tests before the
+minimal fix; no integrated GREEN or ready claim. All existing publication and
+ordinary-cancel assertions must remain. Real drain still precedes release.
+
+G3 test preparation BD4894/A1FE36 received two SOURCE P2 findings, not execution:
+import-time environment/file/process guards were installed too late, and extra
+socket/reconnect attempts could be swallowed without an irrevocable test record.
+Only test/plan corrections are released; script still absent. Parent prepared
+ignored runnerDEF6E4DC by sole REPO substitution from6D490, with full forward/
+reverse text equality. No Python or actual metadata request has occurred there.
+
+Web functional/performance design SOURCE requested explicit pre-Popen deadline
+origin, retained late-start ownership and whole-tree/reader confirmation even on
+exit0. Revised A8B9B954 addresses those points; parent checked it and released
+test-first root-aware controls only. Production/shared fixture/runner/old3s arms
+remain unchanged. A qualified external bounded test supervisor remains required
+before any root-aware scientific integration run; forced cleanup cannot count as
+product success. No new deadline/latency-fix or universal300s completion claim.
+
+Prior-head PR101 CI36286571814 finished successfully: collection11887=11663+224,
+core11662passed1skipped21142warnings969.78s, Web224passed7167warnings155.08s.
+After PR98 alignment, fresh exactc0c4f9c CI36287476020 is live; last snapshot
+has seven successful components with Agent still running and final aggregate
+pending. These are distinct revisions/runs; old-head success cannot merge new head.
+
 PR98 merged after repeated fresh head/main/check/review guards:9successful checks,
 zero unresolved threads, squashc463dd2824265fbe1015ea5cf0564c804a4e3cf6. Full
 reviewed/landed trees both791e4617fdfa6a9398b6fb1dea1849fd947fc950. CI36286487041
