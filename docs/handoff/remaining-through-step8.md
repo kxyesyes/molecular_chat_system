@@ -28,7 +28,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
-| C0a docking proposal DTO | DraftPR102 46d7076; author/fresh five-module733passed each; SOURCE/QUALITY approve | Fresh aligned-head CI pending; no C transport/Web/dispatch proof |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | No C transport/Web/dispatch proof; C0b tests under preparation |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -36,6 +36,41 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR102 parent repeated fresh head/main/check/review guards, marked ready and
+squash-merged18ad4f93732439d020d9387b1437b09c76358270 (d2f5f6/37d8f4).
+Actual fetch983c07 confirms reviewed46d7076 and landed full trees both
+751bd04706d2cb7d9129b069dfebf19d7d2fb584. CI36288613814: nine successful checks,
+zero unresolved threads; collection12256=12032core+224web; core12031passed,
+1skipped,21142warnings565.85s; Web224passed7167warnings219.01s. This closes
+only the pure proposal protocol, not ordinary-chat docking integration.
+
+Continuation actual P2 RED85871/5ce251 reproduced both detached first-error
+overwrites:2failed3SWIGwarnings11.30s,88pins unchanged. Minimal loopffa8883
+received independent Lovelace SOURCE READY. Exact2 GREEN8866/47f031 now
+2passed3SWIGwarnings11.50s,88pins unchanged, slot RELEASED. Both cases preserve
+real owner drain/join, original FAILED/unconfirmed and absence of Session
+correction authority. Full ordered61 and independent QUALITY remain pending.
+
+Web20controls actual RED331122:20failed3SWIGwarnings6.56s,26pins unchanged,
+all missing-helper call-phase failures; slot RELEASED. Root-aware helper and
+functional-only provenance assertions are now frozen229A875C/planD835D8A6,
+under independent Kant SOURCE. Original20controls and five diagnostic/performance
+arms remain unchanged. External supervisor test-first prep369D9CBB/plan3526DE5B
+is under Lovelace SOURCE; no supervisor or functional scientific run yet.
+
+C0b is isolated in codex/docking-preparation-transport at46d7076. Initial
+test-only preparation preserved the582-line C0a prefix. SOURCE found missing
+profile-isolation, actual deadline/late-response, concurrent-profile and journal
+boundary/privacy controls. These are mandatory release gates, not optional
+coverage; Socrates is adding tests only. No transport implementation or Python
+execution has occurred in this batch.
+
+G3 metadata scriptDFCE7BB9 passed parent SOURCE inspection against frozen tests
+E4E5F7D and runnerDEF6E4DC. Sole Python slot is now assigned to Zeno for one
+offline whole-module GREEN only, with seven original pins plus script checked
+before/after. No result yet; no live metadata request, inference, model loading
+or configuration/credential discovery is authorized by that execution grant.
 
 PR102 exact46d7076 CI36288613814 is confirmed in_progress (70ee55), not complete.
 Web root-aware test preparation D56DE8CD/planF17990CF is under independent SOURCE:
