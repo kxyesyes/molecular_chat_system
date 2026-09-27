@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from contextlib import contextmanager
 import hashlib
 import importlib.util
@@ -10,7 +11,7 @@ import os
 import sqlite3
 import sys
 import time
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, dataclass
 from pathlib import Path
 
 import pytest
@@ -3554,50 +3555,81 @@ def test_cancel_completion_race_has_exactly_one_legal_terminal_transition(
     assert terminal_count == 1
 
 
-def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
-    tmp_path: Path,
-) -> None:
-    class CancellationResistantCreate(FakeSandboxClient):
-        def __init__(self) -> None:
-            super().__init__()
-            self.started = asyncio.Event()
-            self.release_create = asyncio.Event()
+class _HungCreateClient(FakeSandboxClient):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = asyncio.Event()
+        self.release_create = asyncio.Event()
+        self.create_task: asyncio.Task | None = None
+        self.create_job_id: str | None = None
 
-        async def create(self, job_id: str) -> SandboxHandle:
-            self.create_count += 1
-            self.started.set()
-            while not self.release_create.is_set():
-                try:
-                    await self.release_create.wait()
-                except asyncio.CancelledError:
-                    continue
-            return SandboxHandle(f"sandbox-{job_id}", object())
+    async def create(self, job_id: str) -> SandboxHandle:
+        self.create_task = asyncio.current_task()
+        self.create_job_id = job_id
+        self.create_count += 1
+        self.started.set()
+        while not self.release_create.is_set():
+            try:
+                await self.release_create.wait()
+            except asyncio.CancelledError:
+                continue
+        return SandboxHandle(f"sandbox-{job_id}", object())
 
-    async def scenario() -> tuple[object, CancellationResistantCreate, list[str]]:
-        sdk = CancellationResistantCreate()
-        service, _, config = _service(tmp_path, sdk)
-        service._create_hard_timeout_seconds = 0.03
-        service._destroy_hard_timeout_seconds = 0.03
+
+async def _run_hung_create_case(
+    service: SandboxBrokerService,
+    sdk: _HungCreateClient,
+    config: BrokerConfig,
+    *,
+    after_started: Callable[[], None] | None = None,
+) -> tuple[object, _HungCreateClient, list[str]]:
+    service._create_hard_timeout_seconds = 0.03
+    service._destroy_hard_timeout_seconds = 0.03
+    first = first_tb = cleanup_error = None
+    try:
         await service.start()
         job = await service.submit(_prepared(config), "idem-hung-create")
         await sdk.started.wait()
+        if after_started is not None:
+            after_started()
         terminal = await asyncio.wait_for(
             service.wait_terminal(job.job_id), timeout=0.5
         )
         with pytest.raises(StopIncomplete, match="shutdown is incomplete"):
             await service.stop(timeout=0.05)
         assert service._create_tasks
+    except BaseException as exc:
+        first, first_tb = exc, exc.__traceback__
+    finally:
         sdk.release_create.set()
-        await service.stop(timeout=0.5)
-        await asyncio.sleep(0)
-        leaked = [
-            task.get_name()
-            for task in asyncio.all_tasks()
-            if task is not asyncio.current_task()
-            and task.get_name().startswith("sandbox-broker-")
-            and not task.done()
-        ]
-        return terminal, sdk, leaked
+        try:
+            await service.stop(timeout=0.5)
+            await asyncio.sleep(0)
+        except BaseException as exc:
+            cleanup_error = exc
+    if first is not None:
+        if cleanup_error is not None:
+            raise first.with_traceback(first_tb) from cleanup_error
+        raise first.with_traceback(first_tb)
+    if cleanup_error is not None:
+        raise cleanup_error
+    leaked = [
+        task.get_name()
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name().startswith("sandbox-broker-")
+        and not task.done()
+    ]
+    return terminal, sdk, leaked
+
+
+def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> tuple[object, _HungCreateClient, list[str]]:
+        sdk = _HungCreateClient()
+        service, _, config = _service(tmp_path, sdk)
+        return await _run_hung_create_case(service, sdk, config)
 
     terminal, sdk, leaked = asyncio.run(scenario())
     assert terminal.status is BrokerJobStatus.FAILED
@@ -3607,6 +3639,243 @@ def test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success(
     assert sdk.destroy_count == 1
     assert sdk.destroyed_ids == [f"sandbox-{terminal.job_id}"]
     assert leaked == []
+
+
+@dataclass(frozen=True)
+class _HungCreateExit:
+    error: BaseException | None
+    cause: BaseException | None
+    traceback_frames: tuple[str, ...]
+    released: bool
+    create_done: bool
+    create_count: int
+    run_count: int
+    destroy_count: int
+    destroyed_ids: tuple[str, ...]
+    owned: tuple[tuple[str, str, bool], ...]
+    pending: tuple[str, ...]
+
+
+def _hung_create_exit(
+    service: SandboxBrokerService,
+    sdk: _HungCreateClient,
+    error: BaseException | None,
+) -> _HungCreateExit:
+    frames = []
+    traceback = None if error is None else error.__traceback__
+    while traceback is not None:
+        frames.append(traceback.tb_frame.f_code.co_name)
+        traceback = traceback.tb_next
+    owned = [
+        (name, task.get_name(), task.done())
+        for name in ("_job_tasks", "_create_tasks", "_cleanup_tasks")
+        for task in getattr(service, name).values()
+    ]
+    owned.extend(
+        ("_isolated_tasks", task.get_name(), task.done())
+        for task in service._isolated_tasks
+    )
+    return _HungCreateExit(
+        error=error,
+        cause=None if error is None else error.__cause__,
+        traceback_frames=tuple(frames),
+        released=sdk.release_create.is_set(),
+        create_done=sdk.create_task is not None and sdk.create_task.done(),
+        create_count=sdk.create_count,
+        run_count=sdk.run_count,
+        destroy_count=sdk.destroy_count,
+        destroyed_ids=tuple(sdk.destroyed_ids),
+        owned=tuple(sorted(owned)),
+        pending=tuple(sorted(
+            task.get_name() for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+            and not task.done()
+        )),
+    )
+
+
+async def _observe_hung_create_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    inject_first: bool,
+    cleanup_fault: bool,
+) -> tuple[_HungCreateExit, _HungCreateExit, BaseException, BaseException, str]:
+    sdk = _HungCreateClient()
+    service, _, config = _service(tmp_path, sdk)
+    real_stop = service.stop
+    baseline_tasks = set(asyncio.all_tasks())
+    first = AssertionError("injected_after_create_started")
+    cleanup = RuntimeError("injected_cleanup_after_real_drain")
+    caught = None
+    caught_tb = None
+    before = after = None
+    controller_errors = []
+
+    def inject_failure() -> None:
+        raise first
+
+    async def stop_then_fail(*, timeout: float | None = None) -> None:
+        await real_stop(timeout=timeout)
+        raise cleanup
+
+    try:
+        if cleanup_fault:
+            monkeypatch.setattr(service, "stop", stop_then_fail)
+        # Regression-only deadlock guard; original observer stays at .5s.
+        await asyncio.wait_for(
+            _run_hung_create_case(
+                service, sdk, config,
+                after_started=inject_failure if inject_first else None,
+            ),
+            timeout=2.0,
+        )
+    except BaseException as exc:
+        caught, caught_tb = exc, exc.__traceback__
+    finally:
+        try:
+            # Copy values before rescue; later drain cannot repair this snapshot.
+            before = _hung_create_exit(service, sdk, caught)
+        except BaseException as exc:
+            controller_errors.append(("before_snapshot", exc, exc.__traceback__))
+        finally:
+            sdk.release_create.set()
+            try:
+                await real_stop(timeout=0.5)
+                await asyncio.sleep(0)
+            except BaseException as exc:
+                controller_errors.append(("real_stop", exc, exc.__traceback__))
+                # One absolute rescue budget, never renewed by repeated cancel.
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 0.5
+                # Only tasks born in this isolated scenario, never other owners.
+                owned = {
+                    task for task in asyncio.all_tasks() - baseline_tasks
+                    if task.get_name().startswith("sandbox-broker-")
+                }
+                if sdk.create_task is not None:
+                    owned.add(sdk.create_task)
+                for task in owned:
+                    if not task.done():
+                        task.cancel()
+                while True:
+                    # Late create may spawn its real destroy while being drained.
+                    owned.update(
+                        task for task in asyncio.all_tasks() - baseline_tasks
+                        if task.get_name().startswith("sandbox-broker-")
+                    )
+                    pending = {task for task in owned if not task.done()}
+                    remaining = deadline - loop.time()
+                    if not pending or remaining <= 0:
+                        break
+                    try:
+                        await asyncio.wait(pending, timeout=remaining)
+                    except asyncio.CancelledError as exc:
+                        controller_errors.append((
+                            "drain_cancel", exc, exc.__traceback__,
+                        ))
+                        # Keep owner references; retry only the remaining budget.
+                    except BaseException as exc:
+                        controller_errors.append((
+                            "drain_error", exc, exc.__traceback__,
+                        ))
+                        break
+                for task in owned:
+                    if task.done() and not task.cancelled():
+                        error = task.exception()
+                        if error is not None:
+                            controller_errors.append((
+                                "owned_task", error, error.__traceback__,
+                            ))
+                pending = {task for task in owned if not task.done()}
+                if pending:
+                    error = AssertionError(
+                        "rescue retained tasks at fixed deadline: "
+                        + repr(sorted(task.get_name() for task in pending))
+                    )
+                    controller_errors.append(("pending_owner", error, None))
+    try:
+        after = _hung_create_exit(service, sdk, caught)
+    except BaseException as exc:
+        controller_errors.append(("after_snapshot", exc, exc.__traceback__))
+    try:
+        # Completion checks must still run if either diagnostic snapshot failed.
+        assert sdk.release_create.is_set()
+        assert sdk.create_task is not None and sdk.create_task.done()
+        assert sdk.create_count == 1
+        assert sdk.run_count == 0
+        assert sdk.destroy_count == 1
+        assert sdk.create_job_id is not None
+        expected_id = f"sandbox-{sdk.create_job_id}"
+        assert sdk.destroyed_ids == [expected_id]
+        assert service._job_tasks == {}
+        assert service._create_tasks == {}
+        assert service._cleanup_tasks == {}
+        assert service._isolated_tasks == set()
+        assert not [
+            task.get_name() for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and task.get_name().startswith("sandbox-broker-")
+            and not task.done()
+        ]
+        assert before is not None
+        assert after is not None
+    except BaseException as exc:
+        controller_errors.append(("completion_checks", exc, exc.__traceback__))
+    if controller_errors:
+        # Preserve the first object/traceback, not a replacement assertion error.
+        primary = caught if caught is not None else controller_errors[0][1]
+        primary_tb = caught_tb if caught is not None else controller_errors[0][2]
+        report = AssertionError(
+            "hung-create controller secondary errors", tuple(controller_errors),
+        )
+        # Retain an existing helper cleanup cause beneath the secondary report.
+        report.__cause__ = primary.__cause__
+        raise primary.with_traceback(primary_tb) from report
+    return before, after, first, cleanup, expected_id
+
+
+@pytest.mark.parametrize("cleanup_fault", [False, True])
+def test_hung_create_failure_cleanup_preserves_first_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_fault: bool,
+) -> None:
+    before, _, first, cleanup, expected_id = asyncio.run(
+        _observe_hung_create_cleanup(
+            tmp_path, monkeypatch, inject_first=True, cleanup_fault=cleanup_fault,
+        )
+    )
+    assert before.error is first
+    assert "inject_failure" in before.traceback_frames
+    assert before.released, "helper leaked its fixture before outer rescue"
+    assert before.create_done
+    assert before.create_count == 1
+    assert before.run_count == 0
+    assert before.destroy_count == 1
+    assert before.destroyed_ids == (expected_id,)
+    assert before.owned == ()
+    assert before.pending == ()
+    assert before.cause is (cleanup if cleanup_fault else None)
+
+
+def test_hung_create_cleanup_error_without_primary_is_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before, _, _, cleanup, expected_id = asyncio.run(
+        _observe_hung_create_cleanup(
+            tmp_path, monkeypatch, inject_first=False, cleanup_fault=True,
+        )
+    )
+    assert before.error is cleanup
+    assert "stop_then_fail" in before.traceback_frames
+    assert before.released
+    assert before.create_done
+    assert before.create_count == 1
+    assert before.run_count == 0
+    assert before.destroy_count == 1
+    assert before.destroyed_ids == (expected_id,)
+    assert before.owned == ()
+    assert before.pending == ()
 
 
 @pytest.mark.parametrize("store_delay", [0.0, 0.04])
