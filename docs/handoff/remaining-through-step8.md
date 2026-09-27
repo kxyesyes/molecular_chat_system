@@ -30,9 +30,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Initial API/fixture failures retained; five additional real Windows fault cases af886c passed0.88s after test rescue-observer correction; independent full module ea1838:95passed2.55s,zero warnings/skips,329 hash comparisons unchanged | Scoped process/capture/close qualification passed; bootstrap/report integration, remaining qualification and real generation/B2 still open |
+| G3 concrete Windows owner | Manifest one-edge correction preserved strict validator; parent pure-helper114passed3.01s and independent complete module8c8cc8:209passed5.46s,zero warnings/skips,332 hash comparisons unchanged | Scoped owner and pure-helper qualification passed; writer/control/report integration, actual cold imports and real generation/B2 still open |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
-| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; corrected staging/snapshot185passed11skipped25.56s; receipt faults7passed; transaction matrix13passed; actual verification-read cancellation e2af811passed1.48s,10pins unchanged | Fresh expanded seven-module QUALITY is running; integration/publication remain. Prepare-only is not executable docking consent |
+| C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -40,6 +40,25 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C1 independent16128/073569 completed the exact seven-module selection once:
+**990passed,13skipped,0warnings,272.49s**,exit0. Postflight9eb175 confirms
+14/14 identities unchanged. Skips are7 symlink-privilege,1 open-file replacement,
+4 POSIX-only and1 opt-in performance check; none counts as verified coverage.
+SOURCE/fresh QUALITY approve prepare-only. Author recorded receipts and committed
+only seven scoped paths as40d20433d606161801d3f60e084641b8064f8d7d, tree
+9bbb1d1d54e52c9ab42e0120d63866ea7083f04c; production/test hashes unchanged.
+No push/merge. Parent created separate codex/docking-consent-execution at that
+commit for the already approved C2 plan refinement; no C2 implementation yet.
+
+G3 corrected manifest06B840/test231016/plan6FD561 passed independent SOURCE.
+Parentd7e257 original helper selection plus PE controls: **114passed,3.01s**,
+exit0,332 hash comparisons unchanged. Independent full module8c8cc8 then:
+**209passed,5.46s**,exit0,zero warnings/skips;332 comparisons/331 unique files,
+323-source inventory and1246 manifest identities unchanged. This closes the
+exact-reference defect in the test manifest, not cold import or live generation.
+Next test-only slice is existing Windows owner's control writer/report ownership;
+actual cold zero-dispatch import and real generation remain mandatory later gates.
 
 G3 bounded diagnostic18567/eed988 completed **1failed,8.12s**,exit1,332pins
 unchanged. Fixed failure frames identify manifest637/require499. Independent
