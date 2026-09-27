@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Root controls4fc7cd14failed6passed due rewritten assertion messages; explicit-error correction428B5D1B under SOURCE; supervisor API RED8491bf observed | Control GREEN and qualified outer ownership supervisor still pending; Tasks6–8 incomplete; earlier3s failures retained |
+| Normal-Web B1 Tasks4–8 | Corrected root controls52de66:20passed2.44s,3warnings,26pins unchanged; supervisor implementation7C1A8FF0 under SOURCE after API RED8491bf | Qualified outer ownership supervisor and functional integration still pending; Tasks6–8 incomplete; earlier3s failures retained |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -29,7 +29,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
-| G3 bounded metadata script | Diagnostic0c087f5failed3passed0.65s proved zero-length fake-read delay; fixture1E6B56 corrected, productionDFCE unchanged | Whole-module GREEN currently assigned; fresh QUALITY and live metadata still pending; no inference evidence |
+| G3 bounded metadata script | Corrected whole-module1d621a:167passed4.81s,0warnings/skips,8pins unchanged; independent SOURCE READY | Fresh QUALITY assigned; live metadata still pending; no inference evidence |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | No C transport/Web/dispatch proof; C0b tests under preparation |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -38,6 +38,20 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 author whole-module1d621a is directly terminal167passed4.81s,exit0,
+no warnings/skips/errors;8pins unchanged. Lovelace independently SOURCE-approved
+the complete434-line script and910-line tests. No live request or backend token
+enforcement follows. Web corrected exact20controls52de66 likewise directly
+terminal20passed2.44s,3SWIGwarnings,exit0,26pins unchanged; original failures
+remain. Sole Python slot is now assigned to Lovelace for one fresh G3 whole-module
+QUALITY run, no actual metadata. No other local Python job is authorized.
+
+Continuation corrected testBBB6BBEF/plan886D28C2 is under independent SOURCE:
+hash-premise correction plus four actual restore/resumed-publication source-close
+cases; no production change. Kant's ignored supervisor7C1A8FF0/plan2811B2F5
+is separately under Mencius SOURCE before any control GREEN or real lifecycle
+qualification. C0b implementation remains in progress, not tested or published.
 
 Continuation full61 is terminal41731/ca935c:6370passed2failed7warnings1418.28s,
 exit1,88pins unchanged, slot RELEASED. Both reverse-native/reverse-json failures
