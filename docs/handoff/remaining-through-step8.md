@@ -40,6 +40,15 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Fresh independent Web36 QUALITY57490/601a73 completed **36passed,7warnings,
+52.34s**,exit0,32pins plus continuation unchanged; physical process terminal.
+Fresh independent G3 full-module QUALITYea1838 completed **95passed,2.55s**,
+exit0,zero warnings/skips,329comparisons/328unique files unchanged, including the
+323-source-file inventory. Both slots released without restart or auto-retry.
+These close their scoped regression/review gates, not P7/P8: permanent failed-join
+Web coverage, integrated union/publication, G3 bootstrap and real generation,
+C consent/execution and final repeated live/UI acceptance remain required.
+
 Corrected Web36 synchronization188036AA/1766035A passed independent SOURCE:
 seven added lines await shielded actual retained tasks after first/resume frames,
 keeping all business assertions, immediate owner/reader checks and the original
