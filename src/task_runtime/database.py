@@ -101,6 +101,28 @@ def _initialize_once(path: Path) -> None:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {declaration}")
 
         statements = (
+            """CREATE TABLE IF NOT EXISTS docking_consents (
+                preparation_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL UNIQUE,
+                owner_session_id TEXT NOT NULL,
+                schema TEXT NOT NULL DEFAULT 'DockingConsent@1',
+                identity_json TEXT NOT NULL,
+                policy_json TEXT NOT NULL,
+                runtime_generation TEXT NOT NULL,
+                policy_generation TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'AWAITING_INPUT',
+                version INTEGER NOT NULL DEFAULT 1,
+                expires_at_ms INTEGER NOT NULL,
+                monotonic_expires REAL NOT NULL,
+                binding_json TEXT,
+                binding_digest TEXT,
+                approval_nonce_hash TEXT,
+                manifest_locator TEXT,
+                operation_token TEXT,
+                cleanup_state TEXT NOT NULL DEFAULT 'settled'
+            )""",
+            """CREATE INDEX IF NOT EXISTS idx_docking_consents_owner
+            ON docking_consents(owner_session_id, state, cleanup_state)""",
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_type ON tasks(task_type)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_updated ON tasks(updated_at)",

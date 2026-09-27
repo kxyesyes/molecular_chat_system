@@ -837,3 +837,1063 @@ source review found no blockers. The same five-module offline regression passed
 on both actual versions: **0.25.2:855passed,1 anyio pytest-rewrite warning,15.88s;
 0.28.1:855passed,16.23s**, session40577 terminal59d8f2 exit0. The scratch wheel is
 not tracked. Updated-head CI is still required; retain both earlier CI failures.
+
+## C1 prepare/identity — bounded TEST SOURCE preparation, NOT RUN
+
+### Workspace and grant
+
+This batch is in branch `codex/docking-consent-preparation`, local HEAD
+`ebb2093bf817bf375ba77f69c403a223dff0dd99`. That is the reviewed C0b dependency,
+not a claim it is merged or published. Parent will prepare later focused clean
+main-based publication/rebase; no original worktree is changed here. The C0b
+SOURCE/RED/GREEN/fresh receipts and historical assertions above remain intact.
+
+Parent confirmed only the C1 prepare/identity scope in the C1 table and design
+sections3.1/4.1-4.3/5. This grant permits the NEW
+`tests/task_runtime/test_docking_consent.py` and this appended checkpoint only.
+No production, C0b tests, spec, runner, assets, configuration, weights or training
+files were edited. No Python/import/collection/compile/test/network, commit, push
+or tree alignment occurred. Parent owns the ignored runner's REPO-only derivation
+from C0b3761 and its validation/pin; no runner path/hash is invented here.
+
+### Exact test-facing C1 interfaces (proposed, absent production APIs)
+
+The following small internal interfaces make the accepted scope executable in
+tests. They are not HTTP routes, a new scheduler, consent approval or model APIs.
+
+1. New `src/task_runtime/docking_consent.py` exposes:
+   - `DockingConsentError(reason_code)`: fixed-code exception with `.reason_code`;
+     its string contains that code, not input bytes, paths or raw lower errors.
+   - `DockingConsentPolicy`: immutable trusted server policy with explicit
+     `tool_policy_digest`, `adapter_contract_version`, `execution_backend`,
+     `policy_generation`, `runtime_generation`, `vina_limit_seconds`, and
+     `operation_limit_seconds`. Tests pass synthetic identity labels/digest and
+     local/300/420; these are offline policy fixtures, never real installation,
+     executable-identity, OpenSandbox availability or consent evidence.
+   - `DockingConsentPreview.to_dict()`: a detached closed public projection.
+     Its repr excludes the nonce. The only nonce-returning surface is the READY
+     prepare result, not a factual store getter or a repeated prepare.
+2. Existing `TaskRuntime.__init__` gains optional trusted C-only injection seams:
+   `docking_consent_policy`, `consent_wall_time_ms` and `consent_monotonic`.
+   Missing policy means C preparation unavailable, not tool probing or fallback.
+   Clock injections support server TTL tests only; the preparation response
+   deadline still uses the actual event-loop30s budget. No browser/model clock,
+   policy, timeout or backend selection is accepted.
+3. Existing `TaskRuntime` gets precisely this prepare-only entry:
+
+   ```text
+   async prepare_docking_consent(*,
+       preparation_id, owner_session_id, revision,
+       receptor_name, receptor_bytes, ligand_name, ligand_bytes, parameters)
+       -> DockingConsentPreview
+   ```
+
+   Identity/owner are trusted server arguments resolving an EXISTING durable
+   draft, not client-supplied authority. Revision must equal that draft. The
+   method must not generate another task ID, call submit_docking, create a tasks
+   row/event, select a backend, check readiness, or call a model/tool/executor.
+   No **kwargs/execution override surface is part of this API. The four scientific
+   parameter fields are explicit; no stager defaults are inherited by omission.
+4. Existing `TaskStore` adds narrow internal factual/transaction seams:
+
+   ```text
+   reserve_docking_consent_draft(*, identity, policy, now_ms, monotonic_now)
+   get_docking_consent(preparation_id) -> detached private dict
+   expire_docking_consents(*, now_ms, monotonic_now,
+                          runtime_generation, policy_generation)
+   ```
+
+   Reservation writes only docking_consents in the existing DB, with preparation
+   PK/task uniqueness and transactional owner/global capacity. It receives IDs
+   assigned by the later trusted C admission seam; it is not standalone Web
+   admission. The getter is PRIVATE store authority, not C2's owner-bound public
+   view. Expiry invalidates unused records without deleting live files or freeing
+   pending/unresolved cleanup reservations. Calls/readbacks never slide expiry.
+   PREPARING/READY transitions can stay private store implementation details;
+   tests observe their durable results, not a copied transition algorithm.
+
+### Record, preview and digest assertions
+
+The reserved `identity` has exactly preparation_id, task_id, owner_session_id,
+trace_id, origin_turn_id, query_digest, refinement_revision, admission_revision
+and source_refs. `source_refs` contains the trusted receptor_ref/ligand_ref
+identities. C1 preserves these; C0c/C3 must later prove admission, source ownership
+and original-query completeness. Model proposal syntax alone cannot supply them.
+
+The factual private record exposes identity, state, version, binding,
+binding_digest, approval_nonce_hash, manifest_locator, expires_at_ms and
+cleanup_state (other private timestamps/receipt columns may be required by the
+existing design). Initial state is AWAITING_INPUT, with no binding digest/nonce
+hash and no runnable task. READY follows complete verified staging. Store only
+the stager's logical `input_manifest.json` locator plus task identity; resolve
+locally through the existing secure stager, not caller paths. The pending/settled/
+unresolved cleanup fact is separate from consent state.
+
+The binding's fixed closed fields are spelled out in test expected_binding:
+schema DockingConsent@1; the complete identity above; receptor/ligand records
+{name,size,sha256}; ligand_mode=file; center/size/exhaustiveness/num_modes;
+energy_range3.0; config_hash/input_hash/request_digest; tool_name=molecular_docking;
+adapter/policy/backend/generation fields; issued_at_ms/expires_at_ms and the two
+execution budgets. Bind only that record, not an arbitrary request dictionary.
+
+Tests independently compute copied-file SHA256 and:
+
+- config_hash: SHA256 of normalized four-field config's sorted, compact,
+  ASCII-escaped JSON, matching the existing staging algorithm;
+- input_hash: SHA256 of receptor size/hash and ligand mode/size/hash JSON,
+  matching existing docking_execution._input_hash/_manifest_input_hash;
+- request_digest: SHA256 of b"medchat-task-submission-v1\\0" plus the existing
+  config_hash/ligand_mode/ligand_sha256/receptor_sha256 canonical mapping;
+- binding_digest: SHA256 of b"medchat-docking-consent-v1\\0" plus the exact binding
+  mapping, sorted/compact/ASCII-escaped UTF-8, allow_nan=False. In test source the
+  prefixes contain a NUL byte escape, not the printed backslash and digit.
+
+Preview has exactly schema, preparation_id, task_id, trace_id, receptor, ligand,
+parameters, tool_policy, binding_digest, expires_at_ms and approval_nonce.
+parameters includes normalized four inputs and fixed energy_range3.0. tool_policy
+has label=molecular_docking/local, digest, execution_backend,
+adapter_contract_version, vina_limit_seconds and operation_limit_seconds. No
+owner session ID or absolute path is public. Preview dictionaries are detached.
+Use a fresh cryptographic32-byte nonce encoded as64 hex characters; store SHA256
+of its ASCII encoding, never raw nonce. This selects an encoding for the approved
+256-bit nonce, not a new entropy threshold. Hash/nonce are absent until READY;
+repeat/changed preparation of READY is rejected without re-stage or nonce reissue.
+
+Fixed tested error reasons: consent_not_found (same missing/foreign result),
+consent_revision_conflict, consent_expired, consent_invalid_input,
+consent_not_waiting, consent_policy_unavailable, consent_owner_busy,
+consent_capacity_full, consent_identity_conflict, consent_preparation_timeout,
+and consent_cleanup_unresolved. HTTP status mapping remains C3 work, not a new
+runtime dependency on Web response classes.
+
+### Reuse and lifecycle constraints
+
+Use the existing database initialization transaction/WAL and TaskStore database,
+not another store; no runnable tasks entry is created before C2 approval. Reuse
+DockingInputStager.stage/load_verified_locator and its portable names, hashes,
+owned-directory/lease/secure deletion semantics. Existing same-task immutable
+staging behavior must not change. Legacy submit_docking and non-C callers retain
+their behavior; a server-fixed local C policy never invokes the Temporal selector.
+
+The existing _stage_verified drains its writer on caller cancellation, and
+_projection_exists_sync currently only checks tasks. Those helpers alone do not
+prove C1: the prepare caller must finish cancelled/timeout while the real writer
+remains retained by the existing TaskRuntime, and runtime.close must not release
+that owner early. Register the operation before launching I/O. Do not cancel only
+an asyncio wrapper and lose its thread. No new executor pool/service/queue is
+approved. On cancellation/30s deadline, consent becomes REVOKED/non-approvable;
+cleanup stays pending until actual writer/file access settles, then settled or
+unresolved. Cleanup failure must keep capacity and make close report the fixed
+unresolved error instead of false success. No late READY/nonce publication.
+
+One unexpired preparation per owner and16 pending across the C runtime are the
+spec limits, transactionally reserved in the same table. Include pending and
+unresolved I/O/cleanup even when consent is REVOKED/EXPIRED. A new explicit draft
+may reuse capacity only after settlement, not by evicting an old owner. Global
+one-execution admission/raw execution are C2, not exercised by these prepare tests.
+AWAITING_INPUT and newly issued READY each have their own non-sliding15-minute
+TTL; now==expiry rejects. Monotonic elapsed time caps wall-clock rollback;
+runtime/policy generation change invalidates unused records without renewal.
+
+Existing orphan cleanup must treat READY consent or unresolved C writer/cleanup
+as authority despite no tasks row. After actual writer settlement, only its own
+verified stage may be deleted/quarantined through the existing secure path.
+Foreign task stages and unmarked neighboring files survive. Do not hide a failed
+delete by dropping its reservation. Existing _discard_staging's task-only absence
+predicate requires the narrow C-aware ownership seam, not a second cleaner.
+
+### Coverage and honest execution boundary
+
+New tests are16 functions /76 parameter cases by static source count, NOT an
+executed collection count. API and behavioral claims remain separate:
+
+- test_c1_prepare_api_present resolves new APIs only inside its body. It first
+  requires async TaskRuntime.prepare_docking_consent, then the three store methods
+  and new module/types. No new-module import happens during collection.
+- Real temp SQLite and real stager verify durable draft identity across reopened
+  connections, independently copied-file/config/input/request/binding hashes,
+  READY-only nonce hash, private/public separation and detached snapshots.
+- Strict field/type/filename/byte boundaries include missing grid/options,
+  nonfinite/bool/string/tuple numerics, extra parameters and execution overrides,
+  file-only inputs, real25MiB exact/over cases, inherited100-byte portable basename
+  exact/over cases, and spec parameter endpoints. No invented product threshold.
+- Separate real TaskStore instances race from two worker threads/connections for
+  one owner and the sixteenth global reservation. Identity collisions reject;
+  equal scientific input hashes across owners do not share binding/nonce/task.
+- Controlled TTL clocks verify just-before/equal expiry, wall rollback capped by
+  monotonic elapsed time, runtime/policy generations and non-sliding reads; READY
+  starts its TTL at issuance, not draft creation. Generation tests do not try to
+  reserve new work under an invalidated generation.
+- An actual staged writer is held by threading.Event AFTER real copy/publication,
+  then performs a real late read before exiting. Cancel/repeat-cancel/actual30s
+  deadline must return non-success while the writer and its files remain owned;
+  owner/global slots remain occupied, orphan sweep cannot delete, runtime.close
+  cannot finish early, late result cannot become READY, and only owned files are
+  cleaned after release. A failed-delete negative keeps unresolved capacity.
+- The writer's40s event escape and5/6/10/35s test watchdogs bound fixtures only;
+  no production deadline is shortened or enlarged. Release/join happens in
+  finally. The delete-failure injection is removed ONLY for teardown after all
+  unresolved assertions, never counted as successful cleanup evidence.
+- The runtime uses a real LocalTaskBackend with instrumented forbidden methods,
+  a no-execution handler, explicit local config and real store/stager. Model,
+  HTTP send, process launch, selector, broker factory and raw execution sentinels
+  record actual attempted boundary calls and must remain empty. No input digest
+  or synthetic fixture claims real molecular validity or scientific performance.
+
+Multipart accumulation/body framing tests require the later C3 HTTP adapter;
+C1 tests the bytes/closed parameters that adapter must bound before this call.
+OpenSandbox's smaller ligand bound remains its separate release/selected-backend
+gate, not permission to enable it in these initial-local tests. C0c/C2/C3/C4-C8,
+human consent, claim/raw CAS, full ordinary-chat entry/report/download and real
+scientific release remain mandatory and unimplemented by C1 preparation.
+
+### Freeze and next gate
+
+Test SHA256:
+`43593EB7AF0A6032643B04EFB44DAB62A3270109564FBBC835DEEA7A07AAE227`.
+
+Unchanged production reference pins:
+
+| File | SHA256 |
+|---|---|
+| task_runtime/runtime.py | `667665B975E0FE808E208AEC3DFBE5A6C059232E7DE23D589A0344B1D0A2EB33` |
+| task_runtime/store.py | `4585CBCC762AD84FB89401644018F54DC9BF7DEB09638F8EE3F2EDCA921EEC4A` |
+| task_runtime/database.py | `2AAD54CF582A8F9D1F89F505F3B554EE4F0B68D013A01E10939796BF7E1CB73E` |
+| task_runtime/staging.py | `FA9171512B6322C4F2F71B548962850DB6D14B4371A39C86BAB8963088DE2FD1` |
+
+No existing test assertion was edited. New production docking_consent.py is still
+absent. Static whitespace/source checks only; no syntax compilation or execution.
+Independent SOURCE must review these exact interfaces, lifecycle assertions and
+fixture validity before parent grants the one initial API RED node:
+
+`tests/task_runtime/test_docking_consent.py::test_c1_prepare_api_present`
+
+Expected missing-API failure is TaskRuntime.prepare_docking_consent at call phase,
+not collection/import failure. This expected result is NOT an actual RED receipt.
+Parent supplies the approved new-tree MedChat -I -S -B runner and exact pin before
+execution. Only after actual RED and a new bounded grant may production C1 work
+start in its existing allowlist. No implementation/runner/commit grant is implied.
+
+### Parent actual C1 API RED receipt — implementation HOLD
+
+Parent-reported direct terminal `f73b83`: **1 failed in 0.99s, exit 1** for
+`tests/task_runtime/test_docking_consent.py::test_c1_prepare_api_present`.
+The failure reached the test call phase at the missing
+`TaskRuntime.prepare_docking_consent` API; it was not a setup or collection
+failure. This is the actual initial API RED receipt, not evidence that the
+remaining behavioral tests have run or that production implementation is ready.
+
+Parent confirmed all **7 before/after pins unchanged**: test
+`43593EB7AF0A6032643B04EFB44DAB62A3270109564FBBC835DEEA7A07AAE227`,
+pre-receipt plan
+`754EE143213BF898D3739195263BBED06C0C0C3BB6B8FA2EECF42F230528E7A0`,
+approved runner
+`A99BB658B70EAC9DB91F6BA59557D3F54ED0B91134AB16682DA06FA9FC0980B2`,
+and the four production reference pins listed above.
+
+Parent reports the Python slot released. This worker did not execute Python;
+the present grant is this plan-only receipt append, followed by freeze.
+Zeno's independent full-SPEC review remains in progress. Production
+implementation is NOT released: await that review and a separate explicit
+bounded implementation grant. Tests, production and runner remain frozen.
+
+### Bounded C1 implementation SOURCE handoff — NOT GREEN, self-review blocker
+
+Parent subsequently accepted Zeno's full C1 SOURCE review of test43593/plan754EE
+and the D5FB receipt append, then explicitly granted implementation ONLY in
+runtime.py, store.py, database.py, new docking_consent.py and this plan. The
+actual initial API RED remains f73b83 above; no behavioral GREEN is inferred.
+This batch uses that grant, not an older slot or publication authority.
+
+Implementation prepared in the existing worktree, with no commit or alignment:
+
+- database.py adds docking_consents and its owner index in the existing WAL
+  initialization transaction. No runnable tasks/event row, second DB or queue.
+- store.py adds trusted draft reservation, detached private facts, expiry, and
+  private token-bound PREPARING/READY/revocation/cleanup transitions. Reservation
+  uses BEGIN IMMEDIATE for preparation/task uniqueness and one-owner/16-global
+  capacity. Pending/unresolved file ownership remains occupied after expiry.
+  Ready bindings remain historical facts; no reverse transition/nonce recovery.
+- docking_consent.py supplies the immutable local-only policy and private-repr
+  preview, closed native input checks, binding construction and nonce-free public
+  metadata except the one prepare response's raw approval nonce. The existing
+  stager validates portable names, bounds and normalized config unchanged; input
+  and request hashes reuse the existing execution/runtime algorithms. Only the
+  approval nonce hash is stored. The separate private operation token is writer
+  ownership, not human approval or raw-dispatch authority.
+- runtime.py adds prepare-only orchestration. Its retained owner covers actual
+  to_thread staging and verification; no wrapper cancellation substitutes for
+  physical completion. A cleanup owner waits that actual worker, then uses the
+  stager's existing lease/owned-tree discard with a token-specific store predicate.
+  The generic orphan predicate additionally protects C records. Runtime.close
+  drains retained owners and reports consent_cleanup_unresolved on uncertain
+  deletion/storage, rather than releasing the capacity. READY files stay protected;
+  no C2 approve/cancel/view/claim/dispatch or public HTTP surface was introduced.
+- The single preparation deadline is30s; checks occur before/after phases and
+  after SQLite lock acquisition before sealing. Late results cannot be returned
+  as a successful preview. The following *return-boundary gap* remains a blocker,
+  rather than being relabeled a passed deadline contract.
+
+**Self-review SOURCE blocker (not executed):**
+runtime.py `_abort_consent_preparation` currently awaits the durable SQLite
+revocation marker via `_await_task_outcome` before the prepare caller returns.
+This supplies the frozen test's immediate REVOKED fact and retains the actual
+writer, but a blocked SQLite operation can extend caller latency beyond the
+already chosen30s failure deadline. It therefore does not yet establish the
+specification's finite logical return independent of SQL settlement. Do not
+call this full-SPEC READY or silently relax the deadline. Independent SOURCE
+must resolve the logical revocation vs durable receipt boundary; a deterministic
+blocked-SQL regression/contract clarification would require a new test grant
+because test43593 is frozen. No staging edit or new client/service framework is
+proposed. The current source is frozen for review, not released for GREEN by
+this handoff. API RED alone proves none of this behavioral ownership.
+
+Additional conservative behavior for review: when stage throws before returning
+a verified owned locator, cleanup cannot certify absence and retains an
+unresolved reservation; it never guesses from a missing path. Existing private
+stager quarantine/delete behavior is reused, not rewritten. Unresolved cleanup
+is not auto-retried or converted to success by a second close.
+
+SOURCE freeze SHA256:
+
+| File | SHA256 |
+|---|---|
+| src/task_runtime/runtime.py | `E089B580479013902F6020F70D672AE58A480EA6430D5805E2FA2F854EA0FF35` |
+| src/task_runtime/store.py | `1033921B70B31B7ABE6ADD23F183FEECE22AF27642E744A17C906862A388A1EA` |
+| src/task_runtime/database.py | `7043CBCF85A8B5262CF3B5F857F15B56A8450C4F4E1299AC3750C2114F58E12E` |
+| src/task_runtime/docking_consent.py | `80BC2E0FF7A5749F533D420B6242A6DB4DC2FAFA120706B33D4DF9B14F09EB0D` |
+
+Test43593 and stagingFA917 remain byte-identical. C0b transport041699 and
+model7F36 remain unchanged. Runner was neither edited nor executed. Only shell
+source/hash/whitespace inspection was performed; git diff --check passed.
+No Python/import/collection/compile/tests/network/assets/training/configuration,
+commit or push was performed. The full C1 module and legacy staging/local/runtime
+regressions remain required after SOURCE clearance and a separate Python grant;
+all C0c/C2-C8/real-execution and production activation gates remain mandatory.
+
+### C1 blocked-revocation TEST-FIRST amendment — SOURCE only, NOT RUN
+
+Parent accepted Zeno's boundary review and explicitly released only this test
+amendment plus this plan append. Production remains frozen at runtimeE089 /
+store1033 / database7043 / contract80BC from the preceding full hash table.
+No fix is included. Historical test43593 remains the pre-amendment pin, not the
+current amended test hash; its previous API RED f73b83 remains intact.
+
+Test amendment:
+
+- The existing interrupted-writer test retains its REVOKED/pending assertion,
+  nonce/binding absence, owner/global capacity, orphan, real late file read,
+  cleanup success/failure and shutdown assertions. Only the timing of the first
+  REVOKED observation changes: a transparent wrapper sets an event after the
+  real store revocation returns, and the assertion follows that event, after
+  caller completion but before releasing the physical writer. Caller completion
+  alone is no longer represented as proof of a durable SQL write.
+- New test `test_c1_blocked_revocation_returns_before_receipt_and_retains_owners`
+  has six combinations: cancel/repeat-cancel/actual30s deadline crossed with
+  SQL-first/writer-first release. It uses the real temporary SQLite TaskStore,
+  a second Store for independent connections, actual stager copies, an actual
+  post-release read, and real secure deletion with an observation-only wrapper.
+- The revocation wrapper is installed on TaskStore, not just one instance:
+  every caller/settlement/shutdown invocation records entry and waits a finite
+  barrier BEFORE delegating to the unchanged SQL method. Returned/exited events
+  distinguish actual method completion from an asyncio wrapper. This is a held
+  real-store call test, NOT a claim to hold a native SQLite write lock.
+- Before the expected caller-return RED assertion, tests establish actual
+  PREPARING/pending state, no binding/nonce, a still-live writer and an entered
+  revocation with no returned receipt. Caller is observed via asyncio.wait:
+  observation timeout never cancels it into a false pass. Cancellation must
+  propagate CancelledError; deadline must return consent_preparation_timeout.
+  While SQL is held, the independent store must still report PREPARING, not an
+  invented REVOKED projection. Other-connection owner/global reservations remain
+  bounded; orphan cleanup cannot delete this task's files.
+- Exactly one actual revocation invocation is required across caller cleanup,
+  settlement and shutdown, including repeated cancellation of a close awaiter.
+  No test fixture deduplicates calls or substitutes a successful receipt. The
+  proposed future fix must share one retained revoke operation itself.
+- With only SQL released, tests observe actual REVOKED/pending while the writer
+  remains alive. With only writer released, tests observe its real late read
+  and unchanged PREPARING while SQL is blocked. In either case shutdown, deletion
+  and capacity release remain blocked. After BOTH complete, require actual
+  REVOKED/settled, no binding/nonce, zero seal attempts, one exited SQL invocation,
+  deletion only after both returns, intact unowned neighbor and reusable capacity.
+- `test_c1_blocked_revocation_fixture_preserves_normal_success` is the seventh
+  case: the same wrappers permit real READY, independently recomputed binding
+  digest and nonce hash, one actual seal and zero revocation/deletion calls.
+  This is a positive fixture control, not authorization from fabricated consent.
+
+All barrier release occurs at the start of finally, before joins/assertions.
+Teardown gathers the caller/close awaiters, invokes the real runtime owner drain,
+then checks actual writer/SQL-call exit events. asyncio.run additionally joins
+the default executor's actual threads on exit. The60s barrier escapes and5/35s
+observation watchdogs are fixture bounds only; the production30s deadline is
+not patched, extended or represented as a35s contract. No barrier escape is
+accepted as a passing result. These cleanup paths have been inspected, NOT run.
+
+Approved semantic boundary for the later fix: existing local aborted latch is
+sticky and chooses the existing exception outcome immediately. Durable receipt
+is separate, with proposed internal pending/confirmed/unconfirmed status; a held
+or uncertain write is never reported as committed REVOKED. No public view/HTTP
+schema or cancellation exception payload is added here. The tests observe the
+actual behavioral boundary, not a fake receipt/status algorithm. SQL failure or
+commit ambiguity cannot release ownership merely because the caller returned.
+
+Explicit exclusion: these tests interrupt while stage is held BEFORE sealing;
+they do NOT solve or prove the seal-in-flight/commit-then-raise/other-process
+READY claim race. C2's cross-process authorization and subsequent full-C gates
+remain mandatory. Local revocation is not a substitute for a durable raw fence.
+
+Amended test SHA256:
+`B4FEA807B4BDCBB91C34402AD7CBF2C03DEC32CF4A89652C29FF72543E9D7B20`.
+
+Exact proposed targeted selectors (6+1 parameter cases, static count only):
+
+```text
+tests/task_runtime/test_docking_consent.py::test_c1_blocked_revocation_returns_before_receipt_and_retains_owners
+tests/task_runtime/test_docking_consent.py::test_c1_blocked_revocation_fixture_preserves_normal_success
+```
+
+Expected negative on frozen production: caller remains waiting for the held
+revocation after real call/DB/writer facts are established. This is an expected
+behavioral RED, not an actual terminal receipt; neither failures nor the positive
+control are claimed executed. Independent TEST SOURCE comes next, then only a
+separate parent slot grant can authorize targeted RED. No Python/import/compile/
+collection/tests/network, runner/production/staging edit, commit or push occurred.
+
+### Parent actual boundary RED and minimal retained-revoke SOURCE repair
+
+Parent-reported direct terminal `e87933`: **1 failed, 1 passed in6.59s,
+exit1**, eight before/after pins unchanged. The selected sql-first/cancel case
+reached the actual held-revocation facts then failed test line865 at
+`prepare caller awaited blocked durable revocation receipt`; the normal-success
+control passed. This is an actual behavioral RED, not a missing API/collection
+failure. The other five interrupted parameters were NOT reported executed.
+
+Parent then granted the minimal runtime/store repair, with B4FE tests and
+staging read-only. This amendment changes only those two production files and
+this plan; database7043 and contract80BC did not need changes.
+
+- `_abort_consent_preparation` sets the sticky local aborted latch and creates
+  at most one retained revocation task plus one settlement task. It awaits no
+  SQL/worker I/O before returning to the caller. Caller cancellation and the
+  original30s timeout keep their existing exception outcomes; no deadline change.
+- The retained revocation task owns/drains the real to_thread store invocation.
+  It records internal pending/confirmed/unconfirmed status. Caller, repeated
+  cancellation, settlement and shutdown reuse that task; no second revoke or
+  retry is started. Physical drain remains a shutdown/settlement obligation.
+- Store revocation returns a boolean only AFTER the existing connection context
+  commits successfully. Confirmation requires exactly one matching preparation/
+  operation-token row and an actual REVOKED or EXPIRED state with no approval
+  nonce hash. EXPIRED remains EXPIRED; no terminal state is reopened. Zero-match
+  returns false; exceptions/commit uncertainty never produce confirmation.
+- Settlement waits BOTH the original worker and the shared revocation task.
+  With matching ownership but no confirmed receipt it does not delete files or
+  free capacity; pending/unresolved records continue to protect orphan cleanup.
+  An independent post-worker lookup finding no owned row for a rejected request,
+  with no stage ever started, can settle that empty local owner, but does NOT
+  relabel its revocation receipt confirmed. This preserves rejected duplicate/
+  foreign/missing-request behavior without touching another writer's token.
+
+Source-only freeze SHA256:
+
+| File | SHA256 |
+|---|---|
+| src/task_runtime/runtime.py | `1B6D6D74845086910B8DC957C5F799FD9AEF111E598B0C4D94ECF40F7A85DA46` |
+| src/task_runtime/store.py | `105E265C37E7A4274FFB2C11CE3181736AFA27ABE26EF97BEBE66C3AC0BE04BD` |
+
+The previous blocker is addressed in SOURCE, not proven GREEN. Tests remain
+`B4FEA807B4BDCBB91C34402AD7CBF2C03DEC32CF4A89652C29FF72543E9D7B20`.
+Only static inspection/hash checks and git diff --check were performed. No
+Python/import/collection/compile/tests/network, runner/staging edit, commit or
+push occurred. Exception/zero-match receipt branches are not claimed separately
+fault-injection tested by the reported boundary RED. Any additional tests or
+semantic expansion require parent grant before changing this freeze.
+
+Independent SOURCE precedes parent-authorized selected/full-module GREEN and
+legacy regressions. Seal-in-flight/commit-then-raise authorization races are NOT
+claimed solved; no C2 approve/view/claim/dispatch surface or activation is added.
+
+### Parent full C1 module terminal and read-only filename diagnosis
+
+Parent actual terminal `50394/7e1596`: **82 passed, 1 failed in99.88s,
+exit1**, eight before/after pins unchanged, no warnings reported. All seven
+blocked-revocation boundary/control cases passed. The sole failure was
+`test_c1_reuses_existing_portable_filename_byte_limit[100]`: preparation raised
+consent_invalid_input at runtime line188, followed by conservative
+consent_cleanup_unresolved at close line328. This is NOT full C1 GREEN or C1
+completion. Receipt faults (revoke zero/pre/post-commit throw, finish pre/post-
+commit throw and real deletion failure), begin outcomes and seal-in-flight
+remain outstanding; none is inferred passed from this module run.
+
+Keep the reviewer's receipt distinction: physical deletion confirmed followed
+by finish COMMITTED as settled can legitimately free durable DB capacity even
+if the local close later sees an exception. Do not require a new cross-process
+receipt-equals-commit framework. Unconfirmed revocation may remain conservative.
+
+Read-only source findings (NO diagnostic execution or fixture correction yet):
+
+- stager basename validation allows100 UTF-8 bytes; a separate practical-path
+  check at staging.py2405 applies the240-character ceiling unconditionally.
+- `_stage_under_lease` checks both the final task input path (539-546) and the
+  temporary `.stage-<16hex>/inputs/<name>` path (551-569). Neither limit can be
+  relaxed or bypassed by a filename-boundary test.
+- This fixture uses `stage_root = tmp_path / 'stage'`, task ID `c-task-1` (8
+  characters), directory `inputs` (6), receptor name100 ASCII characters. If T
+  is the character length of the resolved tmp_path, final receptor length is
+  T+123; temporary receptor length is T+138. Therefore this positive test needs
+  T<=102 for BOTH paths to satisfy240. T in103..117 could pass the final-path
+  check yet fail the longer temporary-path check. This is source arithmetic,
+  not evidence of the actual T in run50394.
+- The frozen runner nests its ordinary-offline temporary root into child TEMP/
+  TMP without --basetemp. Installed pytest tmpdir.py builds pytest-of-user /
+  pytest-N and a30-character node-name prefix plus numbered suffix. Its actual
+  run root length and the lower ManifestError reason were not captured here.
+  Windows path length is a plausible cause, NOT a confirmed diagnosis.
+- Runtime sanitizes the lower stage/verify exception to consent_invalid_input.
+  If stage started without returning a verified locator, settlement deliberately
+  cannot certify deletion/absence and close reports cleanup_unresolved. That
+  secondary error does not identify the original callee or justify a cleanup
+  behavior change from this failure alone.
+
+Proposed minimal next diagnostic, requiring parent test-edit/execution grant:
+instrument ONLY this100-byte case with transparent wrappers that call the real
+stager `_assert_practical_path` and stage methods, re-raise their original
+exceptions, and report fixed callee/phase labels, existing sanitized reason_code,
+basename byte count and numeric full-path character/encoded-byte lengths. Print
+no full path, raw content or raw exception. Keep current tmp_path, assertions,
+limits, cleanup and production unchanged. This can distinguish final/temporary
+path rejection from a different filesystem/manifest failure. If confirmed,
+`tmp_path_factory.mktemp('c1-name')` is the proposed fixture-only short-root
+correction, retaining100/101-byte cases and unmodified practical-path checks;
+it must not be applied before evidence or treated as a production fix.
+
+Only this receipt/source-note append changed in this diagnosis. Production
+1B6D/105E/7043/80BC, testB4FE, staging and runner remain frozen. No Python,
+import/compile/test, retry, fixture/path/config edit, network or commit occurred.
+
+### Original100-byte case: transparent TEST diagnostic SOURCE freeze
+
+Parent explicitly granted diagnostic-test-only wrappers plus this plan append;
+no fixture correction or production repair. The original parametrized function,
+tmp_path root,100/101 names, assertions, prepare and close calls are retained.
+Only the100 branch installs wrappers around the actual stager
+`_assert_practical_path` and the existing observed `stager.stage` callable.
+Each wrapper delegates unchanged arguments, returns the original result and
+uses bare raise for the exact original exception. It neither repairs names,
+shortens paths, changes limits nor substitutes error/success results.
+
+Collected output is ONLY `C1_NAME_DIAGNOSTIC` plus JSON records with these keys:
+callee, phase, reason_code, basename_bytes, path_chars, path_bytes. Callee/phase
+are fixed labels; reason is an existing ManifestError whitelist code or fixed
+ok/non_manifest_error. Counts are numeric UTF-8 basename bytes, path characters
+and os.fsencode path bytes. The path-check record describes the actual candidate;
+the stage summary describes this original case's final receptor candidate.
+No path/name string, raw exception/representation, input bytes or secret is
+retained in the records or printed. Observation/printing failures cannot replace
+the callee outcome. Output is emitted after asyncio.run teardown even when
+close produces the secondary conservative cleanup exception.
+
+Exact parent-only diagnostic node:
+
+`tests/task_runtime/test_docking_consent.py::test_c1_reuses_existing_portable_filename_byte_limit[100]`
+
+Test SHA256:
+`0C4176E3B455534DC6DD09F9821A9C0760D7293AF2D2A66243C042E73B044DB9`.
+
+SOURCE inspection only; diagnostic NOT executed. A missing/inconclusive record
+would not establish root cause. Do not apply the proposed short-root fixture
+correction until actual callee/reason/length evidence supports it. Production
+1B6D/105E/7043/80BC, staging and runner remain frozen; no Python/import/compile/
+collection/test/network, production edit, commit or push occurred.
+
+### Parent actual filename diagnostic and minimal fixture correction
+
+Parent diagnostic terminal `313448`: **1 failed in1.14s, exit1**, eight pins
+unchanged. Exact nonsecret recorded facts: task_root133 characters with8-byte
+basename passed; final_input241 characters with100-byte basename failed the
+real `_assert_practical_path` with manifest_invalid_input_name; stager.stage
+reported the same241-character final candidate and reason. This confirms the
+original failure hit the existing240-character FULL-PATH ceiling, not the
+100-byte basename ceiling. No temporary-path failure is claimed observed: the
+earlier final-path check already rejected. The prior source-only hypothesis is
+now supported by this actual diagnostic, with no raw path or exception disclosed.
+
+Parent explicitly released fixture-only correction after that evidence. Removed
+only the temporary diagnostic wrappers/output. Restored the B4FE function's
+prepare/close flow and all original100/101-byte acceptance/rejection, binding
+name and zero-execution assertions, then made these minimal additions:
+
+- Only this parametrized test now requests tmp_path_factory and constructs its
+  rig at `tmp_path_factory.mktemp('c1-name')`; no global basetemp/runner change.
+- Before prepare in BOTH cases, assert numeric full-path length is at most the
+  unchanged stager `_MAX_WINDOWS_PATH_CHARS` (240) for the final task candidate
+  and the `.stage-` plus16-hex-character temporary candidate. The representative
+  hex value affects no length and creates no path. This makes the independent
+  path-size prerequisite explicit without weakening either stager limit.
+
+Test SOURCE freeze SHA256:
+`436EAD8C1584532FF11D22F3C4195A71031308E85D439703C4270C79D515AF19`.
+
+Exact next parent verification nodes, after SOURCE clearance:
+
+```text
+tests/task_runtime/test_docking_consent.py::test_c1_reuses_existing_portable_filename_byte_limit[100]
+tests/task_runtime/test_docking_consent.py::test_c1_reuses_existing_portable_filename_byte_limit[101]
+```
+
+No execution occurred in this amendment; no two-node GREEN or full-C1 completion
+is claimed. Runtime1B6D, store105E, database7043, contract80BC, staging and runner
+remain unchanged. Only test/plan edited with apply_patch; no Python/import/
+compile/collection/test, production edit, limit change, network, commit or push.
+All outstanding receipt/begin/cleanup/seal-in-flight and later C gates remain.
+
+### Parent corrected-fixture verification receipts — NOT C1 completion
+
+Parent actual two-node terminal `a8eb0a`: **2 passed in1.04s, exit0**, eight
+before/after pins unchanged, for the original filename-boundary[100] and[101]
+nodes after the fixture-only short-root correction.
+
+Parent actual full corrected C1-module terminal `11878/0f5e81`: **83 passed
+in99.17s, exit0, zero warnings and zero skips**, eight before/after pins
+unchanged. This is parent execution evidence on test436E and the frozen
+production, not an independent fresh QUALITY run by this worker.
+
+Preserve all earlier receipts: f73b83 missing-API RED; e87933 boundary1failed/
+1passed;50394/7e1596 full-module82passed/1failed;313448 filename diagnostic
+1failed and its actual241-character path rejection. Those failures are not
+erased or retrospectively relabeled by the subsequent GREEN runs.
+
+This grant changes ONLY this plan receipt appendix. Production1B6D/105E/7043/
+80BC, test436E, staging and runner remain frozen; this worker ran no Python and
+made no production/test edit, commit or push. Receipt-fault coverage, begin/
+cleanup outcomes, seal-in-flight, legacy regressions and independent fresh
+review/QUALITY remain pending. C1 and full C are NOT declared complete. A next
+minimal receipt-fault matrix may be proposed in prose only; no new tests or
+implementation are authorized by these receipts.
+
+### Parent legacy/staging regression receipts and legacy basename diagnostic
+
+Parent actual legacy terminal `9076/7fc675`: **419 passed,2 skipped in35.93s,
+zero warnings**, ten before/after pins unchanged. The two skips are Windows
+symlink privilege and explicit-opt-in wall-clock performance coverage. This is
+offline regression evidence, not scientific/live acceptance. As instructed,
+plan200AC was kept frozen during the subsequent parent staging regression;
+these receipts are appended only after its physical terminal.
+
+Parent actual `30874/2121a3` physical terminal for test_staging.py plus
+test_secure_snapshot_boundary.py: **1 failed,184 passed,11 skipped in43.76s,
+exit1**, POSTFLIGHT_MATCH true, ten pins unchanged. Preserve skip categories:
+six symlink-privilege, one open-file replacement and four POSIX-only cases.
+The sole failure was the pre-existing
+`test_portable_100_byte_input_basename_is_accepted` at test line998, through
+stage line563 into practical-path line2408, with
+ManifestError(manifest_invalid_input_name). It is not a full staging GREEN.
+
+Source inspection: unlike the C1 fixture, this legacy test stages directly under
+tmp_path with task ID `task-1` (6 characters). For tmp_path character length T,
+its100-byte ASCII receptor yields final length T+115 and temporary length T+132.
+Both must satisfy the unchanged240-character practical-path ceiling, requiring
+T<=108. The reported stack points to the temporary-path check. Actual lengths
+have NOT yet been captured for this run; do not substitute the C1 diagnostic's
+241-character final path or assume identical roots for this separate fixture.
+
+Parent granted only minimal diagnostic preparation, not a fixture or production
+fix. Changed only this existing test to accept monkeypatch and transparently
+wrap the real `_assert_practical_path` and this stager's real stage call. Root,
+100-byte basename, task/input bytes/config, actual load_verified and its original
+assertion remain unchanged. Wrappers forward original arguments/results and
+bare-raise original exceptions. The finally output `STAGING_NAME_DIAGNOSTIC`
+contains only fixed callee/phase labels, whitelisted ManifestError reason (or
+fixed ok/non_manifest_error), basename-byte and full-path character/encoded-byte
+counts. No raw path, filename, exception repr or input content is recorded.
+Diagnostic bookkeeping/output failures do not replace the actual outcome.
+
+Exact proposed parent-only diagnostic selector:
+
+`tests/task_runtime/test_staging.py::test_portable_100_byte_input_basename_is_accepted`
+
+Diagnostic test_staging.py SHA256:
+`2C5E6A3684A8D8DDCCB69A6A7810999DE1DC8FAE93B8C75CF5819023309F08D0`.
+Pre-diagnostic test_staging.py SHA256 was
+`0933A13A3F8F779CBF50C82970ECA07220500BD48BE61807682A43BBCDA314BB`.
+test_secure_snapshot_boundary.py remains
+`2D6EE0008855A44F07A9928CB5A326D35B5DBD6C0E9A72A016A12C7F76C1F6A1`.
+
+Diagnostic SOURCE only, NOT executed; no short-root correction yet. Runtime1B6D,
+store105E, database7043, contract80BC, C1 test436E, production staging and runner
+remain frozen. No Python/import/compile/collection/test/network, production
+edit, limit relaxation, commit or push occurred. Receipt-fault tests await review;
+other receipt/begin/cleanup/seal-in-flight/fresh QUALITY and full-C gates remain.
+
+### Actual legacy basename diagnostic and fixture-only correction
+
+Parent actual diagnostic terminal `8c67d5`: **1 failed in1.81s, exit1**, all
+ten before/after pins unchanged. Recorded nonsecret facts: task root125
+characters passed; final receptor233 characters/100-byte basename passed;
+ligand143 characters passed; TEMPORARY receptor250 characters/100-byte basename
+failed the real practical-path check with manifest_invalid_input_name. The
+existing240-character full-path ceiling is the verified cause, not a100-byte
+basename validation failure. Keep this diagnostic and the preceding regression
+failure as historical receipts, not replaced by an assumed corrected GREEN.
+
+Parent then granted only the minimal legacy positive-fixture correction.
+Removed all temporary diagnostic wrappers/output and restored the original
+stage/load_verified/assert flow. Only this test now uses
+`tmp_path_factory.mktemp('stage-name')`. Before staging, numeric final and
+temporary receptor path lengths must both be at most the unchanged existing
+`_MAX_WINDOWS_PATH_CHARS` (240); the temporary candidate uses the real prefix
+and16 representative hex characters. Actual stager code and path/name limits
+are unchanged. Task ID,100-byte receptor basename, input bytes, config and the
+original load_verified assertion are retained. All other tests, including
+overlong101-byte-name negatives and path-limit negatives, remain untouched.
+
+Corrected test_staging.py SHA256:
+`14F92A304927B34E4973E00BC66F8A406A71907F421D4145A3A9A87E7D56F483`.
+
+Exact positive node for parent verification after SOURCE:
+`tests/task_runtime/test_staging.py::test_portable_100_byte_input_basename_is_accepted`.
+
+This is SOURCE-only correction, not an executed pass. Only test_staging.py and
+this plan changed; runtime1B6D/store105E/database7043/contract80BC, C1 test436E,
+secure snapshot test, production staging and runner stay frozen. No Python,
+imports/compile/collection/tests, production edit, limit relaxation, network,
+commit or push. Six receipt-fault preparation remains on HOLD until parent
+GREEN pins; no overlap or C1/full-C completion claim is made.
+
+### Parent corrected legacy module-pair GREEN; receipt-fault TEST SOURCE batch
+
+Parent actual physical terminal `12395/d37397`: **185 passed,11 skipped
+in25.56s, exit0**, all ten before/after pins unchanged, for test_staging.py plus
+test_secure_snapshot_boundary.py after the fixture-only correction. Retain the
+11 skip reasons already recorded (six symlink-privilege, one open-file
+replacement, four POSIX-only). Preserve30874/2121a3 and8c67d5 failures and
+diagnostic facts; this GREEN does not erase them or establish live/scientific
+acceptance. Parent then released the next TEST+plan-only batch below.
+
+Added exactly one parametrized C1 test with six faults and one no-fault control:
+
+`tests/task_runtime/test_docking_consent.py::test_c1_receipt_faults_preserve_actual_sql_and_cleanup_facts`
+
+Exact parameter IDs:
+
+```text
+[revoke-pre-throw]
+[revoke-post-commit-throw]
+[revoke-zero-match]
+[finish-pre-throw]
+[finish-post-commit-throw]
+[delete-failure]
+[normal]
+```
+
+Each case reserves the real owner plus15 other-owner drafts in actual SQLite,
+uses a separate Store for independent connections/readback, stages actual files,
+holds the real writer after stage until cancellation has returned, and then
+performs a real late receptor read before writer exit. No model/backend/tool
+dispatch is allowed. The normal control is successful cancelled-preparation
+revocation+cleanup WITHOUT injected faults; existing ordinary READY positives
+remain unchanged.
+
+Fault boundaries and observations:
+
+- Revoke pre-throw: throw before calling the real method; DB remains PREPARING/
+  pending, no delete, owner/global capacity retained.
+- Revoke post-commit throw: first call the real method and observe its actual
+  committed REVOKED/pending state through the independent connection, then
+  throw. Runtime cannot infer a confirmed receipt from that exception; no file
+  deletion, actual cleanup becomes unresolved and capacity remains occupied.
+- Revoke zero-match: delegate the real SQL method with a deliberately different
+  token (never change the stored/runtime token), require its actual False result
+  and an unchanged independent DB record. No fake False return or mocked UPDATE.
+- Finish pre-throw: require actual secure deletion completed successfully before
+  finish entry, then throw before the real finish write. DB remains pending and
+  capacity remains occupied even though files are physically gone.
+- Finish post-commit throw: require actual deletion first, call the real finish,
+  independently observe COMMITTED settled, then throw. Local close reports its
+  fixed uncertainty error, but the DB must remain settled and actually admit a
+  replacement owner into the now-free global slot. No fictional DB rollback or
+  new cross-process receipt-equals-commit framework is introduced.
+- Delete failure: always call the real `_safe_delete_owned_tree` and its real
+  shutil.rmtree path. Inject PermissionError only at os.unlink of receptor.pdb
+  on this thread inside the verified owned quarantine tree; all other unlinks
+  delegate unchanged. Require actual unlink attempt, real False cleanup result,
+  residual receptor/ownership marker and durable unresolved/capacity retention.
+  The delete method itself is not replaced with fake False.
+
+All cases observe exactly one revoke and one finish invocation, no late binding/
+nonce, real writer/SQL exit events, intact non-owned neighbor, sanitized close
+error, actual DB state and actual other-connection admission decisions. The
+finally block first releases the20s finite fixture barrier, then gathers caller,
+close awaiter and the real runtime.close drain (which may truthfully remain an
+error). It checks physical exits and no additional invocation; asyncio.run joins
+the real default-executor threads. No owner/receipt/state field is mutated by
+teardown, no manual DB rollback and no injected success cleanup. Pytest retains
+responsibility for its own temporary fixture directory after these assertions.
+
+Previous test436E content is unchanged: removing the newly appended parameter
+block and its separating blank lines reproduces SHA256436E exactly by a
+read-only UTF-8 prefix hash check. No previous assertion or fixture was edited.
+Current test SHA256:
+`C0FE246B0753DD7686BEC07FBD88F4C1CA674E948C374E0853202DF2B6E3A232`.
+
+SOURCE preparation only, no collection or execution; seven cases is a static
+parameter count, not a pass claim. Runtime1B6D/store105E/database7043/contract80BC,
+test_staging14F9, secure snapshot, production staging and runner remain frozen.
+No Python/import/compile/test/network, production edit, commit or push. Parent
+SOURCE and a separate slot grant precede execution; no production repair is
+authorized without an actual relevant RED. Begin/cleanup/finite seal outcomes,
+independent fresh QUALITY and later C gates remain incomplete; no C1 completion.
+
+### Parent receipt-fault GREEN; begin/seal transaction TEST SOURCE gate
+
+Parent reports actual physical terminal `67eb55`: **7 passed in4.47s, exit0**,
+all ten before/after pins unchanged, for the six receipt faults plus normal
+control above. No warning/skip count was supplied in this receipt; none is
+inferred. This is parent execution evidence, not an independent fresh QUALITY
+run or scientific/live acceptance. All earlier failures remain recorded.
+
+Under the subsequent TEST+plan-only grant, append the approved13-case matrix;
+do not change production, preceding tests, runner or the original30s preparation
+deadline. The three exact selectors (relative to this worktree) are:
+
+```text
+tests/task_runtime/test_docking_consent.py::test_c1_transaction_boundary_interrupt_retains_actual_owner
+tests/task_runtime/test_docking_consent.py::test_c1_transaction_boundary_normal_control
+tests/task_runtime/test_docking_consent.py::test_c1_transaction_boundary_exception_preserves_real_commit_outcome
+```
+
+The first expands to8 cases: outcome cancel/deadline x boundary pre-commit/
+post-commit x phase begin/seal (e.g. `[cancel-pre-commit-begin]`). The normal
+control holds a real seal after its committed receipt, then releases a successful
+READY preview. The last expands to4 cases: pre-commit/post-commit x begin/seal
+(e.g. `[pre-commit-begin]`). These are static parameter counts, not collection or
+pass claims. Imports and API access remain inside the test/helper bodies.
+
+Transaction instrumentation is deliberately at the existing store connection
+context, not a method-entry exception surrogate:
+
+- Delegate every execute to the actual SQLite connection and return its actual
+  cursor. Identify the target only after the real PREPARING or READY UPDATE has
+  executed with rowcount1. Independently observe begin's preceding EXPIRED UPDATE
+  transaction and its completion, but never hold or fault that expiry transaction.
+- Delegate the original database.connection context manager unchanged. A
+  pre-commit hold is after the real UPDATE and before that original context exits;
+  a pre-commit exception therefore traverses its real rollback. A post-commit hold
+  is only after the original context has actually committed and closed; throwing
+  there cannot be described as a rollback of that committed transaction.
+- Record only fixed COMMIT/ROLLBACK trace labels (not expanded SQL, tokens or
+  payloads). Verify independent native SQLite readbacks before/after the boundary;
+  explicitly close those connections. Do not use the instrumented connection
+  for readback, or issue competing test writes while the target lock is held.
+  The committed flag is set only after the original context returns, not at
+  method entry or upon scheduling a worker.
+
+For cancel/deadline cases the real caller must settle while the actual transaction
+is still held, with CancelledError or the fixed preparation-timeout reason and
+no preview. A concurrent real runtime.close must remain pending, with no early
+deletion and (for seal) the staged receptor still readable. Release the boundary,
+then require actual transaction exit, retained-owner drain, durable REVOKED with
+nonce cleared and settled cleanup; seal files must be physically deleted while
+an unrelated neighbor remains intact. No stager invocation is permitted after a
+held begin is cancelled/timed out. Historical committed seal binding is observed
+and retained, never erased from assertions to pretend a lost reply rolled back.
+
+Exception cases require the fixed sanitized caller error. A begin pre-commit
+exception leaves the independently observed original draft intact after actual
+ROLLBACK and causes no staging. Other exception boundaries require confirmed
+terminal revocation/cleanup; an actual seal commit-then-raise retains its
+historical binding, whereas seal rollback has no committed binding. The normal
+control checks the full expected copied-input/grid/options binding, canonical
+digest and persisted hash of the returned nonce, using the existing helpers.
+Every case checks zero runnable task/event/model/backend/tool activity.
+
+The fixture barrier has a60s escape (reported as a fixture failure), not a new
+production timeout. Deadline cases await the unmodified actual30s caller deadline
+with a35s test observation bound; no clock advance or deadline patch is used.
+Other joins use finite observation windows. Finally always releases the barrier
+before gathering the real caller/close tasks and runtime drain, checks transaction
+exit events, and lets asyncio.run join real default-executor threads. No owner,
+receipt or DB state mutation, fabricated cleanup success or manual rollback.
+
+Removing only this appended helper/test block and separator blank lines reproduces
+the preceding test SHA256 exactly:
+`C0FE246B0753DD7686BEC07FBD88F4C1CA674E948C374E0853202DF2B6E3A232`.
+New test SHA256:
+`76750AEB6F73A73E1E2A2CE8045F7F603F03DC0C4A632C4418A5F35F174A722C`.
+Read-only hashing reverified runtime1B6D/store105E/database7043/contract80BC,
+production stagingFA91, test_staging14F9, secure snapshot2D6E and runnerA99B
+unchanged. No Python/import/compile/collection/test/network or production edit
+was performed. Independent SOURCE review and parent slot authorization precede
+execution; any implementation needs relevant actual RED and a separate grant.
+Begin/seal in-flight outcomes are still an unexecuted C1 gate, not solved or
+deferred to C2; this append does not declare C1 or full C complete.
+
+### Parent actual begin/seal GREEN — independent C1 release gate pending
+
+After Lovelace SOURCE GO for test7675/plan2C4F, parent first ran begin/pre-commit/
+cancel plus the normal control: actual terminal `71d6e5`, **2 passed in1.80s**,
+all ten pins unchanged. No warning/skip or exit-code value was supplied with
+that two-node receipt, so none is inferred here. The batch was not presumed RED.
+
+Parent then reports physical terminal `19685/5ec76b` for all three transaction
+test functions: **13 passed in124.17s, zero warnings, zero skips, exit0**,
+all ten before/after pins unchanged. The four deadline cases retained the actual
+original30s preparation deadline. No automatic retry or production repair was
+performed for this matrix. This replaces its preceding unexecuted status with
+parent GREEN evidence only; it is not independent fresh QUALITY or proof of
+uncovered interleavings. Historical API/boundary/filename failures remain intact.
+
+This grant changes only this plan. Before append, read-only SHA256 checks matched
+test7675, plan2C4F, runtime1B6D, store105E, database7043, contract80BC,
+stagingFA91, legacy staging14F9, secure snapshot2D6E and runnerA99B. No test,
+production or runner change; no Python/import/compile/test/network/commit/push.
+
+Remaining C1 release gates, without adding another feature batch:
+
+1. Independent fresh execution of the entire current C1 test module together
+   with the already required C1 legacy selection, on one frozen source/test/
+   runner set and after a separate sole-slot grant. The explicit C1 selection is:
+
+   ```text
+   tests/task_runtime/test_docking_consent.py
+   tests/task_runtime/test_staging.py
+   tests/task_runtime/test_secure_snapshot_boundary.py
+   tests/task_runtime/test_task_store.py
+   tests/task_runtime/test_local_backend.py
+   tests/agent/test_docking_tool_contract.py
+   tests/agent/test_docking_contract_integration.py
+   ```
+
+   This carries the C1 table's staging/store/typed legacy inputs, the spec's
+   local-backend cancellation regressions, and the secure-snapshot module already
+   included in this C1 validation sequence. It does not import the full C0-C8
+   final legacy list or authorize execution now. The current C1 module includes
+   all old cases, seven blocked-revocation cases, seven receipt-fault/control
+   cases and these13 transaction cases. Do not sum earlier pass counts and call
+   that a fresh full-module/combined run. Report actual collection, terminal
+   counts, warnings, skips/reasons and complete before/after input hashes.
+2. Independent combined SOURCE/QUALITY disposition against the approved C1
+   contract: copied-file/config/input/request/binding identities and hash-only
+   nonce; strict inherited bounds; durable same-task/owner identity without a
+   runnable task or model/tool/backend dispatch; owner1/global16 capacity,
+   non-sliding expiry/generations; retained actual staging/verification/SQL
+   ownership, orphan protection and truthful cleanup/receipt outcomes. Include
+   the new real transaction and six-fault evidence, preserve original deadlines,
+   and distinguish local caller outcome from durable/physical settlement. A
+   newly found gap requires a bounded test-first grant, not silent scope growth.
+3. Before publication, the previously required clean focused integration/alignment
+   and evidence review must resolve the unpublished dependency baseline and
+   verify the actual publishable revision. Do not assume pre-alignment local
+   receipts automatically prove a changed integrated tree; parent coordinates
+   any required fresh validation/CI and publication authorization separately.
+
+No additional C1 production change is authorized or inferred from GREEN. C1 is
+not yet released. C0c ordinary entry, C2 approval/claim/raw dispatch, C3 HTTP/body
+framing, C4-C8 ownership/UI/artifacts/full chat-to-report chain and real scientific
+activation remain their existing later gates, not new requirements to implement
+inside this prepare-only batch. These offline receipts grant no production
+execution authority and do not establish full C completion.
+
+### C1 verification-in-flight cancellation — one-case TEST SOURCE amendment
+
+Parent released one narrowly scoped regression after Lovelace identified the
+existing spec C1/physical-I/O requirement: cancellation after stage has returned,
+but while runtime's subsequent load_verified_locator still owns an actual file
+read. This adds no new product requirement or cancellation/deadline matrix.
+Production and all preceding test assertions remain frozen.
+
+New exact node:
+
+```text
+tests/task_runtime/test_docking_consent.py::test_c1_cancel_during_actual_verification_retains_reader_before_cleanup
+```
+
+Reuse make_rig, actual TaskStore/SQLite and stager. The stage observer delegates
+and records its actual return. Only the subsequent load_verified_locator call
+marks a thread-local verification scope; within that scope only the exact owned
+receptor's existing _secure_read_file marks the read scope. A transparent os.read
+wrapper holds the first actual descriptor read behind a40s finite fixture escape,
+then delegates to the original os.read. All other reads delegate immediately.
+Thus stage's own internal verification is not held, and the target descriptor
+has already been opened/validated by the real secure reader. Original manifest,
+size, hash, containment and descriptor checks run unchanged; no fake manifest,
+digest, read bytes, ownership record or cleanup receipt is returned.
+
+While that read is held, require caller cancellation to return, then observe the
+real revoke method's completed receipt through an independent Store connection:
+REVOKED/pending with no binding/nonce. Keep owner/global capacity occupied using
+the existing1/16 bounds. A real runtime.close stays pending and both copied files
+remain readable. Instrument discard_unprojected at its ENTRY before delegation,
+not merely physical deletion after its lock: cleanup_entries must remain empty.
+This prevents the stager lock from disguising an illegally early cleanup call.
+
+After release, observe actual receptor read bytes through EOF and the actual
+returned validated manifest with independently checked receptor/ligand SHA256.
+Require verification exit before the sole cleanup entry, real secure deletion,
+durable settled cleanup, released capacity and unchanged non-owned neighbor.
+Observe the actual seal method entry as well: none is allowed before or after
+release; caller remains cancelled with no preview, binding or nonce. Existing
+no_execution verifies zero model/tool/backend/runnable-task activity. Finally
+releases the real descriptor barrier before gathering caller/close and runtime
+drain, and asyncio.run joins default-executor threads; no owner/receipt mutation.
+
+Use the unchanged existing positive as the normal control, not a duplicate:
+
+```text
+tests/task_runtime/test_docking_consent.py::test_c1_real_sqlite_copies_hashes_and_seals_existing_identity
+```
+
+Read-only inverse-prefix SHA256 exactly reproduces preceding test
+`76750AEB6F73A73E1E2A2CE8045F7F603F03DC0C4A632C4418A5F35F174A722C`.
+New test SHA256:
+`962E8A48B0FD37B54B2530875EBD07B00270069F947084F7C6E4A84FD6D73318`.
+Plan F29E is the pre-amendment receipt/gate pin. No Python/import/compile/
+collection/test/network/production or runner edit, commit or push. This case is
+SOURCE-only and unexecuted, not predetermined RED. Independent SOURCE and a
+separate parent slot grant precede its targeted validation; the independent
+fresh whole-C1-plus-legacy gate above must include this appended case. No C1
+release or broader C scope is implied.
+
+### C1 independent SOURCE/fresh QUALITY accepted; local commit handoff
+
+Parent reports actual verification-in-flight single-node terminal `e2af81`:
+**1 passed in1.48s, exit0**, all ten before/after pins unchanged, for
+test_c1_cancel_during_actual_verification_retains_reader_before_cleanup.
+No warning/skip count was supplied for this individual receipt. Plan752F and
+test962E stayed frozen during the subsequent independent run; this receipt was
+not appended while execution pins were live.
+
+Parent now confirms Lovelace independent **SOURCE + fresh QUALITY PASS**:
+session `16128`, physical terminal `073569`, **990 passed,13 skipped, zero
+warnings in272.49s, exit0**, for the complete C1 module plus the six legacy
+modules explicitly listed above. Postflight `9eb175` confirms **14/14 inputs
+unchanged**. This is independent execution evidence, not another author run.
+The13 skips remain uncovered: seven symlink-privilege cases, one open-file
+replacement case, four POSIX-only cases and one explicit-opt-in performance
+case. Do not count them as passing coverage or infer scientific/live validation.
+
+Executed pins include test962E, plan752F, runnerA99B and production
+runtime1B6D/store105E/database7043/contract80BC, with their full SHA256 values
+already recorded above. The present plan-only receipt append necessarily changes
+the plan hash; it does not change any executed test or production byte. Preserve
+all preceding RED/failure/diagnostic receipts and actual deadline boundaries.
+
+Parent authorizes local commit of exactly seven paths:
+
+```text
+src/task_runtime/runtime.py
+src/task_runtime/store.py
+src/task_runtime/database.py
+src/task_runtime/docking_consent.py
+tests/task_runtime/test_docking_consent.py
+tests/task_runtime/test_staging.py
+docs/superpowers/plans/2026-09-27-docking-consent-integration.md
+```
+
+This accepts the bounded C1 prepare/identity offline SOURCE/QUALITY gate for
+local handoff. It does not assert remote publication, latest-main integration,
+CI/merge, real Vina availability or full C completion. No push/merge or C2 edits
+are authorized. Parent will create a separate clean C2 worktree/branch and
+release its test preparation independently. Current branch remains
+codex/docking-consent-preparation on reviewed dependency ebb2093; no alignment
+or dependency-merged claim is made in this receipt. Exact local commit/tree and
+new plan SHA256 are reported after commit, outside this self-referential record.
