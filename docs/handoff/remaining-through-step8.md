@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Six-stage controls26094/24ed07:25passed6.23s; full qualification59511/4b6a48:202passed46.52s. Whole-module19841/a4d35f still hit720s,676pins unchanged; complete945 marker sequence captured without gaps/truncation | First two full-chain calls took230.922/220.547s;46 completed preclaim cases spent4.656–5.281s in initial invoke versus0.141–0.516s in resume. Internal cause remains UNKNOWN; no full-module summary, original56 campaign rows still NOT_RUN |
+| Normal-Web B1 Tasks4–8 | Profiler controls66passed and full qualification268passed. Whole66459/cbfde1 again hit720s;676pins unchanged,690 complete markers and two bounded partial profiles captured | Repeated configuration/closure validation is a measured cost candidate; first profiled native CALL failed and its exact assertion remains UNKNOWN. No full-module summary or performance fix; original56 campaign rows still NOT_RUN |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,11 +30,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Actual cold27800/d8836d failed7.26s. Diagnostic P2 reproduced3294/f82a98:2failed4passed; minimal fix passed86211/317de1:6passed, then full3150/dfad34:392passed1actual-cold-skip114.24s,332pins unchanged | Independent fresh QUALITY in progress. Earliest cold failure boundary remains UNKNOWN; trusted @2 caller migration and actual cold run still pending. Offline controls are not generation success |
+| G3 concrete Windows owner | Diagnostic repair independently verified392passed1skip. Actual trusted-@2 cold1073/b832b6 failed7.74s,332pins unchanged: first_failure initial_inventory/operation_error; cleanup/final-inventory fields null, deadline false, zero clients/POST | Earliest failing boundary is now initial loaded-module inventory, before required imports; inner generic exception wrapping still hides the precise cause. No scientific import, generation or G3/B2 completion claim |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Parent54341/b38790:72passed6POSIX-skipped33.76s; independent fresh40403/fb6f52:72passed6POSIX-skipped33.34s,339pins unchanged each. Local section4.1 checkpoint3992505 committed exactly5files, clean at commit | Section14 written SOURCE approved; section4.2 service/tool proof and deferred-cleanup TEST preparation released, not production. Section4.3 lease remains open. No POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Section4.1 checkpoint3992505 independently verified72passed6POSIXskips. Section4.2 whole-module RED15542/d1c45d:38missing-API failures,72passed6skipped60.17s,339pins unchanged, outer settled/slot released | Approved base/tool/service implementation released; new consumer behavior not yet reached. Section4.3 lease remains open. No POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,64 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+All parent Python sessions in this checkpoint are physically terminal; no restart
+or relaxed deadline occurred. C4a15542/d1c45d reached38 explicit CALL missing-API
+assertions at1874, with72legacy passes6POSIXskips60.17s,exit1,339pins unchanged.
+Outer test_failed/settled/slottrue permits releasing the approved base/tool/service
+implementation, not claiming the new physical consumer tests have executed.
+
+Actual G3 cold1073/b832b6 exited1 after1failed7.74s,332pins unchanged. Strict @2
+decode after physical checks exposed first_failure initial_inventory/operation_error;
+context/root cleanup and final-inventory errors are null, final deadline false,
+imports_checked0,guard0,client0,POST0. The inventory helper catches non-timeout
+exceptions into generic ValueError, so operation_error does not identify the
+underlying exception type or failing identity. Do not attribute this to a later
+scientific import or blindly adjust DLL/path/manifest policy. Source investigation
+is released at this narrowed boundary; no automatic retry or live generation.
+
+B1 whole66459/cbfde1 physically exited1 with test_watchdog_timeout,settled,slottrue,
+may_continuefalse and676unchanged45D77 inputs. Full138616character return contains
+690 consecutive markers and two valid bounded profile records; no truncation.
+Native first CALL took305.531s and reported failed (exact traceback unavailable
+before watchdog); JSON second CALL took221.703s and passed. Profile overhead may
+contribute; this run does not prove the same first-case failure without profiling.
+Both profiles are partial due256-key retention (173main/3046owned overflow), not
+complete application coverage. Owned records show106725 validate_json calls,
+36.229s own/48.221s cumulative,144 verify_binding_closure calls98.928s cumulative,
+237 configuration_digest calls81.650s cumulative and3594 _authenticated_record
+calls67.550s cumulative. Inclusive cumulative times overlap and must not be added.
+The excluded decision_execution.settle_action alias/descendant-thread gap remains.
+Read-only source analysis for a minimal equivalence-preserving optimization is
+released; no caching/validation removal/time-budget change is authorized yet.
+Evidence: ignored scratch/b1-profile-diagnostic-2026-09-28.json.
+
+Read-only GitHub UI check still shows Sign in and main73379a1; no authenticated
+PR creation/merge is available through that surface. No credentials were read,
+and no PR/push/merge/deployment occurred in this checkpoint.
+
+Independent G3 fresh QUALITY51551/0a132b completed392passed1actual-cold-skip,
+0warnings113.71s,exit0. All332 pin comparisons (331 unique files; the trusted
+base has relative/absolute entries),323 source inventory and HEAD4280b7a were
+unchanged. This independently confirms the finite diagnostic repair only.
+Minimal caller-side trusted @2 cold migration is released in test/ownplan only;
+launcher019C8059 and manifest2A1A085B stay frozen, with SOURCE required before
+any actual cold execution.
+
+The three-site migration subsequently passed independent SOURCE at testB34B5CC2
+and plan1CCB2C6A; exact inverse restoresB05E5AA4. Both caller versions are fixed
+trusted @2 literals and only strictly decoded closed diagnostic fields can be
+displayed. Source-ready does not mean cold-ready. C4a appended TEST530FE7B4 and
+planBF6916AB also passed independent SOURCE (13functions/38staticcases); its
+first whole-module RED will establish missing API prerequisites only. Physical
+consumer behavior must still be reached and verified after implementation.
+
+B1 parent preflight94a817 verified676 members and canonical45D77F75205D35A4206CD0AA564D377CCBD9F1AE368B1D668282693C6DFD5A64
+at HEADa6aef8b. Inverse of exactly the three approved profiler updates restores
+prior74543DA389FBC650812DC833C3A24FE713DEF400A7178D85C913455968A18BFF.
+One whole-firstmodule diagnostic66459/d9367c is launched via the same qualified
+owner/caller and720/+5 bound. No completion, latency diagnosis or pass count is
+claimed until that exact handle is physically terminal and postflight matches.
 
 B1 bounded-profiler implementation485B0557 passed independent SOURCE, then
 parent exact11-function run6480/834ee7:66passed147.02s, and complete two-owner-
