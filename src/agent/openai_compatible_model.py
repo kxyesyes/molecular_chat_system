@@ -281,6 +281,17 @@ class OpenAICompatibleModel:
             timeout_seconds=timeout_seconds, _journal=_journal,
         )
 
+    async def propose_docking_preparation(
+        self, messages, *, mode="native", max_tokens=256, timeout_seconds=30.0, _journal=None,
+    ):
+        """Return a preparation proposal, never admission, consent or execution."""
+        from src.agent.decision_transport import request_docking_preparation
+
+        return await request_docking_preparation(
+            self, messages, mode=mode, max_tokens=max_tokens,
+            timeout_seconds=timeout_seconds, _journal=_journal,
+        )
+
     async def close(self) -> None:
         close = getattr(self.client, "aclose", None) if self.client is not None else None
         if close:
