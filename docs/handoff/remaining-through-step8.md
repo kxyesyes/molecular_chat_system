@@ -43,6 +43,24 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+G3 cleanup-diagnostic behavior RED3294/f82a98 reached the intended assertion:
+2failed4passed13.29s, physical exit1,332/332 input pins unchanged. Both propagated
+and swallowed guard cases completed the preceding finite resource/restoration
+checks, then failed at test line4389 because context_exit was forbidden_io rather
+than absent. All four independent cleanup-failure controls passed, including a
+different exception object of the same private type. This proves the diagnostic
+misclassification over finite bootstrap fixtures, not an actual cold-start or
+scientific-model success. Minimal latch-echo correction is released for SOURCE
+review before GREEN; actual cold execution and trusted @2 caller migration remain
+separate gates. No external provider or production assets were activated.
+
+C4a section14 clarification A354A931 passed independent written SOURCE. Parent
+released section4.2 TEST preparation only: actual nonsealing prefix proof and
+deduplicated own-job cleanup at tool/service consumers. Production changes need
+observed RED first; section4.3 lease retention is still separately gated. B1
+bounded profiling implementation485B0557 is frozen for independent SOURCE, not
+yet GREEN or evidence that the original whole-module timeout has been repaired.
+
 Independent fresh C4a section4.1 QUALITY40403/fb6f52 completed72passed6POSIX
 skipped0warnings33.34s,exit0, outerpassed/settled/slottrue and339/339pins unchanged.
 The two receipt-only plan appendices inversely preserve8B68/890E prefixes and
