@@ -30,11 +30,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Actual trusted-@2 cold1073/b832b6 failed at initial_inventory/operation_error before imports. Finer explicitly selected protocol3 diagnostic passed52finite cases and whole98347/d55886:444passed1coldskip136.42s,332pins unchanged | Independent fresh verification running next; actual child/caller still protocol2. No new cold attempt, scientific import, generation or G3/B2 completion claim |
+| G3 concrete Windows owner | Fine diagnostic independently verified444passed1skip; reviewed protocol3 migration passed52finite cases. Actual cold16655/142312 failed7.99s at initial_inventory/system_membership/invariant_failed;332pins unchanged,imports/client/POST0 | Investigate the actual directory-membership boundary, distinguishing spelling/case from a genuinely foreign module; no whitelist relaxation, generation or G3/B2 completion claim |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Section4.2 implementation plus independently reviewed acquisition-aware fixture: whole78413/178877111passed6POSIXskipped63.15s,339pins unchanged, outer passed/settled/slot released. Actual native regression previously proved fixture handle-reuse rejection | Await independent fresh QUALITY; Section4.3 lease remains open. Original failed runs preserved, not all historically attributed. No POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Section4.1/4.2 local checkpoint8700b38; parent111passed6POSIXskipped63.15s and independent40000/2148ee111passed6skipped0warnings63.67s;339pins unchanged and physical settlement confirmed | Section4.3 runtime/input lease remains open; written clarification released. Original failed runs preserved, not all historically attributed. No POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,29 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 independent fresh QUALITY91792/8b1069 passed444cases with1actual-cold
+skip and0warnings136.13s,exit0;332 comparisons/331unique files,323source
+and HEAD4280b7a unchanged. The subsequent minimal protocol3 actual-caller
+migration passed SOURCE at launcher75C546EB/manifestF13A5578/testFBB80B18/
+plan8A1668C2. Exact inverses preserve the preceding launcher/manifest/tests;
+four trusted schema literals, fixed validated detail display and integrity
+refresh only. Parent finite64529/656d8b passed52cases27.34s,332pins unchanged.
+Then the sole actual cold node16655/142312 physically exited1 after1failed7.99s,
+332pins unchanged. First failure is initial_inventory/invariant_failed with
+detail system_membership/invariant_failed; close/context/root/final-inventory
+failures are null and final deadline false. Imports_checked0,guard0,client0,
+POST0. This locates the real directory-membership check, not its underlying
+path/casing cause. No automatic retry, case folding or manifest-policy change
+is justified by this receipt; source-only bounded diagnosis is released.
+
+C4a independent fresh40000/2148ee passed111cases with6POSIXskips0warnings
+63.67s,exit0,outerpassed/settled/slottrue. Postflight5e8225 confirms339pins
+unchanged. After receipt-only ownplan90CFBD16, parent committed exactly five
+reviewed files as8700b38; tracked C4 worktree was clean. No push/merge or
+production activation. Section4.3 now has ownplan-only clarification authority
+for preserving the original worker/lease on unresolved physical ownership;
+its production/runtime tests remain unimplemented.
 
 C4a diagnostic94061/9208aa reached2failed109passed6POSIXskipped63.74s,
 exit1,339pins unchanged and outer settled/slottrue. The actual native
