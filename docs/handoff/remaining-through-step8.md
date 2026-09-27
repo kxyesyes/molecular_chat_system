@@ -34,7 +34,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Section4.1 checkpoint3992505 independently verified72passed6POSIXskips. Section4.2 whole-module RED15542/d1c45d:38missing-API failures,72passed6skipped60.17s,339pins unchanged, outer settled/slot released | Approved base/tool/service implementation released; new consumer behavior not yet reached. Section4.3 lease remains open. No POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Section4.1 checkpoint3992505 independently verified72passed6POSIXskips. Section4.2 implementation passed SOURCE; whole16729/7bac21 reached109passed1failed6POSIXskipped64.08s,339pins unchanged, outer settled/slot released | cancel-after-upsert expected cancelled but returned process_ownership_uncertain; the assertion precedes proof that upsert was reached. Investigate fixture handle-acquisition identity and reached phase before changing production. Section4.3 lease remains open. No POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,25 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C4a section4.2 implementation B53755AF/BCA08967/6B63AC16 and plan4FA31B36
+passed independent SOURCE with tests530FE7B4 unchanged. Parent exact F37 whole
+module16729/7bac21 physically exited1:109passed1failed6POSIXskipped64.08s,
+339pins and HEAD3992505 unchanged; outer test_failed/settled/slottrue. New
+consumer tests now execute beyond the former missing API, but GREEN is absent.
+The sole failure is cancel-after-upsert at2565: expected cancelled, actual
+process_ownership_uncertain. Its next upsert-count assertion was not reached,
+so this does not prove cancellation was overwritten. Read-only review identified
+a fixture candidate: historical numeric Job handles are treated as acquisition
+identity, although Windows may reuse a closed handle value. This is not yet the
+observed root cause. Keep production frozen pending bounded pre-rescue facts
+and a finite observer regression; no silent rerun or relaxed assertion.
+
+G3 initial-inventory diagnostic design A18B3D4D passed independent SOURCE.
+Only TEST preparation is released: thirteen finite substeps, one nullable
+detail field under explicitly selected bootstrap protocol3, and four finite
+test groups. Existing protocol1/2 behavior, launcher and manifest stay frozen.
+No actual cold retry or generation was authorized by this design review.
 
 All parent Python sessions in this checkpoint are physically terminal; no restart
 or relaxed deadline occurred. C4a15542/d1c45d reached38 explicit CALL missing-API
