@@ -15,11 +15,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Root controls52de66:20passed; supervisor7C1A8FF0 SOURCE approved, parent765d85:25passed0.86s,5pins unchanged | Real Windows ownership qualification design under independent review; functional integration and Tasks6–8 remain incomplete; earlier3s failures retained |
+| Normal-Web B1 Tasks4–8 | Root20controls and supervisor25controls passed; real Windows qualification6774f6:3passed0.66s,6pins unchanged, independent QUALITY READY | First functional-native e937aa FAILED root_owner_not_unique,1failed4.57s; actual outer receipt settled/released,31pins unchanged. Investigate accepted-before-registration test observation; Tasks6–8 and earlier3s failures remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
-| B1 revision8 continuation | Corrected premise and source-close focus8c1ce5:8passed14.96s,656pins unchanged; checkpoint efa2da3 aligned to main18ad4f9 as1bd76e6; alignment SOURCE READY | Fresh aligned exact61 assigned to Mencius; actual execution/terminal, independent QUALITY and publication pending. Original ca935c6370passed2failed retained |
+| B1 revision8 continuation | Aligned author73095/9e510a GREEN6376passed7warnings816.85s,660pins unchanged; parent additional new shared tests beb95e462passed3.15s,5pins unchanged | Independent fresh QUALITY and publication pending; original ca935c6370passed2failed and focused8c1ce5 remain separate historical evidence |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | C0b SOURCE found pre-dispatch encoding accounting and same-tick cancellation risks; new D2EF41A7 tests under independent review, not executed. No complete C Web/dispatch proof |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | C0b two risks actually reproduced by324328:6failed4passed1.58s,658pins unchanged. Minimal C-only implementation in progress; no GREEN or complete C Web/dispatch proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -38,6 +38,46 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Aligned continuation author exact61 completed73095/9e510a, exit0,
+6376passed7warnings816.85s. All660 SHA256 values and658 tracked Python paths
+were unchanged. Parent separately executed the newly incoming generator-contract
+and ASCII-accounting modules: beb95e462passed3.15s,exit0,5pins unchanged.
+Neither run is an independent fresh continuation QUALITY run or live acceptance.
+Author ownplan now6DF8CDCD records the complete run and older failures honestly.
+
+C0b parent324328 ran exactly the two new parameterized functions via the approved
+isolated MedChat runner:6failed4passed1.58s,exit1,658pins unchanged. All four
+actual HTTPX encoding failures reached the erroneous request_attempts=1 instead
+of0 assertion after zero posts; both native/JSON cancellation cases established
+the race prerequisites before returning a success response instead of cancellation.
+The four normal controls passed. Socrates is authorized to change only the
+transport and ownplan for these reproduced defects, keeping model wrapper and
+tests frozen. No repaired passing run has occurred at this checkpoint.
+
+Real Windows qualification6774f6 executed all three exact synthetic-process
+cases:3passed0.66s,exit0,zero warnings/skips,6pins unchanged. Independent Lovelace
+QUALITY uses full SOURCE plus this parent execution, not a reviewer-run. Following
+separate fixed-launcher SOURCE review, parent ran functional-native once with the
+original26-input manifest plus five qualification files. e937aa is terminal:
+1failed7warnings4.57s,exit1,31pins unchanged; outer receipt explicitly reports
+test_failed/returncode1/settled/slot_released=true. Failure is root_owner_not_unique
+at helper2836, not the historical silence timeout. Source shows request_accepted
+is sent before active_owners registration; whether this exact observation race
+fully explains the failure remains under diagnosis. Do not remove uniqueness,
+inflate setup credit, count process cleanup as scientific success or auto-run JSON.
+
+The external Go E0 proposal was rejected as the next G3 prerequisite: it cannot
+prove installed backend behavior and duplicates much existing transport evidence.
+A single existing-chain real generation canary design is under independent review;
+no canary script, live inference or production grant exists yet. Strict prompt
+bound/identity/enforcement evidence remains distinct from diagnostic generation.
+
+Remote metadata refresh through a new git-credential extraction command was blocked
+by the tool policy before execution. No credential was emitted and no alternate
+credential retrieval was attempted. Any later PR publication/merge still requires
+an available authorized GitHub access path and fresh remote evidence; prior main
+18ad4f9 is only the last confirmed local fetched baseline, not a fresh API audit.
 
 2026-09-27 resumed-work checkpoint: status-only user response is not a new
 implementation gate. Parent re-read the ledger, original13-path dirty checkout,
