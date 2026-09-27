@@ -21,7 +21,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | Draft PR98 head3e5e219; two local49 runs passed; latest CI sandbox-core failed hung-create cleanup test | Do not merge; preserve CI failure and investigate separately; original Web3s issue not fixed |
-| Hung-create test cleanup | DraftPR100 head27589a7; focused4passed and independent wholemodule187passed; SOURCE/QUALITY approve | Latest-head CI and merge guards pending; first0.5s cause remains UNKNOWN |
+| Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -34,6 +34,21 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR100 is merged after repeated exact-head/main/check/review guards, with9CI
+success and zero unresolved threads. Squash4280b7a7a41506698a35f31e1d882f8724d58c4e;
+reviewed27589a7 and landed trees both0b9f4f65c0ddd2d352d6f83c796ced7956d32efd.
+CI36285626423 Agent collection11472=11248+224; core11247passed1skipped21140warnings
+596.23s, Web224passed7166warnings221.59s, sandbox1976passed4skipped1warning51.14s.
+The demonstrated secondary fixture leak is addressed; initial0.5s cause UNKNOWN.
+PR98 will receive this actual landed fix and publication alignment, preserving
+its own source/test bytes and failed CI chronology before a new-head CI run.
+
+B2 fresh QUALITY2312/41bc3b:479passed7.00s,zero failures/warnings/skips,14/14
+inputs unchanged, APPROVE. Author post-alignment exact2 at108df5d terminal99ccfa:
+479passed4.91s,zero failures/warnings/skips;new14 pins unchanged. Both slots released.
+Current sole slot is Wegener's one phase-only installer API RED control; SOURCE
+71598E/751B036 approved. C implementation plan3AB9AAD is under independent SOURCE.
 
 B2 author exact2 GREEN terminal4611bf exit0:479passed4.87s,zero failures,
 errors,warnings,skips;14/14 input hashes unchanged. Slot released, now assigned
