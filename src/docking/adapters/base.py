@@ -37,6 +37,219 @@ class CommandOutputLimitError(RuntimeError):
         super().__init__("Docking command output exceeded the safe limit")
 
 
+class CommandOwnershipScope:
+    """Private per-invocation physical ownership, never execution authority.
+
+    settle() is blocking and belongs to an existing retained synchronous owner.
+    False means unresolved ownership, NOT permission to release a lease/root.
+    No resource or scientific result is exposed by snapshot().
+    """
+
+    def __init__(self, *, task_id, output_root, cancel_event=None):
+        if type(task_id) is not str or not task_id:
+            raise ValueError("Invalid command scope ownership")
+        self._task_id = task_id
+        self._output_root = os.path.abspath(os.fspath(output_root))
+        CommandAdapter._validate_cancel_event(cancel_event)
+        self._cancel_event = cancel_event
+        self._condition = threading.Condition(threading.RLock())
+        self._stop = threading.Event()
+        self._sealed = False
+        self._commands = []
+        self._primary_error = None
+        self._errors = []
+        self._settlement_lock = threading.Lock()
+
+    def reserve_command(self):
+        with self._condition:
+            if self._sealed:
+                raise CommandOwnershipUncertainError()
+            if self._stop.is_set() or (
+                self._cancel_event is not None and self._cancel_event.is_set()
+            ):
+                raise CommandCancelledError()
+            receipt = _CommandReceipt(self)
+            self._commands.append(receipt)
+            return receipt
+
+    def seal(self):
+        with self._condition:
+            self._sealed = True
+            self._condition.notify_all()
+
+    def snapshot(self):
+        with self._condition:
+            pending = [item for item in self._commands if not item.settled]
+            if any(item.unresolved for item in pending):
+                state = "unresolved"
+            elif not pending and self._sealed:
+                state = "settled"
+            elif any(item.call_finished for item in pending):
+                state = "cleanup_pending"
+            elif any(item.process is not None for item in pending):
+                state = "running"
+            elif any(item.spawn_pending for item in pending):
+                state = "spawn_pending"
+            else:
+                state = "reserved"
+            return {
+                "state": state,
+                "command_count": len(self._commands),
+                "pending_count": len(pending),
+                "primary_error_code": self._primary_error,
+                "error_codes": list(self._errors),
+            }
+
+    def settle(self):
+        import asyncio
+
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            raise RuntimeError("Command settlement requires a synchronous owner")
+        current = threading.current_thread()
+        with self._condition:
+            if not self._sealed:
+                raise CommandOwnershipUncertainError()
+            commands = tuple(self._commands)
+            if any(current is item.spawner or current in item.readers
+                   for item in commands):
+                raise CommandOwnershipUncertainError()
+            if any(current is item.caller and not item.call_finished for item in commands):
+                raise CommandOwnershipUncertainError()
+        with self._settlement_lock:
+            for receipt in commands:
+                with self._condition:
+                    while not receipt.call_finished or not receipt.start_resolved:
+                        self._condition.wait()
+                # Finally notifications and is_alive() snapshots are not joins.
+                if receipt.spawner is not None and receipt.spawner.ident is not None:
+                    try:
+                        receipt.spawner.join()
+                    except BaseException:
+                        receipt.fail("spawner_join_failed", uncertain=True)
+                for reader in tuple(receipt.readers):
+                    if reader.ident is not None:
+                        try:
+                            reader.join()
+                        except BaseException:
+                            receipt.fail("reader_join_failed", uncertain=True)
+                with self._condition:
+                    if receipt.unresolved:
+                        continue
+                    process = receipt.process
+                    stopped = process is None or (
+                        process.returncode is not None and receipt.tree_stopped
+                    )
+                    closed = all(stream.closed for stream in receipt.streams)
+                    if os.name == "nt":
+                        closed = closed and (receipt.job is None or receipt.job_closed)
+                        closed = closed and (process is None or receipt.process_closed)
+                    if not stopped or not closed:
+                        receipt.fail("physical_settlement_unconfirmed", uncertain=True)
+                    else:
+                        receipt.settled = True
+                    self._condition.notify_all()
+            return all(item.settled for item in commands)
+
+
+class _CommandReceipt:
+    """Strong acquisition-time references and sticky fixed failure facts."""
+
+    def __init__(self, scope):
+        self.scope = scope
+        self.condition = scope._condition
+        self.caller = threading.current_thread()
+        self.call_finished = False
+        self.spawn_pending = False
+        self.spawner = None
+        self.start_resolved = True
+        self.process = None
+        self.process_handle = None
+        self.job = None
+        self.job_handle = None
+        self.job_closed = False
+        self.job_close_attempted = False
+        self.process_closed = False
+        self.process_close_attempted = False
+        self.tree_stopped = False
+        self.readers = []
+        self.reader_streams = []
+        self.streams = []
+        self.capture = None
+        self.unresolved = False
+        self.settled = False
+        self.cleanup_owner = None
+        self.cleanup_finished = False
+        self.cleanup_output = ("", "")
+        self.stop_reason = None
+
+    def fail(self, code, *, uncertain=False):
+        with self.condition:
+            if self.scope._primary_error is None:
+                self.scope._primary_error = code
+            if code not in self.scope._errors:
+                self.scope._errors.append(code)
+            self.unresolved = self.unresolved or uncertain
+            if uncertain:
+                self.settled = False
+            self.condition.notify_all()
+
+    def stop(self, code):
+        with self.condition:
+            if self.stop_reason is None:
+                self.stop_reason = code
+            self.scope._stop.set()
+            self.fail(code)
+
+    def stopped(self, cancel_event):
+        with self.condition:
+            if cancel_event is not None and cancel_event.is_set():
+                self.stop("cancelled")
+            return self.scope._stop.is_set()
+
+    def attach_job(self, job, handle):
+        with self.condition:
+            self.job = job
+            self.job_handle = handle
+            self.condition.notify_all()
+
+    def attach_process(self, process):
+        with self.condition:
+            self.process = process
+            self.process_handle = getattr(process, "_handle", None)
+            self.streams.extend(stream for stream in (process.stdout, process.stderr)
+                                if stream is not None)
+            process._medchat_command_receipt = self
+            self.condition.notify_all()
+
+    def finish_call(self):
+        with self.condition:
+            self.call_finished = True
+            self.condition.notify_all()
+
+    def begin_cleanup(self):
+        with self.condition:
+            current = threading.current_thread()
+            while self.cleanup_owner is not None and not self.cleanup_finished:
+                if self.cleanup_owner is current:
+                    self.fail("recursive_cleanup", uncertain=True)
+                    raise CommandOwnershipUncertainError()
+                self.condition.wait()
+            if self.cleanup_finished:
+                return False
+            self.cleanup_owner = current
+            return True
+
+    def end_cleanup(self, output):
+        with self.condition:
+            self.cleanup_output = output
+            self.cleanup_finished = True
+            self.condition.notify_all()
+
+
 if os.name == "nt":
     import ctypes
     from ctypes import wintypes
@@ -128,10 +341,43 @@ if os.name == "nt":
 
 
     class _WindowsJob:
-        def __init__(self):
+        def __init__(self, *, receipt=None):
+            self._receipt = receipt
             self.handle = _kernel32.CreateJobObjectW(None, None)
             if not self.handle:
                 raise _windows_error("CreateJobObject")
+
+            if receipt is not None:
+                # A constructor that raises never returns its object to the
+                # spawner. Attach the acquired handle BEFORE configuration.
+                attached = False
+                try:
+                    receipt.attach_job(self, self.handle)
+                    attached = True
+                    limits = _ExtendedLimitInformation()
+                    limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                    if not _kernel32.SetInformationJobObject(
+                        self.handle, _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION_CLASS,
+                        ctypes.byref(limits), ctypes.sizeof(limits),
+                    ):
+                        raise _windows_error("SetInformationJobObject")
+                except BaseException:
+                    if not attached:
+                        receipt.fail("job_attachment_failed", uncertain=True)
+                        # Attachment itself may throw before recording anything.
+                        # Retain the known acquisition without retrying that hook.
+                        with receipt.condition:
+                            receipt.job = self
+                            receipt.job_handle = self.handle
+                            receipt.condition.notify_all()
+                    else:
+                        receipt.fail("job_configuration_failed")
+                    try:
+                        self.close()
+                    except BaseException:
+                        receipt.fail("job_close_failed", uncertain=True)
+                    raise
+                return
 
             limits = _ExtendedLimitInformation()
             limits.BasicLimitInformation.LimitFlags = (
@@ -181,6 +427,26 @@ if os.name == "nt":
             return accounting.ActiveProcesses > 0
 
         def close(self) -> None:
+            if self._receipt is not None:
+                receipt = self._receipt
+                with receipt.condition:
+                    if receipt.job_close_attempted:
+                        if not receipt.job_closed:
+                            raise CommandOwnershipUncertainError()
+                        return
+                    receipt.job_close_attempted = True
+                    handle = self.handle
+                try:
+                    if not _kernel32.CloseHandle(handle):
+                        raise _windows_error("CloseHandle(JobObject)")
+                except BaseException:
+                    receipt.fail("job_close_failed", uncertain=True)
+                    raise
+                with receipt.condition:
+                    self.handle = None
+                    receipt.job_closed = True
+                    receipt.condition.notify_all()
+                return
             if self.handle:
                 handle = self.handle
                 self.handle = None
@@ -191,8 +457,11 @@ if os.name == "nt":
 class CommandAdapter:
     """Wraps a command line executable with consistent path and run helpers."""
 
-    def __init__(self, executable: Optional[str] = ""):
+    def __init__(self, executable: Optional[str] = "", *, ownership_scope=None):
         self.executable = os.path.abspath(executable) if executable else ""
+        if ownership_scope is not None and type(ownership_scope) is not CommandOwnershipScope:
+            raise TypeError("Invalid command ownership scope")
+        self._ownership_scope = ownership_scope
 
     @property
     def exists(self) -> bool:
@@ -212,11 +481,37 @@ class CommandAdapter:
         cancel_event=None,
     ):
         timeout = self._validate_timeout(timeout)
+        scope = self._ownership_scope
+        if scope is not None:
+            if cancel_event is None:
+                cancel_event = scope._cancel_event
+            elif scope._cancel_event is not None and cancel_event is not scope._cancel_event:
+                raise ValueError("Command cancellation owner mismatch")
         self._validate_cancel_event(cancel_event)
         if cancel_event is not None and cancel_event.is_set():
             raise CommandCancelledError()
         started_at = time.monotonic()
         deadline = None if timeout is None else started_at + float(timeout)
+        if scope is not None:
+            receipt = scope.reserve_command()
+            try:
+                if os.name == "nt":
+                    return self._run_windows(args, cwd, timeout, deadline, cancel_event,
+                                             receipt=receipt)
+                return self._run_posix(args, cwd, timeout, deadline, cancel_event,
+                                       receipt=receipt)
+            except CommandCancelledError:
+                receipt.stop("cancelled")
+                raise
+            except subprocess.TimeoutExpired:
+                receipt.stop("timeout")
+                raise
+            except BaseException:
+                if scope._primary_error is None:
+                    receipt.fail("command_failed")
+                raise
+            finally:
+                receipt.finish_call()
         if os.name == "nt":
             return self._run_windows(
                 args,
@@ -255,10 +550,10 @@ class CommandAdapter:
                 "cancel_event must provide a callable is_set method"
             ) from None
 
-    def _run_windows(self, args, cwd, timeout, deadline, cancel_event):
+    def _run_windows(self, args, cwd, timeout, deadline, cancel_event, *, receipt=None):
         windows_job = None
         process = None
-        if deadline is None and cancel_event is None:
+        if deadline is None and cancel_event is None and receipt is None:
             windows_job, process = self._create_windows_suspended(args, cwd)
         else:
             windows_job, process = self._create_windows_until_control(
@@ -267,13 +562,36 @@ class CommandAdapter:
                 timeout,
                 deadline,
                 cancel_event,
+                **({"receipt": receipt} if receipt is not None else {}),
             )
 
         try:
+            if receipt is not None:
+                with receipt.condition:
+                    stopped = receipt.stopped(cancel_event)
+                    expired = deadline is not None and time.monotonic() >= deadline
+                    if stopped:
+                        receipt.stop("cancelled")
+                    elif expired:
+                        receipt.stop("timeout")
+                    else:
+                        try:
+                            windows_job.resume(process)
+                        except BaseException:
+                            receipt.fail("process_resume_failed", uncertain=True)
+                            raise
+                if stopped or expired:
+                    self._cleanup_windows_or_uncertain(windows_job, process)
+                    if stopped:
+                        raise CommandCancelledError()
+                    raise self._timeout_error(timeout)
             if cancel_event is not None and cancel_event.is_set():
+                if receipt is not None:
+                    receipt.stop("cancelled")
                 self._cancel_windows_process(windows_job, process)
             try:
-                windows_job.resume(process)
+                if receipt is None:
+                    windows_job.resume(process)
             except Exception as error:
                 try:
                     self._cleanup_windows_process(
@@ -295,19 +613,29 @@ class CommandAdapter:
                         self._cleanup_windows_or_uncertain(windows_job, process)
                         raise CommandOwnershipUncertainError() from error
                     if not active_descendants:
+                        if receipt is not None:
+                            receipt.tree_stopped = True
                         break
-                if cancel_event is not None and cancel_event.is_set():
+                if (receipt is not None and receipt.stopped(cancel_event)) or (
+                    cancel_event is not None and cancel_event.is_set()
+                ):
+                    if receipt is not None:
+                        receipt.stop("cancelled")
                     self._cancel_windows_process(windows_job, process)
                 remaining = (
                     None if deadline is None else deadline - time.monotonic()
                 )
                 if remaining is not None and remaining <= 0:
+                    if receipt is not None:
+                        receipt.stop("timeout")
                     stdout, stderr = self._cleanup_windows_or_uncertain(
                         windows_job,
                         process,
                     )
                     raise self._timeout_error(timeout, stdout, stderr)
                 if self._captured_output_exceeded(process):
+                    if receipt is not None:
+                        receipt.fail("output_limit_exceeded")
                     self._cleanup_windows_or_uncertain(windows_job, process)
                     raise CommandOutputLimitError()
 
@@ -335,35 +663,95 @@ class CommandAdapter:
                 stdout=stdout,
                 stderr=stderr,
             )
+        except BaseException:
+            if receipt is not None and not receipt.cleanup_finished:
+                try:
+                    self._cleanup_windows_process(windows_job, process, assigned=True)
+                except BaseException:
+                    receipt.fail("command_cleanup_failed", uncertain=True)
+            raise
         finally:
             if windows_job is not None:
                 try:
                     windows_job.close()
                 except Exception:
+                    if receipt is not None:
+                        receipt.fail("job_close_failed", uncertain=True)
+                        raise CommandOwnershipUncertainError() from None
                     if process is not None and process.poll() is None:
                         raise CommandOwnershipUncertainError() from None
 
-    def _run_posix(self, args, cwd, timeout, deadline, cancel_event):
-        process = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-            start_new_session=True,
-        )
+    def _run_posix(self, args, cwd, timeout, deadline, cancel_event, *, receipt=None):
+        if receipt is not None:
+            receipt.spawn_pending = True
+        try:
+            process = subprocess.Popen(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                start_new_session=True,
+            )
+        except BaseException:
+            if receipt is not None:
+                # A failed return does not establish that creation never happened.
+                receipt.fail("spawn_outcome_uncertain", uncertain=True)
+            raise
+        if receipt is not None:
+            receipt.attach_process(process)
+            if receipt.stopped(cancel_event):
+                receipt.stop("cancelled")
+            elif deadline is not None and time.monotonic() >= deadline:
+                receipt.stop("timeout")
+            try:
+                self._attach_capture_readers(process)
+            except BaseException:
+                receipt.fail("reader_start_failed", uncertain=True)
+                try:
+                    self._cleanup_posix_or_uncertain(process)
+                except BaseException:
+                    receipt.fail("command_cleanup_failed", uncertain=True)
+                raise
+            try:
+                return self._supervise_posix(process, args, timeout, deadline, cancel_event, receipt)
+            except BaseException:
+                if not receipt.cleanup_finished:
+                    try:
+                        self._cleanup_posix_or_uncertain(process)
+                    except BaseException:
+                        receipt.fail("command_cleanup_failed", uncertain=True)
+                raise
         self._attach_capture_readers(process)
+        return self._supervise_posix(process, args, timeout, deadline, cancel_event)
+
+    def _supervise_posix(self, process, args, timeout, deadline, cancel_event, receipt=None):
+        if receipt is not None and receipt.scope._stop.is_set():
+            output = self._cleanup_posix_or_uncertain(process)
+            if receipt.stop_reason == "timeout":
+                raise self._timeout_error(timeout, *output)
+            raise CommandCancelledError()
         while True:
             if process.poll() is not None and not self._posix_process_group_active(
                 process.pid
             ):
+                if receipt is not None:
+                    receipt.tree_stopped = True
                 break
-            if cancel_event is not None and cancel_event.is_set():
+            if (receipt is not None and receipt.stopped(cancel_event)) or (
+                cancel_event is not None and cancel_event.is_set()
+            ):
+                if receipt is not None:
+                    receipt.stop("cancelled")
                 self._cancel_posix_process(process)
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
+                if receipt is not None:
+                    receipt.stop("timeout")
                 stdout, stderr = self._cleanup_posix_or_uncertain(process)
                 raise self._timeout_error(timeout, stdout, stderr)
             if self._captured_output_exceeded(process):
+                if receipt is not None:
+                    receipt.fail("output_limit_exceeded")
                 self._cleanup_posix_or_uncertain(process)
                 raise CommandOutputLimitError()
             wait_for = _COMMAND_POLL_INTERVAL_SECONDS
@@ -376,6 +764,8 @@ class CommandAdapter:
             if self._posix_process_group_active(process.pid):
                 time.sleep(wait_for)
                 continue
+            if receipt is not None:
+                receipt.tree_stopped = True
             break
 
 
@@ -408,30 +798,59 @@ class CommandAdapter:
         )
 
     @classmethod
-    def _create_windows_suspended(cls, args, cwd, popen_factory=None):
-        windows_job = _WindowsJob()
+    def _create_windows_suspended(cls, args, cwd, popen_factory=None, *, receipt=None):
+        windows_job = _WindowsJob(**({"receipt": receipt} if receipt is not None else {}))
         process = None
         assigned = False
         try:
-            process = (popen_factory or subprocess.Popen)(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=cwd,
-                creationflags=cls._windows_creationflags(),
-            )
-            cls._attach_capture_readers(process)
-            windows_job.assign(process)
+            try:
+                process = (popen_factory or subprocess.Popen)(
+                    args,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=cwd,
+                    creationflags=cls._windows_creationflags(),
+                )
+            except BaseException:
+                if receipt is not None:
+                    # The child may exist without ever reaching this assignment.
+                    # Closing an empty Job cannot prove that unknown child exited.
+                    receipt.fail("spawn_outcome_uncertain", uncertain=True)
+                raise
+            if receipt is not None:
+                receipt.attach_process(process)
+            try:
+                cls._attach_capture_readers(process)
+            except BaseException:
+                if receipt is not None:
+                    receipt.fail("reader_start_failed", uncertain=True)
+                raise
+            try:
+                windows_job.assign(process)
+            except BaseException:
+                if receipt is not None:
+                    receipt.fail("job_assignment_failed", uncertain=True)
+                raise
             assigned = True
             return windows_job, process
-        except Exception as error:
+        except BaseException as error:
+            if receipt is None and not isinstance(error, Exception):
+                raise
+            if receipt is not None and receipt.scope._primary_error is None:
+                receipt.fail("spawn_failed")
             try:
                 cls._cleanup_windows_process(windows_job, process, assigned=assigned)
             except Exception as cleanup_error:
+                if receipt is not None:
+                    receipt.fail("command_cleanup_failed", uncertain=True)
                 raise RuntimeError(
                     "Windows process creation or Job assignment failed; "
                     "cleanup of the suspended process also failed"
                 ) from cleanup_error
+            if receipt is not None:
+                raise RuntimeError(
+                    "Windows command startup failed; physical settlement is unconfirmed."
+                ) from error
             raise RuntimeError(
                 "Windows process creation or Job assignment failed; "
                 "the suspended process was terminated before execution"
@@ -445,9 +864,11 @@ class CommandAdapter:
         timeout,
         deadline,
         cancel_event,
+        *,
+        receipt=None,
     ):
         popen_factory = subprocess.Popen
-        condition = threading.Condition()
+        condition = threading.Condition() if receipt is None else receipt.condition
         state = {
             "cancelled": False,
             "claimed": False,
@@ -469,6 +890,7 @@ class CommandAdapter:
                     args,
                     cwd,
                     popen_factory=popen_factory,
+                    **({"receipt": receipt} if receipt is not None else {}),
                 )
                 with condition:
                     if not state["cancelled"]:
@@ -511,7 +933,26 @@ class CommandAdapter:
             name="docking-command-spawn",
             daemon=True,
         )
-        worker.start()
+        if receipt is None:
+            worker.start()
+        else:
+            with condition:
+                receipt.spawner = worker
+                receipt.spawn_pending = True
+                receipt.start_resolved = False
+            try:
+                worker.start()
+            except BaseException:
+                receipt.fail("spawner_start_failed", uncertain=True)
+                with condition:
+                    state["cancelled"] = True
+                    receipt.scope._stop.set()
+                    condition.notify_all()
+                raise
+            finally:
+                with condition:
+                    receipt.start_resolved = True
+                    condition.notify_all()
 
         timed_out = False
         cancelled = False
@@ -520,6 +961,8 @@ class CommandAdapter:
         with condition:
             while state["ready"] is None and state["error"] is None:
                 if cancel_event is not None and cancel_event.is_set():
+                    if receipt is not None:
+                        receipt.stop("cancelled")
                     state["cancelled"] = True
                     condition.notify_all()
                     cancelled = True
@@ -528,6 +971,8 @@ class CommandAdapter:
                     None if deadline is None else deadline - time.monotonic()
                 )
                 if remaining is not None and remaining <= 0:
+                    if receipt is not None:
+                        receipt.stop("timeout")
                     state["cancelled"] = True
                     condition.notify_all()
                     timed_out = True
@@ -541,11 +986,15 @@ class CommandAdapter:
                 if deadline is None or state["error_at"] <= deadline:
                     spawn_error = state["error"]
                 else:
+                    if receipt is not None:
+                        receipt.stop("timeout")
                     state["cancelled"] = True
                     condition.notify_all()
                     timed_out = True
             elif not timed_out and not cancelled and state["ready"] is not None:
                 if cancel_event is not None and cancel_event.is_set():
+                    if receipt is not None:
+                        receipt.stop("cancelled")
                     state["cancelled"] = True
                     condition.notify_all()
                     cancelled = True
@@ -554,6 +1003,8 @@ class CommandAdapter:
                     ready = state["ready"]
                     condition.notify_all()
                 else:
+                    if receipt is not None:
+                        receipt.stop("timeout")
                     state["cancelled"] = True
                     condition.notify_all()
                     timed_out = True
@@ -605,6 +1056,39 @@ class CommandAdapter:
 
     @classmethod
     def _cleanup_posix_or_uncertain(cls, process):
+        receipt = getattr(process, "_medchat_command_receipt", None)
+        if receipt is not None:
+            if not receipt.begin_cleanup():
+                return receipt.cleanup_output
+            output = ("", "")
+            failed = False
+            try:
+                try:
+                    cls._terminate_posix_process_group(process)
+                except BaseException:
+                    receipt.fail("process_termination_failed", uncertain=True)
+                    failed = True
+                cls._close_unstarted_pipes(receipt)
+                try:
+                    output = cls._communicate_after_termination(process)
+                except BaseException:
+                    receipt.fail("command_cleanup_failed", uncertain=True)
+                    failed = True
+                try:
+                    receipt.tree_stopped = (
+                        process.poll() is not None
+                        and not cls._posix_process_group_active(process.pid)
+                    )
+                    if not receipt.tree_stopped:
+                        raise CommandOwnershipUncertainError()
+                except BaseException:
+                    receipt.fail("process_tree_unconfirmed", uncertain=True)
+                    failed = True
+            finally:
+                receipt.end_cleanup(output)
+            if failed:
+                raise CommandOwnershipUncertainError()
+            return output
         try:
             cls._terminate_posix_process_group(process)
             stdout, stderr = cls._communicate_after_termination(process)
@@ -627,6 +1111,9 @@ class CommandAdapter:
         *,
         assigned: bool,
     ):
+        receipt = getattr(windows_job, "_receipt", None)
+        if receipt is not None:
+            return cls._cleanup_owned_windows(windows_job, process, assigned, receipt)
         errors = []
         stdout = ""
         stderr = ""
@@ -666,6 +1153,69 @@ class CommandAdapter:
             raise RuntimeError("Windows command cleanup failed") from errors[0]
         return stdout, stderr
 
+    @classmethod
+    def _cleanup_owned_windows(cls, windows_job, process, assigned, receipt):
+        if not receipt.begin_cleanup():
+            return receipt.cleanup_output
+        failed = False
+        output = ("", "")
+        try:
+            if process is not None:
+                try:
+                    if assigned:
+                        windows_job.terminate()
+                    elif process.poll() is None:
+                        process.kill()
+                except BaseException:
+                    receipt.fail("process_termination_failed", uncertain=True)
+                    failed = True
+                cls._close_unstarted_pipes(receipt)
+                try:
+                    output = cls._communicate_after_termination(process)
+                except BaseException:
+                    receipt.fail("command_cleanup_failed", uncertain=True)
+                    failed = True
+                try:
+                    receipt.tree_stopped = (
+                        process.returncode is not None
+                        and not windows_job.has_active_processes()
+                    )
+                    if not receipt.tree_stopped:
+                        raise CommandOwnershipUncertainError()
+                except BaseException:
+                    receipt.fail("process_tree_unconfirmed", uncertain=True)
+                    failed = True
+                # One failed close cannot bypass the subsequent Job close.
+                try:
+                    cls._close_process_handle(process)
+                except BaseException:
+                    receipt.fail("process_handle_close_failed", uncertain=True)
+                    failed = True
+            try:
+                windows_job.close()
+            except BaseException:
+                receipt.fail("job_close_failed", uncertain=True)
+                failed = True
+        finally:
+            receipt.end_cleanup(output)
+        if failed:
+            raise CommandOwnershipUncertainError()
+        return output
+
+    @staticmethod
+    def _close_unstarted_pipes(receipt):
+        # A failed second Thread.start still leaves a pipe that no reader owns.
+        # Never close a pipe concurrently with an actually started reader.
+        for stream in receipt.streams:
+            if any(owned is stream and reader.ident is not None
+                   for reader, owned in receipt.reader_streams):
+                continue
+            try:
+                if not stream.closed:
+                    stream.close()
+            except BaseException:
+                receipt.fail("reader_close_failed", uncertain=True)
+
     @staticmethod
     def _communicate_after_termination(
         process: subprocess.Popen,
@@ -697,6 +1247,7 @@ class CommandAdapter:
 
     @staticmethod
     def _attach_capture_readers(process) -> None:
+        receipt = getattr(process, "_medchat_command_receipt", None)
         state = {
             "lock": threading.Lock(),
             "total": 0,
@@ -705,6 +1256,11 @@ class CommandAdapter:
             "errors": [],
             "threads": [],
         }
+        if receipt is not None:
+            with receipt.condition:
+                receipt.capture = state
+                process._medchat_capture_state = state
+                process._medchat_capture_taken = False
 
         def drain(name, stream) -> None:
             try:
@@ -725,11 +1281,14 @@ class CommandAdapter:
                             state["exceeded"].set()
             except BaseException as error:
                 state["errors"].append(type(error).__name__)
+                if receipt is not None:
+                    receipt.fail("reader_read_failed", uncertain=True)
             finally:
                 try:
                     stream.close()
                 except Exception:
-                    pass
+                    if receipt is not None:
+                        receipt.fail("reader_close_failed", uncertain=True)
 
         for name, stream in (("stdout", process.stdout), ("stderr", process.stderr)):
             thread = threading.Thread(
@@ -739,12 +1298,43 @@ class CommandAdapter:
                 daemon=False,
             )
             state["threads"].append(thread)
-            thread.start()
+            if receipt is not None:
+                with receipt.condition:
+                    receipt.readers.append(thread)
+                    receipt.reader_streams.append((thread, stream))
+                try:
+                    thread.start()
+                except BaseException:
+                    receipt.fail("reader_start_failed", uncertain=True)
+                    raise
+            else:
+                thread.start()
         process._medchat_capture_state = state
         process._medchat_capture_taken = False
 
     @staticmethod
     def _close_process_handle(process) -> None:
+        receipt = getattr(process, "_medchat_command_receipt", None)
+        if receipt is not None and os.name == "nt":
+            with receipt.condition:
+                if receipt.process_close_attempted:
+                    if not receipt.process_closed:
+                        raise CommandOwnershipUncertainError()
+                    return
+                receipt.process_close_attempted = True
+                handle = receipt.process_handle
+            try:
+                if handle is None or not callable(getattr(handle, "Close", None)):
+                    raise CommandOwnershipUncertainError()
+                handle.Close()
+            except BaseException:
+                receipt.fail("process_handle_close_failed", uncertain=True)
+                raise
+            with receipt.condition:
+                process._handle = None
+                receipt.process_closed = True
+                receipt.condition.notify_all()
+            return
         handle = getattr(process, "_handle", None)
         close = getattr(handle, "Close", None)
         if callable(close):
@@ -764,6 +1354,35 @@ class CommandAdapter:
 
     @staticmethod
     def _take_captured_output(process, *, fallback=(None, None), enforce_limit):
+        receipt = getattr(process, "_medchat_command_receipt", None)
+        if receipt is not None:
+            state = receipt.capture
+            if state is None:
+                receipt.fail("capture_setup_failed", uncertain=True)
+                raise CommandOwnershipUncertainError()
+            # Never accept taken=True/fallback as a physical receipt. Keep the
+            # original capture state even after failure or a repeated read.
+            for thread in tuple(receipt.readers):
+                if thread.ident is not None:
+                    try:
+                        thread.join(timeout=2.0)
+                    except BaseException:
+                        receipt.fail("reader_join_failed", uncertain=True)
+                        raise
+            if any(thread.is_alive() for thread in receipt.readers):
+                receipt.fail("reader_join_failed", uncertain=True)
+                raise CommandOwnershipUncertainError()
+            if state["errors"]:
+                receipt.fail("reader_read_failed", uncertain=True)
+                raise CommandOwnershipUncertainError()
+            if not all(stream.closed for stream in receipt.streams):
+                receipt.fail("reader_close_failed", uncertain=True)
+                raise CommandOwnershipUncertainError()
+            if enforce_limit and state["exceeded"].is_set():
+                receipt.fail("output_limit_exceeded")
+                raise CommandOutputLimitError()
+            return tuple(bytes(state["buffers"][name]).decode("utf-8", errors="replace")
+                         for name in ("stdout", "stderr"))
         if getattr(process, "_medchat_capture_taken", False):
             return tuple(value or "" for value in fallback)
         process._medchat_capture_taken = True
