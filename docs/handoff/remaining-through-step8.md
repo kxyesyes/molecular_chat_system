@@ -15,11 +15,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Corrected root controls52de66:20passed2.44s,3warnings,26pins unchanged; supervisor implementation7C1A8FF0 under SOURCE after API RED8491bf | Qualified outer ownership supervisor and functional integration still pending; Tasks6–8 incomplete; earlier3s failures retained |
+| Normal-Web B1 Tasks4–8 | Root controls52de66:20passed; supervisor7C1A8FF0 SOURCE approved, parent765d85:25passed0.86s,5pins unchanged | Real Windows ownership qualification design under independent review; functional integration and Tasks6–8 remain incomplete; earlier3s failures retained |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
-| B1 revision8 continuation | Exact2 first-error regressions passed; full61 ca935c6370passed2failed1418.28s,7warnings | Correct reverse generation-identity versus content-hash test premise; four same-chain source-close cases, independent QUALITY and publication still pending |
+| B1 revision8 continuation | Corrected premise and source-close focus8c1ce5:8passed14.96s,656pins unchanged; checkpoint efa2da3 aligned to main18ad4f9 as1bd76e6; alignment SOURCE READY | Fresh aligned exact61 assigned to Mencius; actual execution/terminal, independent QUALITY and publication pending. Original ca935c6370passed2failed retained |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
@@ -29,8 +29,8 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
-| G3 bounded metadata script | Corrected whole-module1d621a:167passed4.81s,0warnings/skips,8pins unchanged; independent SOURCE READY | Fresh QUALITY assigned; live metadata still pending; no inference evidence |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | No C transport/Web/dispatch proof; C0b tests under preparation |
+| G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | C0b SOURCE found pre-dispatch encoding accounting and same-tick cancellation risks; new D2EF41A7 tests under independent review, not executed. No complete C Web/dispatch proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -38,6 +38,41 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+2026-09-27 resumed-work checkpoint: status-only user response is not a new
+implementation gate. Parent re-read the ledger, original13-path dirty checkout,
+aligned continuation HEAD1bd76e6 and main18ad4f9. Independent Lovelace SOURCE
+confirms all seven continuation-owned files unchanged by alignment; incoming
+generator contracts and ASCII accounting are separate coverage obligations.
+Mencius alone is granted the exact ordered61 run after recording alignment;
+assignment itself is not execution or a passing result. Other workers are
+SOURCE/design-only until the local Python slot is physically released.
+
+The parent fresh G3 run97b838 was directly terminal167passed1.16s; Lovelace
+QUALITY uses that parent execution plus independent SOURCE, not a claimed
+reviewer-run. The earlier reviewer interpreter preflight01762b launched no
+Python. The separately SOURCE-approved fixed metadata launcher then completed
+f12d7e: exit0,2 requests,0.6199s tool wall time,8pins unchanged, no inference.
+It reported Ollama0.34.3 and gmm-llama:latest GGUF/llama/Q4_K_M with declared
+context8192. Template/parameters were represented only by length/hash/presence;
+no raw template, system prompt, credentials, assets or environment were read.
+Tokenizer identity, assembly match and enforcement remain unverified. Zeno's
+ownplan8DA45450 records that evidence and the next source-only qualification.
+
+Continuation parent focus52575/8c1ce5 completed8passed3warnings14.96s,656pins
+unchanged. This covers the corrected reverse-generation premise and real
+source-close-before-restore/after-resumed-CAS paths, not the whole aligned suite.
+Author committed only the seven owned files as efa2da3; parent merged main as
+1bd76e6 with no owned-file changes. Original full61 failure ca935c is preserved.
+
+Supervisor parent765d85 completed25passed0warnings0skips0.86s,5pins unchanged;
+it uses synthetic Job/Popen/clock with real threads/capture and does not qualify
+actual Windows containment. The three-case real-Windows designA0E9D4BF is under
+SOURCE review, with no qualification test implementation or execution yet.
+C0b testD2EF41A7/planF774D8B5 adds actual HTTPX encoding and completed-child
+external-cancellation controls. Original test prefix226C and production802999F/
+7F36FF remain unchanged; these two SOURCE findings are not yet reproduced RED.
+Packages7/8 remain open, and deployment remains excluded.
 
 G3 author whole-module1d621a is directly terminal167passed4.81s,exit0,
 no warnings/skips/errors;8pins unchanged. Lovelace independently SOURCE-approved
