@@ -15,10 +15,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Latest phase-only native diagnostic1passed39.82s after controls2passed; earlier plain-native3s/profiling failures retained | Tasks6–8 not complete; single pass is not a stability/root-cause fix; functional/performance separation design pending |
+| Normal-Web B1 Tasks4–8 | Root-aware helper229A875C has independent SOURCE READY after20 missing-helper REDs; outer supervisor controlsB2B08665 SOURCE READY | Control GREEN and qualified outer ownership supervisor still pending; Tasks6–8 incomplete; earlier3s failures retained |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
+| B1 revision8 continuation | Minimal first-error fix SOURCE READY; exact2 behavioral regressions now passed; full61 in progress | Source-close inside actual restore and resumed publication need same-chain coverage; independent QUALITY and publication still pending |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
@@ -28,6 +29,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
+| G3 bounded metadata script | Offline94bd9a:1failed160passed3.96s; deadline-boundary diagnostic preparation SOURCE READY | Verify suspected zero-length fake-read delay before fixture correction; no live metadata/inference evidence |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | No C transport/Web/dispatch proof; C0b tests under preparation |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -36,6 +38,29 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 offline94bd9a terminated1failed160passed3.96s,exit1,8pins unchanged, slot
+RELEASED. The failing4.999s positive did not expose its error code. Read-only
+stdlib/fixture investigation predicts an extra read(0) advances the fake clock
+again; this is a hypothesis, not a captured result. Diagnostic-only testE1D9B961
+and planEA1A780F received independent Socrates SOURCE READY: bounded safe read
+records and zero/positive-length controls, original behavior unchanged. No
+fixture correction or rerun yet. Sole slot belongs to Mencius full ordered61;
+parent read-only process checkd1346b confirmed runnerPID56596 live at that check.
+
+Kant independent SOURCE approved root helper229A875C/planD835D8A6. Supervisor
+test-first review found direct process.kill was not covered by the no-forced-pass
+guard; minimal test fixB2B08665/planAE56C4D9 now has Lovelace SOURCE READY.
+Helper remains absent; initial API RED and runtime qualification are pending.
+This does not establish physical cleanup or resolve the original3s failures.
+
+Read-only continuation audit found an explicit evidence gap, not a production
+defect: existing cases close the source before resume, after real restore, or
+during initial-run publication; none joins source closure inside real restore
+or after resumed waiting CAS to the ensuing live publication check. Four
+native/JSON same-chain regressions are required before final continuation release.
+No currently running full61 input was edited. C0b added-test freeze226C3BA6/
+plan7FDA2137 is separately under Lovelace SOURCE; production remains unchanged.
 
 PR102 parent repeated fresh head/main/check/review guards, marked ready and
 squash-merged18ad4f93732439d020d9387b1437b09c76358270 (d2f5f6/37d8f4).
