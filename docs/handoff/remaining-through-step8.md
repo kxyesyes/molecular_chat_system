@@ -56,11 +56,14 @@ identity, although Windows may reuse a closed handle value. This is not yet the
 observed root cause. Keep production frozen pending bounded pre-rescue facts
 and a finite observer regression; no silent rerun or relaxed assertion.
 
-G3 initial-inventory diagnostic design A18B3D4D passed independent SOURCE.
-Only TEST preparation is released: thirteen finite substeps, one nullable
-detail field under explicitly selected bootstrap protocol3, and four finite
-test groups. Existing protocol1/2 behavior, launcher and manifest stay frozen.
-No actual cold retry or generation was authorized by this design review.
+G3 initial-inventory diagnostic TEST850CB1AA/plan20FEC8FD passed independent
+SOURCE with the entire original B34B test prefix preserved. Parent API-only
+RED13156/2b7829 reached1failed7.81s,exit1,332pins unchanged: verifier/reader
+lack the proposed optional inventory_diagnostics keyword. No native factory or
+scientific execution was reached. The approved thirteen-substep/one-field
+protocol3 implementation is now released for SOURCE review, not cold retry.
+Existing protocol1/2 behavior and actual cold caller remain unchanged; four
+finite behavioral groups still require execution after implementation.
 
 All parent Python sessions in this checkpoint are physically terminal; no restart
 or relaxed deadline occurred. C4a15542/d1c45d reached38 explicit CALL missing-API
