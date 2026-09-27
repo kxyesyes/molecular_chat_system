@@ -31,7 +31,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
 | G3 concrete Windows owner | API RED018629 followed by source-reviewed F96BA0B3 adapter; initial d40700:2passed/2failed4.66s retained. Corrected fixture665A rerun102315:4passed0.75s; independent full module5f7541:90passed2.13s,329 hash comparisons unchanged | API plus three actual Windows scenarios and finite canary/policy regression passed; no live bootstrap/generation or remaining fault qualification yet |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused local integration ebb2093 on main73379a1; aligned855passed13.33s,9pins unchanged | Local only: no push/PR/CI/merge yet. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -39,6 +39,23 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C0b publication64b104 pushed only the clean reviewed four-file integration branch;
+git ls-remote confirms exact ebb2093bf817bf375ba77f69c403a223dff0dd99. No main write,
+force push, PR or merge. The first preflight3a1435 stopped before push because its
+credential-pattern scan found two occurrences in a synthetic redaction test.
+Independent SOURCE confirmed MockTransport/example.invalid context and the exact
+candidate digest; retry allowed only that digest in the frozen4E42157B test file,
+not a sk-* wildcard. No candidate text was printed; other three files were clean.
+All four reviewed hashes and diff checks matched before publication. Browser
+authentication/PR CI remain separate gates, not inferred from Git push success.
+
+C1 implementation source freeze E089/1033/7043/80BC is NOT READY: self-review
+identified that awaiting durable SQLite revocation after cancellation/expiry can
+extend the30s response boundary. Source review is distinguishing immediate local
+invalidation from unconfirmed durable revocation. A blocked-SQL behavior regression
+must precede correction; no deadline relaxation or immediate durable success is
+authorized. Existing stager and C2 execution boundaries remain unchanged.
 
 Independent Web14 QUALITY79362/adf30e completed **14passed20.52s**,exit0,
 seven warnings,zero skips,32pins plus continuation unchanged. The plan update
