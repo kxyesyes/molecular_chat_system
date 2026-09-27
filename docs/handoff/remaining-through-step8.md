@@ -34,7 +34,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Two actual P1 GREENs3567/afcbee and85036/f73c0c; original13 campaign66565/d2d845 completed21passed5POSIX-skipped, all339pins unchanged after each invocation and outer physical exit0 | Full legacy-module mapping at TEST-first review; C-only false-termination wording TEST preparation; service/tool/lease consumers remain open. Windows resource tests do not prove POSIX or scientific docking |
+| C4a physical command settlement | C-only truthful-error RED75247/b23b81 repaired; focused99554/0a1d9e passed. Complete legacy+C4a command module54341/b38790:72passed6POSIX-skipped33.76s,339pins unchanged, outer physical exit0 | Independent fresh section4.1 QUALITY granted, not yet reported. Service/tool/lease consumers still open; no-scope historical wording preserved only for compatibility, not endorsed as physical proof. No POSIX/Vina success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,21 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C4a whole-module owner amendment reached actual finite RED21790/700cb6:
+2failed1.49s at missing16th mapping,12pins unchanged. Wrapper's one literal
+entry F37DE363 inversely restores08682; its source review passed, then finite
+44730/3632fb49passed5.44s and Windows55100/fa21eb3passed2.39s requalified it.
+The P2 feature75247/b23b81 reproduced inherited false-termination wording after
+all physical/cause checks:1failed8.06s,339pins unchanged. Minimal C-only text
+branch2903F156 retained the original cause and no-scope behavior; independent
+SOURCE approved it. Focused99554/0a1d9e passed1case7.32s, and complete command
+module54341/b38790 passed72cases with6genuine POSIX skips in33.76s. Both had
+physical rc0/settled/slottrue, no reported warnings,339pins unchanged. The full
+module includes old tests and the new genuine-resource no-scope compatibility
+control. It does not establish POSIX execution or scientific docking. Independent
+fresh section4.1 QUALITY is released through the same qualified owner; service,
+tool, runtime and lease retention remain separate section4.2/4.3 gates.
 
 C4a original13 selector campaign66565/d2d845 is now physically terminal:21passed,
 5skipped in genuinely POSIX-specific branches, all outer receipts rc0/settled/
