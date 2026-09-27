@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Corrected25 controls passed ba4ac8 (10.79s); functional native3bc7bf and JSON96ce80 each1passed (21.14s/21.30s),7warnings each,31pins unchanged; both qualified outer owners settled/released | These are offline actual-Web tests, not live acceptance. Remaining Task6 source/reference/home checks, Task7 lifecycle matrices and Task8 exact union/review/publication remain open |
+| Normal-Web B1 Tasks4–8 | Prior25 controls and native/JSON outer-owner checks passed; source/reference/home follow-up10passed; source-swap16passed independently; worker/projection30passed parent30.77s and independent37.42s,7warnings each,32pins unchanged | Offline actual-Web evidence only. Remaining-credit/TTL14 cases are approved test preparation; storage failure and permanent failed-join coverage, Task8 union/review/publication and real acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,6 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
+| G3 concrete Windows owner | API RED018629 followed by source-reviewed F96BA0B3 adapter; initial d40700:2passed/2failed4.66s retained. Corrected fixture665A rerun102315:4passed0.75s,329pins unchanged | Independent full-canary regression assigned. API plus three actual Windows scenarios passed locally; no live bootstrap/generation or remaining fault qualification yet |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused local integration ebb2093 on main73379a1; aligned855passed13.33s,9pins unchanged | Local only: no push/PR/CI/merge yet. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -38,6 +39,23 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 actual Windows qualification d40700 reached four nodes: API and rc0-parent/
+pipe-held-descendant passed; clean/late cases failed while the TEST fixture wrote
+stdin after those children exited (flush/close OSError22). Parent classified the
+actual failures before changes, not as proof of all remaining physical assertions.
+Minimal fixture665A writes a newline only for the descendant input gate, retaining
+finally-close and every process fact/deadline. Independent SOURCE inverse-restored
+the complete9C3 test. RunnerF96BA stayed unchanged. Corrected102315 completed
+**4passed0.75s**,exit0,329pins unchanged, no warnings/skips. Independent full module
+regression is assigned under the sole Python slot; no live generation occurred.
+
+C1 author froze tests43593EB7 and plan754EE143 for independent SOURCE. These
+prepare-only tests use actual temporary SQLite/staging and prohibit execution;
+the missing API test has not yet run. New production interfaces remain absent.
+Normal-Web remaining-credit/TTL14-case design received independent SOURCE READY;
+only test preparation is released, with actual bridge-return TTL and truthful
+send-then-raise accounting. No result of those fourteen cases is claimed yet.
 
 Independent Web30 QUALITY18574/f808c5 completed **30passed,7warnings,37.42s**,
 exit0,32pins plus continuation928B unchanged; physical run terminal and slot
