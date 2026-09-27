@@ -34,7 +34,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | C-only truthful-error RED75247/b23b81 repaired; focused99554/0a1d9e passed. Complete legacy+C4a command module54341/b38790:72passed6POSIX-skipped33.76s,339pins unchanged, outer physical exit0 | Independent fresh section4.1 QUALITY granted, not yet reported. Service/tool/lease consumers still open; no-scope historical wording preserved only for compatibility, not endorsed as physical proof. No POSIX/Vina success claim |
+| C4a physical command settlement | Parent54341/b38790:72passed6POSIX-skipped33.76s; independent fresh40403/fb6f52:72passed6POSIX-skipped33.34s,339pins unchanged each. Local section4.1 checkpoint3992505 committed exactly5files, clean at commit | Section4.2 service/tool proof and deferred-cleanup seams require written clarification before TEST; section4.3 lease remains open. Historical no-scope wording is compatibility only. No POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,24 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Independent fresh C4a section4.1 QUALITY40403/fb6f52 completed72passed6POSIX
+skipped0warnings33.34s,exit0, outerpassed/settled/slottrue and339/339pins unchanged.
+The two receipt-only plan appendices inversely preserve8B68/890E prefixes and
+passed independent SOURCE. Parent local checkpoint3992505822505a63ddab9cb41cb607ccb66aba76
+contains exactly base adapter, command tests, owner qualification tests and their
+two plans; C4a tracked worktree was clean immediately after commit. It is not
+pushed, merged or production-enabled. Section4.2 now needs a minimal explicit
+non-sealing completed-command proof and single deferred own-job-cleanup seam;
+only written clarification is released before new tests. Section4.3 remains open.
+
+B1 profiling API-only29558/23dc41 reached intended CALL-phase missing class:
+1failed4.03s,exit1,41pins unchanged. Full finite TEST review found three fixture/
+oracle coverage gaps; TEST-only correction is released, not profiler implementation
+or another whole-module run. G3 diagnostic implementation SOURCE found a possible
+false cleanup-secondary record on repeated guard-latch reporting; append-only
+finite regressions are released before any fix or cold retry. Neither finding
+has been promoted to a scientific/tool success claim.
 
 C4a whole-module owner amendment reached actual finite RED21790/700cb6:
 2failed1.49s at missing16th mapping,12pins unchanged. Wrapper's one literal
