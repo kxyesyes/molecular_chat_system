@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Bounded bridge4passed plus compatibility171passed; actual native65995/5828bb and JSON72393/c502c6 outer drivers both exit0 with verified retention/forced-cleanup proofs and unchanged36/37pins | Fresh independent compatibility/owner-control verification underway; Task8 full union/publication/live acceptance remain open. Both raw child receipts remain supervisor_error/rc1, not scientific success |
+| Normal-Web B1 Tasks4–8 | Independent91291/4a5e54:265passed7warnings0skips504.95s,39pins unchanged; actual native/JSON outer drivers both verify retention and forced cleanup | Full47-module execution mapping (57 serial owned calls) under SOURCE review; full union/publication/live acceptance remain open. Fault-child raw receipts remain supervisor_error/rc1, not scientific success |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -40,6 +40,28 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Independent B1 fresh QUALITY91291/4a5e54 completed **265passed,7warnings,
+0skips,504.95s**,exit0,39pins unchanged, same11 explicit targets without restart
+or directly executing an infinite child. The slot is released. Source inventory
+confirms Task8's exact ordered25+4+18=47 modules; full B1 runtime includes seven
+scientific/diagnostic variants and A2 lifecycle includes an owned permanent-child
+test. PlanBE8DD9E7 proposes57 serial calls through the existing qualified owner,
+retaining every node and original deadlines, instead of blindly invoking unsafe
+whole modules. It is under SOURCE review, not implemented or a campaign result.
+
+G3 Stage-C first API node25318/af8b30 completed **1failed,6.07s**,exit1,
+332pins unchanged. The call-phase assertion names six missing cold-import/file/
+report APIs; no real native/cold behavior was reached. SOURCE independently
+allowed this API-only node but held the wider test matrix for a missing fixed-name
+unknown-import safety backstop. Test-only correction is released; no cold-helper
+implementation or real cold/generation execution is claimed.
+
+C2 five-file implementation is prepared locally, frozen for source review;
+testsDEE9 are unchanged. Parent source inspection raised unverified rowcount and
+deadline-anchor questions for independent review. Do not label these reproduced
+defects or the implementation correct before actual behavioral tests. Any safe
+offline characterization grant is distinct from a correctness/release approval.
 
 Actual native65995/5828bb and JSON72393/c502c6 expected-fault outer drivers
 each completed **exit0**, preserving36/37pins respectively. In retained,
