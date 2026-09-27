@@ -20,13 +20,14 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
-| Native ASCII validation optimization | Draft PR98 head3e5e219; two local49 runs passed; latest CI sandbox-core failed hung-create cleanup test | Do not merge; preserve CI failure and investigate separately; original Web3s issue not fixed |
+| Native ASCII validation optimization | DraftPR98 aligned head8ce19a5 includes landed PR99/100; owned source/test unchanged; new CI pending | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
+| B2 generator contracts | DraftPR101 a44ff39; author/fresh/aligned exact2 each479passed; SOURCE/QUALITY approve | Latest-head CI pending; pure contract is not runtime/backend proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -34,6 +35,26 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR98 aligned to actual main4280b7a via40741b3, preserving all3 owned bytes;
+evidence-only append committed8ce19a5 and pushed. Original CI36282797393 failure
+and unknown first-timeout cause remain in plan/PR; fresh CI required on new head.
+B2 pure-contract3-file batch aligned across unrelated PR100 with owned hashes
+unchanged, committeda44ff39eea5ed03d528871715a438bb8f3315560 and published/attached
+as draftPR101. No runtime generation or backend proof claimed by those479 passes.
+
+Continuation tests ACC337/5C6394/F40680 and plan800EF3 are prepared on landed
+publication baseline b4252801, independent SOURCE in progress. C0a plan3AB9AAD
+passed SOURCE; only pure DTO test preparation released. Parent prepared ignored
+runners via exact6D490 REPO-only substitution and full forward/reverse byte
+comparison: continuationEA3B05, C4AE311. Neither author may execute without slot.
+
+Web phase-only API RED675b7a:2call-phase unexpected-keyword failures,3warnings,
+5.43s,26pins unchanged; not scientific/performance failure proof. Minimal
+installer8E25A4/planCA48C6 passed independent SOURCE; collector and scientific
+assertions unchanged, original19 profile code objects captured before wrapping.
+Sole slot granted to Wegener for exact control GREEN, then only if passed with
+unchanged inputs one phase-only-native diagnostic. No outcome yet, no retries.
 
 PR100 is merged after repeated exact-head/main/check/review guards, with9CI
 success and zero unresolved threads. Squash4280b7a7a41506698a35f31e1d882f8724d58c4e;
