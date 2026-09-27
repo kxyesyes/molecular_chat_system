@@ -30,11 +30,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Diagnostic repair independently verified392passed1skip. Actual trusted-@2 cold1073/b832b6 failed7.74s,332pins unchanged: first_failure initial_inventory/operation_error; cleanup/final-inventory fields null, deadline false, zero clients/POST | Earliest failing boundary is now initial loaded-module inventory, before required imports; inner generic exception wrapping still hides the precise cause. No scientific import, generation or G3/B2 completion claim |
+| G3 concrete Windows owner | Actual trusted-@2 cold1073/b832b6 failed at initial_inventory/operation_error before imports. Finer explicitly selected protocol3 diagnostic passed52finite cases and whole98347/d55886:444passed1coldskip136.42s,332pins unchanged | Independent fresh verification running next; actual child/caller still protocol2. No new cold attempt, scientific import, generation or G3/B2 completion claim |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Section4.1 checkpoint3992505 independently verified72passed6POSIXskips. Section4.2 implementation passed SOURCE; whole16729/7bac21 reached109passed1failed6POSIXskipped64.08s,339pins unchanged, outer settled/slot released | cancel-after-upsert expected cancelled but returned process_ownership_uncertain; the assertion precedes proof that upsert was reached. Investigate fixture handle-acquisition identity and reached phase before changing production. Section4.3 lease remains open. No POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Section4.2 implementation plus independently reviewed acquisition-aware fixture: whole78413/178877111passed6POSIXskipped63.15s,339pins unchanged, outer passed/settled/slot released. Actual native regression previously proved fixture handle-reuse rejection | Await independent fresh QUALITY; Section4.3 lease remains open. Original failed runs preserved, not all historically attributed. No POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,32 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C4a diagnostic94061/9208aa reached2failed109passed6POSIXskipped63.74s,
+exit1,339pins unchanged and outer settled/slottrue. The actual native
+acquisition regression proved the test observer rejects a legitimate newly
+acquired Job whose numeric handle was previously closed; the same-acquisition
+double-close negative control had passed. The original cancel-after-upsert
+case passed this run; private-scope tool success failed instead. Do not claim
+the earlier failures have individually proven causes. A TEST-only repair
+records actual acquisitions under one create/close lock and fixes independent
+rescue accounting; service assertions/diagnostics/native regression stay
+unchanged (inverse fixture replacement restores E0795C9E).
+Independent SOURCE approved testD1ABDD7B/plan69CD1060, production unchanged.
+Parent full78413/178877 then passed111cases with6POSIXskips63.15s,exit0,
+339pins unchanged, outerpassed/settled/slottrue. The native reuse regression
+did not skip. Independent fresh QUALITY remains before section4.2 release;
+runtime/lease section4.3 is still unimplemented.
+
+G3 explicitly selected protocol3 diagnostic implementation07CB93C5,
+manifest6AA30E92, testE0B5BE44 and plan7EBCB1AD passed independent SOURCE.
+Manifest inverse restores2A1A with1246members/971edges unchanged; test digest
+literal inverse restores850C with no assertion changes. Parent finite5-function
+3239/ecbaa5 passed52cases27.70s; whole98347/d55886 passed444cases with1
+actual-cold opt-in skip136.42s. Both exit0 with332pins unchanged and no reported
+warnings. Independent fresh QUALITY is granted exclusively to Mencius next.
+The real child/report and actual cold caller still select protocol2; migration
+and a new actual cold execution remain separate, unperformed steps.
 
 C4a section4.2 implementation B53755AF/BCA08967/6B63AC16 and plan4FA31B36
 passed independent SOURCE with tests530FE7B4 unchanged. Parent exact F37 whole
