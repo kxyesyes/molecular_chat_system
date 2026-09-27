@@ -34,6 +34,29 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+B2 actual API RED is terminal: session84529/chunk54bb08, exit1,
+415call-phase missing-API failures and64passed,34.27s,zero warnings/skips;
+14/14 frozen inputs unchanged. This is missing-contract evidence, not a
+scientific runtime failure. Slot released. Minimal A-contract production
+implementation is now released with tests frozen; G3/G4 runtime controls remain
+out of scope for that slice. No live model/tool or production activation.
+
+Sole Python slot is now assigned to the one approved plain-native Web diagnostic
+node (test74208CB/plan9D1D93), preserving26 input pins and original3s/5s guards.
+No outcome yet. Sandbox helper GREEN A0E93B/plan952F13 awaits SOURCE re-review;
+no concurrent Python run is permitted.
+
+C design review found two implementation blockers: local CommandAdapter delayed
+spawn ownership is not transferred to callers, and generic cancellation drain
+cannot establish C's finite control-feedback bound for an uncooperative send.
+Design-only revision is authorized for minimal ownership/settlement receipts
+and C-only undeliverable projection with physical work retained by its owner.
+A2 drain behavior and mandatory ordinary-chat end state must remain unchanged.
+
+Remote PR99 run36284700147 is confirmed in progress at exact3658416; seven
+component checks succeeded, Agent still running and aggregate not yet final.
+PR98 remains draft with retained sandbox-core/aggregate failure; no rerun/merge.
+
 Publication fresh QUALITY terminal42930/0f32a0 exit0:6208passed0skipped7warnings
 1061.14s,78/78 Git/SHA256 unchanged; manifestD19F819BD5D2A7D00C3306E80553CAEB8654D8DAF132752D4FDB86C966A99969.
 Independent APPROVE, no P1/P2. Parent rechecked four production/test identities,
