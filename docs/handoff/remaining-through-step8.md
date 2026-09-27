@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Root20controls, supervisor25controls and real Windows qualification passed; deterministic actual-runtime origin controls c6f3a3 reproduced5failures7warnings7.11s,31pins unchanged | Test-helper origin-capture fix now in progress; no production change. Native/json full integration and Tasks6–8 remain open; earlier failures retained |
+| Normal-Web B1 Tasks4–8 | Corrected25 controls passed ba4ac8 (10.79s); functional native3bc7bf and JSON96ce80 each1passed (21.14s/21.30s),7warnings each,31pins unchanged; both qualified outer owners settled/released | These are offline actual-Web tests, not live acceptance. Remaining Task6 source/reference/home checks, Task7 lifecycle matrices and Task8 exact union/review/publication remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; reviewed/landed tree equal; C0b pre-return physical-close gap now reproduced cf929d:8failed2passed2.95s,5pins unchanged | Construction-time first response guard and explicit borrowed-client opt-in tests/design in preparation. Production1B4A frozen; no GREEN or complete C proof |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; reviewed/landed tree equal; C0b pre-return physical-close gap reproduced cf929d:8failed2passed2.95s. First-guard implementation041699FC/plan4F3F82B8 now frozen for independent SOURCE | No implementation GREEN yet; construction guard, borrowed opt-in and physical close/isolation regression must pass before wider consent/cancel integration |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -38,6 +38,35 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Parent actual-Web source/reference/home follow-up13510/0c809c completed:
+10passed,7warnings,44.99s,exit0;31pins unchanged. Explicit nodes cover restored
+RAG current/stale source, confirmed historical reference projection, actual
+reverse-record consumption by the next decision, and pending terminal not being
+shown as completed at home, across both wire modes. Task7's full resource and
+delivery-fault matrices remain open; this is not real provider acceptance.
+
+C independent SOURCE Lovelace approved041699FC/plan4F3F82B8. Parent five-module
+run33969/1a553e completed855passed in13.32s,exit0,9pins unchanged, no warnings or
+skips reported. Modules: docking_preparation_protocol, ordinary_intent_protocol,
+ordinary_intent_transport, decision_transport_boundaries, decision_protocol_recovery.
+Earlier preflight2204c6 stopped before Python because the parent checked the
+model hash against the wrong file; the approved src/agent/openai_compatible_model.py
+matched unchanged. Fresh independent QUALITY is assigned; no release/merge yet.
+
+Parent Web correction verification: exact25 controls79456/ba4ac8 passed25 in
+10.79s. Qualified outer functional-native67146/3bc7bf passed1 in21.14s and
+functional-json75730/96ce80 passed1 in21.30s. Each reports7warnings,exit0 and
+31 unchanged pins; both functional outer receipts explicitly confirm passed,
+returncode0, physically settled and slot released. Independent Kant SOURCE
+review approves fixture0FE3A310 while distinguishing its review from execution.
+Ownplan1AD38BB0 records all receipts and preserves earlier failures. These use
+offline synthetic HTTP/scientific fixtures with actual Web execution; they do
+not establish live model/tool acceptance or completion of Tasks6–8/P7/P8.
+
+C author handed off construction guard041699FC and plan4F3F82B8 after API RED;
+tests4E42157B/model7F36FF02 remain unchanged. Independent SOURCE review is now
+assigned before GREEN. No live inference, production activation or deployment.
 
 PR103 was converted from draft only after exact-head CI36306118836 completed
 successfully (all nine jobs), independent SOURCE/fresh QUALITY approval and zero
