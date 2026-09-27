@@ -82,7 +82,15 @@ def _normalize_warning_strings(values: Any) -> list[str]:
 class MolecularDocking(BaseMolecularTool):
     """分子对接工具"""
 
-    def __init__(self):
+    def __init__(self, *, command_scope=None, allowed_output_root=None):
+        self._command_scope = command_scope
+        self._allowed_output_root = None
+        if command_scope is not None or allowed_output_root is not None:
+            from src.docking.adapters.base import CommandOwnershipScope
+
+            self._allowed_output_root = CommandOwnershipScope._bound_output_root(
+                command_scope, allowed_output_root,
+            )
         super().__init__(
             name="molecular_docking",
             description="Perform molecular docking between ligands and protein targets"
@@ -190,7 +198,13 @@ class MolecularDocking(BaseMolecularTool):
                 energy_range=float(query.get("energy_range", 3.0)),
                 manual_center=True,
             )
-            service = MolecularDockingService(config=query.get("runtime_config"))
+            ownership = {}
+            if self._command_scope is not None:
+                ownership = {
+                    "command_scope": self._command_scope,
+                    "allowed_output_root": self._allowed_output_root,
+                }
+            service = MolecularDockingService(config=query.get("runtime_config"), **ownership)
             if not service.verify_environment():
                 result["message"] = (
                     "AutoDock Vina docking environment is unavailable. "

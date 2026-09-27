@@ -59,10 +59,25 @@ class CommandOwnershipScope:
         self._primary_error = None
         self._errors = []
         self._settlement_lock = threading.Lock()
+        self._own_job_cleanup = None
+        self._own_job_cleanup_state = "none"
+
+    @staticmethod
+    def _bound_output_root(scope, output_root):
+        if scope is None and output_root is None:
+            return None
+        if type(scope) is not CommandOwnershipScope or output_root is None:
+            raise ValueError("Invalid command scope binding")
+        root = os.path.abspath(os.fspath(output_root))
+        if os.path.normcase(root) != os.path.normcase(scope._output_root):
+            raise ValueError("Command scope root mismatch")
+        return root
 
     def reserve_command(self):
         with self._condition:
             if self._sealed:
+                raise CommandOwnershipUncertainError()
+            if self._own_job_cleanup_state in {"running", "done", "failed"}:
                 raise CommandOwnershipUncertainError()
             if self._stop.is_set() or (
                 self._cancel_event is not None and self._cancel_event.is_set()
@@ -120,39 +135,126 @@ class CommandOwnershipScope:
             if any(current is item.caller and not item.call_finished for item in commands):
                 raise CommandOwnershipUncertainError()
         with self._settlement_lock:
-            for receipt in commands:
-                with self._condition:
+            return self._settle_commands(commands, wait=True)
+
+    def _settle_finished_commands(self):
+        """Prove the current prefix without sealing, waiting or running cleanup."""
+        if not self._settlement_lock.acquire(blocking=False):
+            return False
+        try:
+            if not self._condition.acquire(blocking=False):
+                return False
+            try:
+                commands = tuple(self._commands)
+            finally:
+                self._condition.release()
+            return self._settle_commands(commands, wait=False)
+        finally:
+            self._settlement_lock.release()
+
+    def _settle_commands(self, commands, *, wait):
+        # One definition of physical proof for final drain and the service's
+        # nonblocking prefix check. Pending alone must not become a sticky error.
+        current = threading.current_thread()
+        for receipt in commands:
+            if not self._condition.acquire(blocking=wait):
+                return False
+            try:
+                if receipt.settled and not receipt.unresolved:
+                    continue
+                if wait:
                     while not receipt.call_finished or not receipt.start_resolved:
                         self._condition.wait()
-                # Finally notifications and is_alive() snapshots are not joins.
-                if receipt.spawner is not None and receipt.spawner.ident is not None:
+                elif not receipt.call_finished or not receipt.start_resolved:
+                    return False
+                threads = [(receipt.spawner, "spawner_join_failed")]
+                threads.extend((reader, "reader_join_failed") for reader in receipt.readers)
+            finally:
+                self._condition.release()
+            exited = True
+            for thread, error_code in threads:
+                if thread is current:
+                    return False
+                if thread is not None and thread.ident is not None:
                     try:
-                        receipt.spawner.join()
+                        thread.join(timeout=None if wait else 0)
                     except BaseException:
-                        receipt.fail("spawner_join_failed", uncertain=True)
-                for reader in tuple(receipt.readers):
-                    if reader.ident is not None:
-                        try:
-                            reader.join()
-                        except BaseException:
-                            receipt.fail("reader_join_failed", uncertain=True)
-                with self._condition:
-                    if receipt.unresolved:
-                        continue
-                    process = receipt.process
-                    stopped = process is None or (
-                        process.returncode is not None and receipt.tree_stopped
-                    )
-                    closed = all(stream.closed for stream in receipt.streams)
-                    if os.name == "nt":
-                        closed = closed and (receipt.job is None or receipt.job_closed)
-                        closed = closed and (process is None or receipt.process_closed)
-                    if not stopped or not closed:
-                        receipt.fail("physical_settlement_unconfirmed", uncertain=True)
-                    else:
-                        receipt.settled = True
-                    self._condition.notify_all()
-            return all(item.settled for item in commands)
+                        receipt.fail(error_code, uncertain=True)
+                    if thread.is_alive():
+                        if not wait:
+                            return False
+                        exited = False
+            if not exited:
+                receipt.fail("physical_settlement_unconfirmed", uncertain=True)
+                continue
+            if not self._condition.acquire(blocking=wait):
+                return False
+            try:
+                if receipt.unresolved:
+                    continue
+                process = receipt.process
+                stopped = process is None or (
+                    process.returncode is not None and receipt.tree_stopped
+                )
+                closed = all(stream.closed for stream in receipt.streams)
+                if os.name == "nt":
+                    closed = closed and (receipt.job is None or receipt.job_closed)
+                    closed = closed and (process is None or receipt.process_closed)
+                if not stopped or not closed:
+                    receipt.fail("physical_settlement_unconfirmed", uncertain=True)
+                else:
+                    receipt.settled = True
+                self._condition.notify_all()
+            finally:
+                self._condition.release()
+        return all(item.settled for item in commands)
+
+    def _defer_own_job_cleanup(self, job_id, action):
+        """Retain one trusted invocation action; registration runs no I/O."""
+        if job_id != self._task_id or not callable(action):
+            raise ValueError("Invalid own-job cleanup binding")
+        with self._condition:
+            if self._own_job_cleanup is not None:
+                old_job, old_action = self._own_job_cleanup
+                if old_job != job_id or old_action is not action:
+                    raise ValueError("Own-job cleanup cannot be replaced")
+                return
+            self._own_job_cleanup = (job_id, action)
+            self._own_job_cleanup_state = "pending"
+
+    def _run_own_job_cleanup(self):
+        """Called by the retained execution owner; never retry an action."""
+        with self._condition:
+            state = self._own_job_cleanup_state
+            if state in {"running", "failed"}:
+                return False
+            if state == "done":
+                return True
+        if not self._settle_finished_commands():
+            return False
+        with self._condition:
+            if self._own_job_cleanup_state in {"running", "failed"}:
+                return False
+            if self._own_job_cleanup_state == "done":
+                return True
+            if any(not item.settled or item.unresolved for item in self._commands):
+                return False
+            if self._own_job_cleanup is None:
+                return True
+            action = self._own_job_cleanup[1]
+            self._own_job_cleanup_state = "running"
+        succeeded = False
+        try:
+            succeeded = action() is not False
+        except Exception:
+            # The service action keeps fixed cleanup warnings and first error;
+            # never serialize the exception or re-run an uncertain side effect.
+            pass
+        finally:
+            with self._condition:
+                self._own_job_cleanup_state = "done" if succeeded else "failed"
+                self._condition.notify_all()
+        return succeeded
 
 
 class _CommandReceipt:
