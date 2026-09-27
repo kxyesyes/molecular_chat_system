@@ -35,6 +35,13 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+B2 author exact2 GREEN terminal4611bf exit0:479passed4.87s,zero failures,
+errors,warnings,skips;14/14 input hashes unchanged. Slot released, now assigned
+to Socrates for independent fresh QUALITY plus the same explicit two modules.
+Pure A-contract only; client/backend/G3/G4 and full generated-candidate closure
+are not yet implemented or verified. Web minimized phase-only proposalD9BD892
+is under independent SOURCE before any test preparation or execution.
+
 PR100 CI36285626423 is confirmed live at27589a7; static, sandbox-core,
 sandbox-api and task-runtime succeeded; remaining partitions/aggregate pending.
 No merge or successful full-CI claim yet. PR98 is still blocked on its failed run.
