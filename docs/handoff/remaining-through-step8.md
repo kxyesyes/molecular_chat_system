@@ -39,6 +39,31 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Parent Web Task7 worker/projection matrix38951/d5f176 completed **30passed,
+7warnings,30.77s**, exit0,32pins unchanged. Independent SOURCE approved the
+projection-control/deadline fixture corrections0F9C/31711 before execution;
+production behavior and all deadlines remained unchanged. Receipt-only plan
+A50AB242 is frozen for independent fresh QUALITY. These are actual offline Web
+ownership/drain checks, not real providers or full Task7/Task8/P7 acceptance.
+
+G3 concrete Windows owner API test018629 completed **1failed,0.59s**, exit1,
+call-phase missing_windows_owner_api before any process creation;329 before/after
+pins unchanged (six fixed paths plus source Python files, not the earlier656 set).
+Independent TEST SOURCE approved9C3A/FDB7. The failure is expected API RED,
+not an OS cleanup failure. Concrete private-base adapter implementation is now
+released source-only; all actual Windows and live generation gates remain open.
+
+C1 ignored offline runnerA99BB658 derives solely by REPO-literal replacement
+from reviewed C0b3761E897. Independent Zeno SOURCE verified forward/inverse LF
+equivalence, unchanged isolation/network/explicit-node rules and Git-ignore.
+C1 tests remain in source preparation; no C1 Python or scientific run occurred.
+
+Publication access check: the actual GitHub repository page shows main73379a1
+and **Sign in**, not an authenticated browser session. Current tools still lack
+a PR connector. No credential extraction, push, PR creation or merge was done.
+The user was asked asynchronously to sign in through the normal browser; local
+implementation and tests continue, so this is not an overall work stoppage.
+
 Web first16 independent QUALITY44957/11b4f5 completed16passed,7warnings,21.92s,
 exit0,32pins plus continuation unchanged. Author is preparing the next approved
 30-case worker/validation/projection matrix; permanent failed-join ownership
