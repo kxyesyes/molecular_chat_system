@@ -28,6 +28,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
+| C0a docking proposal DTO | DraftPR102 46d7076; author/fresh five-module733passed each; SOURCE/QUALITY approve | Fresh aligned-head CI pending; no C transport/Web/dispatch proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -35,6 +36,24 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C0a's four-file scope is now on independent codex/docking-preparation-protocol,
+HEAD46d70767bda6c9cd6041f56358b36c150d8ba71d, published/attached as draftPR102.
+Parent aligned from108df5d to actual mainc90c180 with all four owned hashes
+unchanged, then appended baseline evidence. Staged whitespace and bounded added-
+line credential-pattern checks passed. Earlier733 author/fresh results remain
+108df5d evidence; new-head CI is required. C0b will use a separate branch/tree.
+
+G3 actual one-module REDd0b61e:144failed17passed6.57s,exit1,no warnings/skips.
+All144 failures are call-phase missing-module API evidence;17 passes exercise
+the independently reviewed I/O/environment/socket guard positive controls, not
+metadata behavior. Seven hashes unchanged, slot RELEASED. Only standalone script
+implementation plus ownplan is now authorized, tests frozen; no real request.
+
+Sole Python slot now belongs to Mencius for the two SOURCE-approved continuation
+P2 RED nodes (real drain cancellation; post-drain receipt error), with73E5C0 tests,
+5E067 plan and existing productione7b46ef unchanged. No terminal result yet.
+No retry, production fix or broader run is implied by this grant.
 
 PR101 merged after repeated exact head/main/check/review guards:9successful checks,
 zero unresolved threads, squashc90c180c341c1f3da86281f2bd2b7feb08285353. Reviewed
