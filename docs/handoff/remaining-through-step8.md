@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Bounded actual-loop bridge RED45817/652c5f:2failed2passed; minimal pre-display owner settlement passed independent SOURCE and parent96882/bff750:4passed7warnings50.50s,36pins unchanged | Broader compatibility regression in progress; native/JSON owned Web gates, Task8 union/publication/live acceptance remain open. Original native720s failure is retained, not yet superseded by a mounted-Web pass |
+| Normal-Web B1 Tasks4–8 | Bounded bridge4passed plus parent compatibility14651/025d8d:171passed7warnings473.51s,38pins unchanged; minimal pre-display settlement passed independent SOURCE | Native outer65995 now running after receipt-only plan review; JSON, Task8 union/publication/live acceptance remain open. Original native720s failure retained until stronger mounted-Web evidence |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Manifest one-edge correction preserved strict validator; parent pure-helper114passed3.01s and independent complete module8c8cc8:209passed5.46s,zero warnings/skips,332 hash comparisons unchanged | Scoped owner and pure-helper qualification passed; writer/control/report integration, actual cold imports and real generation/B2 still open |
+| G3 concrete Windows owner | Stage-B writer/control/report plus deadline fix SOURCE approved; focused2passed5.86s and parent complete module57933/3a96a7:224passed44.31s,332pins unchanged | Fresh independent verification, actual cold imports and real generation/B2 still open; actual Windows finite-process fixtures are not scientific execution |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
@@ -40,6 +40,27 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Parent compatibility14651/025d8d completed **171passed,7warnings,473.51s**,
+exit0,38pins unchanged: complete decision_chat_transport, web_decision_runtime,
+web_decision_runtime_references, plus six explicit lifecycle selectors retained
+in the B1 plan. It covers no-owner/legacy/A2 and owned display/cancel paths, not
+the permanent failed-join child. Receipt-only plan2BBF2AAF passed SOURCE, then
+the unchanged qualified native outer was launched as65995; no result yet.
+
+G3 minimal final-decode deadline fix8C192 passed SOURCE. Parent66154/b3190b
+completed the two prior failing variants: **2passed,5.86s**,exit0. Full module
+57933/3a96a7 then completed **224passed,44.31s**,exit0, no warnings/skips reported;
+332pins unchanged in both runs. This adds actual finite Windows writer, EOF,
+descendant and report-deadline coverage; actual cold imports and generation are
+still separate requirements. No live molecular or external-model success claim.
+
+C2 revised39-case matrixDEE9/B80F passed SOURCE after adding post-claim binding
+changes and foreign/unknown cancellation privacy. Parent84792/f91f03 completed
+**39failed,42.68s**,exit1,10pins unchanged. Every failure reaches the missing
+async approve API prerequisite; none proves that race/CAS/raw behavior ran.
+The approved five-file C2 implementation is now released, with tests frozen and
+independent source review required before execution; no C4 or Vina expansion.
 
 Parent bounded bridge GREEN96882/bff750 completed **4passed,7warnings,50.50s**,
 exit0,36pins unchanged (bridge8820DC7A, testED974267, plan6A726122).
