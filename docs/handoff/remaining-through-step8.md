@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Permanent-join outer controls62passed2.25s; after binary-LF fixture fix, real Windows qualification4passed3.87s,33pins unchanged; earlier2failed retained | Fresh complete owner/control regression underway; no actual permanent-join Web execution yet. Task8 union/review/publication and real acceptance remain open |
+| Normal-Web B1 Tasks4–8 | Fresh independent owner/control94passed8.86s; first actual native Web13472/9d7ba1 failed before retention, physical cleanup confirmed; unsupported fixture request field removed after SOURCE review | Same native outer-driver retry26908 is running, not passed. Task8 union/review/publication and real acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -32,7 +32,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
 | G3 concrete Windows owner | Initial API/fixture failures retained; five additional real Windows fault cases af886c passed0.88s after test rescue-observer correction; independent full module ea1838:95passed2.55s,zero warnings/skips,329 hash comparisons unchanged | Scoped process/capture/close qualification passed; bootstrap/report integration, remaining qualification and real generation/B2 still open |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
-| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; corrected staging/snapshot185passed11skipped25.56s; seven actual receipt/cleanup fault cases67eb55 passed4.47s,10pins unchanged | Begin/seal-in-flight coverage, fresh expanded QUALITY and integration/publication remain; prepare-only is not executable docking consent |
+| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; corrected staging/snapshot185passed11skipped25.56s; receipt faults7passed; begin/seal transaction matrix19685/5ec76b13passed124.17s,10pins unchanged | Direct verification-read cancellation evidence, fresh expanded seven-module QUALITY and integration/publication remain; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -40,6 +40,32 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 Stage-A actual2741f5 completed **8failed,100passed,4.71s**,exit1,
+332pins unchanged. Valid manifests are rejected before six identity cases reach
+file comparison. Negative-test passes cannot establish validator correctness.
+SOURCE-reviewed test2591/planB5CF adds only bounded fixed-enum/line-number
+diagnostics to one existing positive case; implementation3C6 and manifest6DAC
+remain unchanged. No diagnostic execution, cold import or live generation yet.
+
+C1 transaction matrix76750 completed **13passed,124.17s**,exit0,10pins
+unchanged. Four actual30s deadlines remain unchanged. Tests delegate real
+SQLite begin/seal commit/rollback and independently observe committed state;
+no test-origin database writes race a held transaction. Independent review found
+one remaining original-spec coverage gap: cancellation during the actual
+verification read after staging returns. One bounded test is being prepared;
+this is not yet a demonstrated production defect. Fresh seven-module review
+will include C1 plus staging, secure snapshot, task store, local backend and
+the two docking tool/adapter contract modules; C2 execution is not included.
+
+Web independent64877/a67b7e completed **94passed,8.86s**,zero warnings/skips.
+First actual native outer run13472/9d7ba1 failed at the5s retained wait:
+**1failed,7warnings,14.85s**,raw receipt test_failed/rc1/settled/slot_released.
+All35pins matched and the process physically terminated. SOURCE confirmed that
+the fixture's scientific_tools field is outside the closed request schema;
+request_accepted precedes request validation and does not prove tool execution.
+Removing only that field gives child99B93967/planD9B6841D, independently approved;
+same driver618469 retry26908 is currently live. No JSON run or pass is claimed.
 
 Web ignored helper6577 passed independent SOURCE. Parent04ff3b controls:
 **62passed,2.25s**,exit0,33pins unchanged. Windows28922c then had **2failed,
