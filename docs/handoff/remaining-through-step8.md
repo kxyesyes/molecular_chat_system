@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Fresh independent owner/control94passed8.86s; first actual native Web13472/9d7ba1 failed before retention, physical cleanup confirmed; unsupported fixture request field removed after SOURCE review | Same native outer-driver retry26908 is running, not passed. Task8 union/review/publication and real acceptance remain open |
+| Normal-Web B1 Tasks4–8 | Fresh independent owner/control94passed8.86s; native retry26908/6cb665 reached720s watchdog, raw rc1/settled/slot_released;35pins unchanged. Node decision UI54passed and completion checks passed | Original failure location unavailable before cleanup; SOURCE-approved failure-only diagnostic512A/BC023 prepared, not run. Task8 union/review/publication and real acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -32,7 +32,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
 | G3 concrete Windows owner | Initial API/fixture failures retained; five additional real Windows fault cases af886c passed0.88s after test rescue-observer correction; independent full module ea1838:95passed2.55s,zero warnings/skips,329 hash comparisons unchanged | Scoped process/capture/close qualification passed; bootstrap/report integration, remaining qualification and real generation/B2 still open |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
-| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; corrected staging/snapshot185passed11skipped25.56s; receipt faults7passed; begin/seal transaction matrix19685/5ec76b13passed124.17s,10pins unchanged | Direct verification-read cancellation evidence, fresh expanded seven-module QUALITY and integration/publication remain; prepare-only is not executable docking consent |
+| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; corrected staging/snapshot185passed11skipped25.56s; receipt faults7passed; transaction matrix13passed; actual verification-read cancellation e2af811passed1.48s,10pins unchanged | Fresh expanded seven-module QUALITY is running; integration/publication remain. Prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -40,6 +40,33 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 bounded diagnostic18567/eed988 completed **1failed,8.12s**,exit1,332pins
+unchanged. Fixed failure frames identify manifest637/require499. Independent
+Ordinal comparison finds one exact-reference mismatch: boost_iostreams' resolved
+libbz2.dll path differs from the existing LIBBZ2.dll manifest key. Both resolve
+to the same83216-byte pinned file on this Windows host; the directory spelling
+is lowercase, so the uppercase key is not claimed to be its physical spelling.
+Prepared correction06B840 changes only that edge, preserving strict validator3C6;
+test231016 restores original assertions and adds one positive/five negative PE
+controls. SOURCE review and actual114-case rerun remain pending; no cold/native
+or scientific generation success is established.
+
+Web native26908/6cb665 physically terminated with test_watchdog_timeout,
+rc1,settled,slot_released=true; outer driver exit1 for missing proof,35pins
+unchanged. No failed-assertion position survived cleanup; do not infer which
+assertion failed. SOURCE-approved child512A/planBC023 adds bounded fixed-enum
+failure-only reporting before socket cleanup, preserving original assertions,
+proof and5s/3s/720s limits; this diagnostic has not run. Parent Node03cf7a:
+decision UI54passed, completion checks passed, both modified JS syntax checks
+passed, five file identities unchanged. DOM fixtures are not browser acceptance.
+
+C1 verification test962E/plan752F passed independent SOURCE, then parent
+e2af81: **1passed,1.48s**,exit0,10pins unchanged. The real receptor descriptor
+read is held after staging, cancellation returns while verification remains
+owned, and cleanup is not entered until that read/validation returns. Existing
+production code is unchanged. Independent seven-module fresh QUALITY has the
+sole Python slot; no full-C1 release is claimed before its terminal result.
 
 G3 Stage-A actual2741f5 completed **8failed,100passed,4.71s**,exit1,
 332pins unchanged. Valid manifests are rejected before six identity cases reach
