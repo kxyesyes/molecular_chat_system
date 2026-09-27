@@ -19,7 +19,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
-| B1 revision8 continuation | Aligned author73095/9e510a GREEN6376passed7warnings816.85s,660pins unchanged; parent additional new shared tests beb95e462passed3.15s,5pins unchanged | Independent fresh QUALITY and publication pending; original ca935c6370passed2failed and focused8c1ce5 remain separate historical evidence |
+| B1 revision8 continuation | Aligned author73095/9e510a GREEN6376passed7warnings816.85s,660pins unchanged; parent additional new shared tests beb95e462passed3.15s,5pins unchanged | Kant assigned independent SOURCE plus one fresh exact61, sole Python slot; actual launch/terminal not yet reported. Publication pending; original failures remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | C0b two risks actually reproduced by324328:6failed4passed1.58s,658pins unchanged. Minimal C-only implementation in progress; no GREEN or complete C Web/dispatch proof |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | C0b two risks reproduced324328; correction1B4AFC38 awaiting further cleanup fix. SOURCE identified pre-send-return HTTPX close cancellation gap; C5D13C74 test preparation under review, not executed. No GREEN or complete C proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -38,6 +38,45 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C0b correction1B4AFC38/plan61E04454 implements same-request encoding before
+binding and C-only owned waiting/drain, leaving ordinary behavior and model7F36FF
+unchanged. Independent Lovelace SOURCE is NOT READY: HTTPX may enter response
+hook/error cleanup before client.send returns, before the close wrapper is
+installed. Cancelling that child can interrupt physical close even when HTTPX's
+is_closed flag is already true. This is a SOURCE finding, not yet runtime RED.
+Socrates prepared C5D13C74: both-wire ten controls for hook-error positive,
+cancel/deadline/repeated cancel and cancel during deadline drain, using real
+HTTPX/live stream Events and explicit finally cleanup. Earlier D2EF prefix is
+byte-preserved. SOURCE review is pending; production remains frozen1B4AFC38.
+Public-API installation/borrowed-client compatibility must be resolved after
+actual reproduction, not by mutating shared client hooks during requests.
+
+The functional-native failure's source diagnosis identifies accepted-before-
+registration ordering. Wegener is preparing deterministic actual-runtime controls
+for delayed registration and completed/removed origin owners; helper428B stays
+unchanged pending RED. Recommended oracle captures the actual task-associated
+origin at begin_segment, then verifies unique IDs and same segment after the
+existing setup event, without refreshing3s credit or weakening physical cleanup.
+No JSON functional run occurred. Scratch supervisor note is now4E058F67;
+actual helper/qualification tests and runner remain unchanged.
+
+Kant is assigned continuation independent SOURCE and one exact61 fresh execution
+against1bd76e6/ownplan6DF8CDCD, with660 before/after pins. This is the sole local
+Python slot; no other worker may run tests until an actual terminal/release. At
+the latest parent process inspection8e377a no matching Python was observed; that
+is pre-launch observation, not completion or permission to launch a competitor.
+
+G3 canary design was narrowed to the existing MedChat chain; independent review
+required outer ownership from before process creation and response encoding/cap
+checks before decode/forward. Amended plan5F3F7D9B is SOURCE READY for test-only
+preparation. Zeno may prepare only tests/test_g3_generation_canary.py and ownplan;
+no canary implementation, launcher, inference, deployment or production activation
+is authorized at this checkpoint. The strict token grant remains unproven.
+
+An unauthenticated read-only GitHub metadata request c63eb0 returned HTTP403.
+Its reason is not inferred, and it provides no new remote PR/CI evidence. Local
+code/test work continues; no unsafe credential workaround or merge is attempted.
 
 Aligned continuation author exact61 completed73095/9e510a, exit0,
 6376passed7warnings816.85s. All660 SHA256 values and658 tracked Python paths
