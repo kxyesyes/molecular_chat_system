@@ -39,6 +39,22 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+G3 cancellation behavior is now actually reproduced: source-approved single-node
+32a0d1 returned1failed1.20s,exit1,656pins unchanged. The decisive assertion observes
+two delegate POSTs instead of one after actual task cancellation with the external
+flag false. Earlier actual worker/client cleanup assertions passed before that
+assertion. Author may minimally latch cancellation promptly while retaining the
+same owned call through physical drain; existing strategy/rounds/tests stay fixed.
+No real Ollama generation occurred; the regression uses finite HTTP bodies.
+
+Web Task7 first16 run6b0b83 failed16 in4.91s,7warnings,exit1,32pins unchanged.
+All failed before the publication behavior: function-local source fixture import
+captured actual_app's mocked RAGSystem, so initialize() was not a coroutine.
+Author moved only two imports to collection time (+2/-2), lifecycle70523D54 and
+plan5AF303BC, preserving all16 assertions and deadlines. Independent SOURCE and
+the corrected exact-node run are still pending; no production failure or GREEN
+is inferred from the fixture error.
+
 G3 scriptAB2F4C5E/plan7A355005 received independent SOURCE HOLD: task cancellation
 is latched only after settle_owned_call finishes physical drain, so a generator
 may delegate another round while the external cancellation predicate stays false.
