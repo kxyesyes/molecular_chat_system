@@ -39,6 +39,21 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Corrected Web Task7 exact16 run9804/ab7073 completed16passed,7warnings,21.81s,
+exit0,32pins unchanged after independent SOURCE of the two-import correction.
+All four actual publication boundaries now retain failed/corrected state when
+the underlying source changes; restoring bytes after correction does not release
+science or a continuation nonce. This is the first Task7 matrix only, not the
+other three matrices or independent fresh QUALITY for the whole Web batch.
+
+G3 immediate-cancel latch fix1FC0EB92 preserves the single original owned task
+under shield until physical drain. Independent SOURCE approved its exact delta.
+Parent b585fd ran all18 non-launcher test functions:76passed1.85s,exit0,656pins
+unchanged, including the original actual-task-cancel behavioral regression.
+Independent fresh QUALITY is assigned. The four absent-launcher functions
+(10 parameterized cases) remain explicitly unrun in this selection; no whole
+canary/OS qualification/live-generation success is claimed.
+
 G3 cancellation behavior is now actually reproduced: source-approved single-node
 32a0d1 returned1failed1.20s,exit1,656pins unchanged. The decisive assertion observes
 two delegate POSTs instead of one after actual task cancellation with the external
