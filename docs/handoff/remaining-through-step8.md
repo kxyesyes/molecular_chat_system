@@ -64,8 +64,14 @@ Task8 controls had a source-detected missing brace, corrected testCB7A; receipt
 planFF942 passed independent SOURCE. Attempt7ec2bf stopped at preflight before
 Python due to the receipt-only plan update and is NOT RED. Actual first6 controls
 11558/f5aad0 then completed **6failed4.73s**,exit1,36pins unchanged: real supervise
-rejects the new fixed selectors in the no-real-Popen rig. Full55 controls follow
-before implementation. G3 six bootstrap APIs are prepared in launcher4AD10 with
+rejects the new fixed selectors in the no-real-Popen rig. Full55 controls
+19190/734ff9 then completed **31failed24passed18.85s**,exit1,36pins unchanged:
+new selectors are rejected and the fixed table/thin caller are missing. The
+positive source-coverage and existing rejection checks pass; this is not
+scientific RED or a full47-module result. The approved minimal existing-gate
+whitelist/argv expansion and thin actual-owner-checking caller implementation
+are released, with tests frozen and independent SOURCE before any run.
+G3 six bootstrap APIs are prepared in launcher4AD10 with
 manifestFE6F/testsC5A9/plan14CB, awaiting independent SOURCE; no cold/native or
 real generation result is claimed.
 
