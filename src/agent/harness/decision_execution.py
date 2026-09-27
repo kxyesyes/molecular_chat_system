@@ -13,20 +13,60 @@ def retry_persistence(write):
 
 
 class DecisionEvents:
-    def __init__(self, bus):
+    def __init__(self, bus, *, binding_profile=None):
+        from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
+        if binding_profile is not None and (type(binding_profile) is not str
+                or binding_profile != B1_PROFILE_REVISION):
+            raise ValueError('invalid_binding_profile')
         self.bus = bus
+        self.binding_profile = binding_profile
         self.delivery_retries = 0
 
-    def emit(self, *args, **kwargs):
+    def emit(self, trace_id, event, message, skill=None, tool=None, progress=None,
+             payload=None, event_id=None):
+        from src.agent.runtime.task_state import TaskEventType
+        terminal = {TaskEventType.TASK_COMPLETED: 'completed', TaskEventType.TASK_PARTIAL: 'partial',
+            TaskEventType.TASK_FAILED: 'failed', TaskEventType.TASK_REJECTED: 'rejected',
+            TaskEventType.TASK_CANCELLED: 'cancelled'}
+        if self.binding_profile is not None and event in terminal:
+            import re
+            if type(event_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', event_id) is None:
+                raise ValueError('invalid_terminal_attempt')
+            # Never traverse/copy the candidate scientific payload. Only this
+            # detached server-owned summary crosses the provisional boundary.
+            payload = dict(terminal_attempt_id=event_id, observed_outcome=terminal[event],
+                publication_stage='pending_source_check', answer_released=False)
+            message = 'Decision terminal attempt pending verification'
+            tool, progress = None, None
+        kwargs = dict(trace_id=trace_id, event=event, message=message, skill=skill,
+                      tool=tool, progress=progress, payload=payload, event_id=event_id)
+        if self.binding_profile is not None and event in terminal:
+            kwargs['frozen'] = True
         try:
-            return self.bus.emit(*args, **kwargs)
+            return self.bus.emit(**kwargs)
         except Exception:
             if not kwargs.get('event_id'):
                 raise
             # AgentEventBus journals persistence and attempts each callback at
             # most once. Reusing its event ID cannot redeliver the callback.
             self.delivery_retries += 1
-            return self.bus.emit(*args, **kwargs)
+            return self.bus.emit(**kwargs)
+
+    def emit_publication_correction(self, **kwargs):
+        """Failure-only Session channel; its separate journal owns retries."""
+        from src.agent.runtime.task_state import TaskEventType
+        from .decision_bounds import validate_json
+        payload = kwargs.get('payload')
+        validate_json(payload, max_bytes=8192, reason='invalid_publication_correction')
+        if (self.binding_profile is None or kwargs.get('event') != TaskEventType.TASK_FAILED
+                or type(payload) is not dict or set(payload) != {
+                    'terminal_attempt_id', 'supersedes_terminal_attempt_id', 'observed_outcome',
+                    'publication_stage', 'answer_released', 'reason', 'boundary',
+                    'invalidated_evidence_ids', 'counters'}
+                or payload['publication_stage'] != 'invalidated'
+                or payload['observed_outcome'] != 'failed' or payload['answer_released'] is not False):
+            raise ValueError('invalid_publication_correction')
+        return self.bus.emit(**kwargs, frozen=True)
 
 
 class SingleAttemptTool:
