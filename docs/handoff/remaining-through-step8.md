@@ -15,19 +15,19 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Task6 metadata41 passed; plain-native still3s timeout/plain-json passed; profiled pair both timeout | Tasks6–8 not complete; profiling is not the sole cause; no production timeout fix claimed |
+| Normal-Web B1 Tasks4–8 | Latest phase-only native diagnostic1passed39.82s after controls2passed; earlier plain-native3s/profiling failures retained | Tasks6–8 not complete; single pass is not a stability/root-cause fix; functional/performance separation design pending |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
-| Native ASCII validation optimization | DraftPR98 aligned head8ce19a5 includes landed PR99/100; owned source/test unchanged; new CI pending | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
+| Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
 | Target execution guard integration | PR91 MERGED82bb6c7; reviewed/landed tree1ced6aca equal; exact-head CI36262868730 success9/9 | Foundation prerequisite satisfied; no production entry activation |
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
-| B2 generator contracts | DraftPR101 a44ff39; author/fresh/aligned exact2 each479passed; SOURCE/QUALITY approve | Latest-head CI pending; pure contract is not runtime/backend proof |
+| B2 generator contracts | DraftPR101 c0c4f9c aligned to actual mainc463dd2; prior author/fresh/aligned exact2 each479passed; owned code/test unchanged | Fresh aligned-head CI pending; pure contract is not runtime/backend proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -35,6 +35,41 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR98 merged after repeated fresh head/main/check/review guards:9successful checks,
+zero unresolved threads, squashc463dd2824265fbe1015ea5cf0564c804a4e3cf6. Full
+reviewed/landed trees both791e4617fdfa6a9398b6fb1dea1849fd947fc950. CI36286487041
+actual Agent collection11519=11295core+224web; core11294passed1skipped21140warnings
+577.15s; Web224passed7166warnings180.61s; sandbox1976passed4skipped1warning54.62s.
+The original failed CI and first0.5s/Web3s causes remain recorded, not fixed claims.
+PR101 was aligned by7a1a70d with all three owned hashes unchanged, then evidence
+appendc0c4f9cdae8734e119532183f92d1f0058a7fed6 pushed. Shared bounds intentionally
+changed; prior local479 results are not rerun evidence. Fresh full CI is required.
+
+Continuation actual RED8244/b05e0a:5failed3SWIGwarnings11.26s,exit1,87pins unchanged.
+Four native/JSON feature failures show no initial revision8 nonce; one API failure
+shows missing codec. This is not donor-defect reproduction. Sole slot released;
+minimal production implementation on the current publication baseline authorized,
+with frozen tests and existing cancellation/first-error protections preserved.
+
+C0a test SOURCE READY E4C8/9A38/97B610/4AE311. Actual one-node REDc70277:
+1failed5.34s,exit1, four hashes unchanged, expected absent-contract call-phase
+failure. Slot released; only new pure DTO module plus ownplan implementation
+authorized. No docking dispatch or C0b execution follows from that release.
+
+Normal-Web controls a593e0:2passed3warnings2.63s; phase-only scientific25006/5968da:
+1passed7warnings39.82s. Each run retained26pins and released ownership; no timeout,
+therefore no dual snapshot. Both scientific branches reached four-tool, whole-input,
+evidence-ID and anti-hallucination checks; full provenance fields are validated by
+production, not additionally enumerated by this test. This single pass does not
+resolve earlier3s failures or establish stable performance. Only a written design
+separating product-root functional acceptance from independent wall-clock observation
+is authorized next; no test/production deadline change yet.
+
+G3 metadata designADB89F09 received independent SOURCE READY. Only standalone
+offline test preparation is now released; production script, Python and actual
+two-request metadata campaign remain held. No real inference, model load, config
+or credential discovery occurred. Packages7/8 and their full positive gates remain open.
 
 Fresh remote observations confirm PR98 run36286487041 and PR101 run36286571814
 are still live at exact8ce19a5/a44ff39. Seven component checks succeeded for
