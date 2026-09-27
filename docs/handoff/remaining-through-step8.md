@@ -33,7 +33,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 concrete Windows owner | Stage-B SOURCE and fresh QUALITY approved: parent224passed44.31s; independent27198/77324c224passed44.66s,zero warnings/skips,332pins and1246manifest identities unchanged | Stage-C cold-import guard/report tests being prepared; actual cold imports and real generation/B2 still open. Finite-process fixtures are not scientific execution |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
-| C2 consent execution | Parent43571/05e943 actual39-case characterization:38passed,1failed,84.94s,exit1;11 frozen inputs unchanged | Runtime-generation postclaim terminal projection failed its original5s wait; diagnose before fixing. Two unchecked UPDATE-rowcount paths need genuine SQLite zero-update regressions. No C2 release or real Vina claim |
+| C2 consent execution | Minimal rowcount/receipt fixes20CD/2BA: focused32875/499f74 3passed15.15s; full13768/bf68f1 41passed83.50s,exit0,11pins unchanged | Claim commit-then-raise plus subsequent readback failure still needs coverage; broader compatibility and independent QUALITY/publication remain. Not real Vina/C4/P8 |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -41,6 +41,33 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Actual C2 regression58215/771577 reproduced all three problems in22.94s:
+SQLite RAISE(IGNORE) and original cursor.rowcount=0 were observed before the
+claim case improperly submitted one task, and the dispatch case improperly
+invoked one synthetic raw executor. The generation diagnostic independently
+observed durable FAILED/consent_generation_mismatch, settled cleanup, occupied0,
+no local operation, backend0, one exited lease, successful cleanup and zero raw
+calls BEFORE finally. Its failure is receipt projection, not a physical leak.
+
+Minimal reviewed changes require exactly one affected row inside each original
+claim/dispatch transaction and otherwise rollback without retry. Generation
+fallback now applies only to selected ACTIVE/SUCCEEDED; known negative terminals
+and first errors survive operation removal, while stale success remains UNKNOWN.
+Frozen runtime20CD/store2BA/testsCE745/plan0C4 passed focused32875/499f74:
+**3passed15.15s**, then full41 cases13768/dcef68->bf68f1: **41passed83.50s**,
+bothexit0,11pins unchanged and physical wrappers terminal. The separate ambiguous
+claim-commit plus failed-readback combination remains a required follow-up,
+followed by broader compatibility/independent QUALITY. No production release.
+
+Task8 controls had a source-detected missing brace, corrected testCB7A; receipt
+planFF942 passed independent SOURCE. Attempt7ec2bf stopped at preflight before
+Python due to the receipt-only plan update and is NOT RED. Actual first6 controls
+11558/f5aad0 then completed **6failed4.73s**,exit1,36pins unchanged: real supervise
+rejects the new fixed selectors in the no-real-Popen rig. Full55 controls follow
+before implementation. G3 six bootstrap APIs are prepared in launcher4AD10 with
+manifestFE6F/testsC5A9/plan14CB, awaiting independent SOURCE; no cold/native or
+real generation result is claimed.
 
 Parent C2 normal17691/4ba5d5 completed1passed11.85s, then the independently
 execution-safety-reviewed full39-case matrix43571/05e943 completed **38passed,
