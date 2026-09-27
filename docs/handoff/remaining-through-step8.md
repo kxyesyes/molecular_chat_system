@@ -37,6 +37,13 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+PR102 exact46d7076 CI36288613814 is confirmed in_progress (70ee55), not complete.
+Web root-aware test preparation D56DE8CD/planF17990CF is under independent SOURCE:
+20 proposed contract controls and two explicit functional selectors; helper and
+external supervisor remain absent. Reversing additions restores original8E25
+bytes; original five arms and scientific/3s/5s assertions are preserved. No test
+execution or new functional pass follows from this source preparation.
+
 C0a's four-file scope is now on independent codex/docking-preparation-protocol,
 HEAD46d70767bda6c9cd6041f56358b36c150d8ba71d, published/attached as draftPR102.
 Parent aligned from108df5d to actual mainc90c180 with all four owned hashes
