@@ -19,7 +19,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
-| B1 revision8 continuation | Author6376passed; independent SOURCE READY and fresh37290/bc9113:6376passed7warnings811.40s,660pins unchanged; additional shared462passed | PR103 draft created at5d3df75; exact-head CI36306118836 in progress. Remote review/CI and reviewed/merged-tree equality still required |
+| B1 revision8 continuation | PR103 MERGED73379a1; reviewed5d3df75, CI36306118836 success9/9, zero unresolved threads, reviewed/landed tree694147d5 equal; author/fresh6376passed each | Core revision8 release satisfied; normal-Web integration and P8 live acceptance remain separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
@@ -38,6 +38,35 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+PR103 was converted from draft only after exact-head CI36306118836 completed
+successfully (all nine jobs), independent SOURCE/fresh QUALITY approval and zero
+unresolved review threads/review change requests. SHA-guarded squash returned
+73379a11f962034dcce0976d8b40ce497b916f1b. Parent fetch531424 confirmed reviewed
+and landed full trees both694147d58f749351930bbc95f8d81c81d724a9de. CI Agent core
+reported12199 passed,1 skipped,25774 warnings in816.93s; separate Web lifecycle
+reported224 passed,7167 warnings in179.54s. High warnings and historical failures
+are retained; this is not live-model/scientific acceptance or activation.
+
+Web helper correction926725FC passed independent SOURCE but exact25 run
+87130/ab5b97 returned6failed19passed7warnings11.74s,exit1,31pins unchanged.
+Origin observation now reaches the later checks. One legacy cancellation fixture
+loses exception identity when re-awaiting its cancelled producer; the five new
+runtime controls encounter an invalid FinishDecision evidence-reference fixture.
+Only source-grounded fixture corrections are authorized; terminal, scientific,
+deadline and cleanup assertions stay intact. No functional-native retry yet.
+
+G3 canary B768 test freeze passed independent SOURCE after observer correction.
+Parent whole-module API RED7b948c:76failed9passed2.51s,exit1,657pins unchanged.
+Subject/launcher APIs are absent; this does not prove behavior failures or live
+inference. Implementation of the fixed diagnostic script is now in progress;
+actual launcher/OS qualification and live generation remain required.
+
+C first-guard test/design4E42157B/2F06847E passed independent SOURCE. Parent
+single-node API RED2a5f0c reached the explicit missing callable assertion:
+1failed1.65s,exit1,five pins unchanged. The minimal transport-only implementation
+is now authorized, with all opted-in held-close/isolation tests frozen. No GREEN
+or complete docking preparation/consent execution is claimed.
 
 Continuation publication resumed using the now-available GitHub connector, not
 credential extraction. Repository access succeeded and head-branch search found
