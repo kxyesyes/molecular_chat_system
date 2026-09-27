@@ -18,9 +18,9 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Normal-Web B1 Tasks4–8 | Task5 locally committed5c2e226; Task6 metadata fix focused41 passed; landed parser integrated9fc2813; scientific batch still receive-times-out | Test-only worker timing controls/diagnostics underway; Tasks6–8 not complete; no production timeout fix claimed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
-| B1 terminal publication | Four-production SOURCE-approved; actual focused97 passed after4behavior+1API RED | Expanded60 and fresh QUALITY pending; revision8 separate |
+| B1 terminal publication | Four-production SOURCE-approved; author exact60 terminal6208 passed7 warnings after focused97 GREEN | Independent fresh60 QUALITY pending; revision8 separate |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
-| Native ASCII validation optimization | Draft PR98 head3e5e219; author/fresh exact49 each4774 passed1 skipped; reviewed EOF-only correction; latest-head CI running | Original3s receive timeout remains; uninstrumented control pending; no Web-fix claim |
+| Native ASCII validation optimization | Draft PR98 head3e5e219; two local49 runs passed; latest CI sandbox-core failed hung-create cleanup test | Do not merge; preserve CI failure and investigate separately; original Web3s issue not fixed |
 | Analytical clause / target roles | PR94 MERGED3182617;9CIpassed, reviewed/landed treeeaa8ac67 equal; empty-journal7 regression passed in PR93 | Normal-Web scientific batch still times out; not complete |
 | Core CI suite budget amendment | PR95 MERGED4d896b6;9CIpassed, reviewed/landed tree0127ba7b equal | Aligned PR93 CI passed; core1200/Web600 changes suite capacity, not science/performance |
 | CI complete Agent capacity partition | PR90 MERGED35b8270 afterCI36260272170 success9/9; actual collection9802=9578+224, reviewed/landed trees equal | Retain original timeout and capacity-increase disclosure; not a performance fix |
@@ -33,6 +33,36 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Publication author exact60 terminal46845/4a5ecf exit0:6208passed7warnings1015.62s,
+78/78 Git/SHA256 inputs unchanged, manifestBA37B05826BE3B82A4F338BFB4B5EC0B08DCCAA96CF3D4FBBEDA4620C9C7EA76.
+Author released the slot and appended only ownplan D9BBFBDD. Fresh independent
+QUALITY remains pending, no release/merge claim. Explicit source-close→restore
+scenario remains unproven; the pass count does not remove that limitation.
+
+Web observer controls: actual38648/ceaeb5 RED6missing-keyword call failures and
+6existing-control passes9.50s,26hashes unchanged. Reviewed fixture-only opt-out
+implementation8C16A7 leaves scientific test263DF6 and all production unchanged.
+Full10-function controlGREEN56704/400ad4:29passed7warnings10.13s,26hashes unchanged.
+Parent then released only the explicit plain-native/plain-json scientific pair;
+processes32028/46344 confirmedlive in cfea55. No plain result or overhead conclusion
+yet; original3s receive/5s cleanup remain unchanged. Profiled pair separately gated.
+
+PR98 CI36282797393 sandbox-core job108517744221 failed:1failed1972passed4skipped,
+1warning109.86s. Failure was existing test_hung_create_hits_hard_deadline_and_never_claims_cleanup_success.
+Full stack (4b2385/363a73) shows original0.5s wait_terminal TimeoutError followed
+by asyncio.run cancellation drain hanging until pytest60s. Source test releases
+the cancellation-resistant fake create only on its successful path; missing
+finally explains the secondary cleanup leak. Cause of the initial0.5s timeout
+remains UNKNOWN. No claim that ASCII caused or fixed either problem, no CI retry.
+Independent clean sandbox-hung-create-test-cleanup tree has only a documentation
+design grant; production/deadlines remain unchanged. PR98 is not mergeable yet.
+
+B2 A-contract F75B352 independent written re-review READY; only test-source
+preparation released, not runtime/token/backend control implementation. C docking
+read-only inventory confirms reusable staging/execution/cleanup but missing normal
+chat consent/owner/expiry/artifact authorization closure. Independent C design
+document preparation now underway; no C implementation or real execution.
 
 ASCII publication: exact three-file commit3e5e2195c0e4910295283b3822b9e1609db7aa85
 pushed as draftPR98 (804e8e), based on c612c987. Staged inspection found an extra
