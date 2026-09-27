@@ -40,6 +40,30 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Web36 SOURCE approved7DCAA59A/D63941FD before actual parent run8193/6dfc6c:
+**36failed,7warnings,47.69s**,exit1,32pins unchanged. Visible failures reach the
+new immediate `runtime.tasks` assertion after the completion frame; actual
+`_execute` still awaits the final send and its done callback removes the task.
+Receiving a frame alone is not proof of task settlement. Author is diagnosing
+and preparing an explicit actual-task synchronization amendment; no production
+fix, relaxed deadline, deleted cleanup assertion or successful rerun is claimed.
+The process is terminal and the Python slot is free.
+
+G3 five-fault TEST SOURCE03FF7802/22E4F532 is HOLD: early test failure could undo
+the native Job-close success observer before cleanup joined, losing the receipt
+and then retrying a stale saved handle. The test-only correction separates fault
+disabling from receipt observation until physical cleanup completes. No execution
+of those five cases occurred. Separately, ignored bootstrap plan0FA592B2 passed
+independent SOURCE review; concrete manifest/deadline/report-merge gates remain,
+and no cold import or live generation is claimed.
+
+C1 blocked-revocation proposal passed independent SOURCE review. TEST-FIRST
+preparation is released for cancel/repeated-cancel/deadline crossed with both
+SQL/writer release orders plus a normal success control. Production remains
+frozen E089/1033/7043/80BC until actual regression RED. Immediate local abort is
+distinct from confirmed durable revocation; the old final REVOKED assertion is
+retained after the real receipt, not weakened to an assumed successful write.
+
 C0b publication64b104 pushed only the clean reviewed four-file integration branch;
 git ls-remote confirms exact ebb2093bf817bf375ba77f69c403a223dff0dd99. No main write,
 force push, PR or merge. The first preflight3a1435 stopped before push because its
