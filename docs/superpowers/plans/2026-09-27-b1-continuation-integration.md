@@ -328,3 +328,245 @@ Current blockers to code/test work: actual publication landing and re-pin, paren
 - [ ] Parent SOURCE review of this document closes the planning gate.
 - [ ] Record actual landing/re-pin, approved test source and the separate execution ledger only when those events really occur.
 - [ ] Report exact adapted hashes and verification evidence; never label the merged loop/tests donor-exact or carry historical passing counts forward.
+
+## 7. Actual PR99 landing re-pin and TEST PREPARATION release
+
+Parent reports PR99 actual squash `108df5d8acbdc1881a8f09c31b8b450acdfb247b`, CI36284700147 nine checks successful, collection11472=11248+224, Agent11247 passed/1 skipped and Web224 passed. These are upstream parent evidence, not continuation integration test results.
+
+Local read-only verification: reviewed publication branch commit `3658416a04f4626d80fdd879c15e3c9e2aa72fc2` and actual landing both resolve to full tree `9ddfae2dc26cefb2a14f584328e696a0f4477cb4`. Landing is an ancestor of parent-aligned HEAD `b4252801cbf2396957de445ec563dcfc815e953e`; initial working tree is clean. Compared with origin/main, only this ownplan is added. No publication files were copied from another working tree.
+
+Re-pinned section1 dependencies remain exact: execution582a6fb, eventbusd3c580b, Sessionbf162d1, loopbeb9ce7, publicationtestf2628b6. Existing loop test is `d298090d240f441a9739c9da03bb88c99b1c97b1`; continuation reader is `b44a0cbcbab7d13286c2c3c4fe94a65f4b5750af`. The complete76-file union of publication's exact60 targets and source/preservation dependencies (excluding its plan/runner) matches the accepted publication after-run blobs, zero differences. This covers loop8 and additional14 preservation paths, parser2ec6087, empty-journal7 and parser71 modules. The absent new codec/test are expected feature scope, not a failed dependency audit.
+
+Against donor parent `656330e1908aa31b8499341b7e1c392cf55f9ffc`, Session/CAS/WorkerOwner, journal/resolver/acceptance, adapters and JSON-bounds dependencies are unchanged. Historical parser/RAG/target/reverse and publication phase/test differences are preserved, not reverted. The separately landed molecular-generator difference is outside B's seven selected tools and is untouched. No discovered dependency requires edits beyond the approved six paths.
+
+Parent now releases only the three test paths in section2 plus this plan. No production/runner/Python/import/compilation/test/staging/commit/push authorization. Sandbox cleanup worktree remains frozen and untouched. Missing revision8 nonce is feature RED; an explicit absent-codec assertion/import is API evidence, not either reported donor-bug reproduction. No known donor bug will be deliberately installed for RED. This section supersedes the historical doc-only/landing-pending state solely for re-pin and test preparation; implementation/execution remain separately gated.
+
+## 8. Prepared test source freeze — pending independent SOURCE/execution release
+
+| Prepared test | Git blob | SHA256 |
+|---|---|---|
+| `tests/agent/test_decision_binding_continuation.py` | `1d8e9e770376dab1a3cc78103e38e2d17c53a089` | `ACC337B40EEEC2EFB5D8635D0021B9FEC82B853BE28C362DCD07ED10250ECFA6` |
+| `tests/agent/test_decision_binding_loop.py` | `03149a596c6894e342eee483c8636a55f9361152` | `5C6394E9F5873703364D3C356A715BF6AAB83CF49AC5920CA1691184000D13D1` |
+| `tests/agent/test_decision_binding_publication.py` | `9274535ce828e6f1b34fa2c4cd4a85efdce16e6f` | `F406808AD9DFBFCB2A16DAF1A16227A6973595BA480BA0A52680966A3EC919B7` |
+
+The new module retains the complete donor text as an unchanged prefix (26 test functions), then adds the seven section4 families (24 parametrized cases) and one explicit API-contract function. Missing codec import is not a collection dependency: codec imports remain inside individual tests. This is source preparation, not a collected/passing count.
+
+The cancellation tests use the publication physical-worker harness, real closure/snapshot/finish and SQLite/event callbacks. All blocked-worker assertion paths release and join in `finally`; they assert repeated cancellation retains the pending owner, fixed scientific/model calls and running row until physical exit, then one real drain and no source checks after sealing. Post-snapshot coverage targets the first owned finish precheck after the real codec returns and the loop assembles metadata. Postattempt coverage commits a real partial event then raises with the terminal flag still false; immutable provisional history must be superseded, not overwritten or reclassified as ordinary cancellation.
+
+First-error coverage forwards the real CAS and guarded owned call, records the actual first boundary exception before invoking real start, and distinguishes fully started versus start-event-committed-but-unstarted authority. Reopen coverage constructs fresh actual registries/stores/models; new-generation negatives reopen the exact same temporary producer files/configuration and check file digests without new science during resume. Both real SQLite claimants have separate execution threads/event loops and owners; their bounded rendezvous is immediately before forwarding the real CAS, never a mocked claim result. Fixture teardown closes all registries; newly opened sources close in `finally`.
+
+Existing loop test: only owned initial clarification now requires a revision8 nonce/snapshot; bogus legacy nonce rejection and zero-action/model counts remain. Its 37 test function names and the complete four-case cancellation suffix are unchanged. Existing publication test: all40 functions remain, including all34 original functions and six integration additions. Waiting-status remains ownerless; an additional authenticated waiting-publication branch forwards the real CAS, retains the committed revision8 history, and verifies future rejection after invalidation. The ownerless reentrant waiting-status test still checks its original status sequence. The entire six-addition/cancellation-helper suffix is unchanged. Neither existing module was replaced with historical donor source.
+
+Read-only preparation checks: all61 ordered section5 targets now exist, are unique, and retain the original60 order. Rechecking the76-file preservation union found only the two intentionally adapted test paths above; all74 other paths, including all production dependencies, parser/empty-journal/current-source repairs and Session/worker/store, remain identical. `git diff --check` succeeds. No Python, imports, collection, compile, runner creation/execution, network, staging, commit or push occurred; no test-pass or behavioral-RED claim is made. No sandbox worktree file was edited.
+
+Proposed first focused RED selection, **not executed and requiring separate parent SOURCE plus sole-slot grant**, in this exact order:
+
+1. `tests/agent/test_decision_binding_loop.py::test_initial_clarification_never_mints_legacy_nonce` — native/json; existing-API call-phase assertion that an authenticated B clarification publishes revision8, with no scientific calls.
+2. `tests/agent/test_decision_binding_continuation.py::test_sqlite_revision8_no_action_smiles_then_target_keeps_original_journal` — native/json; first call must mint the missing revision8 journal nonce. Later reply/target assertions are integration goals, not evidence reached on the current baseline.
+3. `tests/agent/test_decision_binding_continuation.py::test_revision8_codec_api_contract` — separate explicit absent-codec API assertion; not a fixture/import crash and not donor-defect reproduction.
+
+The additional snapshot/first-error desired regressions are not initial defect-RED claims; their physical barriers require the later safe implementation. No known donor defect is installed to make them fail. The prior direct source-close→restore publication-scenario coverage caveat remains: closing a source at postclaim before start and asserting no restore does not close that separate caveat. Next action is parent independent SOURCE review; production, execution and publication remain held.
+
+## 9. Accepted initial feature/API RED — actual execution evidence
+
+After Lovelace SOURCE READY on plan800EF3 / testsACC337,5C6394,F40680, parent supplied and verified ignored runner `EA3B05E05F0F39A23D0056F9CC051B4653708F4E4ECD5335E42B7E469E7298A8` (blob `32cd1cfbec0125a8c73cc3b44e516e3446d70391`). Parent reports full forward/reverse byte comparison against admission6D490 with only REPO changed. This worker re-read its isolation settings and verified its hash; no runner edit occurred.
+
+Parent separately granted the sole Python slot for exactly this invocation on HEAD `b4252801cbf2396957de445ec563dcfc815e953e`:
+
+```powershell
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py 'tests/agent/test_decision_binding_loop.py::test_initial_clarification_never_mints_legacy_nonce' 'tests/agent/test_decision_binding_continuation.py::test_sqlite_revision8_no_action_smiles_then_target_keeps_original_journal' 'tests/agent/test_decision_binding_continuation.py::test_revision8_codec_api_contract'
+```
+
+Actual session **8244**, launch **a82028**, authoritative terminal **b05e0a**: exit **1**, `ORDINARY_PYTEST_EXIT=1`, **5 failed, 3 warnings in11.26s**. The same handle was polled, with no restart, retry or expanded selection. All five failures explicitly reported `phase=call`; there were no collection/setup/fixture failures. The three warnings were SWIG missing-`__module__` DeprecationWarnings for SwigPyPacked, SwigPyObject and swigvarlink.
+
+- `test_initial_clarification_never_mints_legacy_nonce[native]` and `[json]`: line261 assertion failed because `result.metadata.get('continuation_id')` was None. Earlier waiting/clarification assertions were reached successfully. The right-hand zero-call conjunct at that failed line short-circuited; do not claim later assertions ran.
+- `test_sqlite_revision8_no_action_smiles_then_target_keeps_original_journal[native]` and `[json]`: line962 explicit missing-nonce assertion failed after the waiting/zero-call assertion. Subsequent SMILES/target replies were not reached.
+- `test_revision8_codec_api_contract`: line999 assertion `find_spec(name) is not None` failed with the explicit absent revision8 codec API message. This is API feature evidence, not an import/setup exception.
+
+Thus four nonce feature RED cases plus one API RED; neither reported donor defect has been reproduced by this run. Before/after **87 file pairs** had identical Git blobs and SHA256s: publication76 preservation union, new continuation test, ownplan, runner, and eight additional SQLite/JSON-bound/input/history/binding-contract/factory/registry/spec dependencies. All three test/plan/runner pins remained exactly section8/above. The codec was absent before and after. HEAD stayed b4252801 and `git diff --check` succeeded. The worker explicitly RELEASED the slot immediately at terminal; parent accepted these results. This section records that historical freeze, not verification of the implementation below.
+
+## 10. Implementation-only source freeze — awaiting independent SOURCE
+
+Parent accepted section9 and released edits only for the approved integration, with tests frozen and another worker owning the Python slot. No Python, imports, compilation, tests, model calls, runner changes, staging, commit or push occurred in this implementation phase.
+
+| Production path | Integrated Git blob | SHA256 / provenance |
+|---|---|---|
+| `src/agent/harness/decision_binding_continuation.py` | `6d500e275af2dc671cb30230b5a0665182e8ae90` | `8DBEF1367EDCE3D6B4EE526405CD243059116570C6703496EA44153B00654C05`; new codec donor-exact |
+| `src/agent/harness/decision_continuation.py` | `18c6714b1dda531768203d7722ca35e9cbfd1ded` | `528E0D9ED2B9B74891CBC42686E245AFD76CB2E0EDF0827BB2A0F10F6C75F259`; one-line B fingerprint conditional, donor-exact |
+| `src/agent/harness/decision_loop.py` | `e7b46ef3d0181202d34e191ae737c18bf044c577` | `1035880B33675B4F5B8BE66A191F0605C5AABD6806743425E0CE2609927AFEED`; adapted against landed publicationbeb9, not donor-exact |
+
+Loop integration uses contextual hunks on the current publication source. It retains phase entry before finish callbacks, owned pre/post checks, commit-then-raise handling, bounded correction and actual owner drain. Added revision8 behavior includes detached replay and whole-live comparison before fresh seals; one bounded real claim; source/configuration rechecks; original no-action journal plus admitted reply; segment-start-anchored saved credit; fixed nonrefundable snapshot tail; guarded waiting publication. Legacy revision6/7 readers/CAS and their non-B restore/deadline branches remain unchanged.
+
+Both source-reported defects are protected in the integrated change, not deliberately installed for RED. Pending snapshot fields are initialized before cancellation handlers; ordinary snapshot/pre-finish cancellation clears them, removes any assembled nonce at finish, rewrites cancelled acceptance and suppresses waiting publication without erasing consumed prior claims or refunding tail credit. Postclaim reason/boundary is frozen before start, preferring the owned first-error latch. Started Sessions use failure-only correction; unstarted commit-then-raise returns an honest detached unconfirmed failure without granting correction authority or repairing the running row.
+
+The donor's safe detached fallback/frozen correction request/reentry guard is merged with current phases. An already latched Session failure is projected read-only from its frozen journal before attempting correction, preserving that reason even if a later callback raises; invalidation never traverses rejected restored observations for optional IDs. No Session/event/store/worker/provider/activation API was changed.
+
+Read-only freeze audit before this documentation append found exactly the two authorized existing production changes among section9's87 pins; all85 other files, including every test, runner, parser, empty-journal and publication/source dependency, were byte-identical. The new codec is the additional approved path. `git diff --check` succeeds. Three test blobs remain `1d8e9e77`, `03149a59`, `9274535c` with their full section8 hashes; all61 regression paths/order remain unchanged. These are source/hash checks, not integrated GREEN evidence. Direct source-close→restore publication coverage remains unclaimed.
+
+Next gate: independent SOURCE review of this exact three-production/three-test freeze and ownplan. Only a separate sole-slot grant may execute the exact three-module command in Task6, then separately authorized exact61/fresh QUALITY. No automatic run, code repair or publication follows this handoff.
+
+## 11. SOURCE P2: unstarted fallback versus outer drain — test preparation only
+
+Lovelace identified a remaining P2 in section10 loop `e7b46ef3`: after confirmed CAS and an actual first postclaim error, start may commit an event then raise while Session remains unstarted. The inner loop returns the detached FAILED/unconfirmed fallback without binding `finalization.session`. Outer `run` then drains the real owner; both its CancelledError and other-exception branches re-raise when that Session is None, losing the earlier returned failure. Source inspection confirms `WorkerOwner.settle` retains its physical drain but can re-raise cancellation after settlement. This is a source finding, not yet an executed behavioral RED.
+
+Parent authorized only two new regressions plus this plan, after the separate C fresh QUALITY run reached terminal and its slot was explicitly released. No production fix, Python, retry or existing-test rewrite is authorized here. Section10 production pins stay frozen; the new source review is required before a separate two-node RED grant.
+
+Appended helper and exactly two non-parametrized native-mode nodes in `tests/agent/test_decision_binding_continuation.py`:
+
+1. `test_unstarted_postclaim_failure_survives_real_drain_cancellation`
+2. `test_unstarted_postclaim_failure_survives_post_drain_error`
+
+Both create a real waiting RAG observation/SQLite nonce, forward the single real claim, close the actual source and observe the owned first `invalid_dynamic_binding` before start. A real start-event write commits then raises before `_started`; the test observes the actual inner detached fallback and unbound finalization, not a supplied replacement result. That callback also registers a real WorkerOwner root with a controlled physical worker. During drain, before releasing the worker, the tests assert running/consumed row and event history unchanged, no restoration/model/tool dispatch, no Session binding, finish or invalidation. All exits release and join the same run/worker tasks in `finally`.
+
+The cancellation node repeatedly cancels the actual run while its real owner retains the blocked worker, then requires the original FAILED reason/boundary/unconfirmed durability after physical settlement. The exception node forwards the entire real owner drain, then injects a **secondary receipt RuntimeError after proven settlement**; it does not pretend to reproduce an OS join failure. Both assert real worker exit, zero pending roots and one drain before the decisive desired-result assertion. Neither authorizes manufacturing a started Session, a failed-row repair, a terminal correction event or a new nonce. Extra secondary diagnostics are not prohibited, but may not replace the earliest reason/boundary.
+
+Expected current-source failure is a returned/gathered CancelledError or the exact injected receipt error instead of the previously observed detached AgentResult; this remains a source expectation until the separately granted run actually reaches these barriers. The existing four cancellation parameters and every prior test body remain unchanged. New test blob: `0f79c9c6fc80818dd6ab77b8d4f294cf56d96acf`; SHA256 `73E5C0E032353A100AC74A473C777A4C97E2CD7F5EA6F98CD129467531681B7D`. No test result is claimed for this addition. Next step is SOURCE review, then separate two-node RED, then separately released minimal production reconciliation.
+
+## 12. Accepted P2 behavioral RED and minimal source fix — GREEN not run
+
+After Lovelace SOURCE READY and G3's terminal slot release, parent granted one invocation on HEAD `b4252801cbf2396957de445ec563dcfc815e953e`, with test73E5C0, plan5E067, loope7b46ef and runnerEA3B05 frozen:
+
+```powershell
+& 'C:/Users/xkx52/.conda/envs/MedChat/python.exe' -I -S -B scratch/ordinary_chat_offline_runner.py 'tests/agent/test_decision_binding_continuation.py::test_unstarted_postclaim_failure_survives_real_drain_cancellation' 'tests/agent/test_decision_binding_continuation.py::test_unstarted_postclaim_failure_survives_post_drain_error'
+```
+
+Actual session **85871**, launch **7d9564**, authoritative terminal **5ce251**: exit **1**, `ORDINARY_PYTEST_EXIT=1`, **2 failed, 3 SWIG warnings in11.30s**. Both failures were `phase=call` at the decisive line1635 assertion `not isinstance(result, BaseException)`: respectively `CancelledError` and the injected `RuntimeError('synthetic post-drain receipt failure')` displaced the actual inner detached FAILED. These were not barrier/setup failures. Before that assertion, both cases verified physical worker exit, one real drain, settled owner/zero roots, unstarted/unbound Session, no finish/invalidate/restore, unchanged running row/events and no additional model/scientific calls. Later desired-result assertions were not reached. All **88/88 before/after Git blob and SHA256 pairs** were unchanged. No restart/retry/expanded run occurred; the slot was explicitly RELEASED at terminal and parent accepted the evidence.
+
+Parent then authorized edits only to loop plus this plan. The fix adds a private `detached_failure` result slot, populated solely in the confirmed-claim/unstarted-Session start-failure branch. It retains the already selected earliest reason/boundary and `correction_durability='unconfirmed'`. The mandatory outer real owner drain still executes; its separate CancelledError/Exception handlers retain that result only when Session is unbound and this explicit detached failure exists. Other unbound paths still raise; started Session handling, ordinary cancellation, correction and post-drain deadline handling are unchanged. No Session binding, finish/invalidate, persistence repair, cleanup retry or assertion weakening is introduced; an unconfirmed failure does not claim durable correction or cleanup success.
+
+New loop blob **`ffa8883b06b359e25825ca9e0c68f302347799ac`**, SHA256 **`1B56E632BB26A2780426634AAF22000C09C89A64A3A78C064F19DB7497D0B2EF`** supersedes section10's loop pin only. The continuation test remains exactly section11's73E5C0; all other production/test/runner preservation inputs remain frozen. The direct source-close→restore publication coverage caveat remains open. This is source-only preparation for independent review: no Python, imports, GREEN, commit or push; execution requires a new explicit sole-slot grant.
+
+## 13. Accepted exact2 GREEN and next exact61 source freeze
+
+Parent reports Lovelace corrected SOURCE READY for loop `ffa8883b06b359e25825ca9e0c68f302347799ac` / SHA256 `1B56E632BB26A2780426634AAF22000C09C89A64A3A78C064F19DB7497D0B2EF`, with test73E5C0 frozen and pre-run plan SHA256 `6E136BEBC549B3CD17663D09C0D8A9F9AE833A0FE3D8B0D18E6F786B0E5C1206` (blob `f96010e8b43760a39de5c11a9aa307c845c1f274`). SOURCE approval is separate from runtime evidence.
+
+Under a new sole-slot grant, the worker executed section12's exact two-node command once, in the same cancellation-then-post-drain-error order with unchanged approved isolated runner EA3B05 and MedChat `-I -S -B`. Actual session **8866**, launch **755def**, authoritative terminal **47f031**: exit **0**, `ORDINARY_PYTEST_EXIT=0`, **2 passed, 3 SWIG warnings in11.50s**. Warnings were the same SwigPyPacked, SwigPyObject and swigvarlink missing-`__module__` DeprecationWarnings. The same handle was polled without retry/restart; the slot was explicitly **RELEASED immediately at terminal**, before read-only post-run hashing.
+
+Unlike the RED's decisive assertion failures, both complete GREEN cases reached the subsequent original-reason/boundary, FAILED/unconfirmed, no-answer/tool-results/nonce assertions. Their actual physical worker exit/owner drain and no Session correction/persistence repair checks also passed. The injected post-drain receipt error remains a controlled fault after real settlement, not proof of an OS join failure. Before/after **88/88 Git blob and SHA256 pairs were identical**. Section12's accepted **85871/5ce251: 2 failed, 3 warnings,11.30s** remains the behavioral RED evidence; nothing was overwritten or relabeled.
+
+Parent accepted GREEN and moved the slot to Zeno. This append is documentation-only; no code/test/runner edits, Python/imports, extra tests, commit or push. Parent reports PR102 landed `18ad4f9`; this campaign is deliberately **not aligned mid-run**. HEAD remains `b4252801cbf2396957de445ec563dcfc815e953e`. No claim of full61 GREEN or direct source-close→restore publication coverage is made.
+
+### Next exact61 ordered hash freeze (not executed)
+
+Read-only recheck found all section5 targets present and **61 unique**, preserving its exact numbered order (original60 plus continuation61). All88 pins still matched the accepted GREEN post-run manifest before this documentation append. Only this plan's hash changes now. Each row below maps to the same numbered full path in section5; both full Git blob and file SHA256 are frozen. The next command must pass all61 paths explicitly in that order, using the same approved runner; no shortened selection or inferred passing count. Execution and fresh QUALITY each require separate parent grants.
+
+| Section5 order | Git blob | SHA256 |
+|---|---|---|
+| 1 | `bd377facce7f997572fb9a51a33e46451ed77205` | `1F8092007DD9C2132435D47ABB507865F32799784835A1C537726E238A031D30` |
+| 2 | `f008fd3d9295dfc37b816b7fa06ce777ce1a0fe2` | `7973D217A8E59AE4B5F1B53AB872A81ADC6E33D013324A4A71376882E236E5A3` |
+| 3 | `69641054cc6c3fad08f64b54d90bc7b7fb90344d` | `1DF3190F3353BDE61BC9C2D6CCCC809A4747E69B95C97E9D5DB6998C3BAF3A3A` |
+| 4 | `ba111abc8e0a7b1b042675205b420223271d82a2` | `07FD2E0129C465065D83E8F6D9D2C89AD8A88082B0FB7B8FFCC88FF87DE74B40` |
+| 5 | `1d8db97dd6c27d5b965d9b96d69addfa6d24f664` | `8E9906D54CADBF42425706E17E06559F1AF93B8F2D44B38B1031B0C607B24A64` |
+| 6 | `54b12b4cc2d46b93998a6d7911e4d15359f0c66f` | `793A9500D45A6E0BD7D352C1465BCC32DC1BA02A5536594D06856586B2903071` |
+| 7 | `506e27c8c3de1d58ad39f278d5269f3214627351` | `80644F2846CD51B14075AD0E3375E69CDC1152C085C4B8F5407F14E8976B7E22` |
+| 8 | `25683ce00eb0594988e30987dca2f2059e5ab971` | `5C3142863F6F97D5A06357488A67499AC60237E895B3DD9110E5C1FEE2A4B216` |
+| 9 | `83df224daddf03bf81c5e2d7858a831c038e23a4` | `DDC529ED251A95C67AED7FF4AC4825A2F776A129B8B79E8E49B026648AB42CF6` |
+| 10 | `2b0b18e01a8361d932201903fff8e7aef9dae46e` | `C0A5DC947BCB7DBE51BFF87E10117AA758AAB05061E80FD7E2388F2E2B53ED3A` |
+| 11 | `69feac27d284ba67352611010020cdd5c7a21456` | `7A4BAB56DAEB4FC7E1E61EEDDC6D8D30B54940F1CAC05018AB266CB1D1ED9984` |
+| 12 | `240a6acc3aa109d3f3dc4ecb517ac3f6a3ae011d` | `6E5DAF34C1B5D97A39F84A0874B8DE6CCC7B4FD9E04AA54EA7795FC2EDA68A45` |
+| 13 | `2020e5701f433522c1a2e159d56066a04a52ffd1` | `25C00CC4A9474EBCF262E19F0D77742DC789D9C16A738D7EE4D94065D9181E45` |
+| 14 | `be0bb0655b68221c664f365bc33c960b04b31f3c` | `3E497531AEC0BC104561901615A9F8B07822A60AFC84B42425C6F1D50F13D544` |
+| 15 | `38a6491d26d917a8af0d209ef6e81a46d49cf651` | `D4B031D5F2CC79F3D4494E29C15F2AEEFB167ECB7E2F1E991F8F12EA174AA07C` |
+| 16 | `544fc6668f3ab2919f8370d8b835f96052d0195e` | `680FB433AC1F30CCE971E2E3D2B9331D30F65699C1A7F4343C64668C43B0D4A0` |
+| 17 | `e99a51997b26010bbde11498240a8bb994ddfae6` | `4B80F72FC374B081F8FA87F0062756ED73E8140881F502CC5C6FDB981CE4A393` |
+| 18 | `34908767f4fe5883ff5d0535de3c037136690ec4` | `9409174207233BFF5D7AFE449E0D4F20FEAB650886E6C0166BC6D950CBFFFFCF` |
+| 19 | `c102da0a5645201c212dbc0acf0b4d51e6623453` | `0DDDED3D6182A8FAAD73B4A886710CE5A51909CD1C482B63358C0DE2F5F83CEF` |
+| 20 | `1a4d1fe1abc573771b3f1d42e1d6d13ec60e033e` | `225E74BDFBDEA36D76D9FBC5B536B51F8286A085C4C173D8C85648440DA35B95` |
+| 21 | `a15a89b6f6a94781e1dacc4311a881888e019342` | `A8A2F17255631AED48E691F736D0C1E5C395B648D4B145948B31C09C5AADD632` |
+| 22 | `b2cd091eb6e67bf43431619fde66f839eb0da26b` | `0CB532412BAF31228A0D4A59A223A3A1CEEE06EA13EC62DDD6A6D3C39A01FB82` |
+| 23 | `97854fbd3b77f747e04d82789057c521c1d400a6` | `E8B3D27DB2FBA059A8EB1C1F217178950BE64258B88BA53E6670995AAB755F42` |
+| 24 | `042da70e2b317811b2b16c3dc4bfee16ddf8d133` | `EE1B702F52C4DA126D555784FC77B2B13C5EF3E4102CA523851D2FED4DBF71CC` |
+| 25 | `b4bc0a75020a825582f524b419cf0f1e8f980df4` | `7979F2306AB7EBAFE14F69FEDD35C55E3BB0EBFEA29037F6900260ED0B3D105C` |
+| 26 | `75bdd8f3992931937967823628ae8012b9bc151a` | `3390E17C779BD6CB151C9F0B9383F22A192AFFAC3016BA2F27705E1A67616086` |
+| 27 | `51a7c6e616268c9334a530d5b2600b546b4d3777` | `FFCF18EEE29E35437B88483E06DD9127849E157743C84180ADE87DEE22CA0AA4` |
+| 28 | `5dfaa929fbf5c3764c5294517ee86576f5056bd5` | `CBDD94261245577DC559D2C11C9D44C18D31E5FE6054B516067C3EFBBD8C1759` |
+| 29 | `53d12b9f299340a98b302616664dca7a70dba226` | `27C56EE9C7A90B6125E0FC5E7EA2163A4E604FA10FC8AE147430F2C40592F634` |
+| 30 | `18f4e068d1eae882c1a299bae768f87676edc10c` | `018C517F72F5B3CB211346EF80614ACE19E41C7A6F0DFD5D45EF47BE174B940A` |
+| 31 | `dce02d8438c217ac581f450b4a67c865e4a3b2bc` | `1983D40901DEFF7CB3595407A42AD56858C89DC5C802E259DB084EFD9D6F8F18` |
+| 32 | `288cfc6d361e7918f46c54fafebb0f8a9a095f5b` | `00F8CDDFBDE821694E432968393E5F9698B0744839EBF2184F34D6777BA49F49` |
+| 33 | `5204d1e34039d9e693ee5795058fbb4a5c5c98bf` | `18961BBA384091A609C6FA19FD8EF42BC67CCAAEE5D680AA1B630450B17455F9` |
+| 34 | `6e0274ebe97806b133474c3aabc6c4c290ffd4a1` | `6E6573520080CBC34DA4B4F49C3C9F105A40B7F2AC260C313981C523C54474C5` |
+| 35 | `833195c67b4940ada343a202f815dd6017d340eb` | `9ABBFD2A873A38224AF108860A05F71C17355F3C480DB8D388ACA5CF54776651` |
+| 36 | `322d8108302ab5b34e7294cee71da242e67b8750` | `8784D3EF66A2CF02CD97C62BE6348E8BB41168F33D30E37E77B5F9B37A1C10D7` |
+| 37 | `1f71d01f03a221a66336cd02759319d77baea761` | `ABEA44385A29B3DD14BA3039982C39739A56A802945E2AF1B64A5E2CEB2BE467` |
+| 38 | `f67dae6889a8787cb2a48fcd3d0ca83cce379372` | `6F6E5C9D550BD433EBB215B97D4EE082F5F7DE0F3E01E12FB9B8BEAE472E8FB0` |
+| 39 | `03149a596c6894e342eee483c8636a55f9361152` | `5C6394E9F5873703364D3C356A715BF6AAB83CF49AC5920CA1691184000D13D1` |
+| 40 | `a30afe74ceab9d1627b89e264e81e74cf57ec2d2` | `F9B843FEE78E8F40B743EC3606AFAF101E714737142C093D1450E0C01ABB9023` |
+| 41 | `84c21cade72aaa0e4343e269ae7ea1d7d1c26512` | `D717FE4DFB42FDF38DDA7993017940EAE7AF787614EFFB9A3E19FA5B36756491` |
+| 42 | `550dced7bbe1e1da24ced5abbc52ce68ab0dea6f` | `81EF658183FDCB9D8F8A3B6C35A45B91EB08C75A4C86B385D0453ACB2F46794D` |
+| 43 | `52b97ca230136fa424ce38871c8561faa4903068` | `D8E6EA0E6887C6184F5C8615F7AEDD69F7A0667DF58A234C6C0B6626B3448772` |
+| 44 | `c149cfcaf627830d0c26718c62b2c7b8c62c7ebb` | `EC1AE90E566F27AF457BACE41125D303028119FA53DCC539028EF8CF30BC3F93` |
+| 45 | `ff99b678842ae13f1a323ea21bf1e16d209b3474` | `E1AC6959EA0AEC567370954BCBF9188F2D21E6A38B218B532747D735BBD7D292` |
+| 46 | `37cabbcb71ff4266462f4dcfdd623ca6545484c3` | `F0875F728BB7468E1935BA503F9908F4F0FF09BEE248F03CF96CDCEADF95E915` |
+| 47 | `c987ab6f2737fa4ab68f4fe6d937577ccbedb264` | `D2CA7C0F7EED3C8853D04DD409B8A150B725E68EEC41CEED97BD151A209331CD` |
+| 48 | `fad128d4baa1fd658b9b230d1a41639be869ce58` | `34584D98DFD7B7F2FCD81B76C0083E626B39081F7442F1533AE1A8972707DFA4` |
+| 49 | `546579c0b5e96aae622f77e4a49c1c183c367e00` | `0419AD64FB8FA9EAD6CCB7F1CABA5F2BFD4F5240B974DFCBC9AF1E2F4B38CD20` |
+| 50 | `31fc0d3f17cd5b694e852417de3d5063594a456f` | `355047EAAB40C6199CE02083D000B7187C4769061DAC90629FE8A7990BC88E91` |
+| 51 | `eb6020b1be52b195d98c84fc20874af98f994d94` | `6963D6EB7A2BCE0CCA8EDC8DF607E7DBB5AFFCDFD7E0D3A01562FDF8979BF6F8` |
+| 52 | `69e92c4270a5b667233ed2652043663e6be73777` | `F628B8E5DF4FCE4163E2FDE112F94BA04BCD97D8714A76C0B20ED5D60A0649D7` |
+| 53 | `cf4ad8471a230efbc7804c7c262a2566939b1888` | `44DF5EB91C63B7C3AEA59FC87CF33F6AB6961168CE9D41D30EA4DB8B5FF1BBCB` |
+| 54 | `464349620aa97c03079fb1f4853efaeb1a4cad38` | `997BD7194B82BB9F0A236557B2B74A75D9A95C597B1CB7468B6228B76A21D205` |
+| 55 | `053af24437dcb10e80096fa09183e1739dffa468` | `A16DDD947418E371437FC933C59735A59917A4FF5E9C5CE72F5E968E6034295D` |
+| 56 | `0e01612bceaabc540cce141bc2974942b46e0bc6` | `50A8F6583A2E4A18379153674F3E4FBAFED97380F11BE00FEE1CCCD41C304364` |
+| 57 | `6ceed90d4072b77204bfad186d7f1fff853ca149` | `7A5E11F3616638EFE70096158F60310CC6865E22A8C58316A3B355C8AE7C1863` |
+| 58 | `8033991b1f346d64f117c23cfaa46aa6eefeaa83` | `94321B9FCE3A5C43272CFC09211D122CCB32B525BD1DBE85C65DB5283EFB4A10` |
+| 59 | `9274535ce828e6f1b34fa2c4cd4a85efdce16e6f` | `F406808AD9DFBFCB2A16DAF1A16227A6973595BA480BA0A52680966A3EC919B7` |
+| 60 | `b3ad28806bfee5c172a528c4910f3497e66e3b69` | `669FF28845F2EEBE32936DB280328EC45C1D4846B1F52FA7831F708A639AA1C2` |
+| 61 | `0f79c9c6fc80818dd6ab77b8d4f294cf56d96acf` | `73E5C0E032353A100AC74A473C777A4C97E2CD7F5EA6F98CD129467531681B7D` |
+
+## 14. Actual author exact61 terminal — two reverse test-premise failures retained
+
+Parent granted one full ordered section5 invocation after G3 terminal94bd9a released the slot. Preflight verified all61 explicit targets exist, are unique and match section13's ordered hashes; all88 pins matched the campaign freeze. HEAD stayed `b4252801cbf2396957de445ec563dcfc815e953e`, runner EA3B05 unchanged, with MedChat `-I -S -B`. The command used Task6's approved isolated prefix followed by **all61 section5 paths as separate positional arguments**, with no directory/`-k` substitution or omission. No PR102 alignment or real-model/service run occurred.
+
+Actual session **41731**, launch **3e553d**. The same handle was polled throughout without restart/retry; progress reached100%. Summary chunk **633046** reported **2 failed,6370 passed,7 warnings in1418.28s (23:38)**. That chunk still had a live session, so it was not treated as runner terminal. The next poll, authoritative terminal **ca935c**, returned exit **1** and `ORDINARY_PYTEST_EXIT=1`. The worker immediately declared the sole Python slot **RELEASED**, then read-only hashing confirmed **88/88 before/after Git blob and SHA256 pairs unchanged**, including all61 targets, three production paths, preservation dependencies, plan and runner. Parent accepted the actual terminal. Warnings: three SWIG missing-`__module__` and four FastAPI on_event deprecations; captured RDKit MorganGenerator stderr messages are not additional pytest-warning counts.
+
+Both failures were `phase=call` in `tests/agent/test_decision_binding_continuation.py::test_sqlite_reopen_new_source_generation_rejects_preclaim`, line1366, asserting `old_projection.source_sha256 == new_projection.source_sha256`:
+
+| Parameter | Actual old source_sha256 | Actual new source_sha256 |
+|---|---|---|
+| reverse-native | `d7ba4b8e7da82b97b4173c8a27c9a5528266a2152fae148d13254094da2c3bb6` | `745cb64b1d04a288df8ee89b29ef71a3c24822a3b34476b04852a3aa516c8e9e` |
+| reverse-json | `4b2416f839d2f65f4f8d19261e055dbad75e25853c4c23f0860ace4bf3e1ff7b` | `8d77d31f87c616cc0916d91465532f2ebe4786de387d671b1b4855e296413e43` |
+
+These are test-premise assertion failures, not fixture-phase exceptions and not evidence of the intended new-generation preclaim rejection: the fresh registry/resume and subsequent generation/configuration/file-equality/no-work assertions were not reached. Both cases retain their existing finally cleanup. Full61 is **not GREEN**; no automatic fix or rerun followed.
+
+Parent permits this evidence append only while another worker owns the slot. Source-only diagnosis identifies that `owned_source.py` constructs a descriptor including fresh `generation_id=uuid.uuid4().hex` and computes `source_sha256=json_sha256(descriptor)`; `capture_prediction_source` exposes that generation-bound digest, not a byte-only digest. Same fixture files therefore do not imply equal source_sha256 across independent strict initialization. The output alone does not enumerate all differing descriptor fields or prove that generation_id was the only difference. Existing file/configuration identity assertions remain required; no assertion, producer hash semantics or source validator has been altered.
+
+The separate missing native/JSON coverage for close-before-real-restore and close-after-resumed-waiting-CAS remains open. Only read-only boundary inspection occurred; no new cases or source changes were prepared. This append changes only ownplan; no Python/imports, tests, runner modification, commit or push. Further test preparation, bounded premise correction and execution each await separate parent authorization.
+
+## 15. Authorized test-only premise correction and four source-close cases — SOURCE pending
+
+Parent confirmed the source diagnosis and authorized only this plan plus `tests/agent/test_decision_binding_continuation.py`; no production edits or execution. The historical section14 result remains **6370 passed/2 failed**, and section13's P2 exact2 GREEN remains unchanged evidence for its old freeze, not a pass claim for these new tests.
+
+Reverse premise correction independently hashes **each full actual descriptor** using stdlib JSON (`ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False`, UTF-8) and SHA256, checking its own captured producer identity and generation. It compares the entire descriptor excluding **only generation_id**, reporting differing keys rather than dumping content. Both `cache_origins` entries must explicitly equal `verified_cache`: the actual fixture's default `cached=True` writes Morgan/MACCS popcounts before either strict initialization; strict loading reads/validates them and does not write caches or read legacy fingerprint metadata. Cache provenance is not dropped or normalized. Generation-bound hashes must differ; the existing generation inequality, configuration equality, independent file-hash before/after, real current-owned rejection, no writes/start/restore/model/science and finally cleanup assertions remain unchanged. No producer/receipt/hash/validator behavior was modified.
+
+Appended a local shared helper and two native/JSON functions (four source-declared cases, **not collected/run**):
+
+1. `tests/agent/test_decision_binding_continuation.py::test_source_close_before_real_restore_is_failure_only`: actual RAG waiting snapshot, reopened same SQLite store, real successful claim/start and completed owned precheck; the restore wrapper closes the real attached source **before** delegating actual Session.restore_observations. Require real restore return, then real owned source rejection before comparison/seals/model; sanitized failure, failed persistence, preserved consumed nonce/history and future rejection.
+2. `tests/agent/test_decision_binding_continuation.py::test_source_close_after_resumed_waiting_cas_is_failure_only`: same initial snapshot/reopen; require successful actual restore, whole-live comparison and fresh seal. A single scripted clarification creates the resumed waiting snapshot without new science. Forward the real new waiting CAS, record committed status/replacement/history, then close the real source before returning to the actual owned post-publication check. Require sanitized FAILED/invalid_dynamic_binding at waiting_publication, no outward nonce/science, one invalidation terminal with provisional summaries preserved, consumed prior claim as CAS expected value, unchanged restored observations and extended input history, retained committed new snapshot, and rejection of both old and new nonces without further events/writes/model/science.
+
+All check/restore/compare/seal/CAS/settle wrappers delegate the real implementation. No mocked validation failure, lifecycle flag mutation or manufactured success. Both variants require settled real WorkerOwner/zero roots and no duplicate RAG or synthetic HTTP requests; actual run-finally drains and the existing source fixture closes sources on failure. These tests do not block a physical worker, so add no hold/release controller. The previous blocked-worker cancellation tests remain intact.
+
+New test blob **`96d216f15fff48a5019eb7abbe3e9888e93bd232`**, SHA256 **`BBB6BBEF9EC8749B64A9E0F884A04D7A5C3CD47372CFFF74A3241E784A8C5286`**. In-memory reverse application of only the premise hunk and removal of the appended helper/two functions reconstructs the exact former test SHA256 **73E5C0E032353A100AC74A473C777A4C97E2CD7F5EA6F98CD129467531681B7D**; no other previous test bytes changed. Section5's exact61 order/set is unchanged, but section13 row61's historical hash is superseded by this pin for any future run. Production loop ffa8883/1B56E632 and the other two production files, publication/loop tests, runner EA3B05 and other preservation inputs remain frozen.
+
+- [ ] Independent SOURCE review of this test/plan freeze.
+- [ ] Separate sole-slot grant for a focused run; candidate explicit order is the existing `test_sqlite_reopen_new_source_generation_rejects_preclaim` function (four source parameters), then the two functions above (two parameters each). This is not execution permission or an observed case count.
+- [ ] Record actual reached assertions/terminal/pins; an earlier precheck/fixture failure does not close either coverage gap. A first GREEN may establish coverage without any production fix; no known bug is installed to force RED.
+- [ ] Parent separately decides next exact61/fresh QUALITY gates.
+
+No Python, imports, collection, models/services, runner creation/edit, commit, push or PR102 alignment occurred. Source-close coverage is now **prepared only**, not runtime-proven.
+
+## 16. Parent-observed focused eight-case GREEN and local checkpoint release
+
+Parent reports Lovelace independent SOURCE READY for test BBB6BBEF and all section15 conditions. Parent then executed the exact focused selection, in this order, using approved runner EA3B05 and MedChat `-I -S -B`:
+
+1. `tests/agent/test_decision_binding_continuation.py::test_sqlite_reopen_new_source_generation_rejects_preclaim` — all four parameters.
+2. `tests/agent/test_decision_binding_continuation.py::test_source_close_before_real_restore_is_failure_only` — native/json.
+3. `tests/agent/test_decision_binding_continuation.py::test_source_close_after_resumed_waiting_cas_is_failure_only` — native/json.
+
+**Parent execution evidence**, not a new run by this worker: session **52575**, authoritative terminal **8c1ce5**, exit **0**, **8 passed, 3 SWIG warnings in14.96s**. Parent verified test BBB6BBEF / plan886D28C2 / runnerEA3B05 beforehand and reports all pins unchanged across 656 tracked Python files plus the new codec/test, ownplan and runner. The slot was RELEASED. These passing cases establish the corrected generation/content premise and the two narrowly specified source-close boundaries with their actual rejection/history/no-duplicate-science assertions; they are not full-suite, real-model or normal-Web acceptance.
+
+Historical evidence is preserved: section14's author exact61 **41731/ca935c remains 6370 passed, 2 failed, 7 warnings in1418.28s, exit1**. The focused eight-case result does not relabel that full61 run GREEN or establish the new freeze's full61 result. Section13's separate P2 exact2 **8866/47f031, 2 passed, 3 warnings in11.50s** also remains its own evidence.
+
+Parent now authorizes a **local checkpoint commit only**, explicitly limited to the three production paths, three tests and this ownplan in section2. Pre-append read-only hashes matched all six code/test pins and the approved runner; production remains codec6d500e27, reader18c6714b, loopffa8883. This append alone changes the reviewed plan hash. No Python/imports/tests, runner edits, other code changes or push are authorized or performed by this worker for the checkpoint. The commit message must state the earlier full61 failure and focused-only GREEN, not claim full integration acceptance.
+
+HEAD before checkpoint is still `b4252801cbf2396957de445ec563dcfc815e953e` on `codex/b1-continuation-integration`. Parent will align actual latest main `18ad4f9` before separately granting fresh full61; this worker does not merge/rebase/fetch or align during the checkpoint. Local commit does not grant publication or execution authority.
