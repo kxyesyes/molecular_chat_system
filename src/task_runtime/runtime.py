@@ -22,10 +22,11 @@ from .backends.base import (
 )
 from .backends.local import LocalTaskBackend, TaskIdempotencyConflictError
 from .config import PROJECT_ROOT, TaskRuntimeConfig
-from .docking_execution import DockingExecution, _manifest_input_hash
+from .docking_execution import DockingExecution, _manifest_input_hash, _input_hash
 from .docking_consent import (
     PREPARATION_SECONDS, DockingConsentError, DockingConsentPolicy,
     DockingConsentPreview, make_preview, seal_binding, validate_inputs,
+    canonical_json, validate_approval, verify_approval, validate_execution_binding,
 )
 from .errors import TaskErrorCode
 from .models import (
@@ -71,6 +72,43 @@ class _ConsentPreparation:
     settled: bool = False
 
 
+@dataclass(eq=False, repr=False)
+class _ConsentExecution:
+    row: dict[str, Any] = field(repr=False)
+    token: str = field(default_factory=lambda: secrets.token_hex(32), repr=False)
+    signal: threading.Event = field(default_factory=threading.Event, repr=False)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    backend_signal: threading.Event | None = field(default=None, repr=False)
+    admission: asyncio.Task | None = field(default=None, repr=False)
+    submission: asyncio.Task | None = field(default=None, repr=False)
+    worker: asyncio.Task | None = field(default=None, repr=False)
+    cancellation: asyncio.Task | None = field(default=None, repr=False)
+    settlement: asyncio.Task | None = field(default=None, repr=False)
+    deadline: asyncio.Task | None = field(default=None, repr=False)
+    raw_deadline: asyncio.Task | None = field(default=None, repr=False)
+    raw_expires: float | None = None
+    backend_owner: asyncio.Task | None = field(default=None, repr=False)
+    loop: asyncio.AbstractEventLoop | None = field(default=None, repr=False)
+    status: str = "ACTIVE"
+    reason: str | None = None
+    pending: bool = False
+    acquired: bool = False
+    claim_uncertain: bool = False
+    unused: bool = False
+    settled: bool = False
+
+    def stop(self, status, reason) -> None:
+        # Never hold this lock across SQLite, a coroutine await or physical cleanup.
+        with self.lock:
+            if self.status != "ACTIVE":
+                return
+            self.status, self.reason, self.pending = status, reason, True
+            if status != "SUCCEEDED":
+                self.signal.set()
+                if self.backend_signal is not None:
+                    self.backend_signal.set()
+
+
 class TaskRuntime:
     """Async backend façade for safely staged scientific tasks."""
 
@@ -112,6 +150,7 @@ class TaskRuntime:
         if temporal_backend is not None:
             assert_async_backend_contract(temporal_backend)
 
+        self._consent_local_handler = local_backend is None
         if local_backend is None:
             self.docking_execution = docking_execution or DockingExecution(
                 self.config.staging_root,
@@ -123,6 +162,11 @@ class TaskRuntime:
                 cancel_event: threading.Event,
                 progress_callback,
             ) -> dict[str, Any]:
+                consent = self._consent_executions.get(submission.task_id)
+                if consent is not None and consent.acquired:
+                    return await self._run_consent_execution(
+                        consent, submission, cancel_event, progress_callback,
+                    )
                 return await asyncio.to_thread(
                     self.docking_execution.run_verified,
                     submission.task_id,
@@ -148,6 +192,450 @@ class TaskRuntime:
         self._consent_monotonic = consent_monotonic or time.monotonic
         # Ownership of real I/O, not a dispatch queue. Durable capacity lives in SQLite.
         self._consent_preparations: set[_ConsentPreparation] = set()
+        self._consent_executions: dict[str, _ConsentExecution] = {}
+
+    async def approve_docking_consent(
+        self, *, preparation_id: str, owner_session_id: str,
+        approval_nonce: str, binding_digest: str, confirm: bool,
+    ) -> dict[str, Any]:
+        row = await self._load_owned_consent(owner_session_id=owner_session_id,
+            preparation_id=preparation_id,
+        )
+        validate_approval(approval_nonce, binding_digest, confirm)
+        verify_approval(row, approval_nonce, binding_digest)
+        if row["state"] in {"CLAIMED", "DISPATCH_RESERVED"}:
+            return await self._consent_receipt(row)
+        if row["state"] != "READY":
+            raise DockingConsentError("consent_not_waiting")
+        if (self._closing or self._closed or not self._consent_local_handler
+                or type(self.docking_execution) is not DockingExecution):
+            raise DockingConsentError("consent_policy_unavailable")
+        operation = self._consent_executions.get(row["task_id"])
+        if operation is None:
+            operation = _ConsentExecution(row, loop=asyncio.get_running_loop())
+            self._consent_executions[row["task_id"]] = operation
+            operation.admission = asyncio.create_task(self._admit_consent_execution(operation))
+        elif operation.unused:
+            raise DockingConsentError("consent_not_waiting")
+        try:
+            await asyncio.shield(operation.admission)
+        except asyncio.CancelledError:
+            self._request_consent_stop(operation, "CANCELLED", "consent_cancelled")
+            raise
+        current = await self._consent_row(operation)
+        return await self._consent_receipt(current)
+
+    async def get_docking_consent_view(
+        self, *, task_id: str, owner_session_id: str,
+    ) -> dict[str, Any]:
+        row = await self._load_owned_consent(owner_session_id=owner_session_id, task_id=task_id,
+        )
+        return await self._consent_receipt(row)
+
+    async def cancel_docking_consent(
+        self, *, task_id: str, owner_session_id: str,
+    ) -> dict[str, Any]:
+        row = await self._load_owned_consent(owner_session_id=owner_session_id, task_id=task_id,
+        )
+        if row["view_status"] != "ACTIVE":
+            return await self._consent_receipt(row)
+        operation = self._consent_executions.get(task_id)
+        if operation is None:
+            if row["state"] != "READY":
+                # Another process or an interrupted prior owner is not replayable.
+                return await self._consent_receipt(row)
+            operation = _ConsentExecution(row, unused=True, loop=asyncio.get_running_loop())
+            self._consent_executions[task_id] = operation
+        self._request_consent_stop(operation, "CANCELLED", "consent_cancelled")
+        # Local signal is immediate; no claim of a completed SQL receipt here.
+        return await self._consent_receipt(row)
+
+    async def _load_owned_consent(self, **identity):
+        try:
+            return await asyncio.to_thread(self.store._owned_docking_consent, **identity)
+        except DockingConsentError:
+            raise
+        except Exception:
+            raise DockingConsentError("consent_persistence_unavailable") from None
+
+    async def _consent_row(self, operation):
+        return await self._load_owned_consent(
+            owner_session_id=operation.row["owner_session_id"],
+            preparation_id=operation.row["preparation_id"],
+        )
+
+    async def _consent_receipt(self, row):
+        operation = self._consent_executions.get(row["task_id"])
+        status, reason = row["view_status"], row["primary_reason"]
+        pending = False
+        if operation is not None and operation.status != "ACTIVE":
+            status, reason, pending = operation.status, operation.reason, operation.pending
+        elif operation is None and status == "ACTIVE" and row["state"] in {"CLAIMED", "DISPATCH_RESERVED"}:
+            status, reason = "UNKNOWN", "consent_execution_unknown"
+        policy = self._docking_consent_policy
+        if status in {"ACTIVE", "SUCCEEDED"} and row["state"] in {"CLAIMED", "DISPATCH_RESERVED"} and (
+            type(policy) is not DockingConsentPolicy
+            or policy.runtime_generation != row["runtime_generation"]
+        ):
+            status, reason = "UNKNOWN", "consent_execution_unknown"
+        try:
+            task = await asyncio.to_thread(self.store.get, row["task_id"])
+            task_status = task.status.value
+        except KeyError:
+            task_status = None
+        except Exception:
+            task_status, pending = None, True
+            if status in {"ACTIVE", "SUCCEEDED"}:
+                status, reason = "UNKNOWN", "consent_execution_unknown"
+        return {
+            "preparation_id": row["preparation_id"], "task_id": row["task_id"],
+            "trace_id": json.loads(row["identity_json"])["trace_id"],
+            "consent_state": row["state"], "dispatch_state": row["dispatch_state"],
+            "view_status": status, "task_status": task_status,
+            "cleanup_status": row["cleanup_state"], "reason_code": reason,
+            "persistence_pending": pending,
+        }
+
+    def _validate_consent_row(self, operation, row):
+        if operation.signal.is_set():
+            raise DockingConsentError(operation.reason or "consent_cancelled")
+        return validate_execution_binding(
+            row, self._docking_consent_policy, self._consent_wall_time_ms(),
+            self._consent_monotonic(), expected=operation.row,
+        )
+
+    def _validate_consent_manifest(self, operation):
+        binding = self._validate_consent_row(operation, operation.row)
+        try:
+            manifest = self.stager.load_verified_locator(
+                operation.row["task_id"], operation.row["manifest_locator"],
+            )
+            if (_manifest_input_hash(manifest) != binding["input_hash"]
+                    or manifest["config_hash"] != binding["config_hash"]
+                    or self._docking_request_digest(manifest) != binding["request_digest"]
+                    or any(manifest["config"][key] != binding[key] for key in manifest["config"])
+                    or any(Path(manifest[key]["path"]).name != binding[key]["name"]
+                           for key in ("receptor", "ligand"))):
+                raise ValueError
+        except Exception:
+            raise DockingConsentError("consent_binding_mismatch") from None
+
+    async def _admit_consent_execution(self, operation):
+        try:
+            await asyncio.to_thread(self._validate_consent_manifest, operation)
+            acquired = await asyncio.to_thread(
+                self.store._claim_docking_consent, operation.row, operation.token,
+                lambda row: self._validate_consent_row(operation, row),
+                self._consent_wall_time_ms, self._consent_monotonic,
+            )
+        except DockingConsentError:
+            if not operation.signal.is_set():
+                self._consent_executions.pop(operation.row["task_id"], None)
+            raise
+        except Exception:
+            # Read back only; never retry a possibly committed claim.
+            try:
+                current = await self._consent_row(operation)
+            except Exception:
+                operation.claim_uncertain = True
+                operation.stop("UNKNOWN", "consent_execution_unknown")
+                raise DockingConsentError("consent_execution_unknown") from None
+            if current["execution_token"] != operation.token:
+                self._consent_executions.pop(operation.row["task_id"], None)
+                raise DockingConsentError("consent_persistence_unavailable") from None
+            operation.acquired = True
+            operation.stop("UNKNOWN", "consent_execution_unknown")
+            await self._persist_consent_terminal(operation)
+            raise DockingConsentError("consent_execution_unknown") from None
+        if not acquired:
+            self._consent_executions.pop(operation.row["task_id"], None)
+            return
+        operation.acquired = True
+        try:
+            await self._submit_claimed_consent(operation)
+        except Exception:
+            operation.stop("UNKNOWN", "consent_execution_unknown")
+            await self._persist_consent_terminal(operation)
+            if operation.settlement is None:
+                operation.settlement = asyncio.create_task(self._settle_consent_execution(operation))
+            raise DockingConsentError("consent_execution_unknown") from None
+
+    async def _submit_claimed_consent(self, operation):
+        current = await self._consent_row(operation)
+        # Keep the original sealed facts for the later in-lease comparison.
+        operation.row.update({key: current[key] for key in (
+            "operation_deadline_ms", "operation_monotonic_expires",
+        )})
+        operation.deadline = asyncio.create_task(self._consent_deadline(operation))
+        submission = TaskSubmission(
+            task_id=operation.row["task_id"], task_type="docking", payload={},
+            input_manifest_path=str(self.stager.resolve_manifest_locator(
+                operation.row["task_id"], operation.row["manifest_locator"],
+            )),
+            request_digest=json.loads(operation.row["binding_json"])["request_digest"],
+        )
+        operation.submission = asyncio.create_task(self.local_backend.submit(submission))
+        try:
+            await asyncio.shield(operation.submission)
+        except Exception:
+            operation.stop("UNKNOWN", "consent_execution_unknown")
+            await self._persist_consent_terminal(operation)
+        finally:
+            operation.settlement = asyncio.create_task(self._settle_consent_execution(operation))
+        if operation.signal.is_set() and operation.cancellation is None:
+            self._request_consent_stop(operation, operation.status, operation.reason)
+
+    def _request_consent_stop(self, operation, status, reason):
+        operation.stop(status, reason)
+        if operation.status == "SUCCEEDED" or operation.settled:
+            return
+        if operation.cancellation is None:
+            operation.cancellation = asyncio.create_task(self._cancel_consent_execution(operation))
+
+    async def _cancel_consent_execution(self, operation):
+        if operation.unused:
+            try:
+                row = await asyncio.to_thread(
+                    self.store._terminal_docking_consent, operation.row, operation.token,
+                    operation.status, operation.reason, unused=True,
+                )
+                if row["execution_token"] != operation.token or row["state"] != "REVOKED":
+                    # A concurrent claim won: no authority to delete its stage.
+                    operation.pending = True
+                    return
+                operation.acquired = True
+                operation.pending = False
+                operation.settlement = asyncio.create_task(self._settle_consent_execution(operation))
+            except Exception:
+                operation.pending = True
+            return
+        if operation.admission is not None and not operation.acquired:
+            try:
+                await asyncio.shield(operation.admission)
+            except Exception:
+                row = await self._consent_row(operation)
+                if row["state"] == "READY":
+                    operation.unused = True
+                    await self._cancel_consent_execution(operation)
+                return
+        if not operation.acquired:
+            return
+        persisted = await self._persist_consent_terminal(operation)
+        if operation.submission is None:
+            return
+        operation.pending = True
+        # Retain actual create/submit; do not cancel the coroutine that owns it.
+        if operation.submission is not None:
+            try:
+                await asyncio.shield(operation.submission)
+            except Exception:
+                pass
+        try:
+            await self.local_backend.cancel(operation.row["task_id"], reason="consent cancelled")
+        except KeyError:
+            # No task row is not evidence that a possibly committed claim is safe.
+            operation.pending = True
+        except Exception:
+            operation.pending = True
+        else:
+            operation.pending = not persisted
+
+    async def _persist_consent_terminal(self, operation):
+        try:
+            row = await asyncio.to_thread(
+                self.store._terminal_docking_consent, operation.row, operation.token,
+                operation.status, operation.reason,
+            )
+            confirmed = (row["execution_token"] == operation.token
+                         and row["view_status"] == operation.status
+                         and row["primary_reason"] == operation.reason)
+        except Exception:
+            confirmed = False
+        operation.pending = not confirmed
+        return confirmed
+
+    async def _consent_deadline(self, operation):
+        # Absolute original budget; cancellation stops feedback but never abandons
+        # the owned thread/lease or extends its deadline.
+        remaining = max(0, operation.row["operation_monotonic_expires"] - self._consent_monotonic())
+        await asyncio.sleep(remaining)
+        self._request_consent_stop(operation, "TIMED_OUT", "consent_execution_timeout")
+
+    def _arm_consent_raw_deadline(self, operation):
+        if operation.raw_deadline is None and not operation.settled:
+            async def deadline():
+                await asyncio.sleep(max(0, operation.raw_expires - self._consent_monotonic()))
+                self._request_consent_stop(operation, "TIMED_OUT", "consent_execution_timeout")
+            operation.raw_deadline = asyncio.create_task(deadline())
+
+    def _consent_execution_guard(self, operation, inputs, phase):
+        try:
+            if phase in {"result", "dispatch"}:
+                if operation.signal.is_set():
+                    raise DockingConsentError(operation.reason or "consent_cancelled")
+                if (self._consent_monotonic() >= operation.row["operation_monotonic_expires"]
+                        or self._consent_wall_time_ms() >= operation.row["operation_deadline_ms"]
+                        or (operation.raw_expires is not None
+                            and self._consent_monotonic() >= operation.raw_expires)):
+                    raise DockingConsentError("consent_execution_timeout")
+                if phase == "dispatch":
+                    operation.raw_expires = (self._consent_monotonic()
+                        + json.loads(operation.row["binding_json"])["vina_limit_seconds"])
+                    operation.loop.call_soon_threadsafe(self._arm_consent_raw_deadline, operation)
+                return
+
+            def validate(row):
+                binding = self._validate_consent_row(operation, row)
+                inputs.verify_integrity()
+                if (_input_hash(inputs) != binding["input_hash"]
+                        or inputs.config_hash != binding["config_hash"]
+                        or canonical_json(dict(inputs.config)) != canonical_json(
+                            {key: binding[key] for key in inputs.config})
+                        or inputs.receptor_path.name != binding["receptor"]["name"]
+                        or inputs.ligand_path.name != binding["ligand"]["name"]):
+                    raise DockingConsentError("consent_binding_mismatch")
+                return binding
+
+            if phase == "reserve":
+                try:
+                    self.store._reserve_docking_dispatch(operation.row, operation.token, validate)
+                except DockingConsentError:
+                    raise
+                except Exception:
+                    raise DockingConsentError("consent_execution_unknown") from None
+            else:
+                row = self.store._owned_docking_consent(
+                    owner_session_id=operation.row["owner_session_id"],
+                    preparation_id=operation.row["preparation_id"],
+                )
+                validate(row)
+        except DockingConsentError as exc:
+            status = ("TIMED_OUT" if exc.reason_code in {"consent_expired", "consent_execution_timeout"}
+                      else "UNKNOWN" if exc.reason_code == "consent_execution_unknown"
+                      else "CANCELLED" if exc.reason_code == "consent_cancelled" else "FAILED")
+            operation.stop(status, exc.reason_code)
+            raise
+
+    async def _run_consent_execution(self, operation, submission, cancel_event, progress_callback):
+        operation.backend_owner = asyncio.current_task()
+        with operation.lock:
+            operation.backend_signal = cancel_event
+            if operation.signal.is_set():
+                cancel_event.set()
+        if operation.signal.is_set():
+            raise DockingConsentError(operation.reason or "consent_cancelled")
+        operation.worker = asyncio.create_task(asyncio.to_thread(
+            self.docking_execution.run_verified, submission.task_id, submission.input_manifest_path,
+            cancel_event=operation.signal, progress_callback=progress_callback,
+            lease_timeout_seconds=min(300.0, max(0.001,
+                operation.row["operation_monotonic_expires"] - self._consent_monotonic())),
+            consent_guard=lambda inputs, phase: self._consent_execution_guard(operation, inputs, phase),
+        ))
+        try:
+            result = await asyncio.shield(operation.worker)
+            # Even a late completion-commit acknowledgement cannot pass a spent
+            # operation deadline or the already chosen non-success terminal.
+            self._consent_execution_guard(operation, None, "result")
+            return result
+        except asyncio.CancelledError:
+            self._request_consent_stop(operation, "CANCELLED", "consent_cancelled")
+            # Physical thread and lease remain owned even under repeated cancellation.
+            try:
+                await self._await_task_outcome(operation.worker)
+            except Exception:
+                pass
+            raise
+        finally:
+            if operation.raw_deadline is not None:
+                operation.raw_deadline.cancel()
+                await asyncio.gather(operation.raw_deadline, return_exceptions=True)
+
+    async def _settle_consent_execution(self, operation):
+        try:
+            if not operation.unused:
+                # Reuse the actual LocalTaskBackend owner, not TaskStatus as a
+                # physical completion signal. No mutation of backend registries.
+                with self.local_backend._lock:
+                    actual = self.local_backend._tasks.get(operation.row["task_id"], operation.backend_owner)
+                while actual is not None:
+                    try:
+                        await self._await_task_outcome(actual)
+                    except (Exception, asyncio.CancelledError):
+                        operation.stop("UNKNOWN", "consent_execution_unknown")
+                    # Done callbacks can install the existing backend recovery
+                    # task. Drain that actual owner too; do not invent recovery.
+                    await asyncio.sleep(0)
+                    with self.local_backend._lock:
+                        successor = self.local_backend._tasks.get(operation.row["task_id"])
+                    if successor is actual:
+                        break
+                    actual = successor
+                if operation.worker is not None:
+                    try:
+                        await self._await_task_outcome(operation.worker)
+                    except (Exception, asyncio.CancelledError):
+                        pass
+                if operation.cancellation is not None:
+                    await self._await_task_outcome(operation.cancellation)
+                record = await asyncio.to_thread(self.store.get, operation.row["task_id"])
+                if record.status not in TERMINAL_STATUSES:
+                    operation.stop("UNKNOWN", "consent_execution_unknown")
+                    await self._persist_consent_terminal(operation)
+                    return
+                if operation.status == "ACTIVE":
+                    if record.status is TaskStatus.SUCCEEDED:
+                        operation.stop("SUCCEEDED", None)
+                    elif record.status is TaskStatus.CANCELED:
+                        operation.stop("CANCELLED", "consent_cancelled")
+                    elif record.status is TaskStatus.TIMED_OUT:
+                        operation.stop("TIMED_OUT", "consent_execution_timeout")
+                    else:
+                        operation.stop("FAILED", "consent_execution_failed")
+            if not await self._persist_consent_terminal(operation):
+                return
+            if operation.status != "SUCCEEDED":
+                manifest = self.stager.resolve_manifest_locator(
+                    operation.row["task_id"], operation.row["manifest_locator"],
+                )
+                removed = await asyncio.to_thread(
+                    self.stager.discard_unprojected, operation.row["task_id"], manifest,
+                    projection_check=lambda task_id: self.store._docking_execution_cleanup_protected(
+                        task_id, operation.token,
+                    ),
+                )
+                if not removed:
+                    await asyncio.to_thread(self.store._settle_docking_execution,
+                                            operation.row, operation.token, settled=False)
+                    return
+            operation.settled = await asyncio.to_thread(
+                self.store._settle_docking_execution, operation.row, operation.token, settled=True,
+            )
+        except (Exception, asyncio.CancelledError):
+            operation.pending = True
+        finally:
+            for timer in (operation.deadline, operation.raw_deadline):
+                if timer is not None:
+                    timer.cancel()
+                    await asyncio.gather(timer, return_exceptions=True)
+            if operation.settled and self._consent_executions.get(operation.row["task_id"]) is operation:
+                self._consent_executions.pop(operation.row["task_id"])
+
+    async def _close_consent_executions(self):
+        operations = tuple(self._consent_executions.values())
+        for operation in operations:
+            if not operation.settled:
+                self._request_consent_stop(operation, "CANCELLED", "consent_cancelled")
+        for operation in operations:
+            for name in ("admission", "cancellation", "settlement", "worker"):
+                task = getattr(operation, name)
+                if task is not None:
+                    try:
+                        await self._await_task_outcome(task)
+                    except (Exception, asyncio.CancelledError):
+                        pass
+        if any((operation.acquired or operation.claim_uncertain) and not operation.settled
+               for operation in operations):
+            raise DockingConsentError("consent_cleanup_unresolved")
 
     async def prepare_docking_consent(
         self, *, preparation_id: str, owner_session_id: str, revision: int,
@@ -845,6 +1333,7 @@ class TaskRuntime:
     async def _close_once(self, shared: Future[None]) -> None:
         try:
             await self._close_consent_preparations()
+            await self._close_consent_executions()
             await self._close_backends()
         except BaseException as exc:
             with self._close_lock:

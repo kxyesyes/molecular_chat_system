@@ -44,6 +44,7 @@ from .staging import (
     ManifestError,
     VerifiedDockingInputs,
 )
+from .docking_consent import DockingConsentError
 
 
 RawExecutor = Callable[..., ToolResult]
@@ -130,6 +131,7 @@ class DockingExecution:
         progress_callback: Callable[..., Any] | None = None,
         cancel_event: Any = None,
         lease_timeout_seconds: float = 300.0,
+        consent_guard: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
         """Return a redacted verified result, never an unvalidated tool payload."""
 
@@ -156,16 +158,21 @@ class DockingExecution:
                     cancel_check=_cancel_check(cancel_event),
                 ) as execution:
                     _emit_progress(progress_callback, "input_verification", 5)
+                    if consent_guard is not None:
+                        consent_guard(execution.inputs, "check")
                     outcome = self._run_under_lease(
                         execution.inputs,
                         attempt=attempt,
                         progress_callback=progress_callback,
                         cancel_event=cancel_event,
+                        **({"consent_guard": consent_guard} if consent_guard is not None else {}),
                     )
                     if isinstance(outcome, PreparedDockingCompletion):
                         prepared = outcome
                         commit_state = _CompletionCommitState()
                         try:
+                            if consent_guard is not None:
+                                consent_guard(execution.inputs, "result")
                             outcome = self._finalize_prepared(
                                 task_id,
                                 prepared,
@@ -181,6 +188,18 @@ class DockingExecution:
                         if not commit_state.committed:
                             prepared = None
                 return outcome
+            except DockingConsentError:
+                # A server-owned consent fence is not scientific tool output.
+                # Preserve its fixed reason for the retained C owner only.
+                if consent_guard is not None:
+                    raise
+                if commit_state is not None and commit_state.committed:
+                    return self._resolve_post_commit_exception(task_id, commit_state)
+                return _failure(
+                    AgentErrorCode.INTERNAL_ERROR,
+                    "Docking execution failed before a verified result was produced.",
+                    details={"reason": "process_failed"},
+                )
             except _PreparedCompletionPending:
                 if pending_deadline is None:
                     pending_deadline = (
@@ -285,6 +304,7 @@ class DockingExecution:
         attempt: int,
         progress_callback: Callable[..., Any] | None,
         cancel_event: Any,
+        consent_guard: Callable[..., None] | None = None,
     ) -> dict[str, Any] | PreparedDockingCompletion:
         inputs.verify_integrity()
         input_hash = _input_hash(inputs)
@@ -327,9 +347,13 @@ class DockingExecution:
                 status=ObservationStatus.CANCELLED,
             )
 
+        if consent_guard is not None:
+            consent_guard(inputs, "reserve")
         payload = _build_payload(inputs)
         sensitive_values = _sensitive_values(inputs, payload)
         try:
+            if consent_guard is not None:
+                consent_guard(inputs, "dispatch")
             tool_result = self.raw_executor(
                 payload,
                 job_id=inputs.task_id,
@@ -338,7 +362,9 @@ class DockingExecution:
             )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            if consent_guard is not None and isinstance(exc, DockingConsentError):
+                raise
             return _failure(
                 AgentErrorCode.INTERNAL_ERROR,
                 "Docking tool execution failed before a scientific result was produced.",

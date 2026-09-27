@@ -154,6 +154,20 @@ def _initialize_once(path: Path) -> None:
         )
         for statement in statements:
             conn.execute(statement)
+        # Additive migration: C1 identities, proofs and preparation receipts survive.
+        consent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(docking_consents)")}
+        for name, declaration in (
+            ("execution_token", "TEXT"),
+            ("execution_occupied", "INTEGER NOT NULL DEFAULT 0"),
+            ("dispatch_state", "TEXT NOT NULL DEFAULT 'not_reserved'"),
+            ("view_status", "TEXT NOT NULL DEFAULT 'ACTIVE'"),
+            ("primary_reason", "TEXT"),
+            ("cancel_requested", "INTEGER NOT NULL DEFAULT 0"),
+            ("operation_deadline_ms", "INTEGER"),
+            ("operation_monotonic_expires", "REAL"),
+        ):
+            if name not in consent_columns:
+                conn.execute(f"ALTER TABLE docking_consents ADD COLUMN {name} {declaration}")
         conn.commit()
     except BaseException:
         conn.rollback()
