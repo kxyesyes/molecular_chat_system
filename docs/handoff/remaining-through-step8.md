@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | API RED018629 followed by source-reviewed F96BA0B3 adapter; initial d40700:2passed/2failed4.66s retained. Corrected fixture665A rerun102315:4passed0.75s,329pins unchanged | Independent full-canary regression assigned. API plus three actual Windows scenarios passed locally; no live bootstrap/generation or remaining fault qualification yet |
+| G3 concrete Windows owner | API RED018629 followed by source-reviewed F96BA0B3 adapter; initial d40700:2passed/2failed4.66s retained. Corrected fixture665A rerun102315:4passed0.75s; independent full module5f7541:90passed2.13s,329 hash comparisons unchanged | API plus three actual Windows scenarios and finite canary/policy regression passed; no live bootstrap/generation or remaining fault qualification yet |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused local integration ebb2093 on main73379a1; aligned855passed13.33s,9pins unchanged | Local only: no push/PR/CI/merge yet. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
@@ -39,6 +39,18 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Independent G3 full-module QUALITY5f7541 completed **90passed2.13s**,exit0,
+zero warnings/skips. It includes the finite HTTP/policy cases and three actual
+Windows cases;329 hash comparisons cover328 unique files and remained identical.
+Physical run terminal, Python slot released. This does not prove live model
+generation, a sterile bootstrap/report channel or uncovered owner fault injection.
+
+C1 API-only SOURCE GO preceded actual f73b83: **1failed0.99s**,exit1,seven pins
+unchanged. The exact call-phase assertion is missing
+TaskRuntime.prepare_docking_consent, not a collection failure. No runtime/store/
+stager instance or scientific execution occurs in this API node. Full C1 SPEC
+review is still pending; production implementation is not yet released.
 
 G3 actual Windows qualification d40700 reached four nodes: API and rc0-parent/
 pipe-held-descendant passed; clean/late cases failed while the TEST fixture wrote
