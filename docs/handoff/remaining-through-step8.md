@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Fresh independent owner/control94passed8.86s; native retry26908/6cb665 reached720s watchdog, raw rc1/settled/slot_released;35pins unchanged. Node decision UI54passed and completion checks passed | Original failure location unavailable before cleanup; SOURCE-approved failure-only diagnostic512A/BC023 prepared, not run. Task8 union/review/publication and real acceptance remain open |
+| Normal-Web B1 Tasks4–8 | Fresh independent owner/control94passed8.86s; native diagnostic34962/bd6341 failed at retained_check/snapshot171, then720s watchdog; raw rc1/settled/slot_released,35pins unchanged. Node decision UI54passed and completion checks passed | Failed assertion is zero model-close/result/complete counts; source shows B1 cleanup-error conversion can bypass bridge exception guard. Bounded real-loop regression design under review; Task8 union/publication/live acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -40,6 +40,29 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Web diagnostic34962/bd6341 is physically terminal,exit1,35pins unchanged.
+Fixed marker identifies retained_check/assertion/snapshot171 without truncation.
+Preceding assertions established pending task, unresolved owner, one reader and
+one HTTP call. The failing assertion combines model_closes/agent_results/completes;
+their individual values were not recorded and must not be invented. Outer raw
+receipt remains test_watchdog_timeout/rc1/settled/slot_released, not success.
+Source inspection finds B1 ModelDecisionLoop converts cleanup failure to a failed
+AgentResult, whereas decision_chat only rethrows an exception; that result can
+reach delivery before Web's final owner settlement. A bounded real-B1-loop bridge
+regression is being designed to establish this behavior without another blind
+720s retry. Original core failure semantics and zero-frame assertions stay intact.
+
+G3 Stage-B writer API source4FED/plan58A9 was independently reviewed before
+actual59821/5557a2: **1failed,5.70s**,exit1,332pins unchanged. The test reached
+call-phase missing configure_bootstrap_control/bootstrap_observation before
+creating an owner/process. Corresponding existing-owner implementation is now
+released within the ignored launcher, not cold imports or scientific execution.
+Original209-test prefix, default owner behavior and original deadline remain
+required. Separately, C2 planFFC85038 passed source review after adding READY
+cancel and in-flight repeated-cancel/persistence coverage; TEST preparation only
+is released in the separate execution worktree. No C2 production edit is approved
+by this checkpoint.
 
 C1 independent16128/073569 completed the exact seven-module selection once:
 **990passed,13skipped,0warnings,272.49s**,exit0. Postflight9eb175 confirms
