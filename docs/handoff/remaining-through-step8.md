@@ -40,6 +40,16 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+C1 minimal runtime/store fix1B6D6D74/105E265C passed independent SOURCE before
+full-module50394/7e1596: **82passed,1failed,99.88s**,exit1,eightpins unchanged.
+All seven blocked-revocation boundary/control cases passed, including unchanged
+actual30s deadlines; the complete C1 module is NOT GREEN. The sole failure is
+the 100-byte basename positive, first consent_invalid_input then conservative
+consent_cleanup_unresolved. Existing staging also caps the full path at240chars;
+long pytest temp roots are a hypothesis, not yet the observed cause. A transparent
+test-only fixed-code/length diagnostic is authorized before changing fixtures.
+No staging/path-limit relaxation, API/production activation or full-C1 claim.
+
 Fresh independent Web36 QUALITY57490/601a73 completed **36passed,7warnings,
 52.34s**,exit0,32pins plus continuation unchanged; physical process terminal.
 Fresh independent G3 full-module QUALITYea1838 completed **95passed,2.55s**,
