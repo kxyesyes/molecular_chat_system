@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Prior25 controls, source/reference/home10, source-swap16, worker/projection30 and remaining-credit/TTL14 passed; storage-failure36 now passed parent43.31s and independent52.34s,7warnings,32pins unchanged; first36 fixture-sync failures retained | Offline actual-Web evidence only. Permanent failed-join coverage, Task8 union/review/publication and real acceptance remain open |
+| Normal-Web B1 Tasks4–8 | Earlier scoped matrices passed; permanent-join outer-entry997d9b now reproduced missing-selector RED1failed0.44s,33pins unchanged | Minimal ignored outer helper extension released; no actual permanent-join Web execution yet. Task8 union/review/publication and real acceptance remain open |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -32,7 +32,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
 | G3 concrete Windows owner | Initial API/fixture failures retained; five additional real Windows fault cases af886c passed0.88s after test rescue-observer correction; independent full module ea1838:95passed2.55s,zero warnings/skips,329 hash comparisons unchanged | Scoped process/capture/close qualification passed; bootstrap/report integration, remaining qualification and real generation/B2 still open |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
-| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; staging/snapshot184passed1failed11skipped43.76s,10pins unchanged | Legacy100-byte basename positive hits practical-path guard; diagnose before correction. Fresh full-source review, receipt-fault coverage and integration/publication remain; prepare-only is not executable docking consent |
+| C1 preparation cancellation | Corrected C1 module83passed99.17s; legacy store/backend419passed2skipped35.93s; corrected staging/snapshot185passed11skipped25.56s,10pins unchanged; original failure retained | Independent full SOURCE ready; receipt/begin/seal-in-flight coverage, fresh QUALITY and integration/publication remain; prepare-only is not executable docking consent |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -40,6 +40,27 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+C1 legacy diagnostic8c67d5 reproduced **1failed,1.81s**,exit1,10pins unchanged:
+final receptor233chars passed, actual temporary receptor250chars failed the
+unchanged240char ceiling. Independent SOURCE approved fixture14F92A30: only
+shorter test-owned root and explicit final/temporary path prerequisites, original
+100/101-byte and path-negative assertions retained, no production relaxation.
+Actual module pair12395/d37397: **185passed,11skipped,25.56s**,exit0,10pins
+unchanged. Six receipt faults plus normal control are released for TEST preparation;
+begin/seal-in-flight, fresh QUALITY and full integration remain C1 gates.
+
+Web permanent-join TEST SOURCE AD347/6235 passed independent review after the
+control was amended to enter actual supervise under the no-real-Popen rig.
+Parent997d9b: **1failed,0.44s**,exit1,33pins unchanged, with actual unsupported
+B1 selector. This is a missing outer qualification path, not a scientific failure.
+Only the ignored existing owner helper is released for bounded implementation;
+control/Windows qualification must pass before the actual nonterminating child.
+
+G3 manifest amendmentABA79484 passed independent SOURCE with JSONAEB1182
+unchanged: root zlib/MSVCP140/VCRUNTIME140_1 identities explicitly bound before
+other native extensions. Stage-A test preparation is released, not actual native
+loading, cold-import or live generation. No P7/P8 completion is claimed.
 
 C1 parent legacy regression9076/7fc675 completed **419passed,2skipped,35.93s**,
 exit0,10pins unchanged,zero warnings (task_store and local_backend). Skips remain
