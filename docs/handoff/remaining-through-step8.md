@@ -36,6 +36,26 @@ and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
 
+Fresh remote observations confirm PR98 run36286487041 and PR101 run36286571814
+are still live at exact8ce19a5/a44ff39. Seven component checks succeeded for
+each; Agent and final aggregate remain pending. Do not merge from these partial
+snapshots. Both retain their original failure/limited-scope evidence.
+
+Continuation prepared tests received independent SOURCE READY; exact3 initial
+feature/API RED nodes await the sole execution slot. C0a test preparation is
+underway after approved implementation-plan SOURCE; no production DTO yet.
+Web installer8E25A4 received independent SOURCE READY; its authorized sequential
+control/phase-only campaign has no reported terminal outcome yet. Do not infer
+release from absent processes or start a competing run before authoritative handoff.
+
+G3 metadata-only next work has a clean independent branch/tree
+codex/g3-ollama-metadata at4280b7a. Scope is design preparation for two bounded
+loopback metadata requests only (version/show, gmm-llama:latest), not actual
+requests, configuration discovery, inference, loading or token enforcement proof.
+Official Generate/Modelfile references inform the plan; post-call usage counters
+do not alone prove a pre-dispatch complete-prompt bound. Proposed code/tests and
+the eventual metadata invocation remain separately gated; no model/secret read.
+
 PR98 aligned to actual main4280b7a via40741b3, preserving all3 owned bytes;
 evidence-only append committed8ce19a5 and pushed. Original CI36282797393 failure
 and unknown first-timeout cause remain in plan/PR; fresh CI required on new head.
