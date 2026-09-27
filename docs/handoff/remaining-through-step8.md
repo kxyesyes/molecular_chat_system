@@ -30,10 +30,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Independent89474/af8560 full current helper module:248passed63.28s,0warnings/skips,332pins unchanged. DLL P2 API RED37255/9f2757:1failed6.55s,332pins unchanged, two missing APIs | Minimal DLL P2 implementation released for source review; actual cold/generation/B2 remain open. Helper fixtures and missing-API RED are not real cold/scientific execution |
+| G3 concrete Windows owner | DLL P2 focused85249/7d14b1:36passed23.31s; independent full86299/79f179:284passed84.14s,0warnings/skips,332pins unchanged | Actual fixed-child Windows/cold qualification is at SOURCE proposal; no actual cold or generation yet. Retain first35pass/1fixture-failure result; helper fixtures do not establish B2/P8 |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
-| C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a isolated branch based on07e751a is at plan review; no production changes/real Vina/C4/P8 completion |
+| C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
+| C4a physical command settlement | Plan/test SOURCE reviewed after four fixture corrections; API-only43230/17e112:1failed8.17s,12pins unchanged, missing CommandOwnershipScope | Only base-adapter receipt/platform implementation released. Real OS tests still HOLD for qualified outer ownership; service/tool/lease consumers and all later C batches remain pending |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -41,6 +42,39 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+G3 DLL P2 first four-selector run26912/2a6ee9 completed **35passed1failed24.20s**,
+exit1,332pins unchanged. The failure was the fixture's swallowed-escape positive
+control: its latch raised, but pytest assertion rewriting appended an explanation
+that violated the anchored message regex. The SOURCE-reviewed test-only explicit
+AssertionError preserves the condition, exact message, anchored regex and cleanup
+checks; no launcher/scientific behavior was changed for this failure. Focused
+85249/7d14b1 then completed **36passed23.31s**,exit0,332pins unchanged. Independent
+full module86299/79f179 completed **284passed84.14s**,zero warnings/skips,exit0,
+332pins unchanged. New actual fixed-child Windows baseline/paired-control proposal
+is under SOURCE review; no actual cold execution or generation is claimed.
+
+B1 timeout diagnosis remains UNKNOWN. Source order and47 captured progress dots
+suggest a boundary near metadata_acceptance teardown or metadata_query setup/call,
+but do not prove the current node or distinguish cumulative delay from a stall.
+The approved next experiment adds bounded hashed node/phase/relative-time markers
+inside the existing isolated runner, for the exact whole first module only;
+no stack/locals, observer thread, deadline change or partial-module substitution.
+New finite controls49716/f8b3bf->bdd292 completed **25failed12.05s**,exit1,37pins
+unchanged:24 missing diagnostic APIs plus one test-only lowercase-hexdigest versus
+uppercase-literal error. After the independently reviewed literal-only correction,
+8556/bfc301 completed **1failed3.27s**,exit1,37pins unchanged, reaching the intended
+missing pre-capture plugin construction. Minimal inline-runner implementation is
+released for SOURCE review; the real first-module diagnostic is NOT yet run.
+
+C4a TEST source B00DD8/planDDCB/runner0AD passed API-only SOURCE. The new physical
+fixtures retain isolated child argv, best-effort teardown with final error
+aggregation, actual zero-resume observations, and independent nested-cleanup
+failure evidence; genuine platform execution remains held until an outer retained
+owner is qualified. Parent43230/17e112 completed **1failed8.17s**,exit1,12pins
+unchanged, at the missing CommandOwnershipScope call-phase assertion. This reached
+no resource fixture, scientific tool or late-spawn behavior. Only the base-adapter
+receipt/platform seam is released; no C4a completion or Web activation is implied.
 
 2026-09-28 fresh receipts: C2's independent eight-module run physically ended
 26566/8c3e0b with **1148passed15skipped0warnings773.33s**, exit0. Skips are
