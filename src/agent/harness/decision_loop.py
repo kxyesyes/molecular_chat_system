@@ -117,6 +117,48 @@ class _Run:
         return counters
 
 
+@dataclass
+class _BindingFinalization:
+    """One request's private candidate, never a stored or wire DTO.
+
+    Task5 will cap tail_deadline when reserving outgoing snapshot credit. Until
+    then B cannot mint a nonce; the root cap still covers terminal callbacks and
+    the outer drain. Failure correction performs no source/owned work.
+    """
+    session: Any = None
+    clock: Any = None
+    deadline: float | None = None
+    tail_deadline: float | None = None
+    counters: dict = field(default_factory=dict)
+    failure: tuple[str, str] | None = None
+    candidate: Any = None
+    phase: str = 'preterminal'
+    ordinary_cancelled: bool = False
+    cancelled_metadata: bool = False
+
+    def expired(self):
+        cap = self.deadline if self.tail_deadline is None else min(self.deadline, self.tail_deadline)
+        return self.clock() >= cap
+
+    def invalidate(self, reason, boundary):
+        if self.session.publication_invalidated:
+            # A reentrant terminal callback can already have committed the
+            # failure. Adopt it, never change its reason or start positive work.
+            self.candidate = self.session.finish()
+            self.failure = (self.candidate.metadata['stop_reason'], self.candidate.metadata['failed_boundary'])
+            return self.candidate
+        if self.failure is None:
+            if type(reason) is not str or re.fullmatch(r'[a-z][a-z0-9_]{0,95}', reason) is None:
+                reason = 'binding_publication_failed'
+            self.failure = (reason, boundary)
+            ids = list(dict.fromkeys(r.quality.get('evidence_id') for r in self.session.results
+                if type(r.quality.get('evidence_id')) is str
+                and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}', r.quality['evidence_id'])))[:12]
+            self.candidate = self.session.invalidate_dynamic_publication(reason=reason,
+                boundary=boundary, invalidated_evidence_ids=ids, counters=self.counters)
+        return self.candidate
+
+
 class ModelDecisionLoop:
     """Explicit experimental API. The caller supplies trusted request obligations.
 
@@ -149,6 +191,52 @@ class ModelDecisionLoop:
     async def run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
                   continuation_id=None, clarified_query=None, requirements=None, worker_owner=None,
                   admission_carry=None, admission_exchange=None):
+        if self.binding_profile is not None:
+            from src.agent.runtime.worker_ownership import WorkerOwner
+            finalization = _BindingFinalization()
+            try:
+                try:
+                    result = await self._run(context, request_kind=request_kind, allowed_tools=allowed_tools,
+                        required_tools=required_tools, event_bus=event_bus, continuation_id=continuation_id,
+                        clarified_query=clarified_query, requirements=requirements, worker_owner=worker_owner,
+                        admission_carry=admission_carry, admission_exchange=admission_exchange,
+                        _finalization=finalization)
+                except (Exception, asyncio.CancelledError) as exc:
+                    if finalization.session is None:
+                        raise
+                    result = finalization.invalidate('cancelled' if isinstance(exc, asyncio.CancelledError)
+                        else 'binding_publication_failed', 'terminal_publication')
+            finally:
+                if type(worker_owner) is WorkerOwner:
+                    try:
+                        await worker_owner.settle()
+                    except asyncio.CancelledError:
+                        if finalization.session is None:
+                            raise
+                        if (finalization.phase == 'cancelled_attempt'
+                                and finalization.failure is None
+                                and not finalization.session.publication_invalidated
+                                and finalization.candidate is not None
+                                and finalization.candidate.outcome == RunOutcome.CANCELLED):
+                            # Repeated cancellation still drains; it cannot turn
+                            # an already verified ordinary cancel into a second
+                            # terminal. Source/cleanup failures are not exempt.
+                            result = finalization.candidate
+                        else:
+                            result = finalization.invalidate('cancelled', 'owner_drain')
+                    except Exception:
+                        if finalization.session is None:
+                            raise
+                        result = finalization.invalidate('worker_cleanup_unconfirmed', 'owner_drain')
+            # The owner is sealed. Only the clock and failure-only correction
+            # may run here, never a source check or another owned action.
+            if finalization.session is not None:
+                if finalization.session.publication_invalidated:
+                    result = finalization.invalidate('binding_publication_failed', 'owner_drain')
+                if finalization.expired():
+                    result = finalization.invalidate('task_deadline_exceeded', 'owner_drain')
+                finalization.phase = 'released'
+            return result
         try:
             return await self._run(context, request_kind=request_kind, allowed_tools=allowed_tools,
                 required_tools=required_tools, event_bus=event_bus, continuation_id=continuation_id,
@@ -161,7 +249,7 @@ class ModelDecisionLoop:
 
     async def _run(self, context, *, request_kind, allowed_tools, required_tools, event_bus=None,
                    continuation_id=None, clarified_query=None, requirements=None, worker_owner=None,
-                   admission_carry=None, admission_exchange=None):
+                   admission_carry=None, admission_exchange=None, _finalization=None):
         from langgraph.graph import END, StateGraph
 
         binding = self.binding_profile is not None
@@ -281,7 +369,7 @@ class ModelDecisionLoop:
         bus = event_bus or AgentEventBus(state_store=self.store)
         if bus.state_store is not self.store:
             raise ValueError('event and run stores must have the same authority')
-        bus = DecisionEvents(bus)
+        bus = DecisionEvents(bus, binding_profile=self.binding_profile)
         catalog, adapters = authorized_catalog(self.registry, context, request_kind,
             allowed_tools - set(requirements.forbidden_tools), binding_profile=self.binding_profile)
         if not (required_tools if binding else {r.tool_name for r in requirements.molecular_results}) <= set(adapters):
@@ -315,6 +403,7 @@ class ModelDecisionLoop:
             observation_prepare=(lambda result, step: guarded(
                 lambda: resolver.prepare_observation(result, step))) if binding else None,
             reference_guard=reference_guard if binding else None,
+            dynamic_publication=binding,
         )
         if binding:
             session._decision_binding_profile = self.binding_profile
@@ -415,18 +504,20 @@ class ModelDecisionLoop:
         if not binding:
             state.task_acceptance = await acceptance()
 
-        def persist(phase):
+        def persist(phase, *, retry=True):
             if admission_carry is not None:
                 state.ordinary_admission = admission_metadata(admission_carry,
                     decision_requests=state.model_requests)
-            retry_persistence(lambda: self.store.update_run_metadata(context.trace_id, {
+            def write():
+                return self.store.update_run_metadata(context.trace_id, {
                 'decision_loop': {**state.counters(), 'phase': phase,
                                   'decision_id': state.decision_id,
                                   'required_tools': sorted(required_tools),
                                   'allowed_tools': sorted(adapters), 'request_kind': request_kind},
                 'task_requirements': requirement_payload, 'task_acceptance': state.task_acceptance,
                 **({'ordinary_admission': state.ordinary_admission} if admission_carry is not None else {}),
-            }))
+                })
+            return retry_persistence(write) if retry else write()
 
         def emit(event, message, payload=None):
             bus.emit(context.trace_id, event, message, payload=payload, event_id=(
@@ -733,18 +824,53 @@ class ModelDecisionLoop:
                 if observed.success:
                     session.outputs[record['step_id']] = deepcopy(observed.data)
                 session.state.artifacts.extend(deepcopy(record['artifacts']))
-        try:
-            state.task_acceptance = await acceptance(
-                state.decision.evidence_ids if binding and getattr(state.decision, 'action', None) == 'finish'
-                and request_kind == 'scientific' else None)
-        except asyncio.CancelledError:
-            if not binding:
-                raise
+        if binding:
+            # All action workers have settled. Bind failure-only authority
+            # before the next cancellable terminal worker (final acceptance),
+            # not after it has already returned.
+            if session.next_index != session.step_count:
+                session.fail_runtime('action_journal_incomplete')
+                state.outcome = RunOutcome.FAILED
+            _finalization.session, _finalization.clock = session, clock
+            _finalization.deadline = state.deadline
+            _finalization.counters = {name: getattr(state, name) for name in (
+                'model_requests', 'protocol_repairs', 'tool_budget_reserved', 'reused_decisions')}
+            _finalization.counters['tool_attempt_count'] = session.tool_attempt_count
+
+        def cancel_terminal():
+            nonlocal error
+            if (session.publication_invalidated or _finalization.failure is not None
+                    or failures or session._runtime_error is not None):
+                return False
+            if _finalization.phase == 'cancelled_attempt':
+                return True
+            if _finalization.phase != 'preterminal':
+                return False
+            # PR96: no finish attempt yet. Preserve actual observations but
+            # remove success/waiting claims, including stored acceptance.
             state.answer, state.waiting_for_input = '', False
             state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
             state.task_acceptance = {'version': '2', 'profile': self.binding_profile,
                 'satisfied': False, 'finish_eligible': False, 'checks': [], 'reason_codes': ['cancelled']}
             error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
+            _finalization.ordinary_cancelled = True
+            return True
+
+        def publication_failure(exc, stage):
+            reason = failures[0] if failures else (
+                'cancelled' if isinstance(exc, asyncio.CancelledError) else
+                str(exc) if isinstance(exc, DecisionBoundaryError) else 'binding_publication_failed')
+            return _finalization.invalidate(reason, stage)
+
+        try:
+            state.task_acceptance = await acceptance(
+                state.decision.evidence_ids if binding and getattr(state.decision, 'action', None) == 'finish'
+                and request_kind == 'scientific' else None)
+        except asyncio.CancelledError as exc:
+            if not binding:
+                raise
+            if not cancel_terminal():
+                return publication_failure(exc, 'terminal_acceptance')
         except Exception:
             state.task_acceptance = {'version': '2' if binding else '1', 'satisfied': False, 'checks': [],
                                      'reason_codes': ['acceptance_verification_failed']}
@@ -754,30 +880,87 @@ class ModelDecisionLoop:
                 state.stop_reason = failures[0] if failures else 'acceptance_verification_failed'
                 state.outcome = RunOutcome.FAILED
                 error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Binding verification failed')
+        if binding and state.outcome == RunOutcome.CANCELLED:
+            # Acceptance still verifies settled observations on graph-cancel
+            # paths, but a valid observation is not a completed/certified task.
+            cancel_terminal()
         if state.outcome == RunOutcome.COMPLETED and not state.task_acceptance['satisfied']:
             state.outcome = RunOutcome.PARTIAL if any(map(usable, session.results if binding else active_results(session))) else RunOutcome.FAILED
             state.stop_reason = 'task_requirements_unfulfilled'
             state.answer = '任务成果复核未通过，不能声明任务已完成。'
             error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Task acceptance did not pass')
-        persist('waiting_for_input' if state.waiting_for_input else 'terminal')
         if binding:
-            try:
-                await boundary()
-            except asyncio.CancelledError:
-                state.answer, state.waiting_for_input = '', False
-                state.stop_reason, state.outcome = 'cancelled', RunOutcome.CANCELLED
-                state.task_acceptance = {'version': '2', 'profile': self.binding_profile,
-                    'satisfied': False, 'finish_eligible': False, 'checks': [], 'reason_codes': ['cancelled']}
-                error = AgentExecutionError(AgentErrorCode.CANCELLED, 'Decision run cancelled')
-                # Replace the earlier acceptance metadata, not the finish journal.
-                persist('terminal')
-            except DecisionBoundaryError as exc:
-                state.answer = ''
-                state.waiting_for_input = False
-                state.stop_reason, state.outcome = str(exc), RunOutcome.FAILED
-                error = AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'Binding verification failed')
+            async def publication_check(stage):
+                try:
+                    await boundary()
+                except asyncio.CancelledError as exc:
+                    # owned() retains the actual verification/root and checks
+                    # the first-error latch in finally. At this point a pure
+                    # cancellation has drained, not skipped the source check.
+                    if not cancel_terminal():
+                        return False, publication_failure(exc, stage)
+                except Exception as exc:
+                    return False, publication_failure(exc, stage)
+                return True, None
+
+            async def publication_write(write, stage, retry=None):
+                # Revalidate even if a callback committed and then raised. A
+                # known invalidation prevents retrying positive writes.
+                for attempt in range(2):
+                    if session.publication_invalidated:
+                        return False, _finalization.invalidate('binding_publication_failed', stage)
+                    valid, correction = await publication_check(stage)
+                    if not valid:
+                        return False, correction
+                    if (stage == 'finish' and _finalization.ordinary_cancelled
+                            and not _finalization.cancelled_metadata):
+                        # Cancellation during finish's precheck must replace
+                        # earlier successful acceptance before finish begins.
+                        valid, correction = await publication_write(
+                            lambda: persist('terminal', retry=False), 'terminal_metadata')
+                        if not valid:
+                            return False, correction
+                    failed = cancelled = False
+                    written_cancelled = _finalization.ordinary_cancelled
+                    try:
+                        with session._dynamic_publication_write():
+                            if stage == 'finish' and _finalization.phase == 'preterminal':
+                                # Enter BEFORE any callback; a false event flag
+                                # cannot prove a commit-then-raise did not happen.
+                                _finalization.phase = ('cancelled_attempt' if written_cancelled
+                                                       else 'terminal_attempt')
+                            value = (retry if attempt and retry is not None else write)()
+                    except (Exception, asyncio.CancelledError) as exc:
+                        failed = True
+                        cancelled = isinstance(exc, asyncio.CancelledError)
+                    if session.publication_invalidated:
+                        return False, _finalization.invalidate('binding_publication_failed', stage)
+                    valid, correction = await publication_check(stage)
+                    if not valid:
+                        return False, correction
+                    if cancelled and not cancel_terminal():
+                        return False, publication_failure(asyncio.CancelledError(), stage)
+                    if not failed:
+                        if stage == 'terminal_metadata':
+                            if written_cancelled != _finalization.ordinary_cancelled:
+                                # PR96's post-metadata cancellation: rewrite the
+                                # cancelled projection with full pre/post checks,
+                                # within the same bounded two-write allowance.
+                                continue
+                            _finalization.cancelled_metadata = written_cancelled
+                        return True, value
+                return False, _finalization.invalidate('publication_write_failed', stage)
+
+            valid, result = await publication_write(
+                lambda: persist('waiting_for_input' if state.waiting_for_input else 'terminal', retry=False),
+                'terminal_metadata')
+            if not valid:
+                return result
+        else:
+            persist('waiting_for_input' if state.waiting_for_input else 'terminal')
         if session.next_index != session.step_count:
-            session.fail_runtime('action_journal_incomplete')
+            if not binding:
+                session.fail_runtime('action_journal_incomplete')
             state.outcome = RunOutcome.FAILED
         if not state.answer:
             state.answer = '本次任务未完成，未生成未经验证的科研结论。'
@@ -799,6 +982,28 @@ class ModelDecisionLoop:
                     'event_delivery_retries': bus.delivery_retries}
         if waiting_payload is not None:
             metadata['continuation_id'] = waiting_payload['id']
+        if binding:
+            def finish_binding():
+                # A cancellable precheck may have replaced the task projection
+                # after metadata was assembled. Freeze only the current request.
+                current_metadata = {**metadata, 'task_acceptance': state.task_acceptance,
+                    'stop_reason': state.stop_reason, 'waiting_for_input': state.waiting_for_input}
+                answer = state.answer or '本次任务未完成，未生成未经验证的科研结论。'
+                return session.finish_dynamic(answer, outcome=state.outcome, error=error,
+                                              metadata=current_metadata)
+
+            valid, result = await publication_write(finish_binding, 'finish', retry=session.finish)
+            if not valid:
+                return result
+            # B nonce publication remains disabled until Task5's authenticated
+            # revision8 replay and reserved-tail protocol are implemented.
+            if state.waiting_for_input:
+                valid, correction = await publication_write(
+                    lambda: self.store.update_run_status(context.trace_id, 'waiting_for_input'), 'waiting_status')
+                if not valid:
+                    return correction
+            _finalization.candidate = result
+            return result
         try:
             result = session.finish_dynamic(state.answer, outcome=state.outcome, error=error, metadata=metadata)
         except Exception:
