@@ -15,11 +15,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Root20controls and supervisor25controls passed; real Windows qualification6774f6:3passed0.66s,6pins unchanged, independent QUALITY READY | First functional-native e937aa FAILED root_owner_not_unique,1failed4.57s; actual outer receipt settled/released,31pins unchanged. Investigate accepted-before-registration test observation; Tasks6–8 and earlier3s failures remain open |
+| Normal-Web B1 Tasks4–8 | Root20controls, supervisor25controls and real Windows qualification passed; deterministic actual-runtime origin controls c6f3a3 reproduced5failures7warnings7.11s,31pins unchanged | Test-helper origin-capture fix now in progress; no production change. Native/json full integration and Tasks6–8 remain open; earlier failures retained |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
-| B1 revision8 continuation | Aligned author73095/9e510a GREEN6376passed7warnings816.85s,660pins unchanged; parent additional new shared tests beb95e462passed3.15s,5pins unchanged | Kant assigned independent SOURCE plus one fresh exact61, sole Python slot; actual launch/terminal not yet reported. Publication pending; original failures remain separate |
+| B1 revision8 continuation | Author6376passed; independent SOURCE READY and fresh37290/bc9113:6376passed7warnings811.40s,660pins unchanged; additional shared462passed | PR103 draft created at5d3df75; exact-head CI36306118836 in progress. Remote review/CI and reviewed/merged-tree equality still required |
 | Strict generation transport | PR97 MERGEDc612c98; exact1053951 CI36279601921 success9/9; reviewed/landed tree9da5ad26 equal; both exact17 runs752 passed+162 subtests | Strict transport prerequisite satisfied; not full B2 closure |
 | Native ASCII validation optimization | PR98 MERGEDc463dd2; exact8ce19a5 CI36286487041 success9/9; reviewed/landed tree791e4617 equal | Retain original failed run and unknown0.5s trigger; original Web3s issue not fixed |
 | Hung-create test cleanup | PR100 MERGED4280b7a; exact27589a7 CI36285626423 success9/9; reviewed/landed tree0b9f4f65 equal; independent187passed | First0.5s cause remains UNKNOWN; original CI failure retained |
@@ -30,7 +30,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| C0a docking proposal DTO | PR102 MERGED18ad4f9; exact46d7076 CI36288613814 success9/9; reviewed/landed tree751bd047 equal; author/fresh733passed each | C0b two risks reproduced324328; correction1B4AFC38 awaiting further cleanup fix. SOURCE identified pre-send-return HTTPX close cancellation gap; C5D13C74 test preparation under review, not executed. No GREEN or complete C proof |
+| C0a docking proposal DTO | PR102 MERGED18ad4f9; reviewed/landed tree equal; C0b pre-return physical-close gap now reproduced cf929d:8failed2passed2.95s,5pins unchanged | Construction-time first response guard and explicit borrowed-client opt-in tests/design in preparation. Production1B4A frozen; no GREEN or complete C proof |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -38,6 +38,37 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Continuation publication resumed using the now-available GitHub connector, not
+credential extraction. Repository access succeeded and head-branch search found
+no existing PR. Safe git fetch still reports main18ad4f9. Parent appended only
+the independent6376-pass and shared462-pass receipts to the owned plan, committed
+5d3df75 and pushed the exact seven-file branch. Draft PR103 was created and
+attached to this task; CI36306118836 is confirmed in progress. No merge or new
+passing CI is claimed. Earlier unauthenticated403 and denied credential extraction
+remain historical; no secret was read, exposed or used to bypass that denial.
+
+Actual parent Web-origin RED c6f3a3 reached both positive races (accepted before
+registration and completed/removed owner), each failing root_owner_not_unique;
+all three corruption controls failed because the origin snapshot was never
+examined. Five failures, seven warnings,7.11s,exit1;31pins unchanged. Independent
+SOURCE approved this corrected FIRST_COMPLETED test freeze. Only the helper and
+old20-control task fixtures may now change; the new five control assertions,
+production behavior, three-second credit and cleanup guarantees remain fixed.
+
+Actual parent C cleanup RED cf929d exercised real HTTPX hook-error close in both
+wire modes: eight cancellation/deadline variants settled outward before physical
+close completed; the two uninterrupted controls passed. Eight failures,two passes,
+2.95s,exit1;five pins unchanged. New construction-time C guard design explicitly
+requires borrowed-client opt-in before requests; unguarded C requests must reject
+before binding/POST without changing ordinary chat behavior. The positive cleanup
+regression must still reach and join the held physical close, not merely pass by
+early rejection. This remains test/design preparation, not a repaired GREEN.
+
+Canary test SOURCE identified an observer-frame KeyError before implementation;
+the minimal test-only correction is under re-review. Script and isolated live
+launcher remain absent. Metadata reachability is not live generation evidence.
+Packages7/8 remain open and deployment remains excluded.
 
 C0b correction1B4AFC38/plan61E04454 implements same-request encoding before
 binding and C-only owned waiting/drain, leaving ordinary behavior and model7F36FF
