@@ -30,11 +30,11 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Actual cold27800/d8836d failed7.26s. Fixed-enum diagnostic API87864/de0a85 now reached intended missing-three-helper RED:1failed7.98s,332pins unchanged; minimal implementation released | Earliest cold failure boundary remains UNKNOWN. Diagnostic controls/implementation are not a corrected cold start or generation success; no repeat/manifest bypass/provider call |
+| G3 concrete Windows owner | Actual cold27800/d8836d failed7.26s. Diagnostic P2 reproduced3294/f82a98:2failed4passed; minimal fix passed86211/317de1:6passed, then full3150/dfad34:392passed1actual-cold-skip114.24s,332pins unchanged | Independent fresh QUALITY in progress. Earliest cold failure boundary remains UNKNOWN; trusted @2 caller migration and actual cold run still pending. Offline controls are not generation success |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Parent54341/b38790:72passed6POSIX-skipped33.76s; independent fresh40403/fb6f52:72passed6POSIX-skipped33.34s,339pins unchanged each. Local section4.1 checkpoint3992505 committed exactly5files, clean at commit | Section4.2 service/tool proof and deferred-cleanup seams require written clarification before TEST; section4.3 lease remains open. Historical no-scope wording is compatibility only. No POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Parent54341/b38790:72passed6POSIX-skipped33.76s; independent fresh40403/fb6f52:72passed6POSIX-skipped33.34s,339pins unchanged each. Local section4.1 checkpoint3992505 committed exactly5files, clean at commit | Section14 written SOURCE approved; section4.2 service/tool proof and deferred-cleanup TEST preparation released, not production. Section4.3 lease remains open. No POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -42,6 +42,22 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+B1 bounded-profiler implementation485B0557 passed independent SOURCE, then
+parent exact11-function run6480/834ee7:66passed147.02s, and complete two-owner-
+module run1048/9324be:268passed192.12s. Both physically exited0,41pins unchanged,
+zero reported skips/warnings. These qualify diagnostic behavior only; the old
+whole-module720s failure and all unrun campaign rows remain unresolved. No new
+whole-module diagnostic has yet run with this profiler.
+
+G3 P2 minimal echo-identity fix019C8059 passed independent SOURCE and actual
+same-six-case GREEN86211/317de1:6passed11.27s,exit0,332pins unchanged. The fix
+recognizes only this invocation's success-cleanup latch exception object, not
+all exceptions of its type; all genuine cleanup controls remain. Complete
+offline module3150/dfad34 then completed392passed1skipped114.24s,exit0,332pins
+unchanged. The skipped case requires separately granted actual-cold execution;
+it is not covered by this run. Independent fresh QUALITY is next, separate from
+the still-pending actual cold caller @2 migration and generation execution.
 
 G3 cleanup-diagnostic behavior RED3294/f82a98 reached the intended assertion:
 2failed4passed13.29s, physical exit1,332/332 input pins unchanged. Both propagated
