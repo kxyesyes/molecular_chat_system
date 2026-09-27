@@ -33,6 +33,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | G3 concrete Windows owner | Stage-B SOURCE and fresh QUALITY approved: parent224passed44.31s; independent27198/77324c224passed44.66s,zero warnings/skips,332pins and1246manifest identities unchanged | Stage-C cold-import guard/report tests being prepared; actual cold imports and real generation/B2 still open. Finite-process fixtures are not scientific execution |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
+| C2 consent execution | Parent43571/05e943 actual39-case characterization:38passed,1failed,84.94s,exit1;11 frozen inputs unchanged | Runtime-generation postclaim terminal projection failed its original5s wait; diagnose before fixing. Two unchecked UPDATE-rowcount paths need genuine SQLite zero-update regressions. No C2 release or real Vina claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
@@ -40,6 +41,29 @@ Original mixed checkout remains untouched. Local component passes, source review
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
 ### Historical checkpoints (newest first; superseded staging states retained)
+
+Parent C2 normal17691/4ba5d5 completed1passed11.85s, then the independently
+execution-safety-reviewed full39-case matrix43571/05e943 completed **38passed,
+1failed,84.94s**,exit1. All11 frozen inputs matched before/after. The sole failure
+was post-claim runtime-generation replacement: the original5s terminal wait did
+not observe FAILED plus settled cleanup. The run reached actual behavior, unlike
+the previous missing-API RED. Its finally cleanup assertions did not fail, but
+this alone does not distinguish receipt projection from all persistence/cleanup
+facts. Source points to generation-based UNKNOWN overriding terminal receipts;
+independent diagnosis is pending. Do not increase the deadline or claim a leak
+without evidence. Two independent unchecked SQL UPDATE rowcount findings remain
+release blockers; TEST-only genuine SQLite RAISE(IGNORE) regressions are released.
+These are temporary-SQLite/actual-backend tests with explicitly synthetic raw
+pose output, not real Vina, C4 physical-process proof or final scientific success.
+
+Task8 final design556047 received independent SOURCE GO after requiring actual
+captured-owner health, physical closure and terminal report together before
+continuing after a normal pytest failure. A first raw outcome cannot mask a later
+capture/query/watchdog failure. The57-call/138-target/47-module mapping remains
+complete; TEST-FIRST is released, not implementation or full-campaign execution.
+G3 Stage-C corrected testsBE4D/plan79A1 received full7-function SOURCE approval;
+the original API RED is retained and six bounded bootstrap helper implementations
+are released for source review. Actual cold import and generation remain pending.
 
 Independent B1 fresh QUALITY91291/4a5e54 completed **265passed,7warnings,
 0skips,504.95s**,exit0,39pins unchanged, same11 explicit targets without restart
