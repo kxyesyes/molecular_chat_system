@@ -15,7 +15,7 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Attached-source hooks | PR89 MERGED7a3309e afterCI36261000462 success9/9; actual collection10020=9796+224, reviewed/landed trees equal | Original CI36255095764 failed600s retained; no performance-root-cause claim |
 | PR87 RAG current source | MERGED b33e2c0; CI36251616084 success8/8; reviewed/landed tree cf78512a equal | Retain old600s timeouts; latest Agent596.81s is near the limit, not a performance fix |
 | Normal-Web B1 Task3 | LOCAL COMPLETE d076653; corrected SOURCE/QUALITY approved; worker380 passed334.58s and independent380 passed338.97s | Not yet integrated into main |
-| Normal-Web B1 Tasks4–8 | Profiler controls66passed and full qualification268passed. Whole66459/cbfde1 again hit720s;676pins unchanged,690 complete markers and two bounded partial profiles captured | Repeated configuration/closure validation is a measured cost candidate; first profiled native CALL failed and its exact assertion remains UNKNOWN. No full-module summary or performance fix; original56 campaign rows still NOT_RUN |
+| Normal-Web B1 Tasks4–8 | Original whole66459/cbfde1 hit720s; digest candidate E63B15C1 passed40focused and four compatibility modules598cases; warm12-auth sample p50 improved7.27% | Additional15case tail, independent verification and current isolated native diagnosis remain; not a Web timeout fix. First historical profiled native assertion UNKNOWN; original campaign not completed |
 | B1 binding foundation | PR92 MERGED82322c3; PR93 MERGED5d36eee after exact9 CI success, full treea3ebb7b7 equal; two exact40 runs4254 passed each | Original36268575293 core600s/exit124 retained; next model-selected loop integration is not yet complete |
 | B1 model-selected loop | PR96 MERGEDaa3cddd; CI36277170168 success9/9; reviewed/landed tree3931f512 equal; both exact58 runs6107 passed | Publication/revision8/normal-Web remain separate; dormant/offline only |
 | B1 terminal publication | PR99 MERGED108df5d; exact3658416 CI36284700147 success9/9; reviewed/landed tree9ddfae2d equal; author/fresh exact60 each6208 passed | Revision8 and normal-Web remain separate |
@@ -30,15 +30,49 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | B2 generation/ranking and C docking | PENDING integration | Real generated-candidate consumption/ranking and consent/cancel/cleanup closure |
 | B2 generator contracts | PR101 MERGEDc90c180; exactc0c4f9c CI36287476020 success9/9; reviewed/landed treec78e0b06 equal | Pure contract is not runtime/backend proof; G3/G4 and full B2 remain open |
 | G3 bounded metadata script | Author1d621a167passed; parent fresh97b838167passed1.16s,8pins unchanged; independent SOURCE/QUALITY READY. Actual bounded metadata f12d7e succeeded in0.6199s,2requests,8pins unchanged | Ollama0.34.3/gmm-llama:latest visible; tokenizer/rendering/context enforcement and actual generation still unverified. Metadata success is not G3/B2 completion |
-| G3 concrete Windows owner | Fine diagnostic independently verified444passed1skip; reviewed protocol3 migration passed52finite cases. Actual cold16655/142312 failed7.99s at initial_inventory/system_membership/invariant_failed;332pins unchanged,imports/client/POST0 | Investigate the actual directory-membership boundary, distinguishing spelling/case from a genuinely foreign module; no whitelist relaxation, generation or G3/B2 completion claim |
+| G3 concrete Windows owner | Protocol4 migration SOURCE approved; finite43532/b70378 passed34cases21.69s. Actual36010/976385 cold failed1case8.76s,332pins unchanged: initial_inventory/system_membership with lexical system_case_variant | Case spelling is observed, not OS directory identity proof. Minimal identity-preserving design pending; no import/client/POST or generation success |
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Section4.1/4.2 local checkpoint8700b38; parent111passed6POSIXskipped63.15s and independent40000/2148ee111passed6skipped0warnings63.67s;339pins unchanged and physical settlement confirmed | Section4.3 runtime/input lease remains open; written clarification released. Original failed runs preserved, not all historically attributed. No POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Section4.1/4.2 local8700b38 accepted; owner mapping checkpoint1e4b9f5. Section4.3 whole-consent93428/59c9dd physically ended1failed158passed432.15s,340pins unchanged, ownership settled | Sole pending-completion case did not reach expected success. Test-only bounded diagnostics released, production frozen. Permanent unresolved runtime ownership and pre-compat factory exception remain uncovered; no POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
 ### Current bounded implementation checkpoint — 2026-09-28
+
+Latest parent evidence supersedes the in-flight chronology below:
+
+- B1 existing fixed four-module owner run87361 physically exited0; all666pins
+  unchanged. Original campaign rows4/6/8/9 respectively:162passed3warnings
+  173.11s;145passed3warnings123.97s;73passed29.17s;218passed3warnings82.40s.
+  Total598passed,9SWIGwarnings,no reported skips/failures. Each actual receipt
+  is passed/ownership settled/slot released/may_continue true. This is a selected
+  compatibility execution, not a successful original57-row campaign or the
+  pending15-case tail. C4 diagnostic77947 then acquired the sole Python slot
+  on SOURCE-approved test96C16CE1/planFCEA7860,340pins; await actual terminal.
+
+- B1 bounded measurement57237/d5a0c0:1passed,3SWIGwarnings,29.96s,exit0;
+  664focused inputs unchanged. Six actual property records,12 authentications
+  per sample,eight paired samples after two warmups. Reference p50/p95 are
+  105073900/106007900ns; candidate97431700/100676400ns. Approximate reductions
+  7.27%/5.03% are limited to this warm-authentication microbenchmark, not full
+  closure, six distinct tools, cold startup or normal-Web response. Reference
+  cold/warm digest counts12/12 versus candidate6/0; parse/integrity/proof/turn/
+  adapter counts stay12 in every pass. Compatibility and original Web failure
+  remain open. No enlarged fixture or watchdog retry is justified by this result.
+- G3 protocol4 actual cold36010/976385:1failed8.76s,exit1,332pins unchanged.
+  Fixed diagnostics locate initial_inventory/system_membership/invariant_failed,
+  lexical system_case_variant,imports_checked0,client_constructions0,POST0.
+  Context/root/close/final-inventory failures are null. Lexical equivalence
+  does not establish directory identity or justify broad admission changes.
+- C4a93428/59c9dd:1failed158passed432.15s,exit1,340pins unchanged; outer
+  test_failed/ownership settled/slot released. Sole failure is pending-completion
+  waiting for SUCCEEDED with settled cleanup. Actual intermediate status was
+  not emitted, so cleanup hang is not established. Source suggests the test
+  removes a residue marker but leaves an empty publication directory which
+  CompletionStore.prepare rejects; this is an unverified hypothesis. Transparent
+  fixed-enum/counter diagnostics are authorized in that test only, with original
+  deadlines/assertions/production preserved. All cited parent sessions exited.
 
 - C4a consent-module test ownership is now qualified, not runtime acceptance:
   fixed-API RED13411/c29133 reached the missing seventeenth selector assertion
@@ -79,6 +113,19 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
   matched. Result1failed3SWIGwarnings21.76s,exit1,664focused pins unchanged.
   Only the approved bounded digest memo implementation is now released; the
   test remains frozen. No performance benefit or full Web pass is established.
+  Candidate E63B15C1/plan5E44BEFF passed independent SOURCE and parent full-module
+  33640/6b7590:40passed3SWIGwarnings68.74s,exit0,664pins unchanged. Four existing
+  compatibility modules have reviewed closed selectors; three additional
+  continuation/migration functions (15static cases) remain pending bounded
+  execution qualification. The planned small measurement is being prepared;
+  no elapsed benefit or full compatibility/timeout repair is claimed.
+
+G3 independent fresh44041/98c1ba confirms478passed1actual-cold-skip0warnings
+156.51s,exit0,332comparisons/323source unchanged. Actual-caller protocol4 migration
+571E0A18/2FFB6CCF/8715BBFF/6CCB62EC passed independent SOURCE and332-pin preflight;
+its finite compatibility and actual cold are not yet executed. C4a93428 remains
+the sole live parent Python invocation at this checkpoint; no overlapping test
+run or restart is authorized by this record.
 
 Packages7/8 remain open. No push, PR creation, merge, provider/model activation
 or deployment occurred in this checkpoint; original dirty checkout is preserved.
