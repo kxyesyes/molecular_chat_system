@@ -387,3 +387,41 @@ platform coverage, not passes. Service/tool/runtime/lease sections4.2/4.3 and
 real scientific docking are still pending. Earlier REDs and startup uncertainty
 remain recorded; no unknown-resource settlement claim is inferred from test
 fixture rescue or from an outer process receipt.
+
+## Section4.3 single-module mapping proposal and TEST-first boundary
+
+Section4.1/4.2 is locally checkpointed at8700b38 after parent111passed6POSIX
+skipped and independent111passed6skipped0warnings. Section4.3 written design
+F54495C1 has independent SOURCE approval; its runtime tests are being prepared
+separately. The existing closed owner needs exactly one additional singleton:
+`tests/task_runtime/test_docking_consent.py`. No wildcard, extra arguments,
+individual unreviewed nodes, permanent-retention child mode or other module is
+authorized by this addition. Original16 selectors and all720/+5 deadlines,
+trusted431 primitives, ownership/cleanup behavior remain unchanged.
+
+TEST preparation only: append that literal to the existing SELECTORS tuple.
+The existing fixed-API equality and parameterized argv control cover it; all
+old negative tests remain unchanged. First finite RED selects only
+`test_c4a_owner_fixed_api_control`, before any helper edit. After observed RED,
+the proposed implementation is one literal in the existing _NODES tuple.
+Its removal must restore F37DE363 byte-for-byte. Full finite qualification
+and the unchanged three actual Windows owner cases precede runtime execution.
+This mapping is not proof of runtime lease retention, permanent-failure
+containment or scientific docking. SOURCE review is required before RED;
+the helper, launcher, runner and trusted primitive have not changed here.
+
+Independent SOURCE approved the TEST-first amendment BDC811FE/48CDEB9A.
+Actual fixed-API RED13411/c29133 reached line87's tuple mismatch: the expected
+mapping contains the additional consent module. Result1failed1.26s,exit1;
+9explicit pins unchanged, no native owner or scientific execution reached.
+
+Parent added only that literal to the ignored helper, now C27DA90E. Independent
+SOURCE verified that removing exactly the added line restores complete F37DE363.
+The original seven finite functions49554/a946ed passed50cases5.52s,exit0;
+unchanged three genuine Windows qualification cases54559/812d3d passed3cases
+2.24s,exit0. Both postflights confirm all9explicit pins unchanged; no skips or
+warnings reported. The launcher1043519F and inner runner0AD88551 are unchanged.
+
+This qualifies the seventeenth singleton only. Consent-runtime TEST SOURCE and
+its actual RED/GREEN remain separate; permanently retained worker scenarios
+still require their own reviewed bounded child containment before execution.

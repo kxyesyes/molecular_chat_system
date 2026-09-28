@@ -43,7 +43,7 @@ SELECTORS = tuple(PREFIX + name for name in (
     'test_c4a_windows_root_exit_does_not_settle_live_job',
     'test_c4a_job_attach_failure_after_real_acquisition_cannot_settle',
     'test_c4a_popen_after_real_child_failure_cannot_settle',
-)) + ('tests/test_docking_command_cancellation.py',)
+)) + ('tests/test_docking_command_cancellation.py', 'tests/task_runtime/test_docking_consent.py')
 
 
 @pytest.fixture(autouse=True)
