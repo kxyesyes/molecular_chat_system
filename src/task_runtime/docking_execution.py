@@ -25,6 +25,7 @@ from src.agent.persistence.redaction import sanitize_sensitive_text
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.validators.result_validator import AgentResultValidator
+from src.docking.adapters.base import CommandOwnershipScope, CommandOwnershipUncertainError
 
 from .completion import (
     AUTHORITY_BLOCKED,
@@ -57,6 +58,59 @@ _MAX_PDBQT_LINE_BYTES = 64 * 1024
 
 class _PreparedCompletionPending(RuntimeError):
     pass
+
+
+class _CommandLeaseGate:
+    """One invocation's proof, executed only by its existing lease owner."""
+
+    def __init__(self, scope, observer):
+        self.scope = scope
+        self.observer = observer
+        self.entered = False
+        self.completed = False
+        self.unresolved = None
+
+    def enter(self):
+        if self.entered or self.completed:
+            raise CommandOwnershipUncertainError()
+        self.entered = True
+
+    def _retain(self, reason):
+        # Never unwind the snapshot/lease to publish a physical failure. The
+        # existing runtime observes this latch independently of worker completion.
+        if self.unresolved is None:
+            self.unresolved = reason
+            if self.observer is not None:
+                try:
+                    self.observer(reason)
+                except BaseException:
+                    pass  # Notification failure cannot transfer/release ownership.
+        with self.scope._condition:
+            while True:
+                self.scope._condition.wait()
+                # Sticky uncertainty has no reset/retry authority in this gate.
+
+    def finish(self):
+        if self.unresolved is not None:
+            self._retain(self.unresolved)
+        if self.completed:
+            return
+        if not self.entered and self.scope.snapshot()["command_count"] == 0:
+            return  # Pre-raw completion waiting/reuse must not seal the scope.
+        try:
+            self.scope.seal()
+            physical = self.scope.settle()
+        except BaseException:
+            physical = False
+        if not physical:
+            self._retain("command_ownership_unresolved")
+        try:
+            cleaned = self.scope._run_own_job_cleanup()
+        except BaseException:
+            cleaned = False
+        if not cleaned:
+            self._retain("own_job_cleanup_unresolved")
+        self.completed = True
 
 
 @dataclass
@@ -97,10 +151,13 @@ class DockingExecution:
             else Path(allowed_output_root)
         )
         self._allowed_output_root = Path(os.path.abspath(output_root))
+        self._raw_executor_injected = raw_executor is not None
+        self._execution_backend = None
         if raw_executor is not None:
             self.raw_executor = raw_executor
         else:
             backend = os.environ.get("MEDCHAT_DOCKING_EXECUTION_BACKEND", "local")
+            self._execution_backend = backend
             if backend == "local":
                 self.raw_executor = self._execute_local_tool
             elif backend == "opensandbox":
@@ -132,6 +189,8 @@ class DockingExecution:
         cancel_event: Any = None,
         lease_timeout_seconds: float = 300.0,
         consent_guard: Callable[..., None] | None = None,
+        command_scope: CommandOwnershipScope | None = None,
+        ownership_observer: Callable[[str], None] | None = None,
     ) -> dict[str, Any]:
         """Return a redacted verified result, never an unvalidated tool payload."""
 
@@ -145,6 +204,24 @@ class DockingExecution:
                 AgentErrorCode.INVALID_INPUT,
                 "A docking input manifest path is required.",
             )
+        command_gate = None
+        if command_scope is not None:
+            try:
+                CommandOwnershipScope._bound_output_root(command_scope, self._allowed_output_root)
+                if (command_scope._task_id != task_id or command_scope._sealed
+                        or (ownership_observer is not None and not callable(ownership_observer))):
+                    raise ValueError
+                if cancel_event is None:
+                    cancel_event = command_scope._cancel_event
+                elif cancel_event is not command_scope._cancel_event:
+                    raise ValueError
+            except (TypeError, ValueError):
+                return _failure(AgentErrorCode.INVALID_INPUT, "Invalid docking command ownership binding.")
+            if not self._raw_executor_injected and self._execution_backend != "local":
+                return _failure(AgentErrorCode.TOOL_UNAVAILABLE, "Scoped local docking execution is unavailable.")
+            command_gate = _CommandLeaseGate(command_scope, ownership_observer)
+        elif ownership_observer is not None:
+            return _failure(AgentErrorCode.INVALID_INPUT, "Invalid docking command ownership binding.")
         _emit_progress(progress_callback, "environment_check", 2)
         pending_deadline: float | None = None
         while True:
@@ -157,36 +234,43 @@ class DockingExecution:
                     lease_timeout_seconds=lease_timeout_seconds,
                     cancel_check=_cancel_check(cancel_event),
                 ) as execution:
-                    _emit_progress(progress_callback, "input_verification", 5)
-                    if consent_guard is not None:
-                        consent_guard(execution.inputs, "check")
-                    outcome = self._run_under_lease(
-                        execution.inputs,
-                        attempt=attempt,
-                        progress_callback=progress_callback,
-                        cancel_event=cancel_event,
-                        **({"consent_guard": consent_guard} if consent_guard is not None else {}),
-                    )
-                    if isinstance(outcome, PreparedDockingCompletion):
-                        prepared = outcome
-                        commit_state = _CompletionCommitState()
-                        try:
-                            if consent_guard is not None:
-                                consent_guard(execution.inputs, "result")
-                            outcome = self._finalize_prepared(
-                                task_id,
-                                prepared,
-                                execution=execution,
-                                commit_state=commit_state,
-                                cancel_event=cancel_event,
-                            )
-                        except BaseException:
+                    try:
+                        _emit_progress(progress_callback, "input_verification", 5)
+                        if consent_guard is not None:
+                            consent_guard(execution.inputs, "check")
+                        outcome = self._run_under_lease(
+                            execution.inputs,
+                            attempt=attempt,
+                            progress_callback=progress_callback,
+                            cancel_event=cancel_event,
+                            **({"consent_guard": consent_guard} if consent_guard is not None else {}),
+                            **({"command_gate": command_gate} if command_gate is not None else {}),
+                        )
+                        if isinstance(outcome, PreparedDockingCompletion):
+                            prepared = outcome
+                            commit_state = _CompletionCommitState()
+                            try:
+                                if consent_guard is not None:
+                                    consent_guard(execution.inputs, "result")
+                                outcome = self._finalize_prepared(
+                                    task_id,
+                                    prepared,
+                                    execution=execution,
+                                    commit_state=commit_state,
+                                    cancel_event=cancel_event,
+                                )
+                            except BaseException:
+                                if not commit_state.committed:
+                                    self._completions.abort(prepared)
+                                    prepared = None
+                                raise
                             if not commit_state.committed:
-                                self._completions.abort(prepared)
                                 prepared = None
-                            raise
-                        if not commit_state.committed:
-                            prepared = None
+                    finally:
+                        # INSIDE the lease: an unresolved gate cannot unwind the
+                        # staging context's input-close/lease-release finally.
+                        if command_gate is not None:
+                            command_gate.finish()
                 return outcome
             except DockingConsentError:
                 # A server-owned consent fence is not scientific tool output.
@@ -305,6 +389,7 @@ class DockingExecution:
         progress_callback: Callable[..., Any] | None,
         cancel_event: Any,
         consent_guard: Callable[..., None] | None = None,
+        command_gate: _CommandLeaseGate | None = None,
     ) -> dict[str, Any] | PreparedDockingCompletion:
         inputs.verify_integrity()
         input_hash = _input_hash(inputs)
@@ -352,14 +437,26 @@ class DockingExecution:
         payload = _build_payload(inputs)
         sensitive_values = _sensitive_values(inputs, payload)
         try:
-            if consent_guard is not None:
-                consent_guard(inputs, "dispatch")
-            tool_result = self.raw_executor(
-                payload,
-                job_id=inputs.task_id,
-                progress_callback=progress_callback,
-                cancel_event=cancel_event,
-            )
+            if command_gate is not None:
+                command_gate.enter()
+            try:
+                if consent_guard is not None:
+                    consent_guard(inputs, "dispatch")
+                control = dict(job_id=inputs.task_id, progress_callback=progress_callback,
+                               cancel_event=cancel_event)
+                if command_gate is not None and not self._raw_executor_injected:
+                    # Per-call private binding; shared raw_executor/compatibility
+                    # identity and explicitly injected raw signatures stay intact.
+                    tool_result = execute_tool_compat(MolecularDocking(
+                        command_scope=command_gate.scope, allowed_output_root=self._allowed_output_root,
+                    ), payload, **control)
+                else:
+                    tool_result = self.raw_executor(payload, **control)
+            finally:
+                # Before parsing/validation/preparation or explicit input close,
+                # including constructor/raw exceptions and unsuccessful returns.
+                if command_gate is not None:
+                    command_gate.finish()
         except asyncio.CancelledError:
             raise
         except Exception as exc:

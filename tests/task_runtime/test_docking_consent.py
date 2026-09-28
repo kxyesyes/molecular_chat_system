@@ -2915,3 +2915,575 @@ def test_c2_committed_claim_with_failed_readback_retains_unresolved_ownership(tm
                 assert all(tx["exited"].is_set() for tx in probe.connections)
 
     asyncio.run(run())
+
+
+# C4a §4.3: finite physical ownership only. Permanent unresolved retention needs
+# a separately qualified isolated owner; no parked runtime thread is created here.
+def _c4a_runtime_api():
+    from src.task_runtime.docking_execution import DockingExecution
+
+    parameters = inspect.signature(DockingExecution.run_verified).parameters
+    for name in ("command_scope", "ownership_observer"):
+        assert name in parameters, "C4a missing run_verified private " + name
+        assert parameters[name].kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameters[name].default is None
+    return DockingExecution
+
+
+def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
+    Execution = _c4a_runtime_api()  # Call-phase prerequisite, before native fixtures.
+    import os
+    import subprocess
+    import sys
+    from contextlib import contextmanager
+    from src.agent.tools.molecular_docking import MolecularDocking
+    from src.docking.adapters import base
+    from src.docking.adapters.adfr_adapter import ADFRAdapter
+    from src.docking.adapters.meeko_adapter import MeekoAdapter
+    from src.docking.adapters.vina_adapter import VinaAdapter
+    from src.docking.molecular_docking_service import MolecularDockingService
+    from src.docking import history_index
+    from src.task_runtime import docking_execution as execution_module
+    from tests.test_docking_command_cancellation import (
+        _C4aPhysicalResources, _c4a_finished_threads, _c4a_wait,
+    )
+
+    if os.environ.get("MEDCHAT_DOCKING_EXECUTION_BACKEND", "local") != "local":
+        pytest.skip("C4a requires the existing local executor profile; no backend override")
+    if hold and os.name != "nt":
+        pytest.skip("genuine Windows post-return spawner hold; not POSIX early-return proof")
+    real_popen = subprocess.Popen
+    rig = _c2_rig(tmp_path, monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    rig.physical = SimpleNamespace(
+        scope=None, events=[], raw_calls=0, raw_result=None, worker_id=None,
+        phase=None, phases=[], services=[], inputs=[], snapshot_closes=[],
+        raw_returned=threading.Event(), held=threading.Event(), release=threading.Event(),
+        barrier_errors=[], fault_reached=False, fault=fault, hold=hold, residue_reads=0,
+    )
+    p = rig.physical
+    if fault == "pending-completion":
+        p.pending_diagnostic = {"phase": "pre_raw", "residue_calls": 0,
+                                "residue_samples": [], "prepare_error": None, "view": {}}
+        original_view = rig.first.runtime.get_docking_consent_view
+
+        async def observed_view(**kwargs):
+            value = await original_view(**kwargs)
+            try:
+                p.pending_diagnostic["view"] = {
+                    key: _c4a_pending_enum(value.get(key), kind)
+                    for key, kind in (("view_status", "status"), ("task_status", "task"),
+                                      ("cleanup_status", "cleanup"), ("reason_code", "reason"))
+                }
+            except BaseException:
+                p.pending_diagnostic["view_observation_failed"] = True
+            return value
+
+        monkeypatch.setattr(rig.first.runtime, "get_docking_consent_view", observed_view)
+    rig.releases.append(p.release)
+    script = ("import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2],"
+              "encoding='utf-8'); sys.exit(int(sys.argv[3]))")
+
+    def allowed_popen(args, *a, **kw):
+        # Only this literal harmless file-writer argv may cross the native boundary.
+        assert type(args) is list and len(args) == 9
+        assert args[:6] == [sys.executable, "-I", "-S", "-B", "-c", script]
+        return real_popen(args, *a, **kw)
+
+    monkeypatch.setattr(subprocess, "Popen", allowed_popen)
+    patcher = pytest.MonkeyPatch()
+    p.resources = _C4aPhysicalResources(base, patcher)
+    request.addfinalizer(p.resources.cleanup)  # Also covers setup failure before return.
+    # Configure the existing handler's dependency BEFORE any task submission.
+    # This is a real default-local executor, not replacement of its raw callable.
+    execution = Execution(rig.root, allowed_output_root=rig.output)
+    rig.first.execution = execution
+    rig.first.runtime.docking_execution = execution
+    original_verified = execution.run_verified
+
+    def verified(*args, **kwargs):
+        p.scope = kwargs.get("command_scope")
+        assert type(p.scope) is base.CommandOwnershipScope, "runtime omitted retained scope"
+        if kwargs.get("consent_guard") is not None:
+            assert callable(kwargs.get("ownership_observer")), "runtime omitted physical-state observer"
+            operation = rig.first.runtime._consent_executions[args[0]]
+            assert getattr(operation, "command_scope", None) is p.scope
+        return original_verified(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "run_verified", verified)
+    rig.output.mkdir(exist_ok=True)
+    p.neighbor = rig.output / "docking_neighbor"
+    p.neighbor.mkdir()
+    (p.neighbor / "keep").write_bytes(b"C4a neighbor unchanged")
+    history_index.upsert_history_record(rig.output, {"job_id": "neighbor", "timestamp": 1})
+
+    def event(name):
+        snapshot = p.scope.snapshot() if p.scope is not None else None
+        p.events.append((name, threading.get_ident(),
+                         snapshot is not None and snapshot["state"] == "settled",
+                         _c4a_finished_threads(p.resources)))
+
+    p.event = event
+    original_init = MolecularDockingService.__init__
+
+    def service_init(service, config=None, **ownership):
+        # Observe production injection; never provide a missing scope/root for it.
+        assert ownership.get("command_scope") is p.scope and p.scope is not None
+        assert Path(ownership["allowed_output_root"]) == rig.output
+        configured = dict(config or {}, vina_exe=sys.executable,
+                          prepare_receptor_cmd=sys.executable, prepare_ligand_cmd=sys.executable)
+        original_init(service, configured, **ownership)
+        p.services.append(service)
+        if fault == "constructor-error":
+            p.fault_reached = True
+            raise RuntimeError("C4a fixed post-construction fault")
+
+    monkeypatch.setattr(MolecularDockingService, "__init__", service_init)
+    atom = "ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+    pose = "MODEL 1\nREMARK VINA RESULT: -7.200 0.000 0.000\nROOT\n" + atom + "ENDROOT\nTORSDOF 0\nENDMDL\n"
+
+    def argv(adapter, phase, output):
+        assert adapter._ownership_scope is p.scope and p.scope is not None
+        p.phase = phase
+        p.phases.append(phase)
+        code = "3" if fault == "raw-nonsuccess" and phase == "receptor" else "0"
+        return [sys.executable, "-I", "-S", "-B", "-c", script,
+                str(output), pose if phase == "vina" else atom, code]
+
+    monkeypatch.setattr(ADFRAdapter, "build_prepare_command",
+                        lambda adapter, source, output: argv(adapter, "receptor", output))
+    monkeypatch.setattr(MeekoAdapter, "build_prepare_command",
+                        lambda adapter, source, output: argv(adapter, "ligand", output))
+
+    def vina_argv(adapter, path):
+        values = dict(line.split(" = ", 1) for line in Path(path).read_text().splitlines())
+        return argv(adapter, "vina", values["out"])
+
+    monkeypatch.setattr(VinaAdapter, "build_run_command", vina_argv)
+    thread_phases = {}
+    p.resources.start_before = lambda thread: thread_phases.setdefault(thread, p.phase)
+
+    def after_thread(thread):
+        if hold and thread.name == "docking-command-spawn" and thread_phases[thread] == "receptor":
+            p.held.set()
+            if not p.release.wait(40):
+                p.barrier_errors.append("spawner_escape")
+
+    p.resources.thread_after = after_thread
+    original_run = base.CommandAdapter.run
+
+    def command_run(adapter, *args, **kwargs):
+        result = original_run(adapter, *args, **kwargs)
+        if not hold:
+            _c4a_wait(lambda: _c4a_finished_threads(p.resources))
+        return result  # No test proof/settle/receipt mutation.
+
+    monkeypatch.setattr(base.CommandAdapter, "run", command_run)
+    original_compat = execution_module.execute_tool_compat
+
+    def compat(tool, payload, **control):
+        assert isinstance(tool, MolecularDocking)
+        assert tool._command_scope is p.scope, "factory replaced the retained command scope"
+        assert type(p.scope) is base.CommandOwnershipScope, "runtime omitted private command scope"
+        assert p.scope._task_id == "c-task-1" and p.scope._cancel_event is control["cancel_event"]
+        p.worker_id = threading.get_ident()
+        p.raw_calls += 1
+        if fault == "progress-error":
+            original_progress = control["progress_callback"]
+
+            def progress(phase, value):
+                result = original_progress(phase, value)
+                if phase == "ligand_preparation":
+                    p.fault_reached = True
+                    raise RuntimeError("C4a fixed progress boundary fault")
+                return result
+
+            control = dict(control, progress_callback=progress)
+        try:
+            p.raw_result = original_compat(tool, payload, **control)
+            if fault == "raw-error":
+                p.fault_reached = True
+                raise RuntimeError("C4a fixed raw-return boundary fault")
+            return p.raw_result
+        finally:
+            event("raw_return")
+            p.raw_returned.set()
+
+    monkeypatch.setattr(execution_module, "execute_tool_compat", compat)
+    original_settle = base.CommandOwnershipScope.settle
+
+    def settle(scope):
+        result = original_settle(scope)
+        if scope is p.scope:
+            event("settle_true" if result else "settle_false")
+        return result
+
+    monkeypatch.setattr(base.CommandOwnershipScope, "settle", settle)
+    original_cleanup = base.CommandOwnershipScope._run_own_job_cleanup
+
+    def cleanup(scope):
+        result = original_cleanup(scope)
+        if scope is p.scope:
+            event("cleanup_true" if result else "cleanup_false")
+        return result
+
+    monkeypatch.setattr(base.CommandOwnershipScope, "_run_own_job_cleanup", cleanup)
+    original_discard = MolecularDockingService._discard_partial_job
+
+    def discard(path):
+        event("own_job_delete")  # Entry before original file operations/locks.
+        return original_discard(path)
+
+    monkeypatch.setattr(MolecularDockingService, "_discard_partial_job", staticmethod(discard))
+    original_upsert, original_remove = history_index.upsert_history_record, history_index.remove_history_record
+
+    def history_upsert(root, record):
+        if record.get("job_id") == "c-task-1":
+            event("history_upsert")
+        return original_upsert(root, record)
+
+    def history_remove(root, task_id):
+        if task_id == "c-task-1":
+            event("history_remove")
+        return original_remove(root, task_id)
+
+    monkeypatch.setattr(history_index, "upsert_history_record", history_upsert)
+    monkeypatch.setattr(history_index, "remove_history_record", history_remove)
+    original_lease = execution._stager.task_execution
+
+    @contextmanager
+    def lease(task_id, *args, **kwargs):
+        entry = {"task_id": task_id, "exited": threading.Event()}
+        try:
+            with original_lease(task_id, *args, **kwargs) as actual:
+                rig.leases.append(entry)
+                p.inputs.append(actual.inputs)
+                yield actual
+        finally:
+            event("lease_exit" if p.raw_calls else "pre_raw_lease_exit")
+            entry["exited"].set()
+
+    monkeypatch.setattr(execution._stager, "task_execution", lease)
+    original_close = execution._stager._close_task_execution_inputs
+
+    def close_inputs(*args, **kwargs):
+        p.snapshot_closes.append(threading.get_ident())
+        event("snapshot_close" if p.raw_calls else "pre_raw_snapshot_close")
+        return original_close(*args, **kwargs)
+
+    monkeypatch.setattr(execution._stager, "_close_task_execution_inputs", close_inputs)
+    original_validate = execution_module.AgentResultValidator.validate_tool_result
+
+    def validate(validator, result):
+        event("validate")
+        validated = original_validate(validator, result)
+        if fault == "validation-error":
+            p.fault_reached = True
+            raise RuntimeError("C4a fixed post-validation fault")
+        return validated
+
+    monkeypatch.setattr(execution_module.AgentResultValidator, "validate_tool_result", validate)
+    original_prepare = execution._completions.prepare
+
+    def completion_prepare(*args, **kwargs):
+        event("prepare")
+        if fault != "pending-completion":
+            return original_prepare(*args, **kwargs)
+        p.pending_diagnostic["phase"] = "prepare"
+        try:
+            return original_prepare(*args, **kwargs)
+        except BaseException as error:
+            # Diagnose before the caller discards the actual attempt; never
+            # replace the original exception or publish its text/traceback.
+            facts = {"reason": "unrecognized", "existing_target_branch": False}
+            p.pending_diagnostic["prepare_error"] = facts
+            try:
+                facts["reason"] = _c4a_pending_enum(getattr(error, "reason_code", None), "completion")
+                trace = error.__traceback__
+                for _ in range(16):
+                    if trace is None:
+                        break
+                    if (trace.tb_frame.f_code is original_prepare.__func__.__code__
+                            and trace.tb_lineno == 783):
+                        facts["existing_target_branch"] = True  # Frozen prepare's lstat conflict.
+                    trace = trace.tb_next
+                final_root = rig.root / "c-task-1" / "artifacts"
+                facts["final_exists"] = final_root.exists()
+                facts["final_empty"] = final_root.is_dir() and not any(final_root.iterdir())
+                facts["attempt_pose_exists"] = (
+                    kwargs["artifact_attempt"].root / "artifacts" / "docking_pose.pdbqt"
+                ).is_file()
+            except BaseException:
+                facts["observation_failed"] = True
+            raise
+        finally:
+            p.pending_diagnostic["phase"] = "pre_raw"
+
+    monkeypatch.setattr(execution._completions, "prepare", completion_prepare)
+    original_finalize = execution._finalize_prepared
+
+    def finalize(*args, **kwargs):
+        event("finalize")
+        if fault == "prepared-error":
+            p.fault_reached = True
+            raise execution_module.CompletionError("completion_io_error")
+        return original_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(execution, "_finalize_prepared", finalize)
+    original_residue = execution._completions.has_artifact_residue
+
+    def residue(task_id):
+        present = original_residue(task_id)
+        if fault == "pending-completion":
+            diagnostic = p.pending_diagnostic
+            diagnostic["residue_calls"] += 1
+            if len(diagnostic["residue_samples"]) < 8:
+                sample = {"phase": diagnostic["phase"], "present": present is True}
+                diagnostic["residue_samples"].append(sample)
+                try:
+                    sample["marker_exists"] = (
+                        rig.root / task_id / "artifacts" / "c4a-pending-marker"
+                    ).is_file()
+                except BaseException:
+                    sample["observation_failed"] = True
+        if fault == "pending-completion" and present:
+            # Remove this test-owned marker and its now-empty publication root,
+            # but preserve the actual True residue result for this turn.
+            p.residue_reads += 1
+            assert p.raw_calls == 0 and p.scope.snapshot()["command_count"] == 0
+            assert p.scope._sealed is False
+            (rig.root / task_id / "artifacts" / "c4a-pending-marker").unlink()
+            (rig.root / task_id / "artifacts").rmdir()  # Nonrecursive: unexpected contents fail.
+        return present
+
+    monkeypatch.setattr(execution._completions, "has_artifact_residue", residue)
+    return rig
+
+
+def _c4a_pending_enum(value, kind):
+    allowed = {
+        "status": {"ACTIVE", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"},
+        "task": {None, "queued", "running", "cancel_requested", "succeeded", "failed", "canceled", "timed_out"},
+        "cleanup": {"pending", "settled", "unresolved"},
+        "reason": {None, "consent_execution_failed", "consent_execution_unknown", "consent_cancelled",
+                   "consent_execution_timeout", "consent_cleanup_unresolved"},
+        "completion": {"completion_conflict", "completion_io_error", "completion_schema_invalid",
+                       "completion_artifact_invalid", "completion_ownership_uncertain"},
+    }
+    return value if (value is None or type(value) is str) and value in allowed[kind] else "unrecognized"
+
+
+def _c4a_pending_terminal_diagnostic(rig):
+    # Called only on the original pending-case assertion, BEFORE finally rescue.
+    # Additional reads cannot replace that assertion; output is fixed-schema.
+    p = rig.physical
+    facts = dict(p.pending_diagnostic)
+    try:
+        row = _c2_row(rig, identity())  # Independent actual SQLite read, no mutation.
+        facts["db_view"] = _c4a_pending_enum(row["view_status"], "status")
+        facts["db_reason"] = _c4a_pending_enum(row["primary_reason"], "reason")
+        facts["db_cleanup"] = _c4a_pending_enum(row["cleanup_state"], "cleanup")
+        occupied = row["execution_occupied"]
+        facts["db_occupied"] = occupied if type(occupied) is int and occupied in (0, 1) else "unrecognized"
+        operation = rig.first.runtime._consent_executions.get("c-task-1")
+        facts["operation_present"] = operation is not None
+        facts["worker_present"] = operation is not None and operation.worker is not None
+        facts["worker_done"] = operation.worker.done() if facts["worker_present"] else None
+        facts["backend_live_count"] = rig.first.backend.background_task_count
+        facts["raw_calls"] = p.raw_calls
+        facts["lease_entries"] = len(rig.leases)
+        facts["lease_exits"] = sum(entry["exited"].is_set() for entry in rig.leases)
+        facts["snapshot_close_calls"] = len(p.snapshot_closes)
+        facts["staging_discard_calls"] = len(rig.discards)
+        facts["events"] = {name: sum(item[0] == name for item in p.events) for name in (
+            "raw_return", "settle_true", "settle_false", "cleanup_true", "cleanup_false",
+            "prepare", "finalize", "pre_raw_lease_exit", "lease_exit")}
+    except BaseException:
+        facts["terminal_observation_failed"] = True
+    try:
+        encoded = json.dumps(facts, sort_keys=True)
+        print("C4A_PENDING_DIAGNOSTIC " + (encoded if len(encoded.encode("utf-8")) <= 4096
+                                         else '{"report_overflow":true}'), flush=True)
+    except BaseException:
+        pass  # Diagnostic output cannot replace the original assertion.
+
+
+def _c4a_runtime_retained(rig):
+    p = rig.physical
+    assert p.raw_returned.is_set() and p.held.is_set()
+    assert p.scope.snapshot()["pending_count"] > 0
+    operation = rig.first.runtime._consent_executions["c-task-1"]
+    assert getattr(operation, "command_scope", None) is p.scope
+    assert operation.worker is not None and not operation.worker.done()
+    assert rig.first.backend.background_task_count > 0
+    assert len(rig.leases) == 1 and not rig.leases[0]["exited"].is_set()
+    assert p.snapshot_closes == [] and rig.discards == []
+    assert not {"validate", "prepare", "finalize", "own_job_delete", "history_upsert", "history_remove",
+                "snapshot_close", "lease_exit"}.intersection(
+        name for name, *_ in p.events)
+    row = _c2_row(rig, identity())  # Independent real SQLite connection.
+    assert row["execution_occupied"] == 1 and row["cleanup_state"] != "settled"
+    assert p.inputs and p.inputs[0].receptor_path.is_file() and p.inputs[0].ligand_path.is_file()
+    assert (rig.output / "docking_c-task-1").is_dir()
+    assert (p.neighbor / "keep").read_bytes() == b"C4a neighbor unchanged"
+    return operation
+
+
+def _c4a_runtime_order(rig):
+    p = rig.physical
+    names = [entry[0] for entry in p.events]
+    assert p.raw_calls == 1 and len(rig.submits) == 1
+    assert "settle_true" in names and "settle_false" not in names
+    assert names.index("raw_return") < names.index("settle_true") < names.index("snapshot_close")
+    # Service may have completed the obligation before raw returned. The final
+    # gate must still consume that completed outcome after actual final settlement.
+    assert "cleanup_true" in names[names.index("settle_true") + 1:names.index("snapshot_close")]
+    for name, owner, settled, joined in p.events:
+        if name in {"validate", "prepare", "finalize", "snapshot_close", "lease_exit"}:
+            assert settled and joined, "downstream entry preceded real physical proof"
+            assert owner == p.worker_id
+        if name in {"own_job_delete", "history_upsert", "history_remove"}:
+            assert joined and owner == p.worker_id
+    assert all(entry["exited"].is_set() for entry in rig.leases)
+    assert p.barrier_errors == []
+    assert (p.neighbor / "keep").read_bytes() == b"C4a neighbor unchanged"
+    from src.docking.history_index import read_history_page
+
+    records, _, _, _ = read_history_page(rig.output)
+    assert next(record for record in records if record["job_id"] == "neighbor")["timestamp"] == 1
+    p.resources.assert_physically_stopped()
+
+
+async def _c4a_runtime_finish(rig):
+    rig.physical.release.set()
+    await _c2_finish(rig)  # Release and join real runtime/backend/lease first.
+    # Registered pytest finalizer independently rescues OS resources even on error.
+
+
+@pytest.mark.parametrize("interrupt", ["normal", "cancel", "deadline"])
+def test_c4a_pending_command_retains_real_lease_and_capacity(tmp_path, monkeypatch, request, interrupt):
+    rig = _c4a_runtime_rig(tmp_path, monkeypatch, request, hold=interrupt != "normal")
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            await _c2_approve(rig, proof)
+            if interrupt != "normal":
+                assert await asyncio.to_thread(rig.physical.raw_returned.wait, 8)
+                _c4a_runtime_retained(rig)
+                if interrupt == "cancel":
+                    result = await _c2_result(_c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                        task_id="c-task-1", owner_session_id="owner-1")))
+                    assert result["view_status"] == "CANCELLED"
+                else:
+                    # Advance only existing injected server clocks to the ORIGINAL
+                    # operation deadline; do not change policy, loop clock or timers.
+                    rig.clock.wall += 420_000
+                    rig.clock.mono += 420
+                _c4a_runtime_retained(rig)
+                rig.physical.release.set()
+            status = {"normal": "SUCCEEDED", "cancel": "CANCELLED", "deadline": "TIMED_OUT"}[interrupt]
+            final = await _c2_terminal(rig, status)
+            if interrupt != "normal":
+                assert final["reason_code"] == ("consent_cancelled" if interrupt == "cancel"
+                                                else "consent_execution_timeout")
+                assert sum(name == "own_job_delete" for name, *_ in rig.physical.events) == 1
+            assert _c2_row(rig, identity())["execution_occupied"] == 0
+            _c4a_runtime_order(rig)
+        finally:
+            await _c4a_runtime_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c4a_repeated_cancel_shutdown_retains_command_settlement(tmp_path, monkeypatch, request):
+    rig = _c4a_runtime_rig(tmp_path, monkeypatch, request, hold=True)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(rig.physical.raw_returned.wait, 8)
+            operation = _c4a_runtime_retained(rig)
+            worker = operation.worker
+            for _ in range(2):
+                result = await _c2_result(_c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                    task_id="c-task-1", owner_session_id="owner-1")))
+                assert result["view_status"] == "CANCELLED" and operation.signal.is_set()
+            closer = _c2_task(rig, rig.first.runtime.close())
+            done, _ = await asyncio.wait({closer}, timeout=0.1)
+            assert not done, "shutdown reported success while a real command owner was held"
+            assert _c4a_runtime_retained(rig) is operation and operation.worker is worker
+            assert rig.cancels == ["c-task-1"]
+            rig.physical.release.set()
+            await _c2_result(closer)
+            assert worker.done() and operation.settled
+            assert sum(name == "own_job_delete" for name, *_ in rig.physical.events) == 1
+            final = await _c2_view(rig)
+            assert final["view_status"] == "CANCELLED" and final["cleanup_status"] == "settled"
+            assert _c2_row(rig, identity())["execution_occupied"] == 0
+            _c4a_runtime_order(rig)
+        finally:
+            await _c4a_runtime_finish(rig)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("boundary", [
+    "constructor-error", "raw-error", "raw-nonsuccess", "progress-error", "validation-error",
+    "prepared-error", "success", "reuse", "pending-completion",
+])
+def test_c4a_raw_failure_and_validation_paths_settle_before_lease_exit(tmp_path, monkeypatch, request, boundary):
+    rig = _c4a_runtime_rig(tmp_path, monkeypatch, request, fault=boundary)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            if boundary == "pending-completion":
+                residue = rig.root / "c-task-1" / "artifacts"
+                residue.mkdir()
+                (residue / "c4a-pending-marker").write_bytes(b"test-owned incomplete artifact")
+            await _c2_approve(rig, proof)
+            status = "SUCCEEDED" if boundary in {"success", "reuse", "pending-completion"} else "FAILED"
+            try:
+                final = await _c2_terminal(rig, status)
+            except AssertionError:
+                if boundary == "pending-completion":
+                    _c4a_pending_terminal_diagnostic(rig)
+                raise
+            if status == "FAILED":
+                assert final["reason_code"] == "consent_execution_failed"
+            if boundary in {"constructor-error", "raw-error", "progress-error", "validation-error", "prepared-error"}:
+                assert rig.physical.fault_reached
+            if boundary == "constructor-error":
+                assert rig.physical.resources.processes == []
+                assert rig.physical.scope.snapshot()["command_count"] == 0
+            if boundary == "raw-nonsuccess":
+                assert not rig.physical.raw_result.success
+                assert rig.physical.raw_result.quality["execution_status"] == "receptor_preparation_failed"
+            if boundary == "progress-error":
+                assert rig.physical.raw_result.quality["execution_status"] == "progress_callback_failed"
+            _c4a_runtime_order(rig)
+            if boundary == "pending-completion":
+                assert rig.physical.residue_reads == 1 and len(rig.leases) == 2
+                assert sum(name == "pre_raw_lease_exit" for name, *_ in rig.physical.events) == 1
+                assert sum(name == "lease_exit" for name, *_ in rig.physical.events) == 1
+                assert len(rig.physical.snapshot_closes) == 2
+            if boundary == "reuse":
+                from src.docking.adapters.base import CommandOwnershipScope
+
+                before = (rig.physical.raw_calls, len(rig.physical.resources.processes))
+                scope = CommandOwnershipScope(task_id="c-task-1", output_root=rig.output,
+                                              cancel_event=threading.Event())
+                result = await asyncio.to_thread(
+                    rig.first.execution.run_verified, "c-task-1",
+                    rig.first.stager.resolve_manifest_locator("c-task-1", _c2_row(rig, identity())["manifest_locator"]),
+                    command_scope=scope,
+                )
+                assert result["success"] is True and result["reused_completion"] is True
+                assert scope.snapshot()["command_count"] == 0
+                assert before == (rig.physical.raw_calls, len(rig.physical.resources.processes))
+        finally:
+            await _c4a_runtime_finish(rig)
+
+    asyncio.run(run())
