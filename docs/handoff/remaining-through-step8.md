@@ -49,16 +49,36 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
   Current helper C27DA90E; no deadlines, cleanup lifecycle or science assertions
   changed. Section4.3 runtime tests are being prepared separately; permanent
   retention scenarios still need reviewed bounded child containment.
+  Owner-test/receipt-only checkpoint is now1e4b9f5. Section4.3 TEST20C5D925/
+  plan32B7F95B then passed independent SOURCE with the complete original test
+  prefix unchanged. Actual C27 whole-consent44618/ff3731 reached13CALL prerequisite
+  failures at2839 (missing run_verified command_scope), with146legacy passes,
+  385.71s,exit1,340pins unchanged; outertest_failed/ownershipsettled/slottrue.
+  No new native fixture was reached. Minimal runtime/execution implementation is
+  released, not GREEN; permanent unresolved ownership remains a separate gate.
 - G3 lexical diagnosis TEST68F3340A/plan707294D8 passed independent SOURCE.
   Parent API-only RED94083/2cde14 reached the missing helper assertion at4872,
   1failed8.51s,exit1,332pins unchanged. This is a prerequisite failure before
   any native fixture or scientific execution, not proof of the original path
   cause. Minimal protocol4 diagnostic implementation is released; actual caller
   remains protocol3 until separately reviewed migration. No whitelist relaxation.
+  Implementation9C52C696/manifest2D26C2FF/test5E8241E9/plan8DEFE978 then passed
+  independent SOURCE. Parent finite21971/137621 passed34cases20.96s; whole
+  offline30333/a44bfe passed478cases with1explicit actual-cold opt-in skip in
+  152.36s. Both exit0 with332pins unchanged. Independent fresh verification
+  remains before actual-caller migration; no actual cold or generation success.
 - B1 pure record-digest reuse design5FE78542 passed independent written SOURCE.
   TEST-first preparation alone is released. All mutable integrity, source,
   journal and configuration checks must remain fresh; no measured speedup or
   Web timeout repair is claimed. Original56 campaign rows remain NOT_RUN.
+  TEST33A99847/plan72ABF5C7 passed independent SOURCE. A first preflight used
+  the wrong path subset for the657 tracked Python count and stopped before
+  Python; corrected inventory uses git ls-files '*.py'. Actual focused
+  59555/5d4bf9 then reached line233's intended digest-count failure (2 != 1)
+  after both real authentications, outputs/state and all five fresh-check counts
+  matched. Result1failed3SWIGwarnings21.76s,exit1,664focused pins unchanged.
+  Only the approved bounded digest memo implementation is now released; the
+  test remains frozen. No performance benefit or full Web pass is established.
 
 Packages7/8 remain open. No push, PR creation, merge, provider/model activation
 or deployment occurred in this checkpoint; original dirty checkout is preserved.
