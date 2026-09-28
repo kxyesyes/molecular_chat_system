@@ -34,13 +34,38 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | C0a docking proposal DTO | PR102 MERGED18ad4f9; C0b SOURCE/fresh QUALITY passed, both855tests. Focused integration ebb2093 on main73379a1; aligned855passed13.33s. Remote branch codex/docking-preparation-transport-integration now matches exact ebb2093 | Branch pushed only; no PR/PR-CI/merge yet because authenticated PR access remains unavailable. Full ordinary-chat consent/cancel/physical cleanup and artifact closure remain open |
 | C1 preparation cancellation | Independent SOURCE/fresh seven-module QUALITY073569:990passed13skipped0warnings272.49s;14pins unchanged. Local scoped commit40d2043, tree9bbb1d1d, original C1 checkout clean | Alignment/CI/publication remain. C2 preparation is on separate branch based on40d2043; prepare-only is not executable docking consent |
 | C2 consent execution | Independent26566/8c3e0b exact8-module QUALITY:1148passed15skipped0warnings773.33s,16pins unchanged. Local07e751a/treeb0dfa5e clean7paths; final receipt-only plan66AA audited | Alignment/CI/publication pending. C4a proceeds on a separate branch from07e751a; C2 evidence does not establish real Vina/C4/P8 completion |
-| C4a physical command settlement | Section4.1/4.2 local8700b38 accepted; owner mapping checkpoint1e4b9f5. Section4.3 whole-consent93428/59c9dd physically ended1failed158passed432.15s,340pins unchanged, ownership settled | Sole pending-completion case did not reach expected success. Test-only bounded diagnostics released, production frozen. Permanent unresolved runtime ownership and pre-compat factory exception remain uncovered; no POSIX/Vina/fullC4a success claim |
+| C4a physical command settlement | Section4.1/4.2 local8700b38 accepted; owner mapping checkpoint1e4b9f5. Fixture correction6220508F passed all159 in424.76s at35439/aeafd6,340pins unchanged, outer ownership settled | Independent fresh159 released to Lovelace, not yet a result. Permanent unresolved runtime ownership and pre-compat factory exception remain uncovered; no POSIX/Vina/fullC4a success claim |
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
 ### Current bounded implementation checkpoint — 2026-09-28
 
 Latest parent evidence supersedes the in-flight chronology below:
+
+- Corrected C4 whole-consent35439/aeafd6 physically exited0:159passed424.76s,
+  no warning/skip count reported,340pins unchanged,outerpassed/settled/slottrue.
+  This confirms the fixture repair while preserving production conflict protection
+  and all original deadlines. Lovelace receives the sole independent fresh-run
+  slot after the author's receipt-only plan update; no independent result is
+  inferred from that grant. Sticky retention/precompat/Vina remain separate.
+- G3 system-directory plus file-handle identity design received independent
+  SOURCE approval after final-inventory error attribution was clarified. Five
+  finite test groups are prepared at98E0E43A (53static cases,not executed),
+  preserving original8715 test prefix. Test SOURCE and API RED precede any
+  implementation; current actual cold still fails and generation is unverified.
+
+- C4 diagnostic77947/2f6daa physically exited1:1failed158passed430.96s,
+  340pins unchanged,outertest_failed/settled/slottrue. Reached prepare conflict
+  branch,existing empty final directory and existing attempted pose. Pre-rescue
+  DB FAILED/cleanup settled/occupied0;backend0;lease entries/exits2/2;raw1;
+  settle_true1/cleanup_true1. This confirms the fixture-only empty publication
+  directory hypothesis, not a worker-cleanup failure. Correction6220508F adds
+  nonrecursive rmdir after deleting the test-owned marker and two stronger
+  lease/snapshot assertions. Original5s deadline and production8BB8/5778 remain.
+- B1 fixed-followup selector TEST2377/6fee4d reached genuine missing-selector
+  RED:1failed4.66s,exit1,667pins unchanged. Actual supervise rejected the native
+  selector before any scientific child launch. It is a test-owner capability
+  prerequisite, not a new scientific failure. Implementation still pending.
 
 - B1 existing fixed four-module owner run87361 physically exited0; all666pins
   unchanged. Original campaign rows4/6/8/9 respectively:162passed3warnings
