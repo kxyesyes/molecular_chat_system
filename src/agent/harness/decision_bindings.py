@@ -154,6 +154,7 @@ def prepare_binding_requirements(value, *, context, request_kind, allowed_tools,
 # The opt-in loop owns admission, deadlines, workers and Session creation.
 import json
 from dataclasses import dataclass, replace
+from threading import Lock
 
 from src.agent.contracts.decision import ToolDecision
 from src.agent.contracts.decision_bindings import (
@@ -169,6 +170,8 @@ _MOLECULAR = B1_TOOLS - {'rag_search', 'target_database_search', 'reverse_target
 _TARGET_FIELDS = ('gene_symbol', 'target_gene', 'uniprot_id', 'target_name', 'protein_name')
 _BINDING_ERROR = 'invalid_dynamic_binding'
 _RECORD_BYTES = 512 * 1024
+_RECORD_DIGEST_ENTRIES = 128
+_RECORD_DIGEST_BYTES = 512 * 1024
 
 
 def _native(value, ceiling=65536):
@@ -265,6 +268,11 @@ class B1BindingResolver:
         self.requirements_sha256 = _digest(self.requirements.model_dump(mode='json'))
         self._records = {}
         self._issued = set()
+        # Pure digest only, keyed by exact immutable wire; never auth authority
+        # or a decoded object. The byte cap counts retained UTF-8 keys only.
+        self._record_digests = {}
+        self._record_digest_bytes = 0
+        self._record_digest_lock = Lock()
         self._check_owner()
 
     def _check_owner(self):
@@ -741,7 +749,11 @@ class B1BindingResolver:
             trial.verify_binding_closure()
         except (KeyError, TypeError, ValueError, AttributeError):
             raise DecisionBoundaryError(_BINDING_ERROR) from None
-        self._records = trial._records
+        with self._record_digest_lock:
+            self._records = trial._records
+            # Trial closure may be warm; restoration does not transfer its memo.
+            self._record_digests.clear()
+            self._record_digest_bytes = 0
 
     def _source(self, result, record, expected=None):
         name = result.tool_name
@@ -783,12 +795,17 @@ class B1BindingResolver:
         if type(raw) is not str or len(raw) > _RECORD_BYTES:
             raise DecisionBoundaryError(_BINDING_ERROR)
         try:
-            if len(raw.encode('utf-8')) > _RECORD_BYTES:
+            raw_bytes = len(raw.encode('utf-8'))
+            if raw_bytes > _RECORD_BYTES:
                 raise ValueError(_BINDING_ERROR)
             record = json.loads(raw)
             if type(record) is not dict:
                 raise ValueError(_BINDING_ERROR)
-            digest = _record_digest(record)
+            with self._record_digest_lock:
+                digest = self._record_digests.get(raw)
+            missing_digest = digest is None
+            if missing_digest:
+                digest = _record_digest(record)
             diagnostic = 'binding_record_sha256' not in source.quality
             if diagnostic:
                 if (not self._sanitized_preparation_failure(source)
@@ -821,6 +838,15 @@ class B1BindingResolver:
                 raise ValueError(_BINDING_ERROR)
         except (KeyError, TypeError, ValueError, AttributeError, RecursionError):
             raise DecisionBoundaryError(_BINDING_ERROR) from None
+        if missing_digest:
+            # Admit only after ALL fresh checks succeed. Concurrent misses may
+            # compute twice; recheck membership/caps to charge the key once.
+            with self._record_digest_lock:
+                if (raw not in self._record_digests
+                        and len(self._record_digests) < _RECORD_DIGEST_ENTRIES
+                        and self._record_digest_bytes + raw_bytes <= _RECORD_DIGEST_BYTES):
+                    self._record_digests[raw] = digest
+                    self._record_digest_bytes += raw_bytes
         return record, diagnostic
 
     def _admitted_subject(self, verified):
