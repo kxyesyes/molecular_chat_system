@@ -38,6 +38,31 @@ User objective: complete work packages 1–8 from the remaining-work inventory; 
 | Package8 | PENDING final live acceptance | 32 GOLD/DIVERSE ×3, separate REAL-010 UI ×3, ordinary multi-turn and 16 legacy contract accounting |
 | Step9 deployment | OUT OF SCOPE | No deployment authorized by this objective |
 
+### Current bounded implementation checkpoint — 2026-09-28
+
+- C4a consent-module test ownership is now qualified, not runtime acceptance:
+  fixed-API RED13411/c29133 reached the missing seventeenth selector assertion
+  (1failed1.26s,exit1). The only helper edit adds that exact singleton; independent
+  SOURCE confirmed its inverse restores F37DE363. Seven finite functions
+  49554/a946ed passed50cases5.52s and the unchanged three genuine Windows cases
+  54559/812d3d passed3cases2.24s, both exit0 with9explicit pins unchanged.
+  Current helper C27DA90E; no deadlines, cleanup lifecycle or science assertions
+  changed. Section4.3 runtime tests are being prepared separately; permanent
+  retention scenarios still need reviewed bounded child containment.
+- G3 lexical diagnosis TEST68F3340A/plan707294D8 passed independent SOURCE.
+  Parent API-only RED94083/2cde14 reached the missing helper assertion at4872,
+  1failed8.51s,exit1,332pins unchanged. This is a prerequisite failure before
+  any native fixture or scientific execution, not proof of the original path
+  cause. Minimal protocol4 diagnostic implementation is released; actual caller
+  remains protocol3 until separately reviewed migration. No whitelist relaxation.
+- B1 pure record-digest reuse design5FE78542 passed independent written SOURCE.
+  TEST-first preparation alone is released. All mutable integrity, source,
+  journal and configuration checks must remain fresh; no measured speedup or
+  Web timeout repair is claimed. Original56 campaign rows remain NOT_RUN.
+
+Packages7/8 remain open. No push, PR creation, merge, provider/model activation
+or deployment occurred in this checkpoint; original dirty checkout is preserved.
+
 Original mixed checkout remains untouched. Local component passes, source reviews,
 and synthetic transport tests are not final live/model or normal-Web acceptance.
 
