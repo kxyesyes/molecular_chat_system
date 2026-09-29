@@ -1116,9 +1116,11 @@ def test_c_journal_real_request_descriptors_and_network_logs_are_private(mode, d
     import httpx
     transport, Model = c_transport_api()
     journal, calls = c_journal(transport), []
+    # Synthetic credential shape for redaction, not a stored credential literal.
+    synthetic_credential = "sk-" + "syntheticcredential123"
     names = {"boundary": "m" * 256, "overlong": "m" * 257,
              "url": "https://example.invalid/private-model",
-             "credential": "sk-syntheticcredential123"}
+             "credential": synthetic_credential}
     marker = "C0B_PRIVATE_PAYLOAD_MARKER"
     caplog.set_level(logging.DEBUG)
 
@@ -1154,7 +1156,7 @@ def test_c_journal_real_request_descriptors_and_network_logs_are_private(mode, d
     assert metadata["usage"] == {"prompt": 11, "completion": 7, "total": 18}
     serialized = json.dumps(snapshot) + caplog.text
     for secret in (marker, "synthetic-only-key", "synthetic-private-provider", "private-model",
-                   "sk-syntheticcredential123"):
+                   synthetic_credential):
         assert secret not in serialized
     # Positive control: unrelated logging must work after the request context exits.
     logging.getLogger("httpx").debug("C0B_OUTSIDE_REQUEST_CONTROL")

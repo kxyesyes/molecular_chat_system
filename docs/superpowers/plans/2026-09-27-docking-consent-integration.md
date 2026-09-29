@@ -796,3 +796,20 @@ and tests remain
 No Python, network, production/test edit, commit, push or alignment was performed.
 Freeze these inputs for parent to prepare focused clean main-based integration;
 no integration publication or widened C scope is authorized by this receipt.
+
+## PR #104 publication verification — 2026-09-30
+
+Publication authority now follows the user's remaining-through-step8 instruction.
+Exact `ebb2093` was independently re-reviewed without actionable blockers, and
+the isolated, network-disabled five-module command above passed 855 tests in
+18.42s (exit0). PR #104 targets main; no model or docking execution was enabled.
+
+Initial CI run36596556172 failed its unchanged credential scan: the new privacy
+test contained a literal synthetic credential matching the scanner pattern.
+Local reproduction identified only that test file. The fixture now constructs
+the exact same synthetic value at runtime; all redaction assertions and the
+scanner remain unchanged. AST comparison confirmed fixture-value equivalence.
+The original scan now passes, `git diff --check` passes, and the same five-module
+offline regression passed **855 tests in16.13s**, exit0 (terminal8b8da9).
+No production file changed in this correction. CI on the amended head remains
+required; the initial failed run is not represented as successful.
