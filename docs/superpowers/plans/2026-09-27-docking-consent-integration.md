@@ -813,3 +813,27 @@ The original scan now passes, `git diff --check` passes, and the same five-modul
 offline regression passed **855 tests in16.13s**, exit0 (terminal8b8da9).
 No production file changed in this correction. CI on the amended head remains
 required; the initial failed run is not represented as successful.
+
+### HTTPX encoder compatibility correction
+
+Run36597065439 on6da2018 completed failed: Agent had two surrogate-fixture
+failures,12319passed,1skipped; task-runtime independently failed downloading the
+Temporal test server with HTTP524 (1568passed,7skipped). Static scan passed.
+The Agent failures reproduce with the repository-pinned HTTPX0.25.2 installed
+only in an ignored scratch target: focused RED2failed4passed. No installed
+environment or dependency pin was changed.
+
+Minimal design: the real client encoder is an independent pre-call oracle.
+HTTPX0.25.2 escapes the surrogate in valid JSON; local0.28.1 rejects its UTF-8
+encoding. Keep ordinary success and non-ASCII-header rejection unconditional.
+For a successful probe, require exact model round-trip and dispatched-body
+equality, one attempt/POST and the full successful journal sequence. For failed
+encoding, require zero dispatch/attempts, null IDs and the exact sanitized build
+error. No version skip, altered serializer, weakened scanner, production change
+or real-provider acceptance claim is introduced.
+
+Implementation/verification: only the existing encoding test changed. Independent
+source review found no blockers. The same five-module offline regression passed
+on both actual versions: **0.25.2:855passed,1 anyio pytest-rewrite warning,15.88s;
+0.28.1:855passed,16.23s**, session40577 terminal59d8f2 exit0. The scratch wheel is
+not tracked. Updated-head CI is still required; retain both earlier CI failures.

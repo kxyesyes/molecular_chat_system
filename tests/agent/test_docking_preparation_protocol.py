@@ -1327,7 +1327,7 @@ def test_c_actual_httpx_encoding_precedes_request_binding(mode, fault):
     import asyncio
     import httpx
     transport, Model = c_transport_api()
-    journal, posts, encoder_errors = c_journal(transport), [], []
+    journal, posts, encoder_errors, encoded_bodies = c_journal(transport), [], [], []
     messages = [{"role": "user", "content": "complete synthetic docking request"}]
     bad_value = {"none": None, "nonascii-key": "synthetic-key-\u6d4b",
                  "model-surrogate": "test-model-\ud800"}[fault]
@@ -1341,34 +1341,45 @@ def test_c_actual_httpx_encoding_precedes_request_binding(mode, fault):
             model = Model(bad_value if fault == "nonascii-key" else "synthetic-only-key",
                           bad_value if fault == "model-surrogate" else "test-model",
                           "https://example.invalid/v1", client=client)
-            # Both builders genuinely succeed. Probe the installed HTTPX encoder
-            # separately: it must fail locally, not in the MockTransport handler.
-            # No patched builder, client, request, serializer or error algorithm.
+            # Independently observe the real encoder before production runs.
+            # HTTPX 0.25 escapes surrogate code points; 0.28 encodes UTF-8
+            # directly. Header ASCII rejection remains unconditional on both.
             payload = transport._payload(model, messages, mode, 256,
                                          transport.ProtocolProfile.DOCKING_PREPARATION_V1)
-            headers = model._headers()
+            headers = {**model._headers(), "Accept-Encoding": "identity"}
             before = journal.snapshot()
-            if fault == "none":
-                request = client.build_request("POST", model.base_url, headers=headers, json=payload)
-                assert json.loads(request.content)["model"] == "test-model"
+            try:
+                request = client.build_request(
+                    "POST", model.base_url, headers=headers, json=payload, timeout=30.0)
+            except UnicodeEncodeError as exc:
+                assert fault != "none"
+                assert exc.encoding == ("ascii" if fault == "nonascii-key" else "utf-8")
+                encoder_errors.append(exc.encoding)
             else:
-                with pytest.raises(UnicodeEncodeError) as caught:
-                    client.build_request("POST", model.base_url, headers=headers, json=payload)
-                encoder_errors.append(caught.value.encoding)
+                assert fault != "nonascii-key", "authorization headers must remain ASCII"
+                expected_model = bad_value if fault == "model-surrogate" else "test-model"
+                assert json.loads(request.content)["model"] == expected_model
+                encoded_bodies.append(request.content)
             assert posts == [] and journal.snapshot() == before
             return await model.propose_docking_preparation(messages, mode=mode, _journal=journal)
 
     result = asyncio.run(run())
     snapshot = journal.snapshot()
-    if fault == "none":
+    if encoded_bodies:
         assert encoder_errors == [] and result.success
         assert len(posts) == result.metadata["request_attempts"] == 1
+        assert posts[0].content == encoded_bodies[0]
         assert result.metadata["request_id"] == journal.request_id is not None
         assert snapshot["stage"] == "parsed"
+        assert snapshot["stages"] == [
+            "created", "validated", "dispatch_started", "response_received", "parsed",
+        ]
     else:
         assert encoder_errors == ["ascii" if fault == "nonascii-key" else "utf-8"]
         assert posts == [] and not result.success and result.proposal is None
         assert result.error is not None
+        assert result.error.code.value == "internal_error"
+        assert result.error.details == {"reason": "docking_preparation_build_failed"}
         assert result.metadata["request_attempts"] == snapshot["model_call_metadata"]["request_attempts"] == 0
         assert result.metadata["request_id"] is journal.request_id is None
         assert snapshot["stages"] == ["created", "failed"] and snapshot["completion"] == "not_started"
