@@ -2421,6 +2421,94 @@ def test_c2_cancel_or_expire_under_actual_lease_before_raw(tmp_path, monkeypatch
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("clock", ["wall", "monotonic", "both", "not-expired"])
+def test_c2_expiry_after_committed_reservation_blocks_raw_dispatch(tmp_path, monkeypatch, clock):
+    rig = _c2_rig(tmp_path, monkeypatch)
+    reserved, release = threading.Event(), threading.Event()
+    rig.releases.append(release)
+    original = rig.first.store._reserve_docking_dispatch
+
+    def hold_committed_reservation(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # Real validation, integrity verification, SQL commit and close ran.
+        reserved.set()
+        if not release.wait(40):
+            rig.errors.append("committed reservation fixture escape")
+            raise RuntimeError("reservation barrier not released")
+        return result
+
+    monkeypatch.setattr(rig.first.store, "_reserve_docking_dispatch", hold_committed_reservation)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            rig.clock.wall += TTL_MS - 1000
+            rig.clock.mono += TTL_MS / 1000 - 1
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(reserved.wait, 5)
+            row = _c2_row(rig, identity())
+            assert row["state"] == "DISPATCH_RESERVED" and row["dispatch_state"] == "reserved"
+            assert rig.raw == [] and len(rig.leases) == 1
+            assert not rig.leases[0]["exited"].is_set()
+            if clock in {"wall", "both"}:
+                rig.clock.wall += 1000
+            if clock in {"monotonic", "both"}:
+                rig.clock.mono += 1
+            release.set()
+            deadline = asyncio.get_running_loop().time() + 5
+            while True:
+                final = await _c2_view(rig)
+                if final["view_status"] != "ACTIVE" and final["cleanup_status"] == "settled":
+                    break
+                assert asyncio.get_running_loop().time() < deadline, "dispatch boundary did not settle"
+                await asyncio.sleep(0.01)
+            expected_calls = 1 if clock == "not-expired" else 0
+            assert len(rig.raw) == expected_calls, "expired consent reached raw docking"
+            assert final["view_status"] == ("SUCCEEDED" if expected_calls else "TIMED_OUT")
+            assert final["reason_code"] == (None if expected_calls else "consent_expired")
+            assert final["dispatch_state"] == "reserved"
+            assert _c2_row(rig, identity())["state"] == "DISPATCH_RESERVED"
+            assert len(rig.submits) == 1
+            assert all(entry["exited"].is_set() for entry in rig.leases)
+            assert all(entry["all_leases_exited"] for entry in rig.discards)
+            if expected_calls:
+                assert rig.discards == []
+            else:
+                assert len(rig.discards) == 1 and rig.discards[0]["result"] is True
+                assert not (rig.root / "c-task-1").exists()
+            again = await _c2_approve(rig, proof)
+            assert again["view_status"] == final["view_status"]
+            assert len(rig.raw) == expected_calls and len(rig.submits) == 1
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c2_valid_dispatch_can_finish_after_consent_expiry(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch, hold_raw=True)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            rig.clock.wall += TTL_MS - 1000
+            rig.clock.mono += TTL_MS / 1000 - 1
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(rig.raw_entered.wait, 5)
+            rig.clock.wall += 1000
+            rig.clock.mono += 1
+            rig.raw_release.set()
+            final = await _c2_terminal(rig, "SUCCEEDED")
+            assert final["reason_code"] is None
+            assert len(rig.raw) == len(rig.submits) == 1
+            assert rig.raw[0]["returned_success"]
+            assert all(entry["exited"].is_set() for entry in rig.leases)
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("change,reason", [
     ("binding", "consent_binding_mismatch"), ("policy", "consent_binding_mismatch"),
     ("policy-generation", "consent_generation_mismatch"),

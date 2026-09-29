@@ -479,8 +479,11 @@ class TaskRuntime:
                             and self._consent_monotonic() >= operation.raw_expires)):
                     raise DockingConsentError("consent_execution_timeout")
                 if phase == "dispatch":
+                    # Reservation verification/commit may outlive the consent.
+                    # Recheck at raw dispatch without restoring its spent claim.
+                    binding = self._validate_consent_row(operation, operation.row)
                     operation.raw_expires = (self._consent_monotonic()
-                        + json.loads(operation.row["binding_json"])["vina_limit_seconds"])
+                        + binding["vina_limit_seconds"])
                     operation.loop.call_soon_threadsafe(self._arm_consent_raw_deadline, operation)
                 return
 

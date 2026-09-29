@@ -2611,3 +2611,38 @@ Precommit checks are shell-only source/spec hashes, exact path scope, current
 branch and Git diff/whitespace checks. No add-A, other-file staging, Python run,
 push, PR or merge is authorized. Parent independently audits the resulting local
 commit/tree before any later publication action.
+
+## Prepublication dispatch-expiry correction — 2026-09-30
+
+The current remaining-through-step8 instruction authorizes bounded fixes before
+publication. Independent source review found expiry validated before the actual
+reservation transaction finishes, but not at the final raw-dispatch boundary.
+This is initially a source finding, not an executed reproduction.
+
+Design: reuse the existing consent binding validation immediately before raw
+dispatch. Expiry uses both original server clocks; keep operation/raw deadlines,
+spent reservation and first-error semantics intact. Do not revalidate consent
+TTL after a valid dispatch, which could invalidate already-authorized work.
+No new permission subsystem, retry, READY restoration or scientific fallback.
+
+- [x] Add a real SQLite/staging/lease regression holding the return from the
+  committed reservation. Advance wall clock, monotonic clock, or both past the
+  original consent expiry; include a not-expired positive control.
+- [x] Observe RED: the old code dispatches despite expiry. Keep real assertions
+  on spent reservation, no replay, cleanup after lease exit and unchanged inputs.
+- [x] Add the smallest runtime guard change and run the same tests GREEN plus
+  existing C2 expiry/cancel/one-use regressions.
+- [ ] Independent review, exact-file commit and later main-aligned CI remain
+  required. Synthetic raw fixtures are not evidence of real Vina execution.
+
+Actual verification: RED8bfc09 was **3failed,1passed in4.87s**; all three expiry
+variants observed an unwanted raw call after actual reservation commit. The
+dispatch-only existing-validator reuse then passed the focused8 tests in5.72s.
+Added a positive test allowing already-valid dispatch to finish after consent
+TTL, and strengthened failed-case cleanup to require exactly one successful
+discard and owned-stage deletion. Final C2 subset terminal6341f2: **47passed,
+104deselected in12.42s**, exit0, with real SQLite/staging and synthetic raw-tool
+fixtures only. Independent source review found no production blockers; its
+nonblocking cleanup-assertion suggestion is included in the final tested bytes.
+AST syntax and whitespace checks passed. Full main-aligned/CI verification is
+still pending; the prior1148/15 receipt does not cover this new correction.
