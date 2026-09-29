@@ -1,5 +1,33 @@
 # P7-C Docking Consent Integration Implementation Plan
 
+## C0b test preparation on isolated branch
+
+Parent created `codex/docking-preparation-transport` in its own worktree at
+46d70767bda6c9cd6041f56358b36c150d8ba71d, the exact C0a PR102 head. This is a
+stacked preparation baseline, not proof PR102 landed; no C0b PR is published yet.
+The approved C0b table below is the implementation scope. Only appended transport
+tests and this checkpoint changed; C0a parser/tests remain an unchanged prefix.
+No Python, collection, provider request or production implementation occurred.
+
+The first missing-API RED will be `test_c_transport_api_present`, independently
+SOURCE-reviewed before an explicit sole-slot grant. Subsequent tests use actual
+HTTPX MockTransport through the real model wrapper and existing shared request
+path, never replace that request with a proposal fixture. They require strict
+native/JSON schema, request ID/attempt/stages, detached bounded journal, null ID
+and zero posts on ALL pre-dispatch failures including payload/header construction,
+post-dispatch invalid/timeout/cancel spent once, no retry/cross-profile fallback,
+terminal journal immutability and invalid/reused journal rejection. Root durable
+proposal counts, Web admission and scientific consent remain C0c/C3 requirements.
+
+Implementation must preserve existing ordinary bind-before-validation behavior;
+C binds only after options, whole history, required model configuration, payload
+and headers are captured successfully. C prevalidation leaves stages created→failed,
+not a fictitious validated/dispatch stage. The shared journal snapshot/size/sanitizer
+mechanics may be reused, but ordinary semantics cannot change to accommodate C.
+Retain the same five-module regression command; add actual concurrent three-profile
+coverage and stronger journal boundary probes before final C0b release if SOURCE
+identifies gaps. No C0b production code is currently authorized or implemented.
+
 ## C0a publication baseline (parent evidence, 2026-09-27)
 
 The pure-protocol four-file slice is published separately on
@@ -243,3 +271,569 @@ Publish only these new files, subject to parent alignment and publication gates:
 4. `docs/superpowers/plans/2026-09-27-docking-consent-integration.md`
 
 Ignored runner/scratch outputs are excluded. Parent plans to align this tree from 108df5d to actual main `c90c180` (including PR98/101); this worker has not performed or verified that alignment. Re-pin the actual resulting head and incoming overlap before publication, and require latest-head CI; these 108df5d passes are not evidence of a run on c90c180. C0b remains a future separately released test-first batch, with no code changes in this turn.
+
+## C0b mandatory SOURCE-gap test preparation — 2026-09-27, NOT RUN
+
+Parent explicitly released this reviewer to act as test-prep implementer ONLY:
+append to `tests/agent/test_docking_preparation_protocol.py` and update this plan.
+The current branch remains `codex/docking-preparation-transport`, HEAD
+`46d70767bda6c9cd6041f56358b36c150d8ba71d`. Mencius owns the sole Python slot.
+No Python, import, collection, compilation, test, production edit, runner edit,
+real network request, staging or commit occurred. Initial API RED is still NOT RUN.
+
+This checkpoint makes the earlier preparation's conditional "if SOURCE identifies
+gaps" obligation unconditional: all following coverage is mandatory before final
+C0b release. Authored assertions are not proof of behavior or independent approval.
+Another reviewer must review this freeze; the author must not self-approve it.
+
+Added twelve test functions (parameter counts remain uncollected), retaining all
+previous tests and reusing the existing C helpers and ordinary transport's literal
+`INTENT`/`DECISION`/`MESSAGES`, `wire` and journal helpers. No generic test framework:
+
+- Valid C arguments with only the native function name wrong, separately from
+  correct C function plus ordinary/decision envelope in both wires. Complete
+  decision-native history is first accepted by the real decision history checker,
+  then rejected by C with null ID and zero posts in both wires.
+- Actual asyncio deadline and explicit cancellation, both wires, with cooperative
+  and cancellation-resistant HTTPX MockTransport handlers. The latter returns a
+  valid response only after real cancellation reaches it: no success/parsed stage,
+  one spent attempt, timeout/cancelled terminal, and no subsequent parsed overwrite.
+  Events coordinate entry/interruption/release; no fabricated ReadTimeout or clock.
+  The existing 0.05s deadline/2s control bounds match the ordinary transport tests.
+  Every handler/task is released and joined in finally; no worker/process is used.
+- Three actual profiles share one model/MockTransport and real ModelRequestGate;
+  separately release each request, assert distinct IDs/DTOs/schema routing/history,
+  reader counts and writer exclusion until all three settle. Ordinary prevalidation
+  retains its non-null bound ID; C retains null. Additional payload/header probes
+  observe created/null *during* construction, not merely after failure cleanup.
+- Real-request journal descriptor 256/257 boundaries, URL/credential redaction,
+  ignored raw body/usage/header material, dependency log suppression with an
+  outside-request positive control, and nested detached snapshot mutation.
+- Invalid/skip/non-native stages, wrong request ID/status/error type and rebind
+  leave records unchanged and errors sanitized. Foreign, ordinary and subclass C
+  journals cannot dispatch or mutate; foreign methods are never invoked.
+- Direct existing journal-mechanism seams `_bind`, `_replace`, `_record` exercise
+  exactly 8 versus 9 entries and 8192 versus 8193 encoded bytes, atomically. The
+  seeded history and padded record are defensive primitive tests, NOT legal
+  seven-stage lifecycles, accepted oversized descriptors, or durable root evidence.
+
+Test SHA256: `226C3BA667C8E992A55B926639F54E2192550A856942006C80B1D2CA76FD57F4`.
+Read-only static checks: the original 582-line C0a prefix matches HEAD exactly;
+the entire prior 825-line file prefix hashes to
+`E4D607DB7E2189A283B4EF959EDFA7939A5D50F0A716A2948EA0D03131EF8061`.
+This amendment adds494 lines after that prefix; `git diff --check` is clean.
+Only test/plan differ from HEAD. No syntax, collection, RED, GREEN or pass count
+is claimed. The initial `test_c_transport_api_present` remains the first proposed
+single-node API RED after independent SOURCE and explicit sole-slot transfer.
+Full five-module GREEN/fresh QUALITY, two-file implementation SOURCE, and parent
+release remain separate gates. C0c/C3 durable proposal limits, admission/consent,
+physical model lease integration and scientific execution are not proven here.
+
+Parent subsequently reported ignored-runner preparation: REPO-only substitution
+from6D490 with full forward/reverse equality at terminal366c1e. This amendment
+independently verified runner SHA256
+`3761E8976C9DA239340AF31675950ED81F3FE1BEBCE0B170B2B4A74FFF20A755`
+without changing or executing it. Parent also reports PR102 merged at18ad4f9,
+reviewed/landed tree751bd047 equal and nine CI checks passed: C0a evidence only,
+not C0b. This editing tree stays at46d7076; no alignment occurred. Parent owns
+later patch preservation/alignment and fresh input re-pinning before execution.
+
+## C0b accepted API RED and two-file implementation SOURCE handoff — NOT GREEN
+
+Parent reports the authorized exact initial API RED at direct terminal `d56fee`:
+`test_docking_preparation_protocol.py::test_c_transport_api_present`, **1 failed
+in2.79s**, exit1, call-phase missing `DockingPreparationResponse`. No live task;
+parent released the slot. All7 pins were unchanged: test226C, plan7FDA, spec,
+C0a contract, two preimplementation production files, and runner3761. This is
+missing-API evidence only, not reached transport/deadline/journal behavior.
+
+Parent subsequently authorized ONLY `src/agent/decision_transport.py`,
+`src/agent/openai_compatible_model.py` and this checkpoint. This implementation
+did not run Python/import/compile/collection/tests, make real requests, change
+tests/C0a contract/runner, align the tree, stage, commit or push. HEAD stays46d7076.
+G3 work and its independently granted slot do not authorize execution here.
+
+- Explicit third enum/function/schema/parser selection and frozen response DTO;
+  C uses the existing strict C0a parser and closed role/content history. Native C
+  calls require exact id/type/function and name/arguments shapes. No retry/fallback,
+  separate client, root store, Web admission, consent or scheduler was added.
+- One thin model wrapper delegates through `request_docking_preparation` to the
+  existing `_request_protocol -> _post -> _read_post` chain, default256 tokens/30s.
+- C's exact journal/profile guard runs before use; foreign/subclass/reused records
+  fail without mutation/dispatch. Options/history/config/build failures retain
+  null ID, zero attempts and created→failed. Payload/headers are captured before
+  C allocates/binds the UUID and records validated/dispatch_started. Ordinary's
+  early UUID/bind and validated-before-build ordering remain in the legacy branch.
+- C journal reuses IntentJournal snapshot/8-entry/8192-byte/transition mechanics
+  and existing allowlisted metadata sanitizer; its identities, digest, revision,
+  phase and protocol are C-specific. A C-only null-ID failed transition is allowed;
+  terminal stages cannot advance/rebind. IntentJournal's fixed error string is
+  now a class constant so C can use its own fixed error without duplicating logic.
+- C alone rechecks its dispatch deadline after the actual shared HTTP operation
+  and after parsing: cancellation-resistant late success cannot become parsed.
+  Explicit cancellation still propagates with a spent/unknown journal, with no
+  detached worker or timeout increase. This is source intent, not executed proof.
+
+Implementation SHA256 freeze:
+
+| File | SHA256 |
+|---|---|
+| `src/agent/decision_transport.py` | `802999F93316D0875E9110600464DD3FF49CD7D7E4E59F8E1174FDA42EC03BD0` |
+| `src/agent/openai_compatible_model.py` | `7F36FF02A1237E1C704D9BB3EBE6C0E33ECA873E1C35EFB136C0201C777A8250` |
+| Frozen tests | `226C3BA667C8E992A55B926639F54E2192550A856942006C80B1D2CA76FD57F4` |
+| Unchanged C0a contract | `FD13F3ADC899F4D5B739DB0571AF051F68912768A0A6A6B7EFE36772BA29BE57` |
+| Unchanged ignored runner | `3761E8976C9DA239340AF31675950ED81F3FE1BEBCE0B170B2B4A74FFF20A755` |
+
+Static checks only: `git diff --check` clean; direct HEAD/source substring equality
+for `_journal_metadata`, `_validate_options`, `_parse_response`, and the entire
+`_read_post`/`_post` block. Removing only the new model wrapper in memory restores
+the original model file exactly. Legacy payload instruction/description/schema
+strings and model-payload construction order were reviewed without executing.
+No GREEN or independent approval is claimed. Stop for independent implementation
+SOURCE; parent alignment/re-pinning and separate exact five-module GREEN/fresh
+QUALITY grants remain outstanding. C0c/C3 durable counters and consent/execution
+activation remain separate, unimplemented gates.
+
+## Wegener two-P2 regression preparation — SOURCE freeze, NOT RUN
+
+Parent reports independent implementation SOURCE **NOT READY**, with two P2
+hypotheses. Parent authorizes tests/checkpoint only before targeted RED; production
+remains frozen at802999F/7F36FF. No Python, import, compilation, collection, test,
+network call, production correction, tree alignment, commit or push occurred.
+The earlier one-node missing-API RED does not reproduce either new issue.
+
+Read-only inspection of the installed MedChat dependency sources establishes the
+relevant paths, not runtime reproduction:
+
+| Installed source | SHA256 | Relevant source behavior |
+|---|---|---|
+| `Lib/site-packages/httpx/_client.py` | `C43F941BAEFE58C91E96D00039E1868FE719D91453026D7DB1647194563BFF8D` | build_request:340-389 merges headers and constructs Request; AsyncClient.stream:1570-1583 builds before send |
+| `Lib/site-packages/httpx/_models.py` | `E3FFC6BB2BF580BC6E6428708A6F247D036220E709F5A72B785392BABBD97E6B` | _normalize_header_value:74-82 encodes str headers with default ASCII |
+| `Lib/site-packages/httpx/_content.py` | `2C61B3AC94D1DCEBCDE0C6F519554D2D7917247FBAA0A97002DB4EF69E70FF28` | encode_json:176-179 uses ensure_ascii=False followed by UTF-8 encoding |
+| `Lib/asyncio/tasks.py` | `B3BCCB5346D370059D20191CFEC96E15BB07442C3AAE9CE9C717190A8D8920C7` | wait_for:432-435 catches external CancelledError then returns fut.result() if the child is already done |
+
+The installed HTTPX version source declares0.28.1. MockTransport's
+`handle_async_request`:29-43 awaits request.aread, invokes its handler and accepts
+an immediate Response. No dependency or stdlib code is patched by these tests.
+Current production binds at decision_transport:586 and increments attempts:595
+before _post's local HTTPX encoding; wait_for is at:599 and parsed publication:627.
+
+Appended two test functions, retaining the entire prior1319-line226C test prefix:
+
+1. `test_c_actual_httpx_encoding_precedes_request_binding`, both wires, covers
+   non-ASCII synthetic authorization and an unpaired surrogate in model_name,
+   plus a normal request positive control. Real _payload/_headers must succeed;
+   a separate real client.build_request probe must raise UnicodeEncodeError with
+   the expected ASCII/UTF-8 encoding before any MockTransport post. The actual C
+   model call must then return a sanitized failure, null request/journal ID,
+   zero actual posts/attempts, created→failed and completion=not_started.
+   No synthetic builder exception replaces the installed encoding seam.
+2. `test_c_external_cancel_at_completed_http_child_is_not_lost`, both wires,
+   schedules one external cancellation callback just before returning a valid
+   immediate HTTPX response, plus a no-cancel positive control. Callback facts
+   must demonstrate a completed, noncancelled child distinct from the pending
+   outer awaiter and an accepted outer cancellation. Assertions run in the test,
+   not silently inside a loop callback. The caller must receive CancelledError;
+   exactly one spent attempt and terminal cancelled/unknown/interrupted remain,
+   with no parsed stage or later parsed overwrite. Child and outer tasks are
+   retained/joined in finally. No sleeps, patched wait_for or fabricated journal
+   transition is used to create the race; the postterminal negative assertion is
+   separate from the actual response/cancellation observation.
+
+Test SHA256: `D2EF41A76F765DEC2A320AFE0F7440EE4FE7C4D9B010ADE4A11D90DF7037F8BC`.
+Static prefix SHA remains
+`226C3BA667C8E992A55B926639F54E2192550A856942006C80B1D2CA76FD57F4`;
+production hashes remain802999F/7F36FF; git diff --check is clean. These are
+unexecuted desired-contract tests, not confirmed failures or an implementation fix.
+Ordinary/decision semantics and tests are unchanged. SOURCE review of this freeze
+must precede a parent-granted targeted RED selecting exactly the two new functions;
+no module-wide run or production edit is authorized by this checkpoint. Subsequent
+fix authority remains limited to the two approved production files and own plan,
+only after parent accepts actual reproduction. No C0a contract change is needed
+or made for these two hypotheses.
+
+## C0b two-P2 correction — implementation SOURCE handoff, NOT GREEN
+
+Parent reports actual targeted RED, direct terminal `324328`, exit1:
+**6 failed, 4 passed in1.58s; 658 before/after pins unchanged**. This is parent
+execution evidence, not a fresh run by this implementer. Both named regression
+functions ran (10 parameter cases); the actual encoder/race prerequisites passed:
+
+- Four encoding-fault cases (two faults, both wires) passed real HTTPX
+  UnicodeEncodeError/no-POST checks, then failed at test:1370 because actual
+  request_attempts was1 rather than0.
+- Two external-cancel cases (both wires) passed every completed-child/callback
+  race fact, then failed at:1424 because the outcome was a successful
+  DockingPreparationResponse, not CancelledError.
+- Four positive controls passed. Parent reports terminal slot release.
+
+The subsequent implementation grant permits only decision_transport.py and this
+checkpoint. No Python, import, compile, collection, test, network call, alignment,
+commit or push was performed here. No extra test or production module was edited.
+
+Source correction, C profile only:
+
+1. The existing shared _post/_read_post path selects a private C stream context.
+   It builds the actual HTTPX Request with the same client, headers, JSON,
+   timeout and identity encoding. Only after build_request succeeds does the
+   transport-local synchronous dispatch closure bind the ID, record validated
+   and spend the one attempt. client.send sends that same Request once, with
+   stream=True/follow_redirects=False; there is no probe/rebuild or second POST.
+   Pre-dispatch errors retain null ID/zero attempts and fixed sanitized reasons.
+2. C retains an explicitly owned HTTP task and waits with asyncio.wait against
+   one unchanged absolute deadline. External cancellation cannot return a done
+   child's value. Cancellation/expiry is latched before cancellation and joining
+   of the actual child; late values and child failures are consumed, not parsed.
+   Repeated outer cancellation is retained without repeatedly cancelling or
+   detaching that child. Cancellation during an expiry drain still propagates.
+3. Returned live HTTPX response streams delegate iteration unchanged and protect
+   their underlying asynchronous close with an owned, joined cleanup task.
+   This also covers HTTPX's implicit EOF close: HTTPX sets is_closed before
+   awaiting stream.aclose, so merely retrying response.aclose after interruption
+   is insufficient. Buffered/closed responses add no cleanup scheduling point.
+   The same small join helper protects closure of a C-owned client on build,
+   send, read and cancellation exits; a borrowed client is never closed here.
+   HTTPX retains its native send-error cleanup before a response is returned.
+4. Terminal cancellation/timeout is recorded only after the owned HTTP task and
+   its cleanup settle. A pre-dispatch interruption records failed/not_started
+   with null ID rather than inventing a spent attempt; after dispatch it records
+   cancelled/timeout and unknown completion. The fixed deadline is checked
+   before binding, after HTTP settlement and after parsing. Physical cleanup is
+   joined, not claimed to finish within the logical request deadline.
+5. Ordinary/decision paths keep their original bind/dispatch order, client.stream,
+   asyncio.wait_for, timeout and cleanup behavior. All profiles still use one
+   shared HTTP status/encoding/byte-bound validator and one response parser;
+   no public callback API, consent authority, scheduler or fallback is added.
+
+SOURCE SHA256 freeze:
+
+| File | SHA256 |
+|---|---|
+| `src/agent/decision_transport.py` | `1B4AFC38C69B2D1BA484DBBE552219BE4941F53F189C864E3A77C2A59FFBE19A` |
+| Unchanged `src/agent/openai_compatible_model.py` | `7F36FF02A1237E1C704D9BB3EBE6C0E33ECA873E1C35EFB136C0201C777A8250` |
+| Unchanged frozen tests | `D2EF41A76F765DEC2A320AFE0F7440EE4FE7C4D9B010ADE4A11D90DF7037F8BC` |
+| Unchanged C0a contract | `FD13F3ADC899F4D5B739DB0571AF051F68912768A0A6A6B7EFE36772BA29BE57` |
+| Unchanged approved spec | `97B61082201E2703BE460C3C592212ABA8E8E348B8FA3DD58FC04C5EB82FE0EF` |
+| Unchanged ignored runner | `3761E8976C9DA239340AF31675950ED81F3FE1BEBCE0B170B2B4A74FFF20A755` |
+
+Static checks only: git diff --check is clean; in-memory normalized text
+comparisons against HEAD confirm _journal_metadata, _validate_options,
+_parse_response and the shared _read_post response-validation body are unchanged.
+Protected-file hashes above were rechecked. Branch remains
+codex/docking-preparation-transport, HEAD46d70767bda6c9cd6041f56358b36c150d8ba71d.
+The 658-pin execution manifest is parent-reported, not independently re-run here.
+
+This is ready for independent implementation SOURCE review, not execution or
+release approval. Existing pending/late and completed-child regression tests
+remain frozen. Repeated cancellation during real body/client cleanup is a source
+reasoning check here, not claimed executed coverage. No GREEN, fresh QUALITY,
+new timeout guarantee or production activation is inferred. Await parent review
+and a separate exact execution grant before any Python.
+
+## C0b construction-time guard contract — TEST/DESIGN SOURCE, NOT IMPLEMENTED
+
+### Actual pre-return-close RED and authority boundary
+
+Independent Lovelace SOURCE found a remaining P2 in transport1B4A: the response
+stream is protected only after client.send returns, but HTTPX response-hook or
+redirect-processing errors can call response.aclose before that return. Installed
+HTTPX _client.py:1693-1715 invokes response hooks and catches their exceptions to
+close; _models.py:1065-1076 sets is_closed before awaiting the underlying stream.
+Cancelling/joining the HTTP child therefore need not finish the physical close.
+
+This is now reproduced, not merely a source hypothesis. Parent reports direct
+terminal `cf929d`, exit1: **8 failed, 2 passed in2.95s; 5 pins unchanged**, against
+test `C5D13C7453E0EDD20DA37D366D6A827C2AEE04E0B4DE85782F7DFB7FA6276CFB`.
+Both no-interruption hook-error controls passed. Every interruption case passed
+the actual HTTPX pre-return facts, then failed at old test:1522 because the outer
+request settled before physical cleanup. The live stream re-raises cancellation;
+it does not simulate a successful close. Earlier324328 six-failure RED remains
+valid history and is not superseded by this different defect.
+
+Parent approved the following bounded compatibility design and TEST+ownplan
+preparation only. Production transport1B4A and model7F36FF remain unchanged.
+No Python/import/compile/collection/test/network, implementation, commit or push
+occurred in this preparation. Parent owns all execution grants.
+
+### Exact interface and ownership contract
+
+The only new public production symbol proposed is:
+
+```python
+async def docking_preparation_response_guard(response: httpx.Response) -> None:
+    ...
+```
+
+This is a construction-time HTTPX response hook, not an installer accepting a
+live client and not an authorization token. The existing model method signature,
+wire schemas, pure C0a module, ordinary profiles and chat APIs remain unchanged.
+Only decision_transport.py needs future production changes; no client subclass,
+new scheduler, replacement response parser or transport framework is proposed.
+
+| Boundary | Required behavior |
+|---|---|
+| C-owned client | Construct the existing real AsyncClient with the exact guard as its first response hook; retain its existing timeout/follow_redirects options and close ownership. |
+| Borrowed client | Creator explicitly passes event_hooks={"response": [guard, *existing_response_hooks]} when constructing its real AsyncClient. Existing hooks retain identity and order; request hooks/transport/auth/options are not silently replaced. |
+| Borrowed admission | C checks exact callable identity at response-hook index0, without changing the client. Absent or misordered guard yields INTERNAL_ERROR with details exactly {"reason": "docking_preparation_client_not_opted_in"}, null request ID, attempt0, zero POST and created->failed/not_started. Do not close the borrowed client. |
+| Ordinary/decision/chat | No guard-admission requirement. Their existing request/bind/wait_for/error/cleanup behavior is retained. A registered guard must be a no-op outside the matching C request. |
+| Request-local owner | A private ContextVar carries a per-call owner tied to the exact built Request identity, not a global active flag/model field. The guard must not adopt a foreign Request in a nested hook even if it inherits the same context/task. Reset the token after all owned work is joined. |
+| First response guard | Before its first suspension, associate/protect the live response stream for that matching owner, before any later user hook can fail/read/close it. Do not inspect/copy/log the body or alter status, headers, decoding or validation. |
+| Cancellation/expiry | Continue to cancel the actual HTTP operation under the same absolute deadline; do not shield the entire send. Protect and retain actual close tasks, consume failures, and join them under repeated cancellation before outer completion. A flag or cancelled task is not physical close success. |
+| Publication/accounting | Same actual build-before-bind Request, one spent attempt after dispatch, no refund/retry/additional POST, no late parsed value. Preserve null-ID predispatch and sticky spent/unknown cancellation/timeout journal semantics. |
+
+Concrete borrowed construction example (not production added in this checkpoint):
+
+```python
+client = httpx.AsyncClient(
+    transport=existing_transport,
+    event_hooks={
+        "request": existing_request_hooks,
+        "response": [docking_preparation_response_guard, *existing_response_hooks],
+    },
+)
+model = OpenAICompatibleModel(api_key, model_name, base_url, client=client)
+```
+
+Compatibility is intentionally tightened for this new C feature: an arbitrary
+existing borrowed client is no longer silently accepted for C. It remains usable
+unchanged by ordinary/chat. The default Web model constructor at src/web/app.py:494
+does not inject a borrowed client and uses the owned branch. No migration of all
+chat clients or request-time insert/pop of shared hooks is allowed.
+
+The creator must keep the guard first and unchanged throughout client use; later
+hooks must not remove/reorder it, replace the protected stream or launch detached
+close work. Custom auth/transport/hooks must preserve the one-request contract
+and normal HTTPX ownership. This is not support for arbitrary subclasses or
+extensions that fail/leak before the first response hook. A first-hook check is
+not a sandbox or proof about arbitrary caller code. No-hook borrowed clients
+also require opt-in: HTTPX may process a redirect location even when following
+redirects is disabled. Public auth runs after response hooks and cannot replace
+this boundary. Cloning a borrowed client or shielding the whole send is rejected.
+
+### Test preparation and preservation of unsafe RED
+
+The test-local c_opted_in_client helper constructs the same real httpx.AsyncClient,
+using the supplied transport/options unchanged, and passes a copied hook mapping
+with the exact guard first and existing response hooks behind it. It does not
+patch any request-time code or supply an ownership algorithm. c_guard_api looks
+up the new symbol only when a test/helper is called, so missing API is a call-phase
+assertion, not an import/collection failure.
+
+Exactly17 existing C client constructor calls were mechanically changed from
+httpx.AsyncClient to this explicit helper. Reversing those names in memory and
+excluding the appended new definitions restores **all74081 original C5D13 bytes**
+and its SHA256. This includes every original C0a/D2EF assertion and all ten
+pre-return cleanup parameters. No event, timeout, close barrier, race prerequisite,
+terminal assertion or teardown was changed. The migrated cleanup test must now
+reach held physical close through an opted-in real client; early refusal cannot
+pass its close_entered/actual-request prerequisites. The old C5D13 unsafe-client
+RED is retained above as historical evidence, not represented as a passing test.
+
+New test sources (13 parameter cases by static count; not collected):
+
+- test_c_construction_response_guard_api_present: async public hook exists at call
+  phase; exact initial API RED node below (one case).
+- test_c_uninstrumented_borrowed_client_refuses_without_changing_ordinary: absent
+  and misordered guard, both wires; exact null/zero/refusal details, no hook or
+  POST before refusal; same original client then successfully handles ordinary,
+  decision and chat with unchanged hook list identity/order (four cases).
+- test_c_constructor_guard_three_profiles_keep_request_local_close_ownership:
+  three concurrent real HTTPX requests, two preserved later hooks, same transport,
+  distinct request IDs; real EOF close in an owned task for C but original HTTP
+  task for both legacy profiles; client/hooks unchanged (both wires).
+- test_c_guard_does_not_adopt_foreign_request_inside_response_hook: actual nested
+  GET in a C user response hook shares its task/context but not Request identity;
+  its physical close stays unwrapped. Also directly checks a no-context no-op
+  without reading/replacing its stream (both wires).
+- test_c_owned_client_installs_guard_at_actual_construction_and_closes: constructor
+  observation requires production to provide the guard itself; observer adds
+  only a MockTransport, delegates to the actual HTTPX constructor and confirms
+  one POST/one constructed-and-closed owned client (both wires).
+- test_c_two_opted_in_requests_do_not_share_cleanup_owner: two concurrent C hook
+  errors reach separate held closes; repeated cancellation of left cannot detach
+  it or block/steal right's cleanup; independent spent terminal records, actual
+  task joins, no parsed stages (both wires).
+
+The constructor observer replaces only decision_transport's HTTPX dependency
+reference with the real attributes plus the observing constructor. It never
+globally patches HTTPX or installs a missing guard. The nested foreign GET is
+test-hook behavior, not a new production request or fallback.
+
+### Ordered gates; no execution granted here
+
+- [x] Record actual cf929d evidence and explicit borrowed compatibility boundary.
+- [x] Prepare opt-in fixtures and tests while production1B4A/model7F36FF remain frozen.
+- [ ] Independent SOURCE review of this test/design freeze.
+- [ ] Parent grants/runs exactly the new call-phase API RED node:
+  `MedChat python -I -S -B scratch/ordinary_chat_offline_runner.py tests/agent/test_docking_preparation_protocol.py::test_c_construction_response_guard_api_present`.
+  Desired failure is missing docking_preparation_response_guard, not collection
+  or a fixture/setup error. Record the actual handle/result/pins; do not infer it.
+- [ ] Only after accepted API RED and new implementation authority: minimal
+  decision_transport-only guard/owner/admission correction, retaining shared
+  parser/privacy and fixed deadline; independent implementation SOURCE handoff.
+- [ ] Separate parent-granted GREEN must include migrated physical-cleanup tests,
+  new opt-in/refusal/isolation cases and previous encoding/completed-child races.
+  A refusal pass is not cleanup proof; full five-module/fresh QUALITY remain
+  separately authorized gates. No runtime grant, consent or release follows here.
+
+Current test SHA256:
+`4E42157BA756C80B591703E3C6E17FE746E1C3AF4042BC5DD3DDBD68093601D0`.
+Production remains
+`1B4AFC38C69B2D1BA484DBBE552219BE4941F53F189C864E3A77C2A59FFBE19A`;
+model remains
+`7F36FF02A1237E1C704D9BB3EBE6C0E33ECA873E1C35EFB136C0201C777A8250`.
+Static inverse-prefix verification and git diff --check passed. No executed
+GREEN, collection count, independent QUALITY or production support is claimed.
+
+## C0b construction guard implementation — SOURCE handoff, NOT GREEN
+
+Parent accepted Lovelace SOURCE READY for tests4E42/design2F0684 and reports
+actual API RED, direct terminal `2a5f0c`, exit1: **1 failed in1.65s; 5 pins
+unchanged**. The exact guard-present node reached the missing callable guard
+assertion at call phase, not a collection failure. This is parent-run evidence,
+not a local execution by this implementer. The earlier cf929d physical-cleanup
+RED and324328 encoding/cancellation RED remain unchanged historical evidence.
+
+After that RED, parent authorized implementation ONLY in decision_transport.py
+and this checkpoint. The interrupted turn was resumed under the same bounded
+grant; no additional execution authority was inferred. No Python, import,
+compilation, collection, test, network, commit, push or alignment occurred.
+
+Implemented source changes:
+
+- Public async docking_preparation_response_guard is installed as response hook0
+  when the C-owned real HTTPX client is constructed. Borrowed C clients must
+  already have that exact callable at index0. The C predispatch check reads the
+  existing hook list only; absent/misordered/unreadable registration returns the
+  approved fixed INTERNAL_ERROR reason docking_preparation_client_not_opted_in
+  with null ID/attempt0, without creating an HTTP task, POST or closing the client.
+- A private ContextVar holds a fresh _DockingResponseOwner for each C HTTP child.
+  The actual built Request is attached before synchronous bind/dispatch. The
+  guard compares response.request by identity with this Request; foreign nested
+  requests and non-C profiles are no-ops, even with inherited task context.
+- The matching guard installs the protected live stream synchronously, before
+  any later user response hook runs. Post-send installation was removed. Native
+  HTTPX hook/redirect-error cleanup therefore reaches the protected stream even
+  when client.send raises without returning a response to _docking_stream.
+- Each protected stream retains one actual close task. Repeated close entry joins
+  the same task and checks its result; it neither retries nor treats is_closed
+  as success. The existing cancellation-resistant join loop remains the only
+  drain mechanism. A failed close stays a failed result even if a user hook
+  caught its first exception. No entire-send shield was added.
+- C _post finally checks/joins its retained stream, then closes only its owned
+  client, then resets the ContextVar token using nested finally blocks. Thus
+  stream failure does not skip owned-client closure or token reset. HTTP child
+  interruption remains latched by _await_docking_post, with actual child drain
+  before the caller records cancelled/timeout; late values cannot become parsed.
+- Ordinary/decision client construction, bind order, stream and wait_for paths
+  are unchanged. No shared hooks are inserted, removed or reordered during calls;
+  no model/global active-request field, alternate parser, retry or scheduler was
+  added. The approved custom-hook/extension compatibility boundary above still
+  applies: guard order/protected stream must not be changed and work not detached.
+
+Static verification, not execution:
+
+- git diff --check is clean.
+- In-memory normalized text comparisons against frozen1B4A confirm unchanged
+  _journal_metadata, _parse_response, _await_docking_post, all of _read_post, and
+  the complete _request_protocol tail from its fixed-deadline assignment onward.
+  This includes its original absolute deadline checks, single-attempt dispatch,
+  ordinary wait_for, error sanitization and terminal parsing publication.
+- Model/tests/C0a contract/spec/runner hashes were rechecked unchanged; only the
+  authorized production file and own plan were edited for this implementation.
+
+| SOURCE freeze | SHA256 |
+|---|---|
+| decision_transport.py | `041699FCEFEB303E49F6B721EC2468BDAFB04559F2CB45AA47F4384F2F5FC7D2` |
+| Unchanged model | `7F36FF02A1237E1C704D9BB3EBE6C0E33ECA873E1C35EFB136C0201C777A8250` |
+| Unchanged tests | `4E42157BA756C80B591703E3C6E17FE746E1C3AF4042BC5DD3DDBD68093601D0` |
+| Unchanged C0a contract | `FD13F3ADC899F4D5B739DB0571AF051F68912768A0A6A6B7EFE36772BA29BE57` |
+| Unchanged spec | `97B61082201E2703BE460C3C592212ABA8E8E348B8FA3DD58FC04C5EB82FE0EF` |
+| Unchanged ignored runner | `3761E8976C9DA239340AF31675950ED81F3FE1BEBCE0B170B2B4A74FFF20A755` |
+
+Ready for independent implementation SOURCE review only. The opt-in physical
+cleanup regression must still actually reach and finish held closure; refusal
+tests are separate and do not prove cleanup. Parent-selected GREEN, five-module
+regression and independent fresh QUALITY remain unexecuted gates here. No
+production activation, scientific execution, timeout guarantee or final release
+approval is claimed. Stop at this freeze pending SOURCE review and parent grants.
+
+## C0b offline verification receipts — parent GREEN and independent fresh QUALITY
+
+Parent reports independent Lovelace implementation **SOURCE READY** for the
+041699FC transport freeze, unchanged model7F36FF/tests4E42, and plan4F3F82.
+The following terminal receipts advance the preceding pending verification gates;
+earlier RED and SOURCE records remain intact.
+
+| Verification | Actual session / terminal | Result | Frozen inputs |
+|---|---|---|---|
+| Parent five-module GREEN | `33969 / 1a553e` | exit0; **855 passed in13.32s**; no warnings/skips reported | 9 before/after pins unchanged |
+| Independent fresh QUALITY, Lovelace | `95857 / 97deb4` | exit0; **855 passed in13.02s**; no warnings/skips | 9 before/after pins unchanged; slot released |
+
+These are exact execution receipts supplied by parent, including the independent
+reviewer's fresh result; this plan-only update did not itself execute or rerun
+either suite. Parent GREEN and independent QUALITY are separate runs and are not
+interchangeable evidence.
+
+Preserved preflight record: parent terminal `2204c6` stopped **before Python**
+because the preflight used the wrong model path `web/models/ollama_model`.
+The approved `src/agent/openai_compatible_model.py` matched its unchanged hash.
+This was a parent preflight path typo, not a code/test failure or a Python run.
+
+Scope: SOURCE and the two five-module offline verification runs support this
+bounded C0b transport/preparation contract, including constructor opt-in and
+cleanup regression coverage. They are **not full C acceptance**, real-provider
+or scientific execution evidence, consent authorization, docking activation,
+end-to-end ordinary-chat-to-report acceptance, or a physical-cleanup time bound.
+C0c/C1-C8 and production activation remain separately gated.
+
+This checkpoint changes ONLY own plan. Production transport remains
+`041699FCEFEB303E49F6B721EC2468BDAFB04559F2CB45AA47F4384F2F5FC7D2`,
+model remains
+`7F36FF02A1237E1C704D9BB3EBE6C0E33ECA873E1C35EFB136C0201C777A8250`,
+and tests remain
+`4E42157BA756C80B591703E3C6E17FE746E1C3AF4042BC5DD3DDBD68093601D0`.
+No Python, network, production/test edit, commit, push or alignment was performed.
+Freeze these inputs for parent to prepare focused clean main-based integration;
+no integration publication or widened C scope is authorized by this receipt.
+
+## PR #104 publication verification — 2026-09-30
+
+Publication authority now follows the user's remaining-through-step8 instruction.
+Exact `ebb2093` was independently re-reviewed without actionable blockers, and
+the isolated, network-disabled five-module command above passed 855 tests in
+18.42s (exit0). PR #104 targets main; no model or docking execution was enabled.
+
+Initial CI run36596556172 failed its unchanged credential scan: the new privacy
+test contained a literal synthetic credential matching the scanner pattern.
+Local reproduction identified only that test file. The fixture now constructs
+the exact same synthetic value at runtime; all redaction assertions and the
+scanner remain unchanged. AST comparison confirmed fixture-value equivalence.
+The original scan now passes, `git diff --check` passes, and the same five-module
+offline regression passed **855 tests in16.13s**, exit0 (terminal8b8da9).
+No production file changed in this correction. CI on the amended head remains
+required; the initial failed run is not represented as successful.
+
+### HTTPX encoder compatibility correction
+
+Run36597065439 on6da2018 completed failed: Agent had two surrogate-fixture
+failures,12319passed,1skipped; task-runtime independently failed downloading the
+Temporal test server with HTTP524 (1568passed,7skipped). Static scan passed.
+The Agent failures reproduce with the repository-pinned HTTPX0.25.2 installed
+only in an ignored scratch target: focused RED2failed4passed. No installed
+environment or dependency pin was changed.
+
+Minimal design: the real client encoder is an independent pre-call oracle.
+HTTPX0.25.2 escapes the surrogate in valid JSON; local0.28.1 rejects its UTF-8
+encoding. Keep ordinary success and non-ASCII-header rejection unconditional.
+For a successful probe, require exact model round-trip and dispatched-body
+equality, one attempt/POST and the full successful journal sequence. For failed
+encoding, require zero dispatch/attempts, null IDs and the exact sanitized build
+error. No version skip, altered serializer, weakened scanner, production change
+or real-provider acceptance claim is introduced.
+
+Implementation/verification: only the existing encoding test changed. Independent
+source review found no blockers. The same five-module offline regression passed
+on both actual versions: **0.25.2:855passed,1 anyio pytest-rewrite warning,15.88s;
+0.28.1:855passed,16.23s**, session40577 terminal59d8f2 exit0. The scratch wheel is
+not tracked. Updated-head CI is still required; retain both earlier CI failures.

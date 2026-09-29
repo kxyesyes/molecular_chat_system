@@ -580,3 +580,1343 @@ def test_schema_is_closed_complete_and_fresh_without_authority_fields():
     schema["properties"].clear()
     assert api.docking_preparation_json_schema() == api.DockingPreparationEnvelope.model_json_schema()
     json.dumps(api.docking_preparation_json_schema(), allow_nan=False)
+
+
+# C0b: actual shared HTTP transport, not ordinary-chat admission or root storage.
+def c_transport_api():
+    from src.agent import decision_transport as transport
+    from src.agent.openai_compatible_model import OpenAICompatibleModel
+    for name in ("DockingPreparationResponse", "DockingPreparationJournal", "request_docking_preparation"):
+        assert hasattr(transport, name), "C0b missing " + name
+    assert hasattr(transport.ProtocolProfile, "DOCKING_PREPARATION_V1")
+    assert callable(getattr(OpenAICompatibleModel, "propose_docking_preparation", None))
+    return transport, OpenAICompatibleModel
+
+
+def c_journal(transport, **overrides):
+    values = dict(proposal_id="proposal-1", trace_id="trace-1", turn_id="turn-1",
+                  query_digest="a" * 64, refinement_revision=0,
+                  model_generation="model-1", capability_generation="capability-1")
+    values.update(overrides)
+    return transport.DockingPreparationJournal(**values)
+
+
+def c_wire(mode, envelope=None, function="docking_preparation"):
+    raw = MINIMAL if envelope is None else json.dumps(envelope)
+    message = {"role": "assistant", "content": raw}
+    if mode == "native":
+        message.update(content=None, tool_calls=[{"id": "proposal-call-1", "type": "function",
+            "function": {"name": function, "arguments": raw}}])
+    return {"choices": [{"message": message, "finish_reason": "tool_calls" if mode == "native" else "stop"}],
+            "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18}}
+
+
+def test_c_transport_api_present():
+    c_transport_api()
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_actual_request_and_journal(mode):
+    import asyncio
+    import re
+    from dataclasses import FrozenInstanceError
+    import httpx
+    transport, Model = c_transport_api()
+    journal = c_journal(transport)
+    messages = [{"role": "user", "content": "原始 docking 请求 🧪，不要省略条件。"}]
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        snap = journal.snapshot()
+        assert snap["stage"] == "dispatch_started" and snap["model_call_metadata"]["request_attempts"] == 1
+        assert re.fullmatch(r"[0-9a-f]{32}", snap["request_id"])
+        return httpx.Response(200, json=c_wire(mode))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            return await model.propose_docking_preparation(messages, mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert isinstance(result, transport.DockingPreparationResponse) and result.success
+    assert result.proposal.model_dump() == proposal()
+    with pytest.raises(FrozenInstanceError):
+        result.proposal = None
+    assert len(calls) == result.metadata["request_attempts"] == 1
+    assert result.tool_call_id == ("proposal-call-1" if mode == "native" else None)
+    payload = json.loads(calls[0].content)
+    assert payload["messages"][1:] == messages and payload["stream"] is False
+    assert payload["max_tokens"] == 256 and payload["temperature"] == 0
+    assert calls[0].headers["accept-encoding"] == "identity"
+    if mode == "native":
+        assert len(payload["tools"]) == 1 and payload["parallel_tool_calls"] is False
+        assert payload["tool_choice"]["function"]["name"] == "docking_preparation"
+        assert payload["tools"][0]["function"]["parameters"] == contract().docking_preparation_json_schema()
+    else:
+        assert "tools" not in payload and payload["response_format"] == {"type": "json_object"}
+        instruction = payload["messages"][0]["content"]
+        assert json.loads(instruction[instruction.index("{"):]) == contract().docking_preparation_json_schema()
+    snapshot = journal.snapshot()
+    assert set(snapshot) == {"proposal_id", "trace_id", "turn_id", "query_digest", "refinement_revision",
+        "model_generation", "capability_generation", "phase", "protocol_name", "protocol_version",
+        "request_id", "stage", "stages", "http_status", "parser_outcome", "completion", "model_call_metadata"}
+    assert snapshot["phase"] == snapshot["protocol_name"] == "docking_preparation"
+    assert snapshot["request_id"] == result.metadata["request_id"] == journal.request_id
+    assert snapshot["stages"] == ["created", "validated", "dispatch_started", "response_received", "parsed"]
+    assert snapshot["query_digest"] == "a" * 64 and snapshot["refinement_revision"] == 0
+    assert snapshot["http_status"] == 200 and snapshot["completion"] == "received"
+    assert snapshot["model_call_metadata"]["usage"] == {"prompt": 11, "completion": 7, "total": 18}
+    assert len(json.dumps(snapshot).encode()) <= 8192
+    assert messages[0]["content"] not in json.dumps(snapshot, ensure_ascii=False)
+    snapshot["stages"].clear()
+    snapshot["model_call_metadata"].clear()
+    assert journal.to_dict()["stages"][-1] == "parsed" and journal.to_dict()["model_call_metadata"]
+    with pytest.raises(DecisionProtocolError):
+        journal.transition("failed")
+
+
+@pytest.mark.parametrize("fault", ["mode", "tokens", "timeout", "history", "key", "model", "url", "payload", "headers"])
+def test_c_prevalidation_failure_has_null_id_and_zero_posts(fault, monkeypatch):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal = c_journal(transport)
+    calls, options = [], {}
+    messages = [{"role": "user", "content": "docking request"}]
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json=c_wire("native"))
+
+    def unavailable(*args, **kwargs):
+        raise ValueError("private-value-marker")
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            if fault == "mode": options["mode"] = "auto"
+            elif fault == "tokens": options["max_tokens"] = True
+            elif fault == "timeout": options["timeout_seconds"] = float("nan")
+            elif fault == "history": messages[0] = {"role": "tool", "content": "unsupported", "tool_call_id": "x"}
+            elif fault in ("key", "model", "url"):
+                setattr(model, {"key": "api_key", "model": "model_name", "url": "base_url"}[fault], "")
+            else:
+                monkeypatch.setattr(model, "_payload" if fault == "payload" else "_headers", unavailable)
+            return await model.propose_docking_preparation(messages, _journal=journal, **options)
+
+    result = asyncio.run(run())
+    assert not result.success and result.error is not None and result.proposal is None
+    assert calls == [] and result.metadata["request_attempts"] == 0
+    assert result.metadata["request_id"] is None and journal.request_id is None
+    snapshot = journal.snapshot()
+    assert snapshot["stages"] == ["created", "failed"]
+    assert snapshot["model_call_metadata"]["request_attempts"] == 0
+    assert snapshot["completion"] == "not_started"
+    assert "private-value-marker" not in repr(result) + repr(snapshot)
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("fault", ["profile", "parallel", "suffix", "duplicate", "finish", "http", "encoding"])
+def test_c_rejects_wrong_profile_parallel_calls_and_fallback(mode, fault):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal, calls = c_journal(transport), []
+    body = c_wire(mode)
+    message = body["choices"][0]["message"]
+    carrier, key = (message["tool_calls"][0]["function"], "arguments") if mode == "native" else (message, "content")
+    if fault == "profile":
+        body = c_wire(mode, {"intent": {"version": "1", "kind": "capability", "history_relation": "none", "unresolved": False}}, "ordinary_intent")
+    elif fault == "parallel":
+        if mode == "native": message["tool_calls"].append(dict(message["tool_calls"][0]))
+        else: message["tool_calls"] = []
+    elif fault == "suffix": carrier[key] += " private-value-marker"
+    elif fault == "duplicate": carrier[key] = carrier[key].replace('"version":"1"', '"version":"1","version":"1"')
+    elif fault == "finish": body["choices"][0]["finish_reason"] = "length"
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(403 if fault == "http" else 200, json=body,
+                              headers={"content-encoding": "unknown"} if fault == "encoding" else {})
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            return await Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client).propose_docking_preparation(
+                [{"role": "user", "content": "docking"}], mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert not result.success and result.proposal is None and result.error is not None
+    assert len(calls) == result.metadata["request_attempts"] == 1
+    assert journal.snapshot()["stage"] == "failed" and journal.request_id == result.metadata["request_id"]
+    assert "private-value-marker" not in repr(result) + repr(journal.snapshot())
+
+
+@pytest.mark.parametrize("fault", ["timeout", "cancel"])
+def test_c_interruption_keeps_spent_attempt_and_terminal_journal(fault):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal, calls = c_journal(transport), []
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        async def handle(request):
+            calls.append(request)
+            entered.set()
+            if fault == "timeout": raise httpx.ReadTimeout("private-value-marker")
+            await release.wait()
+            return httpx.Response(200, json=c_wire("native"))
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            task = asyncio.create_task(model.propose_docking_preparation(
+                [{"role": "user", "content": "docking"}], _journal=journal))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                if fault == "cancel": task.cancel()
+                result = (await asyncio.gather(task, return_exceptions=True))[0]
+                if fault == "cancel": assert isinstance(result, asyncio.CancelledError)
+                else: assert not isinstance(result, BaseException) and not result.success
+            finally:
+                release.set()
+                if not task.done(): task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    snapshot = journal.snapshot()
+    assert len(calls) == snapshot["model_call_metadata"]["request_attempts"] == 1
+    assert snapshot["stage"] == ("cancelled" if fault == "cancel" else "timeout")
+    assert snapshot["completion"] == "unknown" and snapshot["parser_outcome"] == "interrupted"
+    with pytest.raises(DecisionProtocolError): journal.transition("parsed", metadata={"request_id": journal.request_id})
+    assert journal.snapshot() == snapshot and "private-value-marker" not in repr(snapshot)
+
+
+@pytest.mark.parametrize("name,value", [("proposal_id", ""), ("trace_id", True), ("turn_id", "a/b"),
+    ("query_digest", "x" * 64), ("query_digest", "a" * 63), ("refinement_revision", True),
+    ("refinement_revision", -1), ("refinement_revision", 4), ("model_generation", ""),
+    ("capability_generation", "a" * 129)])
+def test_c_journal_rejects_invalid_server_identity(name, value):
+    transport, _ = c_transport_api()
+    with pytest.raises(DecisionProtocolError): c_journal(transport, **{name: value})
+
+
+@pytest.mark.parametrize("fault", ["ordinary", "reused"])
+def test_c_wrong_or_reused_journal_never_posts(fault):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal = (transport.IntentJournal(intent_id="intent-1", trace_id="trace-1", turn_id="turn-1",
+        model_generation="model-1", capability_generation="capability-1") if fault == "ordinary" else c_journal(transport))
+    calls = []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json=c_wire("native"))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            if fault == "reused":
+                assert (await model.propose_docking_preparation([{"role": "user", "content": "dock"}], _journal=journal)).success
+            prior, count = journal.snapshot(), len(calls)
+            result = await model.propose_docking_preparation([{"role": "user", "content": "dock"}], _journal=journal)
+            assert not result.success and len(calls) == count and journal.snapshot() == prior
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("function", ["ordinary_intent", "agent_decision"])
+def test_c_valid_envelope_with_wrong_native_function_is_rejected(function):
+    import asyncio
+    import httpx
+    from src.agent.contracts.errors import AgentErrorCode
+    transport, Model = c_transport_api()
+    journal, calls = c_journal(transport), []
+    body = c_wire("native", function=function)
+    # Only the function name is wrong; independently establish valid C arguments.
+    arguments = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+    assert contract().parse_docking_preparation_json(arguments).model_dump() == proposal()
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json=body)
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            return await Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client).propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], _journal=journal)
+
+    result = asyncio.run(run())
+    assert not result.success and result.proposal is None and result.tool_call_id is None
+    assert result.error.code == AgentErrorCode.INVALID_OUTPUT
+    assert len(calls) == result.metadata["request_attempts"] == 1
+    assert journal.snapshot()["stage"] == "failed"
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("other_profile", ["ordinary", "decision"])
+def test_c_correct_function_with_foreign_envelope_is_rejected(mode, other_profile):
+    import asyncio
+    import httpx
+    from src.agent.contracts.errors import AgentErrorCode
+    from test_ordinary_intent_transport import INTENT, DECISION
+    transport, Model = c_transport_api()
+    body = c_wire(mode, INTENT if other_profile == "ordinary" else DECISION)
+    journal, calls = c_journal(transport), []
+    if mode == "native":
+        assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "docking_preparation"
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json=body)
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            return await Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client).propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert not result.success and result.proposal is None and result.tool_call_id is None
+    assert result.error.code == AgentErrorCode.INVALID_OUTPUT
+    assert len(calls) == result.metadata["request_attempts"] == 1
+    assert journal.snapshot()["stage"] == "failed"
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_rejects_complete_decision_history_with_null_id(mode):
+    import asyncio
+    import httpx
+    from src.agent.contracts.errors import AgentErrorCode
+    from test_ordinary_intent_transport import DECISION, wire
+    transport, Model = c_transport_api()
+    message = wire("native", DECISION, "agent_decision")["choices"][0]["message"]
+    history = [message, {"role": "tool", "content": "synthetic observation", "tool_call_id": "intent-1"}]
+    # This positive control rules out an unmatched-tool failure masquerading as
+    # C's closed role/content history check. No request is performed here.
+    copied, calls_seen = transport._snapshot_messages(history, transport.ProtocolProfile.DECISION_V1)
+    assert copied == history and calls_seen == {"intent-1"}
+    journal, posts = c_journal(transport), []
+
+    def handle(request):
+        posts.append(request)
+        return httpx.Response(200, json=c_wire(mode))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            return await Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client).propose_docking_preparation(
+                history, mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert not result.success and result.error.code == AgentErrorCode.INVALID_INPUT
+    assert posts == [] and result.metadata["request_attempts"] == 0
+    assert result.metadata["request_id"] is journal.request_id is None
+    assert journal.snapshot()["stages"] == ["created", "failed"]
+    assert history == copied
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("interrupt", ["deadline", "cancel"])
+@pytest.mark.parametrize("delivery", ["cooperative", "late-response"])
+def test_c_actual_interruption_never_accepts_late_success(mode, interrupt, delivery):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal, calls, delivered = c_journal(transport), [], []
+
+    async def run():
+        entered, interrupted, release, exited = (asyncio.Event() for _ in range(4))
+
+        async def handle(request):
+            calls.append(request)
+            entered.set()
+            try:
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    interrupted.set()
+                    if delivery == "cooperative":
+                        raise
+                    # Deliberately uncooperative only at the lowest HTTP seam.
+                    # Never fabricate a transport result or journal transition.
+                    await release.wait()
+                delivered.append(True)
+                return httpx.Response(200, json=c_wire(mode))
+            finally:
+                exited.set()
+
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            task = asyncio.create_task(model.propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode, _journal=journal,
+                timeout_seconds=0.05 if interrupt == "deadline" else 30.0))
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                if interrupt == "cancel":
+                    task.cancel()
+                # The actual request deadline/cancellation must reach transport;
+                # the fixture never raises ReadTimeout or changes the clock.
+                await asyncio.wait_for(interrupted.wait(), 2)
+                if delivery == "late-response":
+                    assert not exited.is_set()
+                release.set()
+                outcome = (await asyncio.wait_for(
+                    asyncio.gather(task, return_exceptions=True), 2))[0]
+                if interrupt == "cancel":
+                    assert isinstance(outcome, asyncio.CancelledError)
+                else:
+                    assert not isinstance(outcome, BaseException)
+                    assert not outcome.success and outcome.proposal is None
+                    assert outcome.metadata["request_id"] == journal.request_id
+                assert exited.is_set()
+            finally:
+                release.set()
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(run())
+    assert delivered == ([True] if delivery == "late-response" else [])
+    snapshot = journal.snapshot()
+    assert len(calls) == snapshot["model_call_metadata"]["request_attempts"] == 1
+    assert snapshot["stage"] == ("timeout" if interrupt == "deadline" else "cancelled")
+    assert "parsed" not in snapshot["stages"]
+    assert snapshot["completion"] == "unknown" and snapshot["parser_outcome"] == "interrupted"
+    assert snapshot["model_call_metadata"]["success"] is False
+    with pytest.raises(DecisionProtocolError):
+        journal.transition("parsed", metadata={"request_id": journal.request_id})
+    assert journal.snapshot() == snapshot
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_three_profiles_share_transport_and_hold_actual_model_gate(mode):
+    import asyncio
+    import httpx
+    from src.web.model_lifecycle import ModelRequestGate
+    from test_ordinary_intent_transport import MESSAGES, INTENT, DECISION, wire, journal as intent_journal
+    transport, Model = c_transport_api()
+    c_record, ordinary_record = c_journal(transport), intent_journal()
+
+    async def run():
+        gate = ModelRequestGate()
+        names = ("docking_preparation", "ordinary_intent", "agent_decision")
+        releases = {name: asyncio.Event() for name in names}
+        all_entered, writer_queued, writer_entered = (asyncio.Event() for _ in range(3))
+        requests = {}
+
+        async def handle(request):
+            payload = json.loads(request.content)
+            if mode == "native":
+                name = payload["tools"][0]["function"]["name"]
+            else:
+                instruction = payload["messages"][0]["content"]
+                properties = json.loads(instruction[instruction.index("{"):])["properties"]
+                name = {"proposal": names[0], "intent": names[1], "decision": names[2]}[next(iter(properties))]
+            assert name not in requests
+            requests[name] = payload
+            if len(requests) == 3:
+                all_entered.set()
+            await releases[name].wait()
+            body = c_wire(mode) if name == names[0] else wire(
+                mode, INTENT if name == names[1] else DECISION, name)
+            return httpx.Response(200, json=body)
+
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+
+            async def read(name):
+                async with gate.request():
+                    if name == names[0]:
+                        return await model.propose_docking_preparation(MESSAGES, mode=mode, _journal=c_record)
+                    if name == names[1]:
+                        return await model.propose_ordinary_intent(MESSAGES, mode=mode, _journal=ordinary_record)
+                    return await model.decide(MESSAGES, mode=mode)
+
+            async def write():
+                writer_queued.set()
+                async with gate.exclusive():
+                    writer_entered.set()
+                    model.model_name = "replacement-model"
+
+            readers = [asyncio.create_task(read(name)) for name in names]
+            writer = None
+            results = []
+            try:
+                await asyncio.wait_for(all_entered.wait(), 2)
+                assert gate._readers == 3
+                writer = asyncio.create_task(write())
+                await asyncio.wait_for(writer_queued.wait(), 2)
+                for index, name in enumerate(names):
+                    assert not writer_entered.is_set()
+                    releases[name].set()
+                    results.append(await asyncio.wait_for(asyncio.shield(readers[index]), 2))
+                    assert gate._readers == 2 - index
+                await asyncio.wait_for(asyncio.shield(writer), 2)
+                assert writer_entered.is_set() and model.model_name == "replacement-model"
+                assert all(result.success and result.metadata["request_attempts"] == 1 for result in results)
+                assert len({result.metadata["request_id"] for result in results}) == 3
+                assert isinstance(results[0], transport.DockingPreparationResponse)
+                assert isinstance(results[1], transport.IntentResponse)
+                assert isinstance(results[2], transport.DecisionResponse)
+                assert results[0].proposal.model_dump() == proposal()
+                assert results[1].intent.model_dump() == INTENT["intent"]
+                assert results[2].decision.model_dump() == DECISION["decision"]
+                for name, payload in requests.items():
+                    assert payload["model"] == "test-model" and payload["messages"][1:] == MESSAGES
+                    assert payload["max_tokens"] == (1500 if name == names[2] else 256)
+                assert c_record.request_id == results[0].metadata["request_id"]
+                assert ordinary_record.request_id == results[1].metadata["request_id"]
+                assert c_record.snapshot()["protocol_name"] == "docking_preparation"
+                assert ordinary_record.snapshot()["protocol_name"] == "ordinary_intent"
+            finally:
+                for event in releases.values():
+                    event.set()
+                tasks = readers + ([writer] if writer is not None else [])
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_null_prevalidation_id_does_not_change_ordinary_bind_order(mode):
+    import asyncio
+    import httpx
+    from test_ordinary_intent_transport import journal as intent_journal
+    transport, Model = c_transport_api()
+    c_record, ordinary_record, calls = c_journal(transport), intent_journal(), []
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json=c_wire(mode))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            messages = [{"role": "user", "content": "whole query"}]
+            c_result = await model.propose_docking_preparation(messages, mode=mode, max_tokens=True, _journal=c_record)
+            ordinary_result = await model.propose_ordinary_intent(messages, mode=mode, max_tokens=True, _journal=ordinary_record)
+            return c_result, ordinary_result
+
+    c_result, ordinary_result = asyncio.run(run())
+    assert calls == [] and not c_result.success and not ordinary_result.success
+    assert c_result.metadata["request_attempts"] == ordinary_result.metadata["request_attempts"] == 0
+    assert c_result.metadata["request_id"] is c_record.request_id is None
+    assert ordinary_result.metadata["request_id"] == ordinary_record.request_id
+    assert isinstance(ordinary_record.request_id, str) and len(ordinary_record.request_id) == 32
+    assert c_record.snapshot()["stages"] == ordinary_record.snapshot()["stages"] == ["created", "failed"]
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("descriptor", ["boundary", "overlong", "url", "credential"])
+def test_c_journal_real_request_descriptors_and_network_logs_are_private(mode, descriptor, caplog):
+    import asyncio
+    import logging
+    import httpx
+    transport, Model = c_transport_api()
+    journal, calls = c_journal(transport), []
+    # Synthetic credential shape for redaction, not a stored credential literal.
+    synthetic_credential = "sk-" + "syntheticcredential123"
+    names = {"boundary": "m" * 256, "overlong": "m" * 257,
+             "url": "https://example.invalid/private-model",
+             "credential": synthetic_credential}
+    marker = "C0B_PRIVATE_PAYLOAD_MARKER"
+    caplog.set_level(logging.DEBUG)
+
+    def handle(request):
+        calls.append(request)
+        # Observe the real request privacy context, not a fixture-installed filter.
+        for name in ("httpx", "httpcore.connection", "httpcore.http11", "httpcore.http2",
+                     "httpcore.proxy", "httpcore.socks"):
+            logging.getLogger(name).debug(marker)
+        body = c_wire(mode)
+        body["private_response"] = marker
+        body["usage"].update(prompt_text=marker, authorization=marker)
+        return httpx.Response(200, json=body, headers={"x-private-response": marker})
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", names[descriptor], "https://example.invalid/v1", client=client)
+            model.provider_name = "Bearer synthetic-private-provider"
+            return await model.propose_docking_preparation(
+                [{"role": "user", "content": marker}], mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert result.success and len(calls) == 1
+    snapshot = journal.snapshot()
+    metadata = snapshot["model_call_metadata"]
+    assert metadata["provider"] == "[REDACTED]"
+    if descriptor == "boundary":
+        assert metadata["model"] == names[descriptor]
+    elif descriptor == "overlong":
+        assert "model" not in metadata
+    else:
+        assert metadata["model"] == "[REDACTED]"
+    assert metadata["usage"] == {"prompt": 11, "completion": 7, "total": 18}
+    serialized = json.dumps(snapshot) + caplog.text
+    for secret in (marker, "synthetic-only-key", "synthetic-private-provider", "private-model",
+                   synthetic_credential):
+        assert secret not in serialized
+    # Positive control: unrelated logging must work after the request context exits.
+    logging.getLogger("httpx").debug("C0B_OUTSIDE_REQUEST_CONTROL")
+    assert "C0B_OUTSIDE_REQUEST_CONTROL" in caplog.text
+    snapshot["model_call_metadata"]["usage"]["prompt"] = 999
+    assert journal.snapshot()["model_call_metadata"]["usage"]["prompt"] == 11
+
+
+@pytest.mark.parametrize("invalid", ["skip", "unknown", "nonnative", "wrong-id", "status", "error-code", "rebind"])
+def test_c_journal_invalid_operations_leave_record_unchanged(invalid):
+    transport, _ = c_transport_api()
+    journal = c_journal(transport)
+    metadata = {"request_id": "a" * 32, "request_attempts": 0}
+    journal._bind(metadata)
+    before = journal.snapshot()
+    with pytest.raises(DecisionProtocolError) as caught:
+        if invalid == "skip":
+            journal.transition("parsed", metadata=metadata)
+        elif invalid == "unknown":
+            journal.transition("private-stage-marker", metadata=metadata)
+        elif invalid == "nonnative":
+            journal.transition([], metadata=metadata)
+        elif invalid == "wrong-id":
+            journal.transition("validated", metadata={**metadata, "request_id": "b" * 32})
+        elif invalid == "status":
+            journal.transition("validated", metadata=metadata, http_status=True)
+        elif invalid == "error-code":
+            journal.transition("failed", metadata=metadata, error_code="private-error-marker")
+        else:
+            journal._bind({**metadata, "request_id": "b" * 32})
+    assert journal.snapshot() == before
+    assert "private-stage-marker" not in str(caught.value)
+    assert "private-error-marker" not in str(caught.value)
+
+
+def test_c_journal_eighth_stage_is_bounded_and_ninth_is_atomic(monkeypatch):
+    transport, _ = c_transport_api()
+    journal = c_journal(transport)
+    metadata = {"request_id": "a" * 32, "request_attempts": 0}
+    journal._bind(metadata)
+    journal.transition("validated", metadata=metadata)
+    record = journal.snapshot()
+    # The legal graph normally has <=5 entries. Seed only the history length to
+    # exercise the shared defensive cap, NOT a possible seven-stage C lifecycle.
+    record["stages"] = ["created"] + ["validated"] * 6
+    monkeypatch.setattr(journal, "_record", record)
+    journal.transition("dispatch_started", metadata={**metadata, "request_attempts": 1})
+    before = journal.snapshot()
+    assert len(before["stages"]) == 8 and before["stage"] == "dispatch_started"
+    with pytest.raises(DecisionProtocolError):
+        journal.transition("response_received", http_status=200)
+    assert journal.snapshot() == before
+
+
+def test_c_journal_replace_exact_byte_limit_and_atomic_overflow():
+    transport, _ = c_transport_api()
+    journal = c_journal(transport)
+    record = journal.snapshot()
+    # Direct shared storage-primitive control. Padding bypasses the separate
+    # descriptor sanitizer intentionally; it is NOT valid provider metadata.
+    record["model_call_metadata"] = {"model": ""}
+    encoded = lambda value: json.dumps(value, ensure_ascii=True, allow_nan=False).encode("utf-8")
+    record["model_call_metadata"]["model"] = "x" * (8192 - len(encoded(record)))
+    assert len(encoded(record)) == 8192
+    journal._replace(record)
+    before = journal.snapshot()
+    assert len(encoded(before)) == 8192
+    oversized = journal.snapshot()
+    oversized["model_call_metadata"]["model"] += "x"
+    assert len(encoded(oversized)) == 8193
+    with pytest.raises(DecisionProtocolError):
+        journal._replace(oversized)
+    assert journal.snapshot() == before
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("kind", ["foreign", "subclass", "ordinary"])
+def test_c_exact_journal_type_rejects_foreign_and_subclass_without_mutation(mode, kind):
+    import asyncio
+    import httpx
+    from test_ordinary_intent_transport import journal as intent_journal
+    transport, Model = c_transport_api()
+    calls, foreign_calls = [], []
+
+    class ForeignJournal:
+        def _bind(self, *args, **kwargs):
+            foreign_calls.append("bind")
+
+        def transition(self, *args, **kwargs):
+            foreign_calls.append("transition")
+
+    class DerivedJournal(transport.DockingPreparationJournal):
+        pass
+
+    if kind == "foreign":
+        journal, before = ForeignJournal(), None
+    elif kind == "ordinary":
+        journal = intent_journal()
+        before = journal.snapshot()
+    else:
+        journal = DerivedJournal(proposal_id="proposal-1", trace_id="trace-1", turn_id="turn-1",
+            query_digest="a" * 64, refinement_revision=0,
+            model_generation="model-1", capability_generation="capability-1")
+        before = journal.snapshot()
+
+    def handle(request):
+        calls.append(request)
+        return httpx.Response(200, json=c_wire(mode))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            return await Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client).propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert not result.success and result.proposal is None and result.error is not None
+    assert calls == foreign_calls == [] and result.metadata["request_attempts"] == 0
+    assert result.metadata["request_id"] is None
+    if before is not None:
+        assert journal.snapshot() == before
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("fault", [None, "payload", "headers"])
+def test_c_binding_happens_only_after_payload_and_headers_are_captured(mode, fault, monkeypatch):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal, builds, calls = c_journal(transport), [], []
+
+    def handle(request):
+        calls.append(request)
+        snapshot = journal.snapshot()
+        assert snapshot["request_id"] is not None and snapshot["stage"] == "dispatch_started"
+        return httpx.Response(200, json=c_wire(mode))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            original_payload, original_headers = model._payload, model._headers
+
+            def observe(name, original, *args, **kwargs):
+                builds.append((name, journal.snapshot()))
+                if fault == name:
+                    raise ValueError("private-build-marker")
+                return original(*args, **kwargs)
+
+            monkeypatch.setattr(model, "_payload", lambda *a, **k: observe("payload", original_payload, *a, **k))
+            monkeypatch.setattr(model, "_headers", lambda: observe("headers", original_headers))
+            return await model.propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    assert [name for name, _ in builds] == (["payload"] if fault == "payload" else ["payload", "headers"])
+    for _, snapshot in builds:
+        assert snapshot["request_id"] is None and snapshot["stages"] == ["created"]
+    assert result.success is (fault is None)
+    assert len(calls) == result.metadata["request_attempts"] == (1 if fault is None else 0)
+    if fault is not None:
+        assert result.metadata["request_id"] is journal.request_id is None
+        assert journal.snapshot()["stages"] == ["created", "failed"]
+        assert "private-build-marker" not in repr(result) + repr(journal.snapshot())
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("fault", ["none", "nonascii-key", "model-surrogate"])
+def test_c_actual_httpx_encoding_precedes_request_binding(mode, fault):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal, posts, encoder_errors, encoded_bodies = c_journal(transport), [], [], []
+    messages = [{"role": "user", "content": "complete synthetic docking request"}]
+    bad_value = {"none": None, "nonascii-key": "synthetic-key-\u6d4b",
+                 "model-surrogate": "test-model-\ud800"}[fault]
+
+    def handle(request):
+        posts.append(request)
+        return httpx.Response(200, json=c_wire(mode))
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model(bad_value if fault == "nonascii-key" else "synthetic-only-key",
+                          bad_value if fault == "model-surrogate" else "test-model",
+                          "https://example.invalid/v1", client=client)
+            # Independently observe the real encoder before production runs.
+            # HTTPX 0.25 escapes surrogate code points; 0.28 encodes UTF-8
+            # directly. Header ASCII rejection remains unconditional on both.
+            payload = transport._payload(model, messages, mode, 256,
+                                         transport.ProtocolProfile.DOCKING_PREPARATION_V1)
+            headers = {**model._headers(), "Accept-Encoding": "identity"}
+            before = journal.snapshot()
+            try:
+                request = client.build_request(
+                    "POST", model.base_url, headers=headers, json=payload, timeout=30.0)
+            except UnicodeEncodeError as exc:
+                assert fault != "none"
+                assert exc.encoding == ("ascii" if fault == "nonascii-key" else "utf-8")
+                encoder_errors.append(exc.encoding)
+            else:
+                assert fault != "nonascii-key", "authorization headers must remain ASCII"
+                expected_model = bad_value if fault == "model-surrogate" else "test-model"
+                assert json.loads(request.content)["model"] == expected_model
+                encoded_bodies.append(request.content)
+            assert posts == [] and journal.snapshot() == before
+            return await model.propose_docking_preparation(messages, mode=mode, _journal=journal)
+
+    result = asyncio.run(run())
+    snapshot = journal.snapshot()
+    if encoded_bodies:
+        assert encoder_errors == [] and result.success
+        assert len(posts) == result.metadata["request_attempts"] == 1
+        assert posts[0].content == encoded_bodies[0]
+        assert result.metadata["request_id"] == journal.request_id is not None
+        assert snapshot["stage"] == "parsed"
+        assert snapshot["stages"] == [
+            "created", "validated", "dispatch_started", "response_received", "parsed",
+        ]
+    else:
+        assert encoder_errors == ["ascii" if fault == "nonascii-key" else "utf-8"]
+        assert posts == [] and not result.success and result.proposal is None
+        assert result.error is not None
+        assert result.error.code.value == "internal_error"
+        assert result.error.details == {"reason": "docking_preparation_build_failed"}
+        assert result.metadata["request_attempts"] == snapshot["model_call_metadata"]["request_attempts"] == 0
+        assert result.metadata["request_id"] is journal.request_id is None
+        assert snapshot["stages"] == ["created", "failed"] and snapshot["completion"] == "not_started"
+        # Descriptors and raw Unicode codec exceptions are not error diagnostics.
+        assert set(result.error.details) == {"reason"}
+        error_text = repr(result.error)
+        for private in ("synthetic-key", "test-model-", "UnicodeEncodeError", "surrogates not allowed"):
+            assert private not in error_text
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("cancel", [False, True], ids=["return-control", "cancel-at-child-return"])
+def test_c_external_cancel_at_completed_http_child_is_not_lost(mode, cancel):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal, posts, children, callbacks = c_journal(transport), [], [], []
+
+    async def run():
+        outer = None
+
+        def handle(request):
+            posts.append(request)
+            child = asyncio.current_task()
+            children.append(child)
+            response = httpx.Response(200, json=c_wire(mode))
+
+            def at_return():
+                # Record the race prerequisites; do not throw from a loop callback
+                # where pytest could miss the assertion. This is external cancel,
+                # not cancellation fabricated inside HTTP or a patched wait_for.
+                facts = {"child_done": child.done(), "child_cancelled": child.cancelled(),
+                         "different_task": child is not outer, "outer_done": outer.done()}
+                facts["cancel_accepted"] = outer.cancel() if cancel else None
+                callbacks.append(facts)
+
+            # The real immediate MockTransport response lets _post finish in this
+            # tick. This callback queues before wait_for's child-done wakeup.
+            asyncio.get_running_loop().call_soon(at_return)
+            return response
+
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            outer = asyncio.create_task(model.propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode, _journal=journal))
+            try:
+                outcome = (await asyncio.wait_for(
+                    asyncio.gather(outer, return_exceptions=True), 2))[0]
+                assert callbacks == [{"child_done": True, "child_cancelled": False,
+                                      "different_task": True, "outer_done": False,
+                                      "cancel_accepted": True if cancel else None}]
+                assert len(posts) == len(children) == 1
+                assert children[0].done() and children[0].exception() is None
+                if cancel:
+                    assert isinstance(outcome, asyncio.CancelledError), "external cancellation was lost"
+                    assert outer.cancelled()
+                else:
+                    assert not isinstance(outcome, BaseException) and outcome.success
+                    assert outcome.proposal.model_dump() == proposal()
+            finally:
+                if not outer.done():
+                    outer.cancel()
+                await asyncio.gather(outer, return_exceptions=True)
+                for child in children:
+                    if not child.done():
+                        child.cancel()
+                await asyncio.gather(*children, return_exceptions=True)
+
+    asyncio.run(run())
+    snapshot = journal.snapshot()
+    assert snapshot["model_call_metadata"]["request_attempts"] == 1
+    assert snapshot["request_id"] == journal.request_id is not None
+    assert snapshot["stage"] == ("cancelled" if cancel else "parsed")
+    assert snapshot["completion"] == ("unknown" if cancel else "received")
+    if cancel:
+        assert snapshot["parser_outcome"] == "interrupted" and "parsed" not in snapshot["stages"]
+        with pytest.raises(DecisionProtocolError):
+            journal.transition("parsed", metadata={"request_id": journal.request_id})
+        assert journal.snapshot() == snapshot
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("interrupt", [
+    "none", "cancel", "deadline", "repeat-cancel", "deadline-then-cancel",
+])
+def test_c_httpx_pre_return_error_cleanup_is_physically_joined(mode, interrupt):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal = c_journal(transport)
+
+    async def run():
+        close_entered, release_close, physically_closed = (asyncio.Event() for _ in range(3))
+        close_interrupted = asyncio.Event()
+        posts, responses, http_tasks, close_tasks, hook_facts, reads, settlements = ([] for _ in range(7))
+
+        class LiveBody(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                reads.append(True)
+                yield json.dumps(c_wire(mode)).encode("utf-8")
+
+            async def aclose(self):
+                close_tasks.append(asyncio.current_task())
+                close_entered.set()
+                try:
+                    await release_close.wait()
+                except asyncio.CancelledError:
+                    close_interrupted.set()
+                    raise  # Do not make a broken owner pass by suppressing cancellation.
+                physically_closed.set()
+
+        stream = LiveBody()
+
+        def handle(request):
+            posts.append(request)
+            http_tasks.append(asyncio.current_task())
+            response = httpx.Response(200, stream=stream)
+            responses.append(response)
+            return response
+
+        async def fail_response_hook(response):
+            hook_facts.append((response.is_closed, response.is_stream_consumed))
+            # Actual HTTPX catches this and closes the live response before send
+            # returns. No patched send, close, wait, deadline or journal algorithm.
+            raise RuntimeError("private-response-hook-marker")
+
+        deadline_case = interrupt in {"deadline", "deadline-then-cancel"}
+        async with c_opted_in_client(transport=httpx.MockTransport(handle),
+                                     event_hooks={"response": [fail_response_hook]}) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            outer = asyncio.create_task(model.propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode, _journal=journal,
+                timeout_seconds=0.25 if deadline_case else 30.0))
+            outer.add_done_callback(lambda _: settlements.append(physically_closed.is_set()))
+            try:
+                await asyncio.wait_for(close_entered.wait(), 2)
+                # Establish the real pre-return seam before asserting ownership:
+                # HTTPX has set its flag, but the underlying close is still live.
+                assert hook_facts == [(False, False)] and len(posts) == len(responses) == 1
+                assert responses[0].is_closed and not physically_closed.is_set()
+                assert len(close_tasks) == len(http_tasks) == 1
+                assert http_tasks[0] is not outer and not http_tasks[0].done()
+                assert not close_tasks[0].done() and reads == []
+                assert journal.snapshot()["stage"] == "dispatch_started"
+                assert not outer.done()
+
+                if interrupt in {"cancel", "repeat-cancel"}:
+                    assert outer.cancel()
+                # asyncio.wait observes without cancelling the subject. The real
+                # 0.25s request deadline must elapse while physical close is held;
+                # these observation/watchdog bounds never change that deadline.
+                done, _ = await asyncio.wait({outer}, timeout=0.5 if deadline_case else 0.05)
+                assert not done, "outer settled before HTTPX pre-return physical cleanup"
+                assert not close_interrupted.is_set() and not physically_closed.is_set()
+                if interrupt in {"repeat-cancel", "deadline-then-cancel"}:
+                    assert outer.cancel()
+                    done, _ = await asyncio.wait({outer}, timeout=0.05)
+                    assert not done, "repeated cancellation detached pre-return cleanup"
+                    assert not close_interrupted.is_set()
+                assert "parsed" not in journal.snapshot()["stages"]
+
+                release_close.set()
+                outcome = (await asyncio.wait_for(
+                    asyncio.gather(outer, return_exceptions=True), 2))[0]
+                assert physically_closed.is_set() and not close_interrupted.is_set()
+                assert settlements == [True] and len(close_tasks) == 1 and reads == []
+                assert all(task.done() for task in http_tasks + close_tasks)
+                snapshot = journal.snapshot()
+                assert snapshot["model_call_metadata"]["request_attempts"] == len(posts) == 1
+                assert snapshot["request_id"] == journal.request_id is not None
+                assert snapshot["completion"] == "unknown" and "parsed" not in snapshot["stages"]
+                if interrupt in {"cancel", "repeat-cancel", "deadline-then-cancel"}:
+                    assert isinstance(outcome, asyncio.CancelledError) and outer.cancelled()
+                    assert snapshot["stage"] == "cancelled" and snapshot["parser_outcome"] == "interrupted"
+                else:
+                    assert not isinstance(outcome, BaseException)
+                    assert not outcome.success and outcome.proposal is None and outcome.error is not None
+                    assert snapshot["stage"] == ("timeout" if deadline_case else "failed")
+                    assert outcome.error.details == {"reason": (
+                        "decision_timeout" if deadline_case else "decision_provider_unavailable")}
+                    assert "private-response-hook-marker" not in repr(outcome) + repr(snapshot)
+                with pytest.raises(DecisionProtocolError):
+                    journal.transition("parsed", metadata={"request_id": journal.request_id})
+                assert journal.snapshot() == snapshot
+            finally:
+                release_close.set()
+                if not outer.done():
+                    outer.cancel()
+                await asyncio.gather(outer, return_exceptions=True)
+                await asyncio.gather(*set(http_tasks + close_tasks), return_exceptions=True)
+                # RED teardown only: an already interrupted HTTPX close has its
+                # flag set, so close the fixture stream itself after joining. No
+                # desired-behavior assertion above uses this teardown completion.
+                if not physically_closed.is_set():
+                    await stream.aclose()
+
+    asyncio.run(run())
+
+
+def c_guard_api():
+    transport, _ = c_transport_api()
+    guard = getattr(transport, "docking_preparation_response_guard", None)
+    assert callable(guard), "C0b missing construction-time docking_preparation_response_guard"
+    return guard
+
+
+def c_opted_in_client(**kwargs):
+    """Explicit fixture opt-in at real HTTPX construction, never during a request."""
+    import httpx
+    hooks = dict(kwargs.pop("event_hooks", {}))
+    hooks["response"] = [c_guard_api(), *hooks.get("response", [])]
+    return httpx.AsyncClient(event_hooks=hooks, **kwargs)
+
+
+def test_c_construction_response_guard_api_present():
+    import inspect
+    assert inspect.iscoroutinefunction(c_guard_api())
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+@pytest.mark.parametrize("registration", ["absent", "misordered"])
+def test_c_uninstrumented_borrowed_client_refuses_without_changing_ordinary(mode, registration):
+    import asyncio
+    import httpx
+    from test_ordinary_intent_transport import MESSAGES, INTENT, DECISION, wire
+    transport, Model = c_transport_api()
+    guard = c_guard_api()
+    journal, posts, hook_calls = c_journal(transport), [], []
+
+    async def user_hook(response):
+        hook_calls.append(response.request)
+
+    hooks = [user_hook] if registration == "absent" else [user_hook, guard]
+
+    def handle(request):
+        posts.append(request)
+        payload = json.loads(request.content)
+        if "response_format" not in payload and "tools" not in payload:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "chat-control"}}]})
+        instruction = payload["messages"][0]["content"]
+        ordinary = (payload["tools"][0]["function"]["name"] == "ordinary_intent"
+                    if mode == "native" else '"intent"' in instruction)
+        return httpx.Response(200, json=wire(mode, INTENT if ordinary else DECISION,
+                                            "ordinary_intent" if ordinary else "agent_decision"))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle),
+                                     event_hooks={"response": hooks}) as client:
+            configured = client.event_hooks["response"]
+            original_hooks = tuple(configured)
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            result = await model.propose_docking_preparation(MESSAGES, mode=mode, _journal=journal)
+            assert not result.success and result.proposal is None and result.error is not None
+            assert result.error.code is transport.AgentErrorCode.INTERNAL_ERROR
+            assert result.error.details == {"reason": "docking_preparation_client_not_opted_in"}
+            assert result.metadata["request_id"] is journal.request_id is None
+            assert result.metadata["request_attempts"] == 0 and posts == hook_calls == []
+            snapshot = journal.snapshot()
+            assert snapshot["stages"] == ["created", "failed"] and snapshot["completion"] == "not_started"
+            assert snapshot["model_call_metadata"]["request_attempts"] == 0
+            assert not client.is_closed
+            ordinary = await model.propose_ordinary_intent(MESSAGES, mode=mode)
+            decision = await model.decide(MESSAGES, mode=mode)
+            chat = await model.generate("chat control")
+            assert ordinary.success and ordinary.intent.model_dump() == INTENT["intent"]
+            assert decision.success and decision.decision.model_dump() == DECISION["decision"]
+            assert chat == "chat-control" and len(posts) == len(hook_calls) == 3
+            assert client.event_hooks["response"] is configured and tuple(configured) == original_hooks
+            assert hooks == list(original_hooks) and not client.is_closed
+            assert journal.snapshot() == snapshot
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_constructor_guard_three_profiles_keep_request_local_close_ownership(mode):
+    import asyncio
+    import httpx
+    from test_ordinary_intent_transport import MESSAGES, INTENT, DECISION, wire, journal as intent_journal
+    transport, Model = c_transport_api()
+    guard = c_guard_api()
+    c_record, ordinary_record = c_journal(transport), intent_journal()
+
+    async def run():
+        entered, release = asyncio.Event(), asyncio.Event()
+        names = ("docking_preparation", "ordinary_intent", "agent_decision")
+        requests, http_tasks, closes, hooks_seen = {}, {}, {}, {}
+
+        def name_for(request):
+            payload = json.loads(request.content)
+            if mode == "native":
+                return payload["tools"][0]["function"]["name"]
+            instruction = payload["messages"][0]["content"]
+            key = next(iter(json.loads(instruction[instruction.index("{"):])["properties"]))
+            return {"proposal": names[0], "intent": names[1], "decision": names[2]}[key]
+
+        class Body(httpx.AsyncByteStream):
+            def __init__(self, name):
+                self.name = name
+
+            async def __aiter__(self):
+                body = c_wire(mode) if self.name == names[0] else wire(
+                    mode, INTENT if self.name == names[1] else DECISION, self.name)
+                yield json.dumps(body).encode("utf-8")
+
+            async def aclose(self):
+                assert self.name not in closes
+                closes[self.name] = asyncio.current_task()
+
+        async def handle(request):
+            name = name_for(request)
+            assert name not in requests
+            requests[name], http_tasks[name] = request, asyncio.current_task()
+            if len(requests) == 3:
+                entered.set()
+            await release.wait()
+            return httpx.Response(200, stream=Body(name))
+
+        async def first_user_hook(response):
+            hooks_seen[name_for(response.request)] = ["first"]
+
+        async def second_user_hook(response):
+            hooks_seen[name_for(response.request)].append("second")
+
+        original = {"response": [first_user_hook, second_user_hook]}
+        async with c_opted_in_client(transport=httpx.MockTransport(handle), event_hooks=original) as client:
+            configured = client.event_hooks["response"]
+            assert configured == [guard, first_user_hook, second_user_hook]
+            assert original == {"response": [first_user_hook, second_user_hook]}
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            tasks = [
+                asyncio.create_task(model.propose_docking_preparation(MESSAGES, mode=mode, _journal=c_record)),
+                asyncio.create_task(model.propose_ordinary_intent(MESSAGES, mode=mode, _journal=ordinary_record)),
+                asyncio.create_task(model.decide(MESSAGES, mode=mode)),
+            ]
+            try:
+                await asyncio.wait_for(entered.wait(), 2)
+                assert len(set(http_tasks.values())) == 3
+                assert client.event_hooks["response"] is configured
+                assert configured == [guard, first_user_hook, second_user_hook]
+                release.set()
+                results = await asyncio.wait_for(asyncio.gather(*tasks), 2)
+                assert all(result.success and result.metadata["request_attempts"] == 1 for result in results)
+                assert len({result.metadata["request_id"] for result in results}) == 3
+                assert hooks_seen == {name: ["first", "second"] for name in names}
+                assert set(closes) == set(names) and all(task.done() for task in closes.values())
+                # Real EOF closes, not a simulated profile switch: C delegates to
+                # owned cleanup; both legacy profiles close in their HTTP task.
+                assert closes[names[0]] is not http_tasks[names[0]]
+                assert all(closes[name] is http_tasks[name] for name in names[1:])
+                assert results[0].proposal.model_dump() == proposal()
+                assert results[1].intent.model_dump() == INTENT["intent"]
+                assert results[2].decision.model_dump() == DECISION["decision"]
+                assert c_record.snapshot()["stage"] == ordinary_record.snapshot()["stage"] == "parsed"
+                assert client.event_hooks["response"] is configured
+                assert configured == [guard, first_user_hook, second_user_hook] and not client.is_closed
+            finally:
+                release.set()
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                await asyncio.gather(*(set(http_tasks.values()) | set(closes.values())), return_exceptions=True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_guard_does_not_adopt_foreign_request_inside_response_hook(mode):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    guard = c_guard_api()
+
+    async def run():
+        http_tasks, close_tasks, calls = {}, {}, []
+
+        class Body(httpx.AsyncByteStream):
+            def __init__(self, name):
+                self.name = name
+
+            async def __aiter__(self):
+                yield json.dumps(c_wire(mode)).encode("utf-8") if self.name == "POST" else b"foreign"
+
+            async def aclose(self):
+                close_tasks[self.name] = asyncio.current_task()
+
+        def handle(request):
+            name = request.method
+            assert name not in http_tasks
+            http_tasks[name] = asyncio.current_task()
+            calls.append(name)
+            return httpx.Response(200, stream=Body(name))
+
+        async def user_hook(response):
+            if response.request.method == "POST":
+                # Same task and inherited context, different actual Request.
+                async with client.stream("GET", "https://example.invalid/foreign") as foreign:
+                    assert await foreign.aread() == b"foreign"
+
+        async with c_opted_in_client(transport=httpx.MockTransport(handle),
+                                    event_hooks={"response": [user_hook]}) as client:
+            hooks = client.event_hooks["response"]
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            result = await model.propose_docking_preparation(
+                [{"role": "user", "content": "dock"}], mode=mode)
+            assert result.success and result.metadata["request_attempts"] == 1
+            assert calls == ["POST", "GET"] and http_tasks["POST"] is http_tasks["GET"]
+            assert close_tasks["GET"] is http_tasks["GET"]
+            assert close_tasks["POST"] is not http_tasks["POST"] and close_tasks["POST"].done()
+            assert client.event_hooks["response"] is hooks and hooks == [guard, user_hook]
+            # Outside any C request, the public hook is an exact no-op as well.
+            response = httpx.Response(200, request=httpx.Request("GET", "https://example.invalid/noop"),
+                                      stream=Body("noop"))
+            before = response.stream
+            try:
+                await guard(response)
+                assert response.stream is before and not response.is_closed
+            finally:
+                await response.aclose()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_owned_client_installs_guard_at_actual_construction_and_closes(mode, monkeypatch):
+    import asyncio
+    import httpx
+    from types import SimpleNamespace
+    transport, Model = c_transport_api()
+    guard = c_guard_api()
+    actual_constructor = httpx.AsyncClient
+    constructed, posts = [], []
+
+    def handle(request):
+        posts.append(request)
+        return httpx.Response(200, json=c_wire(mode))
+
+    def observed_constructor(*args, **kwargs):
+        # Only the socket boundary is offline. Do not add/fix production hooks.
+        assert kwargs["event_hooks"]["response"][0] is guard
+        assert "transport" not in kwargs
+        client = actual_constructor(*args, transport=httpx.MockTransport(handle), **kwargs)
+        constructed.append(client)
+        return client
+
+    # Replace only this module's dependency reference, not the global HTTPX class
+    # used by other profiles/models. Every other HTTPX attribute stays real.
+    dependency = SimpleNamespace(**vars(httpx))
+    dependency.AsyncClient = observed_constructor
+    monkeypatch.setattr(transport, "httpx", dependency)
+    model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1")
+    result = asyncio.run(model.propose_docking_preparation(
+        [{"role": "user", "content": "dock"}], mode=mode))
+    assert result.success and result.metadata["request_attempts"] == len(posts) == 1
+    assert len(constructed) == 1 and constructed[0].is_closed and model.client is None
+
+
+@pytest.mark.parametrize("mode", ["native", "json"])
+def test_c_two_opted_in_requests_do_not_share_cleanup_owner(mode):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    c_guard_api()
+
+    async def run():
+        entered = {name: asyncio.Event() for name in ("left", "right")}
+        release = {name: asyncio.Event() for name in entered}
+        closed = {name: asyncio.Event() for name in entered}
+        records = {name: c_journal(transport, proposal_id=name) for name in entered}
+        close_tasks, http_tasks, interrupted = {}, {}, []
+
+        class Body(httpx.AsyncByteStream):
+            def __init__(self, name):
+                self.name = name
+
+            async def __aiter__(self):
+                yield json.dumps(c_wire(mode)).encode("utf-8")
+
+            async def aclose(self):
+                close_tasks[self.name] = asyncio.current_task()
+                entered[self.name].set()
+                try:
+                    await release[self.name].wait()
+                except asyncio.CancelledError:
+                    interrupted.append(self.name)
+                    raise
+                closed[self.name].set()
+
+        def handle(request):
+            name = json.loads(request.content)["messages"][-1]["content"]
+            assert name not in http_tasks
+            http_tasks[name] = asyncio.current_task()
+            return httpx.Response(200, stream=Body(name))
+
+        async def fail_hook(response):
+            raise RuntimeError("private-two-owner-marker")
+
+        async with c_opted_in_client(transport=httpx.MockTransport(handle),
+                                    event_hooks={"response": [fail_hook]}) as client:
+            model = Model("synthetic-only-key", "test-model", "https://example.invalid/v1", client=client)
+            tasks = {name: asyncio.create_task(model.propose_docking_preparation(
+                [{"role": "user", "content": name}], mode=mode, _journal=records[name]))
+                for name in entered}
+            try:
+                await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), 2)
+                assert len(set(http_tasks.values())) == len(set(close_tasks.values())) == 2
+                assert tasks["left"].cancel()
+                done, _ = await asyncio.wait(set(tasks.values()), timeout=0.05)
+                assert not done and interrupted == []
+                assert tasks["left"].cancel()
+                release["right"].set()
+                right = await asyncio.wait_for(asyncio.shield(tasks["right"]), 2)
+                assert not right.success and closed["right"].is_set()
+                assert right.error.details == {"reason": "decision_provider_unavailable"}
+                assert not tasks["left"].done() and not closed["left"].is_set()
+                assert "private-two-owner-marker" not in repr(right)
+                release["left"].set()
+                left = (await asyncio.wait_for(
+                    asyncio.gather(tasks["left"], return_exceptions=True), 2))[0]
+                assert isinstance(left, asyncio.CancelledError) and closed["left"].is_set()
+                assert interrupted == [] and all(task.done() for task in close_tasks.values())
+                assert records["left"].snapshot()["stage"] == "cancelled"
+                assert records["right"].snapshot()["stage"] == "failed"
+                assert records["left"].request_id != records["right"].request_id
+                for record in records.values():
+                    snapshot = record.snapshot()
+                    assert snapshot["model_call_metadata"]["request_attempts"] == 1
+                    assert snapshot["completion"] == "unknown" and "parsed" not in snapshot["stages"]
+            finally:
+                for event in release.values():
+                    event.set()
+                for task in tasks.values():
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
+                await asyncio.gather(*(set(http_tasks.values()) | set(close_tasks.values())),
+                                     return_exceptions=True)
+
+    asyncio.run(run())
