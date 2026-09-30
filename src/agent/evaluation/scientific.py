@@ -29,6 +29,7 @@ from src.agent.tools.rag_search_tool import RAGSearchTool
 from src.agent.tools.reverse_target_tool import ReverseTargetTool
 from src.agent.tools.target_database_tool import TargetDatabaseTool
 from src.agent.validators import SemanticInputValidator
+from src.agent.tooling import build_tool_registry
 from src.agent.workflows import WorkflowCatalog
 
 from .models import EvaluationCase
@@ -177,7 +178,23 @@ class ScientificAcceptanceRunner:
         self.catalog = getattr(router, "catalog", None) or WorkflowCatalog()
         self.router = router or HybridSkillRouter(catalog=self.catalog)
         self.planner = planner or TaskPlanner()
-        self.tools = dict(tools or self._build_real_tools())
+        supplied_tools = tools is not None
+        self.tools = (
+            dict(tools) if supplied_tools else dict(self._build_real_tools())
+        )
+        # Keep the public/raw map for compatibility with acceptance fixtures,
+        # but execute default real runs through the same typed adapters used by
+        # the web Supervisor.  In particular, target lookup's domain statuses
+        # must be mapped before generic ToolResult validation.
+        self.tool_registry = (
+            None if supplied_tools else build_tool_registry(self.tools.values())
+        )
+        self._execution_tools = dict(self.tools)
+        if self.tool_registry is not None:
+            registered = self.tool_registry.as_mapping()
+            for name in ("target_database_search", "reverse_target_predictor"):
+                if name in registered:
+                    self._execution_tools[name] = registered[name]
         self.harness_factory = harness_factory or HarnessFactory()
 
     def run(self, repeat: int = 1) -> dict[str, Any]:
@@ -263,7 +280,7 @@ class ScientificAcceptanceRunner:
                         harness_run = self.harness_factory.create(executor).execute(
                             context=context,
                             policy=policy,
-                            all_tools=self.tools,
+                            all_tools=self._execution_tools,
                             idempotency_key=context.metadata.get("idempotency_key"),
                         )
                         execution = harness_run.authoritative
@@ -853,11 +870,25 @@ def _tool_provenance(
 ) -> dict[str, Any]:
     persisted = dict(execution_record or {})
     data_summary = _summarize_value(result.data)
-    model_name = (
+    model_provenance = result.quality.get("model_provenance")
+    model_names: list[str] = []
+    provenance_items = (
+        model_provenance
+        if isinstance(model_provenance, list)
+        else [model_provenance]
+    )
+    for item in provenance_items:
+        if not isinstance(item, Mapping):
+            continue
+        for key in ("model_path", "model_type", "model_id"):
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                model_names.append(value)
+                break
+    model_name: str | list[str] | None = (
         result.quality.get("model_name")
         or result.quality.get("model")
-        or result.quality.get("model_provenance", {}).get("model_path")
-        or result.quality.get("model_provenance", {}).get("model_type")
+        or (model_names[0] if len(model_names) == 1 else model_names or None)
         or result.quality.get("engine")
     )
     return {

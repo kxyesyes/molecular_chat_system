@@ -57,6 +57,23 @@ def test_real_acceptance_tool_registry_includes_candidate_ranker(tmp_path):
 
     assert "candidate_ranker" in runner.tools
     assert runner.tools["candidate_ranker"].name == "candidate_ranker"
+    assert runner._execution_tools["target_database_search"].__class__.__name__ == "TargetToolAdapter"
+
+
+def test_tool_provenance_accepts_per_prediction_model_metadata(tmp_path):
+    result = ToolResult.success_result(
+        "activity_predictor",
+        data=[],
+        quality={
+            "model_provenance": [
+                {"model_path": "models/pde/model.pt", "model_type": "rg_mpnn"}
+            ]
+        },
+    )
+
+    provenance = scientific._tool_provenance(result, tmp_path)
+
+    assert provenance["model_name"] == "models/pde/model.pt"
 
 
 def test_execution_exception_takes_precedence_over_dependent_truth_failures():

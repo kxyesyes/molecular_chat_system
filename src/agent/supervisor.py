@@ -868,7 +868,19 @@ class SupervisorAgent:
         capabilities = context.capabilities
         if not capabilities["scientific_tools"]:
             return {}
+        # A chat-facing Supervisor may retain the legacy raw tool map for
+        # lifecycle/model binding.  Only domain tools whose raw status values
+        # need a dedicated mapping are replaced here; all other raw tools keep
+        # their established compatibility input contract.
         tools = dict(self.tools)
+        if self.tool_registry is not None:
+            registered = self.tool_registry.as_mapping()
+            from src.agent.tooling.target_contract import TargetToolAdapter
+
+            for name, adapter in registered.items():
+                if (name in {"target_database_search", "reverse_target_predictor"}
+                        and isinstance(adapter, TargetToolAdapter)):
+                    tools[name] = adapter
         for alias, canonical in TOOL_ALIASES.items():
             if alias in tools:
                 # Preserve an explicitly provided canonical tool. Legacy raw
