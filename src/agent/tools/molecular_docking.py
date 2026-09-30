@@ -284,12 +284,32 @@ class MolecularDocking(BaseMolecularTool):
                     else docking_result.get("error", "Docking failed.")
                 )
             )
-            result["formatted"] = (
-                f"Docking job: {docking_result.get('job_id')}\n"
-                f"Poses: {docking_result.get('total_poses', 0)}"
-                if result["success"]
-                else ""
-            )
+            if result["success"]:
+                best_pose = docking_data.get("best_pose")
+                best_pose = best_pose if isinstance(best_pose, dict) else {}
+                binding_energy = best_pose.get("binding_energy")
+                if binding_energy is None:
+                    binding_energy = docking_data.get("binding_energy")
+                pose_file = (
+                    docking_data.get("pose_file")
+                    or best_pose.get("pose_file")
+                )
+                formatted_lines = [
+                    f"Docking job: {docking_result.get('job_id')}",
+                    f"Poses: {docking_result.get('total_poses', 0)}",
+                ]
+                if (
+                    isinstance(binding_energy, (int, float))
+                    and not isinstance(binding_energy, bool)
+                ):
+                    formatted_lines.append(
+                        f"Binding energy: {binding_energy:g} kcal/mol"
+                    )
+                if isinstance(pose_file, str) and pose_file.strip():
+                    formatted_lines.append(f"Pose file: {pose_file}")
+                result["formatted"] = "\n".join(formatted_lines)
+            else:
+                result["formatted"] = ""
             result["reasoning"] = (
                 "Results were parsed from an actual Vina output file."
                 if result["success"]
