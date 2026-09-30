@@ -24,7 +24,7 @@ from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
 from src.agent.capabilities.catalog import TOOL_ALIASES
 from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
-from src.agent.planning import WorkflowPlan
+from src.agent.planning import WorkflowPlan, request_parsing
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.router import SkillRouter
 from src.agent.specialists import SpecialistAgent
@@ -141,6 +141,7 @@ class SupervisorAgent:
         *,
         session_id: str | None = None,
         resolved_molecule: ResolvedScientificMolecule | None = None,
+        metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Chat-compatible entry point backed by the workflow runtime."""
         routing_query = query
@@ -275,11 +276,16 @@ class SupervisorAgent:
                 "agent_events": [],
             }
 
-        request_metadata: dict[str, Any] = (
-            {"capabilities": dict(capabilities)}
-            if capabilities is not None
-            else {}
-        )
+        request_metadata: dict[str, Any] = dict(metadata or {})
+        if capabilities is not None:
+            request_metadata["capabilities"] = dict(capabilities)
+        if (
+            policy.name == "docking_simulation"
+            and "docking_input" not in request_metadata
+        ):
+            docking_input = request_parsing.parse_structured_docking_input(query)
+            if docking_input is not None:
+                request_metadata["docking_input"] = docking_input
         if mol_count is not _MOL_COUNT_UNSET:
             request_metadata["requested_count"] = mol_count
         elif "llm_molecular_generator" in policy.allowed_tools:
