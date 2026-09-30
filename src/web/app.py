@@ -352,6 +352,7 @@ class MolecularChatApp:
         """Create the sole chat-facing Supervisor entry point."""
         from src.agent.supervisor import SupervisorAgent
         from src.agent.tools import get_all_tools
+        from src.agent.tooling import build_tool_registry
 
         acquired_tools = get_all_tools(self.molecular_generator_model, rag_system=self.rag_system)
         # Retain the returned pool before Supervisor or registry construction.
@@ -362,8 +363,14 @@ class MolecularChatApp:
         for tool in unique_tools:
             self._register_assembly_owner(tool)
         tools = {tool.name: tool for tool in unique_tools}
+        # Keep the raw map for model/lifecycle binding, but make the typed
+        # registry the execution source.  This prevents domain-specific raw
+        # statuses (notably target lookup outcomes) from reaching the generic
+        # observation validator unchanged.
+        self.agent_tool_registry = build_tool_registry(unique_tools)
         return SupervisorAgent(
             tools=tools,
+            tool_registry=self.agent_tool_registry,
             llm=self.model,
             molecular_generator_llm=self.molecular_generator_model,
             state_store=self._get_agent_state_store(),
