@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import Future
+from dataclasses import dataclass, field
 import hashlib
 import inspect
 import json
+import secrets
 from pathlib import Path
 import sqlite3
 import threading
@@ -20,7 +22,11 @@ from .backends.base import (
 )
 from .backends.local import LocalTaskBackend, TaskIdempotencyConflictError
 from .config import PROJECT_ROOT, TaskRuntimeConfig
-from .docking_execution import DockingExecution
+from .docking_execution import DockingExecution, _manifest_input_hash
+from .docking_consent import (
+    PREPARATION_SECONDS, DockingConsentError, DockingConsentPolicy,
+    DockingConsentPreview, make_preview, seal_binding, validate_inputs,
+)
 from .errors import TaskErrorCode
 from .models import (
     BackendHealth,
@@ -50,6 +56,21 @@ _STAGING_ORPHAN_TTL_SECONDS = 24 * 60 * 60.0
 _STAGING_CLEANUP_LIMIT = 16
 
 
+@dataclass(eq=False)
+class _ConsentPreparation:
+    preparation_id: str
+    token: str = field(default_factory=lambda: secrets.token_hex(32), repr=False)
+    aborted: threading.Event = field(default_factory=threading.Event, repr=False)
+    worker: asyncio.Task | None = field(default=None, repr=False)
+    revocation: asyncio.Task | None = field(default=None, repr=False)
+    revocation_status: str = "pending"
+    settlement: asyncio.Task | None = field(default=None, repr=False)
+    task_id: str | None = None
+    manifest_path: Path | None = None
+    stage_started: bool = False
+    settled: bool = False
+
+
 class TaskRuntime:
     """Async backend façade for safely staged scientific tasks."""
 
@@ -65,6 +86,9 @@ class TaskRuntime:
         temporal_backend_factory: Callable[[], Any] | None = None,
         uuid_factory: Callable[[], Any] | None = None,
         docking_execution: DockingExecution | Any | None = None,
+        docking_consent_policy: DockingConsentPolicy | None = None,
+        consent_wall_time_ms: Callable[[], int] | None = None,
+        consent_monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.config = config or TaskRuntimeConfig.from_env()
         self.store = store or TaskStore()
@@ -119,6 +143,189 @@ class TaskRuntime:
         self._close_runner: asyncio.Task[None] | None = None
         self._staging_cleanup_lock = threading.Lock()
         self._last_staging_cleanup = 0.0
+        self._docking_consent_policy = docking_consent_policy
+        self._consent_wall_time_ms = consent_wall_time_ms or (lambda: time.time_ns() // 1_000_000)
+        self._consent_monotonic = consent_monotonic or time.monotonic
+        # Ownership of real I/O, not a dispatch queue. Durable capacity lives in SQLite.
+        self._consent_preparations: set[_ConsentPreparation] = set()
+
+    async def prepare_docking_consent(
+        self, *, preparation_id: str, owner_session_id: str, revision: int,
+        receptor_name: str, receptor_bytes: bytes, ligand_name: str,
+        ligand_bytes: bytes, parameters: dict[str, Any],
+    ) -> DockingConsentPreview:
+        if self._closed or self._closing:
+            raise DockingConsentError("consent_policy_unavailable")
+        policy = self._docking_consent_policy
+        if type(policy) is not DockingConsentPolicy:
+            raise DockingConsentError("consent_policy_unavailable")
+        deadline = asyncio.get_running_loop().time() + PREPARATION_SECONDS
+        config = validate_inputs(receptor_name, receptor_bytes, ligand_name,
+                                 ligand_bytes, parameters)
+        operation = _ConsentPreparation(preparation_id)
+        self._consent_preparations.add(operation)
+        operation.worker = asyncio.create_task(
+            self._prepare_consent_owned(
+                operation, owner_session_id, revision, policy, deadline,
+                receptor_name, receptor_bytes, ligand_name, ligand_bytes, config,
+            ), name="medchat-consent-prepare",
+        )
+        try:
+            done, _ = await asyncio.wait(
+                {operation.worker}, timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+            if not done or asyncio.get_running_loop().time() >= deadline:
+                raise DockingConsentError("consent_preparation_timeout")
+            if operation.aborted.is_set() or self._closing:
+                raise DockingConsentError("consent_not_waiting")
+            preview = operation.worker.result()
+        except BaseException as exc:
+            await self._abort_consent_preparation(operation)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if isinstance(exc, DockingConsentError):
+                raise
+            raise DockingConsentError("consent_invalid_input") from None
+        self._consent_preparations.discard(operation)
+        return preview
+
+    async def _prepare_consent_owned(
+        self, operation, owner_session_id, revision, policy, deadline,
+        receptor_name, receptor_bytes, ligand_name, ligand_bytes, config,
+    ) -> DockingConsentPreview:
+        self._check_consent_preparation(operation, deadline)
+        loop = asyncio.get_running_loop()
+
+        def still_current():
+            return (not operation.aborted.is_set() and loop.time() < deadline
+                    and self._docking_consent_policy is policy)
+
+        identity = await asyncio.to_thread(
+            self.store._begin_docking_preparation,
+            preparation_id=operation.preparation_id, owner_session_id=owner_session_id,
+            revision=revision, policy=policy, token=operation.token,
+            now_ms=self._consent_wall_time_ms(), monotonic_now=self._consent_monotonic(),
+            still_current=still_current,
+        )
+        operation.task_id = identity["task_id"]
+        self._check_consent_preparation(operation, deadline)
+        operation.stage_started = True
+        path = await asyncio.to_thread(
+            self.stager.stage, operation.task_id, receptor_name, receptor_bytes,
+            ligand_name, ligand_bytes, None, config,
+        )
+        operation.manifest_path = Path(path)
+        self._check_consent_preparation(operation, deadline)
+        manifest = await asyncio.to_thread(
+            self.stager.load_verified_locator, operation.task_id, "input_manifest.json",
+        )
+        self._check_consent_preparation(operation, deadline)
+        issued_ms = self._consent_wall_time_ms()
+        binding, digest = seal_binding(
+            identity, manifest, policy, self._docking_request_digest(manifest),
+            _manifest_input_hash(manifest), issued_ms,
+        )
+        nonce = secrets.token_hex(32)
+        preview = make_preview(binding, digest, nonce)
+        await asyncio.to_thread(
+            self.store._seal_docking_preparation, operation.preparation_id, operation.token,
+            binding, digest, hashlib.sha256(nonce.encode("ascii")).hexdigest(),
+            now_ms=issued_ms, monotonic_now=self._consent_monotonic(),
+            still_current=still_current, wall_time_ms=self._consent_wall_time_ms,
+            monotonic=self._consent_monotonic,
+        )
+        self._check_consent_preparation(operation, deadline)
+        return preview
+
+    @staticmethod
+    def _check_consent_preparation(operation, deadline) -> None:
+        if operation.aborted.is_set():
+            raise DockingConsentError("consent_not_waiting")
+        if asyncio.get_running_loop().time() >= deadline:
+            raise DockingConsentError("consent_preparation_timeout")
+
+    async def _abort_consent_preparation(self, operation) -> None:
+        # This coroutine deliberately does not await I/O. Caller outcome is local;
+        # only the retained receipt below can confirm a durable terminal state.
+        operation.aborted.set()
+        if operation.revocation is None:
+            operation.revocation = asyncio.create_task(
+                self._revoke_consent_preparation(operation), name="medchat-consent-revoke",
+            )
+        if operation.settlement is None:
+            # Never cancel the to_thread wrapper: settlement owns its actual return.
+            operation.settlement = asyncio.create_task(
+                self._settle_consent_preparation(operation), name="medchat-consent-cleanup",
+            )
+
+    async def _revoke_consent_preparation(self, operation) -> None:
+        marker = asyncio.create_task(asyncio.to_thread(
+            self.store._revoke_docking_preparation, operation.preparation_id, operation.token,
+        ))
+        try:
+            confirmed = await self._await_task_outcome(marker)
+        except Exception:
+            # No retry or success inference after an uncertain commit outcome.
+            operation.revocation_status = "unconfirmed"
+        else:
+            operation.revocation_status = "confirmed" if confirmed is True else "unconfirmed"
+
+    async def _settle_consent_preparation(self, operation) -> None:
+        try:
+            try:
+                await self._await_task_outcome(operation.worker)
+            except BaseException:
+                pass
+            await self._await_task_outcome(operation.revocation)
+            task_id = await asyncio.to_thread(
+                self.store._docking_preparation_task, operation.preparation_id, operation.token,
+            )
+            if task_id is None:
+                # A rejected duplicate/missing/foreign request acquired no writer.
+                # This proves absence of our ownership, NOT a confirmed revocation.
+                operation.settled = not operation.stage_started
+            elif operation.revocation_status != "confirmed":
+                # Matching ownership still exists: no cleanup/capacity release
+                # from an exception, zero-match or merely completed SQL wrapper.
+                operation.settled = False
+            elif not operation.stage_started:
+                operation.settled = True
+            elif operation.manifest_path is not None:
+                def protected(candidate):
+                    if candidate != task_id:
+                        return True
+                    try:
+                        self.store.get(candidate)
+                    except KeyError:
+                        return self.store._docking_stage_protected(
+                            candidate, cleanup_token=operation.token,
+                        )
+                    return True
+
+                operation.settled = bool(await asyncio.to_thread(
+                    self.stager.discard_unprojected, task_id, operation.manifest_path,
+                    projection_check=protected,
+                ))
+            # An exception before stage returned supplies no safe deletion receipt.
+            # Keep that reservation unresolved, not guessed absent from a pathname.
+            if task_id is not None:
+                await asyncio.to_thread(
+                    self.store._finish_docking_cleanup, operation.preparation_id,
+                    operation.token, settled=operation.settled,
+                )
+        except Exception:
+            operation.settled = False
+        if operation.settled:
+            self._consent_preparations.discard(operation)
+
+    async def _close_consent_preparations(self) -> None:
+        operations = tuple(self._consent_preparations)
+        for operation in operations:
+            await self._abort_consent_preparation(operation)
+        for operation in operations:
+            await self._await_task_outcome(operation.settlement)
+        if any(not operation.settled for operation in operations):
+            raise DockingConsentError("consent_cleanup_unresolved")
 
     async def submit_docking(
         self,
@@ -492,7 +699,7 @@ class TaskRuntime:
         try:
             self.store.get(task_id)
         except KeyError:
-            return False
+            return self.store._docking_stage_protected(task_id)
         return True
 
     async def cleanup_staging_once(
@@ -637,6 +844,7 @@ class TaskRuntime:
 
     async def _close_once(self, shared: Future[None]) -> None:
         try:
+            await self._close_consent_preparations()
             await self._close_backends()
         except BaseException as exc:
             with self._close_lock:
