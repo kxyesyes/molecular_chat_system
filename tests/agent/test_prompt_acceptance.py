@@ -196,7 +196,11 @@ def test_structured_docking_resolves_receptor_and_ligand_paths(
                 "success": True,
                 "job_id": "real-paths",
                 "total_poses": 1,
-                "best_pose": {"binding_energy": -7.0},
+                "best_pose": {
+                    "binding_energy": -7.0,
+                    "pose_file": str(tmp_path / "poses.pdbqt"),
+                },
+                "pose_file": str(tmp_path / "poses.pdbqt"),
             }
 
     monkeypatch.chdir(tmp_path)
@@ -217,6 +221,8 @@ def test_structured_docking_resolves_receptor_and_ligand_paths(
     assert result["success"] is True
     assert captured["receptor_file"] == str(receptor.resolve())
     assert captured["ligand_input"] == str(ligand.resolve())
+    assert "Binding energy: -7" in result["formatted"]
+    assert str(tmp_path / "poses.pdbqt") in result["formatted"]
 
 
 def test_hf004_generation_overreach_is_bounded_to_generator():

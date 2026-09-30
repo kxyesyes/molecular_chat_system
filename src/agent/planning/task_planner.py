@@ -103,6 +103,16 @@ class TaskPlanner:
                 metadata={"input_type": "target_hint", "atomic": True},
             )
 
+        if selected == "docking_simulation" and self._looks_like_unauthorized_tool_request(query):
+            return WorkflowPlan(
+                workflow_name="docking_simulation",
+                steps=[],
+                metadata={
+                    "input_type": "rejected_unauthorized_tool_request",
+                    "reason": "unauthorized_tool_request",
+                },
+            )
+
         if selected == "docking_simulation" and isinstance(
             context.metadata.get("docking_input"), dict
         ):
@@ -117,16 +127,6 @@ class TaskPlanner:
                     )
                 ],
                 metadata={"input_type": "structured_docking", "atomic": True},
-            )
-
-        if selected == "docking_simulation" and self._looks_like_unauthorized_tool_request(query):
-            return WorkflowPlan(
-                workflow_name="docking_simulation",
-                steps=[],
-                metadata={
-                    "input_type": "rejected_unauthorized_tool_request",
-                    "reason": "unauthorized_tool_request",
-                },
             )
 
         atomic_tools = {

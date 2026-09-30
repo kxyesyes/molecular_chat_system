@@ -1,5 +1,6 @@
 """Stateless Planner parsing; existing domain contracts own scientific grammar."""
 import re
+import math
 from collections.abc import Callable
 from typing import Any
 
@@ -7,6 +8,59 @@ from src.agent.contracts.generation_request import (
     has_generation_intent, parse_generation_count, validate_generation_count,
 )
 from src.agent.contracts.target_request import analyze_target_request
+
+
+_DOCKING_FIELD = re.compile(
+    r"(?P<label>receptor(?:_path)?|ligand(?:_path)?|受体|配体)"
+    r"\s*[:：=]\s*(?P<value>[^\r\n；;。]+)",
+    re.I,
+)
+_DOCKING_VECTOR = re.compile(
+    r"(?P<label>center|size|中心|尺寸)\s*[:：=]\s*\[(?P<value>[^\]]+)\]",
+    re.I,
+)
+
+
+def parse_structured_docking_input(query: str) -> dict[str, Any] | None:
+    """Parse an explicitly labelled docking request without guessing inputs.
+
+    A natural-language target name remains unstructured and is intentionally
+    left to ``MolecularDocking``'s refusal path.  This parser only binds a
+    request when all four required labelled fields are present.
+    """
+    if not isinstance(query, str):
+        return None
+    fields: dict[str, str] = {}
+    for match in _DOCKING_FIELD.finditer(query):
+        label = match.group('label').strip().lower()
+        value = match.group('value').strip().strip('`"\'')
+        value = value.rstrip('，；;。').strip()
+        if label.startswith('receptor') or label == '受体':
+            fields['receptor_path'] = value
+        else:
+            fields['ligand_path'] = value
+
+    vectors: dict[str, list[float]] = {}
+    for match in _DOCKING_VECTOR.finditer(query):
+        label = match.group('label').strip().lower()
+        try:
+            values = [float(item.strip()) for item in re.split(r'[,，]', match.group('value'))]
+        except (TypeError, ValueError):
+            return None
+        if len(values) != 3 or not all(math.isfinite(value) for value in values):
+            return None
+        vectors['center' if label == 'center' or label == '中心' else 'size'] = values
+
+    if not fields.get('receptor_path') or not fields.get('ligand_path'):
+        return None
+    if 'center' not in vectors or 'size' not in vectors:
+        return None
+    return {
+        'receptor_path': fields['receptor_path'],
+        'ligand_path': fields['ligand_path'],
+        'center': vectors['center'],
+        'size': vectors['size'],
+    }
 
 
 def looks_like_design(query: str) -> bool:
