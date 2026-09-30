@@ -1611,3 +1611,1307 @@ def test_c1_cancel_during_actual_verification_retains_reader_before_cleanup(tmp_
             assert barrier_errors == []
 
     asyncio.run(run())  # Runtime drains the real owner; executor joins its thread.
+
+
+def test_c2_consent_execution_api_present():
+    # Existing module, imported only at call phase. No missing new-module import
+    # or collection failure can substitute for an absent execution API.
+    from src.task_runtime.runtime import TaskRuntime
+
+    signatures = {
+        "approve_docking_consent": (
+            "preparation_id", "owner_session_id", "approval_nonce", "binding_digest", "confirm",
+        ),
+        "cancel_docking_consent": ("task_id", "owner_session_id"),
+        "get_docking_consent_view": ("task_id", "owner_session_id"),
+    }
+    for name, arguments in signatures.items():
+        method = getattr(TaskRuntime, name, None)
+        assert inspect.iscoroutinefunction(method), "C2 missing async TaskRuntime." + name
+        parameters = inspect.signature(method).parameters
+        assert tuple(parameters) == ("self", *arguments), "C2 unexpected parameters: " + name
+        for argument in arguments:
+            parameter = parameters[argument]
+            assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+            assert parameter.default is inspect.Parameter.empty
+
+
+_C2_RECEIPT_KEYS = {
+    "preparation_id", "task_id", "trace_id", "consent_state", "dispatch_state",
+    "view_status", "task_status", "cleanup_status", "reason_code", "persistence_pending",
+}
+
+
+def _c2_row(rig, draft):
+    conn = sqlite3.connect(rig.db)
+    try:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM docking_consents WHERE preparation_id=?",
+                           (draft["preparation_id"],)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def _c2_rig(tmp_path, monkeypatch, *, hold_raw=False):
+    """Real runtime/backend/DB/lease; only lowest science boundary is synthetic."""
+    test_c2_consent_execution_api_present()  # Body-phase feature prerequisite.
+    from contextlib import contextmanager
+    from src.task_runtime.runtime import TaskRuntime
+    from src.task_runtime.store import TaskStore
+    from src.task_runtime.config import TaskRuntimeConfig
+    from src.task_runtime.staging import DockingInputStager
+    from src.task_runtime.docking_execution import DockingExecution
+    from src.agent.contracts import ToolResult, ToolProvenance
+    from src.agent.openai_compatible_model import OpenAICompatibleModel
+    from src.agent.tools.molecular_docking import MOLECULAR_DOCKING_ADAPTER_VERSION
+    import httpx
+    import subprocess
+
+    api, _, _ = c1_api()
+    rig = SimpleNamespace(api=api, clock=Clock(), root=tmp_path / "stage",
+                          db=tmp_path / "tasks.sqlite", output=tmp_path / "synthetic-output",
+                          runtimes=[], pending=[], releases=[], calls=[], stages=[], submits=[],
+                          cancels=[], raw=[], leases=[], discards=[], errors=[])
+    rig.policy = policy(api, adapter_contract_version=MOLECULAR_DOCKING_ADAPTER_VERSION)
+    raw_release = threading.Event()
+    if not hold_raw:
+        raw_release.set()
+    rig.raw_release = raw_release
+    rig.raw_entered = threading.Event()
+    rig.releases.append(raw_release)
+
+    def forbidden(name):
+        rig.calls.append(name)
+        raise AssertionError("C2 forbidden real boundary: " + name)
+
+    async def denied(*args, **kwargs):
+        forbidden("model-or-http")
+
+    for name in ("generate", "decide", "propose_ordinary_intent", "propose_docking_preparation"):
+        monkeypatch.setattr(OpenAICompatibleModel, name, denied)
+    monkeypatch.setattr(httpx.AsyncClient, "send", denied)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: forbidden("process"))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", denied)
+
+    def raw(payload, **control):
+        task_id = control["job_id"]
+        entry = {"task_id": task_id, "cancel_event": control["cancel_event"],
+                 "exited": threading.Event(), "returned_success": False,
+                 "receptor": Path(payload["receptor_path"]).read_bytes(),
+                 "ligand": Path(payload["ligand_path"]).read_bytes()}
+        rig.raw.append(entry)
+        assert any(item["task_id"] == task_id and not item["exited"].is_set() for item in rig.leases)
+        rig.raw_entered.set()
+        try:
+            if not raw_release.wait(40):
+                rig.errors.append("raw fixture escape")
+                raise RuntimeError("raw fixture barrier not released")
+            # Deliberately return late synthetic success even after cancel.
+            # Real DockingExecution parsing/validation/commit must arbitrate it.
+            pose = rig.output / ("docking_" + task_id) / "result.pdbqt"
+            pose.parent.mkdir(parents=True, exist_ok=True)
+            pose.write_text(
+                "MODEL 1\nREMARK VINA RESULT: -7.200 0.000 0.000\nROOT\n"
+                "ATOM      1  C   LIG A   1       0.000   0.000   0.000  0.00  0.00    +0.000 C\n"
+                "ENDROOT\nTORSDOF 0\nENDMDL\n", encoding="utf-8")
+            result = ToolResult.success_result(
+                "molecular_docking", data={"total_poses": 1, "pose_file": str(pose),
+                    "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)}},
+                quality={"real_execution": True},
+                provenance=ToolProvenance(tool_name="molecular_docking", tool_version="vina-test-1"),
+            )  # Fixture provenance only, never evidence that real Vina ran.
+            entry["returned_success"] = True
+            return result
+        finally:
+            entry["exited"].set()
+
+    def new_runtime():
+        store, stager = TaskStore(rig.db), DockingInputStager(rig.root)
+        execution = DockingExecution(rig.root, raw_executor=raw, allowed_output_root=rig.output)
+        config = TaskRuntimeConfig(backend="local", canary_percent=0, temporal_address="unused.invalid:7233",
+                                   temporal_namespace="test", docking_queue="test", docking_concurrency=1,
+                                   staging_root=rig.root)
+        runtime = TaskRuntime(config=config, store=store, stager=stager, docking_execution=execution,
+                              docking_consent_policy=rig.policy, consent_wall_time_ms=rig.clock.wall_time_ms,
+                              consent_monotonic=rig.clock.monotonic,
+                              uuid_factory=lambda: forbidden("replacement-task-id"),
+                              temporal_backend_factory=lambda: forbidden("temporal"))
+        backend = runtime.local_backend  # The actual default LocalTaskBackend/handler.
+        original_stage, original_discard = stager.stage, stager.discard_unprojected
+        original_submit, original_cancel = backend.submit, backend.cancel
+        original_lease = execution._stager.task_execution
+
+        def stage(*args, **kwargs):
+            rig.stages.append(args[0])
+            return original_stage(*args, **kwargs)
+
+        def discard(*args, **kwargs):
+            entry = {"task_id": args[0], "all_raw_exited": all(x["exited"].is_set() for x in rig.raw),
+                     "all_leases_exited": all(x["exited"].is_set() for x in rig.leases)}
+            rig.discards.append(entry)  # BEFORE any original stager lock.
+            entry["result"] = original_discard(*args, **kwargs)
+            return entry["result"]
+
+        async def submit(submission):
+            rig.submits.append(submission)
+            return await original_submit(submission)
+
+        async def cancel(*args, **kwargs):
+            rig.cancels.append(args[0])
+            return await original_cancel(*args, **kwargs)
+
+        @contextmanager
+        def lease(task_id, *args, **kwargs):
+            entry = {"task_id": task_id, "exited": threading.Event()}
+            try:
+                with original_lease(task_id, *args, **kwargs) as actual:
+                    rig.leases.append(entry)
+                    yield actual
+            finally:
+                entry["exited"].set()  # Original context has exited, including error paths.
+
+        monkeypatch.setattr(stager, "stage", stage)
+        monkeypatch.setattr(stager, "discard_unprojected", discard)
+        monkeypatch.setattr(backend, "submit", submit)
+        monkeypatch.setattr(backend, "cancel", cancel)
+        monkeypatch.setattr(execution._stager, "task_execution", lease)
+        item = SimpleNamespace(runtime=runtime, store=store, stager=stager, execution=execution, backend=backend)
+        rig.runtimes.append(item)
+        return item
+
+    rig.new_runtime = new_runtime
+    rig.first = new_runtime()
+    return rig
+
+
+async def _c2_ready(rig, draft=None, *, item=None):
+    draft, item = draft or identity(), item or rig.first
+    item.store.reserve_docking_consent_draft(identity=copy.deepcopy(draft), policy=rig.policy,
+                                            now_ms=rig.clock.wall, monotonic_now=rig.clock.mono)
+    preview = await prepare(SimpleNamespace(runtime=item.runtime), draft)
+    return preview.to_dict()
+
+
+async def _c2_approve(rig, proof, *, item=None, owner=None, **changes):
+    item = item or rig.first
+    values = dict(preparation_id=proof["preparation_id"], owner_session_id=owner or "owner-1",
+                  approval_nonce=proof["approval_nonce"], binding_digest=proof["binding_digest"], confirm=True)
+    values.update(changes)
+    return await item.runtime.approve_docking_consent(**values)
+
+
+def _c2_task(rig, coroutine):
+    task = asyncio.create_task(coroutine)
+    rig.pending.append(task)
+    return task
+
+
+async def _c2_result(task):
+    done, _ = await asyncio.wait({task}, timeout=5)
+    assert task in done, "C2 caller awaited a held physical operation"
+    return task.result()
+
+
+def _c2_receipt(value, draft):
+    assert type(value) is dict and set(value) == _C2_RECEIPT_KEYS
+    for key in ("preparation_id", "task_id", "trace_id"):
+        assert value[key] == draft[key]
+    assert value["view_status"] in {"ACTIVE", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"}
+    assert value["dispatch_state"] in {"not_reserved", "reserved", "unknown"}
+    assert value["cleanup_status"] in {"pending", "settled", "unresolved"}
+    assert type(value["persistence_pending"]) is bool
+    assert value["task_status"] in {None, "queued", "running", "cancel_requested", "succeeded",
+                                    "failed", "canceled", "timed_out"}
+    return value
+
+
+async def _c2_view(rig, draft=None, *, item=None):
+    draft, item = draft or identity(), item or rig.first
+    return _c2_receipt(await item.runtime.get_docking_consent_view(
+        task_id=draft["task_id"], owner_session_id=draft["owner_session_id"]), draft)
+
+
+async def _c2_terminal(rig, status, draft=None):
+    deadline = asyncio.get_running_loop().time() + 5
+    while True:
+        view = await _c2_view(rig, draft)
+        if view["view_status"] == status and view["cleanup_status"] == "settled":
+            return view
+        assert asyncio.get_running_loop().time() < deadline, "C2 expected terminal/cleanup did not settle"
+        await asyncio.sleep(0.01)
+
+
+async def _c2_finish(rig):
+    for release in rig.releases:
+        release.set()
+    for task in rig.pending:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*rig.pending, return_exceptions=True)
+    for item in rig.runtimes:
+        outcome = (await asyncio.gather(item.runtime.close(), return_exceptions=True))[0]
+        if outcome is not None:
+            assert isinstance(outcome, rig.api.DockingConsentError)
+            assert outcome.reason_code == "consent_cleanup_unresolved"
+            # An uncertain C receipt must not hide a still-live legacy backend.
+            await item.backend.close()
+        assert item.backend.background_task_count == 0
+    assert all(entry["exited"].is_set() for entry in rig.raw)
+    assert all(entry["exited"].is_set() for entry in rig.leases)
+    assert rig.calls == [] and rig.errors == []
+
+
+def test_c2_approve_same_identity_once(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            before = _c2_row(rig, identity())
+            _c2_receipt(await _c2_approve(rig, proof), identity())
+            final = await _c2_terminal(rig, "SUCCEEDED")
+            assert final["reason_code"] is None and not final["persistence_pending"]
+            assert final["consent_state"] == "DISPATCH_RESERVED" and final["task_status"] == "succeeded"
+            assert len(rig.submits) == len(rig.raw) == 1 and rig.stages == ["c-task-1"]
+            submission = rig.submits[0]
+            assert submission.task_id == "c-task-1"
+            assert Path(submission.input_manifest_path) == rig.root / "c-task-1" / "input_manifest.json"
+            binding = json.loads(before["binding_json"])
+            assert submission.request_digest == binding["request_digest"]
+            assert rig.raw[0]["receptor"] == RECEPTOR and rig.raw[0]["ligand"] == LIGAND
+            completion = rig.first.execution._completions.load_verified(
+                "c-task-1", input_hash=binding["input_hash"], config_hash=binding["config_hash"])
+            pose = rig.root / "c-task-1" / completion.pose.path
+            assert hashlib.sha256(pose.read_bytes()).hexdigest() == completion.pose.sha256
+            assert completion.task_id == "c-task-1" and completion.best_energy == -7.2 and completion.pose_count == 1
+            assert _c2_row(rig, identity())["binding_json"] == before["binding_json"]
+            assert proof["approval_nonce"] not in json.dumps(final)
+            final["trace_id"] = "mutated-detached-copy"
+            assert (await _c2_view(rig))["trace_id"] == "trace-1"
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("fault,reason", [
+    ("foreign", "consent_not_found"), ("missing", "consent_not_found"),
+    ("nonce", "consent_proof_mismatch"), ("digest", "consent_proof_mismatch"),
+    ("bool-int", "consent_invalid_input"), ("false", "consent_invalid_input"),
+    ("nonce-type", "consent_invalid_input"), ("extra", "consent_invalid_input"),
+    ("file", "consent_binding_mismatch"), ("config", "consent_binding_mismatch"),
+    ("policy", "consent_binding_mismatch"), ("backend", "consent_binding_mismatch"),
+    ("adapter", "consent_binding_mismatch"), ("policy-unavailable", "consent_policy_unavailable"),
+    ("generation", "consent_generation_mismatch"), ("runtime-generation", "consent_generation_mismatch"),
+    ("expiry", "consent_expired"), ("rollback", "consent_expired"),
+])
+def test_c2_reject_invalid_or_changed_proof(tmp_path, monkeypatch, fault, reason):
+    rig = _c2_rig(tmp_path, monkeypatch)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            changes = {}
+            if fault == "foreign":
+                changes["owner"] = "owner-foreign"
+            elif fault == "missing":
+                changes["preparation_id"] = "preparation-missing"
+            elif fault in {"nonce", "digest"}:
+                key = "approval_nonce" if fault == "nonce" else "binding_digest"
+                changes[key] = ("0" if proof[key][0] != "0" else "1") + proof[key][1:]
+            elif fault in {"bool-int", "false"}:
+                changes["confirm"] = 1 if fault == "bool-int" else False
+            elif fault == "nonce-type":
+                changes["approval_nonce"] = 123
+            elif fault == "extra":
+                changes["timeout"] = 999
+            elif fault == "file":
+                (rig.root / "c-task-1" / "inputs" / "receptor.pdb").write_bytes(b"X" * len(RECEPTOR))
+            elif fault == "config":
+                path = rig.root / "c-task-1" / "input_manifest.json"
+                manifest = json.loads(path.read_text(encoding="utf-8"))
+                manifest["config"]["center"][0] += 1
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+            elif fault == "policy":
+                rig.first.runtime._docking_consent_policy = policy(rig.api,
+                    adapter_contract_version=rig.policy.adapter_contract_version, tool_policy_digest="b" * 64)
+            elif fault == "adapter":
+                rig.first.runtime._docking_consent_policy = policy(rig.api, adapter_contract_version="changed-adapter")
+            elif fault == "policy-unavailable":
+                rig.first.runtime._docking_consent_policy = None
+            elif fault == "generation":
+                rig.first.runtime._docking_consent_policy = policy(rig.api,
+                    adapter_contract_version=rig.policy.adapter_contract_version, policy_generation="policy-2")
+            elif fault == "runtime-generation":
+                rig.first.runtime._docking_consent_policy = policy(rig.api,
+                    adapter_contract_version=rig.policy.adapter_contract_version, runtime_generation="runtime-2")
+            elif fault == "backend":
+                # Actual stored-policy corruption; no enabling another backend.
+                with sqlite3.connect(rig.db) as conn:
+                    saved = json.loads(conn.execute("SELECT policy_json FROM docking_consents").fetchone()[0])
+                    saved["execution_backend"] = "opensandbox"
+                    conn.execute("UPDATE docking_consents SET policy_json=?", (json.dumps(saved),))
+            elif fault == "expiry":
+                rig.clock.wall += TTL_MS
+                rig.clock.mono += TTL_MS / 1000
+            elif fault == "rollback":
+                rig.clock.wall -= 1000
+                rig.clock.mono += TTL_MS / 1000
+            private_io = []
+            original_verify = rig.first.stager.load_verified_locator
+
+            def observed_verify(*args, **kwargs):
+                private_io.append("manifest-read")
+                return original_verify(*args, **kwargs)
+
+            monkeypatch.setattr(rig.first.stager, "load_verified_locator", observed_verify)
+            if fault == "extra":
+                with pytest.raises(TypeError):  # Native closed method signature, not an HTTP error mapping.
+                    await _c2_approve(rig, proof, **changes)
+            else:
+                with pytest.raises(rig.api.DockingConsentError) as caught:
+                    await _c2_approve(rig, proof, **changes)
+                assert str(caught.value) == caught.value.reason_code == reason
+            assert rig.submits == rig.raw == [] and rig.stages == ["c-task-1"]
+            assert _c2_row(rig, identity())["state"] not in {"CLAIMED", "DISPATCH_RESERVED"}
+            if fault in {"foreign", "missing"}:
+                assert private_io == []
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def _c2_sql_probe(rig, monkeypatch, *, race=False, fail_after_state=None, block_cancel=False):
+    """Delegate real SQL/context/commit. Observe transitions, never synthesize CAS."""
+    from contextlib import contextmanager
+    import src.task_runtime.store as store_module
+
+    original = store_module.connection
+    gate = threading.Barrier(2, timeout=5)
+    lock = threading.Lock()
+    release, entered = threading.Event(), threading.Event()
+    rig.releases.append(release)
+    probe = SimpleNamespace(connections=[], commits=[], faults=[], race_connections=[],
+                            cancel_writes=[], entered=entered, release=release, original=original)
+
+    @contextmanager
+    def connection(*args, **kwargs):
+        tx = {"transitions": [], "trace": [], "exited": threading.Event()}
+        probe.connections.append(tx)
+        try:
+            with original(*args, **kwargs) as actual:
+                def trace(statement):
+                    label = statement.strip().upper()
+                    if label in {"COMMIT", "ROLLBACK"}:
+                        tx["trace"].append(label)
+                actual.set_trace_callback(trace)
+
+                class Observer:
+                    def execute(self, sql, parameters=()):
+                        normalized = " ".join(sql.upper().split())
+                        if race and normalized == "BEGIN IMMEDIATE":
+                            with lock:
+                                chosen = len(probe.race_connections) < 2
+                                if chosen:
+                                    probe.race_connections.append(actual)
+                            if chosen:
+                                gate.wait()  # BEFORE either real SQLite write-lock acquisition.
+                        cancel_write = (block_cancel and normalized.startswith("UPDATE TASKS ")
+                                        and "cancel_requested" in parameters)
+                        if cancel_write:
+                            probe.cancel_writes.append("actual-task-cancel-update")
+                            entered.set()
+                            if not release.wait(40):
+                                rig.errors.append("cancel SQL fixture escape")
+                                raise RuntimeError("cancel SQL barrier not released")
+                        change = normalized.startswith("UPDATE DOCKING_CONSENTS ")
+                        before = {}
+                        if change:
+                            before = {row["preparation_id"]: row["state"] for row in actual.execute(
+                                "SELECT preparation_id,state FROM docking_consents").fetchall()}
+                        cursor = actual.execute(sql, parameters)
+                        if change:
+                            for row in actual.execute("SELECT preparation_id,state FROM docking_consents").fetchall():
+                                if before.get(row["preparation_id"]) != row["state"]:
+                                    tx["transitions"].append((row["preparation_id"], row["state"]))
+                        return cursor
+
+                    def __getattr__(self, name):
+                        return getattr(actual, name)
+
+                yield Observer()
+            # Original context committed and closed successfully, not merely traced COMMIT.
+            probe.commits.extend(tx["transitions"])
+            if fail_after_state and any(state == fail_after_state for _, state in tx["transitions"]):
+                row = _c2_row(rig, identity())
+                probe.faults.append({"state": row["state"], "trace": tuple(tx["trace"])})
+                raise RuntimeError("injected exception AFTER actual SQL commit")
+        finally:
+            tx["exited"].set()
+
+    monkeypatch.setattr(store_module, "connection", connection)
+    return probe
+
+
+@pytest.mark.parametrize("competition", ["same-proof", "global-capacity"])
+def test_c2_sqlite_claim_and_execution_capacity_race(tmp_path, monkeypatch, competition):
+    rig = _c2_rig(tmp_path, monkeypatch, hold_raw=True)
+
+    async def run():
+        try:
+            first = await _c2_ready(rig)
+            second_runtime = rig.new_runtime()
+            second_draft = identity() if competition == "same-proof" else identity(2)
+            second = first if competition == "same-proof" else await _c2_ready(rig, second_draft, item=second_runtime)
+            if competition == "global-capacity":
+                assert first["receptor"]["sha256"] == second["receptor"]["sha256"]
+                assert first["binding_digest"] != second["binding_digest"]
+                assert first["approval_nonce"] != second["approval_nonce"]
+            probe = _c2_sql_probe(rig, monkeypatch, race=True)
+            a = _c2_task(rig, _c2_approve(rig, first))
+            b = _c2_task(rig, _c2_approve(rig, second, item=second_runtime, owner=second_draft["owner_session_id"]))
+            done, _ = await asyncio.wait({a, b}, timeout=6)
+            assert done == {a, b}
+            results = await asyncio.gather(a, b, return_exceptions=True)
+            assert len(probe.race_connections) == 2 and probe.race_connections[0] is not probe.race_connections[1]
+            claims = [entry for entry in probe.commits if entry[1] == "CLAIMED"]
+            assert len(claims) == 1 and len(rig.submits) == 1
+            if competition == "same-proof":
+                for result in results:
+                    _c2_receipt(result, identity())
+            else:
+                errors = [result for result in results if isinstance(result, rig.api.DockingConsentError)]
+                assert len(errors) == 1 and errors[0].reason_code == "consent_execution_busy"
+                assert sum(type(result) is dict for result in results) == 1
+            assert await asyncio.to_thread(rig.raw_entered.wait, 5)
+            assert len(rig.raw) == 1
+            assert rig.stages == (["c-task-1"] if competition == "same-proof" else ["c-task-1", "c-task-2"])
+            winning = identity(1 if rig.raw[0]["task_id"] == "c-task-1" else 2)
+            assert _c2_row(rig, winning)["state"] == "DISPATCH_RESERVED"
+            rig.raw_release.set()
+            await _c2_terminal(rig, "SUCCEEDED", winning)
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("boundary", ["CLAIMED", "DISPATCH_RESERVED"])
+def test_c2_committed_claim_or_reservation_exception_never_replays(tmp_path, monkeypatch, boundary):
+    rig = _c2_rig(tmp_path, monkeypatch)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            probe = _c2_sql_probe(rig, monkeypatch, fail_after_state=boundary)
+            result = (await asyncio.gather(_c2_approve(rig, proof), return_exceptions=True))[0]
+            if isinstance(result, rig.api.DockingConsentError):
+                assert result.reason_code == "consent_execution_unknown"
+            else:
+                _c2_receipt(result, identity())
+            deadline = asyncio.get_running_loop().time() + 5
+            while not probe.faults:
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
+            assert probe.faults == [{"state": boundary, "trace": ("COMMIT",)}]
+            assert _c2_row(rig, identity())["state"] == boundary
+            assert rig.raw == [] and len(rig.submits) == (0 if boundary == "CLAIMED" else 1)
+            # Finish actual threads/lease before restart simulation. No process
+            # crash or fictitious surviving owner is claimed by this exception.
+            await _c2_finish(rig)
+            assert all(tx["exited"].is_set() for tx in probe.connections)
+            replacement = rig.new_runtime()
+            repeat = await _c2_approve(rig, proof, item=replacement)
+            _c2_receipt(repeat, identity())
+            assert repeat["view_status"] == "UNKNOWN" and repeat["reason_code"] == "consent_execution_unknown"
+            assert repeat["consent_state"] != "READY"
+            assert rig.raw == [] and len(rig.submits) == (0 if boundary == "CLAIMED" else 1)
+            assert rig.stages == ["c-task-1"]
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c2_backend_start_then_raise_keeps_first_failure_and_single_owner(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch, hold_raw=True)
+    submit = rig.first.backend.submit
+    accepted = []
+
+    async def start_then_raise(submission):
+        result = await submit(submission)
+        assert await asyncio.to_thread(rig.raw_entered.wait, 5)
+        accepted.append(result)
+        raise RuntimeError("injected after actual backend acceptance and raw entry")
+
+    monkeypatch.setattr(rig.first.backend, "submit", start_then_raise)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            other = await _c2_ready(rig, identity(2))
+            result = (await asyncio.gather(_c2_approve(rig, proof), return_exceptions=True))[0]
+            assert len(accepted) == len(rig.submits) == len(rig.raw) == 1
+            if isinstance(result, rig.api.DockingConsentError):
+                assert result.reason_code == "consent_execution_unknown"
+            else:
+                _c2_receipt(result, identity())
+                assert result["view_status"] == "UNKNOWN"
+            before = await _c2_view(rig)
+            assert before["view_status"] == "UNKNOWN" and before["reason_code"] == "consent_execution_unknown"
+            repeat = await _c2_approve(rig, proof)
+            assert repeat["view_status"] == "UNKNOWN" and len(rig.submits) == 1
+            assert not rig.raw[0]["exited"].is_set() and not rig.leases[0]["exited"].is_set()
+            with pytest.raises(rig.api.DockingConsentError) as caught:
+                await _c2_approve(rig, other, owner="owner-2")
+            assert caught.value.reason_code == "consent_execution_busy"
+            assert len(rig.submits) == 1
+            rig.raw_release.set()
+            await _c2_terminal(rig, "UNKNOWN")
+            assert rig.raw[0]["returned_success"] and len(rig.raw) == 1
+            assert (await _c2_view(rig))["reason_code"] == before["reason_code"]
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c2_lost_reply_repeat_owned_view_and_completion_do_not_reinvoke(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            await _c2_approve(rig, proof)  # Actual reply deliberately discarded by client.
+            original = await _c2_terminal(rig, "SUCCEEDED")
+            for _ in range(2):
+                assert await _c2_approve(rig, proof) == original
+            with pytest.raises(rig.api.DockingConsentError) as caught:
+                await _c2_approve(rig, proof, owner="foreign")
+            assert caught.value.reason_code == "consent_not_found"
+            with pytest.raises(rig.api.DockingConsentError) as caught:
+                await _c2_approve(rig, proof, approval_nonce="f" * 64 if proof["approval_nonce"] != "f" * 64 else "e" * 64)
+            assert caught.value.reason_code == "consent_proof_mismatch"
+            # Foreign/unknown view must not reach even a backend refresh.
+            refreshes = []
+            original_get = rig.first.backend.get
+
+            async def observed_get(*args, **kwargs):
+                refreshes.append("refresh")
+                return await original_get(*args, **kwargs)
+
+            monkeypatch.setattr(rig.first.backend, "get", observed_get)
+            for task_id in ("c-task-1", "missing"):
+                with pytest.raises(rig.api.DockingConsentError) as caught:
+                    await rig.first.runtime.get_docking_consent_view(task_id=task_id, owner_session_id="foreign")
+                assert caught.value.reason_code == "consent_not_found"
+            assert refreshes == []
+            # Already confirmed terminal cannot be rewritten by later cancellation.
+            cancelled = await rig.first.runtime.cancel_docking_consent(task_id="c-task-1", owner_session_id="owner-1")
+            assert cancelled == original and rig.cancels == []
+            assert len(rig.submits) == len(rig.raw) == 1 and rig.stages == ["c-task-1"]
+            assert proof["approval_nonce"] not in json.dumps(cancelled)
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c2_cancel_ready_before_claim_revokes_without_duplicate_cleanup(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            first = await rig.first.runtime.cancel_docking_consent(task_id="c-task-1", owner_session_id="owner-1")
+            _c2_receipt(first, identity())
+            assert first["view_status"] == "CANCELLED"
+            final = await _c2_terminal(rig, "CANCELLED")
+            assert final["consent_state"] == "REVOKED" and final["dispatch_state"] == "not_reserved"
+            assert final["reason_code"] == "consent_cancelled" and final["task_status"] is None
+            row = _c2_row(rig, identity())
+            assert row["state"] == "REVOKED" and row["approval_nonce_hash"] is None
+            assert len(rig.discards) == 1 and rig.discards[0]["result"] is True
+            assert not (rig.root / "c-task-1").exists()
+            again = await rig.first.runtime.cancel_docking_consent(task_id="c-task-1", owner_session_id="owner-1")
+            assert again == final and len(rig.discards) == 1
+            with pytest.raises(rig.api.DockingConsentError) as caught:
+                await _c2_approve(rig, proof)
+            assert caught.value.reason_code == "consent_not_waiting"
+            assert rig.submits == rig.raw == rig.cancels == []
+            assert proof["approval_nonce"] not in json.dumps(again)
+            await _c2_ready(rig, identity(2, owner="owner-1"))  # Settled preparation capacity is reusable.
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c2_cancel_before_task_projection_retains_real_submit_owner(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch)
+    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
+    rig.releases.append(release)
+    create = rig.first.store.create
+    created = []
+
+    def held_create(*args, **kwargs):
+        entered.set()
+        try:
+            if not release.wait(40):
+                rig.errors.append("create fixture escape")
+                raise RuntimeError("create fixture barrier not released")
+            result = create(*args, **kwargs)  # Real original SQLite create/commit.
+            created.append(result.task_id)
+            return result
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(rig.first.store, "create", held_create)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            approval = _c2_task(rig, _c2_approve(rig, proof))
+            assert await asyncio.to_thread(entered.wait, 5)
+            with pytest.raises(KeyError):
+                rig.first.store.get("c-task-1")
+            assert _c2_row(rig, identity())["state"] == "CLAIMED"
+            cancellation = _c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                task_id="c-task-1", owner_session_id="owner-1"))
+            first = _c2_receipt(await _c2_result(cancellation), identity())
+            assert first["view_status"] == "CANCELLED" and first["reason_code"] == "consent_cancelled"
+            assert not exited.is_set() and created == [] and rig.raw == rig.discards == []
+            assert (rig.root / "c-task-1" / "inputs" / "receptor.pdb").read_bytes() == RECEPTOR
+            repeated = _c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                task_id="c-task-1", owner_session_id="owner-1"))
+            assert (await _c2_result(repeated))["view_status"] == "CANCELLED"
+            release.set()
+            outcome = await _c2_result(approval)
+            assert outcome["view_status"] == "CANCELLED"
+            final = await _c2_terminal(rig, "CANCELLED")
+            assert exited.is_set() and created == ["c-task-1"]
+            assert final["task_status"] == "canceled" and len(rig.submits) == 1
+            assert rig.raw == [] and len(rig.cancels) <= 1
+            assert all(item["result"] and item["all_raw_exited"] and item["all_leases_exited"] for item in rig.discards)
+        finally:
+            await _c2_finish(rig)
+            if entered.is_set():
+                assert exited.is_set()
+
+    asyncio.run(run())
+
+
+def test_c2_repeat_cancel_running_signals_before_blocked_sql_and_retains_capacity(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch, hold_raw=True)
+
+    async def run():
+        probe = None
+        try:
+            proof = await _c2_ready(rig)
+            other = await _c2_ready(rig, identity(2))
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(rig.raw_entered.wait, 5)
+            assert len(rig.raw) == 1 and not rig.raw[0]["cancel_event"].is_set()
+            probe = _c2_sql_probe(rig, monkeypatch, block_cancel=True)
+            cancellation = _c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                task_id="c-task-1", owner_session_id="owner-1"))
+            assert await asyncio.to_thread(probe.entered.wait, 5)
+            # SQL is genuinely held before the actual task cancellation UPDATE;
+            # signal ordering cannot be hidden by a fast or mocked DB response.
+            assert rig.raw[0]["cancel_event"].is_set()
+            first = _c2_receipt(await _c2_result(cancellation), identity())
+            assert first["view_status"] == "CANCELLED" and first["reason_code"] == "consent_cancelled"
+            assert first["persistence_pending"] is True
+            for _ in range(2):
+                repeat = _c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                    task_id="c-task-1", owner_session_id="owner-1"))
+                assert (await _c2_result(repeat))["view_status"] == "CANCELLED"
+            assert rig.cancels == ["c-task-1"] and len(probe.cancel_writes) == 1
+            assert rig.discards == [] and not rig.raw[0]["exited"].is_set()
+            assert len(rig.leases) == 1 and not rig.leases[0]["exited"].is_set()
+            assert _c2_row(rig, identity())["cleanup_state"] != "settled"
+            # No competing test writes while the actual SQL lock is held.
+            probe.release.set()
+            deadline = asyncio.get_running_loop().time() + 5
+            while not all(tx["exited"].is_set() for tx in probe.connections):
+                assert asyncio.get_running_loop().time() < deadline
+                await asyncio.sleep(0.01)
+            with pytest.raises(rig.api.DockingConsentError) as caught:
+                await _c2_approve(rig, other, owner="owner-2")
+            assert caught.value.reason_code == "consent_execution_busy"
+            assert len(rig.submits) == 1 and rig.discards == []
+            rig.raw_release.set()
+            final = await _c2_terminal(rig, "CANCELLED")
+            assert final["reason_code"] == "consent_cancelled" and not final["persistence_pending"]
+            assert rig.raw[0]["returned_success"] and rig.raw[0]["exited"].is_set()
+            assert rig.leases[0]["exited"].is_set() and len(rig.raw) == 1
+            assert len(rig.discards) == 1
+            assert rig.discards[0]["all_raw_exited"] and rig.discards[0]["all_leases_exited"]
+            assert rig.discards[0]["result"] is True
+            assert await rig.first.runtime.cancel_docking_consent(
+                task_id="c-task-1", owner_session_id="owner-1") == final
+            assert rig.cancels == ["c-task-1"] and len(rig.discards) == 1
+        finally:
+            await _c2_finish(rig)
+            if probe is not None:
+                assert all(tx["exited"].is_set() for tx in probe.connections)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("interrupt,reason", [
+    ("cancel", "consent_cancelled"), ("consent-expiry", "consent_expired"),
+    ("operation-deadline", "consent_execution_timeout"),
+])
+def test_c2_cancel_or_expire_under_actual_lease_before_raw(tmp_path, monkeypatch, interrupt, reason):
+    from contextlib import contextmanager
+
+    rig = _c2_rig(tmp_path, monkeypatch)
+    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
+    rig.releases.append(release)
+    execution_stager = rig.first.execution._stager
+    original = execution_stager.task_execution
+
+    @contextmanager
+    def held_lease(*args, **kwargs):
+        try:
+            with original(*args, **kwargs) as actual:
+                entered.set()  # Actual verified inputs and cross-process lease already acquired.
+                if not release.wait(40):
+                    rig.errors.append("lease fixture escape")
+                    raise RuntimeError("lease fixture barrier not released")
+                yield actual
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(execution_stager, "task_execution", held_lease)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            if interrupt == "consent-expiry":
+                rig.clock.wall += TTL_MS - 1000
+                rig.clock.mono += TTL_MS / 1000 - 1
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert rig.raw == [] and not exited.is_set()
+            if interrupt == "cancel":
+                value = await _c2_result(_c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                    task_id="c-task-1", owner_session_id="owner-1")))
+                assert value["view_status"] == "CANCELLED"
+            else:
+                # Existing injected server clocks; never modify policy limits,
+                # the event-loop clock or the runner's actual watchdog.
+                delta = 1 if interrupt == "consent-expiry" else 420
+                rig.clock.wall += delta * 1000
+                rig.clock.mono += delta
+            release.set()
+            status = "CANCELLED" if interrupt == "cancel" else "TIMED_OUT"
+            final = await _c2_terminal(rig, status)
+            assert final["reason_code"] == reason and rig.raw == []
+            assert final["consent_state"] != "DISPATCH_RESERVED" and len(rig.submits) == 1
+            assert exited.is_set() and all(item["all_leases_exited"] for item in rig.discards)
+        finally:
+            await _c2_finish(rig)
+            if entered.is_set():
+                assert exited.is_set()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("clock", ["wall", "monotonic", "both", "not-expired"])
+def test_c2_expiry_after_committed_reservation_blocks_raw_dispatch(tmp_path, monkeypatch, clock):
+    rig = _c2_rig(tmp_path, monkeypatch)
+    reserved, release = threading.Event(), threading.Event()
+    rig.releases.append(release)
+    original = rig.first.store._reserve_docking_dispatch
+
+    def hold_committed_reservation(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # Real validation, integrity verification, SQL commit and close ran.
+        reserved.set()
+        if not release.wait(40):
+            rig.errors.append("committed reservation fixture escape")
+            raise RuntimeError("reservation barrier not released")
+        return result
+
+    monkeypatch.setattr(rig.first.store, "_reserve_docking_dispatch", hold_committed_reservation)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            rig.clock.wall += TTL_MS - 1000
+            rig.clock.mono += TTL_MS / 1000 - 1
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(reserved.wait, 5)
+            row = _c2_row(rig, identity())
+            assert row["state"] == "DISPATCH_RESERVED" and row["dispatch_state"] == "reserved"
+            assert rig.raw == [] and len(rig.leases) == 1
+            assert not rig.leases[0]["exited"].is_set()
+            if clock in {"wall", "both"}:
+                rig.clock.wall += 1000
+            if clock in {"monotonic", "both"}:
+                rig.clock.mono += 1
+            release.set()
+            deadline = asyncio.get_running_loop().time() + 5
+            while True:
+                final = await _c2_view(rig)
+                if final["view_status"] != "ACTIVE" and final["cleanup_status"] == "settled":
+                    break
+                assert asyncio.get_running_loop().time() < deadline, "dispatch boundary did not settle"
+                await asyncio.sleep(0.01)
+            expected_calls = 1 if clock == "not-expired" else 0
+            assert len(rig.raw) == expected_calls, "expired consent reached raw docking"
+            assert final["view_status"] == ("SUCCEEDED" if expected_calls else "TIMED_OUT")
+            assert final["reason_code"] == (None if expected_calls else "consent_expired")
+            assert final["dispatch_state"] == "reserved"
+            assert _c2_row(rig, identity())["state"] == "DISPATCH_RESERVED"
+            assert len(rig.submits) == 1
+            assert all(entry["exited"].is_set() for entry in rig.leases)
+            assert all(entry["all_leases_exited"] for entry in rig.discards)
+            if expected_calls:
+                assert rig.discards == []
+            else:
+                assert len(rig.discards) == 1 and rig.discards[0]["result"] is True
+                assert not (rig.root / "c-task-1").exists()
+            again = await _c2_approve(rig, proof)
+            assert again["view_status"] == final["view_status"]
+            assert len(rig.raw) == expected_calls and len(rig.submits) == 1
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+def test_c2_valid_dispatch_can_finish_after_consent_expiry(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch, hold_raw=True)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            rig.clock.wall += TTL_MS - 1000
+            rig.clock.mono += TTL_MS / 1000 - 1
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(rig.raw_entered.wait, 5)
+            rig.clock.wall += 1000
+            rig.clock.mono += 1
+            rig.raw_release.set()
+            final = await _c2_terminal(rig, "SUCCEEDED")
+            assert final["reason_code"] is None
+            assert len(rig.raw) == len(rig.submits) == 1
+            assert rig.raw[0]["returned_success"]
+            assert all(entry["exited"].is_set() for entry in rig.leases)
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("binding", "consent_binding_mismatch"), ("policy", "consent_binding_mismatch"),
+    ("policy-generation", "consent_generation_mismatch"),
+    ("runtime-generation", "consent_generation_mismatch"),
+    ("input", "consent_binding_mismatch"), ("config", "consent_binding_mismatch"),
+])
+def test_c2_post_claim_changes_are_rechecked_before_dispatch(tmp_path, monkeypatch, change, reason):
+    from contextlib import contextmanager
+    from dataclasses import replace
+    import src.task_runtime.staging as staging_module
+
+    rig = _c2_rig(tmp_path, monkeypatch)
+    entered, release, verified, exited = (threading.Event() for _ in range(4))
+    rig.releases.append(release)
+    execution_stager = rig.first.execution._stager
+    original = execution_stager.task_execution
+
+    @contextmanager
+    def held_before_verification(*args, **kwargs):
+        # run_verified already reached its real execution boundary, after claim
+        # and submit. No original lease or test SQLite transaction is held here.
+        entered.set()
+        try:
+            if not release.wait(40):
+                rig.errors.append("post-claim fixture escape")
+                raise RuntimeError("post-claim fixture barrier not released")
+            with original(*args, **kwargs) as actual:
+                verified.set()  # Original snapshot/lease verification really succeeded.
+                yield actual
+        finally:
+            exited.set()
+
+    monkeypatch.setattr(execution_stager, "task_execution", held_before_verification)
+
+    async def run():
+        probe = None
+        try:
+            proof = await _c2_ready(rig)
+            sealed = _c2_row(rig, identity())
+            probe = _c2_sql_probe(rig, monkeypatch)
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(entered.wait, 5)
+            assert probe.commits.count(("preparation-1", "CLAIMED")) == 1
+            assert _c2_row(rig, identity())["state"] == "CLAIMED"
+            assert len(rig.submits) == 1 and rig.raw == rig.leases == []
+            assert not verified.is_set() and not exited.is_set()
+
+            if change == "binding":
+                digest = sealed["binding_digest"]
+                changed_digest = ("0" if digest[0] != "0" else "1") + digest[1:]
+                conn = sqlite3.connect(rig.db)
+                try:
+                    conn.execute("UPDATE docking_consents SET binding_digest=? WHERE preparation_id=?",
+                                 (changed_digest, "preparation-1"))
+                    conn.commit()  # Actual independent tamper, not a mocked returned record.
+                finally:
+                    conn.close()
+                assert _c2_row(rig, identity())["binding_digest"] == changed_digest
+            elif change == "policy":
+                rig.first.runtime._docking_consent_policy = replace(rig.policy, tool_policy_digest="b" * 64)
+            elif change == "policy-generation":
+                rig.first.runtime._docking_consent_policy = replace(rig.policy, policy_generation="policy-2")
+            elif change == "runtime-generation":
+                rig.first.runtime._docking_consent_policy = replace(rig.policy, runtime_generation="runtime-2")
+            else:
+                manifest_path = rig.root / "c-task-1" / "input_manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if change == "input":
+                    changed = b"X" * len(RECEPTOR)
+                    (rig.root / "c-task-1" / manifest["receptor"]["path"]).write_bytes(changed)
+                    manifest["receptor"]["sha256"] = hashlib.sha256(changed).hexdigest()
+                else:
+                    manifest["config"]["center"][0] += 1
+                    manifest["config_hash"] = staging_module._config_hash(manifest["config"])
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                # Self-consistent actual staging must still verify; rejection
+                # cannot be credited merely to a broken file/hash fixture.
+                actual = rig.first.stager.load_verified_locator("c-task-1", "input_manifest.json")
+                binding = json.loads(sealed["binding_json"])
+                if change == "input":
+                    assert actual["receptor"]["sha256"] != binding["receptor"]["sha256"]
+                else:
+                    assert actual["config_hash"] != binding["config_hash"]
+            assert rig.raw == [] and _c2_row(rig, identity())["state"] == "CLAIMED"
+            release.set()
+            try:
+                final = await _c2_terminal(rig, "FAILED")
+            except AssertionError:
+                if change != "runtime-generation":
+                    raise
+                # Capture BEFORE finally drain, using an independent SQLite read.
+                # Only fixed labels/counts/booleans; no private row or exception dump.
+                actual = _c2_row(rig, identity())
+                safe = lambda value, allowed: value if value in allowed else "unrecognized"
+                facts = {
+                    "db_view": safe(actual["view_status"], {
+                        "ACTIVE", "SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"}),
+                    "db_reason": safe(actual["primary_reason"], {
+                        None, "consent_generation_mismatch", "consent_execution_unknown",
+                        "consent_cancelled", "consent_cleanup_unresolved", "consent_execution_failed"}),
+                    "db_cleanup": safe(actual["cleanup_state"], {"pending", "settled", "unresolved"}),
+                    "db_execution_occupied": safe(actual["execution_occupied"], {0, 1}),
+                    "operation_present": identity()["task_id"] in rig.first.runtime._consent_executions,
+                    "lease_count": len(rig.leases),
+                    "all_leases_exited": all(entry["exited"].is_set() for entry in rig.leases),
+                    "verification_entered": verified.is_set(),
+                    "boundary_exited": exited.is_set(),
+                    "backend_live_count": rig.first.backend.background_task_count,
+                    "raw_count": len(rig.raw),
+                    "all_raw_exited": all(entry["exited"].is_set() for entry in rig.raw),
+                    "cleanup_entry_count": len(rig.discards),
+                    "cleanup_true_count": sum(entry.get("result") is True for entry in rig.discards),
+                }
+                raise AssertionError("C2 generation terminal facts: " + json.dumps(facts, sort_keys=True)) from None
+            assert final["reason_code"] == reason and final["dispatch_state"] == "not_reserved"
+            assert verified.is_set() and exited.is_set()
+            assert rig.raw == [] and len(rig.submits) == 1 and rig.stages == ["c-task-1"]
+            assert all(state != "DISPATCH_RESERVED" for _, state in probe.commits)
+            assert _c2_row(rig, identity())["state"] != "DISPATCH_RESERVED"
+        finally:
+            await _c2_finish(rig)
+            if entered.is_set():
+                assert exited.is_set()
+            if probe is not None:
+                assert all(tx["exited"].is_set() for tx in probe.connections)
+
+    asyncio.run(run())
+
+
+def test_c2_foreign_and_unknown_cancel_have_no_effect_on_actual_raw_owner(tmp_path, monkeypatch):
+    rig = _c2_rig(tmp_path, monkeypatch, hold_raw=True)
+
+    async def run():
+        try:
+            proof = await _c2_ready(rig)
+            await _c2_approve(rig, proof)
+            assert await asyncio.to_thread(rig.raw_entered.wait, 5)
+            assert len(rig.raw) == len(rig.leases) == 1
+            signal = rig.raw[0]["cancel_event"]
+            assert not signal.is_set() and not rig.raw[0]["exited"].is_set()
+            before = _c2_row(rig, identity())
+            assert before["state"] == "DISPATCH_RESERVED"
+            refreshes, cancel_writes, manifest_reads = [], [], []
+            original_get = rig.first.backend.get
+            original_cancel = rig.first.store.request_cancel
+            original_verify = rig.first.stager.load_verified_locator
+
+            async def observed_get(*args, **kwargs):
+                refreshes.append("backend-refresh")
+                return await original_get(*args, **kwargs)
+
+            def observed_cancel(*args, **kwargs):
+                cancel_writes.append("task-cancel")
+                return original_cancel(*args, **kwargs)
+
+            def observed_verify(*args, **kwargs):
+                manifest_reads.append("manifest-read")
+                return original_verify(*args, **kwargs)
+
+            monkeypatch.setattr(rig.first.backend, "get", observed_get)
+            monkeypatch.setattr(rig.first.store, "request_cancel", observed_cancel)
+            monkeypatch.setattr(rig.first.stager, "load_verified_locator", observed_verify)
+            errors = []
+            for task_id in ("c-task-1", "missing"):
+                task = _c2_task(rig, rig.first.runtime.cancel_docking_consent(
+                    task_id=task_id, owner_session_id="foreign"))
+                with pytest.raises(rig.api.DockingConsentError) as caught:
+                    await _c2_result(task)
+                errors.append((type(caught.value), str(caught.value), caught.value.reason_code))
+                assert not signal.is_set() and not rig.raw[0]["exited"].is_set()
+                assert not rig.leases[0]["exited"].is_set()
+                assert rig.cancels == rig.discards == refreshes == cancel_writes == manifest_reads == []
+                assert _c2_row(rig, identity()) == before
+            assert errors[0] == errors[1] == (rig.api.DockingConsentError, "consent_not_found", "consent_not_found")
+            assert not any(event.event_type == "task_cancel_requested" for event in rig.first.store.events("c-task-1"))
+            assert len(rig.submits) == len(rig.raw) == 1
+            rig.raw_release.set()
+            final = await _c2_terminal(rig, "SUCCEEDED")
+            assert final["reason_code"] is None and not signal.is_set()
+            assert rig.raw[0]["returned_success"] and rig.cancels == cancel_writes == []
+        finally:
+            await _c2_finish(rig)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("boundary", ["CLAIMED", "DISPATCH_RESERVED"])
+def test_c2_zero_update_cannot_authorize_submit_or_raw(tmp_path, monkeypatch, boundary):
+    from contextlib import contextmanager
+    import src.task_runtime.store as store_module
+
+    rig = _c2_rig(tmp_path, monkeypatch)
+    ignored = []
+
+    async def run():
+        probe = None
+        try:
+            proof = await _c2_ready(rig)
+            previous = "READY" if boundary == "CLAIMED" else "CLAIMED"
+            conn = sqlite3.connect(rig.db)
+            try:
+                # Install before approval, with no concurrent held transaction.
+                # Real SQLite ignores this UPDATE; no fake CAS/rowcount/receipt.
+                conn.execute("CREATE TABLE c2_ignored_update (boundary TEXT NOT NULL)")
+                conn.execute(f"""CREATE TRIGGER c2_ignore_authority_update
+                    BEFORE UPDATE OF state ON docking_consents
+                    WHEN OLD.preparation_id='preparation-1'
+                        AND OLD.state='{previous}' AND NEW.state='{boundary}'
+                    BEGIN
+                        INSERT INTO c2_ignored_update(boundary) VALUES ('{boundary}');
+                        SELECT RAISE(IGNORE);
+                    END""")
+                conn.commit()
+            finally:
+                conn.close()
+
+            probe = _c2_sql_probe(rig, monkeypatch)
+            original = store_module.connection
+
+            @contextmanager
+            def observe_zero_update(*args, **kwargs):
+                with original(*args, **kwargs) as actual:
+                    class Observer:
+                        def execute(self, sql, parameters=()):
+                            watching = " ".join(sql.upper().split()).startswith("UPDATE DOCKING_CONSENTS ")
+                            if watching:
+                                before = actual.execute("SELECT COUNT(*) AS n FROM c2_ignored_update").fetchone()["n"]
+                            cursor = actual.execute(sql, parameters)
+                            if watching:
+                                after = actual.execute("SELECT COUNT(*) AS n FROM c2_ignored_update").fetchone()["n"]
+                                if after != before:
+                                    row = actual.execute(
+                                        "SELECT state,dispatch_state,execution_token,execution_occupied "
+                                        "FROM docking_consents WHERE preparation_id=?", ("preparation-1",),
+                                    ).fetchone()
+                                    # Observe inside the real transaction, before a
+                                    # correct rejection may roll back the audit INSERT.
+                                    ignored.append({
+                                        "rowcount": cursor.rowcount, "audit_delta": after - before,
+                                        "state": row["state"], "dispatch": row["dispatch_state"],
+                                        "token_present": row["execution_token"] is not None,
+                                        "occupied": row["execution_occupied"],
+                                    })
+                            return cursor  # The actual cursor, entirely unchanged.
+
+                        def __getattr__(self, name):
+                            return getattr(actual, name)
+
+                    yield Observer()
+
+            monkeypatch.setattr(store_module, "connection", observe_zero_update)
+            approval = _c2_task(rig, _c2_approve(rig, proof))
+            done, _ = await asyncio.wait({approval}, timeout=5)
+            assert approval in done, "zero UPDATE approval did not return within the existing observation bound"
+            outcome = (await asyncio.gather(approval, return_exceptions=True))[0]
+            # Do not cancel/close before checking raw count: that could conceal
+            # unauthorized late raw entry. This rig's real raw callable is unheld.
+            deadline = asyncio.get_running_loop().time() + 5
+            while rig.first.backend.background_task_count:
+                assert asyncio.get_running_loop().time() < deadline, "zero UPDATE backend owner did not exit"
+                await asyncio.sleep(0.01)
+
+            assert ignored == [{
+                "rowcount": 0, "audit_delta": 1, "state": previous, "dispatch": "not_reserved",
+                "token_present": boundary == "DISPATCH_RESERVED",
+                "occupied": 0 if boundary == "CLAIMED" else 1,
+            }], "prerequisite: real trigger and real cursor must demonstrate exactly one ignored authority UPDATE"
+            row = _c2_row(rig, identity())  # Independent committed read, not wrapper facts.
+            assert row["state"] == previous and row["dispatch_state"] == "not_reserved"
+            assert all(state != boundary for _, state in probe.commits)
+            assert len(rig.submits) == (0 if boundary == "CLAIMED" else 1), "zero claim UPDATE authorized submit"
+            assert rig.raw == [], "zero authority UPDATE authorized the actual raw callable"
+            assert not rig.first.execution._completions.has_manifest(identity()["task_id"])
+            assert rig.stages == [identity()["task_id"]]
+            assert all(entry["exited"].is_set() for entry in rig.leases)
+            if boundary == "CLAIMED":
+                assert row["execution_token"] is None and row["execution_occupied"] == 0
+                assert isinstance(outcome, rig.api.DockingConsentError)
+                assert outcome.reason_code in {"consent_persistence_unavailable", "consent_execution_unknown"}
+                assert rig.leases == []
+            else:
+                assert len(rig.leases) == 1
+                view = await _c2_view(rig)
+                assert view["view_status"] == "UNKNOWN" and view["reason_code"] == "consent_execution_unknown"
+                if row["cleanup_state"] != "settled":
+                    assert row["execution_occupied"] == 1
+        finally:
+            await _c2_finish(rig)
+            if probe is not None:
+                assert all(tx["exited"].is_set() for tx in probe.connections)
+
+    asyncio.run(run())
+
+
+def test_c2_committed_claim_with_failed_readback_retains_unresolved_ownership(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    import src.task_runtime.store as store_module
+
+    rig = _c2_rig(tmp_path, monkeypatch)
+    read_fault = {"allocated": False, "denials": [], "errors": []}
+    fault_lock = threading.Lock()
+
+    async def run():
+        probe = None
+        try:
+            proof = await _c2_ready(rig)
+            other = await _c2_ready(rig, identity(2))
+            probe = _c2_sql_probe(rig, monkeypatch, fail_after_state="CLAIMED")
+            original = store_module.connection
+
+            @contextmanager
+            def fail_one_actual_readback(*args, **kwargs):
+                with original(*args, **kwargs) as actual:
+                    # The original probe records independent committed CLAIMED
+                    # evidence before throwing. Only its next store connection
+                    # gets a real SQLite read fault; independent reads are intact.
+                    with fault_lock:
+                        inject = bool(probe.faults) and not read_fault["allocated"]
+                        if inject:
+                            read_fault["allocated"] = True
+                    if inject:
+                        def authorize(action, table, column, database, trigger):
+                            if action == sqlite3.SQLITE_READ and table == "docking_consents":
+                                read_fault["denials"].append("docking_consents_read_denied")
+                                return sqlite3.SQLITE_DENY
+                            return sqlite3.SQLITE_OK
+
+                        actual.set_authorizer(authorize)
+
+                    class Observer:
+                        def execute(self, sql, parameters=()):
+                            try:
+                                return actual.execute(sql, parameters)
+                            except sqlite3.DatabaseError:
+                                if inject and read_fault["denials"]:
+                                    read_fault["errors"].append("actual_sqlite_read_error")
+                                raise  # Original error, not a fabricated getter result.
+
+                        def __getattr__(self, name):
+                            return getattr(actual, name)
+
+                    yield Observer()
+                # Original context closes its connection, including the authorizer.
+
+            monkeypatch.setattr(store_module, "connection", fail_one_actual_readback)
+            approval = _c2_task(rig, _c2_approve(rig, proof))
+            done, _ = await asyncio.wait({approval}, timeout=5)
+            assert approval in done, "claim/readback fault caller exceeded the existing observation bound"
+            outcome = (await asyncio.gather(approval, return_exceptions=True))[0]
+            assert probe.faults == [{"state": "CLAIMED", "trace": ("COMMIT",)}]
+            assert read_fault == {
+                "allocated": True, "denials": ["docking_consents_read_denied"],
+                "errors": ["actual_sqlite_read_error"],
+            }, "prerequisite: original SQL must actually fail after the genuine committed claim"
+            assert isinstance(outcome, rig.api.DockingConsentError)
+            assert str(outcome) == outcome.reason_code == "consent_execution_unknown"
+
+            committed = _c2_row(rig, identity())
+            assert committed["state"] == "CLAIMED" and committed["dispatch_state"] == "not_reserved"
+            assert committed["execution_token"] is not None
+            assert committed["execution_occupied"] == 1 and committed["cleanup_state"] != "settled"
+            assert rig.submits == rig.raw == rig.leases == rig.discards == []
+            assert rig.first.backend.background_task_count == 0
+
+            # Readback now recovers through the unmodified real store query. It
+            # cannot upgrade the first failure or re-enter claim/submit/dispatch.
+            first = await _c2_view(rig)
+            assert first["view_status"] == "UNKNOWN" and first["reason_code"] == outcome.reason_code
+            for _ in range(2):
+                repeat = _c2_receipt(await _c2_approve(rig, proof), identity())
+                assert repeat["view_status"] == "UNKNOWN" and repeat["reason_code"] == outcome.reason_code
+            replacement = rig.new_runtime()
+            recovered = _c2_receipt(await _c2_approve(rig, proof, item=replacement), identity())
+            assert recovered["view_status"] == "UNKNOWN" and recovered["reason_code"] == outcome.reason_code
+            with pytest.raises(rig.api.DockingConsentError) as busy:
+                await _c2_approve(rig, other, item=replacement, owner="owner-2")
+            assert busy.value.reason_code == "consent_execution_busy"
+            assert probe.commits.count(("preparation-1", "CLAIMED")) == 1
+            assert all(state != "DISPATCH_RESERVED" for _, state in probe.commits)
+            retained = _c2_row(rig, identity())
+            same_token = retained["execution_token"] == committed["execution_token"]
+            assert same_token and retained["execution_occupied"] == 1
+            assert retained["state"] == "CLAIMED" and retained["cleanup_state"] != "settled"
+            assert rig.submits == rig.raw == rig.leases == rig.discards == []
+            assert rig.stages == ["c-task-1", "c-task-2"]
+
+            # No fabricated receipt/owner mutation and no assumed auto-cleanup:
+            # unknown committed authority remains explicitly unresolved on close.
+            closer = _c2_task(rig, rig.first.runtime.close())
+            done, _ = await asyncio.wait({closer}, timeout=5)
+            assert closer in done, "unresolved close did not return within the existing observation bound"
+            closed = (await asyncio.gather(closer, return_exceptions=True))[0]
+            after_close = _c2_row(rig, identity())
+            assert after_close["state"] == "CLAIMED" and after_close["execution_occupied"] == 1
+            assert after_close["cleanup_state"] != "settled" and rig.discards == []
+            assert isinstance(closed, rig.api.DockingConsentError), "close falsely succeeded with an unresolved committed claim"
+            assert closed.reason_code == "consent_cleanup_unresolved"
+            final = await _c2_view(rig)
+            assert final["view_status"] == "UNKNOWN" and final["reason_code"] == outcome.reason_code
+            assert all(item.backend.background_task_count == 0 for item in rig.runtimes)
+        finally:
+            await _c2_finish(rig)
+            if probe is not None:
+                assert all(tx["exited"].is_set() for tx in probe.connections)
+
+    asyncio.run(run())

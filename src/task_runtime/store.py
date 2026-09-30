@@ -813,6 +813,109 @@ class TaskStore:
             ).fetchone()
         return row["task_id"] if row is not None else None
 
+    def _owned_docking_consent(self, *, owner_session_id, preparation_id=None, task_id=None):
+        """Private owner-bound lookup. No backend refresh or file access precedes this."""
+        if type(owner_session_id) is not str or not owner_session_id:
+            raise DockingConsentError("consent_not_found")
+        key, value = ("preparation_id", preparation_id) if preparation_id is not None else ("task_id", task_id)
+        if type(value) is not str or not value:
+            raise DockingConsentError("consent_not_found")
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                f"SELECT * FROM docking_consents WHERE {key}=? AND owner_session_id=?",
+                (value, owner_session_id),
+            ).fetchone()
+        if row is None:
+            raise DockingConsentError("consent_not_found")
+        return dict(row)
+
+    def _claim_docking_consent(self, expected, token, validate, wall_time_ms, monotonic):
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = dict(conn.execute("SELECT * FROM docking_consents WHERE preparation_id=?",
+                                    (expected["preparation_id"],)).fetchone())
+            # A consumed proof can only retrieve the existing receipt, never replay submit.
+            if row["state"] in {"CLAIMED", "DISPATCH_RESERVED"}:
+                return False
+            if row["state"] != "READY":
+                raise DockingConsentError("consent_not_waiting")
+            binding = validate(row)
+            if row["version"] != expected["version"]:
+                raise DockingConsentError("consent_binding_mismatch")
+            if conn.execute("SELECT 1 FROM docking_consents WHERE execution_occupied=1").fetchone():
+                raise DockingConsentError("consent_execution_busy")
+            changed = conn.execute(
+                """UPDATE docking_consents SET state='CLAIMED',version=version+1,
+                execution_token=?,execution_occupied=1,cleanup_state='pending',
+                operation_deadline_ms=?,operation_monotonic_expires=?
+                WHERE preparation_id=? AND state='READY' AND version=?""",
+                (token, wall_time_ms() + binding["operation_limit_seconds"] * 1000,
+                 monotonic() + binding["operation_limit_seconds"],
+                 row["preparation_id"], row["version"]),
+            ).rowcount
+            if changed != 1:
+                raise DockingConsentError("consent_persistence_unavailable")
+        return True
+
+    def _reserve_docking_dispatch(self, expected, token, validate):
+        """Called only inside the actual verified execution lease, before raw call."""
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = dict(conn.execute("SELECT * FROM docking_consents WHERE preparation_id=?",
+                                    (expected["preparation_id"],)).fetchone())
+            validate(row)
+            if (row["execution_token"] != token or row["state"] != "CLAIMED"
+                    or row["view_status"] != "ACTIVE" or row["cancel_requested"]):
+                raise DockingConsentError("consent_execution_unknown")
+            changed = conn.execute(
+                """UPDATE docking_consents SET state='DISPATCH_RESERVED',dispatch_state='reserved',
+                version=version+1 WHERE preparation_id=? AND execution_token=? AND state='CLAIMED'""",
+                (row["preparation_id"], token),
+            ).rowcount
+            if changed != 1:
+                raise DockingConsentError("consent_execution_unknown")
+        # A thrown commit acknowledgement never permits raw entry.
+
+    def _terminal_docking_consent(self, expected, token, status, reason, *, unused=False):
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if unused:
+                conn.execute(
+                    """UPDATE docking_consents SET state='REVOKED',view_status='CANCELLED',
+                    primary_reason='consent_cancelled',approval_nonce_hash=NULL,cancel_requested=1,
+                    execution_token=?,cleanup_state='pending',version=version+1
+                    WHERE preparation_id=? AND owner_session_id=? AND state='READY'""",
+                    (token, expected["preparation_id"], expected["owner_session_id"]),
+                )
+            else:
+                conn.execute(
+                    """UPDATE docking_consents SET view_status=?,primary_reason=?,
+                    cancel_requested=CASE WHEN ?='CANCELLED' THEN 1 ELSE cancel_requested END,
+                    version=version+1 WHERE preparation_id=? AND execution_token=? AND view_status='ACTIVE'""",
+                    (status, reason, status, expected["preparation_id"], token),
+                )
+        return self._owned_docking_consent(owner_session_id=expected["owner_session_id"],
+                                           preparation_id=expected["preparation_id"])
+
+    def _settle_docking_execution(self, expected, token, *, settled):
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            changed = conn.execute(
+                """UPDATE docking_consents SET cleanup_state=?,
+                execution_occupied=CASE WHEN ? THEN 0 ELSE execution_occupied END,version=version+1
+                WHERE preparation_id=? AND execution_token=? AND view_status!='ACTIVE'""",
+                ("settled" if settled else "unresolved", settled, expected["preparation_id"], token),
+            ).rowcount
+        return changed == 1
+
+    def _docking_execution_cleanup_protected(self, task_id, token):
+        with connection(self.db_path) as conn:
+            row = conn.execute("SELECT * FROM docking_consents WHERE task_id=?", (task_id,)).fetchone()
+            task = conn.execute("SELECT status FROM tasks WHERE task_id=?", (task_id,)).fetchone()
+        return (row is None or row["execution_token"] != token
+                or row["view_status"] in {"ACTIVE", "SUCCEEDED"}
+                or (task is not None and task["status"] not in {s.value for s in TERMINAL_STATUSES}))
+
     @staticmethod
     def _next_sequence(conn, task_id: str) -> int:
         row = conn.execute(

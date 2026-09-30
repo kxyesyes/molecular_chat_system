@@ -1,8 +1,9 @@
-"""Prepare-only consent values. Syntax and previews never authorize execution."""
+"""Closed consent values. Only durable claim and lease-local reservation authorize execution."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import hashlib
+import hmac
 import json
 import math
 from pathlib import PurePosixPath
@@ -27,6 +28,9 @@ _REASONS = frozenset({
     "consent_invalid_input", "consent_not_waiting", "consent_policy_unavailable",
     "consent_owner_busy", "consent_capacity_full", "consent_identity_conflict",
     "consent_preparation_timeout", "consent_cleanup_unresolved",
+    "consent_proof_mismatch", "consent_binding_mismatch", "consent_generation_mismatch",
+    "consent_execution_busy", "consent_execution_unknown", "consent_persistence_unavailable",
+    "consent_cancelled", "consent_execution_timeout", "consent_execution_failed",
 })
 
 
@@ -80,6 +84,62 @@ class DockingConsentPreview:
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"),
                       ensure_ascii=True, allow_nan=False).encode("utf-8")
+
+
+def validate_approval(nonce, digest, confirm) -> None:
+    if confirm is not True or any(
+        type(value) is not str or re.fullmatch(r"[a-f0-9]{64}", value) is None
+        for value in (nonce, digest)
+    ):
+        raise DockingConsentError("consent_invalid_input")
+
+
+def verify_approval(row, nonce, digest) -> None:
+    if row["state"] in {"REVOKED", "EXPIRED"}:
+        raise DockingConsentError(
+            "consent_expired" if row["state"] == "EXPIRED" else "consent_not_waiting"
+        )
+    if (not hmac.compare_digest(row["binding_digest"] or "", digest)
+            or not hmac.compare_digest(row["approval_nonce_hash"] or "",
+                                       hashlib.sha256(nonce.encode("ascii")).hexdigest())):
+        raise DockingConsentError("consent_proof_mismatch")
+
+
+def validate_execution_binding(row, policy, now_ms, monotonic_now, *, expected=None):
+    """Revalidate trusted policy and immutable consent facts, including after claim."""
+    if type(policy) is not DockingConsentPolicy:
+        raise DockingConsentError("consent_policy_unavailable")
+    validate_clocks(now_ms, monotonic_now)
+    if (row["runtime_generation"] != policy.runtime_generation
+            or row["policy_generation"] != policy.policy_generation):
+        raise DockingConsentError("consent_generation_mismatch")
+    if now_ms >= row["expires_at_ms"] or monotonic_now >= row["monotonic_expires"]:
+        raise DockingConsentError("consent_expired")
+    if row.get("operation_deadline_ms") is not None and (
+        now_ms >= row["operation_deadline_ms"]
+        or monotonic_now >= row["operation_monotonic_expires"]
+    ):
+        raise DockingConsentError("consent_execution_timeout")
+    try:
+        binding = json.loads(row["binding_json"])
+        stored_policy = json.loads(row["policy_json"])
+        if stored_policy != asdict(policy):
+            raise ValueError
+        digest = hashlib.sha256(b"medchat-docking-consent-v1\0" + canonical_json(binding)).hexdigest()
+        if not hmac.compare_digest(digest, row["binding_digest"]):
+            raise ValueError
+        if expected is not None and any(row[key] != expected[key] for key in (
+            "identity_json", "binding_json", "binding_digest", "approval_nonce_hash", "policy_json",
+        )):
+            raise ValueError
+        identity = json.loads(row["identity_json"])
+        if any(binding[key] != value for key, value in identity.items()):
+            raise ValueError
+        if any(binding[key] != value for key, value in stored_policy.items()):
+            raise ValueError
+    except (TypeError, ValueError, KeyError):
+        raise DockingConsentError("consent_binding_mismatch") from None
+    return binding
 
 
 def validate_identity(identity: Any) -> dict[str, Any]:
