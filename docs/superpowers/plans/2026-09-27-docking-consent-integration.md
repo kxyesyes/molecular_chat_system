@@ -2632,8 +2632,9 @@ No new permission subsystem, retry, READY restoration or scientific fallback.
   on spent reservation, no replay, cleanup after lease exit and unchanged inputs.
 - [x] Add the smallest runtime guard change and run the same tests GREEN plus
   existing C2 expiry/cancel/one-use regressions.
-- [ ] Independent review, exact-file commit and later main-aligned CI remain
-  required. Synthetic raw fixtures are not evidence of real Vina execution.
+- [x] Independent source review, exact-file commits and main-aligned CI are
+  complete for this correction. Synthetic raw fixtures are not evidence of
+  real Vina execution.
 
 Actual verification: RED8bfc09 was **3failed,1passed in4.87s**; all three expiry
 variants observed an unwanted raw call after actual reservation commit. The
@@ -2644,5 +2645,11 @@ discard and owned-stage deletion. Final C2 subset terminal6341f2: **47passed,
 104deselected in12.42s**, exit0, with real SQLite/staging and synthetic raw-tool
 fixtures only. Independent source review found no production blockers; its
 nonblocking cleanup-assertion suggestion is included in the final tested bytes.
-AST syntax and whitespace checks passed. Full main-aligned/CI verification is
-still pending; the prior1148/15 receipt does not cover this new correction.
+AST syntax and whitespace checks passed. The main-aligned offline regression
+then exited 0 with **1191 passed, 13 skipped in 303.87s**, covering the current
+expiry correction and the selected C1/C2 task-runtime, staging, local-backend,
+docking-execution and agent-contract modules. The 13 skips are platform or
+explicit opt-in performance cases (Windows symlink/permission, POSIX barriers,
+and the wall-clock offload check); no failure was suppressed. The prior1148/15
+receipt does not cover this new correction. Remote CI/publication remains a
+separate gate; no real Vina execution is claimed.
