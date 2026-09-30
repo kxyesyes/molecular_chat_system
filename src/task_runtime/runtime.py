@@ -14,6 +14,8 @@ import time
 from typing import Any, Callable, Mapping
 from uuid import uuid4
 
+from src.docking.adapters.base import CommandOwnershipScope
+
 from .backends.base import (
     BackendSubmitResult,
     StartOutcome,
@@ -82,6 +84,9 @@ class _ConsentExecution:
     admission: asyncio.Task | None = field(default=None, repr=False)
     submission: asyncio.Task | None = field(default=None, repr=False)
     worker: asyncio.Task | None = field(default=None, repr=False)
+    command_scope: CommandOwnershipScope | None = field(default=None, repr=False)
+    physical_unresolved: str | None = None
+    physical_notice: asyncio.Future | None = field(default=None, repr=False)
     cancellation: asyncio.Task | None = field(default=None, repr=False)
     settlement: asyncio.Task | None = field(default=None, repr=False)
     deadline: asyncio.Task | None = field(default=None, repr=False)
@@ -96,6 +101,10 @@ class _ConsentExecution:
     claim_uncertain: bool = False
     unused: bool = False
     settled: bool = False
+
+    def __post_init__(self):
+        if self.loop is not None:
+            self.physical_notice = self.loop.create_future()
 
     def stop(self, status, reason) -> None:
         # Never hold this lock across SQLite, a coroutine await or physical cleanup.
@@ -527,12 +536,18 @@ class TaskRuntime:
                 cancel_event.set()
         if operation.signal.is_set():
             raise DockingConsentError(operation.reason or "consent_cancelled")
+        operation.command_scope = CommandOwnershipScope(
+            task_id=submission.task_id, output_root=self.docking_execution._allowed_output_root,
+            cancel_event=operation.signal,
+        )
         operation.worker = asyncio.create_task(asyncio.to_thread(
             self.docking_execution.run_verified, submission.task_id, submission.input_manifest_path,
             cancel_event=operation.signal, progress_callback=progress_callback,
             lease_timeout_seconds=min(300.0, max(0.001,
                 operation.row["operation_monotonic_expires"] - self._consent_monotonic())),
             consent_guard=lambda inputs, phase: self._consent_execution_guard(operation, inputs, phase),
+            command_scope=operation.command_scope,
+            ownership_observer=lambda reason: self._observe_consent_ownership(operation, reason),
         ))
         try:
             result = await asyncio.shield(operation.worker)
@@ -552,6 +567,60 @@ class TaskRuntime:
             if operation.raw_deadline is not None:
                 operation.raw_deadline.cancel()
                 await asyncio.gather(operation.raw_deadline, return_exceptions=True)
+
+    def _observe_consent_ownership(self, operation, reason):
+        if reason not in {"command_ownership_unresolved", "own_job_cleanup_unresolved"}:
+            raise ValueError("Invalid command ownership observation")
+        with operation.lock:
+            if operation.physical_unresolved is None:
+                operation.physical_unresolved = reason
+            operation.pending = True
+        # The signal reports a real worker outcome, not task completion. Never
+        # invoke loop callbacks or perform physical cleanup under operation.lock.
+        def notify():
+            notice = operation.physical_notice
+            if notice is not None and not notice.done():
+                notice.set_result(None)
+
+        try:
+            operation.loop.call_soon_threadsafe(notify)
+        except RuntimeError:
+            pass  # A closed loop cannot erase the retained synchronous latch.
+
+    @staticmethod
+    def _consent_commands_released(operation):
+        with operation.lock:
+            if operation.physical_unresolved is not None:
+                return False
+            scope = operation.command_scope
+            dispatched = operation.raw_expires is not None
+        if scope is None:
+            return not dispatched
+        with scope._condition:
+            if not dispatched and not scope._commands and scope._own_job_cleanup is None:
+                return True  # Independently fenced pre-raw rejection/reuse.
+            return (scope.snapshot()["state"] == "settled"
+                    and scope._own_job_cleanup_state in {"none", "done"})
+
+    async def _await_consent_close_task(self, operation, task):
+        # Race existing tasks against a one-way Future, not another owner/task.
+        # Cancellation of shutdown observation must not cancel either input.
+        while True:
+            with operation.lock:
+                if operation.physical_unresolved is not None:
+                    raise DockingConsentError("consent_cleanup_unresolved")
+                if task.done():
+                    # Read the already-completed outcome in the same latch
+                    # observation; no callback, await or cleanup under this lock.
+                    return task.result()
+            try:
+                if operation.physical_notice is None:
+                    await asyncio.shield(task)
+                else:
+                    await asyncio.wait((task, operation.physical_notice),
+                                       return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                continue
 
     async def _settle_consent_execution(self, operation):
         try:
@@ -594,6 +663,9 @@ class TaskRuntime:
                         operation.stop("TIMED_OUT", "consent_execution_timeout")
                     else:
                         operation.stop("FAILED", "consent_execution_failed")
+            if not self._consent_commands_released(operation):
+                self._observe_consent_ownership(operation, "command_ownership_unresolved")
+                return  # No staging deletion, capacity release or owner removal.
             if not await self._persist_consent_terminal(operation):
                 return
             if operation.status != "SUCCEEDED":
@@ -633,7 +705,10 @@ class TaskRuntime:
                 task = getattr(operation, name)
                 if task is not None:
                     try:
-                        await self._await_task_outcome(task)
+                        await self._await_consent_close_task(operation, task)
+                    except DockingConsentError as exc:
+                        if exc.reason_code == "consent_cleanup_unresolved":
+                            raise
                     except (Exception, asyncio.CancelledError):
                         pass
         if any((operation.acquired or operation.claim_uncertain) and not operation.settled
