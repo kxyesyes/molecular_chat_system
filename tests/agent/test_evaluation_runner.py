@@ -461,6 +461,22 @@ def test_golden_scientific_dataset_contains_12_traceable_cases():
         assert required_fields.issubset(case.scientific_acceptance)
 
 
+def test_golden_lead_case_reaches_real_baseline_without_repair():
+    from src.agent.tools.property_calculator import PropertyCalculator
+
+    case = next(case for case in load_cases(
+        "data/agent_evals/golden_scientific_cases.jsonl"
+    ) if case.case_id == "GOLD-009")
+    tool = PropertyCalculator()
+    result = tool.execute(case.prompt)
+    assert result["success"] is True, result["message"]
+    assert [item["smiles"] for item in result["data"]] == [case.metadata["lead_smiles"]]
+    # A trailing dot is not safe prose punctuation: it is malformed SMILES.
+    invalid = tool.execute("SMILES: CCO.")
+    assert invalid["success"] is False
+    assert not invalid["data"]
+
+
 def test_diverse_scientific_dataset_contains_20_traceable_cases():
     cases = load_cases("data/agent_evals/diverse_scientific_cases.jsonl")
 
