@@ -1349,6 +1349,23 @@ def test_c4a_scope_normal_command_settles_real_resources(tmp_path, c4a_resources
     resources.assert_physically_stopped()
 
 
+def test_c4a_posix_group_settlement_waits_through_transient_active_state(monkeypatch):
+    from src.docking.adapters import base
+
+    observations = []
+    active_states = iter((True, True, False))
+
+    def active(_group_id):
+        observations.append(True)
+        return next(active_states)
+
+    monkeypatch.setattr(base.CommandAdapter, "_posix_process_group_active", staticmethod(active))
+    monkeypatch.setattr(base.time, "sleep", lambda _seconds: None)
+
+    assert base.CommandAdapter._wait_for_posix_process_group_stopped(1234, timeout=1.0)
+    assert len(observations) == 3
+
+
 @pytest.mark.skipif(os.name != "nt", reason="genuine Windows Job acquisition/configuration")
 @pytest.mark.parametrize("close_fails", [False, True], ids=["close-success", "close-failure"])
 def test_c4a_windows_job_configuration_failure_retains_acquired_handle(

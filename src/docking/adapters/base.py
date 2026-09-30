@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _COMMAND_POLL_INTERVAL_SECONDS = 0.2
 _COMMAND_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
+_POSIX_GROUP_SETTLEMENT_TIMEOUT_SECONDS = 2.0
 
 
 class CommandCancelledError(RuntimeError):
@@ -1179,7 +1180,7 @@ class CommandAdapter:
                 try:
                     receipt.tree_stopped = (
                         process.poll() is not None
-                        and not cls._posix_process_group_active(process.pid)
+                        and cls._wait_for_posix_process_group_stopped(process.pid)
                     )
                     if not receipt.tree_stopped:
                         raise CommandOwnershipUncertainError()
@@ -1515,6 +1516,28 @@ class CommandAdapter:
         except OSError:
             if process.poll() is None:
                 process.kill()
+
+    @classmethod
+    def _wait_for_posix_process_group_stopped(
+        cls,
+        process_group_id: int,
+        *,
+        timeout: float = _POSIX_GROUP_SETTLEMENT_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Allow a killed group to disappear before declaring ownership uncertain.
+
+        A root process can exit before its descendants.  After SIGKILL, the
+        kernel may still report the process group briefly while descendants are
+        being reaped.  This bounded wait distinguishes that transient state
+        from a group that remains live or cannot be proven stopped.
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while cls._posix_process_group_active(process_group_id):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(_COMMAND_POLL_INTERVAL_SECONDS, remaining))
+        return True
 
     @staticmethod
     def _posix_process_group_active(process_group_id: int) -> bool:

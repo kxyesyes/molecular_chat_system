@@ -2781,7 +2781,14 @@ def test_c2_zero_update_cannot_authorize_submit_or_raw(tmp_path, monkeypatch, bo
             assert all(state != boundary for _, state in probe.commits)
             assert len(rig.submits) == (0 if boundary == "CLAIMED" else 1), "zero claim UPDATE authorized submit"
             assert rig.raw == [], "zero authority UPDATE authorized the actual raw callable"
-            assert not rig.first.execution._completions.has_manifest(identity()["task_id"])
+            completion_store = rig.first.execution._completions
+            completion_root = completion_store._root / identity()["task_id"]
+            # discard_unprojected may remove the whole task directory.  The
+            # strict completion query intentionally rejects a missing root, so
+            # only query it when the root still exists; absence itself proves
+            # that no completion manifest survived.
+            if completion_root.exists():
+                assert not completion_store.has_manifest(identity()["task_id"])
             assert rig.stages == [identity()["task_id"]]
             assert all(entry["exited"].is_set() for entry in rig.leases)
             if boundary == "CLAIMED":
