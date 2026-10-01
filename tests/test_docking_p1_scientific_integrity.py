@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,4 +110,59 @@ def test_run_manifest_records_inputs_box_and_preprocessing_without_absolute_inpu
     assert payload["docking_box"]["source"] == "user_explicit"
     assert payload["preprocessing"]["ligand"].startswith("Meeko")
     assert provenance["manifest"] == "run_manifest.json"
+    assert str(tmp_path) not in json.dumps(payload)
+
+
+def test_blind_box_is_not_overwritten_when_vina_config_is_written(tmp_path: Path):
+    from src.docking.molecular_docking_service import DockingConfig, MolecularDockingService
+
+    receptor = tmp_path / "receptor.pdbqt"
+    ligand = tmp_path / "ligand.pdbqt"
+    output = tmp_path / "result.pdbqt"
+    receptor.write_text(
+        "ATOM      1  C   ALA A   1      10.000  20.000  30.000  1.00 20.00\n",
+        encoding="utf-8",
+    )
+    ligand.write_text("ATOM      1  C   LIG     1       0.000   0.000   0.000\n", encoding="utf-8")
+    service = MolecularDockingService()
+    service.vina_exe = "vina"
+    captured = {}
+
+    def fake_run_config(config_path, cwd, timeout=None, **kwargs):
+        captured["config"] = Path(config_path).read_text(encoding="utf-8")
+        return SimpleNamespace(returncode=1)
+
+    service.vina_adapter.run_config = fake_run_config
+    config = DockingConfig(blind_docking=True)
+
+    assert service.run_vina_docking(str(receptor), str(ligand), config, str(output), str(tmp_path)) is False
+    assert "center_x = 0.0" in captured["config"]
+    assert "center_y = 0.0" in captured["config"]
+    assert "center_z = 0.0" in captured["config"]
+
+
+def test_run_manifest_records_actual_vina_execution_state(tmp_path: Path):
+    from src.docking.molecular_docking_service import DockingConfig, MolecularDockingService
+
+    receptor = tmp_path / "receptor.pdbqt"
+    ligand = tmp_path / "ligand.pdbqt"
+    output = tmp_path / "result.pdbqt"
+    receptor.write_bytes(b"receptor")
+    ligand.write_bytes(b"ligand")
+    service = MolecularDockingService()
+    config = DockingConfig(manual_center=True)
+    box = service._resolve_docking_box(str(receptor), config)
+    service._write_run_manifest(str(tmp_path), str(receptor), str(ligand), "file", config, box)
+
+    def fake_run_config(*_args, **_kwargs):
+        return SimpleNamespace(returncode=2)
+
+    service.vina_adapter.run_config = fake_run_config
+    assert service.run_vina_docking(str(receptor), str(ligand), config, str(output), str(tmp_path)) is False
+
+    payload = json.loads((tmp_path / "run_manifest.json").read_text(encoding="utf-8"))
+    assert payload["execution"]["status"] == "failed"
+    assert payload["execution"]["returncode"] == 2
+    assert payload["execution"]["config"] == "config.txt"
+    assert payload["execution"]["command"][-2:] == ["--config", "config.txt"]
     assert str(tmp_path) not in json.dumps(payload)

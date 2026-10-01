@@ -661,59 +661,6 @@ class MolecularDockingService:
         """
         try:
             self._require_finished_commands()
-            # 如果未提供中心坐标（默认为0,0,0），则自动从受体估算网格框
-            def _auto_box_from_receptor(pdbqt_path: str) -> Tuple[float, float, float, float, float, float]:
-                min_x = min_y = min_z = float('inf')
-                max_x = max_y = max_z = float('-inf')
-                try:
-                    with open(pdbqt_path, 'r', encoding='utf-8', errors='ignore') as rf:
-                        for line in rf:
-                            if line.startswith(('ATOM', 'HETATM')):
-                                try:
-                                    x = float(line[30:38])
-                                    y = float(line[38:46])
-                                    z = float(line[46:54])
-                                except Exception:
-                                    # 宽松解析：按空白拆分尝试
-                                    parts = line.split()
-                                    if len(parts) >= 9:
-                                        x = float(parts[6]); y = float(parts[7]); z = float(parts[8])
-                                    else:
-                                        continue
-                                min_x = min(min_x, x); max_x = max(max_x, x)
-                                min_y = min(min_y, y); max_y = max(max_y, y)
-                                min_z = min(min_z, z); max_z = max(max_z, z)
-                    if any(v in (float('inf'), float('-inf')) for v in (min_x, max_x, min_y, max_y, min_z, max_z)):
-                        # 解析失败时回退原默认
-                        return (0.0, 0.0, 0.0, config.size_x, config.size_y, config.size_z)
-                    cx = (min_x + max_x) / 2.0
-                    cy = (min_y + max_y) / 2.0
-                    cz = (min_z + max_z) / 2.0
-                    # 尺寸：边界加适度边距
-                    padding = 8.0
-                    sx = max(10.0, (max_x - min_x) + padding)
-                    sy = max(10.0, (max_y - min_y) + padding)
-                    sz = max(10.0, (max_z - min_z) + padding)
-                    return (cx, cy, cz, sx, sy, sz)
-                except Exception:
-                    return (0.0, 0.0, 0.0, config.size_x, config.size_y, config.size_z)
-
-            if (
-                not config.manual_center
-                and abs(config.center_x) < 1e-6
-                and abs(config.center_y) < 1e-6
-                and abs(config.center_z) < 1e-6
-            ):
-                cx, cy, cz, sx, sy, sz = _auto_box_from_receptor(receptor_path)
-                config.center_x = cx
-                config.center_y = cy
-                config.center_z = cz
-                # 仅当用户未自定义尺寸（保持默认20）时，才替换为自动尺寸
-                if (abs(config.size_x - 20.0) < 1e-6 and abs(config.size_y - 20.0) < 1e-6 and abs(config.size_z - 20.0) < 1e-6):
-                    config.size_x = sx
-                    config.size_y = sy
-                    config.size_z = sz
-
             # 每个作业拥有独立配置文件和进程工作目录。
             resolved_job_dir = os.path.abspath(
                 job_dir or os.path.dirname(os.path.abspath(output_path))
@@ -734,6 +681,16 @@ class MolecularDockingService:
                 f.write(f"num_modes = {config.num_modes}\n")
                 f.write(f"energy_range = {config.energy_range}\n")
 
+            self._update_run_manifest(
+                resolved_job_dir,
+                execution={
+                    "status": "running",
+                    "config": "config.txt",
+                    "command": [Path(self.vina_exe).name or "vina", "--config", "config.txt"],
+                    "config_sha256": self._sha256_file(config_path)[0],
+                },
+            )
+
             # 运行Vina
             adapter_control = {}
             if cancel_event is not None:
@@ -746,9 +703,17 @@ class MolecularDockingService:
             )
 
             if result.returncode == 0:
+                self._update_run_manifest(
+                    resolved_job_dir,
+                    execution={"status": "completed", "returncode": result.returncode},
+                )
                 logger.info("Vina docking command succeeded")
                 return True
             else:
+                self._update_run_manifest(
+                    resolved_job_dir,
+                    execution={"status": "failed", "returncode": result.returncode},
+                )
                 logger.error(
                     "Vina docking command failed (returncode=%s)",
                     result.returncode,
@@ -1045,6 +1010,11 @@ class MolecularDockingService:
             ),
             "implicit_hydrogen_policy": "recorded by preparation path; no silent fallback to unoptimized geometry",
         }
+        preprocessing_state = {
+            "status": "planned",
+            "receptor": {"status": "pending", "output": "receptor.pdbqt"},
+            "ligand": {"status": "pending", "output": "ligand.pdbqt"},
+        }
         manifest = {
             "schema_version": 1,
             "inputs": {
@@ -1058,12 +1028,36 @@ class MolecularDockingService:
                 "energy_range": config.energy_range,
             },
             "preprocessing": preprocessing,
+            "preprocessing_state": preprocessing_state,
+            "execution": {"status": "planned"},
         }
         manifest_path = os.path.join(job_dir, "run_manifest.json")
         with open(manifest_path, "w", encoding="utf-8") as stream:
             json.dump(manifest, stream, ensure_ascii=False, sort_keys=True, indent=2)
             stream.write("\n")
         return manifest_path, {"preprocessing": preprocessing, "manifest": "run_manifest.json"}
+
+    def _update_run_manifest(self, job_dir: str, **updates: Dict[str, Any]) -> None:
+        """Atomically add actual execution state to the per-job manifest."""
+        manifest_path = Path(job_dir) / "run_manifest.json"
+        if not manifest_path.is_file():
+            return
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for key, value in updates.items():
+                current = manifest.get(key)
+                if isinstance(current, dict) and isinstance(value, dict):
+                    current.update(value)
+                else:
+                    manifest[key] = value
+            temporary = manifest_path.with_name(f".{manifest_path.name}.tmp")
+            temporary.write_text(
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, manifest_path)
+        except Exception:
+            logger.warning("Unable to update docking run manifest", exc_info=True)
 
     @staticmethod
     def _cancel_requested(cancel_event) -> bool:
@@ -1304,12 +1298,32 @@ class MolecularDockingService:
                 receptor_pdbqt,
                 **command_control,
             ):
+                self._update_run_manifest(
+                    job_dir,
+                    preprocessing_state={
+                        "status": "failed",
+                        "receptor": {"status": "failed", "method": "adfrsuite_or_pdbqt_passthrough"},
+                    },
+                )
                 return self._failed_job_response(
                     job_dir,
                     "receptor_preparation_failed",
                     "Receptor preparation failed",
                     **cleanup_control,
                 )
+            self._update_run_manifest(
+                job_dir,
+                preprocessing_state={
+                    "receptor": {
+                        "status": "completed",
+                        "method": (
+                            "pdbqt_passthrough"
+                            if receptor_file.lower().endswith(".pdbqt")
+                            else "adfrsuite_prepare_receptor"
+                        ),
+                    },
+                },
+            )
             self._raise_if_cancelled(cancel_event)
             self._require_finished_commands()
 
@@ -1327,12 +1341,36 @@ class MolecularDockingService:
                     **command_control,
                 )
             if not ligand_ready:
+                self._update_run_manifest(
+                    job_dir,
+                    preprocessing_state={
+                        "status": "failed",
+                        "ligand": {"status": "failed"},
+                    },
+                )
                 return self._failed_job_response(
                     job_dir,
                     "ligand_preparation_failed",
                     "Ligand preparation failed",
                     **cleanup_control,
                 )
+            self._update_run_manifest(
+                job_dir,
+                preprocessing_state={
+                    "ligand": {
+                        "status": "completed",
+                        "method": (
+                            "rdkit_3d_then_meeko"
+                            if input_type == "smiles"
+                            else (
+                                "pdbqt_passthrough"
+                                if ligand_input.lower().endswith(".pdbqt")
+                                else "meeko_file_preparation_with_explicit_hydrogen_retry"
+                            )
+                        ),
+                    },
+                },
+            )
             self._raise_if_cancelled(cancel_event)
             self._require_finished_commands()
 
