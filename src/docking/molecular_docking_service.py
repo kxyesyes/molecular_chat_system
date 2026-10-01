@@ -45,6 +45,7 @@ class DockingResult:
     rmsd_lb: float
     rmsd_ub: float
     pose_data: str
+    pose_index: int = 0
 
 @dataclass
 class DockingConfig:
@@ -59,6 +60,18 @@ class DockingConfig:
     num_modes: int = 10
     energy_range: float = 3.0
     manual_center: bool = False
+
+
+def _ligand_efficiency(binding_energy: float | None, heavy_atom_count: int) -> float | None:
+    """Return LE = -ΔG / heavy-atom count, or None when it is undefined."""
+    if (
+        type(binding_energy) not in (int, float)
+        or not math.isfinite(float(binding_energy))
+        or type(heavy_atom_count) is not int
+        or heavy_atom_count <= 0
+    ):
+        return None
+    return round(-float(binding_energy) / heavy_atom_count, 3)
 
 class MolecularDockingService:
     """分子对接服务类"""
@@ -290,6 +303,41 @@ class MolecularDockingService:
             return Chem.MolFromPDBFile(ligand_path, removeHs=False)
         return None
 
+    @staticmethod
+    def _prepare_3d_molecule(mol):
+        """Embed and optimize a molecule, failing closed on invalid geometry."""
+        from rdkit.Chem import AllChem
+
+        try:
+            embedded = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+            if embedded < 0:
+                embedded = AllChem.EmbedMolecule(mol, AllChem.ETKDGv2())
+            if embedded < 0 or mol.GetNumConformers() == 0:
+                logger.error("RDKit failed to generate a 3D conformer")
+                return None
+
+            if AllChem.MMFFHasAllMoleculeParams(mol):
+                force_field = "MMFF"
+                optimization_status = AllChem.MMFFOptimizeMolecule(mol)
+            elif AllChem.UFFHasAllMoleculeParams(mol):
+                force_field = "UFF"
+                optimization_status = AllChem.UFFOptimizeMolecule(mol)
+            else:
+                logger.error("No complete MMFF or UFF parameters are available")
+                return None
+
+            if optimization_status != 0:
+                logger.error(
+                    "RDKit %s optimization did not converge (status=%s)",
+                    force_field,
+                    optimization_status,
+                )
+                return None
+            return mol
+        except Exception as exc:
+            logger.error("RDKit 3D preparation failed (%s)", type(exc).__name__)
+            return None
+
     def _prepare_ligand_file_with_explicit_hs(self, ligand_path: str, output_path: str,
                                               job_dir: str, *, cancel_event=None) -> bool:
         """Normalize ligand files through RDKit so Meeko receives explicit hydrogens."""
@@ -304,19 +352,22 @@ class MolecularDockingService:
 
             mol = Chem.AddHs(mol, addCoords=True)
             if mol.GetNumConformers() == 0:
-                params = AllChem.ETKDGv3()
-                if AllChem.EmbedMolecule(mol, params) < 0:
-                    if AllChem.EmbedMolecule(mol, AllChem.ETKDGv2()) < 0:
-                        logger.error("RDKit无法为配体生成 3D 构象")
+                mol = self._prepare_3d_molecule(mol)
+            else:
+                # Existing coordinates are still not accepted without a
+                # converged force-field check.
+                if not AllChem.MMFFHasAllMoleculeParams(mol):
+                    if not AllChem.UFFHasAllMoleculeParams(mol):
+                        logger.error("No complete force-field parameters are available")
                         return False
-
-            try:
-                AllChem.MMFFOptimizeMolecule(mol)
-            except Exception as optimize_error:
-                logger.warning(
-                    "Ligand MMFF optimization failed (%s); using current conformer",
-                    type(optimize_error).__name__,
-                )
+                    if AllChem.UFFOptimizeMolecule(mol) != 0:
+                        logger.error("RDKit UFF optimization did not converge")
+                        return False
+                elif AllChem.MMFFOptimizeMolecule(mol) != 0:
+                    logger.error("RDKit MMFF optimization did not converge")
+                    return False
+            if mol is None:
+                return False
 
             normalized_sdf_path = os.path.join(job_dir, "ligand_explicit_h.sdf")
             writer = Chem.SDWriter(normalized_sdf_path)
@@ -507,13 +558,9 @@ class MolecularDockingService:
 
             self._raise_if_cancelled(cancel_event)
             mol = Chem.AddHs(mol)
-            params = AllChem.ETKDGv3()
-            if AllChem.EmbedMolecule(mol, params) < 0:
-                # ETKDGv3 失败时回退 ETKDG
-                self._raise_if_cancelled(cancel_event)
-                AllChem.EmbedMolecule(mol, AllChem.ETKDGv2())
-            self._raise_if_cancelled(cancel_event)
-            AllChem.MMFFOptimizeMolecule(mol)
+            mol = self._prepare_3d_molecule(mol)
+            if mol is None:
+                return False
             self._raise_if_cancelled(cancel_event)
 
             sdf_path = os.path.join(job_dir, "ligand_input.sdf")
@@ -719,48 +766,132 @@ class MolecularDockingService:
 
     def parse_vina_results(self, output_path: str) -> List[DockingResult]:
         """
-        解析Vina输出结果
-        """
-        results = []
+        Parse and validate the complete Vina pose file.
 
+        A score remark by itself is not a scientific result. Every accepted
+        pose must contain a finite Vina score, at least one valid atom record,
+        and a matching MODEL/ENDMDL boundary. Results are sorted by score so
+        callers cannot accidentally treat the first file model as the best.
+        """
+        results: List[DockingResult] = []
         try:
             if not os.path.exists(output_path):
                 logger.error("Vina result file is missing")
                 return results
 
-            with open(output_path, 'r') as f:
-                content = f.read()
+            with open(output_path, "r", encoding="utf-8", errors="strict") as stream:
+                lines = stream.read().splitlines()
 
-            # 解析结果（更稳健正则解析，兼容不同空白/制表）
-            import re
-            lines = content.split('\n')
-            current_pose = 1
+            model = None
+            completed_models = 0
+            score_pattern = re.compile(
+                r"REMARK\s+VINA\s+RESULT:\s*"
+                r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+"
+                r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+"
+                r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+            )
+
+            def invalid(reason: str):
+                logger.error("Invalid Vina output: %s", reason)
+                return []
 
             for line in lines:
-                if line.startswith('REMARK VINA RESULT:'):
-                    # 典型: REMARK VINA RESULT:    -8.2      0.000      0.000
-                    m = re.search(r"REMARK\s+VINA\s+RESULT:\s*([\-+]?\d*\.?\d+(?:[eE][\-+]?\d+)?)\s+([\-+]?\d*\.?\d+(?:[eE][\-+]?\d+)?)\s+([\-+]?\d*\.?\d+(?:[eE][\-+]?\d+)?)", line)
-                    if m:
-                        energy = float(m.group(1))
-                        rmsd_lb = float(m.group(2))
-                        rmsd_ub = float(m.group(3))
+                if line.startswith("MODEL"):
+                    if model is not None:
+                        return invalid("nested MODEL")
+                    fields = line.split()
+                    if len(fields) != 2 or not fields[1].isdigit():
+                        return invalid("invalid MODEL record")
+                    pose_index = int(fields[1])
+                    if pose_index != completed_models + 1:
+                        return invalid("non-sequential MODEL record")
+                    model = {
+                        "pose_index": pose_index,
+                        "energy": None,
+                        "rmsd_lb": None,
+                        "rmsd_ub": None,
+                        "atoms": [],
+                        "atom_serials": set(),
+                    }
+                    continue
 
-                        result = DockingResult(
-                            ligand_id=f"pose_{current_pose}",
-                            binding_energy=energy,
-                            rmsd_lb=rmsd_lb,
-                            rmsd_ub=rmsd_ub,
-                            pose_data=""  # 可以扩展为包含具体坐标
+                if line == "ENDMDL":
+                    if model is None:
+                        return invalid("ENDMDL without MODEL")
+                    if model["energy"] is None or not model["atoms"]:
+                        return invalid("pose lacks finite score or atom records")
+                    results.append(
+                        DockingResult(
+                            ligand_id=f"pose_{model['pose_index']}",
+                            binding_energy=model["energy"],
+                            rmsd_lb=model["rmsd_lb"],
+                            rmsd_ub=model["rmsd_ub"],
+                            pose_data="\n".join(model["atoms"]),
+                            pose_index=model["pose_index"],
                         )
-                        results.append(result)
-                        current_pose += 1
+                    )
+                    completed_models += 1
+                    model = None
+                    continue
 
-            logger.info(f"解析到 {len(results)} 个对接结果")
+                if model is None:
+                    # Vina may emit header remarks outside MODEL blocks. They
+                    # are not accepted as scientific scores or poses.
+                    if line.startswith(("ATOM  ", "HETATM")):
+                        return invalid("atom record outside MODEL")
+                    continue
+
+                score = score_pattern.fullmatch(line.strip())
+                if score is not None:
+                    if model["energy"] is not None:
+                        return invalid("multiple score records in pose")
+                    try:
+                        values = tuple(float(value) for value in score.groups())
+                    except (TypeError, ValueError, OverflowError):
+                        return invalid("non-numeric score record")
+                    if not all(math.isfinite(value) for value in values):
+                        return invalid("non-finite score record")
+                    if values[1] < 0 or values[2] < values[1]:
+                        return invalid("invalid RMSD values")
+                    model["energy"], model["rmsd_lb"], model["rmsd_ub"] = values
+                    continue
+
+                if line.startswith("REMARK VINA RESULT:"):
+                    return invalid("malformed Vina score record")
+
+                if line.startswith(("ATOM  ", "HETATM")):
+                    try:
+                        serial = int(line[6:11].strip())
+                        coordinates = tuple(float(line[start:start + 8]) for start in (30, 38, 46))
+                    except (TypeError, ValueError, IndexError):
+                        return invalid("malformed atom record")
+                    if (
+                        serial <= 0
+                        or serial in model["atom_serials"]
+                        or not all(math.isfinite(value) for value in coordinates)
+                    ):
+                        return invalid("invalid atom serial or coordinates")
+                    model["atom_serials"].add(serial)
+                    model["atoms"].append(line)
+                elif (
+                    line.startswith("REMARK")
+                    or line.strip() in {"ROOT", "ENDROOT"}
+                    or line.startswith(("BRANCH", "ENDBRANCH", "TORSDOF"))
+                ):
+                    continue
+                elif line.strip():
+                    return invalid("unexpected content inside pose")
+
+            if model is not None or not results:
+                return invalid("incomplete or empty pose set")
+
+            results.sort(key=lambda item: item.binding_energy)
+            logger.info("解析并验证到 %s 个对接构象", len(results))
             return results
 
         except Exception as e:
             logger.error(f"结果解析异常: {e}")
-            return results
+            return []
 
     @classmethod
     def _auto_box_from_co_crystal(cls, pdb_path: str, cancel_event=None):
@@ -1125,17 +1256,15 @@ class MolecularDockingService:
                         )
             except Exception:
                 heavy_atom_count = 0
-            heavy_atom_count = max(1, heavy_atom_count)
-
             formatted_results = [
                 {
-                    "pose": index,
+                    "pose": item.pose_index or index,
                     "binding_energy": item.binding_energy,
                     "rmsd_lb": item.rmsd_lb,
                     "rmsd_ub": item.rmsd_ub,
-                    "ligand_efficiency": round(
-                        item.binding_energy / heavy_atom_count,
-                        3,
+                    "ligand_efficiency": _ligand_efficiency(
+                        item.binding_energy,
+                        heavy_atom_count,
                     ),
                 }
                 for index, item in enumerate(results, 1)

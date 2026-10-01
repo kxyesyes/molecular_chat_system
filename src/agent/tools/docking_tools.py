@@ -105,4 +105,6 @@ class GetDockingResultTool(_DockingServiceTool):
 
     def run(self, output_path: str) -> Dict[str, Any]:
         poses = self.service.parse_vina_results(output_path)
-        return self._result(True, f"解析到 {len(poses)} 个对接构象", {"poses": [p.__dict__ for p in poses]})
+        if not poses:
+            return self._result(False, "Vina 输出未通过构象、原子记录和有限数值校验。", {"poses": []})
+        return self._result(True, f"解析并验证到 {len(poses)} 个对接构象", {"poses": [p.__dict__ for p in poses]})

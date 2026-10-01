@@ -162,25 +162,90 @@ def _write_records_unlocked(
 
 
 def _parse_vina_summary(result_file: Path) -> tuple[float | None, int]:
-    best_energy: float | None = None
-    pose_count = 0
+    energies: list[float] = []
+    current_energy: float | None = None
+    current_atom_count = 0
+    current_atom_serials: set[int] = set()
+    model_count = 0
+    in_model = False
     if not result_file.exists():
-        return best_energy, pose_count
+        return None, 0
 
     try:
         lines = result_file.read_text(encoding="utf-8", errors="ignore").splitlines()
     except Exception:
         return None, 0
 
+    score_re = re.compile(
+        r"REMARK\s+VINA\s+RESULT:\s*"
+        r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+"
+        r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+"
+        r"([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
+    )
     for line in lines:
-        match = _VINA_RESULT_RE.match(line)
-        if not match:
+        if line.startswith("MODEL"):
+            if in_model:
+                return None, 0
+            fields = line.split()
+            if len(fields) != 2 or not fields[1].isdigit() or int(fields[1]) != model_count + 1:
+                return None, 0
+            model_count += 1
+            in_model = True
+            current_energy = None
+            current_atom_count = 0
+            current_atom_serials = set()
             continue
-        energy = float(match.group(1))
-        pose_count += 1
-        if best_energy is None or energy < best_energy:
-            best_energy = energy
-    return best_energy, pose_count
+        if line == "ENDMDL":
+            if not in_model or current_energy is None or current_atom_count == 0:
+                return None, 0
+            energies.append(current_energy)
+            in_model = False
+            continue
+        if not in_model:
+            if line.startswith(("ATOM  ", "HETATM")):
+                return None, 0
+            continue
+        match = score_re.fullmatch(line.strip())
+        if match:
+            if current_energy is not None:
+                return None, 0
+            try:
+                values = tuple(float(value) for value in match.groups())
+            except (TypeError, ValueError, OverflowError):
+                return None, 0
+            if not all(math.isfinite(value) for value in values):
+                return None, 0
+            if values[1] < 0 or values[2] < values[1]:
+                return None, 0
+            current_energy = values[0]
+        elif line.startswith("REMARK VINA RESULT:"):
+            return None, 0
+        elif line.startswith(("ATOM  ", "HETATM")):
+            try:
+                serial = int(line[6:11].strip())
+                coordinates = tuple(float(line[start:start + 8]) for start in (30, 38, 46))
+            except (TypeError, ValueError, IndexError):
+                return None, 0
+            if (
+                serial <= 0
+                or serial in current_atom_serials
+                or not all(math.isfinite(value) for value in coordinates)
+            ):
+                return None, 0
+            current_atom_serials.add(serial)
+            current_atom_count += 1
+        elif (
+            line.startswith("REMARK")
+            or line.strip() in {"ROOT", "ENDROOT"}
+            or line.startswith(("BRANCH", "ENDBRANCH", "TORSDOF"))
+        ):
+            continue
+        elif line.strip():
+            return None, 0
+
+    if in_model or not energies:
+        return None, 0
+    return min(energies), len(energies)
 
 
 def _directory_size(job_dir: Path) -> int:
