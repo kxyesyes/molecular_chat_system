@@ -73,10 +73,10 @@ class DockingConfig:
             return
         if (
             type(self.random_seed) is not int
-            or self.random_seed < 0
+            or self.random_seed <= 0
             or self.random_seed > 2**31 - 1
         ):
-            raise ValueError("random_seed must be an integer between 0 and 2147483647")
+            raise ValueError("random_seed must be an integer between 1 and 2147483647")
 
 
 def _ligand_efficiency(binding_energy: float | None, heavy_atom_count: int) -> float | None:
@@ -795,6 +795,17 @@ class MolecularDockingService:
                 raise
 
             if result.returncode == 0:
+                if not os.path.isfile(output_path):
+                    self._update_run_manifest(
+                        resolved_job_dir,
+                        execution={
+                            "status": "failed",
+                            "returncode": result.returncode,
+                            "failure_reason": "output_artifact_missing",
+                        },
+                    )
+                    logger.error("Vina returned success without an output artifact")
+                    return False
                 actual_command = getattr(result, "args", None) or [
                     Path(self.vina_exe).name or "vina",
                     "--config",

@@ -181,6 +181,9 @@ def assess_seed_stability(
             manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
             execution = manifest.get("execution", {})
             search = manifest.get("search", {})
+            if not isinstance(execution, dict) or not isinstance(search, dict):
+                failures.append({"index": index, "reason": "execution_manifest_invalid"})
+                continue
             if (
                 execution.get("status") != "completed"
                 or execution.get("returncode") != 0
@@ -194,7 +197,7 @@ def assess_seed_stability(
             if execution.get("output_sha256") != digest:
                 failures.append({"index": index, "reason": "pose_artifact_hash_mismatch"})
                 continue
-        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        except (AttributeError, OSError, TypeError, ValueError, json.JSONDecodeError):
             failures.append({"index": index, "reason": "execution_manifest_invalid"})
             continue
 

@@ -284,7 +284,7 @@ def test_mutated_seed_is_rejected_before_vina_launch(tmp_path):
     assert calls == []
 
 
-@pytest.mark.parametrize("seed", [-1, 2**31, 1.5, True, "37"])
+@pytest.mark.parametrize("seed", [0, -1, 2**31, 1.5, True, "37"])
 def test_docking_config_rejects_invalid_random_seed(seed):
     from src.docking.molecular_docking_service import DockingConfig
 
