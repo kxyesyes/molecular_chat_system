@@ -712,7 +712,7 @@ function dockingStepForPhase(phase) {
     return "prepare_protein";
   }
   if (normalized.includes("ligand")) return "prepare_ligand";
-  if (normalized.includes("vina") || normalized === "running") return "run_docking";
+  if (normalized.includes("vina")) return "run_docking";
   if (normalized.includes("result") || normalized.includes("scientific") || normalized.includes("artifact") || normalized === "completing") {
     return "parse_results";
   }
@@ -767,28 +767,56 @@ function durableDockingResult(record) {
   const result = record && record.result && typeof record.result === "object" ? record.result : {};
   const data = result.data && typeof result.data === "object" ? result.data : {};
   const bestPose = result.best_pose || data.best_pose;
-  const poseCount = Number(data.pose_count ?? data.total_poses ?? result.pose_count ?? result.total_poses);
-  const pose = bestPose && Number.isInteger(Number(bestPose.pose)) ? Number(bestPose.pose) : 1;
-  const bindingEnergy = bestPose && Number.isFinite(Number(bestPose.binding_energy))
-    ? Number(bestPose.binding_energy)
-    : Number.isFinite(Number(result.binding_energy))
-      ? Number(result.binding_energy)
+  const poseCount = data.pose_count ?? data.total_poses ?? result.pose_count ?? result.total_poses;
+  const bindingEnergy = bestPose && typeof bestPose.binding_energy === "number" && Number.isFinite(bestPose.binding_energy)
+    ? bestPose.binding_energy
+    : typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
+      ? result.binding_energy
       : null;
-  if (!record || record.status !== "succeeded" || result.success === false || bindingEnergy === null) {
+  if (
+    !record ||
+    record.status !== "succeeded" ||
+    result.success === false ||
+    typeof poseCount !== "number" ||
+    !Number.isInteger(poseCount) ||
+    poseCount <= 0 ||
+    bindingEnergy === null
+  ) {
     return null;
   }
   return {
     success: true,
-    job_id: record.task_id,
-    total_poses: Number.isFinite(poseCount) ? poseCount : 1,
-    results: [{
-      pose,
-      binding_energy: bindingEnergy,
-      ligand_efficiency: bestPose && Number.isFinite(Number(bestPose.ligand_efficiency)) ? Number(bestPose.ligand_efficiency) : null,
-      rmsd_lb: bestPose && Number.isFinite(Number(bestPose.rmsd_lb)) ? Number(bestPose.rmsd_lb) : null,
-      rmsd_ub: bestPose && Number.isFinite(Number(bestPose.rmsd_ub)) ? Number(bestPose.rmsd_ub) : null,
-    }],
+    task_id: record.task_id,
+    total_poses: poseCount,
+    binding_energy: bindingEnergy,
   };
+}
+
+function renderDurableTaskSuccess(record, result) {
+  const warnings = Array.isArray(record.warnings) ? record.warnings : [];
+  const artifacts = Array.isArray(record.artifacts) ? record.artifacts : [];
+  const warningText = warnings.length
+    ? warnings.map((item) => Safe.escapeHtml(item.message || item.code || String(item))).join("；")
+    : "无";
+  const artifactText = artifacts.length
+    ? artifacts.map((item) => Safe.escapeHtml(item.path || item.label || "已提交产物")).join("；")
+    : "未返回";
+  const resultsContent = document.getElementById("results-content");
+  if (!resultsContent) return;
+  resultsContent.innerHTML = `
+    <div style="margin-bottom: 20px; padding: 16px; background: #f0fdf4; border-radius: 8px; border-left: 4px solid #16a34a;">
+      <div style="font-weight: bold; color: #166534;">持久化对接任务完成</div>
+      <div style="font-size: 14px; color: #166534; margin-top: 4px;">任务ID：${Safe.escapeHtml(result.task_id)} · 已验证构象数：${result.total_poses}</div>
+      <div style="font-size: 14px; color: #166534; margin-top: 4px;">最佳结合能：${result.binding_energy.toFixed(3)} kcal/mol</div>
+      <div style="font-size: 12px; color: #475569; margin-top: 8px;">警告：${warningText}</div>
+      <div style="font-size: 12px; color: #475569; margin-top: 4px;">产物：${artifactText}</div>
+      <div style="font-size: 12px; color: #64748b; margin-top: 8px;">当前任务记录没有提供最佳构象编号，因此不会把结果强行映射为 Pose 1。可使用任务记录中的已验证产物继续查看。</div>
+    </div>
+    <div class="action-buttons">
+      <button class="action-btn btn-primary" onclick="downloadResults('${Safe.escapeInlineJsString(result.task_id)}')">下载已验证 PDBQT</button>
+      <button class="action-btn btn-secondary" onclick="resetDocking()">重新对接</button>
+    </div>`;
+  setResultsMinHeightToLeft();
 }
 
 function renderDurableTaskFailure(record) {
@@ -824,10 +852,15 @@ function applyDockingTaskRecord(record) {
       throw new Error("任务已结束，但未得到经过校验的对接结果");
     }
     DOCKING_STEPS.slice(0, 5).forEach((step) => stepManager.completeStep(step.id, "后端已完成"));
-    showRealResults(result);
+    renderDurableTaskSuccess(record, result);
+    document.querySelectorAll(".status-indicator").forEach((indicator) => {
+      indicator.className = "status-indicator status-completed";
+      indicator.textContent = "已完成";
+    });
     try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
     return true;
   }
+  renderDockingProgress(Math.min(dockingProgressPercent(record.progress), 99));
   if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || status);
   renderDurableTaskFailure(record);
   try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
@@ -836,14 +869,27 @@ function applyDockingTaskRecord(record) {
 
 async function pollDockingTask(taskId) {
   clearDockingPoll();
-  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
-  const payload = await response.json();
+  let response;
+  let payload;
+  try {
+    response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+    payload = await response.json();
+  } catch (error) {
+    if (readRememberedDockingTask() === taskId) {
+      renderDockingStepLog("run_docking", "连接中断，等待重连…");
+      dockingPollTimer = setTimeout(() => {
+        pollDockingTask(taskId).catch(handleDockingTaskError);
+      }, 3000);
+      return;
+    }
+    throw error;
+  }
   if (!response.ok || payload.success === false) {
     throw new Error(payload.message || payload.detail || "无法读取对接任务状态");
   }
   const record = unwrapApiData(payload);
   const terminal = applyDockingTaskRecord(record);
-  if (!terminal) {
+  if (!terminal && readRememberedDockingTask() === taskId) {
     dockingPollTimer = setTimeout(() => {
       pollDockingTask(taskId).catch(handleDockingTaskError);
     }, 1000);
@@ -912,11 +958,17 @@ function startDocking() {
   }
 
   const proteinFile = document.getElementById("protein-file").files[0];
-  const ligandFile = document.getElementById("ligand-file").files[0];
+  const ligandInput = document.getElementById("ligand-file");
+  const ligandFiles = ligandInput ? Array.from(ligandInput.files || []) : [];
+  const ligandFile = ligandFiles[0];
   const smilesInput = document.getElementById("smiles-input").value.trim();
 
   if (!proteinFile || (!ligandFile && !smilesInput)) {
     alert("请上传蛋白质文件和配体文件，或输入SMILES字符串");
+    return;
+  }
+  if (ligandFiles.length > 1) {
+    alert("单配体模式只能选择一个配体文件；请切换批量模式或仅保留一个文件");
     return;
   }
 
