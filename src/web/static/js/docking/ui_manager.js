@@ -768,6 +768,14 @@ function durableDockingResult(record) {
   const data = result.data && typeof result.data === "object" ? result.data : {};
   const bestPose = result.best_pose || data.best_pose;
   const poseCount = data.pose_count ?? data.total_poses ?? result.pose_count ?? result.total_poses;
+  const resultJobId =
+    typeof data.result_job_id === "string" && data.result_job_id.trim()
+      ? data.result_job_id
+      : null;
+  const bestPoseIndex =
+    bestPose && Number.isInteger(bestPose.pose) && bestPose.pose > 0
+      ? bestPose.pose
+      : null;
   const bindingEnergy = bestPose && typeof bestPose.binding_energy === "number" && Number.isFinite(bestPose.binding_energy)
     ? bestPose.binding_energy
     : typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
@@ -787,6 +795,8 @@ function durableDockingResult(record) {
   return {
     success: true,
     task_id: record.task_id,
+    result_job_id: resultJobId,
+    best_pose_index: bestPoseIndex,
     total_poses: poseCount,
     binding_energy: bindingEnergy,
   };
@@ -803,6 +813,16 @@ function renderDurableTaskSuccess(record, result) {
     : "未返回";
   const resultsContent = document.getElementById("results-content");
   if (!resultsContent) return;
+  const canViewBestPose =
+    typeof result.result_job_id === "string" &&
+    Number.isInteger(result.best_pose_index) &&
+    result.best_pose_index > 0;
+  const poseMappingText = canViewBestPose
+    ? `最佳构象：Pose ${result.best_pose_index}（已由后端验证）`
+    : "当前任务记录没有提供可验证的最佳构象编号，不会把结果强行映射为 Pose 1。";
+  const viewBestPoseButton = canViewBestPose
+    ? `<button class="action-btn btn-secondary" onclick="loadComplexStructure('${Safe.escapeInlineJsString(result.result_job_id)}', ${result.best_pose_index})">查看最佳构象</button>`
+    : "";
   resultsContent.innerHTML = `
     <div style="margin-bottom: 20px; padding: 16px; background: #f0fdf4; border-radius: 8px; border-left: 4px solid #16a34a;">
       <div style="font-weight: bold; color: #166534;">持久化对接任务完成</div>
@@ -810,10 +830,11 @@ function renderDurableTaskSuccess(record, result) {
       <div style="font-size: 14px; color: #166534; margin-top: 4px;">最佳结合能：${result.binding_energy.toFixed(3)} kcal/mol</div>
       <div style="font-size: 12px; color: #475569; margin-top: 8px;">警告：${warningText}</div>
       <div style="font-size: 12px; color: #475569; margin-top: 4px;">产物：${artifactText}</div>
-      <div style="font-size: 12px; color: #64748b; margin-top: 8px;">当前任务记录没有提供最佳构象编号，因此不会把结果强行映射为 Pose 1。可使用任务记录中的已验证产物继续查看。</div>
+      <div style="font-size: 12px; color: #64748b; margin-top: 8px;">${poseMappingText}</div>
     </div>
     <div class="action-buttons">
       <button class="action-btn btn-primary" onclick="downloadResults('${Safe.escapeInlineJsString(result.task_id)}')">下载已验证 PDBQT</button>
+      ${viewBestPoseButton}
       <button class="action-btn btn-secondary" onclick="resetDocking()">重新对接</button>
     </div>`;
   setResultsMinHeightToLeft();
@@ -1291,15 +1312,17 @@ function exportBatchResultsCsv() {
 }
 
 // 加载复合物结构（叠加蛋白+配体）
-function loadComplexStructure(jobId) {
+function loadComplexStructure(jobId, poseNumber = 1) {
   if (!viewer) initViewer();
+  const selectedPoseNumber =
+    Number.isInteger(poseNumber) && poseNumber > 0 ? poseNumber : 1;
 
   Promise.all([
     fetch(`/api/docking/result/${jobId}`).then((response) => {
       if (response.ok) return response.text();
       throw new Error("无法获取对接结果文件");
     }),
-    fetchDockedPoseSdf(jobId, 1),
+    fetchDockedPoseSdf(jobId, selectedPoseNumber),
   ])
     .then(([ligandPdbqt, ligandSdf]) => {
       try {

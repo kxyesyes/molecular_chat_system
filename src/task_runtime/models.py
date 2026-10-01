@@ -879,6 +879,7 @@ _STRICT_NUMERIC_RESULT_KEYS = frozenset(
         "elapsed_ms",
         "energy",
         "pose_count",
+        "pose",
         "progress",
         "score",
         "total_poses",
@@ -970,11 +971,12 @@ _STRICT_RESULT_OBJECT_SCHEMAS: dict[str, frozenset[str]] = {
             "progress",
             "score",
             "total_poses",
+            "result_job_id",
             "best_pose",
         }
     ),
     "best_pose": frozenset(
-        {"best_energy", "binding_energy", "pose_count", "score"}
+        {"best_energy", "binding_energy", "pose", "pose_count", "score"}
     ),
     "quality": frozenset(
         {
@@ -1037,6 +1039,9 @@ def _sanitize_scientific_result_object(
         elif key in _STRICT_DIGEST_RESULT_KEYS:
             if isinstance(raw_value, str) and _SAFE_DIGEST.fullmatch(raw_value):
                 sanitized = raw_value.lower()
+        elif key == "result_job_id":
+            if isinstance(raw_value, str) and _SAFE_DIGEST_IDENTIFIER.fullmatch(raw_value):
+                sanitized = raw_value
         elif key == "status":
             if isinstance(raw_value, str):
                 lowered = raw_value.strip().lower()

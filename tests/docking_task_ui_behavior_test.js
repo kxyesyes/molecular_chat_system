@@ -59,6 +59,18 @@ test("summary never invents pose 1 or a legacy job path", () => {
   assert.equal(summary.results, undefined);
   assert.equal(summary.job_id, undefined);
 });
+test("durable result uses explicit legacy identity and best pose mapping", () => {
+  const { context: c, get } = harness();
+  const r = success();
+  r.result.data.result_job_id = "result-job-7";
+  r.result.data.best_pose.pose = 2;
+  const summary = c.durableDockingResult(r);
+  assert.equal(summary.result_job_id, "result-job-7");
+  assert.equal(summary.best_pose_index, 2);
+  c.renderDurableTaskSuccess(r, summary);
+  assert.match(get("results-content").innerHTML, /loadComplexStructure\('result-job-7', 2\)/);
+  assert.doesNotMatch(get("results-content").innerHTML, /映射为 Pose 1/);
+});
 test("running is not proof that any preparation step completed", () => {
   const { context: c, completedSteps, get } = harness();
   c.syncDockingStepState({ ...record(), phase: "running" });
