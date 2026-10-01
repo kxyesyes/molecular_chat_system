@@ -11,8 +11,14 @@ from src.agent.contracts.target_request import analyze_target_request
 
 
 _DOCKING_FIELD = re.compile(
-    r"(?P<label>receptor(?:_path)?|ligand(?:_path)?|受体|配体)"
-    r"\s*[:：=]\s*(?P<value>[^\r\n；;。]+)",
+    r"(?P<label>receptor(?:_path)?|ligand(?:_path)?|"
+    r"protein(?:_path)?|蛋白(?:文件|结构)?|受体|配体)"
+    r"\s*[:：=]?\s*"
+    r"(?P<value>[^\r\n；;。]+?)"
+    r"(?=\s*(?:[；;。]|(?:和|and)\s*"
+    r"(?:receptor(?:_path)?|ligand(?:_path)?|"
+    r"protein(?:_path)?|蛋白(?:文件|结构)?|受体|配体)\b|"
+    r"(?:进行|使用|执行)|(?:perform|run)\b)|$)",
     re.I,
 )
 _DOCKING_VECTOR = re.compile(
@@ -35,7 +41,11 @@ def parse_structured_docking_input(query: str) -> dict[str, Any] | None:
         label = match.group('label').strip().lower()
         value = match.group('value').strip().strip('`"\'')
         value = value.rstrip('，；;。').strip()
-        if label.startswith('receptor') or label == '受体':
+        if (
+            label.startswith('receptor')
+            or label.startswith('protein')
+            or label in {'蛋白', '蛋白文件', '蛋白结构', '受体'}
+        ):
             fields['receptor_path'] = value
         else:
             fields['ligand_path'] = value
