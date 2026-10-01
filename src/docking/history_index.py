@@ -255,6 +255,56 @@ def _directory_size(job_dir: Path) -> int:
         return 0
 
 
+def _read_run_manifest(job_dir: Path) -> dict[str, Any]:
+    manifest_path = job_dir / "run_manifest.json"
+    if not manifest_path.is_file():
+        return {}
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _best_pose_index(result_file: Path) -> int | None:
+    """Return the pose index selected by the strict Vina parser."""
+    if not result_file.is_file():
+        return None
+    try:
+        # Import lazily so the lightweight history index remains importable
+        # without initializing the docking service or its adapters.
+        from .molecular_docking_service import MolecularDockingService
+
+        results = MolecularDockingService.parse_vina_results(str(result_file))
+        return results[0].pose_index if results else None
+    except Exception:
+        return None
+
+
+def _heavy_atom_count(ligand_file: Path) -> int:
+    if not ligand_file.is_file():
+        return 0
+    try:
+        count = 0
+        for line in ligand_file.read_text(encoding="utf-8", errors="strict").splitlines():
+            if line.startswith(("ATOM  ", "HETATM")) and not line[12:16].strip().upper().startswith("H"):
+                count += 1
+        return count
+    except (OSError, UnicodeError):
+        return 0
+
+
+def _ligand_efficiency(best_energy: float | None, heavy_atom_count: int) -> float | None:
+    if (
+        type(best_energy) not in (int, float)
+        or not math.isfinite(float(best_energy))
+        or type(heavy_atom_count) is not int
+        or heavy_atom_count <= 0
+    ):
+        return None
+    return round(-float(best_energy) / heavy_atom_count, 3)
+
+
 def build_history_record(
     job_dir: str | Path,
     job_id: str | None = None,
@@ -270,6 +320,14 @@ def build_history_record(
     has_receptor = receptor_file.exists()
     has_ligand = ligand_file.exists()
     best_energy, pose_count = _parse_vina_summary(result_file)
+    manifest = _read_run_manifest(job_path)
+    best_pose_index = _best_pose_index(result_file)
+    heavy_atom_count = _heavy_atom_count(ligand_file)
+    artifacts = {
+        name: name
+        for name in ("receptor.pdbqt", "ligand.pdbqt", "result.pdbqt", "run_manifest.json")
+        if (job_path / name).is_file()
+    }
 
     try:
         timestamp = job_path.stat().st_mtime
@@ -286,10 +344,19 @@ def build_history_record(
         "status": record_status,
         "best_energy": best_energy,
         "pose_count": pose_count,
+        "best_pose_index": best_pose_index,
+        "ligand_efficiency": _ligand_efficiency(best_energy, heavy_atom_count),
         "has_receptor": has_receptor,
         "has_ligand": has_ligand,
         "has_result": has_result,
         "size_bytes": _directory_size(job_path),
+        "artifacts": artifacts,
+        "manifest_file": "run_manifest.json" if manifest else None,
+        "docking_box": manifest.get("docking_box"),
+        "search": manifest.get("search"),
+        "preprocessing": manifest.get("preprocessing"),
+        "preprocessing_state": manifest.get("preprocessing_state"),
+        "execution": manifest.get("execution"),
     }
 
 

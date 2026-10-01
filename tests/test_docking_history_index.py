@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from src.web.routes.api_routes import setup_api_routes
 from src.docking import history_index as history_index_module
 from src.docking.history_index import (
+    build_history_record,
     read_history_page,
     remove_history_record,
     upsert_history_record,
@@ -20,6 +21,67 @@ from src.docking.history_index import (
 class MockDockingService:
     def __init__(self, work_dir: Path):
         self.work_dir = str(work_dir)
+
+
+def test_history_record_preserves_scientific_provenance_and_best_pose(tmp_path):
+    job_dir = tmp_path / "docking_provenance"
+    job_dir.mkdir()
+    (job_dir / "result.pdbqt").write_text(
+        "\n".join(
+            [
+                "MODEL 1",
+                "REMARK VINA RESULT: -5.000 0.000 0.000",
+                "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C",
+                "ENDMDL",
+                "MODEL 2",
+                "REMARK VINA RESULT: -9.000 0.000 0.000",
+                "HETATM    1  C   LIG A   1       5.000   2.000   3.000  1.00  0.00     0.000 C",
+                "ENDMDL",
+            ]
+        ),
+        encoding="ascii",
+    )
+    (job_dir / "ligand.pdbqt").write_text(
+        "\n".join(
+            [
+                "HETATM    1  C1  LIG A   1       0.000   0.000   0.000  1.00  0.00     0.000 C",
+                "HETATM    2  C2  LIG A   1       1.000   0.000   0.000  1.00  0.00     0.000 C",
+            ]
+        ),
+        encoding="ascii",
+    )
+    (job_dir / "run_manifest.json").write_text(
+        json.dumps(
+            {
+                "docking_box": {
+                    "source": "user_explicit",
+                    "mode": "targeted",
+                    "center": [5.0, 6.0, 7.0],
+                    "size": [18.0, 19.0, 20.0],
+                },
+                "search": {
+                    "exhaustiveness": 16,
+                    "num_modes": 20,
+                    "energy_range": 3.0,
+                    "random_seed": 37,
+                },
+                "preprocessing": {"receptor": "pdbqt_passthrough"},
+                "preprocessing_state": {"status": "completed"},
+                "execution": {"status": "completed", "returncode": 0},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = build_history_record(job_dir, job_id="provenance", status="completed")
+
+    assert record["best_energy"] == -9.0
+    assert record["best_pose_index"] == 2
+    assert record["ligand_efficiency"] == 4.5
+    assert record["docking_box"]["source"] == "user_explicit"
+    assert record["search"]["random_seed"] == 37
+    assert record["preprocessing_state"]["status"] == "completed"
+    assert record["execution"]["returncode"] == 0
 
 
 def write_history_index(work_dir: Path, count: int = 120) -> None:
