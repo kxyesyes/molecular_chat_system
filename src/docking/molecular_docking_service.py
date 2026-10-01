@@ -907,6 +907,13 @@ class MolecularDockingService:
 
     def _resolve_docking_box(self, receptor_file: str, config: DockingConfig, cancel_event=None) -> Dict[str, Any]:
         """Resolve the box source and reject unsupported silent defaults."""
+        center_values = (config.center_x, config.center_y, config.center_z)
+        size_values = (config.size_x, config.size_y, config.size_z)
+        if (
+            not all(math.isfinite(float(value)) for value in (*center_values, *size_values))
+            or not all(float(value) > 0 for value in size_values)
+        ):
+            raise ValueError("invalid_docking_box")
         default_box = (
             abs(config.center_x) < 1e-6
             and abs(config.center_y) < 1e-6
@@ -1282,6 +1289,13 @@ class MolecularDockingService:
                         job_dir,
                         "docking_box_confirmation_required",
                         "No supported pocket evidence or explicit docking box was provided; confirm a targeted or blind docking box.",
+                        **cleanup_control,
+                    )
+                if str(error) == "invalid_docking_box":
+                    return self._failed_job_response(
+                        job_dir,
+                        "invalid_docking_box",
+                        "Docking box coordinates must be finite and box dimensions must be positive.",
                         **cleanup_control,
                     )
                 raise

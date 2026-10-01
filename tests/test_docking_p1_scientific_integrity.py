@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,27 @@ def test_docking_box_requires_confirmation_without_evidence(tmp_path: Path, monk
 
     with pytest.raises(ValueError, match="docking_box_confirmation_required"):
         service._resolve_docking_box(str(receptor), DockingConfig())
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"center_x": math.nan},
+        {"size_x": 0.0},
+        {"size_y": -1.0},
+        {"size_z": math.inf},
+    ],
+)
+def test_docking_box_rejects_nonfinite_or_nonpositive_values(tmp_path: Path, updates):
+    from src.docking.molecular_docking_service import DockingConfig, MolecularDockingService
+
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    service = MolecularDockingService()
+    config = DockingConfig(manual_center=True, **updates)
+
+    with pytest.raises(ValueError, match="invalid_docking_box"):
+        service._resolve_docking_box(str(receptor), config)
 
 
 def test_blind_docking_is_explicit_and_records_search_cost(tmp_path: Path, monkeypatch):
