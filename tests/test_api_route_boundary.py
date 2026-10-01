@@ -725,6 +725,18 @@ def test_pose_sdf_rejects_non_positive_pose_numbers(tmp_path, pose):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize("path", [
+    "/api/docking/result/bad.job",
+    "/api/docking/pose_sdf/bad.job",
+])
+def test_docking_artifact_routes_reject_invalid_job_ids(tmp_path, path):
+    service = SimpleNamespace(work_dir=str(tmp_path))
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get(path)
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Invalid job_id"}
+
+
 def test_pose_sdf_does_not_fallback_to_all_models_for_out_of_range_pose(tmp_path):
     job = tmp_path / "docking_demo"
     job.mkdir()
