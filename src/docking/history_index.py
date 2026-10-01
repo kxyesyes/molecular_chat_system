@@ -355,6 +355,7 @@ def build_history_record(
         "docking_box": manifest.get("docking_box"),
         "search": manifest.get("search"),
         "preprocessing": manifest.get("preprocessing"),
+        "preprocessing_policy": manifest.get("preprocessing_policy"),
         "preprocessing_state": manifest.get("preprocessing_state"),
         "execution": manifest.get("execution"),
     }
