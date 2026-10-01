@@ -452,9 +452,11 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         )
 
         receptor_path, ligand_path = resolve_analysis_inputs(job_dir, pose)
+        pose_export_error = None
         if receptor_path is not None and ligand_path is None:
             result_file = _support.os.path.join(job_dir, "result.pdbqt")
             if _support.os.path.isfile(result_file):
+                temporary = None
                 try:
                     from src.docking.pose_export import pose_sdf_from_pdbqt
 
@@ -477,11 +479,26 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     _support.os.replace(temporary, ligand_candidate)
                     _, ligand_path = resolve_analysis_inputs(job_dir, pose)
                 except Exception as error:
+                    pose_export_error = type(error).__name__
+                    if temporary and _support.os.path.exists(temporary):
+                        try:
+                            _support.os.unlink(temporary)
+                        except OSError:
+                            pass
                     _support.logger.warning(
                         "Unable to create topology-bearing pose artifact for interaction analysis: %s",
                         type(error).__name__,
                     )
         if receptor_path is None or ligand_path is None:
+            if pose_export_error:
+                return {
+                    "status": "failed",
+                    "reason_code": "pose_export_failed",
+                    "pose": pose,
+                    "interactions": [],
+                    "warnings": [f"pose_export_failed:{pose_export_error}"],
+                    "provenance": {"analyzer": "prolif", "tool_derived": False},
+                }
             return {
                 "status": "unavailable",
                 "reason_code": "analysis_input_missing",

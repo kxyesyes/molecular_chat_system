@@ -639,6 +639,21 @@ def test_interaction_endpoint_materializes_topology_bearing_pose_artifact(tmp_pa
     assert "V2000" in pose_artifact.read_text(encoding="utf-8")
 
 
+def test_interaction_endpoint_preserves_pose_export_failure(tmp_path):
+    job = tmp_path / "docking_demo"
+    job.mkdir()
+    (job / "analysis_receptor.pdb").write_text("ATOM\n", encoding="utf-8")
+    (job / "result.pdbqt").write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+    service = SimpleNamespace(work_dir=str(tmp_path))
+
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get("/api/docking/interactions/demo")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "failed"
+    assert response.json()["reason_code"] == "pose_export_failed"
+
+
 @pytest.mark.parametrize("pose", [0, -1])
 def test_pose_sdf_rejects_non_positive_pose_numbers(tmp_path, pose):
     job = tmp_path / "docking_demo"
