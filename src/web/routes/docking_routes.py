@@ -123,8 +123,14 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         temp_paths: List[str] = []
         try:
-            if not ligand_file and not smiles:
+            clean_smiles = (smiles or "").strip() or None
+            if ligand_file is None and clean_smiles is None:
                 raise HTTPException(status_code=400, detail="请提供配体文件或SMILES字符串")
+            if ligand_file is not None and clean_smiles is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Provide either a ligand file or SMILES, not both",
+                )
             _support._validate_docking_limits(
                 size_x=size_x,
                 size_y=size_y,
@@ -158,11 +164,11 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
             # 执行对接
             ligand_temp_path = None
-            if smiles:
+            if clean_smiles is not None:
                 result = await _support._invoke_in_threadpool(
                     docking_service.perform_docking,
                     receptor_file=protein_temp.name,
-                    ligand_input=smiles,
+                    ligand_input=clean_smiles,
                     config=config,
                     input_type="smiles"
                 )
@@ -247,6 +253,11 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         if not ligand_files and not smiles_rows:
             raise HTTPException(status_code=400, detail="请提供至少一个配体文件或一行 SMILES")
+        if ligand_files and smiles_rows:
+            raise HTTPException(
+                status_code=400,
+                detail="Provide either ligand files or batch SMILES, not both",
+            )
         max_batch_ligands = _support._get_int_env("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", 100)
         if len(ligand_files) + len(smiles_rows) > max_batch_ligands:
             raise HTTPException(

@@ -14,12 +14,13 @@ import sys
 import textwrap
 from collections import Counter
 from importlib.metadata import version
+from io import BytesIO
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
-from fastapi import FastAPI, Response
+from fastapi import FastAPI, HTTPException, Response, UploadFile
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 
@@ -349,6 +350,36 @@ def test_unavailable_runtime_is_503_without_registration_resolution(mode):
             assert response.status_code == 503
             assert response.json() == {"detail": "Task runtime unavailable"}
     assert calls == ([] if mode == "none" else [mode, mode])
+
+
+def test_legacy_single_docking_rejects_file_and_smiles_together(controlled_app):
+    app, _ = controlled_app
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/docking/submit",
+            files={
+                "protein_file": ("protein.pdb", b"P"),
+                "ligand_file": ("ligand.sdf", b"L"),
+            },
+            data={"smiles": "CC"},
+        )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Provide either a ligand file or SMILES, not both"}
+
+
+def test_batch_docking_rejects_file_and_smiles_together(controlled_app):
+    app, _ = controlled_app
+    route = next(route for route in app.routes if route.path == "/api/docking/batch_submit")
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(
+            route.endpoint(
+                protein_file=UploadFile(filename="protein.pdb", file=BytesIO(b"P")),
+                ligand_files=[UploadFile(filename="ligand.sdf", file=BytesIO(b"L"))],
+                batch_smiles="CC",
+            )
+        )
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "Provide either ligand files or batch SMILES, not both"
 
 
 @pytest.mark.parametrize("timing", ["before", "after"])
