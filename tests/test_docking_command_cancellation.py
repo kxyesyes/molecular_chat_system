@@ -2124,7 +2124,15 @@ class _C4aServiceRig:
                 )
             content = "ATOM      1  C   LIG A   1       0.000   0.000   0.000\n"
             if phase == "vina" and self.failure != "no-poses":
-                content = "REMARK VINA RESULT: -7.2 0.0 0.0\n" + content
+                # Keep this fixture structurally equivalent to a minimal Vina
+                # pose.  The production parser intentionally rejects a
+                # score-only file or atoms outside MODEL/ENDMDL.
+                content = (
+                    "MODEL 1\n"
+                    "REMARK VINA RESULT: -7.2 0.0 0.0\n"
+                    + content
+                    + "ENDMDL\n"
+                )
             code = 3 if self.failure == phase + "-false" else 0
             self._spawn_phase = phase
             self.phase_calls.append((phase, adapter, adapter._ownership_scope))

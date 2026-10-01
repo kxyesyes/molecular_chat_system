@@ -1010,6 +1010,7 @@ class _VinaPoseStreamValidator:
         self._minimum_energy = math.inf
         self._in_model = False
         self._model_has_atom = False
+        self._model_atom_serials: set[int] = set()
         self._model_energy: float | None = None
 
     def feed(self, chunk: bytes) -> None:
@@ -1061,6 +1062,7 @@ class _VinaPoseStreamValidator:
             self._models += 1
             self._in_model = True
             self._model_has_atom = False
+            self._model_atom_serials = set()
             self._model_energy = None
             return
         if line == b"ENDMDL":
@@ -1091,8 +1093,26 @@ class _VinaPoseStreamValidator:
                 raise CompletionError("completion_artifact_invalid") from None
             if not all(math.isfinite(item) for item in values):
                 raise CompletionError("completion_artifact_invalid")
+            if values[1] < 0 or values[2] < values[1]:
+                raise CompletionError("completion_artifact_invalid")
             self._model_energy = values[0]
+        elif line.startswith(b"REMARK VINA RESULT:"):
+            raise CompletionError("completion_artifact_invalid")
         elif line.startswith((b"ATOM  ", b"HETATM")):
+            try:
+                serial = int(line[6:11].strip())
+                coordinates = tuple(
+                    float(line[start:start + 8]) for start in (30, 38, 46)
+                )
+            except (TypeError, ValueError, IndexError):
+                raise CompletionError("completion_artifact_invalid") from None
+            if (
+                serial <= 0
+                or serial in self._model_atom_serials
+                or not all(math.isfinite(value) for value in coordinates)
+            ):
+                raise CompletionError("completion_artifact_invalid")
+            self._model_atom_serials.add(serial)
             self._model_has_atom = True
 
     def finish(self) -> None:

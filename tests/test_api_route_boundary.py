@@ -605,6 +605,56 @@ def test_pose_helpers_reconstruct_requested_coordinates_from_synthetic_file(tmp_
     assert (position.x, position.y, position.z) == pytest.approx((5.0, 2.0, 3.0))
 
 
+@pytest.mark.parametrize("pose", [0, -1])
+def test_pose_sdf_rejects_non_positive_pose_numbers(tmp_path, pose):
+    job = tmp_path / "docking_demo"
+    job.mkdir()
+    (job / "result.pdbqt").write_text(
+        "REMARK SMILES C\nREMARK SMILES IDX 1 1\nMODEL 1\nENDMDL\n",
+        encoding="utf-8",
+    )
+    service = SimpleNamespace(work_dir=str(tmp_path))
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get("/api/docking/pose_sdf/demo", params={"pose": pose})
+    assert response.status_code == 422
+
+
+def test_pose_sdf_does_not_fallback_to_all_models_for_out_of_range_pose(tmp_path):
+    job = tmp_path / "docking_demo"
+    job.mkdir()
+    lines = [
+        "REMARK SMILES C",
+        "REMARK SMILES IDX 1 1",
+        "MODEL 1",
+        "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C",
+        "ENDMDL",
+    ]
+    (job / "result.pdbqt").write_text("\n".join(lines), encoding="utf-8")
+    service = SimpleNamespace(work_dir=str(tmp_path))
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get("/api/docking/pose_sdf/demo", params={"pose": 2})
+    assert response.status_code == 404
+
+
+def test_pose_sdf_rejects_incomplete_heavy_atom_mapping(tmp_path):
+    pytest.importorskip("rdkit")
+    job = tmp_path / "docking_demo"
+    job.mkdir()
+    lines = [
+        "REMARK SMILES CC",
+        "REMARK SMILES IDX 1 1",
+        "MODEL 1",
+        "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C",
+        "HETATM    2  C   LIG A   1       4.000   5.000   6.000  1.00  0.00     0.000 C",
+        "ENDMDL",
+    ]
+    (job / "result.pdbqt").write_text("\n".join(lines), encoding="utf-8")
+    service = SimpleNamespace(work_dir=str(tmp_path))
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get("/api/docking/pose_sdf/demo", params={"pose": 1})
+    assert response.status_code == 400
+
+
 def test_properties_endpoint_reports_unknown_admet_after_behavior_fix(monkeypatch):
     # Post-PR64 behavior correction: replace unsupported labels, not the frozen
     # registration/HTTP contract. Successful basic descriptors are not ADMET evidence.

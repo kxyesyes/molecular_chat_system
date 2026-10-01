@@ -939,20 +939,36 @@ function showRealResults(data) {
   `;
 
   data.results.forEach((result) => {
+    const bindingEnergy =
+      typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
+        ? result.binding_energy
+        : null;
+    const ligandEfficiency =
+      typeof result.ligand_efficiency === "number" && Number.isFinite(result.ligand_efficiency)
+        ? result.ligand_efficiency.toFixed(3)
+        : "未计算";
+    const rmsdLower =
+      typeof result.rmsd_lb === "number" && Number.isFinite(result.rmsd_lb)
+        ? result.rmsd_lb.toFixed(1)
+        : "未计算";
+    const rmsdUpper =
+      typeof result.rmsd_ub === "number" && Number.isFinite(result.rmsd_ub)
+        ? result.rmsd_ub.toFixed(1)
+        : "未计算";
     const energyClass =
-      result.binding_energy <= -8
+      bindingEnergy !== null && bindingEnergy <= -8
         ? "score-high"
-        : result.binding_energy <= -6
+        : bindingEnergy !== null && bindingEnergy <= -6
           ? "score-medium"
           : "score-low";
 
     tableHTML += `
       <tr>
         <td>Pose ${result.pose}</td>
-        <td><span class="${energyClass}">${result.binding_energy.toFixed(1)}</span></td>
-        <td>${result.ligand_efficiency.toFixed(3)}</td>
-        <td>${result.rmsd_lb.toFixed(1)}</td>
-        <td>${result.rmsd_ub.toFixed(1)}</td>
+        <td><span class="${energyClass}">${bindingEnergy === null ? "未计算" : bindingEnergy.toFixed(1)}</span></td>
+        <td>${ligandEfficiency}</td>
+        <td>${rmsdLower}</td>
+        <td>${rmsdUpper}</td>
         <td><button class="action-btn btn-primary" style="padding: 5px 10px; font-size: 12px;" onclick="viewPose(${result.pose})">查看</button></td>
       </tr>
     `;
@@ -1549,7 +1565,9 @@ function loadDockingHistory() {
               ? "⏳ 进行中"
               : "❌ 失败";
         const energy =
-          item.best_energy !== null ? item.best_energy.toFixed(1) : "--";
+          typeof item.best_energy === "number" && Number.isFinite(item.best_energy)
+            ? `${item.best_energy.toFixed(1)} kcal/mol`
+            : "未计算";
         const sizeKB = (item.size_bytes / 1024).toFixed(0);
         const safeJobIdText = Safe.escapeHtml(item.job_id);
         const safeJobIdAttr = Safe.escapeAttr(item.job_id);
@@ -1564,7 +1582,7 @@ function loadDockingHistory() {
             </div>
             <div class="history-card-info">
               <span class="history-meta history-time">🕐 ${safeHistoryTime}</span>
-              <span class="history-energy">${energy} kcal/mol</span>
+              <span class="history-energy">${energy}</span>
               <span class="history-meta">📊 ${item.pose_count} 个构象</span>
               <span class="history-meta">💾 ${sizeKB} KB</span>
             </div>
@@ -1653,7 +1671,7 @@ function loadHistoryJob(jobId) {
             binding_energy: parseFloat(m[1]),
             rmsd_lb: parseFloat(m[2]),
             rmsd_ub: parseFloat(m[3]),
-            ligand_efficiency: 0,
+            ligand_efficiency: null,
           });
         }
       });
