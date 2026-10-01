@@ -4,6 +4,8 @@ from pathlib import Path
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from src.docking.interaction_analysis import (
     analyze_docking_interactions,
     normalize_prolif_output,
@@ -127,3 +129,40 @@ def test_prolif_success_is_structured_and_tool_derived(tmp_path: Path, monkeypat
     assert result["provenance"]["tool_derived"] is True
     assert result["provenance"]["analyzer"] == "prolif"
     assert result["interactions"][0]["type"] == "hydrogen_bond"
+
+
+def test_real_prolif_adapter_smoke_with_explicit_hydrogens(tmp_path: Path):
+    pytest.importorskip("MDAnalysis")
+    pytest.importorskip("prolif")
+    from rdkit import Chem
+    from rdkit.Chem import AllChem
+
+    receptor = tmp_path / "receptor.pdb"
+    receptor.write_text(
+        "\n".join(
+            [
+                "ATOM      1  N   ALA A   1       0.000   0.000   0.000  1.00  0.00           N",
+                "ATOM      2  H   ALA A   1       0.900   0.000   0.000  1.00  0.00           H",
+                "ATOM      3  CA  ALA A   1       1.450   0.000   0.000  1.00  0.00           C",
+                "ATOM      4  C   ALA A   1       2.000   1.300   0.000  1.00  0.00           C",
+                "ATOM      5  O   ALA A   1       3.200   1.300   0.000  1.00  0.00           O",
+                "CONECT    1    2    3",
+                "CONECT    2    1",
+                "CONECT    3    1    4",
+                "CONECT    4    3    5",
+                "CONECT    5    4",
+                "TER",
+                "END",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    molecule = Chem.AddHs(Chem.MolFromSmiles("CO"))
+    assert AllChem.EmbedMolecule(molecule, randomSeed=7) == 0
+    Chem.MolToMolFile(molecule, str(tmp_path / "pose.sdf"))
+
+    result = analyze_docking_interactions(receptor, tmp_path / "pose.sdf")
+
+    assert result["status"] == "success", result
+    assert result["provenance"]["tool_derived"] is True
+    assert result["provenance"]["analyzer"] == "prolif"
