@@ -42,6 +42,27 @@ def test_web_style_docking_prompt_is_bound_to_structured_tool_input():
     }
 
 
+def test_common_chinese_protein_and_ligand_wording_is_bound_to_structured_input():
+    tool = _RecordingDockingTool()
+    prompt = (
+        "请把仓库样例蛋白 D:/work/data/receptor.pdb 和配体 "
+        "D:/work/data/ligand.sdf 进行真实 AutoDock Vina docking，"
+        "使用 center=[5.99,3.01,17.345], size=[20,20,20]。"
+    )
+
+    SupervisorAgent(tools={"molecular_docking": tool}).execute(
+        prompt,
+        active_skill="docking_simulation",
+    )
+
+    assert tool.received == {
+        "receptor_path": "D:/work/data/receptor.pdb",
+        "ligand_path": "D:/work/data/ligand.sdf",
+        "center": [5.99, 3.01, 17.345],
+        "size": [20.0, 20.0, 20.0],
+    }
+
+
 def test_incomplete_docking_prompt_remains_unstructured_for_safe_rejection():
     tool = _RecordingDockingTool()
     SupervisorAgent(tools={"molecular_docking": tool}).execute(
