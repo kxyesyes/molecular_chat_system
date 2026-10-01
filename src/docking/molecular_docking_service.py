@@ -1172,7 +1172,13 @@ class MolecularDockingService:
         root = Path(job_dir).resolve()
         safe = []
         for value in command:
-            path = Path(str(value))
+            raw_value = str(value)
+            # Windows command switches such as ``/c`` are absolute-looking
+            # on POSIX, but are not filesystem paths and must remain intact.
+            if raw_value.startswith("/") and len(raw_value) <= 3 and "/" not in raw_value[1:]:
+                safe.append(raw_value)
+                continue
+            path = Path(raw_value)
             try:
                 relative = path.resolve().relative_to(root)
                 safe.append(str(relative).replace("\\", "/"))
