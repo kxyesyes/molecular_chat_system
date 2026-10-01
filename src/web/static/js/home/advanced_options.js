@@ -5,6 +5,7 @@ window.HomeAdvancedOptions = (function () {
     ragCount: HomeConfig.advancedDefaults.ragCount,
     temperature: HomeConfig.advancedDefaults.temperature,
     molCount: HomeConfig.advancedDefaults.moleculeCount,
+    molCountExplicit: false,
   };
 
   function save() {
@@ -30,13 +31,20 @@ window.HomeAdvancedOptions = (function () {
         loaded.temperature || HomeConfig.advancedDefaults.temperature;
       advancedConfig.molCount =
         loaded.molCount || HomeConfig.advancedDefaults.moleculeCount;
+      // Older saved options always included the default count; they cannot
+      // establish that the user intended to override a natural-language count.
+      advancedConfig.molCountExplicit = loaded.molCountExplicit === true;
     } catch (error) {
       console.error("❌ 加载高级选项失败:", error);
     }
   }
 
   function getConfig() {
-    return { ...advancedConfig };
+    // JSON serialization omits undefined in both homepage chat transports.
+    // Explicit slider choices retain the existing authoritative API behavior.
+    return { ...advancedConfig,
+      molCount: advancedConfig.molCountExplicit ? advancedConfig.molCount : undefined,
+    };
   }
 
   function init() {
@@ -91,7 +99,8 @@ window.HomeAdvancedOptions = (function () {
 
       if (molCountSlider) {
         molCountSlider.value = advancedConfig.molCount;
-        if (molCountValue) molCountValue.innerHTML = advancedConfig.molCount;
+        if (molCountValue) molCountValue.textContent = advancedConfig.molCountExplicit
+          ? String(advancedConfig.molCount) : "自动";
         updateTrackFill(molCountSlider, molSliderFill);
       }
     }
@@ -161,7 +170,8 @@ window.HomeAdvancedOptions = (function () {
       molCountSlider.addEventListener("input", function (e) {
         const value = parseInt(e.target.value, 10);
         advancedConfig.molCount = value;
-        if (molCountValue) molCountValue.innerHTML = value;
+        advancedConfig.molCountExplicit = true;
+        if (molCountValue) molCountValue.textContent = String(value);
         updateTrackFill(molCountSlider, molSliderFill);
         save();
       });
@@ -172,6 +182,7 @@ window.HomeAdvancedOptions = (function () {
         advancedConfig.ragCount = HomeConfig.advancedDefaults.ragCount;
         advancedConfig.temperature = HomeConfig.advancedDefaults.temperature;
         advancedConfig.molCount = HomeConfig.advancedDefaults.moleculeCount;
+        advancedConfig.molCountExplicit = false;
         updateSliderValues();
         save();
         notify("✅ 已恢复默认设置", "success");

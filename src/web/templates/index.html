@@ -2466,7 +2466,7 @@
                   <span>分子生成数量</span>
                   <span class="badge">Generation</span>
                 </div>
-                <div class="card-value" id="molCountValue">5</div>
+                <div class="card-value" id="molCountValue">自动</div>
               </div>
               <div class="slider-container">
                 <input type="range" id="molCountSlider" min="1" max="10" value="5" class="modern-slider" />
@@ -2477,7 +2477,7 @@
                 </div>
               </div>
               <div class="card-description">
-                控制 AI 单次生成的分子候选方案数量
+                默认按消息中的数量生成；主动调整滑块将覆盖消息数量。恢复默认可回到自动模式。
               </div>
             </div>
           </div>
@@ -2550,7 +2550,7 @@
   <script src="/static/js/home/formatters.js"></script>
   <script src="/static/js/home/molecule_renderer.js"></script>
   <script src="/static/js/home/chat_renderer.js"></script>
-  <script src="/static/js/home/advanced_options.js"></script>
+  <script src="/static/js/home/advanced_options.js?v=20261001-explicit-count-v1"></script>
   <script src="/static/js/home/ws_client.js"></script>
   <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20260925-terminal-labels-v1 -->
