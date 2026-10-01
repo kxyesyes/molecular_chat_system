@@ -424,6 +424,83 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             _support.logger.error(f"获取对接结果失败: {e}")
             raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
 
+    @app.get("/api/docking/interactions/{job_id}")
+    async def get_docking_interactions(job_id: str, pose: int = 1):
+        """Return backend-derived interactions for an explicitly prepared pose.
+
+        The endpoint intentionally does not analyze ``result.pdbqt`` directly:
+        PDBQT does not reliably carry the bond orders and explicit hydrogens
+        required for defensible interaction assignment.
+        """
+        import re
+
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id or ""):
+            raise HTTPException(status_code=400, detail="Invalid job_id")
+        if type(pose) is not int or pose <= 0:
+            raise HTTPException(status_code=422, detail="pose 必须是正整数")
+
+        work_dir = docking_service.work_dir if docking_service else _support.os.path.join(
+            _support.os.getcwd(), "temp_docking"
+        )
+        job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
+        if not _support.os.path.isdir(job_dir):
+            raise HTTPException(status_code=404, detail="对接任务不存在")
+
+        from src.docking.interaction_analysis import (
+            analyze_docking_interactions,
+            resolve_analysis_inputs,
+        )
+
+        receptor_path, ligand_path = resolve_analysis_inputs(job_dir, pose)
+        if receptor_path is not None and ligand_path is None:
+            result_file = _support.os.path.join(job_dir, "result.pdbqt")
+            if _support.os.path.isfile(result_file):
+                try:
+                    from src.docking.pose_export import pose_sdf_from_pdbqt
+
+                    with open(result_file, "r", encoding="utf-8", errors="ignore") as stream:
+                        pose_text = stream.read()
+                    pose_sdf = pose_sdf_from_pdbqt(
+                        pose_text,
+                        pose,
+                        keep_hydrogens=True,
+                    )
+                    ligand_candidate = _support.os.path.join(
+                        job_dir,
+                        f"analysis_pose_{pose}.sdf",
+                    )
+                    temporary = f"{ligand_candidate}.tmp"
+                    with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
+                        stream.write(pose_sdf)
+                        stream.flush()
+                        _support.os.fsync(stream.fileno())
+                    _support.os.replace(temporary, ligand_candidate)
+                    _, ligand_path = resolve_analysis_inputs(job_dir, pose)
+                except Exception as error:
+                    _support.logger.warning(
+                        "Unable to create topology-bearing pose artifact for interaction analysis: %s",
+                        type(error).__name__,
+                    )
+        if receptor_path is None or ligand_path is None:
+            return {
+                "status": "unavailable",
+                "reason_code": "analysis_input_missing",
+                "pose": pose,
+                "interactions": [],
+                "warnings": [
+                    "explicit_analysis_receptor_and_pose_sdf_are_required",
+                    "pdbqt_was_not_used_as_a_topology_fallback",
+                ],
+                "provenance": {"analyzer": "prolif", "tool_derived": False},
+            }
+        result = analyze_docking_interactions(
+            receptor_path,
+            ligand_path,
+            pose_index=1,
+        )
+        result["pose"] = pose
+        return result
+
     def _extract_pose_atom_lines(pdbqt_text: str, pose_index: int = 1):
         if type(pose_index) is not int or pose_index <= 0:
             raise ValueError("pose index must be a positive integer")

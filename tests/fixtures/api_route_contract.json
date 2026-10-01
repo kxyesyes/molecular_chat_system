@@ -58,6 +58,15 @@
       "methods": [
         "GET"
       ],
+      "path": "/api/docking/interactions/{job_id}",
+      "name": "get_docking_interactions",
+      "status_code": null,
+      "parameters": "job_id: str, pose: int=1"
+    },
+    {
+      "methods": [
+        "GET"
+      ],
       "path": "/api/docking/pose_sdf/{job_id}",
       "name": "get_docking_pose_sdf",
       "status_code": null,
@@ -787,6 +796,54 @@
                 "minimum": 1,
                 "default": 3,
                 "title": "Timeout"
+              }
+            }
+          ],
+          "responses": {
+            "200": {
+              "description": "Successful Response",
+              "content": {
+                "application/json": {
+                  "schema": {}
+                }
+              }
+            },
+            "422": {
+              "description": "Validation Error",
+              "content": {
+                "application/json": {
+                  "schema": {
+                    "$ref": "#/components/schemas/HTTPValidationError"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "/api/docking/interactions/{job_id}": {
+        "get": {
+          "summary": "Get Docking Interactions",
+          "description": "Return backend-derived interactions for an explicitly prepared pose.\n\nThe endpoint intentionally does not analyze ``result.pdbqt`` directly:\nPDBQT does not reliably carry the bond orders and explicit hydrogens\nrequired for defensible interaction assignment.",
+          "operationId": "get_docking_interactions_api_docking_interactions__job_id__get",
+          "parameters": [
+            {
+              "name": "job_id",
+              "in": "path",
+              "required": true,
+              "schema": {
+                "type": "string",
+                "title": "Job Id"
+              }
+            },
+            {
+              "name": "pose",
+              "in": "query",
+              "required": false,
+              "schema": {
+                "type": "integer",
+                "default": 1,
+                "title": "Pose"
               }
             }
           ],

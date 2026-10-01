@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 
 
 DOMAINS = [
-    ("docking", 10),
+    ("docking", 11),
     ("molecule_utility", 3),
     ("docking_report", 1),
     ("reverse_target", 7),
@@ -106,11 +106,11 @@ def test_registration_contract():
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
     actual = registration_contract(registered_app())
     assert actual == expected
-    assert len(actual["operations"]) == 30
+    assert len(actual["operations"]) == 31
     assert Counter(row["methods"][0] for row in actual["operations"]) == {
-        "POST": 14, "GET": 13, "DELETE": 3,
+        "POST": 14, "GET": 14, "DELETE": 3,
     }
-    assert len(actual["openapi"]["paths"]) == 29
+    assert len(actual["openapi"]["paths"]) == 30
 
 
 @pytest.mark.parametrize("domain,count", DOMAINS)
@@ -168,7 +168,7 @@ def fake_module(monkeypatch, name, **attributes):
 
 
 # Each case enters its endpoint (not merely FastAPI's pre-handler 422 path).
-# These fixed cases are also the executable 30-operation coverage map.
+# These fixed cases are also the executable 31-operation coverage map.
 OPERATION_CASES = [
     ("POST", "/api/docking/tasks", {"files": {"protein_file": ("p.pdb", b"P")}}, 503,
      {"detail": "Task runtime unavailable"}),
@@ -179,6 +179,7 @@ OPERATION_CASES = [
      "data": {"batch_smiles": "CC first\nCCC second"}}, 200, {"total": 2, "completed": 0, "failed": 2}),
     ("GET", "/api/docking/status", {}, 200, {"status": "error", "environment_check": False}),
     ("GET", "/api/docking/result/job", {}, 200, None),
+    ("GET", "/api/docking/interactions/job", {}, 200, {"status": "unavailable", "reason_code": "analysis_input_missing"}),
     ("GET", "/api/docking/pose_sdf/job", {}, 400, None),
     ("GET", "/api/docking/history", {}, 200, {"history": [], "total": 0}),
     ("DELETE", "/api/docking/history", {}, 200, {"success": True, "deleted": 0}),
@@ -262,7 +263,7 @@ def controlled_app(monkeypatch, tmp_path):
                          ids=[f"{m} {p}" for m, p, *_ in OPERATION_CASES])
 def test_controlled_operation_branch(controlled_app, method, path, kwargs, status, expected):
     app, work_dir = controlled_app
-    if path in {"/api/docking/result/job", "/api/docking/report/job", "/api/docking/pose_sdf/job"}:
+    if path in {"/api/docking/result/job", "/api/docking/interactions/job", "/api/docking/report/job", "/api/docking/pose_sdf/job"}:
         job = work_dir / "docking_job"
         job.mkdir(parents=True)
         (job / "result.pdbqt").write_text("REMARK controlled fixture\n", encoding="utf-8")
@@ -603,6 +604,39 @@ def test_pose_helpers_reconstruct_requested_coordinates_from_synthetic_file(tmp_
     assert mol.GetNumAtoms() == 1
     position = mol.GetConformer().GetAtomPosition(0)
     assert (position.x, position.y, position.z) == pytest.approx((5.0, 2.0, 3.0))
+
+
+def test_interaction_endpoint_materializes_topology_bearing_pose_artifact(tmp_path, monkeypatch):
+    from src.docking import interaction_analysis
+
+    monkeypatch.setattr(interaction_analysis, "_dependency_available", lambda _: False)
+    job = tmp_path / "docking_demo"
+    job.mkdir()
+    (job / "analysis_receptor.pdb").write_text(
+        "ATOM      1  C   ALA A   1       0.000   0.000   0.000\n",
+        encoding="utf-8",
+    )
+    (job / "result.pdbqt").write_text(
+        "\n".join(
+            [
+                "REMARK SMILES C",
+                "REMARK SMILES IDX 1 1",
+                "MODEL 1",
+                "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C",
+                "ENDMDL",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    service = SimpleNamespace(work_dir=str(tmp_path))
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get("/api/docking/interactions/demo", params={"pose": 1})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["reason_code"] == "dependency_missing"
+    pose_artifact = job / "analysis_pose_1.sdf"
+    assert pose_artifact.is_file()
+    assert "V2000" in pose_artifact.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("pose", [0, -1])

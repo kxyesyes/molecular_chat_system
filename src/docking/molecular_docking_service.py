@@ -1402,6 +1402,20 @@ class MolecularDockingService:
                 "error": "Docking job directory could not be created",
             }
 
+        # Preserve a topology-bearing receptor for the optional backend
+        # interaction analyzer.  The prepared PDBQT is intentionally not used
+        # as an analysis fallback because it may lack bond orders and explicit
+        # hydrogens.
+        try:
+            receptor_suffix = Path(receptor_file).suffix.lower()
+            if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
+                shutil.copyfile(
+                    receptor_file,
+                    os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
+                )
+        except OSError:
+            logger.warning("Unable to preserve receptor analysis artifact", exc_info=True)
+
         # Capture only the directory created above. No conflicting invocation,
         # mutable service root or neighbor can acquire this cleanup obligation.
         owned_root = self.work_dir
