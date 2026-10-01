@@ -149,14 +149,21 @@ def test_blind_box_is_not_overwritten_when_vina_config_is_written(tmp_path: Path
     service = MolecularDockingService()
     service.vina_exe = "vina"
     captured = {}
+    config = DockingConfig(blind_docking=True)
+    service._write_run_manifest(
+        str(tmp_path),
+        str(receptor),
+        str(ligand),
+        "file",
+        config,
+        service._resolve_docking_box(str(receptor), config),
+    )
 
     def fake_run_config(config_path, cwd, timeout=None, **kwargs):
         captured["config"] = Path(config_path).read_text(encoding="utf-8")
         return SimpleNamespace(returncode=1)
 
     service.vina_adapter.run_config = fake_run_config
-    config = DockingConfig(blind_docking=True)
-
     assert service.run_vina_docking(str(receptor), str(ligand), config, str(output), str(tmp_path)) is False
     assert "center_x = 0.0" in captured["config"]
     assert "center_y = 0.0" in captured["config"]
