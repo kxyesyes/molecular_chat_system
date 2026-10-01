@@ -9,6 +9,8 @@ import logging
 import math
 import inspect
 import re
+import hashlib
+import json
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
 from dataclasses import dataclass
@@ -60,6 +62,7 @@ class DockingConfig:
     num_modes: int = 10
     energy_range: float = 3.0
     manual_center: bool = False
+    blind_docking: bool = False
 
 
 def _ligand_efficiency(binding_energy: float | None, heavy_atom_count: int) -> float | None:
@@ -937,6 +940,131 @@ class MolecularDockingService:
         size = [max(10.0, high - low + 8.0) for low, high in zip(minimum, maximum)]
         return (*center, *size)
 
+    def _resolve_docking_box(self, receptor_file: str, config: DockingConfig, cancel_event=None) -> Dict[str, Any]:
+        """Resolve the box source and reject unsupported silent defaults."""
+        default_box = (
+            abs(config.center_x) < 1e-6
+            and abs(config.center_y) < 1e-6
+            and abs(config.center_z) < 1e-6
+            and abs(config.size_x - 20.0) < 1e-6
+            and abs(config.size_y - 20.0) < 1e-6
+            and abs(config.size_z - 20.0) < 1e-6
+        )
+        if config.blind_docking:
+            return {
+                "source": "blind_explicit",
+                "mode": "blind",
+                "center": [config.center_x, config.center_y, config.center_z],
+                "size": [config.size_x, config.size_y, config.size_z],
+                "exhaustiveness": config.exhaustiveness,
+                "num_modes": config.num_modes,
+                "energy_range": config.energy_range,
+                "warning": "The user explicitly enabled blind docking; box size, search cost and pocket coverage must be interpreted accordingly.",
+            }
+        if config.manual_center or not default_box:
+            return {
+                "source": "user_explicit",
+                "mode": "targeted",
+                "center": [config.center_x, config.center_y, config.center_z],
+                "size": [config.size_x, config.size_y, config.size_z],
+                "exhaustiveness": config.exhaustiveness,
+                "num_modes": config.num_modes,
+                "energy_range": config.energy_range,
+                "warning": "The docking box was supplied explicitly; pocket evidence was not independently verified.",
+            }
+
+        auto_box = self._auto_box_from_co_crystal(receptor_file, cancel_event)
+        if auto_box is not None:
+            (
+                config.center_x,
+                config.center_y,
+                config.center_z,
+                config.size_x,
+                config.size_y,
+                config.size_z,
+            ) = auto_box
+            return {
+                "source": "co_crystal_ligand",
+                "mode": "targeted",
+                "center": [config.center_x, config.center_y, config.center_z],
+                "size": [config.size_x, config.size_y, config.size_z],
+                "exhaustiveness": config.exhaustiveness,
+                "num_modes": config.num_modes,
+                "energy_range": config.energy_range,
+                "warning": "The box was estimated from non-solvent HETATM coordinates in the receptor file.",
+            }
+
+        raise ValueError("docking_box_confirmation_required")
+
+    @staticmethod
+    def _sha256_file(path: str) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        size = 0
+        with open(path, "rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+        return digest.hexdigest(), size
+
+    def _write_run_manifest(
+        self,
+        job_dir: str,
+        receptor_file: str,
+        ligand_input: str,
+        input_type: str,
+        config: DockingConfig,
+        box_provenance: Dict[str, Any],
+    ) -> tuple[str, Dict[str, Any]]:
+        """Persist reproducibility metadata without exposing absolute inputs."""
+        if os.path.isfile(receptor_file):
+            receptor_digest, receptor_size = self._sha256_file(receptor_file)
+            receptor_available = True
+        else:
+            receptor_digest, receptor_size = None, None
+            receptor_available = False
+        if input_type == "smiles":
+            ligand_bytes = ligand_input.encode("utf-8")
+            ligand_digest = hashlib.sha256(ligand_bytes).hexdigest()
+            ligand_size = len(ligand_bytes)
+            ligand_source = "smiles"
+            ligand_available = True
+        else:
+            if os.path.isfile(ligand_input):
+                ligand_digest, ligand_size = self._sha256_file(ligand_input)
+                ligand_available = True
+            else:
+                ligand_digest, ligand_size = None, None
+                ligand_available = False
+            ligand_source = Path(ligand_input).suffix.lower().lstrip(".") or "file"
+        preprocessing = {
+            "receptor": "ADFRsuite preparation or validated PDBQT passthrough",
+            "ligand": (
+                "RDKit ETKDGv3/ETKDGv2 + converged MMFF/UFF + Meeko"
+                if input_type == "smiles"
+                else "Meeko direct preparation or RDKit explicit-hydrogen retry; PDBQT is passed through"
+            ),
+            "implicit_hydrogen_policy": "recorded by preparation path; no silent fallback to unoptimized geometry",
+        }
+        manifest = {
+            "schema_version": 1,
+            "inputs": {
+                "receptor": {"available": receptor_available, "sha256": receptor_digest, "size_bytes": receptor_size},
+                "ligand": {"available": ligand_available, "source": ligand_source, "sha256": ligand_digest, "size_bytes": ligand_size},
+            },
+            "docking_box": box_provenance,
+            "search": {
+                "exhaustiveness": config.exhaustiveness,
+                "num_modes": config.num_modes,
+                "energy_range": config.energy_range,
+            },
+            "preprocessing": preprocessing,
+        }
+        manifest_path = os.path.join(job_dir, "run_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as stream:
+            json.dump(manifest, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+        return manifest_path, {"preprocessing": preprocessing, "manifest": "run_manifest.json"}
+
     @staticmethod
     def _cancel_requested(cancel_event) -> bool:
         return bool(cancel_event is not None and cancel_event.is_set())
@@ -1148,28 +1276,29 @@ class MolecularDockingService:
                 command_control["cancel_event"] = cancel_event
 
             self._emit_phase(*_DOCKING_PHASES[0], progress_callback, cancel_event)
-            if (
-                not config.manual_center
-                and abs(config.center_x) < 1e-6
-                and abs(config.center_y) < 1e-6
-                and abs(config.center_z) < 1e-6
-                and abs(config.size_x - 20.0) < 1e-6
-                and abs(config.size_y - 20.0) < 1e-6
-                and abs(config.size_z - 20.0) < 1e-6
-            ):
-                auto_box = self._auto_box_from_co_crystal(
+            try:
+                box_provenance = self._resolve_docking_box(
                     receptor_file,
+                    config,
                     cancel_event,
                 )
-                if auto_box is not None:
-                    (
-                        config.center_x,
-                        config.center_y,
-                        config.center_z,
-                        config.size_x,
-                        config.size_y,
-                        config.size_z,
-                    ) = auto_box
+            except ValueError as error:
+                if str(error) == "docking_box_confirmation_required":
+                    return self._failed_job_response(
+                        job_dir,
+                        "docking_box_confirmation_required",
+                        "No supported pocket evidence or explicit docking box was provided; confirm a targeted or blind docking box.",
+                        **cleanup_control,
+                    )
+                raise
+            _, preparation_provenance = self._write_run_manifest(
+                job_dir,
+                receptor_file,
+                ligand_input,
+                input_type,
+                config,
+                box_provenance,
+            )
             if not self.prepare_protein(
                 receptor_file,
                 receptor_pdbqt,
@@ -1323,9 +1452,17 @@ class MolecularDockingService:
                 "best_pose": best_pose,
                 "pose_file": resolved_pose_file,
                 "total_poses": len(formatted_results),
+                "provenance": {
+                    "docking_box": box_provenance,
+                    "preprocessing": preparation_provenance["preprocessing"],
+                    "manifest": preparation_provenance["manifest"],
+                },
             }
-            if history_warnings:
-                response["warnings"] = history_warnings
+            warnings = list(history_warnings)
+            if box_provenance.get("warning"):
+                warnings.append(box_provenance["warning"])
+            if warnings:
+                response["warnings"] = warnings
             return response
 
         except CommandCancelledError:
