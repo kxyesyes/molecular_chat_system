@@ -321,17 +321,46 @@ class MolecularDockingService:
         return None
 
     @staticmethod
-    def _prepare_3d_molecule(mol):
+    def _prepare_3d_molecule(mol, *, trace: Optional[Dict[str, Any]] = None):
         """Embed and optimize a molecule, failing closed on invalid geometry."""
         from rdkit.Chem import AllChem
 
+        if trace is not None:
+            trace.update(
+                {
+                    "status": "in_progress",
+                    "embedding": {"attempts": []},
+                    "force_field": None,
+                    "optimization_status": None,
+                    "converged": False,
+                }
+            )
+
+        def record_embedding(method: str, result: int) -> None:
+            if trace is not None:
+                trace["embedding"]["attempts"].append(
+                    {
+                        "method": method,
+                        "return_code": int(result),
+                        "status": "completed" if result >= 0 else "failed",
+                    }
+                )
+
+        def fail(reason: str):
+            if trace is not None:
+                trace["status"] = "failed"
+                trace["failure_reason"] = reason
+            return None
+
         try:
             embedded = AllChem.EmbedMolecule(mol, AllChem.ETKDGv3())
+            record_embedding("ETKDGv3", embedded)
             if embedded < 0:
                 embedded = AllChem.EmbedMolecule(mol, AllChem.ETKDGv2())
+                record_embedding("ETKDGv2", embedded)
             if embedded < 0 or mol.GetNumConformers() == 0:
                 logger.error("RDKit failed to generate a 3D conformer")
-                return None
+                return fail("embedding_failed")
 
             if AllChem.MMFFHasAllMoleculeParams(mol):
                 force_field = "MMFF"
@@ -341,7 +370,11 @@ class MolecularDockingService:
                 optimization_status = AllChem.UFFOptimizeMolecule(mol)
             else:
                 logger.error("No complete MMFF or UFF parameters are available")
-                return None
+                return fail("force_field_parameters_missing")
+
+            if trace is not None:
+                trace["force_field"] = force_field
+                trace["optimization_status"] = int(optimization_status)
 
             if optimization_status != 0:
                 logger.error(
@@ -349,14 +382,24 @@ class MolecularDockingService:
                     force_field,
                     optimization_status,
                 )
-                return None
+                return fail("force_field_optimization_not_converged")
+            if trace is not None:
+                trace["status"] = "completed"
+                trace["converged"] = True
             return mol
         except Exception as exc:
             logger.error("RDKit 3D preparation failed (%s)", type(exc).__name__)
-            return None
+            return fail(type(exc).__name__)
 
-    def _prepare_ligand_file_with_explicit_hs(self, ligand_path: str, output_path: str,
-                                              job_dir: str, *, cancel_event=None) -> bool:
+    def _prepare_ligand_file_with_explicit_hs(
+        self,
+        ligand_path: str,
+        output_path: str,
+        job_dir: str,
+        *,
+        cancel_event=None,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Normalize ligand files through RDKit so Meeko receives explicit hydrogens."""
         try:
             from rdkit import Chem
@@ -369,7 +412,8 @@ class MolecularDockingService:
 
             mol = Chem.AddHs(mol, addCoords=True)
             if mol.GetNumConformers() == 0:
-                mol = self._prepare_3d_molecule(mol)
+                geometry_trace = None if trace is None else trace.setdefault("ligand_geometry", {})
+                mol = self._prepare_3d_molecule(mol, trace=geometry_trace)
             else:
                 # Existing coordinates are still not accepted without a
                 # converged force-field check.
@@ -377,12 +421,31 @@ class MolecularDockingService:
                     if not AllChem.UFFHasAllMoleculeParams(mol):
                         logger.error("No complete force-field parameters are available")
                         return False
-                    if AllChem.UFFOptimizeMolecule(mol) != 0:
+                    optimization_status = AllChem.UFFOptimizeMolecule(mol)
+                    if trace is not None:
+                        trace["ligand_geometry"] = {
+                            "status": "completed" if optimization_status == 0 else "failed",
+                            "embedding": {"attempts": [], "source": "input_conformer"},
+                            "force_field": "UFF",
+                            "optimization_status": int(optimization_status),
+                            "converged": optimization_status == 0,
+                        }
+                    if optimization_status != 0:
                         logger.error("RDKit UFF optimization did not converge")
                         return False
-                elif AllChem.MMFFOptimizeMolecule(mol) != 0:
-                    logger.error("RDKit MMFF optimization did not converge")
-                    return False
+                else:
+                    optimization_status = AllChem.MMFFOptimizeMolecule(mol)
+                    if trace is not None:
+                        trace["ligand_geometry"] = {
+                            "status": "completed" if optimization_status == 0 else "failed",
+                            "embedding": {"attempts": [], "source": "input_conformer"},
+                            "force_field": "MMFF",
+                            "optimization_status": int(optimization_status),
+                            "converged": optimization_status == 0,
+                        }
+                    if optimization_status != 0:
+                        logger.error("RDKit MMFF optimization did not converge")
+                        return False
             if mol is None:
                 return False
 
@@ -581,7 +644,8 @@ class MolecularDockingService:
 
             self._raise_if_cancelled(cancel_event)
             mol = Chem.AddHs(mol)
-            mol = self._prepare_3d_molecule(mol)
+            geometry_trace = None if trace is None else trace.setdefault("ligand_geometry", {})
+            mol = self._prepare_3d_molecule(mol, trace=geometry_trace)
             if mol is None:
                 return False
             self._raise_if_cancelled(cancel_event)
@@ -662,6 +726,7 @@ class MolecularDockingService:
                     output_path,
                     job_dir,
                     cancel_event=cancel_event,
+                    trace=trace,
                 )
                 if retried and trace is not None:
                     trace["ligand_method"] = "rdkit_explicit_h_retry_then_meeko"
@@ -1161,6 +1226,15 @@ class MolecularDockingService:
             ),
             "implicit_hydrogen_policy": "recorded by preparation path; no silent fallback to unoptimized geometry",
         }
+        preprocessing_policy = {
+            "protonation": "not_changed_by_service",
+            "tautomerization": "not_performed_by_service",
+            "stereochemistry": "preserved_from_input",
+            "missing_atoms": "not_reconstructed_by_service",
+            "alternate_conformations": "delegated_to_input_or_preparer",
+            "waters": "delegated_to_receptor_preparer",
+            "metals_and_cofactors": "delegated_to_receptor_preparer",
+        }
         preprocessing_state = {
             "status": "planned",
             "receptor": {"status": "pending", "output": "receptor.pdbqt"},
@@ -1180,6 +1254,7 @@ class MolecularDockingService:
                 "random_seed": config.random_seed,
             },
             "preprocessing": preprocessing,
+            "preprocessing_policy": preprocessing_policy,
             "preprocessing_state": preprocessing_state,
             "execution": {"status": "planned"},
         }
@@ -1589,6 +1664,7 @@ class MolecularDockingService:
                             ),
                         ),
                     },
+                    "trace": preparation_trace,
                 },
             )
             self._raise_if_cancelled(cancel_event)

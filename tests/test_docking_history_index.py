@@ -66,6 +66,10 @@ def test_history_record_preserves_scientific_provenance_and_best_pose(tmp_path):
                     "random_seed": 37,
                 },
                 "preprocessing": {"receptor": "pdbqt_passthrough"},
+                "preprocessing_policy": {
+                    "protonation": "not_changed_by_service",
+                    "tautomerization": "not_performed_by_service",
+                },
                 "preprocessing_state": {"status": "completed"},
                 "execution": {"status": "completed", "returncode": 0},
             }
@@ -81,6 +85,7 @@ def test_history_record_preserves_scientific_provenance_and_best_pose(tmp_path):
     assert record["docking_box"]["source"] == "user_explicit"
     assert record["search"]["random_seed"] == 37
     assert record["preprocessing_state"]["status"] == "completed"
+    assert record["preprocessing_policy"]["protonation"] == "not_changed_by_service"
     assert record["execution"]["returncode"] == 0
 
 
