@@ -351,6 +351,36 @@ def test_unavailable_runtime_is_503_without_registration_resolution(mode):
     assert calls == ([] if mode == "none" else [mode, mode])
 
 
+def test_legacy_single_docking_rejects_file_and_smiles_together(controlled_app):
+    app, _ = controlled_app
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/docking/submit",
+            files={
+                "protein_file": ("protein.pdb", b"P"),
+                "ligand_file": ("ligand.sdf", b"L"),
+            },
+            data={"smiles": "CC"},
+        )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Provide either a ligand file or SMILES, not both"}
+
+
+def test_batch_docking_rejects_file_and_smiles_together(controlled_app):
+    app, _ = controlled_app
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/docking/batch_submit",
+            files={
+                "protein_file": ("protein.pdb", b"P"),
+                "ligand_files": ("ligand.sdf", b"L"),
+            },
+            data={"batch_smiles": "CC"},
+        )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Provide either ligand files or batch SMILES, not both"}
+
+
 @pytest.mark.parametrize("timing", ["before", "after"])
 @pytest.mark.parametrize("patch_name", ["_invoke_in_threadpool", "run_in_threadpool", "logger"])
 def test_old_support_patch_timing(monkeypatch, timing, patch_name):
