@@ -530,7 +530,9 @@ class DockingExecution:
             )
         inputs.verify_integrity()
 
-        pose_source, pose_count, best_energy = _validated_scientific_values(validated)
+        pose_source, pose_count, best_energy, best_pose_index = _validated_scientific_values(
+            validated
+        )
         pose_job_root = self._allowed_output_root / f"docking_{inputs.task_id}"
         pose_parser = _VinaPoseStreamValidator(
             expected_pose_count=pose_count,
@@ -572,6 +574,7 @@ class DockingExecution:
                 attempt=attempt,
                 result_metadata=result_metadata,
                 artifact_attempt=artifact_attempt,
+                best_pose_index=best_pose_index,
             )
         finally:
             self._completions.discard_artifact_attempt(artifact_attempt)
@@ -971,7 +974,9 @@ def _attach_verified_input_evidence(
     }
 
 
-def _validated_scientific_values(result: ToolResult) -> tuple[Path, int, float]:
+def _validated_scientific_values(
+    result: ToolResult,
+) -> tuple[Path, int, float, int | None]:
     if result.tool_name != "molecular_docking" or not isinstance(result.data, dict):
         raise CompletionError("completion_schema_invalid")
     data = result.data
@@ -992,7 +997,14 @@ def _validated_scientific_values(result: ToolResult) -> tuple[Path, int, float]:
         raise CompletionError("completion_schema_invalid")
     if not isinstance(pose_value, (str, os.PathLike)):
         raise CompletionError("completion_artifact_invalid")
-    return Path(pose_value), pose_count, float(energy)
+    best_pose_index = best_pose.get("pose", best_pose.get("pose_index"))
+    if best_pose_index is not None and (
+        type(best_pose_index) is not int
+        or best_pose_index <= 0
+        or best_pose_index > pose_count
+    ):
+        raise CompletionError("completion_schema_invalid")
+    return Path(pose_value), pose_count, float(energy), best_pose_index
 
 
 class _VinaPoseStreamValidator:
@@ -1322,6 +1334,12 @@ def _trusted_result(
         )
         for artifact in metadata.artifacts
     )
+    best_pose = {
+        "binding_energy": completion.best_energy,
+        "pose_file": relative_pose,
+    }
+    if completion.best_pose_index is not None:
+        best_pose["pose"] = completion.best_pose_index
     result = ToolResult.success_result(
         "molecular_docking",
         message=(
@@ -1330,12 +1348,10 @@ def _trusted_result(
             else "Docking completed and passed scientific validation."
         ),
         data={
+            "result_job_id": completion.task_id,
             "total_poses": completion.pose_count,
             "pose_file": relative_pose,
-            "best_pose": {
-                "binding_energy": completion.best_energy,
-                "pose_file": relative_pose,
-            },
+            "best_pose": best_pose,
         },
         formatted=metadata.formatted,
         elapsed_ms=metadata.elapsed_ms,

@@ -60,7 +60,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _TASK_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
 _TOOL_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}\Z")
 _MODEL_IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._:+-]{0,127}\Z")
-_MANIFEST_KEYS = frozenset(
+_MANIFEST_KEYS_V1 = frozenset(
     {
         "schema",
         "task_id",
@@ -81,6 +81,7 @@ _MANIFEST_KEYS = frozenset(
         "result_metadata",
     }
 )
+_MANIFEST_KEYS = _MANIFEST_KEYS_V1 | frozenset({"best_pose_index"})
 _POSE_KEYS = frozenset({"path", "size", "sha256"})
 _RESULT_METADATA_KEYS = frozenset(
     {"elapsed_ms", "formatted", "warnings", "evidence", "artifacts", "quality"}
@@ -175,6 +176,7 @@ class DockingCompletionManifest:
     pose: DockingPoseRecord
     pose_count: int
     best_energy: float
+    best_pose_index: int | None
     validator_status: str
     attempt: int
     completed_at: str
@@ -682,6 +684,7 @@ class DockingCompletionStore:
         attempt: int,
         result_metadata: DockingResultMetadata,
         artifact_attempt: ArtifactCaptureAttempt,
+        best_pose_index: int | None = None,
     ) -> PreparedDockingCompletion:
         task_root = self._task_root(task_id)
         _require_sha256(input_hash)
@@ -695,6 +698,12 @@ class DockingCompletionStore:
         if real_execution is not True:
             raise CompletionError("completion_schema_invalid")
         if type(pose_count) is not int or pose_count <= 0:
+            raise CompletionError("completion_schema_invalid")
+        if best_pose_index is not None and (
+            type(best_pose_index) is not int
+            or best_pose_index <= 0
+            or best_pose_index > pose_count
+        ):
             raise CompletionError("completion_schema_invalid")
         if (
             type(best_energy) not in (int, float)
@@ -768,6 +777,7 @@ class DockingCompletionStore:
             ),
             pose_count=pose_count,
             best_energy=float(best_energy),
+            best_pose_index=best_pose_index,
             validator_status=validator_status,
             attempt=attempt,
             completed_at=_utc_now(),
@@ -959,7 +969,10 @@ class DockingCompletionStore:
 
 
 def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
-    if type(payload) is not dict or set(payload) != _MANIFEST_KEYS:
+    if type(payload) is not dict or set(payload) not in {
+        _MANIFEST_KEYS_V1,
+        _MANIFEST_KEYS,
+    }:
         raise CompletionError("completion_schema_invalid")
     pose = payload.get("pose")
     if type(pose) is not dict or set(pose) != _POSE_KEYS:
@@ -986,6 +999,13 @@ def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
     _require_sha256(pose.get("sha256"))
     pose_count = payload.get("pose_count")
     if type(pose_count) is not int or pose_count <= 0:
+        raise CompletionError("completion_schema_invalid")
+    best_pose_index = payload.get("best_pose_index")
+    if best_pose_index is not None and (
+        type(best_pose_index) is not int
+        or best_pose_index <= 0
+        or best_pose_index > pose_count
+    ):
         raise CompletionError("completion_schema_invalid")
     energy = payload.get("best_energy")
     if type(energy) not in (int, float) or not math.isfinite(float(energy)):
@@ -1015,6 +1035,7 @@ def _parse_manifest(payload: Any, task_id: str) -> DockingCompletionManifest:
         ),
         pose_count=pose_count,
         best_energy=float(energy),
+        best_pose_index=best_pose_index,
         validator_status="succeeded",
         attempt=attempt,
         completed_at=payload["completed_at"],
