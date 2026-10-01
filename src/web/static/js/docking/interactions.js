@@ -90,37 +90,37 @@ function displayHydrogenBonds() {
       (a) => !CONFIG.WATER_RESIDUES.includes((a.resn || "").toUpperCase()),
     );
 
-    const proteinNO = proteinAtoms.filter((a) => ["N", "O"].includes(a.elem));
-    const ligandNO = ligandAtoms.filter((a) => ["N", "O"].includes(a.elem));
-
-    let count = 0;
+    const geometry = window.InteractionGeometry;
+    if (!geometry) {
+      Utils.showToast("相互作用几何模块不可用，未执行氢键判定", "warning");
+      return;
+    }
+    const analysis = geometry.detectHydrogenBonds(proteinAtoms, ligandAtoms);
     const resSet = new Set();
-    proteinNO.forEach((p) => {
-      ligandNO.forEach((l) => {
-        const dx = p.x - l.x,
-          dy = p.y - l.y,
-          dz = p.z - l.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d >= 2.4 && d <= 3.6) {
-          viewer.addCylinder({
-            start: { x: p.x, y: p.y, z: p.z },
-            end: { x: l.x, y: l.y, z: l.z },
-            radius: 0.1,
-            color: "cyan",
-            dashed: true,
-            fromCap: 1,
-            toCap: 1,
-          });
-          resSet.add(`${p.resn}:${p.resi}:${p.chain || ""}`);
-          count++;
-        }
+    analysis.interactions.forEach((interaction) => {
+      const p = interaction.donor;
+      const l = interaction.acceptor;
+      viewer.addCylinder({
+        start: { x: p.x, y: p.y, z: p.z },
+        end: { x: l.x, y: l.y, z: l.z },
+        radius: 0.1,
+        color: "cyan",
+        dashed: true,
+        fromCap: 1,
+        toCap: 1,
       });
+      resSet.add(interaction.donor_residue);
+      resSet.add(interaction.acceptor_residue);
     });
     focusLigandAndResidues(resSet, false);
     viewer.render();
     Utils.showToast(
-      count > 0 ? `检测到 ${count} 个氢键 (青色虚线)` : "未检测到氢键",
-      count > 0 ? "success" : "warning",
+      analysis.interactions.length > 0
+        ? `检测到 ${analysis.interactions.length} 个几何支持的氢键 (青色虚线)`
+        : analysis.warnings.length > 0
+          ? "未确认氢键：缺少显式供体氢或几何信息"
+          : "未检测到氢键",
+      analysis.interactions.length > 0 ? "success" : "warning",
     );
   } catch (e) {
     console.error("氢键检测错误:", e);
@@ -148,15 +148,17 @@ function displayPiPiInteractions() {
     const pRings = findAromaticRingsImproved(proteinAtoms);
     const lRings = findAromaticRingsImproved(ligandAtoms);
 
+    const geometry = window.InteractionGeometry;
+    if (!geometry) {
+      Utils.showToast("相互作用几何模块不可用，未执行 π–π 判定", "warning");
+      return;
+    }
     let count = 0;
     const resSet = new Set();
     pRings.forEach((pR) => {
       lRings.forEach((lR) => {
-        const dx = pR.center.x - lR.center.x;
-        const dy = pR.center.y - lR.center.y;
-        const dz = pR.center.z - lR.center.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d >= 3.3 && d <= 6.0) {
+        const interaction = geometry.classifyPiPiInteraction(pR, lR);
+        if (interaction) {
           viewer.addCylinder({
             start: pR.center,
             end: lR.center,
@@ -174,7 +176,7 @@ function displayPiPiInteractions() {
     viewer.render();
     Utils.showToast(
       count > 0
-        ? `检测到 ${count} 个 π–π 相互作用 (洋红虚线)`
+        ? `检测到 ${count} 个几何支持的 π–π 相互作用 (洋红虚线)`
         : "未检测到 π–π 相互作用",
       count > 0 ? "success" : "warning",
     );
@@ -195,36 +197,19 @@ function displayHydrophobicInteractions() {
     const atoms = viewer.selectedAtoms({});
     const ligandKeys = identifyLigandResidueKeys(atoms);
 
-    const proteinC = atoms
-      .filter(
-        (a) =>
-          a.elem === "C" &&
-          CONFIG.PROTEIN_RESIDUES.includes((a.resn || "").toUpperCase()) &&
-          !CONFIG.WATER_RESIDUES.includes((a.resn || "").toUpperCase()),
-      )
-      .filter((a) => !isPartOfPolarGroup(a));
-    const ligandC = atomsForResidueKeys(atoms, ligandKeys).filter(
-      (a) => a.elem === "C" && !isPartOfPolarGroup(a),
-    );
-
-    const byResidue = new Map();
-    for (const p of proteinC) {
-      for (const l of ligandC) {
-        const dx = p.x - l.x,
-          dy = p.y - l.y,
-          dz = p.z - l.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d < 3.0 || d > 5.0) continue;
-        const rk = `${p.resn}:${p.resi}:${p.chain || ""}`;
-        const cur = byResidue.get(rk);
-        if (!cur || d < cur.distance) byResidue.set(rk, { p, l, distance: d });
-      }
+    const geometry = window.InteractionGeometry;
+    if (!geometry) {
+      Utils.showToast("相互作用几何模块不可用，未执行疏水判定", "warning");
+      return;
     }
-
-    let count = 0;
+    const analysis = geometry.detectHydrophobicContacts(
+      proteinAtomsForHydrophobic(atoms),
+      atomsForResidueKeys(atoms, ligandKeys),
+    );
+    let count = analysis.interactions.length;
     const resSet = new Set();
     const shorten = 0.25;
-    byResidue.forEach(({ p, l }) => {
+    analysis.interactions.forEach(({ protein_atom: p, ligand_atom: l }) => {
       const vx = l.x - p.x,
         vy = l.y - p.y,
         vz = l.z - p.z;
@@ -253,20 +238,27 @@ function displayHydrophobicInteractions() {
         alpha: 0.95,
       });
       resSet.add(`${p.resn}:${p.resi}:${p.chain || ""}`);
-      count++;
     });
 
     focusLigandAndResidues(resSet, false);
     viewer.render();
     Utils.showToast(
       count > 0
-        ? `检测到 ${count} 个疏水相互作用 (琥珀色虚线，每残基一条代表线)`
+        ? `检测到 ${count} 个疏水接触 (琥珀色虚线，每残基一条代表线；未评估溶剂暴露)`
         : "未检测到疏水相互作用",
       count > 0 ? "success" : "warning",
     );
   } catch (e) {
     console.error("疏水检测错误:", e);
   }
+}
+
+function proteinAtomsForHydrophobic(atoms) {
+  return atoms.filter(
+    (atom) =>
+      CONFIG.PROTEIN_RESIDUES.includes((atom.resn || "").toUpperCase()) &&
+      !CONFIG.WATER_RESIDUES.includes((atom.resn || "").toUpperCase()),
+  );
 }
 
 // 移除特定类型的相互作用
@@ -323,9 +315,14 @@ function findAromaticRingsImproved(atoms) {
   const rings = [];
   const residueGroups = {};
   const otherAtoms = [];
+  const aromaticResidues = ["PHE", "TYR", "TRP", "HIS"];
 
   atoms.forEach((atom) => {
-    if (atom.resn && atom.resi) {
+    if (
+      atom.resn &&
+      atom.resi &&
+      aromaticResidues.includes((atom.resn || "").toUpperCase())
+    ) {
       const key = `${atom.resn}_${atom.resi}`;
       if (!residueGroups[key]) residueGroups[key] = [];
       residueGroups[key].push(atom);
@@ -334,7 +331,6 @@ function findAromaticRingsImproved(atoms) {
     }
   });
 
-  const aromaticResidues = ["PHE", "TYR", "TRP", "HIS"];
   for (const key in residueGroups) {
     const residueAtoms = residueGroups[key];
     const resName = residueAtoms[0].resn;
@@ -343,7 +339,7 @@ function findAromaticRingsImproved(atoms) {
         PHE: ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
         TYR: ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
         TRP: ["CG", "CD1", "CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2"],
-        HIS: ["CG", "CD2", "CE1"],
+        HIS: ["CG", "ND1", "CD2", "CE1", "NE2"],
       };
       if (ringAtomNames[resName]) {
         const ringAtoms = residueAtoms.filter((a) =>
@@ -351,7 +347,7 @@ function findAromaticRingsImproved(atoms) {
             (name) => a.atom && a.atom.includes(name),
           ),
         );
-        if (ringAtoms.length >= 5) {
+        if (ringAtoms.length >= ringAtomNames[resName].length) {
           const centerX =
             ringAtoms.reduce((sum, a) => sum + a.x, 0) / ringAtoms.length;
           const centerY =
@@ -362,6 +358,7 @@ function findAromaticRingsImproved(atoms) {
             center: { x: centerX, y: centerY, z: centerZ },
             atoms: ringAtoms,
             type: resName,
+            normal: ringPlaneNormal(ringAtoms),
           });
         }
       }
@@ -411,6 +408,7 @@ function findAromaticRingsImproved(atoms) {
             center: { x: centerX, y: centerY, z: centerZ },
             atoms: cluster,
             type: "ligand",
+            normal: ringPlaneNormal(cluster),
           });
         }
       }
@@ -419,6 +417,33 @@ function findAromaticRingsImproved(atoms) {
 
   console.log(`检测到 ${rings.length} 个芳香环`);
   return rings;
+}
+
+function ringPlaneNormal(atoms) {
+  if (!Array.isArray(atoms) || atoms.length < 3) return null;
+  const origin = atoms[0];
+  let normal = { x: 0, y: 0, z: 0 };
+  for (let i = 1; i < atoms.length - 1; i++) {
+    const first = {
+      x: atoms[i].x - origin.x,
+      y: atoms[i].y - origin.y,
+      z: atoms[i].z - origin.z,
+    };
+    const second = {
+      x: atoms[i + 1].x - origin.x,
+      y: atoms[i + 1].y - origin.y,
+      z: atoms[i + 1].z - origin.z,
+    };
+    normal = {
+      x: normal.x + first.y * second.z - first.z * second.y,
+      y: normal.y + first.z * second.x - first.x * second.z,
+      z: normal.z + first.x * second.y - first.y * second.x,
+    };
+  }
+  const length = Math.hypot(normal.x, normal.y, normal.z);
+  return length > 1e-8
+    ? { x: normal.x / length, y: normal.y / length, z: normal.z / length }
+    : null;
 }
 
 // 兼容旧版本
