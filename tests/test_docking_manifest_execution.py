@@ -142,3 +142,36 @@ def test_file_ligand_direct_preparation_records_direct_method(run_inputs, monkey
         'input.sdf', str(output.parent / 'prepared.pdbqt'), trace=trace
     )
     assert trace['ligand_method'] == 'meeko_direct'
+
+
+def test_smiles_preparation_records_geometry_trace_and_transform_policy(
+    run_inputs, monkeypatch
+):
+    pytest.importorskip("rdkit")
+    service, _, _, config, output = run_inputs
+    monkeypatch.setattr(service, "_run_prepare_ligand", lambda *a, **kw: (True, ""))
+
+    trace = {}
+    assert service.prepare_ligand_from_smiles("CCO", str(output), trace=trace)
+
+    geometry = trace["ligand_geometry"]
+    assert geometry["status"] == "completed"
+    assert geometry["embedding"]["attempts"][0]["method"] == "ETKDGv3"
+    assert geometry["force_field"] in {"MMFF", "UFF"}
+    assert geometry["optimization_status"] == 0
+
+    manifest_path, _ = service._write_run_manifest(
+        str(run_inputs[-1].parent),
+        str(run_inputs[1]),
+        "CCO",
+        "smiles",
+        config,
+        service._resolve_docking_box(str(run_inputs[1]), config),
+    )
+    payload = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    policy = payload["preprocessing_policy"]
+    assert policy["protonation"] == "not_changed_by_service"
+    assert policy["tautomerization"] == "not_performed_by_service"
+    assert policy["stereochemistry"] == "preserved_from_input"
+    assert policy["waters"] == "delegated_to_receptor_preparer"
+    assert policy["metals_and_cofactors"] == "delegated_to_receptor_preparer"
