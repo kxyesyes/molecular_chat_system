@@ -2,6 +2,7 @@
 import re
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Response
+from src.web.api_response import api_error
 
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -207,9 +208,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         except HTTPException:
             raise
-        except Exception as e:
-            _support.logger.error(f"分子对接任务提交失败: {e}")
-            raise HTTPException(status_code=500, detail=f"对接计算失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("分子对接任务提交失败")
+            return api_error("DOCKING_EXECUTION_FAILED", "对接计算失败", status_code=500)
         finally:
             for path in temp_paths:
                 try:
@@ -226,9 +227,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 raise HTTPException(status_code=503, detail="分子对接服务不可用")
             info = docking_service.env_diagnostics()
             return {"success": info.get("ok", False), "diagnostics": info}
-        except Exception as e:
-            _support.logger.error(f"环境自检失败: {e}")
-            raise HTTPException(status_code=500, detail=f"环境自检失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("环境自检失败")
+            return api_error("DOCKING_ENVIRONMENT_CHECK_FAILED", "环境自检失败", status_code=500)
 
     @app.post("/api/docking/batch_submit")
     async def submit_batch_docking_job(
@@ -388,9 +389,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         except HTTPException:
             raise
-        except Exception as e:
-            _support.logger.error(f"批量分子对接任务提交失败: {e}")
-            raise HTTPException(status_code=500, detail=f"批量对接失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("批量分子对接任务提交失败")
+            return api_error("DOCKING_BATCH_FAILED", "批量对接失败", status_code=500)
         finally:
             for path in temp_paths:
                 try:
@@ -412,8 +413,13 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 "environment_check": env_ok,
                 "message": "服务正常" if env_ok else "环境配置有问题"
             }
-        except Exception as e:
-            return {"status": "error", "message": str(e)}
+        except Exception:
+            _support.logger.exception("对接服务状态检查失败")
+            return {
+                "status": "error",
+                "message": "对接服务状态检查失败",
+                "error_code": "DOCKING_STATUS_FAILED",
+            }
 
     @app.get("/api/docking/result/{job_id}")
     async def get_docking_result(job_id: str):
@@ -440,9 +446,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         except HTTPException:
             raise
-        except Exception as e:
-            _support.logger.error(f"获取对接结果失败: {e}")
-            raise HTTPException(status_code=500, detail=f"获取结果失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("获取对接结果失败")
+            return api_error("DOCKING_RESULT_READ_FAILED", "获取结果失败", status_code=500)
 
     @app.get("/api/docking/interactions/{job_id}")
     async def get_docking_interactions(job_id: str, pose: int = 1):
@@ -568,9 +574,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         except HTTPException:
             raise
-        except Exception as e:
-            _support.logger.error(f"重建 pose SDF 失败: {e}")
-            raise HTTPException(status_code=500, detail=f"重建 pose SDF 失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("重建 pose SDF 失败")
+            return api_error("DOCKING_POSE_EXPORT_FAILED", "重建 pose SDF 失败", status_code=500)
 
     @app.get("/api/docking/history")
     async def get_docking_history(page: int = 1, limit: int = 50):
@@ -601,9 +607,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 "limit": resolved_limit,
             }
 
-        except Exception as e:
-            _support.logger.error(f"获取对接历史失败: {e}")
-            raise HTTPException(status_code=500, detail=f"获取历史失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("获取对接历史失败")
+            return api_error("DOCKING_HISTORY_READ_FAILED", "获取历史失败", status_code=500)
 
     @app.delete("/api/docking/history")
     async def clear_docking_history():
@@ -627,9 +633,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             clear_history_records(work_dir)
 
             return {"success": True, "message": f"已清除 {deleted} 条历史记录", "deleted": deleted}
-        except Exception as e:
-            _support.logger.error(f"清除对接历史失败: {e}")
-            raise HTTPException(status_code=500, detail=f"清除历史失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("清除对接历史失败")
+            return api_error("DOCKING_HISTORY_CLEAR_FAILED", "清除历史失败", status_code=500)
 
     @app.delete("/api/docking/history/{job_id}")
     async def delete_docking_job(job_id: str):
@@ -648,6 +654,6 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             return {"success": True, "message": f"已删除任务 {job_id}"}
         except HTTPException:
             raise
-        except Exception as e:
-            _support.logger.error(f"删除对接记录失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            _support.logger.exception("删除对接记录失败")
+            return api_error("DOCKING_HISTORY_DELETE_FAILED", "删除对接记录失败", status_code=500)
