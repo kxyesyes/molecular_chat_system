@@ -150,6 +150,33 @@ def _read_pose_pdb_from_pdbqt_file(file_path: str, pose_index: int = 1) -> str:
         return ""
 
 
+def _read_best_pose_pdb_from_pdbqt_file(file_path: str) -> str:
+    """Export the validated lowest-energy Vina pose, never the first model.
+
+    Report generation must use the same strict parser as the service and
+    history paths.  A Vina file's model order is not a scientific guarantee
+    of score order, so selecting ``MODEL 1`` would make the report's
+    coordinates disagree with its claimed best score.
+    """
+    if not os.path.exists(file_path):
+        return ""
+    try:
+        from src.docking.molecular_docking_service import MolecularDockingService
+
+        results = MolecularDockingService.parse_vina_results(file_path)
+        if not results:
+            return ""
+        with open(file_path, "r", encoding="utf-8", errors="strict") as stream:
+            content = stream.read()
+        return _extract_pose_pdb_from_pdbqt_text(
+            content,
+            pose_index=results[0].pose_index,
+        )
+    except Exception as error:
+        logger.warning(f"从 Vina 结果导出最佳构象失败 ({file_path}): {error}")
+        return ""
+
+
 def _generate_html_report(job_id: str, now: str, config_lines: list, results: list,
                          viewer_png_b64: str, smiles_images_b64: list):
     """生成 HTML 格式报告"""
@@ -249,7 +276,9 @@ def _generate_zip_report(job_id: str, md: list, viewer_png_b64: str,
         if ligand_pdb:
             zf.writestr("ligand/ligand.pdb", ligand_pdb)
 
-        best_pose_pdb = _read_pose_pdb_from_pdbqt_file(os.path.join(job_dir, "result.pdbqt"), pose_index=1)
+        best_pose_pdb = _read_best_pose_pdb_from_pdbqt_file(
+            os.path.join(job_dir, "result.pdbqt")
+        )
         if best_pose_pdb:
             zf.writestr("poses/docked_pose_1.pdb", best_pose_pdb)
 

@@ -606,6 +606,32 @@ def test_pose_helpers_reconstruct_requested_coordinates_from_synthetic_file(tmp_
     assert (position.x, position.y, position.z) == pytest.approx((5.0, 2.0, 3.0))
 
 
+def test_docking_report_zip_exports_the_lowest_energy_pose(tmp_path):
+    from src.web.routes.report_generator import _read_best_pose_pdb_from_pdbqt_file
+
+    result = tmp_path / "result.pdbqt"
+    result.write_text(
+        "\n".join(
+            [
+                "MODEL 1",
+                "REMARK VINA RESULT: -5.000 0.000 0.000",
+                "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C",
+                "ENDMDL",
+                "MODEL 2",
+                "REMARK VINA RESULT: -9.000 0.000 0.000",
+                "HETATM    1  C   LIG A   1       5.000   2.000   3.000  1.00  0.00     0.000 C",
+                "ENDMDL",
+            ]
+        ),
+        encoding="ascii",
+    )
+
+    exported = _read_best_pose_pdb_from_pdbqt_file(str(result))
+
+    assert "  5.000   2.000   3.000" in exported
+    assert "  1.000   2.000   3.000" not in exported
+
+
 def test_interaction_endpoint_materializes_topology_bearing_pose_artifact(tmp_path, monkeypatch):
     from src.docking import interaction_analysis
 
