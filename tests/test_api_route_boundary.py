@@ -737,6 +737,54 @@ def test_docking_artifact_routes_reject_invalid_job_ids(tmp_path, path):
     assert response.json() == {"detail": "Invalid job_id"}
 
 
+def test_single_docking_failure_returns_stable_error_code_without_internal_details(tmp_path):
+    secret_detail = "C:\\private\\vina\\command --token=hidden"
+
+    def fail(**kwargs):
+        raise RuntimeError(secret_detail)
+
+    service = SimpleNamespace(work_dir=str(tmp_path), perform_docking=fail)
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.post(
+            "/api/docking/submit",
+            files={"protein_file": ("protein.pdb", b"ATOM\n")},
+            data={"smiles": "CCO"},
+        )
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["success"] is False
+    assert body["code"] == "DOCKING_EXECUTION_FAILED"
+    assert body["message"] == "对接计算失败"
+    assert body["details"] is None
+    assert secret_detail not in response.text
+
+
+def test_docking_report_failure_returns_stable_error_code_without_internal_details(tmp_path):
+    secret_detail = "C:\\private\\report\\result.pdbqt"
+    job = tmp_path / "docking_job"
+    job.mkdir()
+    (job / "result.pdbqt").write_text("REMARK fixture\n", encoding="utf-8")
+
+    def fail(_path):
+        raise RuntimeError(secret_detail)
+
+    service = SimpleNamespace(
+        work_dir=str(tmp_path),
+        parse_vina_results=fail,
+    )
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.post("/api/docking/report/job", json={"format": "md"})
+
+    assert response.status_code == 500
+    body = response.json()
+    assert body["success"] is False
+    assert body["code"] == "DOCKING_REPORT_FAILED"
+    assert body["message"] == "生成对接报告失败"
+    assert body["details"] is None
+    assert secret_detail not in response.text
+
+
 def test_pose_sdf_does_not_fallback_to_all_models_for_out_of_range_pose(tmp_path):
     job = tmp_path / "docking_demo"
     job.mkdir()

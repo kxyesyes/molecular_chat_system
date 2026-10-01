@@ -1,6 +1,7 @@
 """Docking report route registration."""
 from typing import Dict, Any
 from fastapi import Body, HTTPException
+from src.web.api_response import api_error
 
 
 def setup_docking_report_routes(app, docking_service=None, *, _support):
@@ -46,6 +47,6 @@ def setup_docking_report_routes(app, docking_service=None, *, _support):
 
         except HTTPException:
             raise
-        except Exception as e:
-            _support.logger.error(f"生成报告失败: {e}")
-            raise HTTPException(status_code=500, detail=f"生成报告失败: {str(e)}")
+        except Exception:
+            _support.logger.exception("生成报告失败")
+            return api_error("DOCKING_REPORT_FAILED", "生成对接报告失败", status_code=500)
