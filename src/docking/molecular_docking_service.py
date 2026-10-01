@@ -63,6 +63,17 @@ class DockingConfig:
     energy_range: float = 3.0
     manual_center: bool = False
     blind_docking: bool = False
+    random_seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        if self.random_seed is None:
+            return
+        if (
+            type(self.random_seed) is not int
+            or self.random_seed < 0
+            or self.random_seed > 2**31 - 1
+        ):
+            raise ValueError("random_seed must be an integer between 0 and 2147483647")
 
 
 def _ligand_efficiency(binding_energy: float | None, heavy_atom_count: int) -> float | None:
@@ -725,6 +736,8 @@ class MolecularDockingService:
                 f.write(f"exhaustiveness = {config.exhaustiveness}\n")
                 f.write(f"num_modes = {config.num_modes}\n")
                 f.write(f"energy_range = {config.energy_range}\n")
+                if config.random_seed is not None:
+                    f.write(f"seed = {config.random_seed}\n")
 
             if not self._update_run_manifest(
                 resolved_job_dir,
@@ -1126,6 +1139,7 @@ class MolecularDockingService:
                 "exhaustiveness": config.exhaustiveness,
                 "num_modes": config.num_modes,
                 "energy_range": config.energy_range,
+                "random_seed": config.random_seed,
             },
             "preprocessing": preprocessing,
             "preprocessing_state": preprocessing_state,
@@ -1647,6 +1661,10 @@ class MolecularDockingService:
                 "provenance": {
                     "docking_box": box_provenance,
                     "preprocessing": preparation_provenance["preprocessing"],
+                    "reproducibility": {
+                        "random_seed": config.random_seed,
+                        "seed_recorded": config.random_seed is not None,
+                    },
                     "manifest": preparation_provenance["manifest"],
                 },
             }
