@@ -479,6 +479,7 @@ class MolecularDockingService:
         output_path: str,
         *,
         cancel_event=None,
+        trace: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         准备蛋白质文件 (PDB -> PDBQT)
@@ -494,6 +495,8 @@ class MolecularDockingService:
                     cancel_event,
                 )
                 logger.info("Using receptor input already in PDBQT format")
+                if trace is not None:
+                    trace["receptor_method"] = "pdbqt_passthrough"
                 return True
 
             # 使用 ADFRsuite 的 prepare_receptor（支持 .bat / 无扩展 / .py）
@@ -516,6 +519,8 @@ class MolecularDockingService:
 
                 if result.returncode == 0:
                     logger.info("Receptor preparation succeeded")
+                    if trace is not None:
+                        trace["receptor_method"] = "adfrsuite_prepare_receptor"
                     return True
                 else:
                     logger.error(
@@ -540,6 +545,7 @@ class MolecularDockingService:
         output_path: str,
         *,
         cancel_event=None,
+        trace: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         从SMILES生成配体PDBQT文件
@@ -580,6 +586,8 @@ class MolecularDockingService:
                 "配体准备",
                 cancel_event=cancel_event,
             )
+            if success and trace is not None:
+                trace["ligand_method"] = "rdkit_3d_then_meeko"
             return success
 
         except (CommandCancelledError, CommandOwnershipUncertainError):
@@ -594,6 +602,7 @@ class MolecularDockingService:
         output_path: str,
         *,
         cancel_event=None,
+        trace: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
         从文件准备配体 (SDF/MOL/PDB -> PDBQT)
@@ -613,6 +622,8 @@ class MolecularDockingService:
                     cancel_event,
                 )
                 logger.info("Using ligand input already in PDBQT format")
+                if trace is not None:
+                    trace["ligand_method"] = "pdbqt_passthrough"
                 return True
 
             success, error_output = self._run_prepare_ligand(
@@ -624,18 +635,23 @@ class MolecularDockingService:
                 cancel_event=cancel_event,
             )
             if success:
+                if trace is not None:
+                    trace["ligand_method"] = "meeko_direct"
                 return True
 
             # Meeko 对部分文件要求显式氢，这里在失败后做一次 RDKit 归一化再重试
             if "implicit Hs" in error_output:
                 self._require_finished_commands()
                 logger.warning("检测到配体含隐式氢，将先用 RDKit 补显式氢后再次尝试")
-                return self._prepare_ligand_file_with_explicit_hs(
+                retried = self._prepare_ligand_file_with_explicit_hs(
                     ligand_path,
                     output_path,
                     job_dir,
                     cancel_event=cancel_event,
                 )
+                if retried and trace is not None:
+                    trace["ligand_method"] = "rdkit_explicit_h_retry_then_meeko"
+                return retried
 
             logger.error("Ligand file preparation failed")
             return False
@@ -661,64 +677,40 @@ class MolecularDockingService:
         """
         try:
             self._require_finished_commands()
-            # 如果未提供中心坐标（默认为0,0,0），则自动从受体估算网格框
-            def _auto_box_from_receptor(pdbqt_path: str) -> Tuple[float, float, float, float, float, float]:
-                min_x = min_y = min_z = float('inf')
-                max_x = max_y = max_z = float('-inf')
-                try:
-                    with open(pdbqt_path, 'r', encoding='utf-8', errors='ignore') as rf:
-                        for line in rf:
-                            if line.startswith(('ATOM', 'HETATM')):
-                                try:
-                                    x = float(line[30:38])
-                                    y = float(line[38:46])
-                                    z = float(line[46:54])
-                                except Exception:
-                                    # 宽松解析：按空白拆分尝试
-                                    parts = line.split()
-                                    if len(parts) >= 9:
-                                        x = float(parts[6]); y = float(parts[7]); z = float(parts[8])
-                                    else:
-                                        continue
-                                min_x = min(min_x, x); max_x = max(max_x, x)
-                                min_y = min(min_y, y); max_y = max(max_y, y)
-                                min_z = min(min_z, z); max_z = max(max_z, z)
-                    if any(v in (float('inf'), float('-inf')) for v in (min_x, max_x, min_y, max_y, min_z, max_z)):
-                        # 解析失败时回退原默认
-                        return (0.0, 0.0, 0.0, config.size_x, config.size_y, config.size_z)
-                    cx = (min_x + max_x) / 2.0
-                    cy = (min_y + max_y) / 2.0
-                    cz = (min_z + max_z) / 2.0
-                    # 尺寸：边界加适度边距
-                    padding = 8.0
-                    sx = max(10.0, (max_x - min_x) + padding)
-                    sy = max(10.0, (max_y - min_y) + padding)
-                    sz = max(10.0, (max_z - min_z) + padding)
-                    return (cx, cy, cz, sx, sy, sz)
-                except Exception:
-                    return (0.0, 0.0, 0.0, config.size_x, config.size_y, config.size_z)
-
-            if (
-                not config.manual_center
-                and abs(config.center_x) < 1e-6
-                and abs(config.center_y) < 1e-6
-                and abs(config.center_z) < 1e-6
-            ):
-                cx, cy, cz, sx, sy, sz = _auto_box_from_receptor(receptor_path)
-                config.center_x = cx
-                config.center_y = cy
-                config.center_z = cz
-                # 仅当用户未自定义尺寸（保持默认20）时，才替换为自动尺寸
-                if (abs(config.size_x - 20.0) < 1e-6 and abs(config.size_y - 20.0) < 1e-6 and abs(config.size_z - 20.0) < 1e-6):
-                    config.size_x = sx
-                    config.size_y = sy
-                    config.size_z = sz
-
+            try:
+                center_values = (config.center_x, config.center_y, config.center_z)
+                size_values = (config.size_x, config.size_y, config.size_z)
+                if (
+                    not all(math.isfinite(float(value)) for value in (*center_values, *size_values))
+                    or not all(float(value) > 0 for value in size_values)
+                ):
+                    return False
+            except (TypeError, ValueError):
+                return False
             # 每个作业拥有独立配置文件和进程工作目录。
             resolved_job_dir = os.path.abspath(
                 job_dir or os.path.dirname(os.path.abspath(output_path))
             )
             os.makedirs(resolved_job_dir, exist_ok=True)
+            manifest_path = os.path.join(resolved_job_dir, "run_manifest.json")
+            if not os.path.isfile(manifest_path):
+                self._write_run_manifest(
+                    resolved_job_dir,
+                    receptor_path,
+                    ligand_path,
+                    "file",
+                    config,
+                    {
+                        "source": "direct_caller",
+                        "mode": "targeted",
+                        "center": [config.center_x, config.center_y, config.center_z],
+                        "size": [config.size_x, config.size_y, config.size_z],
+                        "exhaustiveness": config.exhaustiveness,
+                        "num_modes": config.num_modes,
+                        "energy_range": config.energy_range,
+                        "warning": "Direct Vina execution received an explicit box; pocket evidence was not independently verified.",
+                    },
+                )
             config_path = os.path.join(resolved_job_dir, "config.txt")
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(f"receptor = {receptor_path}\n")
@@ -734,21 +726,78 @@ class MolecularDockingService:
                 f.write(f"num_modes = {config.num_modes}\n")
                 f.write(f"energy_range = {config.energy_range}\n")
 
+            if not self._update_run_manifest(
+                resolved_job_dir,
+                execution={
+                    "status": "running",
+                    "config": "config.txt",
+                    "command": [Path(self.vina_exe).name or "vina", "--config", "config.txt"],
+                    "config_sha256": self._sha256_file(config_path)[0],
+                },
+            ):
+                logger.error("Unable to persist docking execution manifest before Vina launch")
+                return False
+
             # 运行Vina
             adapter_control = {}
             if cancel_event is not None:
                 adapter_control["cancel_event"] = cancel_event
-            result = self.vina_adapter.run_config(
-                config_path,
-                resolved_job_dir,
-                timeout=self.vina_timeout_seconds,
-                **adapter_control,
-            )
+            try:
+                result = self.vina_adapter.run_config(
+                    config_path,
+                    resolved_job_dir,
+                    timeout=self.vina_timeout_seconds,
+                    **adapter_control,
+                )
+            except (CommandCancelledError, CommandOwnershipUncertainError) as error:
+                self._update_run_manifest(
+                    resolved_job_dir,
+                    execution={
+                        "status": (
+                            "cancelled"
+                            if isinstance(error, CommandCancelledError)
+                            else "ownership_uncertain"
+                        )
+                    },
+                )
+                raise
+            except subprocess.TimeoutExpired:
+                self._update_run_manifest(resolved_job_dir, execution={"status": "timeout"})
+                raise
+            except Exception:
+                self._update_run_manifest(resolved_job_dir, execution={"status": "failed"})
+                raise
 
             if result.returncode == 0:
+                actual_command = getattr(result, "args", None) or [
+                    Path(self.vina_exe).name or "vina",
+                    "--config",
+                    "config.txt",
+                ]
+                self._update_run_manifest(
+                    resolved_job_dir,
+                    execution={
+                        "status": "completed",
+                        "returncode": result.returncode,
+                        "command": self._manifest_command(actual_command, resolved_job_dir),
+                    },
+                )
                 logger.info("Vina docking command succeeded")
                 return True
             else:
+                actual_command = getattr(result, "args", None) or [
+                    Path(self.vina_exe).name or "vina",
+                    "--config",
+                    "config.txt",
+                ]
+                self._update_run_manifest(
+                    resolved_job_dir,
+                    execution={
+                        "status": "failed",
+                        "returncode": result.returncode,
+                        "command": self._manifest_command(actual_command, resolved_job_dir),
+                    },
+                )
                 logger.error(
                     "Vina docking command failed (returncode=%s)",
                     result.returncode,
@@ -940,8 +989,23 @@ class MolecularDockingService:
         size = [max(10.0, high - low + 8.0) for low, high in zip(minimum, maximum)]
         return (*center, *size)
 
+    @staticmethod
+    def _validate_box_values(center_values, size_values) -> None:
+        try:
+            values = (*center_values, *size_values)
+            if (
+                not all(math.isfinite(float(value)) for value in values)
+                or not all(float(value) > 0 for value in size_values)
+            ):
+                raise ValueError("invalid_docking_box")
+        except (TypeError, ValueError):
+            raise ValueError("invalid_docking_box") from None
+
     def _resolve_docking_box(self, receptor_file: str, config: DockingConfig, cancel_event=None) -> Dict[str, Any]:
         """Resolve the box source and reject unsupported silent defaults."""
+        center_values = (config.center_x, config.center_y, config.center_z)
+        size_values = (config.size_x, config.size_y, config.size_z)
+        self._validate_box_values(center_values, size_values)
         default_box = (
             abs(config.center_x) < 1e-6
             and abs(config.center_y) < 1e-6
@@ -975,6 +1039,7 @@ class MolecularDockingService:
 
         auto_box = self._auto_box_from_co_crystal(receptor_file, cancel_event)
         if auto_box is not None:
+            self._validate_box_values(auto_box[:3], auto_box[3:])
             (
                 config.center_x,
                 config.center_y,
@@ -1045,6 +1110,11 @@ class MolecularDockingService:
             ),
             "implicit_hydrogen_policy": "recorded by preparation path; no silent fallback to unoptimized geometry",
         }
+        preprocessing_state = {
+            "status": "planned",
+            "receptor": {"status": "pending", "output": "receptor.pdbqt"},
+            "ligand": {"status": "pending", "output": "ligand.pdbqt"},
+        }
         manifest = {
             "schema_version": 1,
             "inputs": {
@@ -1058,12 +1128,63 @@ class MolecularDockingService:
                 "energy_range": config.energy_range,
             },
             "preprocessing": preprocessing,
+            "preprocessing_state": preprocessing_state,
+            "execution": {"status": "planned"},
         }
         manifest_path = os.path.join(job_dir, "run_manifest.json")
         with open(manifest_path, "w", encoding="utf-8") as stream:
             json.dump(manifest, stream, ensure_ascii=False, sort_keys=True, indent=2)
             stream.write("\n")
         return manifest_path, {"preprocessing": preprocessing, "manifest": "run_manifest.json"}
+
+    def _update_run_manifest(self, job_dir: str, **updates: Dict[str, Any]) -> None:
+        """Atomically add actual execution state to the per-job manifest."""
+        manifest_path = Path(job_dir) / "run_manifest.json"
+        if not manifest_path.is_file():
+            return False
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for key, value in updates.items():
+                current = manifest.get(key)
+                if isinstance(current, dict) and isinstance(value, dict):
+                    current.update(value)
+                else:
+                    manifest[key] = value
+            temporary = manifest_path.with_name(f".{manifest_path.name}.tmp")
+            temporary.write_text(
+                json.dumps(manifest, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.replace(temporary, manifest_path)
+            return True
+        except Exception:
+            logger.warning("Unable to update docking run manifest", exc_info=True)
+            try:
+                if 'temporary' in locals() and temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                logger.warning("Unable to remove temporary docking manifest", exc_info=True)
+            return False
+
+    def _manifest_command(self, command: Any, job_dir: str) -> List[str]:
+        """Return the adapter's command without absolute machine paths."""
+        command = list(command or [])
+        root = Path(job_dir).resolve()
+        safe = []
+        for value in command:
+            raw_value = str(value)
+            # Windows command switches such as ``/c`` are absolute-looking
+            # on POSIX, but are not filesystem paths and must remain intact.
+            if raw_value.startswith("/") and len(raw_value) <= 3 and "/" not in raw_value[1:]:
+                safe.append(raw_value)
+                continue
+            path = Path(raw_value)
+            try:
+                relative = path.resolve().relative_to(root)
+                safe.append(str(relative).replace("\\", "/"))
+            except (OSError, ValueError):
+                safe.append(path.name if path.is_absolute() else str(value))
+        return safe
 
     @staticmethod
     def _cancel_requested(cancel_event) -> bool:
@@ -1290,6 +1411,13 @@ class MolecularDockingService:
                         "No supported pocket evidence or explicit docking box was provided; confirm a targeted or blind docking box.",
                         **cleanup_control,
                     )
+                if str(error) == "invalid_docking_box":
+                    return self._failed_job_response(
+                        job_dir,
+                        "invalid_docking_box",
+                        "Docking box coordinates must be finite and box dimensions must be positive.",
+                        **cleanup_control,
+                    )
                 raise
             _, preparation_provenance = self._write_run_manifest(
                 job_dir,
@@ -1299,40 +1427,104 @@ class MolecularDockingService:
                 config,
                 box_provenance,
             )
-            if not self.prepare_protein(
-                receptor_file,
-                receptor_pdbqt,
-                **command_control,
-            ):
+            preparation_trace: Dict[str, Any] = {}
+
+            def run_preparation(method, *args):
+                kwargs = dict(command_control)
+                try:
+                    parameters = inspect.signature(method).parameters.values()
+                    if any(
+                        parameter.name == "trace"
+                        or parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in parameters
+                    ):
+                        kwargs["trace"] = preparation_trace
+                except (TypeError, ValueError):
+                    pass
+                return method(*args, **kwargs)
+
+            self._update_run_manifest(
+                job_dir,
+                preprocessing_state={"status": "in_progress"},
+            )
+            if not run_preparation(self.prepare_protein, receptor_file, receptor_pdbqt):
+                self._update_run_manifest(
+                    job_dir,
+                    preprocessing_state={
+                        "status": "failed",
+                        "receptor": {"status": "failed", "method": "adfrsuite_or_pdbqt_passthrough"},
+                    },
+                )
                 return self._failed_job_response(
                     job_dir,
                     "receptor_preparation_failed",
                     "Receptor preparation failed",
                     **cleanup_control,
                 )
+            self._update_run_manifest(
+                job_dir,
+                preprocessing_state={
+                    "status": "in_progress",
+                    "receptor": {
+                        "status": "completed",
+                        "method": preparation_trace.get(
+                            "receptor_method",
+                            "pdbqt_passthrough"
+                            if receptor_file.lower().endswith(".pdbqt")
+                            else "adfrsuite_prepare_receptor",
+                        ),
+                    },
+                },
+            )
             self._raise_if_cancelled(cancel_event)
             self._require_finished_commands()
 
             self._emit_phase(*_DOCKING_PHASES[1], progress_callback, cancel_event)
             if input_type == "smiles":
-                ligand_ready = self.prepare_ligand_from_smiles(
+                ligand_ready = run_preparation(
+                    self.prepare_ligand_from_smiles,
                     ligand_input,
                     ligand_pdbqt,
-                    **command_control,
                 )
             else:
-                ligand_ready = self.prepare_ligand_from_file(
+                ligand_ready = run_preparation(
+                    self.prepare_ligand_from_file,
                     ligand_input,
                     ligand_pdbqt,
-                    **command_control,
                 )
             if not ligand_ready:
+                self._update_run_manifest(
+                    job_dir,
+                    preprocessing_state={
+                        "status": "failed",
+                        "ligand": {"status": "failed"},
+                    },
+                )
                 return self._failed_job_response(
                     job_dir,
                     "ligand_preparation_failed",
                     "Ligand preparation failed",
                     **cleanup_control,
                 )
+            self._update_run_manifest(
+                job_dir,
+                preprocessing_state={
+                    "status": "completed",
+                    "ligand": {
+                        "status": "completed",
+                        "method": preparation_trace.get(
+                            "ligand_method",
+                            "rdkit_3d_then_meeko"
+                            if input_type == "smiles"
+                            else (
+                                "pdbqt_passthrough"
+                                if ligand_input.lower().endswith(".pdbqt")
+                                else "meeko_file_preparation_with_explicit_hydrogen_retry"
+                            ),
+                        ),
+                    },
+                },
+            )
             self._raise_if_cancelled(cancel_event)
             self._require_finished_commands()
 
