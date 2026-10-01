@@ -1,5 +1,4 @@
 """Docking route registration."""
-import math
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Response
 
@@ -518,57 +517,6 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         result["pose"] = pose
         return result
 
-    def _extract_pose_atom_lines(pdbqt_text: str, pose_index: int = 1):
-        if type(pose_index) is not int or pose_index <= 0:
-            raise ValueError("pose index must be a positive integer")
-        lines = pdbqt_text.splitlines()
-        current = 0
-        collecting = False
-        atom_lines = []
-
-        for line in lines:
-            if line.startswith("MODEL"):
-                current += 1
-                collecting = current == pose_index
-                continue
-            if line.startswith("ENDMDL"):
-                if collecting:
-                    break
-                collecting = False
-                continue
-            if collecting and line.startswith(("ATOM", "HETATM")):
-                atom_lines.append(line)
-        return atom_lines
-
-    def _extract_remark_smiles(pdbqt_text: str) -> str:
-        for line in pdbqt_text.splitlines():
-            if line.startswith("REMARK SMILES ") and not line.startswith("REMARK SMILES IDX"):
-                return line.split("REMARK SMILES ", 1)[1].strip()
-        return ""
-
-    def _extract_remark_pairs(pdbqt_text: str, prefix: str):
-        import re
-
-        nums = []
-        for line in pdbqt_text.splitlines():
-            if line.startswith("MODEL"):
-                # Vina/Meeko may repeat the same mapping inside every pose.
-                # The topology mapping is global; consume only the header and
-                # first model so repeated records cannot create duplicates.
-                if nums:
-                    break
-                continue
-            if line == "ENDMDL" and nums:
-                break
-            if line.startswith(prefix):
-                tail = line[len(prefix):].strip()
-                nums.extend(int(x) for x in re.findall(r"\d+", tail))
-
-        pairs = []
-        for i in range(0, len(nums) - 1, 2):
-            pairs.append((nums[i], nums[i + 1]))
-        return pairs
-
     @app.get("/api/docking/pose_sdf/{job_id}")
     async def get_docking_pose_sdf(job_id: str, pose: int = 1):
         """将指定 pose 重建为标准 SDF，保留原始化学拓扑并应用对接坐标"""
@@ -586,104 +534,12 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
             with open(result_file, "r", encoding="utf-8", errors="ignore") as f:
                 pdbqt_text = f.read()
+            from src.docking.pose_export import PoseExportError, pose_sdf_from_pdbqt
 
-            smiles = _extract_remark_smiles(pdbqt_text)
-            if not smiles:
-                raise HTTPException(status_code=400, detail="结果文件缺少 SMILES 注释，无法重建标准配体结构")
-
-            smiles_idx_pairs = _extract_remark_pairs(pdbqt_text, "REMARK SMILES IDX")
-            if not smiles_idx_pairs:
-                raise HTTPException(status_code=400, detail="结果文件缺少 SMILES IDX 映射，无法重建标准配体结构")
-
-            h_parent_pairs = _extract_remark_pairs(pdbqt_text, "REMARK H PARENT")
             try:
-                atom_lines = _extract_pose_atom_lines(pdbqt_text, pose)
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail="pose 必须是正整数") from exc
-            if not atom_lines:
-                raise HTTPException(status_code=404, detail=f"未找到 Pose {pose} 的坐标")
-
-            from rdkit import Chem
-            from rdkit.Geometry import Point3D
-
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                raise HTTPException(status_code=400, detail="无法从结果文件中的 SMILES 重建分子")
-
-            mol = Chem.AddHs(mol)
-
-            # Do not embed a fallback conformer here. Any unmapped heavy atom
-            # would otherwise silently retain an unrelated initial coordinate.
-            conf = Chem.Conformer(mol.GetNumAtoms())
-            mol.RemoveAllConformers()
-            mol.AddConformer(conf, assignId=True)
-            conf = mol.GetConformer()
-            pose_coords = {}
-            seen_serials = set()
-            for line in atom_lines:
-                try:
-                    serial = int(line[6:11])
-                    x = float(line[30:38])
-                    y = float(line[38:46])
-                    z = float(line[46:54])
-                except (TypeError, ValueError, IndexError) as exc:
-                    raise HTTPException(status_code=400, detail="Pose 含有无效原子坐标") from exc
-                if serial <= 0 or serial in seen_serials or not all(math.isfinite(v) for v in (x, y, z)):
-                    raise HTTPException(status_code=400, detail="Pose 含有重复或非有限原子坐标")
-                seen_serials.add(serial)
-                pose_coords[serial] = (x, y, z)
-
-            assigned_atoms = set()
-            mapped_serials = set()
-            for smiles_atom_idx, pdbqt_serial in smiles_idx_pairs:
-                atom_idx = smiles_atom_idx - 1
-                coords = pose_coords.get(pdbqt_serial)
-                if (
-                    coords is None
-                    or atom_idx < 0
-                    or atom_idx >= mol.GetNumAtoms()
-                    or atom_idx in assigned_atoms
-                    or pdbqt_serial in mapped_serials
-                ):
-                    raise HTTPException(status_code=400, detail="Pose 原子映射不完整或不唯一")
-                conf.SetAtomPosition(atom_idx, Point3D(*coords))
-                assigned_atoms.add(atom_idx)
-                mapped_serials.add(pdbqt_serial)
-
-            hydrogen_map = {}
-            for parent_smiles_idx, pdbqt_serial in h_parent_pairs:
-                hydrogen_map.setdefault(parent_smiles_idx - 1, []).append(pdbqt_serial)
-
-            for parent_idx, hydrogen_serials in hydrogen_map.items():
-                if parent_idx < 0 or parent_idx >= mol.GetNumAtoms():
-                    raise HTTPException(status_code=400, detail="Pose 氢原子映射无效")
-                hydrogen_neighbors = [
-                    nbr.GetIdx()
-                    for nbr in mol.GetAtomWithIdx(parent_idx).GetNeighbors()
-                    if nbr.GetAtomicNum() == 1
-                ]
-                for h_idx, pdbqt_serial in zip(hydrogen_neighbors, hydrogen_serials):
-                    coords = pose_coords.get(pdbqt_serial)
-                    if coords is None:
-                        raise HTTPException(status_code=400, detail="Pose 氢原子映射不完整")
-                    if h_idx in assigned_atoms or pdbqt_serial in mapped_serials:
-                        raise HTTPException(status_code=400, detail="Pose 原子映射不唯一")
-                    conf.SetAtomPosition(h_idx, Point3D(*coords))
-                    assigned_atoms.add(h_idx)
-                    mapped_serials.add(pdbqt_serial)
-
-            heavy_atoms = {
-                atom.GetIdx()
-                for atom in mol.GetAtoms()
-                if atom.GetAtomicNum() > 1
-            }
-            if not heavy_atoms.issubset(assigned_atoms):
-                raise HTTPException(status_code=400, detail="Pose 未完整映射全部重原子")
-
-            mol_no_h = Chem.RemoveHs(mol)
-            sdf_block = Chem.MolToMolBlock(mol_no_h)
-            if not sdf_block:
-                raise HTTPException(status_code=500, detail="无法导出标准 SDF")
+                sdf_block = pose_sdf_from_pdbqt(pdbqt_text, pose)
+            except PoseExportError as exc:
+                raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
 
             return Response(
                 content=sdf_block,

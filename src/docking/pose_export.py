@@ -86,6 +86,7 @@ def pose_sdf_from_pdbqt(
     conf = Chem.Conformer(mol.GetNumAtoms())
     mol.RemoveAllConformers()
     mol.AddConformer(conf, assignId=True)
+    conf = mol.GetConformer()
     pose_coords: dict[int, tuple[float, float, float]] = {}
     seen_serials: set[int] = set()
     for line in atom_lines:
