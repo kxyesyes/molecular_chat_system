@@ -241,6 +241,21 @@ def test_seed_report_rejects_score_not_in_artifact(tmp_path):
     assert result["failures"][0]["reason"] == "binding_energy_mismatch"
 
 
+def test_seed_report_fail_closes_on_malformed_manifest(tmp_path):
+    from src.docking.reproducibility import assess_seed_stability
+
+    first = _record(tmp_path / "first.pdbqt", 11)
+    second = _record(tmp_path / "second.pdbqt", 17)
+    Path(second["manifest_path"]).write_text(
+        json.dumps({"execution": [], "search": {"random_seed": 17}}),
+        encoding="utf-8",
+    )
+    result = assess_seed_stability([first, second])
+
+    assert result["status"] == "failed"
+    assert result["failures"][0]["reason"] == "execution_manifest_invalid"
+
+
 @pytest.mark.parametrize("seed", [None, True, -1, 0, 2**31, 1.5, "37", 11])
 def test_seed_report_requires_distinct_explicit_seeds(tmp_path, seed):
     from src.docking.reproducibility import assess_seed_stability
