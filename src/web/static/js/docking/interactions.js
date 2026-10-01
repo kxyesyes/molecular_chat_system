@@ -68,205 +68,52 @@ function toggleHydrophobicInteractions() {
   }
 }
 
-// ============ 显示氢键相互作用 (青色虚线) ============
-function displayHydrogenBonds() {
+// 相互作用只展示后端成熟分析器的结构化证据；浏览器端不再自行猜测化学作用。
+async function requestInteractionAnalysis(kind) {
+  const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
+  const poseSelect = document.getElementById("pose-select");
+  const pose = poseSelect ? parseInt(poseSelect.value || "1", 10) : 1;
+  if (!jobId || !Number.isInteger(pose) || pose <= 0) {
+    Utils.showToast("请先加载有效的对接任务和构象", "warning");
+    return;
+  }
   try {
-    if (
-      !interactionsState.piPiInteractions &&
-      !interactionsState.hydrophobicInteractions
-    ) {
-      viewer.removeAllShapes();
+    const response = await fetch(`/api/docking/interactions/${encodeURIComponent(jobId)}?pose=${pose}`);
+    const analysis = await response.json();
+    if (!response.ok || analysis.status === "failed") {
+      Utils.showToast("相互作用分析失败，未显示推测结果", "warning");
+      return;
     }
-    const atoms = viewer.selectedAtoms({});
-    const ligandKeys = identifyLigandResidueKeys(atoms);
-    const proteinAtoms = atoms.filter((a) => {
-      const rn = (a.resn || "").toUpperCase();
-      return (
-        CONFIG.PROTEIN_RESIDUES.includes(rn) &&
-        !CONFIG.WATER_RESIDUES.includes(rn)
+    const interactions = (analysis.interactions || []).filter((item) => item.type === kind);
+    if (analysis.status !== "success") {
+      Utils.showToast(
+        analysis.warnings?.[0] || "缺少可靠结构证据，无法分析该类相互作用",
+        "warning",
       );
-    });
-    const ligandAtoms = atomsForResidueKeys(atoms, ligandKeys).filter(
-      (a) => !CONFIG.WATER_RESIDUES.includes((a.resn || "").toUpperCase()),
-    );
-
-    const proteinNO = proteinAtoms.filter((a) => ["N", "O"].includes(a.elem));
-    const ligandNO = ligandAtoms.filter((a) => ["N", "O"].includes(a.elem));
-
-    let count = 0;
-    const resSet = new Set();
-    proteinNO.forEach((p) => {
-      ligandNO.forEach((l) => {
-        const dx = p.x - l.x,
-          dy = p.y - l.y,
-          dz = p.z - l.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d >= 2.4 && d <= 3.6) {
-          viewer.addCylinder({
-            start: { x: p.x, y: p.y, z: p.z },
-            end: { x: l.x, y: l.y, z: l.z },
-            radius: 0.1,
-            color: "cyan",
-            dashed: true,
-            fromCap: 1,
-            toCap: 1,
-          });
-          resSet.add(`${p.resn}:${p.resi}:${p.chain || ""}`);
-          count++;
-        }
-      });
-    });
-    focusLigandAndResidues(resSet, false);
-    viewer.render();
+      return;
+    }
     Utils.showToast(
-      count > 0 ? `检测到 ${count} 个氢键 (青色虚线)` : "未检测到氢键",
-      count > 0 ? "success" : "warning",
+      interactions.length > 0
+        ? `后端分析确认 ${interactions.length} 条${kind}证据`
+        : "后端分析未报告该类相互作用",
+      interactions.length > 0 ? "success" : "warning",
     );
-  } catch (e) {
-    console.error("氢键检测错误:", e);
+  } catch (error) {
+    console.warn("后端相互作用分析不可用:", error);
+    Utils.showToast("相互作用分析服务不可用，未显示推测结果", "warning");
   }
 }
 
-// ============ 显示 π–π 堆积相互作用 (洋红虚线) ============
+function displayHydrogenBonds() {
+  return requestInteractionAnalysis("hydrogen_bond");
+}
+
 function displayPiPiInteractions() {
-  try {
-    if (
-      !interactionsState.hydrogenBonds &&
-      !interactionsState.hydrophobicInteractions
-    ) {
-      viewer.removeAllShapes();
-    }
-    const atoms = viewer.selectedAtoms({});
-    const ligandKeys = identifyLigandResidueKeys(atoms);
-    const proteinAtoms = atoms.filter((a) =>
-      CONFIG.PROTEIN_RESIDUES.includes((a.resn || "").toUpperCase()),
-    );
-    const ligandAtoms = atomsForResidueKeys(atoms, ligandKeys).filter(
-      (a) => !CONFIG.WATER_RESIDUES.includes((a.resn || "").toUpperCase()),
-    );
-
-    const pRings = findAromaticRingsImproved(proteinAtoms);
-    const lRings = findAromaticRingsImproved(ligandAtoms);
-
-    let count = 0;
-    const resSet = new Set();
-    pRings.forEach((pR) => {
-      lRings.forEach((lR) => {
-        const dx = pR.center.x - lR.center.x;
-        const dy = pR.center.y - lR.center.y;
-        const dz = pR.center.z - lR.center.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d >= 3.3 && d <= 6.0) {
-          viewer.addCylinder({
-            start: pR.center,
-            end: lR.center,
-            radius: 0.15,
-            color: "magenta",
-            dashed: true,
-          });
-          const a0 = pR.atoms[0];
-          resSet.add(`${a0.resn}:${a0.resi}:${a0.chain || ""}`);
-          count++;
-        }
-      });
-    });
-    focusLigandAndResidues(resSet, false);
-    viewer.render();
-    Utils.showToast(
-      count > 0
-        ? `检测到 ${count} 个 π–π 相互作用 (洋红虚线)`
-        : "未检测到 π–π 相互作用",
-      count > 0 ? "success" : "warning",
-    );
-  } catch (e) {
-    console.error("π–π 检测错误:", e);
-  }
+  return requestInteractionAnalysis("pi_pi");
 }
 
-// ============ 显示疏水相互作用 (橙色虚线) ============
 function displayHydrophobicInteractions() {
-  try {
-    if (
-      !interactionsState.hydrogenBonds &&
-      !interactionsState.piPiInteractions
-    ) {
-      viewer.removeAllShapes();
-    }
-    const atoms = viewer.selectedAtoms({});
-    const ligandKeys = identifyLigandResidueKeys(atoms);
-
-    const proteinC = atoms
-      .filter(
-        (a) =>
-          a.elem === "C" &&
-          CONFIG.PROTEIN_RESIDUES.includes((a.resn || "").toUpperCase()) &&
-          !CONFIG.WATER_RESIDUES.includes((a.resn || "").toUpperCase()),
-      )
-      .filter((a) => !isPartOfPolarGroup(a));
-    const ligandC = atomsForResidueKeys(atoms, ligandKeys).filter(
-      (a) => a.elem === "C" && !isPartOfPolarGroup(a),
-    );
-
-    const byResidue = new Map();
-    for (const p of proteinC) {
-      for (const l of ligandC) {
-        const dx = p.x - l.x,
-          dy = p.y - l.y,
-          dz = p.z - l.z;
-        const d = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (d < 3.0 || d > 5.0) continue;
-        const rk = `${p.resn}:${p.resi}:${p.chain || ""}`;
-        const cur = byResidue.get(rk);
-        if (!cur || d < cur.distance) byResidue.set(rk, { p, l, distance: d });
-      }
-    }
-
-    let count = 0;
-    const resSet = new Set();
-    const shorten = 0.25;
-    byResidue.forEach(({ p, l }) => {
-      const vx = l.x - p.x,
-        vy = l.y - p.y,
-        vz = l.z - p.z;
-      const len = Math.sqrt(vx * vx + vy * vy + vz * vz) || 1.0;
-      const ux = vx / len,
-        uy = vy / len,
-        uz = vz / len;
-      const start = {
-        x: p.x + ux * shorten,
-        y: p.y + uy * shorten,
-        z: p.z + uz * shorten,
-      };
-      const end = {
-        x: l.x - ux * shorten,
-        y: l.y - uy * shorten,
-        z: l.z - uz * shorten,
-      };
-      viewer.addCylinder({
-        start,
-        end,
-        radius: 0.085,
-        color: "#FF7A00",
-        dashed: true,
-        fromCap: 2,
-        toCap: 2,
-        alpha: 0.95,
-      });
-      resSet.add(`${p.resn}:${p.resi}:${p.chain || ""}`);
-      count++;
-    });
-
-    focusLigandAndResidues(resSet, false);
-    viewer.render();
-    Utils.showToast(
-      count > 0
-        ? `检测到 ${count} 个疏水相互作用 (琥珀色虚线，每残基一条代表线)`
-        : "未检测到疏水相互作用",
-      count > 0 ? "success" : "warning",
-    );
-  } catch (e) {
-    console.error("疏水检测错误:", e);
-  }
+  return requestInteractionAnalysis("hydrophobic");
 }
 
 // 移除特定类型的相互作用
@@ -316,129 +163,6 @@ function removeInteractions(type) {
     displayPiPiInteractions();
   if (type !== "hydrophobic" && interactionsState.hydrophobicInteractions)
     displayHydrophobicInteractions();
-}
-
-// 改进的芳香环检测函数（供本模块以及 ligand_recognizer.js 兼容调用）
-function findAromaticRingsImproved(atoms) {
-  const rings = [];
-  const residueGroups = {};
-  const otherAtoms = [];
-
-  atoms.forEach((atom) => {
-    if (atom.resn && atom.resi) {
-      const key = `${atom.resn}_${atom.resi}`;
-      if (!residueGroups[key]) residueGroups[key] = [];
-      residueGroups[key].push(atom);
-    } else {
-      otherAtoms.push(atom);
-    }
-  });
-
-  const aromaticResidues = ["PHE", "TYR", "TRP", "HIS"];
-  for (const key in residueGroups) {
-    const residueAtoms = residueGroups[key];
-    const resName = residueAtoms[0].resn;
-    if (aromaticResidues.includes(resName)) {
-      const ringAtomNames = {
-        PHE: ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
-        TYR: ["CG", "CD1", "CD2", "CE1", "CE2", "CZ"],
-        TRP: ["CG", "CD1", "CD2", "CE2", "CE3", "CZ2", "CZ3", "CH2"],
-        HIS: ["CG", "CD2", "CE1"],
-      };
-      if (ringAtomNames[resName]) {
-        const ringAtoms = residueAtoms.filter((a) =>
-          ringAtomNames[resName].some(
-            (name) => a.atom && a.atom.includes(name),
-          ),
-        );
-        if (ringAtoms.length >= 5) {
-          const centerX =
-            ringAtoms.reduce((sum, a) => sum + a.x, 0) / ringAtoms.length;
-          const centerY =
-            ringAtoms.reduce((sum, a) => sum + a.y, 0) / ringAtoms.length;
-          const centerZ =
-            ringAtoms.reduce((sum, a) => sum + a.z, 0) / ringAtoms.length;
-          rings.push({
-            center: { x: centerX, y: centerY, z: centerZ },
-            atoms: ringAtoms,
-            type: resName,
-          });
-        }
-      }
-    }
-  }
-
-  const ligandCarbons = otherAtoms.filter((a) => a.elem === "C");
-  if (ligandCarbons.length >= 5) {
-    const visited = new Set();
-    ligandCarbons.forEach((carbon, idx) => {
-      if (visited.has(idx)) return;
-      const cluster = [carbon];
-      visited.add(idx);
-      for (let i = 0; i < ligandCarbons.length; i++) {
-        if (visited.has(i)) continue;
-        const other = ligandCarbons[i];
-        const dist = Math.sqrt(
-          Math.pow(carbon.x - other.x, 2) +
-            Math.pow(carbon.y - other.y, 2) +
-            Math.pow(carbon.z - other.z, 2),
-        );
-        if (dist < 1.6) {
-          cluster.push(other);
-          visited.add(i);
-        }
-      }
-      if (cluster.length >= 5 && cluster.length <= 7) {
-        const centerX =
-          cluster.reduce((sum, a) => sum + a.x, 0) / cluster.length;
-        const centerY =
-          cluster.reduce((sum, a) => sum + a.y, 0) / cluster.length;
-        const centerZ =
-          cluster.reduce((sum, a) => sum + a.z, 0) / cluster.length;
-        const avgDist =
-          cluster.reduce((sum, a) => {
-            return (
-              sum +
-              Math.sqrt(
-                Math.pow(a.x - centerX, 2) +
-                  Math.pow(a.y - centerY, 2) +
-                  Math.pow(a.z - centerZ, 2),
-              )
-            );
-          }, 0) / cluster.length;
-        if (avgDist >= 1.5 && avgDist <= 3.5) {
-          rings.push({
-            center: { x: centerX, y: centerY, z: centerZ },
-            atoms: cluster,
-            type: "ligand",
-          });
-        }
-      }
-    });
-  }
-
-  console.log(`检测到 ${rings.length} 个芳香环`);
-  return rings;
-}
-
-// 兼容旧版本
-function findAromaticRings(atoms) {
-  return findAromaticRingsImproved(atoms);
-}
-
-// 判断是否为芳香原子
-function isAromatic(atom) {
-  if (!atom.bonds) return false;
-  const doubleBonds = atom.bonds.filter((bond) => bond.bondOrder === 2);
-  return doubleBonds.length >= 1;
-}
-
-// 判断是否属于极性基团
-function isPartOfPolarGroup(atom) {
-  if (!atom.bonds) return false;
-  return atom.bonds.some(
-    (bond) => bond.elem === "O" || bond.elem === "N" || bond.elem === "S",
-  );
 }
 
 // 显示相互作用信息提示

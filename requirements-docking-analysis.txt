@@ -1,0 +1,6 @@
+# Optional scientific interaction-analysis profile.
+# The base application remains installable without these heavy dependencies;
+# the interaction endpoint reports dependency_missing when this profile is not
+# installed instead of using a distance-only fallback.
+prolif==2.2.2
+MDAnalysis==2.9.0
