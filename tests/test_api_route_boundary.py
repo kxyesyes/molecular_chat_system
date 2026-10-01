@@ -371,10 +371,10 @@ def test_batch_docking_rejects_file_and_smiles_together(controlled_app):
     with TestClient(app) as client:
         response = client.post(
             "/api/docking/batch_submit",
-            files={
-                "protein_file": ("protein.pdb", b"P"),
-                "ligand_files": ("ligand.sdf", b"L"),
-            },
+            files=[
+                ("protein_file", ("protein.pdb", b"P")),
+                ("ligand_files", ("ligand.sdf", b"L")),
+            ],
             data={"batch_smiles": "CC"},
         )
     assert response.status_code == 400
