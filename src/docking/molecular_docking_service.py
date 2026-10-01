@@ -66,6 +66,9 @@ class DockingConfig:
     random_seed: Optional[int] = None
 
     def __post_init__(self) -> None:
+        self.validate_random_seed()
+
+    def validate_random_seed(self) -> None:
         if self.random_seed is None:
             return
         if (
@@ -687,6 +690,10 @@ class MolecularDockingService:
         运行AutoDock Vina对接计算
         """
         try:
+            # Config objects are mutable for backwards compatibility. Validate
+            # again at the trust boundary so a caller cannot inject a Vina
+            # config line after construction.
+            config.validate_random_seed()
             self._require_finished_commands()
             try:
                 center_values = (config.center_x, config.center_y, config.center_z)
@@ -722,6 +729,12 @@ class MolecularDockingService:
                         "warning": "Direct Vina execution received an explicit box; pocket evidence was not independently verified.",
                     },
                 )
+            if not self._update_run_manifest(
+                resolved_job_dir,
+                search={"random_seed": config.random_seed},
+            ):
+                logger.error("Unable to persist docking random seed in manifest")
+                return False
             config_path = os.path.join(resolved_job_dir, "config.txt")
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(f"receptor = {receptor_path}\n")
@@ -829,7 +842,8 @@ class MolecularDockingService:
             logger.error(f"Vina对接计算异常: {e}")
             return False
 
-    def parse_vina_results(self, output_path: str) -> List[DockingResult]:
+    @staticmethod
+    def parse_vina_results(output_path: str) -> List[DockingResult]:
         """
         Parse and validate the complete Vina pose file.
 

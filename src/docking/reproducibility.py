@@ -18,24 +18,35 @@ def _load_molecule(value: Any):
     suffix = path.suffix.lower()
     if suffix in {".sdf", ".sd"}:
         supplier = Chem.SDMolSupplier(str(path), removeHs=False)
-        molecules = [mol for mol in supplier if mol is not None]
-        if len(molecules) != 1:
+        molecules = list(supplier)
+        if len(molecules) != 1 or molecules[0] is None:
             raise ValueError("structure file must contain exactly one valid molecule")
         return molecules[0]
     if suffix == ".mol":
-        return Chem.MolFromMolFile(str(path), removeHs=False)
+        molecule = Chem.MolFromMolFile(str(path), removeHs=False)
+        if molecule is None:
+            raise ValueError("invalid MOL structure")
+        return molecule
     if suffix == ".mol2":
-        return Chem.MolFromMol2File(str(path), removeHs=False)
+        molecule = Chem.MolFromMol2File(str(path), removeHs=False)
+        if molecule is None:
+            raise ValueError("invalid MOL2 structure")
+        return molecule
     if suffix == ".pdb":
-        return Chem.MolFromPDBFile(str(path), removeHs=False)
+        molecule = Chem.MolFromPDBFile(str(path), removeHs=False)
+        if molecule is None:
+            raise ValueError("invalid PDB structure")
+        return molecule
     raise ValueError(f"unsupported structure format: {suffix or 'unknown'}")
 
 
 def symmetry_aware_heavy_atom_rmsd(reference: Any, candidate: Any) -> float:
     """Return symmetry-aware RMSD for two 3-D ligand structures.
 
-    RDKit's ``GetBestRMS`` searches equivalent atom mappings. Hydrogens are
-    removed before comparison, and unusable structures fail closed.
+    RDKit's ``CalcRMS`` searches equivalent atom mappings without aligning the
+    probe to the reference. This matters for docking: both structures must
+    already be in the receptor frame, so a translated pose must not be made
+    to look correct by a best-fit rotation/translation.
     """
     from rdkit import Chem
     from rdkit.Chem import rdMolAlign
@@ -44,8 +55,20 @@ def symmetry_aware_heavy_atom_rmsd(reference: Any, candidate: Any) -> float:
     candidate_mol = _load_molecule(candidate)
     if reference_mol is None or candidate_mol is None:
         raise ValueError("invalid structure for RMSD validation")
-    if reference_mol.GetNumConformers() == 0 or candidate_mol.GetNumConformers() == 0:
-        raise ValueError("3D conformer is required for RMSD validation")
+
+    def validate_conformer(molecule, label: str) -> None:
+        if molecule.GetNumConformers() != 1:
+            raise ValueError(f"{label} must contain exactly one 3D conformer")
+        conformer = molecule.GetConformer()
+        if not conformer.Is3D():
+            raise ValueError(f"{label} must contain a 3D conformer")
+        for atom_index in range(molecule.GetNumAtoms()):
+            point = conformer.GetAtomPosition(atom_index)
+            if not all(math.isfinite(float(value)) for value in (point.x, point.y, point.z)):
+                raise ValueError(f"{label} contains non-finite coordinates")
+
+    validate_conformer(reference_mol, "reference")
+    validate_conformer(candidate_mol, "candidate")
 
     reference_heavy = Chem.RemoveHs(Chem.Mol(reference_mol))
     candidate_heavy = Chem.RemoveHs(Chem.Mol(candidate_mol))
@@ -53,9 +76,33 @@ def symmetry_aware_heavy_atom_rmsd(reference: Any, candidate: Any) -> float:
         raise ValueError("heavy-atom counts do not match for RMSD validation")
     if reference_heavy.GetNumConformers() == 0 or candidate_heavy.GetNumConformers() == 0:
         raise ValueError("3D conformer is required after hydrogen removal")
+    if reference_heavy.GetNumAtoms() == 0:
+        raise ValueError("structures must contain at least one heavy atom")
+
+    reference_smiles = Chem.MolToSmiles(reference_heavy, isomericSmiles=True)
+    candidate_smiles = Chem.MolToSmiles(candidate_heavy, isomericSmiles=True)
+    if reference_smiles != candidate_smiles:
+        raise ValueError("structures have different chemical identity")
+
+    # Explicitly bound the symmetry search. Unbounded mappings can become a
+    # denial-of-service vector for highly symmetric ligands.
+    matches = reference_heavy.GetSubstructMatches(
+        candidate_heavy,
+        uniquify=False,
+        useChirality=True,
+        maxMatches=10001,
+    )
+    if not matches:
+        raise ValueError("structures are not compatible for symmetry-aware RMSD")
+    if len(matches) > 10000:
+        raise ValueError("too many symmetry mappings for RMSD validation")
+    atom_maps = [
+        [(candidate_atom, reference_atom) for candidate_atom, reference_atom in enumerate(match)]
+        for match in matches
+    ]
 
     try:
-        rmsd = float(rdMolAlign.GetBestRMS(candidate_heavy, reference_heavy))
+        rmsd = float(rdMolAlign.CalcRMS(candidate_heavy, reference_heavy, map=atom_maps))
     except Exception as error:
         raise ValueError("structures are not compatible for symmetry-aware RMSD") from error
     if not math.isfinite(rmsd) or rmsd < 0:
@@ -75,16 +122,36 @@ def assess_seed_stability(
     is reported for a caller-specific stability policy; it is not called an
     experimental affinity or a universal pass threshold.
     """
+    if type(minimum_runs) is not int or minimum_runs < 2:
+        raise ValueError("minimum_runs must be an integer greater than or equal to 2")
+
+    # Import lazily to avoid coupling the small validation module to the
+    # service's adapter initialization at import time.
+    from .molecular_docking_service import MolecularDockingService
+
     records = list(runs)
     failures: list[dict[str, Any]] = []
     energies: list[float] = []
     artifact_checks: list[bool] = []
+    seen_seeds: set[int] = set()
+    seen_artifacts: set[str] = set()
 
     for index, record in enumerate(records, 1):
         if not isinstance(record, dict) or record.get("success") is not True:
             failures.append({"index": index, "reason": "run_not_successful"})
             artifact_checks.append(False)
             continue
+
+        seed = record.get("seed")
+        if type(seed) is not int or seed <= 0 or seed > 2**31 - 1:
+            failures.append({"index": index, "reason": "seed_invalid"})
+            artifact_checks.append(False)
+            continue
+        if seed in seen_seeds:
+            failures.append({"index": index, "reason": "seed_not_distinct"})
+            artifact_checks.append(False)
+            continue
+        seen_seeds.add(seed)
 
         energy = record.get("binding_energy")
         if type(energy) not in (int, float) or not math.isfinite(float(energy)):
@@ -98,6 +165,20 @@ def assess_seed_stability(
         if not artifact_ok:
             failures.append({"index": index, "reason": "pose_artifact_missing"})
             continue
+        artifact_path = str(Path(pose_file).resolve())
+        if artifact_path in seen_artifacts:
+            failures.append({"index": index, "reason": "pose_artifact_reused"})
+            continue
+        seen_artifacts.add(artifact_path)
+
+        parsed_poses = MolecularDockingService.parse_vina_results(artifact_path)
+        if not parsed_poses:
+            failures.append({"index": index, "reason": "pose_artifact_invalid"})
+            continue
+        best_energy = float(parsed_poses[0].binding_energy)
+        if not math.isclose(float(energy), best_energy, rel_tol=0.0, abs_tol=1e-6):
+            failures.append({"index": index, "reason": "binding_energy_mismatch"})
+            continue
         energies.append(float(energy))
 
     result: dict[str, Any] = {
@@ -108,10 +189,13 @@ def assess_seed_stability(
         "failures": failures,
         "energies_kcal_per_mol": energies,
         "energy_range_kcal_per_mol": None,
+        "validation_scope": "pose_artifact_and_record_consistency",
+        "scientific_execution_verified": False,
     }
     if len(records) < minimum_runs:
-        result["status"] = "insufficient_data"
-        result["failures"] = [{"reason": "minimum_runs_not_reached", "minimum_runs": minimum_runs}]
+        result["failures"].append(
+            {"reason": "minimum_runs_not_reached", "minimum_runs": minimum_runs}
+        )
     if energies:
         result["energy_range_kcal_per_mol"] = max(energies) - min(energies)
     return result
