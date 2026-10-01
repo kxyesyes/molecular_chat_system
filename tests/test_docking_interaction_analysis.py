@@ -9,6 +9,7 @@ import pytest
 from src.docking.interaction_analysis import (
     analyze_docking_interactions,
     normalize_prolif_output,
+    resolve_analysis_inputs,
 )
 
 
@@ -34,6 +35,18 @@ def test_missing_analysis_inputs_are_explicitly_unavailable(tmp_path: Path):
     assert result["status"] == "unavailable"
     assert result["reason_code"] == "analysis_input_missing"
     assert result["interactions"] == []
+
+
+def test_analysis_input_resolution_skips_missing_candidate_names(tmp_path: Path):
+    receptor = tmp_path / "receptor_analysis.pdb"
+    ligand = tmp_path / "pose_1.sdf"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    ligand.write_text("sdf\n", encoding="utf-8")
+
+    resolved_receptor, resolved_ligand = resolve_analysis_inputs(tmp_path, 1)
+
+    assert resolved_receptor == receptor
+    assert resolved_ligand == ligand
 
 
 def test_prolif_output_is_normalized_without_inventing_geometry():

@@ -209,6 +209,7 @@ def resolve_analysis_inputs(job_dir: str | Path, pose_index: int) -> tuple[Path 
                 "analysis_receptor.mmcif",
                 "receptor_analysis.pdb",
             )
+            if (root / name).is_file()
         ),
         None,
     )
@@ -220,8 +221,8 @@ def resolve_analysis_inputs(job_dir: str | Path, pose_index: int) -> tuple[Path 
                 f"pose_{pose_index}.sdf",
                 f"ligand_pose_{pose_index}.sdf",
             )
+            if (root / name).is_file()
         ),
         None,
     )
-    return (receptor if receptor and receptor.is_file() else None,
-            ligand if ligand and ligand.is_file() else None)
+    return receptor, ligand
