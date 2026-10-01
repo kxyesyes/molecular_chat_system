@@ -1,5 +1,6 @@
 """Regression checks for truthful execution records (no real docking here)."""
 import json
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -66,12 +67,15 @@ def test_recorded_command_comes_from_actual_adapter(run_inputs, monkeypatch):
 
     service.vina_adapter = VinaAdapter(str(output.parent / 'actual-vina.bat'))
     argv = ['cmd', '/c', str(output.parent / 'actual-vina.bat'), '--config', str(output.parent / 'config.txt')]
-    monkeypatch.setattr(service.vina_adapter, 'run_config',
-                        lambda *a, **kw: subprocess.CompletedProcess(argv, 0))
+    def run(*_args, **_kwargs):
+        output.write_text('synthetic output', encoding='utf-8')
+        return subprocess.CompletedProcess(argv, 0)
+    monkeypatch.setattr(service.vina_adapter, 'run_config', run)
     assert service.run_vina_docking(str(receptor), str(ligand), config, str(output)) is True
     execution = manifest(run_inputs)['execution']
     assert execution['command'] == ['cmd', '/c', 'actual-vina.bat', '--config', 'config.txt']
     assert execution['status'] == 'completed'
+    assert execution['output_sha256'] == hashlib.sha256(output.read_bytes()).hexdigest()
     assert str(output.parent) not in json.dumps(execution)
 
 

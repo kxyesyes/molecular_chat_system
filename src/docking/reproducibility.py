@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import math
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -171,9 +173,41 @@ def assess_seed_stability(
             continue
         seen_artifacts.add(artifact_path)
 
-        parsed_poses = MolecularDockingService.parse_vina_results(artifact_path)
+        manifest_path = record.get("manifest_path")
+        if not isinstance(manifest_path, (str, Path)) or not Path(manifest_path).is_file():
+            failures.append({"index": index, "reason": "execution_manifest_missing"})
+            continue
+        try:
+            manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+            execution = manifest.get("execution", {})
+            search = manifest.get("search", {})
+            if (
+                execution.get("status") != "completed"
+                or execution.get("returncode") != 0
+            ):
+                failures.append({"index": index, "reason": "execution_not_completed"})
+                continue
+            if search.get("random_seed") != seed:
+                failures.append({"index": index, "reason": "seed_manifest_mismatch"})
+                continue
+            digest = hashlib.sha256(Path(artifact_path).read_bytes()).hexdigest()
+            if execution.get("output_sha256") != digest:
+                failures.append({"index": index, "reason": "pose_artifact_hash_mismatch"})
+                continue
+        except (OSError, TypeError, ValueError, json.JSONDecodeError):
+            failures.append({"index": index, "reason": "execution_manifest_invalid"})
+            continue
+
+        diagnostics: list[str] = []
+        parsed_poses = MolecularDockingService.parse_vina_results(
+            artifact_path,
+            diagnostics=diagnostics,
+        )
         if not parsed_poses:
-            failures.append({"index": index, "reason": "pose_artifact_invalid"})
+            failure = {"index": index, "reason": "pose_artifact_invalid"}
+            if diagnostics:
+                failure["detail"] = diagnostics[0]
+            failures.append(failure)
             continue
         best_energy = float(parsed_poses[0].binding_energy)
         if not math.isclose(float(energy), best_energy, rel_tol=0.0, abs_tol=1e-6):

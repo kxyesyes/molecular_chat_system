@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,26 @@ def _pose(path, energy=-7.1):
         "ENDMDL\n", encoding="utf-8",
     )
     return str(path)
+
+
+def _record(path, seed, energy=-7.1):
+    pose_file = Path(_pose(path, energy))
+    manifest_path = pose_file.with_suffix(".manifest.json")
+    manifest_path.write_text(json.dumps({
+        "search": {"random_seed": seed},
+        "execution": {
+            "status": "completed",
+            "returncode": 0,
+            "output_sha256": hashlib.sha256(pose_file.read_bytes()).hexdigest(),
+        },
+    }), encoding="utf-8")
+    return {
+        "seed": seed,
+        "success": True,
+        "binding_energy": energy,
+        "pose_file": str(pose_file),
+        "manifest_path": str(manifest_path),
+    }
 
 
 def _molecule(smiles="CCO"):
@@ -102,8 +123,8 @@ def test_seed_stability_report_requires_real_pose_artifacts(tmp_path: Path):
 
     report = assess_seed_stability(
         [
-            {"seed": 11, "success": True, "binding_energy": -7.1, "pose_file": str(pose_a)},
-            {"seed": 17, "success": True, "binding_energy": -7.4, "pose_file": str(pose_b)},
+            _record(pose_a, 11, -7.1),
+            _record(pose_b, 17, -7.4),
         ]
     )
 
@@ -122,7 +143,7 @@ def test_seed_stability_report_does_not_promote_missing_run_to_success(tmp_path:
 
     report = assess_seed_stability(
         [
-            {"seed": 11, "success": True, "binding_energy": -7.1, "pose_file": str(pose)},
+            _record(pose, 11, -7.1),
             {"seed": 17, "success": False, "binding_energy": None, "pose_file": None},
         ]
     )
@@ -197,9 +218,14 @@ def test_seed_report_rejects_invalid_pose_content(tmp_path, content):
     from src.docking.reproducibility import assess_seed_stability
     path = tmp_path / "invalid.pdbqt"
     path.write_text(content, encoding="utf-8")
+    invalid_record = _record(tmp_path / "invalid-record.pdbqt", 11, -7.1)
+    Path(invalid_record["pose_file"]).write_text(content, encoding="utf-8")
+    manifest = json.loads(Path(invalid_record["manifest_path"]).read_text(encoding="utf-8"))
+    manifest["execution"]["output_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    Path(invalid_record["manifest_path"]).write_text(json.dumps(manifest), encoding="utf-8")
     result = assess_seed_stability([
-        dict(seed=11, success=True, binding_energy=-7.1, pose_file=str(path)),
-        dict(seed=17, success=True, binding_energy=-7.1, pose_file=_pose(tmp_path / "valid.pdbqt")),
+        invalid_record,
+        _record(tmp_path / "valid.pdbqt", 17, -7.1),
     ])
     assert result["status"] == "failed"
     assert result["failures"][0]["reason"] == "pose_artifact_invalid"
@@ -207,8 +233,9 @@ def test_seed_report_rejects_invalid_pose_content(tmp_path, content):
 
 def test_seed_report_rejects_score_not_in_artifact(tmp_path):
     from src.docking.reproducibility import assess_seed_stability
-    records = [dict(seed=seed, success=True, binding_energy=-99,
-                    pose_file=_pose(tmp_path / f"{seed}.pdbqt")) for seed in (11, 17)]
+    records = [_record(tmp_path / f"{seed}.pdbqt", seed, -7.1) for seed in (11, 17)]
+    for record in records:
+        record["binding_energy"] = -99
     result = assess_seed_stability(records)
     assert result["status"] == "failed"
     assert result["failures"][0]["reason"] == "binding_energy_mismatch"

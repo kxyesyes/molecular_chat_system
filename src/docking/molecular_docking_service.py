@@ -806,6 +806,11 @@ class MolecularDockingService:
                         "status": "completed",
                         "returncode": result.returncode,
                         "command": self._manifest_command(actual_command, resolved_job_dir),
+                        "output_sha256": (
+                            self._sha256_file(output_path)[0]
+                            if os.path.isfile(output_path)
+                            else None
+                        ),
                     },
                 )
                 logger.info("Vina docking command succeeded")
@@ -843,7 +848,11 @@ class MolecularDockingService:
             return False
 
     @staticmethod
-    def parse_vina_results(output_path: str) -> List[DockingResult]:
+    def parse_vina_results(
+        output_path: str,
+        *,
+        diagnostics: Optional[List[str]] = None,
+    ) -> List[DockingResult]:
         """
         Parse and validate the complete Vina pose file.
 
@@ -872,6 +881,8 @@ class MolecularDockingService:
 
             def invalid(reason: str):
                 logger.error("Invalid Vina output: %s", reason)
+                if diagnostics is not None:
+                    diagnostics.append(reason)
                 return []
 
             for line in lines:
@@ -970,6 +981,8 @@ class MolecularDockingService:
 
         except Exception as e:
             logger.error(f"结果解析异常: {e}")
+            if diagnostics is not None:
+                diagnostics.append("parser_exception")
             return []
 
     @classmethod
