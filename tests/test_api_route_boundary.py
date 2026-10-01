@@ -737,6 +737,27 @@ def test_docking_artifact_routes_reject_invalid_job_ids(tmp_path, path):
     assert response.json() == {"detail": "Invalid job_id"}
 
 
+def test_molecule_image_preserves_legacy_invalid_smiles_error_contract():
+    with TestClient(registered_app()) as client:
+        response = client.get("/api/utils/smiles_to_image", params={"smiles": "CC(C)(("})
+    assert response.status_code == 500
+    assert response.json() == {"detail": "400: Invalid SMILES"}
+
+
+def test_molecule_image_preserves_legacy_empty_smiles_error_contract():
+    with TestClient(registered_app()) as client:
+        response = client.get("/api/utils/smiles_to_image", params={"smiles": ""})
+    assert response.status_code == 500
+    assert response.json() == {"detail": "400: SMILES cannot be empty"}
+
+
+def test_molecule_3d_rejects_non_string_smiles_with_client_error():
+    with TestClient(registered_app()) as client:
+        response = client.post("/api/docking/smiles_to_3d", json={"smiles": ["CCO"]})
+    assert response.status_code == 400
+    assert response.json() == {"detail": "SMILES字符串必须是字符串"}
+
+
 def test_single_docking_failure_returns_stable_error_code_without_internal_details(tmp_path):
     secret_detail = "C:\\private\\vina\\command --token=hidden"
 
