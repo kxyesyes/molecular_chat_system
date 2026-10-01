@@ -1,6 +1,15 @@
 """Docking route registration."""
+import re
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Response
+
+
+_SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def _validate_job_id(job_id: str) -> None:
+    if not _SAFE_JOB_ID.fullmatch(job_id or ""):
+        raise HTTPException(status_code=400, detail="Invalid job_id")
 
 
 def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _support):
@@ -411,6 +420,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         """获取分子对接结果文件"""
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
+        _validate_job_id(job_id)
 
         try:
             job_dir = _support.os.path.join(docking_service.work_dir, f"docking_{job_id}")
@@ -442,10 +452,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         PDBQT does not reliably carry the bond orders and explicit hydrogens
         required for defensible interaction assignment.
         """
-        import re
-
-        if not re.fullmatch(r"[A-Za-z0-9_-]+", job_id or ""):
-            raise HTTPException(status_code=400, detail="Invalid job_id")
+        _validate_job_id(job_id)
         if type(pose) is not int or pose <= 0:
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
 
@@ -533,6 +540,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         """将指定 pose 重建为标准 SDF，保留原始化学拓扑并应用对接坐标"""
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
+        _validate_job_id(job_id)
         if type(pose) is not int or pose <= 0:
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
 
@@ -627,12 +635,10 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
     async def delete_docking_job(job_id: str):
         """删除指定的对接历史记录"""
         try:
-            import re as _re
             import shutil as _shutil
             from src.docking.history_index import remove_history_record
 
-            if not _re.fullmatch(r"[A-Za-z0-9_-]+", job_id or ""):
-                raise HTTPException(status_code=400, detail="Invalid job_id")
+            _validate_job_id(job_id)
             work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
             job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
             if not _support.os.path.isdir(job_dir):
