@@ -1724,6 +1724,10 @@ function loadDockingHistory() {
         const safeJobIdText = Safe.escapeHtml(item.job_id);
         const safeJobIdAttr = Safe.escapeAttr(item.job_id);
         const safeJobIdJs = Safe.escapeInlineJsString(item.job_id);
+        const safeBestPoseIndex =
+          Number.isInteger(item.best_pose_index) && item.best_pose_index > 0
+            ? item.best_pose_index
+            : "null";
         const safeHistoryTime = Safe.escapeHtml(item.time);
 
         html += `
@@ -1739,7 +1743,7 @@ function loadDockingHistory() {
               <span class="history-meta">💾 ${sizeKB} KB</span>
             </div>
             <div class="history-card-actions">
-              ${item.has_result ? `<button class="history-action-btn history-load-btn" onclick="loadHistoryJob('${safeJobIdJs}')">📂 加载结果</button>` : ""}
+              ${item.has_result ? `<button class="history-action-btn history-load-btn" onclick="loadHistoryJob('${safeJobIdJs}', ${safeBestPoseIndex})">📂 加载结果</button>` : ""}
               <button class="history-action-btn history-delete-btn" onclick="deleteHistoryJob('${safeJobIdJs}')">🗑️ 删除</button>
             </div>
           </div>
@@ -1799,7 +1803,28 @@ function deleteHistoryJob(jobId) {
     .catch(() => Utils.showToast("删除失败", "error"));
 }
 
-function loadHistoryJob(jobId) {
+function selectBestHistoryPose(results, recordedPoseIndex) {
+  if (
+    Number.isInteger(recordedPoseIndex) &&
+    recordedPoseIndex > 0 &&
+    results.some((item) => item.pose === recordedPoseIndex)
+  ) {
+    return recordedPoseIndex;
+  }
+
+  const finiteResults = results.filter(
+    (item) =>
+      typeof item.binding_energy === "number" &&
+      Number.isFinite(item.binding_energy),
+  );
+  if (finiteResults.length === 0) return null;
+
+  return finiteResults.reduce((best, item) =>
+    item.binding_energy < best.binding_energy ? item : best,
+  ).pose;
+}
+
+function loadHistoryJob(jobId, poseIndex) {
   if (!viewer) initViewer();
 
   fetch(`/api/docking/result/${jobId}`)
@@ -1828,47 +1853,57 @@ function loadHistoryJob(jobId) {
         }
       });
 
+      const selectedPoseNumber = selectBestHistoryPose(results, poseIndex);
+
       // 设置全局状态
       currentComplexData = pdbqtText;
       setCurrentJobId(jobId);
 
-      fetchDockedPoseSdf(jobId, 1)
-        .then((ligandSdf) => {
-          dockedLigandData = ligandSdf;
+      if (selectedPoseNumber !== null) {
+        fetchDockedPoseSdf(jobId, selectedPoseNumber)
+          .then((ligandSdf) => {
+            dockedLigandData = ligandSdf;
 
-          viewer.clear();
-          if (currentProteinData) {
-            const prot = viewer.addModel(
-              currentProteinData,
-              AppState.currentProteinFormat || "pdb",
-            );
-            if (prot && prot.setStyle) {
-              prot.setStyle({}, { cartoon: { color: "spectrum" } });
-            }
-          }
-          if (ligandSdf) {
-            const lig = viewer.addModel(ligandSdf, "sdf");
-            if (lig && lig.setStyle) {
-              lig.setStyle(
-                {},
-                { stick: { radius: 0.25, colorscheme: "greenCarbon" } },
+            viewer.clear();
+            if (currentProteinData) {
+              const prot = viewer.addModel(
+                currentProteinData,
+                AppState.currentProteinFormat || "pdb",
               );
+              if (prot && prot.setStyle) {
+                prot.setStyle({}, { cartoon: { color: "spectrum" } });
+              }
             }
-          }
-          viewer.zoomTo();
-          viewer.render();
-        })
-        .catch((err) => {
-          console.warn("加载标准 pose 结构失败:", err);
-        });
+            if (ligandSdf) {
+              const lig = viewer.addModel(ligandSdf, "sdf");
+              if (lig && lig.setStyle) {
+                lig.setStyle(
+                  {},
+                  { stick: { radius: 0.25, colorscheme: "greenCarbon" } },
+                );
+              }
+            }
+            viewer.zoomTo();
+            viewer.render();
+          })
+          .catch((err) => {
+            console.warn("加载最佳 pose 结构失败:", err);
+          });
+      } else {
+        console.warn("历史结果没有可验证的最佳 pose，跳过结构加载");
+      }
 
       // 填充结果表格
       if (results.length > 0) {
+        const bestPose =
+          selectedPoseNumber === null
+            ? null
+            : results.find((item) => item.pose === selectedPoseNumber) || null;
         showRealResults({
           success: true,
           job_id: jobId,
           results: results,
-          best_pose: results[0],
+          best_pose: bestPose,
           total_poses: results.length,
         });
       }
