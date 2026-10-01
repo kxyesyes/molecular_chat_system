@@ -63,6 +63,20 @@ class DockingConfig:
     energy_range: float = 3.0
     manual_center: bool = False
     blind_docking: bool = False
+    random_seed: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        self.validate_random_seed()
+
+    def validate_random_seed(self) -> None:
+        if self.random_seed is None:
+            return
+        if (
+            type(self.random_seed) is not int
+            or self.random_seed <= 0
+            or self.random_seed > 2**31 - 1
+        ):
+            raise ValueError("random_seed must be an integer between 1 and 2147483647")
 
 
 def _ligand_efficiency(binding_energy: float | None, heavy_atom_count: int) -> float | None:
@@ -676,6 +690,10 @@ class MolecularDockingService:
         运行AutoDock Vina对接计算
         """
         try:
+            # Config objects are mutable for backwards compatibility. Validate
+            # again at the trust boundary so a caller cannot inject a Vina
+            # config line after construction.
+            config.validate_random_seed()
             self._require_finished_commands()
             try:
                 center_values = (config.center_x, config.center_y, config.center_z)
@@ -711,6 +729,12 @@ class MolecularDockingService:
                         "warning": "Direct Vina execution received an explicit box; pocket evidence was not independently verified.",
                     },
                 )
+            if not self._update_run_manifest(
+                resolved_job_dir,
+                search={"random_seed": config.random_seed},
+            ):
+                logger.error("Unable to persist docking random seed in manifest")
+                return False
             config_path = os.path.join(resolved_job_dir, "config.txt")
             with open(config_path, 'w', encoding='utf-8') as f:
                 f.write(f"receptor = {receptor_path}\n")
@@ -725,6 +749,8 @@ class MolecularDockingService:
                 f.write(f"exhaustiveness = {config.exhaustiveness}\n")
                 f.write(f"num_modes = {config.num_modes}\n")
                 f.write(f"energy_range = {config.energy_range}\n")
+                if config.random_seed is not None:
+                    f.write(f"seed = {config.random_seed}\n")
 
             if not self._update_run_manifest(
                 resolved_job_dir,
@@ -769,6 +795,17 @@ class MolecularDockingService:
                 raise
 
             if result.returncode == 0:
+                if not os.path.isfile(output_path):
+                    self._update_run_manifest(
+                        resolved_job_dir,
+                        execution={
+                            "status": "failed",
+                            "returncode": result.returncode,
+                            "failure_reason": "output_artifact_missing",
+                        },
+                    )
+                    logger.error("Vina returned success without an output artifact")
+                    return False
                 actual_command = getattr(result, "args", None) or [
                     Path(self.vina_exe).name or "vina",
                     "--config",
@@ -780,6 +817,11 @@ class MolecularDockingService:
                         "status": "completed",
                         "returncode": result.returncode,
                         "command": self._manifest_command(actual_command, resolved_job_dir),
+                        "output_sha256": (
+                            self._sha256_file(output_path)[0]
+                            if os.path.isfile(output_path)
+                            else None
+                        ),
                     },
                 )
                 logger.info("Vina docking command succeeded")
@@ -816,7 +858,12 @@ class MolecularDockingService:
             logger.error(f"Vina对接计算异常: {e}")
             return False
 
-    def parse_vina_results(self, output_path: str) -> List[DockingResult]:
+    @staticmethod
+    def parse_vina_results(
+        output_path: str,
+        *,
+        diagnostics: Optional[List[str]] = None,
+    ) -> List[DockingResult]:
         """
         Parse and validate the complete Vina pose file.
 
@@ -845,6 +892,8 @@ class MolecularDockingService:
 
             def invalid(reason: str):
                 logger.error("Invalid Vina output: %s", reason)
+                if diagnostics is not None:
+                    diagnostics.append(reason)
                 return []
 
             for line in lines:
@@ -943,6 +992,8 @@ class MolecularDockingService:
 
         except Exception as e:
             logger.error(f"结果解析异常: {e}")
+            if diagnostics is not None:
+                diagnostics.append("parser_exception")
             return []
 
     @classmethod
@@ -1126,6 +1177,7 @@ class MolecularDockingService:
                 "exhaustiveness": config.exhaustiveness,
                 "num_modes": config.num_modes,
                 "energy_range": config.energy_range,
+                "random_seed": config.random_seed,
             },
             "preprocessing": preprocessing,
             "preprocessing_state": preprocessing_state,
@@ -1647,6 +1699,10 @@ class MolecularDockingService:
                 "provenance": {
                     "docking_box": box_provenance,
                     "preprocessing": preparation_provenance["preprocessing"],
+                    "reproducibility": {
+                        "random_seed": config.random_seed,
+                        "seed_recorded": config.random_seed is not None,
+                    },
                     "manifest": preparation_provenance["manifest"],
                 },
             }
