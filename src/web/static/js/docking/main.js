@@ -67,6 +67,11 @@ document.addEventListener("DOMContentLoaded", function () {
   // 页面加载后先对齐一次高度
   setResultsMinHeightToLeft();
 
+  // 从浏览器会话恢复仍在运行或已完成的持久化任务，不重新提交文件。
+  if (typeof resumeDockingTaskIfPresent === "function") {
+    resumeDockingTaskIfPresent();
+  }
+
   // 环境自检：加载页面即检测并在结果面板提示
   fetch("/api/docking/env_check")
     .then((r) => r.json())

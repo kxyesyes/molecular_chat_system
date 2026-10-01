@@ -199,6 +199,9 @@
       <button id="start-btn" class="submit-btn" onclick="startDocking()">
         开始分子对接分析
       </button>
+      <button id="cancel-docking-btn" class="action-btn btn-secondary" type="button" onclick="cancelDockingTask()" disabled>
+        取消当前任务
+      </button>
     </div>
 
     <!-- 右侧结果面板 -->
@@ -381,7 +384,7 @@
   <script src="/static/js/docking/viewer_manager.js?v=20260520b"></script>
   <script src="/static/js/docking/interactions.js"></script>
   <script src="/static/js/docking/docking_box.js?v=20260324f"></script>
-  <script src="/static/js/docking/ui_manager.js?v=20260902-admin-auth-removed"></script>
+  <script src="/static/js/docking/ui_manager.js?v=20261002-durable-task-ui"></script>
   <script src="/static/js/docking/main.js?v=20260428b"></script>
 </body>
 

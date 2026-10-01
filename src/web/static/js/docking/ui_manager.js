@@ -651,6 +651,259 @@ function startBatchDocking() {
     });
 }
 
+let activeDockingTaskId = null;
+let dockingPollTimer = null;
+
+const DOCKING_TASK_STORAGE_KEY = "medchat.docking.active_task_id";
+const TERMINAL_DOCKING_TASK_STATUSES = new Set([
+  "succeeded",
+  "failed",
+  "canceled",
+  "cancelled",
+  "timed_out",
+]);
+
+function unwrapApiData(payload) {
+  return payload && Object.prototype.hasOwnProperty.call(payload, "data")
+    ? payload.data
+    : payload;
+}
+
+function setDockingTaskButtonState(active) {
+  const startBtn = document.getElementById("start-btn");
+  const cancelBtn = document.getElementById("cancel-docking-btn");
+  if (startBtn) {
+    startBtn.disabled = active;
+    if (!active) {
+      startBtn.textContent = AppState.dockingMode === "batch"
+        ? "开始批量分子对接"
+        : "开始分子对接分析";
+    }
+  }
+  if (cancelBtn) cancelBtn.disabled = !active;
+}
+
+function rememberDockingTask(taskId) {
+  activeDockingTaskId = taskId || null;
+  try {
+    if (taskId) sessionStorage.setItem(DOCKING_TASK_STORAGE_KEY, taskId);
+    else sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY);
+  } catch (_) {}
+}
+
+function readRememberedDockingTask() {
+  try {
+    return sessionStorage.getItem(DOCKING_TASK_STORAGE_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+
+function clearDockingPoll() {
+  if (dockingPollTimer) {
+    clearTimeout(dockingPollTimer);
+    dockingPollTimer = null;
+  }
+}
+
+function dockingStepForPhase(phase) {
+  const normalized = String(phase || "").toLowerCase();
+  if (normalized.includes("receptor") || normalized === "staging" || normalized === "environment_check" || normalized === "input_verification") {
+    return "prepare_protein";
+  }
+  if (normalized.includes("ligand")) return "prepare_ligand";
+  if (normalized.includes("vina") || normalized === "running") return "run_docking";
+  if (normalized.includes("result") || normalized.includes("scientific") || normalized.includes("artifact") || normalized === "completing") {
+    return "parse_results";
+  }
+  return null;
+}
+
+function renderDockingStepLog(stepId, status) {
+  const stepInfo = DOCKING_STEPS.find((step) => step.id === stepId);
+  const log = document.getElementById("progress-log");
+  if (!stepInfo || !log) return;
+  const statusText = String(status || "等待后端状态");
+  const statusClass = /失败|错误|failed/i.test(statusText)
+    ? "failed"
+    : /完成|success|succeeded/i.test(statusText)
+      ? "success"
+      : "running";
+  log.innerHTML = `${stepInfo.icon || "⚙️"} ${stepInfo.title} - ${stepInfo.description} <span class="step-status ${statusClass}">${Safe.escapeHtml(statusText)}</span>`;
+}
+
+function syncDockingStepState(record) {
+  if (!stepManager || !record) return;
+  const progressPercent = dockingProgressPercent(record.progress);
+  const phaseStep = dockingStepForPhase(record.phase);
+  const order = DOCKING_STEPS.map((step) => step.id);
+  const phaseIndex = phaseStep ? order.indexOf(phaseStep) : -1;
+  if (phaseIndex >= 0) {
+    for (let index = 0; index < phaseIndex; index += 1) {
+      stepManager.completeStep(order[index], "后端已完成");
+    }
+    stepManager.startStep(phaseStep);
+    stepManager.updateStepProgress(phaseStep, progressPercent);
+    renderDockingStepLog(phaseStep, `${record.phase || "执行中"} · ${Math.round(progressPercent)}%`);
+  }
+  renderDockingProgress(progressPercent);
+}
+
+function renderDockingProgress(percent) {
+  const progressBar = document.getElementById("docking-progress");
+  if (!progressBar) return;
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  progressBar.style.width = `${value}%`;
+  progressBar.setAttribute("data-progress", `${Math.round(value)}%`);
+}
+
+function dockingProgressPercent(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 0;
+  return numeric >= 0 && numeric <= 1 ? numeric * 100 : numeric;
+}
+
+function durableDockingResult(record) {
+  const result = record && record.result && typeof record.result === "object" ? record.result : {};
+  const data = result.data && typeof result.data === "object" ? result.data : {};
+  const bestPose = result.best_pose || data.best_pose;
+  const poseCount = Number(data.pose_count ?? data.total_poses ?? result.pose_count ?? result.total_poses);
+  const pose = bestPose && Number.isInteger(Number(bestPose.pose)) ? Number(bestPose.pose) : 1;
+  const bindingEnergy = bestPose && Number.isFinite(Number(bestPose.binding_energy))
+    ? Number(bestPose.binding_energy)
+    : Number.isFinite(Number(result.binding_energy))
+      ? Number(result.binding_energy)
+      : null;
+  if (!record || record.status !== "succeeded" || result.success === false || bindingEnergy === null) {
+    return null;
+  }
+  return {
+    success: true,
+    job_id: record.task_id,
+    total_poses: Number.isFinite(poseCount) ? poseCount : 1,
+    results: [{
+      pose,
+      binding_energy: bindingEnergy,
+      ligand_efficiency: bestPose && Number.isFinite(Number(bestPose.ligand_efficiency)) ? Number(bestPose.ligand_efficiency) : null,
+      rmsd_lb: bestPose && Number.isFinite(Number(bestPose.rmsd_lb)) ? Number(bestPose.rmsd_lb) : null,
+      rmsd_ub: bestPose && Number.isFinite(Number(bestPose.rmsd_ub)) ? Number(bestPose.rmsd_ub) : null,
+    }],
+  };
+}
+
+function renderDurableTaskFailure(record) {
+  const message = (record && (record.error || (record.result && record.result.error))) || "持久化对接任务未完成";
+  const resultsContent = document.getElementById("results-content");
+  if (resultsContent) {
+    resultsContent.innerHTML = `
+      <div style="text-align: center; color: #ef4444; padding: 40px;">
+        <div style="font-size: 48px; margin-bottom: 16px;">❌</div>
+        <div style="font-size: 18px; font-weight: bold; margin-bottom: 8px;">对接任务未完成</div>
+        <div style="font-size: 14px;">${Safe.escapeHtml(String(message))}</div>
+        <div style="font-size: 12px; margin-top: 8px; color: #64748b;">状态：${Safe.escapeHtml(String(record?.status || "unknown"))}</div>
+      </div>`;
+  }
+  document.querySelectorAll(".status-indicator").forEach((indicator) => {
+    indicator.className = "status-indicator status-error";
+    indicator.textContent = "任务未完成";
+  });
+}
+
+function applyDockingTaskRecord(record) {
+  if (!record) throw new Error("任务状态为空");
+  syncDockingStepState(record);
+  const status = String(record.status || "").toLowerCase();
+  if (!TERMINAL_DOCKING_TASK_STATUSES.has(status)) return false;
+
+  clearDockingPoll();
+  setDockingTaskButtonState(false);
+  if (status === "succeeded") {
+    const result = durableDockingResult(record);
+    if (!result) {
+      renderDurableTaskFailure(record);
+      throw new Error("任务已结束，但未得到经过校验的对接结果");
+    }
+    DOCKING_STEPS.slice(0, 5).forEach((step) => stepManager.completeStep(step.id, "后端已完成"));
+    showRealResults(result);
+    try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
+    return true;
+  }
+  if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || status);
+  renderDurableTaskFailure(record);
+  try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
+  return true;
+}
+
+async function pollDockingTask(taskId) {
+  clearDockingPoll();
+  const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+  const payload = await response.json();
+  if (!response.ok || payload.success === false) {
+    throw new Error(payload.message || payload.detail || "无法读取对接任务状态");
+  }
+  const record = unwrapApiData(payload);
+  const terminal = applyDockingTaskRecord(record);
+  if (!terminal) {
+    dockingPollTimer = setTimeout(() => {
+      pollDockingTask(taskId).catch(handleDockingTaskError);
+    }, 1000);
+  }
+}
+
+function handleDockingTaskError(error) {
+  clearDockingPoll();
+  setDockingTaskButtonState(false);
+  renderDurableTaskFailure({ error: error.message || "无法读取对接任务状态", status: "unknown" });
+  Utils.showToast(error.message || "无法读取对接任务状态", "error");
+}
+
+async function cancelDockingTask() {
+  const taskId = activeDockingTaskId || readRememberedDockingTask();
+  if (!taskId) return;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/cancel`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "user request" }),
+    });
+    const payload = await response.json();
+    if (!response.ok || payload.success === false) {
+      throw new Error(payload.message || payload.detail || "取消任务失败");
+    }
+    const record = unwrapApiData(payload);
+    const terminal = applyDockingTaskRecord(record);
+    if (!terminal) {
+      pollDockingTask(taskId).catch(handleDockingTaskError);
+    }
+  } catch (error) {
+    handleDockingTaskError(error);
+  }
+}
+
+function resumeDockingTaskIfPresent() {
+  const taskId = readRememberedDockingTask();
+  if (!taskId) return;
+  activeDockingTaskId = taskId;
+  window.showStepLog = renderDockingStepLog;
+  if (!stepManager) stepManager = new DockingStepManager();
+  stepManager.reset();
+  stepManager.show();
+  const progressLog = document.getElementById("progress-log");
+  if (progressLog) {
+    progressLog.textContent = "正在恢复持久化对接任务…";
+    progressLog.style.display = "block";
+  }
+  const progressContainer = document.querySelector(".progress-container");
+  if (progressContainer) progressContainer.style.display = "block";
+  const startBtn = document.getElementById("start-btn");
+  if (startBtn) {
+    startBtn.disabled = true;
+    startBtn.innerHTML = '<span class="spinner" aria-hidden="true"></span> 正在恢复…';
+  }
+  setDockingTaskButtonState(true);
+  pollDockingTask(taskId).catch(handleDockingTaskError);
+}
+
 // 开始对接分析
 function startDocking() {
   if (AppState.dockingMode === "batch") {
@@ -698,7 +951,7 @@ function startDocking() {
   progressBar.style.width = "0%";
   progressContainer.style.display = "block";
 
-  window.showStepLog = showStepLog;
+  window.showStepLog = renderDockingStepLog;
 
   const formData = new FormData();
   formData.append("protein_file", proteinFile);
@@ -709,191 +962,38 @@ function startDocking() {
 
   Object.entries(params).forEach(([k, v]) => formData.append(k, v));
 
-  // -------- CLEAN PROGRESS CONTROLLER --------
-  let requestFinished = false;
-  let simulatedProgress = 0;
-  let progressTimer = null;
-  const startedSteps = new Set(["prepare_protein"]);
-  const requestStartAt = Date.now();
-
-  function renderProgress(percent) {
-    const p = Math.max(0, Math.min(100, percent));
-    progressBar.style.width = `${p}%`;
-    progressBar.setAttribute("data-progress", `${Math.round(p)}%`);
+  if (!AppState.dockingBoxCenterTouched) {
+    handleDockingTaskError(new Error("请先手动确认对接盒中心后再提交持久化任务"));
+    return;
   }
+  rememberDockingTask(null);
+  setDockingTaskButtonState(true);
+  renderDockingProgress(0);
+  stepManager.startStep("prepare_protein");
+  renderDockingStepLog("prepare_protein", "等待后端任务状态...");
 
-  function showStepLog(stepId, status) {
-    const stepInfo = DOCKING_STEPS.find((s) => s.id === stepId);
-    if (!stepInfo) return;
-    const log = document.getElementById("progress-log");
-    if (!log) return;
-
-    const icon = stepInfo.icon || "⚙️";
-    let statusClass = "running";
-    let statusText = status;
-
-    if (
-      status.includes("Success") ||
-      status.includes("成功") ||
-      status.includes("完成")
-    ) {
-      statusClass = "success";
-      statusText = "✓ 完成";
-    } else if (
-      status.includes("Failed") ||
-      status.includes("失败") ||
-      status.includes("错误")
-    ) {
-      statusClass = "failed";
-      statusText = "✗ 失败";
-    } else if (
-      status.includes("进行中") ||
-      status.includes("等待") ||
-      status.includes("计算中")
-    ) {
-      statusText = "⏳ " + status;
-    }
-
-    log.innerHTML = `${icon} ${stepInfo.title} - ${stepInfo.description}  <span class="step-status ${statusClass}">${statusText}</span>`;
-    log.offsetHeight; // force reflow
-  }
-
-  function startProgressSimulation() {
-    stepManager.startStep("prepare_protein");
-    showStepLog("prepare_protein", "进行中...");
-    renderProgress(0);
-
-    progressTimer = setInterval(() => {
-      if (requestFinished) return;
-
-      const elapsed = (Date.now() - requestStartAt) / 1000;
-
-      // Smooth curve approaching ~95% maximum until actual response
-      simulatedProgress = 95 * (1 - Math.exp(-elapsed / 12));
-      renderProgress(simulatedProgress);
-
-      if (elapsed >= 1.5 && !startedSteps.has("prepare_ligand")) {
-        startedSteps.add("prepare_ligand");
-        stepManager.completeStep("prepare_protein", "蛋白质已解析");
-        showStepLog("prepare_protein", "✓ 完成");
-        stepManager.startStep("prepare_ligand");
-        showStepLog("prepare_ligand", "进行中...");
-      }
-      if (elapsed >= 4.0 && !startedSteps.has("setup_docking")) {
-        startedSteps.add("setup_docking");
-        stepManager.completeStep("prepare_ligand", "配体已准备");
-        showStepLog("prepare_ligand", "✓ 完成");
-        stepManager.startStep("setup_docking");
-        showStepLog("setup_docking", "进行中...");
-      }
-      if (elapsed >= 6.5 && !startedSteps.has("run_docking")) {
-        startedSteps.add("run_docking");
-        stepManager.completeStep("setup_docking", "生成对接网格");
-        showStepLog("setup_docking", "✓ 完成");
-        stepManager.startStep("run_docking");
-        showStepLog("run_docking", "计算中...");
-      }
-      if (elapsed >= 15.0 && !startedSteps.has("parse_results")) {
-        // purely to keep the UI active during long waiting times
-        startedSteps.add("parse_results");
-        showStepLog("run_docking", "等待服务器最后响应...");
-      }
-    }, 100); // Higher frequency for perfectly natural animation
-  }
-
-  function clearProgressTimers() {
-    if (progressTimer) {
-      clearInterval(progressTimer);
-      progressTimer = null;
-    }
-  }
-
-  // 开始平滑动画
-  startProgressSimulation();
-
-  fetch("/api/docking/submit", {
+  fetch("/api/docking/tasks", {
     method: "POST",
+    headers: {
+      "Idempotency-Key": window.crypto && typeof window.crypto.randomUUID === "function"
+        ? window.crypto.randomUUID()
+        : `${Date.now()}-${Math.random()}`,
+    },
     body: formData,
   })
-    .then((response) => {
-      requestFinished = true;
-      clearProgressTimers();
-
-      renderProgress(94);
-      stepManager.completeStep("run_docking", "Vina计算完成");
-      showStepLog("run_docking", "✓ 完成");
-
-      stepManager.startStep("parse_results");
-      showStepLog("parse_results", "解析对接坐标...");
-
+    .then(async (response) => {
+      const payload = await response.json();
       if (!response.ok) {
-        return response.json().then((err) => {
-          throw new Error(err.detail || "对接计算失败");
-        });
+        throw new Error(payload.message || payload.detail || "对接任务提交失败");
       }
-      return response.json();
-    })
-    .then((data) => {
-      renderProgress(100);
-      stepManager.completeStep("parse_results", "生成3D构象");
-      showStepLog("parse_results", "✓ 完成");
-
-      if (data.success) {
-        stepManager.completeStep(
-          "parse_results",
-          `共 ${data.total_poses} 个结构`,
-        );
-        showStepLog("parse_results", "Success！");
-        showRealResults(data);
-      } else {
-        showStepLog("parse_results", "Failed！");
-        throw new Error(data.error || "对接计算失败");
-      }
-
-      if (startBtn) {
-        const t =
-          startBtn.getAttribute("data-original-text") || "开始分子对接分析";
-        startBtn.innerHTML = t;
-        startBtn.disabled = false;
-        startBtn.removeAttribute("data-original-text");
-      }
+      const record = unwrapApiData(payload);
+      activeDockingTaskId = record.task_id;
+      rememberDockingTask(record.task_id);
+      return pollDockingTask(record.task_id);
     })
     .catch((error) => {
-      requestFinished = true;
-      clearProgressTimers();
-
-      stepManager.errorStep(
-        stepManager.steps[stepManager.currentStep]?.id || "run_docking",
-        error.message || "失败",
-      );
+      handleDockingTaskError(error);
       console.error("对接错误:", error);
-
-      statusIndicators.forEach((indicator) => {
-        indicator.className = "status-indicator status-error";
-        indicator.textContent = "计算失败";
-      });
-
-      progressBar.style.width = "0%";
-      progressBar.removeAttribute("data-progress");
-      progressContainer.style.display = "none";
-
-      const resultsContent = document.getElementById("results-content");
-      const safeErrorMessage = Safe.escapeHtml(error.message || "对接计算失败");
-      resultsContent.innerHTML = `
-        <div style="text-align: center; color: #ef4444; padding: 40px;">
-          <div style="font-size: 48px; margin-bottom: 16px;">❌</div>
-          <div style="font-size: 18px; font-weight: bold; margin-bottom: 8px;">对接计算失败</div>
-          <div style="font-size: 14px;">${safeErrorMessage}</div>
-        </div>
-      `;
-
-      if (startBtn) {
-        const t =
-          startBtn.getAttribute("data-original-text") || "开始分子对接分析";
-        startBtn.innerHTML = t;
-        startBtn.disabled = false;
-        startBtn.removeAttribute("data-original-text");
-      }
     });
 }
 
