@@ -22,6 +22,7 @@ from src.reverse_target.owned_source import (
     load_owned_source, operation_check, resolve_weights, validate_controls,
     validate_envelope, validate_popcount_rows,
 )
+from src.agent.persistence.redaction import looks_like_credential
 
 
 def _bitvect_to_numpy_array(bitvect) -> np.ndarray:
@@ -661,6 +662,12 @@ class ReverseTargetPredictor:
         """
         row = frame.iloc[int(idx)]
         target_name = str(row.get('target_name', ''))
+        source_file = self.training_data_path.name
+        # Provenance is useful only when it is safe to persist.  A malicious or
+        # accidental credential-shaped filename must not become part of the
+        # scientific payload, where it would evade the normal evidence scrub.
+        if looks_like_credential(source_file):
+            source_file = '[redacted]'
         record = {
             'target_name': target_name,
             'organism': row.get('organism', ''),
@@ -681,7 +688,7 @@ class ReverseTargetPredictor:
             },
             'provenance': {
                 'data_version': (self.metadata or {}).get('data_version', 'unknown'),
-                'source_file': self.training_data_path.name,
+                'source_file': source_file,
                 'row_index': int(idx),
             },
             'chembl_search_url': f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/",
