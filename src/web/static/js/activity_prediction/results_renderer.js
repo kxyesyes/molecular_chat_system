@@ -78,7 +78,7 @@ window.ActivityResults = (function () {
 
     ActivityUtils.setText(
       "singleConfidenceValue",
-      formatProbability(item.confidence),
+      "不可用",
     );
     ActivityUtils.setText("singleClassValue", label);
     ActivityUtils.setText(
@@ -93,7 +93,7 @@ window.ActivityResults = (function () {
     ActivityUtils.setText(
       "activityBandSubtitle",
       taskType === "classification"
-        ? "标记线展示当前预测置信度在概率区间中的位置。"
+        ? "标记线展示当前预测概率在概率区间中的位置。"
         : "标记线展示当前预测活性值在低、中、高区间中的位置。",
     );
     ActivityUtils.setText(
@@ -167,8 +167,7 @@ window.ActivityResults = (function () {
         );
       } else if (!isNumber(score)) {
         row.append(smilesCell, createCell("不可用"),
-          createTagCell(cls, "tag tag-neutral"), createCell(item.task_type === "classification"
-            ? formatProbability(score) : formatProbability(item.confidence)));
+          createTagCell(cls, "tag tag-neutral"), createCell("不可用"));
       } else {
         const scoreCell = createCell(
           "0.000",
@@ -186,8 +185,7 @@ window.ActivityResults = (function () {
           smilesCell,
           scoreCell,
           createTagCell(cls, `tag ${tagClass}`),
-          createCell(item.task_type === "classification"
-            ? formatProbability(score) : formatProbability(item.confidence)),
+          createCell("不可用"),
         );
         animatedScoreCell = scoreCell;
       }
@@ -223,7 +221,7 @@ window.ActivityResults = (function () {
       if (results) results.classList.add("show");
       return;
     }
-    setHeaders(["SMILES", "预测活性值", "分类", "置信度"]);
+    setHeaders(["SMILES", "预测活性值", "分类", "不确定性估计"]);
     const successfulResults = data.results.filter(function (item) {
       return item && item.success !== false && isNumber(ActivityUtils.getPredictionValue(item));
     });
