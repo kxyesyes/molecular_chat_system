@@ -59,14 +59,35 @@ def summarize_predictions(rows):
             "results": rows, "warnings": warnings}
 
 
+def _target_required_row(smiles):
+    return {
+        "smiles": smiles,
+        "requested_target": None,
+        "family_id": None,
+        "bundle_id": None,
+        "success": False,
+        "status": "failed",
+        "execution_status": "failed",
+        "activity_class": None,
+        "activity_probability": None,
+        "predicted_pIC50": None,
+        "units": "pIC50",
+        "label_threshold": LABEL_THRESHOLD,
+        "probability_threshold": PROBABILITY_THRESHOLD,
+        "classification_regression_consistent": None,
+        "warnings": ["必须明确选择 PDE 或 BuChE 靶点后再进行预测"],
+        "errors": {"target": "explicit_target_required"},
+        "provenance": {},
+    }
+
+
 def predict_activity(smiles, *, target=None, model_request=None):
-    if target is not None:
-        predictor = get_family_predictor()
-        if model_request is None:
-            rows = predictor.predict(smiles, target=target)
-        else:
-            rows = predictor.predict(smiles, target=target, model_request=model_request)
+    if target is None:
+        inputs = [smiles] if isinstance(smiles, str) else list(smiles)
+        return summarize_predictions([_target_required_row(value) for value in inputs])
+    predictor = get_family_predictor()
+    if model_request is None:
+        rows = predictor.predict(smiles, target=target)
     else:
-        from .predictor import get_predictor
-        rows = get_predictor().predict(smiles)
+        rows = predictor.predict(smiles, target=target, model_request=model_request)
     return summarize_predictions(rows)

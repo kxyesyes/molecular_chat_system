@@ -340,17 +340,53 @@ test("legacy unvalidated confidence is never rendered as an activity certainty",
   assert.match(h.ids.resultsHeader.textContent, /不确定性估计/);
 });
 
-test("template exposes separate PDE/BuChE/legacy Form fields and accessible result status", () => {
+test("template exposes explicit PDE/BuChE target fields and accessible result status", () => {
   const template = read("src/web/templates/activity_prediction.html");
   for (const id of ["predictForm", "batchForm"]) {
     const form = template.match(new RegExp('<form id="' + id + '">([\\s\\S]*?)</form>'))[1];
     const select = form.match(/<select[^>]*name="target"[^>]*>([\s\S]*?)<\/select>/);
-    assert.ok(select, id + " must submit optional target via FormData");
-    for (const target of ["PDE", "BuChE", ""]) assert.ok(select[1].includes('value="' + target + '"'));
+    assert.ok(select, id + " must submit an explicit target via FormData");
+    for (const target of ["PDE", "BuChE"]) assert.ok(select[1].includes('value="' + target + '"'));
+    assert.ok(!select[1].includes("旧版单模型"), id + " must not advertise a removed legacy fallback");
   }
   assert.match(template, /id="resultsHeader"/);
   assert.match(template, /id="predictionStatus"[^>]*role="status"/);
   assert.ok(!template.includes(">Ready</div>"));
+});
+
+test("missing target is rendered as an explicit failure with actionable guidance", async () => {
+  const h = setup();
+  h.context.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      success: false,
+      status: "failed",
+      results: [{
+        smiles: "CCO",
+        success: false,
+        status: "failed",
+        execution_status: "failed",
+        requested_target: null,
+        predicted_pIC50: null,
+        activity_probability: null,
+        activity_class: null,
+        warnings: ["必须明确选择 PDE 或 BuChE 靶点后再进行预测"],
+        errors: {target: "explicit_target_required"},
+        provenance: {},
+      }],
+    }),
+  });
+
+  await h.context.ActivityMain.handlePredict(
+    "/api/activity/predict",
+    new Map([["target", ""], ["smiles", "CCO"]]),
+    "submitBtn",
+  );
+  assert.equal(h.calls.alerts.length, 0);
+  assert.equal(h.ids.statusStat.textContent, "失败");
+  assert.match(h.ids.resultsBody.textContent, /必须明确选择 PDE 或 BuChE/);
+  assert.ok(!h.ids.resultsBody.textContent.includes("pIC50: 0"));
+  assert.ok(!h.ids.resultsBody.textContent.includes("LogP: 0"));
 });
 
 test("single and batch requests display partial/failed/empty payloads and release loading state", async () => {

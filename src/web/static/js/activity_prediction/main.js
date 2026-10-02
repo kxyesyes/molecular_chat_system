@@ -75,7 +75,8 @@ window.ActivityMain = (function () {
     setStatus("Predicting");
 
     try {
-      // Omitting target preserves the registered legacy single-model contract.
+      // Keep stale sessions safe: the API returns a structured failure when no
+      // explicit family target is selected; never invent a legacy fallback.
       if (formData.get("target") === "") formData.delete("target");
       const res = await fetch(url, { method: "POST", body: formData });
       const data = await res.json();
