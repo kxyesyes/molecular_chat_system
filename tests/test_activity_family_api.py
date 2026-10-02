@@ -304,6 +304,7 @@ def test_absent_target_rejects_without_global_model(client, monkeypatch, endpoin
     assert data["success"] is False
     assert data["status"] == "failed"
     assert data["results"][0]["errors"] == {"target": "explicit_target_required"}
+    assert data["results"][0]["warnings"] == ["必须明确选择 PDE 或 BuChE 靶点后再进行预测"]
     assert data["results"][0]["predicted_pIC50"] is None
 
 

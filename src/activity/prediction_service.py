@@ -75,7 +75,7 @@ def _target_required_row(smiles):
         "label_threshold": LABEL_THRESHOLD,
         "probability_threshold": PROBABILITY_THRESHOLD,
         "classification_regression_consistent": None,
-        "warnings": [],
+        "warnings": ["必须明确选择 PDE 或 BuChE 靶点后再进行预测"],
         "errors": {"target": "explicit_target_required"},
         "provenance": {},
     }

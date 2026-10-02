@@ -113,9 +113,8 @@
                 <select id="activityTarget" name="target" aria-describedby="activityTargetHint">
                   <option value="PDE">PDE</option>
                   <option value="BuChE">BuChE</option>
-                  <option value="">旧版单模型（按已注册任务）</option>
                 </select>
-                <p id="activityTargetHint" class="panel-desc">PDE/BuChE 使用对应家族模型组，不使用顶部旧版单模型；缺少模型时不会回退。</p>
+                <p id="activityTargetHint" class="panel-desc">必须明确选择 PDE 或 BuChE；请求不会回退到旧版全局模型。</p>
               </div>
               <div class="form-group" style="margin-bottom: 24px">
                 <label
@@ -161,7 +160,6 @@
                 <select id="batchActivityTarget" name="target" aria-describedby="batchActivityTargetHint">
                   <option value="PDE">PDE</option>
                   <option value="BuChE">BuChE</option>
-                  <option value="">旧版单模型（按已注册任务）</option>
                 </select>
                 <p id="batchActivityTargetHint" class="panel-desc">家族模型组在请求时校验；部分或失败结果仍保留，不代表实验验证。</p>
               </div>
