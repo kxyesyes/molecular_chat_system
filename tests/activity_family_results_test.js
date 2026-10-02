@@ -318,7 +318,9 @@ test("legacy missing score is unavailable while real zero and summary behaviors 
   assert.equal(h.ids.singleSummary.style.display, "none");
   h.render([{smiles: "CCO", success: true, activity_score: 0, confidence: 0, class: "Low"}], {isSingleRequest: true});
   assert.match(h.ids.resultsBody.textContent, /0\.000/);
-  assert.match(h.ids.resultsBody.textContent, /0\.0%/);
+  assert.match(h.ids.resultsBody.textContent, /不可用/);
+  assert.ok(!h.ids.resultsBody.textContent.includes("0.0%"));
+  assert.equal(h.ids.singleConfidenceValue.textContent, "不可用");
   assert.equal(h.ids.singleSummary.style.display, "block");
   assert.ok(!h.ids.singleModelMeta.textContent.includes("WRONG-FORM"), "Do not invent returned model identity");
   h.render([family()]);
@@ -328,6 +330,14 @@ test("legacy missing score is unavailable while real zero and summary behaviors 
   assert.equal(h.calls.histogram.length, 1);
   assert.equal(h.ids.resultsBody.children.length, 1);
   assert.ok(!h.ids.resultsBody.textContent.includes("synthetic-bundle"));
+});
+
+test("legacy unvalidated confidence is never rendered as an activity certainty", () => {
+  const h = setup();
+  h.render([{smiles: "CCO", success: true, activity_score: 6.2, confidence: 0.98}], {isSingleRequest: true});
+  assert.equal(h.ids.singleConfidenceValue.textContent, "不可用");
+  assert.ok(!h.ids.resultsBody.textContent.includes("98.0%"));
+  assert.match(h.ids.resultsHeader.textContent, /不确定性估计/);
 });
 
 test("template exposes separate PDE/BuChE/legacy Form fields and accessible result status", () => {
