@@ -213,6 +213,63 @@ def test_prediction_preserves_input_order_and_duplicate_smiles() -> None:
     assert [item["value"] for item in results] == pytest.approx([6.1, 6.9, 7.3])
 
 
+def test_prediction_uses_bounded_inference_batches_without_reordering_inputs() -> None:
+    predictor, model = _fake_loaded_predictor(_model_metadata(), [6.1, 6.9, 7.3])
+    predictor.inference_batch_size = 2
+
+    results = predictor.predict(["CCO", "CCN", "CCC"])
+
+    assert model.forward_calls == 2
+    assert [item["smiles"] for item in results] == ["CCO", "CCN", "CCC"]
+    assert all(item["success"] is True for item in results)
+
+
+def test_prediction_keeps_successful_chunks_when_a_later_chunk_fails(monkeypatch) -> None:
+    predictor, model = _fake_loaded_predictor(_model_metadata(), [6.1, 6.9, 7.3, 7.7])
+    predictor.inference_batch_size = 2
+    original_call = model.__class__.__call__
+
+    def fail_second_chunk(self, atom_batch, rg_batch):
+        if self.forward_calls >= 1:
+            raise RuntimeError("second chunk failed")
+        return original_call(self, atom_batch, rg_batch)
+
+    monkeypatch.setattr(model.__class__, "__call__", fail_second_chunk)
+
+    results = predictor.predict(["CCO", "CCN", "CCC", "COC"])
+
+    assert [item["success"] for item in results] == [True, True, False, False]
+    assert [item["smiles"] for item in results] == ["CCO", "CCN", "CCC", "COC"]
+    assert all("second chunk failed" in item["error"] for item in results[2:])
+
+
+def test_prediction_serializes_model_forward_calls_per_chunk() -> None:
+    predictor, _model = _fake_loaded_predictor(_model_metadata(), [6.1, 6.9, 7.3])
+    predictor.inference_batch_size = 2
+
+    class TrackingLock:
+        def __init__(self):
+            self.entries = 0
+            self.active = False
+
+        def __enter__(self):
+            assert self.active is False
+            self.active = True
+            self.entries += 1
+
+        def __exit__(self, *_exc):
+            self.active = False
+
+    lock = TrackingLock()
+    predictor._inference_lock = lock
+
+    results = predictor.predict(["CCO", "CCN", "CCC"])
+
+    assert all(item["success"] is True for item in results)
+    assert lock.entries == 2
+    assert lock.active is False
+
+
 def _scaffold(smiles: str) -> str:
     from rdkit.Chem.Scaffolds import MurckoScaffold
 
