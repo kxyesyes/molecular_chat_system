@@ -407,6 +407,19 @@ class WorkflowOrchestrator:
             endpoint = step.metadata.get("endpoint") or context.metadata.get("endpoint")
             if endpoint is not None:
                 activity_input["endpoint"] = endpoint
+            model_request = {}
+            for field in ("species", "units", "validation", "validation_level"):
+                value = step.metadata.get(field)
+                if value is None:
+                    value = context.metadata.get(field)
+                if value is not None:
+                    model_request[field] = value
+            if endpoint is not None and str(endpoint).casefold() != "pic50":
+                model_request["endpoint"] = endpoint
+            if target is not None:
+                model_request["target"] = target
+            if model_request and set(model_request) != {"target"}:
+                activity_input["model_request"] = model_request
             source = outputs.get(step.input_from or step.metadata.get("candidate_source"))
             if isinstance(source, Mapping):
                 source = source.get("candidates", source)

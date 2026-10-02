@@ -35,7 +35,7 @@ def boundary(monkeypatch):
     calls = []
     state = {"rows": None, "status": "passed"}
 
-    def predict(smiles, *, target=None):
+    def predict(smiles, *, target=None, model_request=None):
         calls.append((smiles, target))
         rows = copy.deepcopy(state["rows"])
         if rows is None:
@@ -93,6 +93,47 @@ def test_target_request_uses_shared_service(boundary, payload, target):
     result = execute_tool_compat(tool, payload)
     assert calls == [(["CCO", "CCN"] if isinstance(payload, dict) and isinstance(payload.get("smiles"), list) else ["CCO"], target)]
     assert result.success
+
+
+def test_structured_model_request_is_forwarded_to_shared_service(boundary, monkeypatch):
+    from src.activity import prediction_service
+
+    tool, _, _ = boundary
+    seen = {}
+
+    def predict(smiles, *, target=None, model_request=None):
+        seen.update(smiles=smiles, target=target, model_request=model_request)
+        row = family_row(requested_target=target)
+        return {"success": True, "status": "passed", "results": [row], "warnings": []}
+
+    monkeypatch.setattr(prediction_service, "predict_activity", predict)
+    result = execute_tool_compat(tool, {
+        "query": "预测PDE5A活性",
+        "smiles": "CCO",
+        "target": "PDE5A",
+        "model_request": {"target": "PDE5A", "species": "human", "endpoint": "pIC50"},
+    })
+
+    assert result.success
+    assert seen["model_request"]["species"] == "human"
+
+
+def test_tool_provenance_binds_request_model_identity(boundary):
+    tool, _, state = boundary
+    row = family_row()
+    row["provenance"]["request"] = {
+        "family_id": "pde-family", "endpoint": "pIC50", "units": "pIC50",
+        "species": "human", "validation": "endpoint_ready", "identity": "request-identity",
+    }
+    state["rows"] = [row]
+
+    result = execute_tool_compat(tool, {
+        "smiles": "CCO", "target": "PDE5A",
+        "model_request": {"target": "PDE5A", "species": "human"},
+    })
+
+    assert result.success
+    assert result.provenance.model_version == "request-identity"
 
 
 @pytest.mark.parametrize("metric", ["pIC50", "IC50", "pic50", "PIC50"])
@@ -203,6 +244,31 @@ def test_generated_candidates_keep_original_target_at_actual_invocation(boundary
     observation = result["tool_results"]["activity_predictor"]
     assert observation["data"][0]["requested_target"] == "PDE5A"
     assert observation["evidence"][0]["prediction"]["provenance"]["bundle_id"] == "synthetic-bundle"
+
+
+def test_workflow_activity_binding_carries_request_model_constraints():
+    from src.agent.contracts import AgentContext
+    from src.agent.orchestrators.base import WorkflowStep
+    from src.agent.orchestrators.workflow import WorkflowOrchestrator
+
+    context = AgentContext(
+        query="预测 PDE5A 活性",
+        trace_id="request-model-binding",
+        metadata={"target": "PDE5A", "species": "human", "endpoint": "pIC50"},
+    )
+    step = WorkflowStep(
+        "activity", "activity_predictor", input_from="molecules",
+        input_binding="$.outputs.molecules", input_transform="smiles_text",
+        metadata={"target": "PDE5A", "endpoint": "pIC50", "species": "human"},
+    )
+
+    payload = WorkflowOrchestrator._resolve_input(
+        context, step, {"molecules": [{"smiles": "CCO", "candidate_id": "cand-1"}]}
+    )
+
+    assert payload["model_request"] == {
+        "target": "PDE5A", "species": "human"
+    }
 
 
 @pytest.mark.parametrize("damage", ["missing", "one_model", "demo", "fallback", "digest", "wrong_family"])

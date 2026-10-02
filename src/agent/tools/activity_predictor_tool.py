@@ -74,7 +74,17 @@ class ActivityPredictorTool(BaseMolecularTool):
             return self._execute_legacy(text, smiles)
         try:
             from src.activity.prediction_service import predict_activity
-            summary = predict_activity(smiles, target=target)
+            request_model = query.get("model_request") if isinstance(query, dict) else None
+            if request_model is not None and not isinstance(request_model, dict):
+                return ToolResult.error_result(
+                    self.name, AgentErrorCode.INVALID_INPUT,
+                    "模型请求参数必须是结构化对象。",
+                    status=ObservationStatus.INVALID_INPUT,
+                )
+            if request_model is None:
+                summary = predict_activity(smiles, target=target)
+            else:
+                summary = predict_activity(smiles, target=target, model_request=request_model)
         except Exception:
             return ToolResult.error_result(
                 self.name, AgentErrorCode.MODEL_UNAVAILABLE,
@@ -113,6 +123,14 @@ class ActivityPredictorTool(BaseMolecularTool):
             if isinstance(service_warnings, list) else []
         # Reuse the shared warning contract without altering original observations.
         warnings = list(dict.fromkeys(warnings + expected["warnings"]))
+        request_identities = {
+            row.get("provenance", {}).get("request", {}).get("identity")
+            for row in rows
+            if isinstance(row.get("provenance"), dict)
+            and isinstance(row["provenance"].get("request"), dict)
+            and row["provenance"]["request"].get("identity")
+        }
+        request_identity = next(iter(request_identities)) if len(request_identities) == 1 else None
         labels = {"passed": "完成", "partial": "部分完成", "failed": "失败"}
         needs_review = any(row.get("classification_regression_consistent") is False for row in rows)
         review_message = "计算已完成，分类与回归不一致，需复核"
@@ -149,9 +167,14 @@ class ActivityPredictorTool(BaseMolecularTool):
                 "model_provenance": [deepcopy(r.get("provenance", {})) for r in rows],
                 "candidate_ids_bound": candidate_ids is not None,
                 "requested_endpoint": endpoint or "pIC50",
+                "request_model_identity": request_identity,
             },
             evidence=[{"prediction": deepcopy(row)} for row in rows],
-            provenance=ToolProvenance(tool_name=self.name, model_name="FamilyActivityPredictor"))
+            provenance=ToolProvenance(
+                tool_name=self.name,
+                model_name="FamilyActivityPredictor",
+                model_version=request_identity,
+            ))
 
     def _execute_legacy(self, query: str, smiles_list) -> Dict[str, Any]:
         result = self._create_base_result(query)

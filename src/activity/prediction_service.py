@@ -59,9 +59,13 @@ def summarize_predictions(rows):
             "results": rows, "warnings": warnings}
 
 
-def predict_activity(smiles, *, target=None):
+def predict_activity(smiles, *, target=None, model_request=None):
     if target is not None:
-        rows = get_family_predictor().predict(smiles, target=target)
+        predictor = get_family_predictor()
+        if model_request is None:
+            rows = predictor.predict(smiles, target=target)
+        else:
+            rows = predictor.predict(smiles, target=target, model_request=model_request)
     else:
         from .predictor import get_predictor
         rows = get_predictor().predict(smiles)

@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import io
+import inspect
 import json
 import math
 import threading
@@ -14,6 +15,7 @@ from .dataset_contract import _canonical_parent
 from .family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD, resolve_activity_family
 from .model_card import _read_snapshot
 from .predictor import ActivityPredictor
+from .request_selection import ActivityModelRequest, select_family_bundle
 
 
 class _PinnedPredictor(ActivityPredictor):
@@ -115,7 +117,7 @@ def _warnings(row, result, task):
         row["warnings"].extend(f"[{task}] {warning}" for warning in warnings if isinstance(warning, str))
 
 
-def _provenance(bundle):
+def _provenance(bundle, request=None):
     fields = ("model_id", "target_id", "task_type", "endpoint", "units", "weights_sha256",
               "model_card_sha256", "prepared_dataset_sha256", "dataset_sha256", "source_sha256",
               "model_contract_key", "scientific_readiness", "demo_mode", "fallback_used")
@@ -124,6 +126,15 @@ def _provenance(bundle):
         "label_threshold", "probability_threshold")}
     result["models"] = {task: {key: copy.deepcopy(record[key]) for key in fields if key in record}
                         for task, record in bundle["models"].items()}
+    if request is not None:
+        result["request"] = {
+            "family_id": request.family_id,
+            "endpoint": request.endpoint,
+            "units": request.units,
+            "species": request.species,
+            "validation": request.validation,
+            "identity": request.identity,
+        }
     return result
 
 
@@ -139,10 +150,11 @@ class FamilyActivityPredictor:
         self._cache = {}
         self._lock = threading.RLock()
 
-    def _pair(self, family):
+    def _pair(self, family, request):
         bundle = self.registry.get_active_family_bundle(family)
         if bundle is None:
             raise ValueError("Family model bundle unavailable")
+        selected = select_family_bundle(bundle, request)
         if (bundle["family_id"] != family or bundle["label_threshold"] != LABEL_THRESHOLD
                 or bundle["probability_threshold"] != PROBABILITY_THRESHOLD):
             raise ValueError("Family bundle contract mismatch")
@@ -156,14 +168,23 @@ class FamilyActivityPredictor:
             contents[task] = _read_snapshot(self.registry.resolve_weights(metadata["model_id"]))
             if hashlib.sha256(contents[task]).hexdigest() != metadata["weights_sha256"]:
                 raise ValueError("Family model digest mismatch")
-        key = hashlib.sha256(json.dumps(bundle, sort_keys=True, allow_nan=False).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps(
+            {"bundle": bundle, "request_identity": selected.identity},
+            sort_keys=True, allow_nan=False).encode()).hexdigest()
         cached = self._cache.get(family)
         if cached is None or cached[0] != key:
             stages = {task: _PinnedPredictor(bundle["models"][task], contents[task]) for task in contents}
             self._cache[family] = (key, stages)
-        return copy.deepcopy(bundle), self._cache[family][1]
+        return copy.deepcopy(bundle), self._cache[family][1], selected
 
-    def predict(self, smiles, *, target):
+    def _pair_for_request(self, family, request):
+        """Keep older test/integration extensions callable during migration."""
+        parameters = inspect.signature(self._pair).parameters
+        if len(parameters) == 1:
+            return (*self._pair(family), None)
+        return self._pair(family, request)
+
+    def predict(self, smiles, *, target, model_request=None):
         inputs = [smiles] if isinstance(smiles, str) else list(smiles)
         rows = [_row(smi, target) for smi in inputs]
         try:
@@ -190,7 +211,10 @@ class FamilyActivityPredictor:
             return rows
         with self._lock:
             try:
-                bundle, stages = self._pair(family)
+                request_payload = dict(model_request or {})
+                request_payload.setdefault("target", target)
+                request = ActivityModelRequest.from_mapping(request_payload)
+                bundle, stages, selected = self._pair_for_request(family, request)
             except Exception:
                 self._cache.pop(family, None)
                 for index in valid:
@@ -198,7 +222,7 @@ class FamilyActivityPredictor:
                 return rows
             for index in valid:
                 rows[index]["bundle_id"] = bundle["bundle_id"]
-                rows[index]["provenance"] = _provenance(bundle)
+                rows[index]["provenance"] = _provenance(bundle, selected)
             canonical = [rows[i]["canonical_smiles"] for i in valid]
             outputs = _stage_results(stages["classification"], canonical, "classification")
             regress = []
