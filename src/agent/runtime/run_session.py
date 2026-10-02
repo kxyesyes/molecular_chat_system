@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 import sqlite3
@@ -132,6 +133,7 @@ class WorkflowRunSession:
         observation_prepare: Callable[[ToolResult, WorkflowStep], None] | None = None,
         reference_guard: Callable[[WorkflowStep, Any], None] | None = None,
         dynamic_publication: bool = False,
+        cancel_event: Any | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.context = context
@@ -184,6 +186,7 @@ class WorkflowRunSession:
         self._start_state: Any = None
         self._start_ledger: EvidenceLedger | None = None
         self._start_run_persisted = False
+        self.cancel_event = cancel_event
 
         self.results: list[ToolResult] = []
         self.state: Any = None
@@ -548,7 +551,10 @@ class WorkflowRunSession:
                 raise SessionLifecycleError(
                     "workflow tool attempt outcome is unavailable"
                 )
-            self._prepare_step_result(index, step, tool, journal)
+            if self._cancel_requested():
+                self._prepare_cancelled_step(step, tool, journal)
+            else:
+                self._prepare_step_result(index, step, tool, journal)
             if journal.advance is not None:
                 self._consume_step(index)
                 self._terminal_reached = True
@@ -556,6 +562,10 @@ class WorkflowRunSession:
 
         result = journal.result
         assert result is not None
+        if self._cancel_requested() and result.status is not ObservationStatus.CANCELLED:
+            self._replace_with_cancelled(step, journal)
+            result = journal.result
+            assert result is not None
         if not journal.prepared:
             if self.dynamic:
                 if result.tool_name != step.tool_name:
@@ -633,6 +643,10 @@ class WorkflowRunSession:
                         "Observation preparation failed",
                     )
                     self._bind_dynamic_observation(result, step, journal)
+            if self._cancel_requested():
+                self._replace_with_cancelled(step, journal)
+                result = journal.result
+                assert result is not None
             elif self.dynamic:
                 self._bind_dynamic_observation(result, step, journal)
             # Distinct from normalized: registration itself can fail before or
@@ -641,6 +655,10 @@ class WorkflowRunSession:
             journal.prepared = True
 
         if not journal.normalized:
+            if self._cancel_requested():
+                self._replace_with_cancelled(step, journal)
+                result = journal.result
+                assert result is not None
             evidence_id = self.ledger.register_tool_result(
                 step_id=step.name,
                 input_digest=journal.input_hash,
@@ -668,6 +686,9 @@ class WorkflowRunSession:
         if not journal.observation_captured:
             if self._observation_capture is not None:
                 self._observation_capture(result)
+            # Observation capture seals the accepted result for persistence.
+            # Cancellation raised by this callback is post-commit and must not
+            # relabel the already-captured scientific observation.
             journal.observation_captured = True
 
         if journal.checkpoint_reused and not journal.reused_recorded:
@@ -874,6 +895,9 @@ class WorkflowRunSession:
             tool=step.tool_name,
             progress=None if self.dynamic else index / self.total_steps,
         )
+        if self._cancel_requested():
+            self._prepare_cancelled_step(step, tool, journal)
+            return
         if not journal.input_hash:
             journal.input_hash = self.orchestrator._input_hash(
                 journal.input_data
@@ -908,6 +932,9 @@ class WorkflowRunSession:
             dispatch = self.orchestrator.step_dispatch
             if dispatch is not None:
                 denial = dispatch.authorize(tool, step)
+                if self._cancel_requested():
+                    self._prepare_cancelled_step(step, tool, journal)
+                    return
                 if denial is not None:
                     journal.result = denial
                     journal.checkpoint_checked = True
@@ -927,6 +954,9 @@ class WorkflowRunSession:
                 journal.checkpoint_warning_entry = {
                     "step": step.name, "reason": "checkpoint_deserialization_failed",
                 }
+            if self._cancel_requested():
+                self._prepare_cancelled_step(step, tool, journal)
+                return
             if checkpoint:
                 try:
                     journal.result = self.orchestrator._result_from_checkpoint(
@@ -943,6 +973,9 @@ class WorkflowRunSession:
                     }
                 else:
                     journal.checkpoint_reused = True
+            if self._cancel_requested():
+                self._prepare_cancelled_step(step, tool, journal)
+                return
             if (checkpoint is None and journal.checkpoint_warning_entry is None
                     and getattr(getattr(tool, "spec", None), "idempotent", True) is not True
                     and self.orchestrator.state_store):
@@ -967,6 +1000,9 @@ class WorkflowRunSession:
                     details={"step": step.name, "reason": "uncertain_prior_execution"},
                 )
             journal.checkpoint_checked = True
+        if self._cancel_requested():
+            self._prepare_cancelled_step(step, tool, journal)
+            return
         if journal.result is not None:
             self._reject_unavailable_reference(step, journal)
             return
@@ -986,19 +1022,95 @@ class WorkflowRunSession:
                 checkpoint_phase="running",
             )
             journal.running_checkpoint_saved = True
+        if self._cancel_requested():
+            self._prepare_cancelled_step(step, tool, journal)
+            return
         # Routing, compilation, event callbacks and persistence can take time.
         # Check again at dispatch (and before checkpoint reuse above), not only
         # at the chat entry. Never hold the source SQLite transaction while a
         # potentially long-running scientific tool executes.
         if self._reject_unavailable_reference(step, journal):
             return
+        if self._cancel_requested():
+            self._prepare_cancelled_step(step, tool, journal)
+            return
         self._tool_attempt_count += 1
         journal.tool_attempted = True
-        journal.result = self.orchestrator._execute_step(
-            tool,
-            journal.input_data,
-            step,
+        if self.cancel_event is None or not self._call_accepts_cancel_event(
+            self.orchestrator._execute_step
+        ):
+            # Preserve subclasses that implement the historical three-argument
+            # dispatch hook; cancellation is opt-in per session.
+            journal.result = self.orchestrator._execute_step(
+                tool, journal.input_data, step,
+            )
+        else:
+            journal.result = self.orchestrator._execute_step(
+                tool, journal.input_data, step,
+                cancel_event=self.cancel_event,
+            )
+
+    def _cancel_requested(self) -> bool:
+        return bool(self.cancel_event is not None and self.cancel_event.is_set())
+
+    @staticmethod
+    def _call_accepts_cancel_event(callable_obj) -> bool:
+        try:
+            signature = inspect.signature(callable_obj)
+        except (TypeError, ValueError):
+            return False
+        parameter = signature.parameters.get("cancel_event")
+        return bool(
+            parameter is not None
+            and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            or any(
+                item.kind is inspect.Parameter.VAR_KEYWORD
+                for item in signature.parameters.values()
+            )
         )
+
+    def _replace_with_cancelled(self, step, journal, *, running: bool = False) -> None:
+        journal.checkpoint_reused = False
+        journal.result = self.orchestrator._cancelled_result(
+            step, running=running,
+        )
+
+    def _prepare_cancelled_step(self, step, tool, journal) -> None:
+        """Record cancellation without dispatching a scientific tool."""
+        if journal.input_data is _UNSET:
+            try:
+                journal.input_data = self.orchestrator._resolve_input(
+                    self.context, step, self.outputs,
+                )
+            except BindingResolutionError:
+                journal.input_data = step.input_data
+        journal.input_hash = self.orchestrator._input_hash(journal.input_data)
+        journal.tool_version = str(
+            step.metadata.get(
+                "tool_version",
+                getattr(getattr(tool, "spec", tool), "version", "1")
+                if tool is not None else "missing",
+            )
+        )
+        journal.model_version = str(
+            step.metadata.get(
+                "model_version",
+                getattr(getattr(tool, "llm_model", None), "model_name", ""),
+            )
+        )
+        if self.dynamic or self.orchestrator.step_dispatch is not None:
+            journal.tool_version = str(
+                getattr(getattr(tool, "spec", tool), "version", "1")
+                if tool is not None else "missing"
+            )
+        journal.adapter_version = str(
+            getattr(tool, "adapter_version", self.orchestrator.adapter_version)
+        )
+        journal.checkpoint_checked = True
+        journal.result = self.orchestrator._cancelled_result(step, running=False)
 
     def _reject_unavailable_reference(self, step, journal) -> bool:
         if self._reference_guard is not None:

@@ -225,6 +225,36 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
     start = time.perf_counter()
 
     try:
+        cancel_event = kwargs.pop("cancel_event", None)
+        if cancel_event is not None:
+            import inspect
+
+            try:
+                signature = inspect.signature(tool.execute)
+            except (TypeError, ValueError):
+                signature = None
+            cancel_parameter = (
+                signature.parameters.get("cancel_event")
+                if signature is not None else None
+            )
+            accepts_cancel = bool(
+                signature is not None
+                and (
+                    (
+                        cancel_parameter is not None
+                        and cancel_parameter.kind in (
+                            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                            inspect.Parameter.KEYWORD_ONLY,
+                        )
+                    )
+                    or any(
+                        parameter.kind is inspect.Parameter.VAR_KEYWORD
+                        for parameter in signature.parameters.values()
+                    )
+                )
+            )
+            if accepts_cancel:
+                kwargs["cancel_event"] = cancel_event
         raw_result = tool.execute(query, **kwargs)
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 

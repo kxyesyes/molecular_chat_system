@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from copy import deepcopy
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from collections.abc import Mapping
 from dataclasses import replace
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from src.agent.contracts import (
@@ -101,6 +103,7 @@ class WorkflowOrchestrator:
         tools: Mapping[str, Any],
         continue_on_error: bool = False,
         idempotency_key: str | None = None,
+        cancel_event: Any | None = None,
     ) -> WorkflowRunSession:
         from src.agent.runtime.run_session import WorkflowRunSession
 
@@ -111,6 +114,7 @@ class WorkflowOrchestrator:
             tools=tools,
             continue_on_error=continue_on_error,
             idempotency_key=idempotency_key,
+            cancel_event=cancel_event,
         )
 
     def run(
@@ -120,13 +124,19 @@ class WorkflowOrchestrator:
         tools: Mapping[str, Any],
         continue_on_error: bool = False,
         idempotency_key: str | None = None,
+        cancel_event: Any | None = None,
     ) -> AgentResult:
+        session_kwargs = {
+            "context": context,
+            "steps": steps,
+            "tools": tools,
+            "continue_on_error": continue_on_error,
+            "idempotency_key": idempotency_key,
+        }
+        if cancel_event is not None:
+            session_kwargs["cancel_event"] = cancel_event
         session = self.create_session(
-            context=context,
-            steps=steps,
-            tools=tools,
-            continue_on_error=continue_on_error,
-            idempotency_key=idempotency_key,
+            **session_kwargs,
         )
         step_count = session.step_count
         session.start()
@@ -141,19 +151,32 @@ class WorkflowOrchestrator:
         tool: Any,
         input_data: Any,
         step: WorkflowStep,
+        *,
+        cancel_event: Any | None = None,
     ) -> ToolResult:
         if self.step_dispatch is not None:
-            return self.step_dispatch(tool, input_data, step)
+            result = self._call_step_dispatch(
+                self.step_dispatch, tool, input_data, step, cancel_event,
+            )
+            return (self._cancelled_result(step, running=False)
+                    if self._is_cancelled(cancel_event) else result)
         if not step.timeout_seconds:
-            return execute_tool_compat(tool, input_data)
+            result = execute_tool_compat(tool, input_data, cancel_event=cancel_event)
+            return (self._cancelled_result(step, running=False)
+                    if self._is_cancelled(cancel_event) else result)
 
         reservation = reserve_worker()
         executor = None
         try:
             executor = ThreadPoolExecutor(max_workers=1)
-            future = (executor.submit(execute_tool_compat, tool, input_data)
-                      if reservation is None else
-                      executor.submit(reservation.run, execute_tool_compat, tool, input_data))
+            call = partial(
+                execute_tool_compat,
+                tool,
+                input_data,
+                cancel_event=cancel_event,
+            )
+            future = (executor.submit(call) if reservation is None else
+                      executor.submit(reservation.run, call))
         except BaseException:
             if reservation is not None:
                 reservation.rollback(executor)
@@ -163,9 +186,13 @@ class WorkflowOrchestrator:
         if reservation is not None:
             reservation.attach(executor, future)
         try:
-            return future.result(timeout=step.timeout_seconds)
+            result = future.result(timeout=step.timeout_seconds)
+            return (self._cancelled_result(step, running=not future.done())
+                    if self._is_cancelled(cancel_event) else result)
         except FutureTimeoutError:
             future.cancel()
+            if self._is_cancelled(cancel_event):
+                return self._cancelled_result(step, running=not future.done())
             return ToolResult.error_result(
                 tool_name=step.tool_name,
                 code=AgentErrorCode.TOOL_TIMEOUT,
@@ -180,6 +207,60 @@ class WorkflowOrchestrator:
             )
         finally:
             executor.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _is_cancelled(cancel_event: Any | None) -> bool:
+        return bool(cancel_event is not None and cancel_event.is_set())
+
+    @staticmethod
+    def _call_step_dispatch(dispatch, tool, input_data, step, cancel_event):
+        """Call both legacy and cancellation-aware delegated dispatch hooks."""
+        if cancel_event is None:
+            return dispatch(tool, input_data, step)
+        try:
+            signature = inspect.signature(dispatch)
+        except (TypeError, ValueError):
+            signature = None
+        accepts_cancel = bool(
+            signature is not None
+            and (
+                (
+                    signature.parameters.get("cancel_event") is not None
+                    and signature.parameters["cancel_event"].kind
+                    in (
+                        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                        inspect.Parameter.KEYWORD_ONLY,
+                    )
+                )
+                or any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in signature.parameters.values()
+                )
+            )
+        )
+        if accepts_cancel:
+            return dispatch(
+                tool, input_data, step, cancel_event=cancel_event,
+            )
+        return dispatch(tool, input_data, step)
+
+    @staticmethod
+    def _cancelled_result(step: WorkflowStep, *, running: bool) -> ToolResult:
+        return ToolResult.error_result(
+            tool_name=step.tool_name,
+            code=AgentErrorCode.CANCELLED,
+            message=(
+                f"Tool {step.tool_name} was cancelled before a scientific "
+                "result was produced"
+            ),
+            details={"step": step.name, "cancelled": True},
+            quality={
+                "cancelled": True,
+                "scientific_result_discarded": True,
+                "invocation_may_still_be_running": running,
+            },
+            status=ObservationStatus.CANCELLED,
+        )
 
     def _resolve_idempotent_context(
         self,
