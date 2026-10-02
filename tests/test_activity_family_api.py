@@ -238,12 +238,12 @@ def test_concurrent_cold_requests_share_one_predictor(monkeypatch, tmp_path):
         prediction_service._family_predictor.cache_clear()
 
 
-def _post_prediction(client, endpoint, *, target=None):
+def _post_prediction(client, endpoint, *, target=None, smiles="CCO"):
     data = {} if target is None else {"target": target}
     if endpoint == "predict":
-        return client.post("/api/activity/predict", data={**data, "smiles": "CCO"})
+        return client.post("/api/activity/predict", data={**data, "smiles": smiles})
     return client.post("/api/activity/batch_predict", data=data,
-                       files={"file": ("input.smi", b"CCO", "text/plain")})
+                       files={"file": ("input.smi", smiles.encode("utf-8"), "text/plain")})
 
 
 @pytest.mark.parametrize("rows,expected", [
@@ -306,6 +306,23 @@ def test_absent_target_rejects_without_global_model(client, monkeypatch, endpoin
     assert data["results"][0]["errors"] == {"target": "explicit_target_required"}
     assert data["results"][0]["warnings"] == ["必须明确选择 PDE 或 BuChE 靶点后再进行预测"]
     assert data["results"][0]["predicted_pIC50"] is None
+
+
+def test_absent_target_rejects_every_batch_row_without_scientific_values(client):
+    response = _post_prediction(client, "batch_predict", smiles="CCO\nCCN")
+    assert response.status_code == 200
+    rows = response.json()["results"]
+    assert len(rows) == 2
+    for row in rows:
+        assert row["success"] is False
+        assert row["status"] == "failed"
+        assert row["errors"] == {"target": "explicit_target_required"}
+        assert row["warnings"] == ["必须明确选择 PDE 或 BuChE 靶点后再进行预测"]
+        assert row["activity_probability"] is None
+        assert row["activity_class"] is None
+        assert row["predicted_pIC50"] is None
+        assert row["classification_regression_consistent"] is None
+        assert row["provenance"] == {}
 
 
 def test_factory_lru_is_bounded_to_two_directories(monkeypatch, tmp_path):
