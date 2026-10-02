@@ -171,12 +171,15 @@ def _build_pharm3d_fallback(candidates: List[Dict[str, Any]], error: str = "") -
     for cand in candidates:
         row = dict(cand)
         score_2d = row.get("final_similarity", 0.0)
-        row["final_3d_score"] = score_2d
+        row["final_3d_score"] = None
+        row["rank_score"] = score_2d
+        row["score_semantics"] = "2d_similarity_fallback"
         row["pharm_combined_3d"] = None
         row["pharm_similarity"] = None
         row["alignment_score"] = None
         row["spatial_score"] = None
         row["pharm_features"] = []
+        row["pharm_refinement_status"] = "fallback"
         if error:
             row["pharm_error"] = error
         fallback.append(row)

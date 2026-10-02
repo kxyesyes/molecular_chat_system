@@ -532,9 +532,21 @@ def test_pharm3d_fallback_partial_order_and_old_support_patch(monkeypatch, mode,
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["pharmacophore_refinement_status"] == expected_status
-    assert [row["target_name"] for row in data["results"]] == ["second", "first"]
-    assert [row["final_3d_score"] for row in data["results"]] == [0.3, 0.8]
-    assert aggregate_calls[0][1] == {"top_k": 2, "score_field": "final_3d_score"}
+    if mode in {"partial", "timeout_partial"}:
+        assert [row["target_name"] for row in data["results"]] == ["second"]
+        assert [row["target_name"] for row in data["fallback_results"]] == ["first"]
+        assert len(aggregate_calls) == 2
+        assert aggregate_calls[0][1] == {"top_k": 2, "score_field": "final_3d_score"}
+        assert aggregate_calls[1][1] == {"top_k": 2, "score_field": "final_similarity"}
+    else:
+        assert [row["target_name"] for row in data["results"]] == ["second", "first"]
+        assert data["fallback_results"] == []
+        assert aggregate_calls[0][1] == {"top_k": 2, "score_field": "final_similarity"}
+    if mode in {"partial", "timeout_partial"}:
+        assert data["results"][0]["final_3d_score"] == 0.3
+        assert data["fallback_results"][0]["final_3d_score"] is None
+    else:
+        assert all(row["final_3d_score"] is None for row in data["results"])
     assert candidates == [{"target_name": "second", "final_similarity": 0.3},
                           {"target_name": "first", "final_similarity": 0.8}]
     if mode in {"timeout", "error"}:

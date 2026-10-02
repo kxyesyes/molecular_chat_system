@@ -93,7 +93,15 @@ function _bindPredictForm() {
         window.lastReverseTargetSummary = data;
         window.lastQuery3DPharmacophore = data.query_pharmacophore;
         window.currentQuerySmiles = window.lastQuerySmiles;
-        RtResults.displayResults(data.results, true);
+        const refinedResults = (data.results || []).map((row) => ({
+          ...row,
+          ranking_group: "3d_refined",
+        }));
+        const fallbackResults = (data.fallback_results || []).map((row) => ({
+          ...row,
+          ranking_group: "2d_fallback",
+        }));
+        RtResults.displayResults(refinedResults.concat(fallbackResults), true);
       } else {
         // ── 2D 模式 ──
         const data = await RtApi.predict2D(formData);
