@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_TASK_TYPES = {"regression", "classification"}
 _INVALID_ENDPOINTS = {"unknown", "unspecified"}
+DEFAULT_INFERENCE_BATCH_SIZE = 32
 
 
 def _validate_prediction_metadata(metadata: Any) -> Dict[str, Any]:
@@ -75,8 +76,19 @@ class ActivityPredictor:
     RG-MPNN 活性预测器封装类
     """
     
-    def __init__(self, model_dir: str = "data/activity/rg_mpnn"):
+    def __init__(
+        self,
+        model_dir: str = "data/activity/rg_mpnn",
+        inference_batch_size: int = DEFAULT_INFERENCE_BATCH_SIZE,
+    ):
+        if (
+            isinstance(inference_batch_size, bool)
+            or not isinstance(inference_batch_size, int)
+            or inference_batch_size < 1
+        ):
+            raise ValueError("inference_batch_size must be a positive integer")
         self.model_dir = model_dir
+        self.inference_batch_size = inference_batch_size
         self.model = None
         self._loaded = False
         self.demo_mode = False # Flag for demo/fallback mode
@@ -483,67 +495,69 @@ class ActivityPredictor:
             from torch_geometric.data import Batch
             import torch
 
-            try:
-                atom_batch = Batch.from_data_list(valid_atom_data).to(request_device)
-                rg_batch = Batch.from_data_list(valid_rg_data).to(request_device)
-                with torch.no_grad():
-                    output, _fingerprint = request_model(atom_batch, rg_batch)
-                    # Sigmoid can conceal infinite logits as finite probabilities.
-                    # Validate raw outputs before any task-specific transform.
-                    if not torch.isfinite(output).all().item():
-                        raise ValueError("Model returned a non-finite raw prediction")
-                    if metadata["task_type"] == "classification":
-                        predictions = (
-                            torch.sigmoid(output)
-                            .detach()
-                            .cpu()
-                            .reshape(-1)
-                            .tolist()
+            for start in range(0, len(valid_indices), self.inference_batch_size):
+                batch_indices = valid_indices[start : start + self.inference_batch_size]
+                batch_atom_data = valid_atom_data[start : start + self.inference_batch_size]
+                batch_rg_data = valid_rg_data[start : start + self.inference_batch_size]
+                try:
+                    atom_batch = Batch.from_data_list(batch_atom_data).to(request_device)
+                    rg_batch = Batch.from_data_list(batch_rg_data).to(request_device)
+                    with torch.no_grad():
+                        output, _fingerprint = request_model(atom_batch, rg_batch)
+                        # Sigmoid can conceal infinite logits as finite probabilities.
+                        # Validate raw outputs before any task-specific transform.
+                        if not torch.isfinite(output).all().item():
+                            raise ValueError("Model returned a non-finite raw prediction")
+                        if metadata["task_type"] == "classification":
+                            predictions = (
+                                torch.sigmoid(output)
+                                .detach()
+                                .cpu()
+                                .reshape(-1)
+                                .tolist()
+                            )
+                            output_key = "probability"
+                        else:
+                            predictions = output.detach().cpu().reshape(-1).tolist()
+                            output_key = "value"
+
+                    if len(predictions) != len(batch_indices):
+                        raise ValueError("Model output count does not match the input batch")
+
+                    for index, raw_value in zip(batch_indices, predictions):
+                        value = float(raw_value)
+                        if not math.isfinite(value):
+                            raise ValueError("Model returned a non-finite prediction")
+                        provenance = {
+                            "model_id": metadata["model_id"],
+                            "weights_sha256": metadata["weights_sha256"].lower(),
+                            "model_path": request_model_path,
+                            "demo_mode": False,
+                            "fallback_used": False,
+                        }
+                        implementation_version = request_model_config.get(
+                            "implementation_version",
+                            metadata.get("model_implementation_version"),
                         )
-                        output_key = "probability"
-                    else:
-                        predictions = output.detach().cpu().reshape(-1).tolist()
-                        output_key = "value"
-
-                if len(predictions) != len(valid_indices):
-                    raise ValueError(
-                        "Model output count does not match the input batch"
-                    )
-
-                for index, raw_value in zip(valid_indices, predictions):
-                    value = float(raw_value)
-                    if not math.isfinite(value):
-                        raise ValueError("Model returned a non-finite prediction")
-                    provenance = {
-                        "model_id": metadata["model_id"],
-                        "weights_sha256": metadata["weights_sha256"].lower(),
-                        "model_path": request_model_path,
-                        "demo_mode": False,
-                        "fallback_used": False,
-                    }
-                    implementation_version = request_model_config.get(
-                        "implementation_version",
-                        metadata.get("model_implementation_version"),
-                    )
-                    if implementation_version is not None:
-                        provenance["implementation_version"] = implementation_version
-                    results[index] = {
-                        "smiles": smiles_list[index],
-                        "success": True,
-                        "task_type": metadata["task_type"],
-                        "endpoint": metadata["endpoint"],
-                        output_key: value,
-                        "units": metadata["units"],
-                        "model_provenance": provenance,
-                    }
-            except Exception as exc:
-                logger.error("Inference batch failed: %s", exc)
-                for index in valid_indices:
-                    results[index] = {
-                        "smiles": smiles_list[index],
-                        "success": False,
-                        "error": f"Inference error: {exc}",
-                    }
+                        if implementation_version is not None:
+                            provenance["implementation_version"] = implementation_version
+                        results[index] = {
+                            "smiles": smiles_list[index],
+                            "success": True,
+                            "task_type": metadata["task_type"],
+                            "endpoint": metadata["endpoint"],
+                            output_key: value,
+                            "units": metadata["units"],
+                            "model_provenance": provenance,
+                        }
+                except Exception as exc:
+                    logger.error("Inference batch failed: %s", exc)
+                    for index in batch_indices:
+                        results[index] = {
+                            "smiles": smiles_list[index],
+                            "success": False,
+                            "error": f"Inference error: {exc}",
+                        }
 
         return [
             result
