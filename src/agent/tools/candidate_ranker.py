@@ -296,23 +296,40 @@ class CandidateRanker:
         if not isinstance(record, Mapping) or record.get("success") is not True:
             return None
         provenance = record.get("model_provenance")
-        if not isinstance(provenance, Mapping):
-            return None
-        if (
-            provenance.get("demo_mode") is not False
-            or provenance.get("fallback_used", False) is not False
-            or not any(
-                provenance.get(key)
-                for key in ("model_id", "model_path", "weights_sha256")
-            )
-        ):
+        if not CandidateRanker._trusted_activity_provenance(provenance):
+            provenance = record.get("provenance")
+        if not CandidateRanker._trusted_activity_provenance(provenance):
             return None
         value = record.get("normalized_activity")
         if value is None:
             value = record.get("probability")
+        if value is None:
+            value = record.get("activity_probability")
         if not CandidateRanker._finite_number(value):
             return None
         return min(max(float(value), 0.0), 1.0)
+
+    @staticmethod
+    def _trusted_activity_provenance(provenance: Mapping[str, Any] | None) -> bool:
+        if not isinstance(provenance, Mapping):
+            return False
+        if "models" in provenance:
+            models = provenance.get("models")
+            if not isinstance(models, Mapping) or not models:
+                return False
+            return all(
+                isinstance(model, Mapping)
+                and model.get("demo_mode") is False
+                and model.get("fallback_used") is False
+                and bool(model.get("model_id") or model.get("model_path"))
+                and bool(model.get("weights_sha256"))
+                for model in models.values()
+            )
+        return (
+            provenance.get("demo_mode") is False
+            and provenance.get("fallback_used", False) is False
+            and any(provenance.get(key) for key in ("model_id", "model_path", "weights_sha256"))
+        )
 
     @staticmethod
     def _logp_window_score(logp: float) -> float:

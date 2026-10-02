@@ -10,6 +10,19 @@ from .molecular_input import (
 
 _TOKENS = re.compile(r"[A-Za-z0-9_-]+|丁酰胆碱酯酶")
 _METRICS = frozenset({"ic50", "pic50", "ec50", "pec50", "ki", "pki", "kd", "pkd"})
+_ACTIVITY_ENDPOINTS = re.compile(
+    r"(?<![A-Za-z0-9])(?:p?ic50|p?ec50|p?ki|p?kd)(?![A-Za-z0-9])",
+    re.I,
+)
+_ACTIVITY_TERMS = re.compile(
+    r"活性(?:预测)?|抑制(?:活性)?|potency|inhibition|activity(?:\s+prediction)?",
+    re.I,
+)
+_ACTIVITY_NEGATION = re.compile(
+    r"(?:不要|无需|不需要|不必|禁止|请勿|勿|do\s+not|don't|no)"
+    r"[^\r\n，,。；;:：]{0,32}$",
+    re.I,
+)
 _GENERIC_SUBJECTS = frozenset({"分子", "这个分子", "该分子"})
 _CONTEXT_WORDS = frozenset({"target", "activity", "potency", "inhibition", "assess"})
 _BACKGROUND = re.compile(r"\s*(?:研究背景|背景|background\b)", re.I)
@@ -25,6 +38,54 @@ _LABELLED_TARGET = re.compile(
     re.I,
 )
 _INVALID = "SMILES 无效或缺失；请提供完整结构，并用换行或分号分隔，不会提取片段替代。"
+
+
+def activity_intent_requested(text):
+    """Return whether text explicitly requests activity work.
+
+    Endpoint words are activity intent too, but an explicit negation immediately
+    governing the endpoint/activity phrase must prevent tool admission.
+    """
+    if not isinstance(text, str):
+        return False
+    matches = list(_ACTIVITY_TERMS.finditer(text)) + list(_ACTIVITY_ENDPOINTS.finditer(text))
+    for match in matches:
+        prefix = text[max(0, match.start() - 40):match.start()]
+        if not _ACTIVITY_NEGATION.search(prefix):
+            return True
+    return False
+
+
+def _canonical_endpoint(value):
+    if not isinstance(value, str):
+        raise ValueError("Invalid activity endpoint")
+    normalized = value.strip().casefold()
+    aliases = {
+        "ic50": "IC50", "pic50": "pIC50",
+        "ec50": "EC50", "pec50": "pEC50",
+        "ki": "Ki", "pki": "pKi",
+        "kd": "Kd", "pkd": "pKd",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError:
+        raise ValueError("不支持的活性端点") from None
+
+
+def requested_activity_endpoint(payload):
+    """Extract one exact endpoint without silently converting units."""
+    data = payload if isinstance(payload, Mapping) else {}
+    text = data.get("query", "") if isinstance(payload, Mapping) else payload
+    if not isinstance(text, str):
+        return None
+    detected = [_canonical_endpoint(match.group()) for match in _ACTIVITY_ENDPOINTS.finditer(text)]
+    structured = _canonical_endpoint(data["endpoint"]) if "endpoint" in data and data["endpoint"] is not None else None
+    unique = list(dict.fromkeys(detected))
+    if structured is not None and unique and unique != [structured]:
+        raise ValueError("结构化活性端点与请求文本不一致")
+    if len(unique) > 1:
+        raise ValueError("一次请求包含多个不一致的活性端点")
+    return structured or (unique[0] if unique else None)
 
 
 def _strict_family(value):

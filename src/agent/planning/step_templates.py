@@ -136,7 +136,11 @@ def target_design_steps(
             continue_on_error=True,
             required=False,
             output_key="activity",
-            metadata={"candidate_source": "molecules"},
+            metadata={
+                "candidate_source": "molecules",
+                "target": target_hint,
+                "endpoint": "pIC50",
+            },
             capability="molecule.activity",
             output_contract="ActivityPredictionSet@1",
         ),
