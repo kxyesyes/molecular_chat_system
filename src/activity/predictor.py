@@ -99,6 +99,10 @@ class ActivityPredictor:
         # Lifecycle mutations (switch/invalidate/reload) must not change the
         # objects already captured by an in-flight inference request.
         self._lifecycle_lock = threading.RLock()
+        # A shared predictor may serve concurrent requests.  Serialize only
+        # model forward calls so GPU/CPU memory usage is bounded while
+        # featurization and result assembly remain outside this critical section.
+        self._inference_lock = threading.Lock()
         
         # Try to check if torch is available
         try:
@@ -502,24 +506,25 @@ class ActivityPredictor:
                 try:
                     atom_batch = Batch.from_data_list(batch_atom_data).to(request_device)
                     rg_batch = Batch.from_data_list(batch_rg_data).to(request_device)
-                    with torch.no_grad():
-                        output, _fingerprint = request_model(atom_batch, rg_batch)
-                        # Sigmoid can conceal infinite logits as finite probabilities.
-                        # Validate raw outputs before any task-specific transform.
-                        if not torch.isfinite(output).all().item():
-                            raise ValueError("Model returned a non-finite raw prediction")
-                        if metadata["task_type"] == "classification":
-                            predictions = (
-                                torch.sigmoid(output)
-                                .detach()
-                                .cpu()
-                                .reshape(-1)
-                                .tolist()
-                            )
-                            output_key = "probability"
-                        else:
-                            predictions = output.detach().cpu().reshape(-1).tolist()
-                            output_key = "value"
+                    with self._inference_lock:
+                        with torch.no_grad():
+                            output, _fingerprint = request_model(atom_batch, rg_batch)
+                            # Sigmoid can conceal infinite logits as finite probabilities.
+                            # Validate raw outputs before any task-specific transform.
+                            if not torch.isfinite(output).all().item():
+                                raise ValueError("Model returned a non-finite raw prediction")
+                            if metadata["task_type"] == "classification":
+                                predictions = (
+                                    torch.sigmoid(output)
+                                    .detach()
+                                    .cpu()
+                                    .reshape(-1)
+                                    .tolist()
+                                )
+                                output_key = "probability"
+                            else:
+                                predictions = output.detach().cpu().reshape(-1).tolist()
+                                output_key = "value"
 
                     if len(predictions) != len(batch_indices):
                         raise ValueError("Model output count does not match the input batch")
