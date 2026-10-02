@@ -52,6 +52,38 @@ def test_public_api():
     assert callable(module().FamilyActivityPredictor)
 
 
+def test_request_model_selection_is_recorded_in_provenance(harness):
+    predictor, _, bundle, _, _ = harness
+    for model in bundle["models"].values():
+        model["species"] = "human"
+
+    row = predictor.predict(
+        "CCO",
+        target="PDE5A",
+        model_request={"target": "PDE5A", "species": "human", "endpoint": "pIC50"},
+    )[0]
+
+    assert row["success"] is True
+    assert row["provenance"]["request"]["family_id"] == "pde-family"
+    assert row["provenance"]["request"]["species"] == "human"
+    assert row["provenance"]["request"]["identity"]
+
+
+def test_request_endpoint_mismatch_fails_without_loading_models(harness):
+    predictor, calls, _, _, _ = harness
+
+    row = predictor.predict(
+        "CCO",
+        target="PDE5A",
+        model_request={"target": "PDE5A", "endpoint": "pKi", "units": "pKi"},
+    )[0]
+
+    assert row["status"] == "failed"
+    assert row["predicted_pIC50"] is None
+    assert "bundle" in row["errors"]
+    assert not any(task == "load" for task, _ in calls)
+
+
 def test_inactive_still_regresses_and_contradiction_not_clipped(harness, monkeypatch):
     predictor, calls, _, _, Stage = harness
     original = Stage.predict
