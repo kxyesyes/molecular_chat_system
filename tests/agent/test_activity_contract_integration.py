@@ -59,7 +59,6 @@ def integrated_activity(monkeypatch):
 
     monkeypatch.setattr(prediction_service, "predict_activity", predict)
     tool = ActivityPredictorTool()
-    monkeypatch.setattr(tool, "_get_predictor", lambda: pytest.fail("unexpected legacy fallback"))
     registry = build_tool_registry([tool])
     adapter = registry.resolve("activity_predictor", agent_name="activity")
     dispatch = SpecialistDispatch(AgentContext(query="synthetic", trace_id="test-activity"),
@@ -143,45 +142,15 @@ def test_invalid_delegated_request_never_reaches_inference(integrated_activity, 
     assert result.data is None
 
 
-@pytest.mark.parametrize("task_type", ["classification", "regression"])
-@pytest.mark.parametrize("failed_indices", [(), (1,), (0, 1, 2)])
-def test_actual_targetless_tool_keeps_compat_normalization(monkeypatch, task_type, failed_indices):
+@pytest.mark.parametrize("payload", [
+    {"smiles": ["CCO", "CCN", "CCO"]},
+    {"query": "预测活性；SMILES: CCO"},
+])
+def test_actual_targetless_tool_requires_explicit_target(payload):
     from src.agent.tools.base_tool import execute_tool_compat
 
-    calls = []
-
-    class SyntheticPredictor:
-        demo_mode = False
-        current_model_metadata = {
-            "model_id": "synthetic-integration-only", "weights_sha256": "d" * 64,
-            "endpoint": "fixture_endpoint", "units": "fixture_units", "task_type": task_type,
-        }
-
-        def predict(self, smiles):
-            calls.append(list(smiles))
-            return [
-                {"smiles": smi, "success": False, "error": "synthetic failure"}
-                if index in failed_indices else
-                {"smiles": smi, "success": True, "task_type": task_type,
-                 "endpoint": "fixture_endpoint", "units": "fixture_units",
-                 "probability" if task_type == "classification" else "value": 0.25,
-                 "extension": {"preserve": ["raw", index]}}
-                for index, smi in enumerate(smiles)
-            ]
-
     tool = ActivityPredictorTool()
-    monkeypatch.setattr(tool, "_get_predictor", lambda: SyntheticPredictor())
-    # Compare actual legacy conversion with the new adapter; neither inference
-    # path loads model assets. Distinct calls must have identical scientific data.
-    payload = {"smiles": ["CCO", "CCN", "CCO"]}
-    expected = execute_tool_compat(tool, payload)
-    registry = build_tool_registry([tool])
-    try:
-        actual = registry.resolve("activity_predictor").execute({"query": payload})
-    finally:
-        registry.close()
-    before, after = expected.to_legacy_dict(), actual.to_legacy_dict()
-    before.pop("elapsed_ms")
-    after.pop("elapsed_ms")
-    assert after == before
-    assert calls == [["CCO", "CCN", "CCO"], ["CCO", "CCN", "CCO"]]
+    result = execute_tool_compat(tool, payload)
+    assert not result.success
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert "靶点" in result.message

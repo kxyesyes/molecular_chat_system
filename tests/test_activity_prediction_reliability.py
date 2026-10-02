@@ -208,59 +208,29 @@ def test_valid_single_atom_smiles_is_reported_as_unsupported_not_invalid():
     assert result["error"] == "unsupported_no_bond_structure"
 
 
-def test_legacy_batch_preserves_partial_status_and_canonical_provenance():
+def test_targetless_batch_requires_explicit_target_before_inference():
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 
-    class StubPredictor:
-        demo_mode = False
-        current_model_metadata = {
-            "model_id": "legacy-model",
-            "weights_sha256": "c" * 64,
-            "task_type": "regression",
-            "endpoint": "pIC50",
-            "units": "pIC50",
-        }
-
-        def predict(self, _smiles):
-            return [
-                {
-                    "smiles": "CCO", "success": True,
-                    "task_type": "regression", "endpoint": "pIC50",
-                    "value": 6.2, "units": "pIC50",
-                },
-                {"smiles": "CCN", "success": False, "error": "invalid_smiles"},
-            ]
-
     tool = ActivityPredictorTool()
-    tool._predictor = StubPredictor()
     raw = tool.execute({"smiles": ["CCO", "CCN"]})
 
     assert raw["success"] is False
-    assert raw["status"] == "partial"
-    assert raw["quality"]["prediction_status"] == "partial"
-    assert len(raw["evidence"]) == 1
-    assert raw["data"][0]["model_provenance"]["fallback_used"] is False
+    assert raw["status"] == "invalid_input"
+    assert raw["error_code"] == "invalid_input"
+    assert "靶点" in raw["message"]
 
 
-def test_legacy_batch_with_no_success_is_failed_without_scientific_values():
+def test_targetless_single_request_is_rejected_without_scientific_values():
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 
-    class StubPredictor:
-        demo_mode = False
-        current_model_metadata = {}
-
-        def predict(self, _smiles):
-            return [{"smiles": "CCO", "success": False, "error": "model unavailable"}]
-
     tool = ActivityPredictorTool()
-    tool._predictor = StubPredictor()
     raw = tool.execute({"smiles": "CCO"})
 
     assert raw["success"] is False
-    assert raw["status"] == "failed"
-    assert raw["data"][0]["success"] is False
-    assert "value" not in raw["data"][0]
-    assert "probability" not in raw["data"][0]
+    assert raw["status"] == "invalid_input"
+    assert raw["error_code"] == "invalid_input"
+    assert raw["data"] is None
+    assert "value" not in raw and "probability" not in raw
 
 
 def test_activity_batch_csv_uses_selected_smiles_column_and_skips_header():

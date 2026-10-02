@@ -392,74 +392,16 @@ def test_training_metadata_records_requested_and_actual_split_provenance(
     assert metadata["dataset_sha256"] == hashlib.sha256(dataset.read_bytes()).hexdigest()
 
 
-@pytest.mark.parametrize(
-    "prediction,expected_token",
-    [
-        (
-            {
-                "smiles": "CCO",
-                "success": True,
-                "task_type": "regression",
-                "endpoint": "AURKA_potency",
-                "value": 6.2,
-                "units": "log10(mol/L)",
-            },
-            "6.2000",
-        ),
-        (
-            {
-                "smiles": "CCO",
-                "success": True,
-                "task_type": "classification",
-                "endpoint": "AURKA_active",
-                "probability": 0.5,
-                "units": "probability",
-            },
-            "0.5000",
-        ),
-    ],
-)
-def test_agent_tool_formats_task_schema_and_exposes_complete_provenance(
-    prediction: dict[str, Any],
-    expected_token: str,
-) -> None:
+def test_agent_tool_requires_target_before_selecting_a_model() -> None:
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 
-    metadata = _model_metadata(
-        task_type=prediction["task_type"],
-        endpoint=prediction["endpoint"],
-        units=prediction["units"],
-    )
-    fake_predictor = SimpleNamespace(
-        predict=lambda _smiles: [dict(prediction)],
-        current_model_metadata=metadata,
-        current_model_path="data/activity/models/contract-model.pt",
-        demo_mode=False,
-    )
     tool = ActivityPredictorTool()
-    tool._predictor = fake_predictor
 
     result = tool.execute("predict activity for CCO")
 
-    assert result["success"] is True
-    assert prediction["endpoint"] in result["formatted"]
-    assert prediction["units"] in result["formatted"]
-    assert expected_token in result["formatted"]
-    assert "High" not in result["formatted"]
-    assert "Medium" not in result["formatted"]
-    assert "Low" not in result["formatted"]
-    assert result["quality"]["model_provenance"] == {
-        "model_id": "contract-model",
-        "weights_sha256": "a" * 64,
-        "endpoint": prediction["endpoint"],
-        "units": prediction["units"],
-        "task_type": prediction["task_type"],
-        "demo_mode": False,
-        "fallback_used": False,
-    }
-    assert result["data"][0]["model_provenance"] == result["quality"][
-        "model_provenance"
-    ]
+    assert result["success"] is False
+    assert result["status"] == "invalid_input"
+    assert "靶点" in result["message"]
 
 
 def test_activity_api_uses_task8_threadpool_for_cold_start_and_prediction(

@@ -114,23 +114,12 @@ def test_unlabelled_invalid_full_structures_cannot_fall_back_global(boundary, pa
     "预测活性；SMILES: CCO", "预测分子活性；SMILES: CCO",
     "预测这个分子的活性；SMILES: CCO", "评估该分子的活性；SMILES: CCO",
 ])
-def test_targetless_legacy_predictor_interface_remains_in_use(monkeypatch, query):
-    calls = []
-
-    class Legacy:
-        demo_mode = False
-        current_model_metadata = {"model_id": "synthetic-legacy"}
-
-        def predict(self, smiles):
-            calls.append(smiles)
-            return [{"smiles": s, "success": True, "task_type": "regression",
-                     "value": 1.0, "endpoint": "synthetic", "units": "synthetic"} for s in smiles]
-
+def test_targetless_activity_request_requires_explicit_target(query):
     tool = ActivityPredictorTool()
-    monkeypatch.setattr(tool, "_get_predictor", lambda: Legacy())
     result = tool.execute(query)
-    assert isinstance(result, dict) and result["success"]
-    assert calls == [["CCO"]]
+    assert isinstance(result, dict) and result["success"] is False
+    assert result["status"] == "invalid_input"
+    assert "靶点" in result["message"]
 
 
 @pytest.mark.parametrize("payload", [

@@ -265,7 +265,6 @@ def test_actual_tool_factory_preflight_is_lazy(monkeypatch):
     monkeypatch.setenv("RXN_API_KEY", "")
     def forbidden(*args, **kwargs):
         pytest.fail("registration must not load scientific models or call providers")
-    monkeypatch.setattr(ActivityPredictorTool, "_get_predictor", forbidden)
     monkeypatch.setattr(ReverseTargetTool, "_get_predictor", forbidden)
     monkeypatch.setattr(TargetDatabaseTool, "_get_service", forbidden)
     monkeypatch.setattr("requests.post", forbidden)
@@ -353,7 +352,6 @@ def test_real_lazy_wrappers_have_unknown_not_false_readiness(monkeypatch):
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
     from src.agent.tools.molecular_docking import MolecularDocking
     from src.agent.tooling.registration import REQUIRED_TOOLS, audit_registration
-    monkeypatch.setattr(ActivityPredictorTool, "_get_predictor", lambda *a: pytest.fail("no weights"))
     registry = build_tool_registry([Tool(name) for name in REQUIRED_TOOLS] + [ActivityPredictorTool(), MolecularDocking()])
     for name, capability in [("activity_predictor", "molecule.activity"), ("molecular_docking", "docking.execute")]:
         adapter = registry.resolve(name)
@@ -365,35 +363,17 @@ def test_real_lazy_wrappers_have_unknown_not_false_readiness(monkeypatch):
     assert "activity_predictor" not in audit_registration(registry, build_default_specialists())["unavailable_tools"]
 
 
-def test_failed_lazy_invocation_does_not_poison_later_calls(monkeypatch):
+def test_targetless_invocation_does_not_load_a_global_model(monkeypatch):
+    from src.activity import prediction_service
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
-    tool = ActivityPredictorTool()
-    calls = []
-    def predictor():
-        calls.append(1)
-        if len(calls) == 1:
-            raise RuntimeError("fixture-model-unavailable")
-        # Synthetic contract metadata only; no checkpoint is loaded or verified.
-        return SimpleNamespace(demo_mode=False, current_model_metadata={
-            "model_id": "synthetic-recovery", "weights_sha256": "a" * 64,
-            "task_type": "regression", "endpoint": "pIC50", "units": "pIC50"},
-            predict=lambda smiles: [{"success": True, "smiles": smiles[0],
-                "task_type": "regression", "endpoint": "pIC50", "units": "pIC50", "value": 5.1}])
-    monkeypatch.setattr(tool, "_get_predictor", predictor)
-    registry = build_tool_registry([tool])
+    monkeypatch.setattr(prediction_service, "predict_activity",
+                        lambda *args, **kwargs: pytest.fail("targetless request loaded a model"))
+    registry = build_tool_registry([ActivityPredictorTool()])
     adapter = registry.resolve("activity_predictor")
-    first = adapter.execute({"query": "预测 CCO 的活性"})
-    assert not first.success
-    health = adapter.health()
-    assert health["available"] is None
-    assert health["last_execution_status"] == "failed"
-    assert "fixture-model-unavailable" not in str(health)
-    second = registry.resolve("activity_predictor").execute({"query": "预测 CCO 的活性"})
-    assert second.success
-    assert calls == [1, 1]
-    assert adapter.health()["available"] is None
-    assert adapter.health()["last_execution_status"] == "succeeded"
-    assert adapter.health()["last_error_code"] is None
+    result = adapter.execute({"query": "预测 CCO 的活性"})
+    assert not result.success
+    assert result.error.code.value == "invalid_input"
+    assert "明确的靶点" in result.message
 
 
 def test_factory_rejects_self_alias():

@@ -623,7 +623,7 @@ def test_resume_uses_public_whole_subject_and_target_boundaries(actual_app, orig
                 for name, attribute in [('activity_predictor', '_predictor'), ('target_database_search', '_service')]:
                     # No tool execution means no asset/service initialization.
                     adapter = b.app.decision_runtime.registry.resolve(name)
-                    assert getattr(adapter.tool, attribute) is None
+                    assert getattr(adapter.tool, attribute, None) is None
     asyncio.run(run())
 
 

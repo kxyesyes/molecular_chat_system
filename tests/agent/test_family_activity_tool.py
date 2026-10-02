@@ -49,8 +49,6 @@ def boundary(monkeypatch):
 
     monkeypatch.setattr(prediction_service, "predict_activity", predict)
     tool = ActivityPredictorTool()
-    # No missing asset may accidentally invoke the global checkpoint finder.
-    monkeypatch.setattr(tool, "_get_predictor", lambda: pytest.fail("legacy fallback"))
     return tool, calls, state
 
 
