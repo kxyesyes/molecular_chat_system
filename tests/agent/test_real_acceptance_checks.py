@@ -76,6 +76,25 @@ def test_tool_provenance_accepts_per_prediction_model_metadata(tmp_path):
     assert provenance["model_name"] == "models/pde/model.pt"
 
 
+def test_rg_mpnn_truth_check_rejects_empty_successful_prediction_result():
+    result = ToolResult.success_result(
+        "activity_predictor",
+        data=[],
+        quality={
+            "model_provenance": {
+                "model_id": "rg-mpnn",
+                "demo_mode": False,
+                "fallback_used": False,
+            }
+        },
+    )
+
+    check = scientific._check_rg_mpnn([result])
+
+    assert check["status"] == "failed"
+    assert check["reason"] == "empty_activity_results"
+
+
 def test_execution_exception_takes_precedence_over_dependent_truth_failures():
     case = EvaluationCase(
         case_id="EXECUTION-ERROR-001",

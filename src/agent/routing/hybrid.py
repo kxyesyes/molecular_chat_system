@@ -13,6 +13,7 @@ from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
+from src.agent.tools.activity_input import activity_intent_requested
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.workflows import WorkflowCatalog
 
@@ -142,7 +143,7 @@ class HybridSkillRouter:
             add("target_database_search", 0.92, "target structure search intent")
         if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "reverse target"):
             add("reverse_target_prediction", 0.95, "reverse target intent")
-        if self._contains(lower, "pic50", "活性", "activity"):
+        if activity_intent_requested(text):
             add("activity_prediction", 0.9, "activity endpoint requested")
         if self._contains(
             lower,

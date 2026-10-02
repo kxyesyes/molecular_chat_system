@@ -171,7 +171,14 @@ def test_target_design_passes_evidence_and_validated_candidates_to_ranking(optio
     }
     assert inputs["property_calculator"] == "CCO\nCCN"
     assert inputs["admet_predictor"] == "CCO\nCCN"
-    assert inputs["activity_predictor"] == {"query": TARGET_QUERY, "smiles": ["CCO", "CCN"]}
+    activity_input = inputs["activity_predictor"]
+    assert activity_input["query"] == TARGET_QUERY
+    assert activity_input["smiles"] == ["CCO", "CCN"]
+    assert activity_input["target"] == "PDE5A"
+    assert activity_input["endpoint"] == "pIC50"
+    assert activity_input["candidate_ids"] == [
+        row["candidate_id"] for row in execution.result.metadata["workflow_state"]["outputs"]["molecules"]["candidates"]
+    ]
     result = execution.result
     outputs = result.metadata["workflow_state"]["outputs"]
     candidates = outputs["molecules"]["candidates"]

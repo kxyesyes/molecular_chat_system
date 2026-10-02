@@ -401,8 +401,22 @@ class WorkflowOrchestrator:
                 BindingResolver.derive_selector(step.input_binding, step.input_from) or "")):
             # Actual bound candidates, with the original user's target context.
             activity_input = {"query": context.query, "smiles": cls._smiles_text(input_data).splitlines()}
-            if "target" in context.metadata:
-                activity_input["target"] = context.metadata["target"]
+            target = step.metadata.get("target") or context.metadata.get("target")
+            if target is not None:
+                activity_input["target"] = target
+            endpoint = step.metadata.get("endpoint") or context.metadata.get("endpoint")
+            if endpoint is not None:
+                activity_input["endpoint"] = endpoint
+            source = outputs.get(step.input_from or step.metadata.get("candidate_source"))
+            if isinstance(source, Mapping):
+                source = source.get("candidates", source)
+            if isinstance(source, list):
+                candidate_ids = [
+                    item.get("candidate_id") for item in source
+                    if isinstance(item, Mapping) and item.get("candidate_id")
+                ]
+                if len(candidate_ids) == len(activity_input["smiles"]):
+                    activity_input["candidate_ids"] = candidate_ids
             return activity_input
         if cls._is_generation_step(step):
             return cls._canonical_generation_input(

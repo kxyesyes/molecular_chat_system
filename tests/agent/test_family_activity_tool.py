@@ -99,8 +99,12 @@ def test_target_request_uses_shared_service(boundary, payload, target):
 def test_metric_label_in_prose_is_not_a_second_smiles(boundary, metric):
     tool, calls, _ = boundary
     result = execute_tool_compat(tool, f"请预测 CCO 对 PDE5A 的活性和 {metric}。")
-    assert result.success
-    assert calls == [(["CCO"], "PDE5A")]
+    if metric.casefold() == "pic50":
+        assert result.success
+        assert calls == [(["CCO"], "PDE5A")]
+    else:
+        assert result.status == ObservationStatus.UNAVAILABLE
+        assert not calls
 
 
 @pytest.mark.parametrize("query", [

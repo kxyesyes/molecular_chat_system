@@ -115,6 +115,13 @@ def test_top_three_contains_plausible_alternatives_for_mixed_query():
     assert "admet_assessment" in top_three
 
 
+def test_router_recognizes_pki_activity_request_but_abstains_on_negation():
+    router = HybridSkillRouter()
+
+    assert router.decide("预测 CCO 的 pKi").selected_skill == "activity_prediction"
+    assert router.decide("不要预测 CCO 的 pKi").selected_skill is None
+
+
 @pytest.mark.parametrize(
     "prompt",
     [

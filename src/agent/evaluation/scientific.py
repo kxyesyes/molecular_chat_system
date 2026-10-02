@@ -1060,11 +1060,28 @@ def _check_rg_mpnn(tool_results: list[ToolResult]) -> dict[str, Any]:
     result = _find_tool(tool_results, "activity_predictor")
     if result is None:
         return {"status": "failed", "reason": "tool_not_run:activity_predictor"}
+    rows = result.data if isinstance(result.data, list) else []
+    if result.success and not rows:
+        return {"status": "failed", "reason": "empty_activity_results"}
     provenance = result.quality.get("model_provenance", {})
-    demo_mode = bool(provenance.get("demo_mode", True))
     if not result.success:
         return {"status": "partial", "reason": result.message}
-    if demo_mode:
+    records = provenance if isinstance(provenance, list) else [provenance]
+    if not records or not all(isinstance(item, Mapping) for item in records):
+        return {"status": "partial", "reason": "activity_model_provenance_missing"}
+
+    def real_model_record(item: Mapping[str, Any]) -> bool:
+        models = item.get("models")
+        if isinstance(models, Mapping):
+            return bool(models) and all(
+                isinstance(model, Mapping)
+                and model.get("demo_mode") is False
+                and model.get("fallback_used") is False
+                for model in models.values()
+            )
+        return item.get("demo_mode") is False and item.get("fallback_used") is False
+
+    if not all(real_model_record(item) for item in records):
         return {
             "status": "partial",
             "reason": "rg_mpnn_demo_mode",

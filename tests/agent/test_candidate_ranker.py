@@ -163,6 +163,47 @@ def test_candidate_ranker_uses_trusted_normalized_activity_and_explicit_admet_ri
     assert evidence["missing_evidence"] == []
 
 
+def test_candidate_ranker_uses_trusted_family_activity_probability():
+    payload = _payload(top_n=1)
+    payload["outputs"]["activity"] = [
+        {
+            "smiles": "CCO",
+            "success": True,
+            "activity_probability": 0.91,
+            "predicted_pIC50": 7.1,
+            "requested_target": "PDE5A",
+            "family_id": "pde",
+            "provenance": {
+                "bundle_id": "pde-family-v1",
+                "models": {
+                    "classification": {
+                        "model_id": "pde-classifier",
+                        "weights_sha256": "a" * 64,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                    "regression": {
+                        "model_id": "pde-regressor",
+                        "weights_sha256": "b" * 64,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                },
+            },
+        }
+    ]
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is True
+    ethanol = next(
+        item
+        for item in result["data"]["ranked_candidates"]
+        if item["canonical_smiles"] == "CCO"
+    )
+    assert ethanol["ranking_evidence"]["activity_score"] == pytest.approx(0.91)
+
+
 def test_candidate_ranker_ignores_demo_or_fallback_admet_scores():
     payload = _payload(top_n=1)
     payload["outputs"]["admet"] = [

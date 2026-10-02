@@ -7,6 +7,24 @@ from src.agent.tools.base_tool import execute_tool_compat
 from tests.agent.test_family_activity_tool import boundary  # shared synthetic service
 
 
+@pytest.mark.parametrize("query", [
+    "预测 CCO 的 pKi",
+    "Predict Ki activity of CCO",
+    "请评估 CCO 的 pKd",
+])
+def test_activity_tool_recognizes_supported_activity_endpoint_language(query):
+    assert ActivityPredictorTool().should_use(query)
+
+
+@pytest.mark.parametrize("query", [
+    "不要预测 CCO 的活性",
+    "请不要给出 CCO 的 pIC50",
+    "Do not predict pKi for CCO",
+])
+def test_activity_tool_does_not_trigger_for_explicit_activity_negation(query):
+    assert not ActivityPredictorTool().should_use(query)
+
+
 @pytest.mark.parametrize("field", [
     '"CCO"junk', "'CCO'junk", '`CCO`junk', '"CCO" invalid',
     '"CCO" pIC50', '"CCO" CCN', '"CCO"垃圾',
@@ -52,8 +70,13 @@ def test_target_labels_do_not_become_molecules(boundary, payload, target):
 @pytest.mark.parametrize("metric", ["IC50", "pIC50", "PIC50", "EC50", "pEC50", "Ki", "pKi", "Kd", "pKd"])
 def test_metric_words_are_context_only_outside_explicit_fields(boundary, metric):
     tool, calls, _ = boundary
-    assert execute_tool_compat(tool, f"Predict {metric} activity of CCO for PDE5A").success
-    assert calls == [(["CCO"], "PDE5A")]
+    result = execute_tool_compat(tool, f"Predict {metric} activity of CCO for PDE5A")
+    if metric.casefold() == "pic50":
+        assert result.success
+        assert calls == [(["CCO"], "PDE5A")]
+    else:
+        assert result.status == ObservationStatus.UNAVAILABLE
+        assert not calls
 
 
 @pytest.mark.parametrize("payload", [
