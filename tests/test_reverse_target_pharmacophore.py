@@ -139,6 +139,21 @@ class PharmacophoreAlignmentTest(unittest.TestCase):
 
         self.assertGreaterEqual(score, 0.95)
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_conformer_result_records_real_optimization_status(self):
+        from src.reverse_target.pharmacophore_refiner import get_molecule_pharmacophore
+
+        result = get_molecule_pharmacophore("CCO")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["conformer_status"], "optimized")
+        self.assertEqual(result["embedding_method"], "ETKDGv3")
+        self.assertTrue(result["mmff_converged"])
+
+    def test_lumped_hydrophobe_has_explicit_cutoff(self):
+        from src.reverse_target.pharmacophore_refiner import _feature_distance_cutoff
+
+        self.assertEqual(_feature_distance_cutoff("LumpedHydrophobe", 1.8), 3.0)
+
     def test_refinement_timeout_logs_once_and_returns_all_candidates(self):
         from src.reverse_target.pharmacophore_refiner import refine_with_pharmacophore
 

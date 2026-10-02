@@ -11,6 +11,8 @@ from rdkit import DataStructs
 from rdkit.Chem import MACCSkeys, rdFingerprintGenerator
 from tqdm import tqdm
 import pickle
+import hashlib
+import json
 
 if __package__ in {None, ""}:
     import sys
@@ -174,6 +176,7 @@ class FingerprintGenerator:
         maccs_fps = np.array(maccs_fps_list)
         
         # 过滤有效数据
+        self._last_row_mapping = [int(df.index[index]) for index in valid_indices]
         valid_df = df.iloc[valid_indices].reset_index(drop=True)
         
         return valid_df, morgan_fps, maccs_fps
@@ -198,18 +201,47 @@ class FingerprintGenerator:
         print(f"✓ 数据表已保存: {df_output}")
         
         # 3. 保存元数据
+        source_bytes = self.input_file.read_bytes()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        fingerprint_params = {
+            'morgan_radius': self.morgan_radius,
+            'morgan_bits': self.morgan_bits,
+            'maccs_bits': self.maccs_bits,
+        }
+        row_mapping = list(getattr(self, '_last_row_mapping', range(len(df))))
         metadata = {
             'morgan_radius': self.morgan_radius,
             'morgan_bits': self.morgan_bits,
             'maccs_bits': self.maccs_bits,
+            'fingerprint_params': fingerprint_params,
             'num_molecules': len(df),
             'num_unique_molecules': df['molecule_chembl_id'].nunique(),
-            'num_targets': df['target_name'].nunique()
+            'num_targets': df['target_name'].nunique(),
+            'source_path': str(self.input_file.resolve()),
+            'source_sha256': source_sha256,
+            'row_mapping': row_mapping,
+            'data_version': f"sha256:{source_sha256}",
         }
         
         metadata_file = self.output_dir / "fingerprint_metadata.pkl"
         with open(metadata_file, 'wb') as f:
             pickle.dump(metadata, f)
+
+        manifest = {
+            'schema_version': 1,
+            'data_version': metadata['data_version'],
+            'source_path': metadata['source_path'],
+            'source_sha256': source_sha256,
+            'fingerprint_params': fingerprint_params,
+            'row_mapping': row_mapping,
+            'morgan_sha256': hashlib.sha256(morgan_fps.tobytes()).hexdigest(),
+            'maccs_sha256': hashlib.sha256(maccs_fps.tobytes()).hexdigest(),
+        }
+        manifest_file = self.output_dir / "fingerprint_manifest.json"
+        manifest_file.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding='utf-8',
+        )
         
         print(f"✓ 元数据已保存: {metadata_file}")
         

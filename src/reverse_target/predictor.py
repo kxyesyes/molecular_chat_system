@@ -512,22 +512,9 @@ class ReverseTargetPredictor:
         for idx in np.where(mask)[0]:
             if check:
                 check()
-            target_name = frame.iloc[idx]['target_name']
-            results.append({
-                'target_name': target_name,
-                'organism': frame.iloc[idx]['organism'],
-                'canonical_smiles': frame.iloc[idx]['canonical_smiles'],
-                'molecule_chembl_id': frame.iloc[idx]['molecule_chembl_id'],
-                'standard_type': frame.iloc[idx]['standard_type'],
-                'standard_value': float(frame.iloc[idx]['standard_value']),
-                'morgan_similarity': float(morgan_sims[idx]),
-                'maccs_similarity': float(maccs_sims[idx]),
-                'final_similarity': float(final_sims[idx]),
-                'row_index': int(idx),  # 保存原始索引
-                # 生成搜索链接
-                'chembl_search_url': f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/",
-                'uniprot_search_url': f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606"
-            })
+            results.append(self._similarity_record(
+                frame, idx, morgan_sims[idx], maccs_sims[idx], final_sims[idx]
+            ))
         
         # 按相似度排序
         results.sort(key=lambda x: x['final_similarity'], reverse=True)
@@ -583,22 +570,32 @@ class ReverseTargetPredictor:
             预测结果列表，每个元素包含 'smiles', 'success', 'targets' 或 'error'
         """
         results = []
-        for smiles in smiles_list:
-            smiles = smiles.strip()
+        for row_index, raw_smiles in enumerate(smiles_list):
+            smiles = raw_smiles.strip() if isinstance(raw_smiles, str) else ""
             if not smiles:
+                results.append({
+                    "row_index": row_index,
+                    "query_smiles": smiles,
+                    "success": False,
+                    "status": "invalid_input",
+                    "error": "SMILES cannot be empty",
+                })
                 continue
-                
             try:
                 res = self.predict(smiles, threshold, top_k, combine_by_target, organism_filter=organism_filter)
                 results.append({
+                    "row_index": row_index,
                     "query_smiles": smiles,
                     "success": True,
+                    "status": "completed",
                     "targets": res
                 })
             except Exception as e:
                 results.append({
+                    "row_index": row_index,
                     "query_smiles": smiles,
                     "success": False,
+                    "status": "failed",
                     "error": str(e)
                 })
         return results
@@ -646,22 +643,64 @@ class ReverseTargetPredictor:
         # 构建结果
         results = []
         for idx in np.where(combined_mask)[0]:
-            results.append({
-                'molecule_chembl_id': self.df.iloc[idx]['molecule_chembl_id'],
-                'canonical_smiles': self.df.iloc[idx]['canonical_smiles'],
-                'target_name': self.df.iloc[idx]['target_name'],
-                'organism': self.df.iloc[idx]['organism'],
-                'standard_type': self.df.iloc[idx]['standard_type'],
-                'standard_value': float(self.df.iloc[idx]['standard_value']),
-                'morgan_similarity': float(morgan_sims[idx]),
-                'maccs_similarity': float(maccs_sims[idx]),
-                'final_similarity': float(final_sims[idx])
-            })
+            results.append(self._similarity_record(
+                self.df, idx, morgan_sims[idx], maccs_sims[idx], final_sims[idx]
+            ))
         
         # 按相似度排序
         results.sort(key=lambda x: x['final_similarity'], reverse=True)
         
         return results[:limit]
+
+    def _similarity_record(self, frame, idx, morgan_similarity,
+                           maccs_similarity, final_similarity):
+        """Build a provenance-rich 2D neighbor record.
+
+        The weighted score is explicitly a structural ranking signal.  It is
+        not an activity probability, affinity, or confidence estimate.
+        """
+        row = frame.iloc[int(idx)]
+        target_name = str(row.get('target_name', ''))
+        record = {
+            'target_name': target_name,
+            'organism': row.get('organism', ''),
+            'canonical_smiles': row.get('canonical_smiles', ''),
+            'molecule_chembl_id': row.get('molecule_chembl_id', ''),
+            'standard_type': row.get('standard_type', ''),
+            'standard_value': float(row['standard_value']) if pd.notna(row.get('standard_value')) else None,
+            'morgan_similarity': float(morgan_similarity),
+            'maccs_similarity': float(maccs_similarity),
+            'final_similarity': float(final_similarity),
+            'row_index': int(idx),
+            'score_semantics': '2d_structure_similarity_rank_only',
+            'similarity_metric': 'weighted_morgan_maccs_tanimoto',
+            'evidence': {
+                'type': 'similarity_neighbor',
+                'source': 'ChEMBL',
+                'quality_eligible': bool(row.get('quality_eligible', True)),
+            },
+            'provenance': {
+                'data_version': (self.metadata or {}).get('data_version', 'unknown'),
+                'source_file': self.training_data_path.name,
+                'row_index': int(idx),
+            },
+            'chembl_search_url': f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/",
+            'uniprot_search_url': f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606",
+        }
+        for field in (
+            'target_chembl_id', 'target_uniprot_id', 'taxon_id', 'assay_id',
+            'document_chembl_id', 'publication_id', 'standard_relation',
+            'standard_units', 'assay_confidence_score', 'data_validity_comment',
+        ):
+            if field in frame.columns and pd.notna(row.get(field)):
+                value = row.get(field)
+                if hasattr(value, 'item'):
+                    value = value.item()
+                record[field] = value
+        for field in ('standard_relation', 'standard_units'):
+            if field in record:
+                record['evidence'][field] = record[field]
+        return record
     
     def get_stats(self) -> Dict:
         """获取数据库统计信息"""

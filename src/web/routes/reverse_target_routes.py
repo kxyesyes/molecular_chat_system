@@ -1,4 +1,6 @@
 """Reverse target route registration."""
+import math
+
 from fastapi import UploadFile, File, Form, HTTPException
 
 
@@ -16,7 +18,7 @@ def setup_reverse_target_routes(app, *, _support):
             if not smiles or not smiles.strip():
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
             
-            if threshold < 0 or threshold > 1:
+            if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
                 raise HTTPException(status_code=400, detail="阈值必须在0-1之间")
             
             if top_k < 1 or top_k > 100:
@@ -62,54 +64,19 @@ def setup_reverse_target_routes(app, *, _support):
     ):
         """反向寻靶批量预测API"""
         try:
+            if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
+                raise HTTPException(status_code=400, detail="阈值必须在0-1之间且为有限数值")
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
 
             content = await _support._read_upload_limited(file, "reverse target batch file")
             text = content.decode("utf-8")
             
-            smiles_list = []
-            # 简单的文件解析逻辑
-            import io
-            import csv
+            from src.reverse_target.batch_input import parse_batch_rows
+            rows = parse_batch_rows(file.filename or "", text, max_rows=100)
+            smiles_list = [row["smiles"] for row in rows]
             
-            if file.filename.endswith('.csv'):
-                reader = csv.DictReader(io.StringIO(text))
-                # 尝试寻找 smiles 列
-                smiles_col = None
-                if reader.fieldnames:
-                    for col in reader.fieldnames:
-                        if col.lower() in ['smiles', 'smile', 'canonical_smiles']:
-                            smiles_col = col
-                            break
-                
-                if smiles_col:
-                    for row in reader:
-                        if row[smiles_col].strip():
-                            smiles_list.append(row[smiles_col].strip())
-                else:
-                    # 如果找不到列名，尝试读取第一列
-                    reader = csv.reader(io.StringIO(text))
-                    for row in reader:
-                        if row and row[0].strip():
-                            smiles_list.append(row[0].strip())
-            else:
-                # 假设是每行一个SMILES的文本文件
-                lines = text.splitlines()
-                for line in lines:
-                    line = line.strip()
-                    if line:
-                        # 简单的处理：如果包含逗号或空格，取第一部分
-                        parts = line.replace(',', ' ').split()
-                        if parts:
-                            smiles_list.append(parts[0])
-            
-            # 去重并限制数量
-            smiles_list = list(set(smiles_list))
-            if len(smiles_list) > 100:
-                smiles_list = smiles_list[:100]
-            
-            if not smiles_list:
+            if not rows:
                 raise HTTPException(status_code=400, detail="未能从文件中解析出有效的SMILES")
 
             def run_batch_prediction():
@@ -131,11 +98,15 @@ def setup_reverse_target_routes(app, *, _support):
             return {
                 "success": True,
                 "count": len(results),
+                "row_count": len(rows),
                 "results": results
             }
             
         except HTTPException:
             raise
+        except ValueError as e:
+            _support.logger.warning(f"批量反向寻靶输入无效: {e}")
+            raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             _support.logger.error(f"批量预测失败: {e}")
             raise HTTPException(status_code=500, detail=f"批量预测失败: {str(e)}")
@@ -146,7 +117,7 @@ def setup_reverse_target_routes(app, *, _support):
         try:
             from src.reverse_target.predictor import get_predictor
             predictor = get_predictor()
-            stats = predictor.get_stats()
+            stats = await _support._invoke_in_threadpool(predictor.get_stats)
             return {"success": True, "stats": stats}
         except Exception as e:
             _support.logger.error(f"获取统计信息失败: {e}")
@@ -180,16 +151,22 @@ def setup_reverse_target_routes(app, *, _support):
             
             if not target_name or not target_name.strip():
                 raise HTTPException(status_code=400, detail="靶点名称不能为空")
+            if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
+                raise HTTPException(status_code=400, detail="阈值必须在0-1之间且为有限数值")
+            if type(limit) is not int or limit < 1 or limit > 100:
+                raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
             
             from src.reverse_target.predictor import get_predictor
             predictor = get_predictor()
             
-            results = predictor.get_similar_molecules(
-                smiles=smiles.strip(),
-                target_name=target_name.strip(),
-                threshold=threshold,
-                limit=limit,
-                organism_filter=organism_filter,
+            results = await _support._invoke_in_threadpool(
+                lambda: predictor.get_similar_molecules(
+                    smiles=smiles.strip(),
+                    target_name=target_name.strip(),
+                    threshold=threshold,
+                    limit=limit,
+                    organism_filter=organism_filter,
+                )
             )
             
             return {
@@ -233,6 +210,12 @@ def setup_reverse_target_routes(app, *, _support):
             if not smiles or not smiles.strip():
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
 
+            if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
+                raise HTTPException(status_code=400, detail="阈值必须在0-1之间且为有限数值")
+            if not math.isfinite(alpha_2d) or not math.isfinite(alpha_3d) or alpha_2d < 0 or alpha_3d < 0:
+                raise HTTPException(status_code=400, detail="3D融合权重必须为非负有限数值")
+            if not math.isclose(alpha_2d + alpha_3d, 1.0, rel_tol=0.0, abs_tol=1e-6):
+                raise HTTPException(status_code=400, detail="3D融合权重之和必须为1")
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
 
@@ -247,10 +230,10 @@ def setup_reverse_target_routes(app, *, _support):
             predictor = get_predictor()
             
             # 降低阈值保证候选数量，提升召回
-            adjusted_threshold = max(0.0, threshold - 0.2)
+            prefilter_threshold = max(0.0, threshold - 0.2)
             raw_candidates = predictor.get_raw_similar_molecules(
                 smiles=smiles,
-                threshold=adjusted_threshold,
+                threshold=prefilter_threshold,
                 limit=candidate_limit,
                 organism_filter=organism_filter,
             )
@@ -275,7 +258,7 @@ def setup_reverse_target_routes(app, *, _support):
                     "candidate_pool_size": candidate_limit,
                     "raw_candidate_count": 0,
                     "unique_target_count_before_top_k": 0,
-                    "adjusted_threshold": adjusted_threshold,
+                    "prefilter_threshold": prefilter_threshold,
                 }
 
             _support.logger.info(
@@ -370,7 +353,7 @@ def setup_reverse_target_routes(app, *, _support):
                 "candidate_pool_size": candidate_limit,
                 "raw_candidate_count": raw_candidate_count,
                 "unique_target_count_before_top_k": unique_target_count_before_top_k,
-                "adjusted_threshold": adjusted_threshold,
+                "prefilter_threshold": prefilter_threshold,
             }
 
         except HTTPException:

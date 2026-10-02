@@ -226,7 +226,7 @@ const RtResults = (() => {
           </td>
           <td class="rt-action-cell">
             <div class="rt-row-actions">
-            <button class="rt-action-btn rt-action-secondary" onclick="RtResults.onShowSimilar(${inlineJsArg(targetName)})">相似分子 ${result.similar_count || 1}</button>
+            <button class="rt-action-btn rt-action-secondary" onclick="RtResults.onShowSimilar(${inlineJsArg(targetName)}, ${inlineJsArg(window.currentQuerySmiles || '')})">相似分子 ${result.similar_count || 1}</button>
             <a class="target-db-link" href="${_targetDbUrl(targetName)}" target="_blank" rel="noopener noreferrer">靶点库</a>
             </div>
           </td>
@@ -367,7 +367,7 @@ const RtResults = (() => {
           <td style="font-family:monospace;">${result.standard_value.toFixed(2)}</td>
           <td>
             <div class="evidence-text">${_evidenceSummary(result, is3DMode)}</div>
-            <button onclick="RtResults.onShowSimilar('${result.target_name.replace(/'/g, "\\'")}')"
+            <button onclick="RtResults.onShowSimilar('${result.target_name.replace(/'/g, "\\'")}', '${String(window.currentQuerySmiles || '').replace(/'/g, "\\'")}')"
                     style="background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;padding:4px 12px;
                            border-radius:6px;cursor:pointer;font-size:12px;font-weight:600;transition:all 0.2s;">
               查看 ${result.similar_count || 1} 个分子
@@ -475,7 +475,7 @@ const RtResults = (() => {
                 <div style="font-size:12px;color:#64748b;">${(target.final_similarity * 100).toFixed(1)}%</div>
               </td>
               <td>
-                <button onclick="RtResults.onShowSimilar(${inlineJsArg(targetName)})"
+                <button onclick="RtResults.onShowSimilar(${inlineJsArg(targetName)}, ${inlineJsArg(querySmiles)})"
                         style="font-size:12px;padding:4px 8px;">详情</button>
                 <a class="target-db-link compact" href="${_targetDbUrl(targetName)}" target="_blank" rel="noopener noreferrer">靶点库</a>
               </td>
@@ -500,7 +500,14 @@ const RtResults = (() => {
   // ──────────────────────────────────────
   //  显示相似分子模态框
   // ──────────────────────────────────────
-  async function showSimilarMolecules(targetName) {
+  let similarRequestId = 0;
+  let similarAbortController = null;
+
+  async function showSimilarMolecules(targetName, querySmiles) {
+    const requestId = ++similarRequestId;
+    if (similarAbortController) similarAbortController.abort();
+    similarAbortController = new AbortController();
+    const resolvedQuerySmiles = String(querySmiles || window.currentQuerySmiles || "");
     const modal = $("similarModal");
     const modalTitle = $("modalTitle");
     const modalBody = $("modalBody");
@@ -512,10 +519,14 @@ const RtResults = (() => {
 
     try {
       const data = await RtApi.fetchSimilarMolecules(
-        window.currentQuerySmiles,
+        resolvedQuerySmiles,
         targetName,
         window.lastThreshold || RT_CONFIG.DEFAULTS.THRESHOLD,
+        50,
+        similarAbortController.signal,
       );
+
+      if (requestId !== similarRequestId) return;
 
       if (!data.results || data.results.length === 0) {
         modalBody.innerHTML =
@@ -526,8 +537,10 @@ const RtResults = (() => {
       modalBody.innerHTML = _buildSimilarModalContent(data.results);
 
       // 异步加载 MCS
-      _loadMCSSection(data.results[0]?.canonical_smiles);
+      _loadMCSSection(resolvedQuerySmiles, data.results[0]?.canonical_smiles);
     } catch (error) {
+      if (error && error.name === "AbortError") return;
+      if (requestId !== similarRequestId) return;
       modalBody.innerHTML = `<div style="text-align:center;padding:40px;color:#ef4444;">加载失败: ${escapeHtml(error.message)}</div>`;
     }
   }
@@ -645,7 +658,7 @@ const RtResults = (() => {
   }
 
   // ── 异步加载 MCS ──
-  async function _loadMCSSection(topHitSmiles) {
+  async function _loadMCSSection(querySmiles, topHitSmiles) {
     const mcsEl = $("mcsContent");
     if (!mcsEl) return;
     if (!topHitSmiles) {
@@ -654,7 +667,7 @@ const RtResults = (() => {
     }
     try {
       const { ok, data: mcsData } = await RtApi.fetchMCS(
-        window.currentQuerySmiles,
+        querySmiles,
         topHitSmiles,
       );
       if (ok && mcsData && mcsData.success) {
@@ -685,8 +698,8 @@ const RtResults = (() => {
   }
 
   // 供外部 onclick 调用的钩子
-  function onShowSimilar(targetName) {
-    showSimilarMolecules(targetName);
+  function onShowSimilar(targetName, querySmiles) {
+    showSimilarMolecules(targetName, querySmiles);
   }
 
   return {

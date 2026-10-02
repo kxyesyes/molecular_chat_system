@@ -501,13 +501,29 @@ def validate_envelope(envelope, *, smiles, controls, expected):
             raise ValueError(PROOF_ERROR)
         indices, targets, total, previous = set(), set(), 0, math.inf
         strings = "target_name organism canonical_smiles molecule_chembl_id standard_type chembl_search_url uniprot_search_url".split()
+        required_record_keys = set(strings + "standard_value morgan_similarity maccs_similarity final_similarity row_index similar_count score_semantics similarity_metric evidence provenance".split())
+        optional_record_keys = set("target_chembl_id target_uniprot_id taxon_id assay_id document_chembl_id publication_id standard_relation standard_units assay_confidence_score data_validity_comment".split())
         for record in records:
-            _closed(record, " ".join(strings) + " standard_value morgan_similarity maccs_similarity final_similarity row_index similar_count")
+            record_keys = set(record)
+            if not required_record_keys.issubset(record_keys) or not record_keys.issubset(required_record_keys | optional_record_keys):
+                raise ValueError(PROOF_ERROR)
             for key in strings:
                 v = record[key]
                 if type(v) is not str or len(v) > 8192 or (key != "organism" and not v.strip()):
                     raise ValueError(PROOF_ERROR)
             if not _number(record["standard_value"], 0):
+                raise ValueError(PROOF_ERROR)
+            if record.get("score_semantics") != "2d_structure_similarity_rank_only":
+                raise ValueError(PROOF_ERROR)
+            if record.get("similarity_metric") != "weighted_morgan_maccs_tanimoto":
+                raise ValueError(PROOF_ERROR)
+            evidence = record.get("evidence")
+            provenance = record.get("provenance")
+            if (not isinstance(evidence, dict) or evidence.get("type") != "similarity_neighbor"
+                    or evidence.get("source") != "ChEMBL"
+                    or not isinstance(provenance, dict)
+                    or not isinstance(provenance.get("data_version"), str)
+                    or not isinstance(provenance.get("source_file"), str)):
                 raise ValueError(PROOF_ERROR)
             if any(not _number(record[key], 0, 1) for key in ("morgan_similarity", "maccs_similarity", "final_similarity")):
                 raise ValueError(PROOF_ERROR)

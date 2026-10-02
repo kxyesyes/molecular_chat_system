@@ -18,6 +18,12 @@ from src.reverse_target.config import (
     get_chembl_db_path,
     get_reverse_target_data_dir,
 )
+from src.reverse_target.data_quality import (
+    apply_activity_quality_flags,
+    deduplicate_activity_rows,
+    quality_filter_for_training,
+    training_columns,
+)
 
 
 class ChEMBLDataExtractor:
@@ -52,8 +58,14 @@ class ChEMBLDataExtractor:
             act.standard_type,
             act.standard_value,
             act.standard_units,
+            act.standard_relation,
             act.pchembl_value,
-            td.organism
+            td.organism,
+            td.chembl_id AS target_chembl_id,
+            td.tax_id AS taxon_id,
+            act.assay_id,
+            a.confidence_score AS assay_confidence_score,
+            d.chembl_id AS document_chembl_id
         FROM
             activities act
         INNER JOIN
@@ -64,10 +76,11 @@ class ChEMBLDataExtractor:
             assays a ON act.assay_id = a.assay_id
         INNER JOIN
             target_dictionary td ON a.tid = td.tid
+        LEFT JOIN
+            docs d ON a.doc_id = d.doc_id
         WHERE
             act.standard_type IS NOT NULL
             AND act.standard_value IS NOT NULL
-            AND act.standard_units IS NOT NULL
             AND cs.canonical_smiles IS NOT NULL
             AND td.pref_name IS NOT NULL
             AND act.standard_type IN ('IC50', 'EC50', 'Ki', 'Kd')
@@ -97,12 +110,12 @@ class ChEMBLDataExtractor:
         print(f"初始数据量: {initial_count}")
         
         # 1. 移除空值
-        df = df.dropna(subset=['molecule_chembl_id', 'canonical_smiles', 'target_name', 
+        df = df.dropna(subset=['molecule_chembl_id', 'canonical_smiles', 'target_name',
                                 'standard_type', 'standard_value', 'organism'])
         print(f"移除空值后: {len(df)} 条 (-{initial_count - len(df)})")
         
-        # 2. 移除重复数据
-        df = df.drop_duplicates(subset=['molecule_chembl_id', 'target_name', 'standard_type'])
+        # 2. 只移除完全相同的观测；不同 assay、物种或文献不能合并
+        df = deduplicate_activity_rows(df)
         print(f"移除重复后: {len(df)} 条")
         
         # 3. 标准化生物体名称
@@ -120,30 +133,8 @@ class ChEMBLDataExtractor:
         df = df[(df['standard_value'] > 0) & (df['standard_value'] < 1e8)]
         print(f"过滤异常值后: {len(df)} 条")
         
-        # 7. 标准化单位为 nM
-        def convert_to_nm(row):
-            value = row['standard_value']
-            unit = row['standard_units']
-            
-            if pd.isna(unit):
-                return value
-            
-            unit = unit.lower().strip()
-            
-            if unit in ['nm', 'nanomolar']:
-                return value
-            elif unit in ['um', 'µm', 'micromolar', 'μm']:
-                return value * 1000  # μM -> nM
-            elif unit in ['mm', 'millimolar']:
-                return value * 1000000  # mM -> nM
-            elif unit in ['m', 'molar']:
-                return value * 1000000000  # M -> nM
-            elif unit in ['pm', 'picomolar']:
-                return value / 1000  # pM -> nM
-            else:
-                return value
-        
-        df['standard_value_nm'] = df.apply(convert_to_nm, axis=1)
+        # 7. 单位、关系和 assay provenance 由统一质量门处理；未知单位不再猜作 nM
+        df = apply_activity_quality_flags(df)
         
         print(f"最终数据量: {len(df)} 条")
         
@@ -153,25 +144,14 @@ class ChEMBLDataExtractor:
         """格式化为训练数据格式"""
         print("\n格式化训练数据...")
         
-        # 选择需要的列
-        training_df = df[[
-            'molecule_chembl_id',
-            'canonical_smiles',
-            'target_name',
-            'standard_type',
-            'standard_value_nm',
-            'organism'
-        ]].copy()
+        # 训练索引只接收质量门通过的记录；完整清洗结果另存为审计表
+        audit_path = self.output_dir / "chembl_quality_audit.tsv"
+        df.to_csv(audit_path, sep='\t', index=False)
+        training_source = quality_filter_for_training(df)
+        training_df = training_source[training_columns(training_source)].copy()
         
         # 重命名列以匹配要求的格式
-        training_df.columns = [
-            'molecule_chembl_id',
-            'canonical_smiles',
-            'target_name',
-            'standard_type',
-            'standard_value',
-            'organism'
-        ]
+        training_df = training_df.rename(columns={'standard_value_nm': 'standard_value'})
         
         # 保存训练数据
         output_path = self.output_dir / "chembl_training_data.tsv"
