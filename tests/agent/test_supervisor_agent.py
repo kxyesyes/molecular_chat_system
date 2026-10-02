@@ -50,7 +50,24 @@ class FakeTool:
         elif self.name == "admet_predictor":
             data = [{"smiles": "CCO", "admet": {"prediction_method": "test"}}]
         elif self.name == "activity_predictor":
-            data = [{"smiles": "CCO", "success": True, "value": 0.5}]
+            row = {
+                "smiles": "CCO",
+                "success": True,
+                "task_type": "regression",
+                "endpoint": "pIC50",
+                "units": "pIC50",
+                "value": 0.5,
+                "model_provenance": {
+                    "model_id": "synthetic-test-activity",
+                    "weights_sha256": "a" * 64,
+                    "task_type": "regression",
+                    "endpoint": "pIC50",
+                    "units": "pIC50",
+                    "demo_mode": False,
+                    "fallback_used": False,
+                },
+            }
+            data = [row]
         elif self.name == "candidate_ranker":
             data = {"top_candidates": [{"canonical_smiles": "CCO", "score": 0.5}]}
         else:
@@ -59,6 +76,8 @@ class FakeTool:
             "success": True,
             "message": f"{self.name} ok",
             "data": data,
+            "evidence": ([{"prediction": data[0]}]
+                         if self.name == "activity_predictor" else []),
             "formatted": f"{self.name}: {query}",
         }
 

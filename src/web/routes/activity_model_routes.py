@@ -9,6 +9,7 @@ def setup_activity_model_routes(app, *, _support):
     async def start_activity_training(
         file: UploadFile           = File(...),
         target_column: str         = Form(...),
+        smiles_column: str          = Form("smiles"),
         task_type: str             = Form("regression"),
         epochs: int                = Form(50, ge=1, le=1000),
         learning_rate: float       = Form(0.001, gt=0, le=1),
@@ -21,7 +22,9 @@ def setup_activity_model_routes(app, *, _support):
         loss_metric: str           = Form("MSE"),
         lr_scheduler: str          = Form("Cosine"),
         split_strategy: str        = Form("scaffold"),
-        random_seed: int           = Form(42, ge=0, le=2147483647)
+        random_seed: int           = Form(42, ge=0, le=2147483647),
+        classification_threshold: float | None = Form(None),
+        classification_direction: str | None = Form(None),
     ):
         """提交活性预测模型训练任务"""
         temp_file = None
@@ -34,6 +37,16 @@ def setup_activity_model_routes(app, *, _support):
                     status_code=400,
                     detail="split_strategy must be 'scaffold' or 'random'",
                 )
+            if not smiles_column.strip():
+                raise HTTPException(status_code=400, detail="smiles_column 不能为空")
+            if classification_direction is not None:
+                classification_direction = classification_direction.strip().lower() or None
+            if classification_direction not in {None, "greater_or_equal", "less_or_equal"}:
+                raise HTTPException(status_code=400, detail="classification_direction 无效")
+            if task_type.strip().lower() != "classification" and (
+                classification_threshold is not None or classification_direction is not None
+            ):
+                raise HTTPException(status_code=400, detail="分类阈值仅适用于 classification")
             content = await _support._read_upload_limited(file, "activity training dataset")
 
             # 1. 保存上传的数据集
@@ -51,6 +64,7 @@ def setup_activity_model_routes(app, *, _support):
             job_id = submit_training_job(
                 file_path=temp_path,
                 target_column=target_column,
+                smiles_column=smiles_column,
                 task_type=task_type,
                 epochs=epochs,
                 lr=learning_rate,
@@ -65,6 +79,8 @@ def setup_activity_model_routes(app, *, _support):
                 lr_scheduler=lr_scheduler,
                 split_strategy=split_strategy,
                 random_seed=random_seed,
+                classification_threshold=classification_threshold,
+                classification_direction=classification_direction,
             )
             retain_temp_file = True
 

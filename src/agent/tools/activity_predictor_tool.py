@@ -133,6 +133,8 @@ class ActivityPredictorTool(BaseMolecularTool):
 
     def _execute_legacy(self, query: str, smiles_list) -> Dict[str, Any]:
         result = self._create_base_result(query)
+        result["status"] = "failed"
+        result["quality"] = {"prediction_status": "failed"}
 
         if not self._check_rdkit(result):
             return result
@@ -146,6 +148,16 @@ class ActivityPredictorTool(BaseMolecularTool):
         try:
             predictor = self._get_predictor()
             predictions = predictor.predict(smiles_list)
+            # A failed inference is not allowed to carry a stale numeric value
+            # from a provider/adapter. Keep the row and its error, but remove
+            # scientific claim fields before status/evidence normalization.
+            for prediction in predictions:
+                if isinstance(prediction, dict) and prediction.get("success") is not True:
+                    for key in (
+                        "task_type", "endpoint", "units", "value", "probability",
+                        "model_provenance", "activity_score", "pic50", "pIC50",
+                    ):
+                        prediction.pop(key, None)
             successful_predictions = [
                 pred for pred in predictions if pred.get("success")
             ]
@@ -186,12 +198,25 @@ class ActivityPredictorTool(BaseMolecularTool):
                         f"| `{pred.get('smiles', 'N/A')[:40]}` | - | - | ❌ 失败 | - | {pred.get('error', '')} |"
                     )
 
-            result['success'] = bool(successful_predictions)
+            if successful_predictions and len(successful_predictions) == len(predictions):
+                prediction_status = "passed"
+            elif successful_predictions:
+                prediction_status = "partial"
+            else:
+                prediction_status = "failed"
+
+            # `success` means the complete requested batch succeeded.  A
+            # partial batch keeps its successful rows and evidence, but must
+            # not be promoted to a completed scientific observation.
+            result['success'] = prediction_status == "passed"
+            result['status'] = prediction_status
             result['data'] = predictions
             result['formatted'] = "\n".join(lines) if successful_predictions else ""
             result['message'] = (
-                f"完成 {len(successful_predictions)} 个分子的任务感知活性预测"
-                if successful_predictions
+                f"完成 {len(successful_predictions)}/{len(predictions)} 个分子的任务感知活性预测"
+                if prediction_status == "partial"
+                else f"完成 {len(successful_predictions)} 个分子的任务感知活性预测"
+                if prediction_status == "passed"
                 else "RG-MPNN 未返回任何真实活性预测结果"
             )
             metadata = getattr(predictor, "current_model_metadata", None) or {}
@@ -202,12 +227,29 @@ class ActivityPredictorTool(BaseMolecularTool):
                 "units": metadata.get("units"),
                 "task_type": metadata.get("task_type"),
                 "demo_mode": bool(getattr(predictor, "demo_mode", True)),
+                "fallback_used": False,
             }
+            if metadata.get("model_implementation_version") is not None:
+                model_provenance["implementation_version"] = metadata[
+                    "model_implementation_version"
+                ]
             for prediction in successful_predictions:
-                prediction["model_provenance"] = dict(model_provenance)
+                prediction["model_provenance"] = dict(
+                    prediction.get("model_provenance") or model_provenance
+                )
             result['quality'] = {
-                "model_provenance": model_provenance
+                "model_provenance": model_provenance,
+                "prediction_status": prediction_status,
             }
+            result['warnings'] = [
+                str(pred.get("error"))
+                for pred in predictions
+                if not pred.get("success") and pred.get("error")
+            ]
+            result['evidence'] = [
+                {"prediction": deepcopy(prediction)}
+                for prediction in successful_predictions
+            ]
 
         except Exception as e:
             logger.error(f"活性预测失败: {e}", exc_info=True)

@@ -110,8 +110,9 @@ def test_direct_activity_validator_does_not_depend_on_field_casing(field, demo):
         "activity_predictor", [{"smiles": "CCO", field: 7.5}],
         quality={"model_provenance": {"model_path": "synthetic-unloaded", "demo_mode": demo}},
     )
-    # This checks the existing provenance metadata rule, not actual model loading.
-    assert bool(ActivityResultValidator().validate(observation)) is demo
+    # Legacy numeric fields are rejected regardless of casing; actual model
+    # loading remains outside this pure contract test.
+    assert ActivityResultValidator().validate(observation)
 
 
 @pytest.mark.parametrize("entry", ["supervisor", "react"])

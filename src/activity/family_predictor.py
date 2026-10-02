@@ -38,9 +38,22 @@ class _PinnedPredictor(ActivityPredictor):
         # Fail closed on PyTorch versions without restricted loading support.
         state = torch.load(io.BytesIO(self._content), map_location=self.device, weights_only=True)
         config = self._metadata["model_config"]
-        self.model = RGNN(**{key: config[key] for key in (
+        model_kwargs = {key: config[key] for key in (
             "in_channels", "channels", "out_channels", "edge_dim", "num_passing_atom",
-            "num_passing_pool", "num_passing_rg", "num_passing_mol", "dropout")}).to(self.device)
+            "num_passing_pool", "num_passing_rg", "num_passing_mol", "dropout",
+            "implementation_version") if key in config}
+        if "implementation_version" not in model_kwargs:
+            state_dict = state["state_dict"] if "state_dict" in state else state
+            residual_indices = {
+                int(key.split(".")[1])
+                for key in state_dict
+                if key.startswith("atom_res_lins.")
+            }
+            atom_layers = int(config.get("num_passing_atom", 1))
+            model_kwargs["implementation_version"] = (
+                2 if len(residual_indices) >= atom_layers else 1
+            )
+        self.model = RGNN(**model_kwargs).to(self.device)
         self.model.load_state_dict(state["state_dict"] if "state_dict" in state else state, strict=True)
         self.model.eval()
         self.current_model_metadata = copy.deepcopy(self._metadata)
@@ -75,10 +88,18 @@ def _stage_results(stage, inputs, task):
 def _value(result, task):
     key, endpoint, units = (("probability", "activity", "probability") if task == "classification"
                             else ("value", "pIC50", "pIC50"))
+    provenance = result.get("model_provenance") or {}
+    invalid_flags = bool(provenance and (
+        provenance.get("demo_mode") is not False
+        or provenance.get("fallback_used") is not False
+    ))
+    if "demo_mode" in result:
+        invalid_flags = invalid_flags or result["demo_mode"] is not False
+    if "fallback_used" in result:
+        invalid_flags = invalid_flags or result["fallback_used"] is not False
     if (result.get("success") is not True or result.get("task_type") != task
             or result.get("endpoint") != endpoint or result.get("units") != units
-            or result.get("demo_mode", False) is not False
-            or result.get("fallback_used", False) is not False):
+            or invalid_flags):
         raise ValueError("Stage failed or output contract invalid")
     value = result.get(key)
     if type(value) not in (int, float) or not math.isfinite(value):

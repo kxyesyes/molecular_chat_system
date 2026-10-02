@@ -76,6 +76,13 @@ def test_regression_prediction_preserves_registered_endpoint_schema() -> None:
         "endpoint": "pIC50",
         "value": pytest.approx(6.2),
         "units": "log10(mol/L)",
+        "model_provenance": {
+            "model_id": "contract-model",
+            "weights_sha256": "a" * 64,
+            "model_path": "data/activity/models/contract-model.pt",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
     }
     assert {"activity_score", "confidence", "class"}.isdisjoint(result)
 
@@ -98,6 +105,13 @@ def test_classification_logit_is_sigmoid_probability_without_invented_fields() -
         "endpoint": "AURKA_active",
         "probability": pytest.approx(0.5),
         "units": "probability",
+        "model_provenance": {
+            "model_id": "contract-model",
+            "weights_sha256": "a" * 64,
+            "model_path": "data/activity/models/contract-model.pt",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
     }
     assert {"pIC50", "activity_score", "confidence", "class"}.isdisjoint(result)
 
@@ -384,6 +398,7 @@ def test_agent_tool_formats_task_schema_and_exposes_complete_provenance(
         "units": prediction["units"],
         "task_type": prediction["task_type"],
         "demo_mode": False,
+        "fallback_used": False,
     }
     assert result["data"][0]["model_provenance"] == result["quality"][
         "model_provenance"
@@ -468,15 +483,21 @@ def test_training_api_and_frontend_forward_split_strategy(
         files={"file": ("train.csv", b"smiles,label\nCCO,1\n", "text/csv")},
         data={
             "target_column": "label",
+            "smiles_column": "structure",
             "task_type": "classification",
             "split_strategy": "random",
             "random_seed": "31",
+            "classification_threshold": "5",
+            "classification_direction": "greater_or_equal",
         },
     )
 
     assert response.status_code == 200
     assert captured["split_strategy"] == "random"
     assert captured["random_seed"] == 31
+    assert captured["smiles_column"] == "structure"
+    assert captured["classification_threshold"] == 5
+    assert captured["classification_direction"] == "greater_or_equal"
 
     source = (
         Path(__file__).parents[1]

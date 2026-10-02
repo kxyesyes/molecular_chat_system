@@ -5,6 +5,8 @@ import uuid
 import threading
 import logging
 import random
+import platform
+import sys
 from pathlib import Path
 from typing import Dict, Any, List
 import pandas as pd
@@ -17,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Global dictionary to track training jobs
 training_jobs: Dict[str, Dict[str, Any]] = {}
 MODELS_DIR = Path("data/activity/models")
+MODEL_IMPLEMENTATION_VERSION = 2
 
 
 def get_activity_models_dir() -> Path:
@@ -97,26 +100,53 @@ def _split_indices(
     if requested_strategy not in {"scaffold", "random"}:
         raise ValueError("split_strategy must be 'scaffold' or 'random'")
 
-    indices = list(range(len(smiles_list)))
-    if requested_strategy == "random":
-        from sklearn.model_selection import train_test_split
+    from rdkit import Chem
+    from rdkit.Chem.Scaffolds import MurckoScaffold
 
-        train_indices, val_indices = train_test_split(
-            indices,
-            test_size=validation_fraction,
-            random_state=random_seed,
+    # Group canonical duplicates before either split strategy.  A random split
+    # of raw rows otherwise leaks replicate/alternate-SMILES observations into
+    # validation and produces over-optimistic metrics.
+    duplicate_groups: Dict[str, List[int]] = {}
+    for index, smiles in enumerate(smiles_list):
+        molecule = Chem.MolFromSmiles(str(smiles))
+        if molecule is None:
+            raise ValueError(f"Invalid SMILES at index {index}; split cannot be calculated")
+        canonical = Chem.MolToSmiles(molecule, canonical=True)
+        duplicate_groups.setdefault(canonical, []).append(index)
+
+    if requested_strategy == "random":
+        grouped_indices = list(duplicate_groups.values())
+        random.Random(random_seed).shuffle(grouped_indices)
+        target_val_size = max(
+            1,
+            min(len(smiles_list) - 1, round(len(smiles_list) * validation_fraction)),
         )
+        val_groups: List[List[int]] = []
+        val_size = 0
+        for group in grouped_indices:
+            proposed_size = val_size + len(group)
+            if proposed_size >= len(smiles_list):
+                continue
+            if abs(proposed_size - target_val_size) < abs(val_size - target_val_size):
+                val_groups.append(group)
+                val_size = proposed_size
+        if not val_groups:
+            val_groups = [min(grouped_indices, key=len)]
+        selected = {id(group) for group in val_groups}
+        val_indices = sorted(index for group in val_groups for index in group)
+        train_indices = sorted(
+            index for group in grouped_indices if id(group) not in selected for index in group
+        )
+        if not train_indices or not val_indices:
+            raise ValueError("Random split could not produce non-empty train and validation sets")
         return {
-            "train_indices": list(train_indices),
-            "val_indices": list(val_indices),
+            "train_indices": train_indices,
+            "val_indices": val_indices,
             "requested_strategy": requested_strategy,
             "actual_strategy": "random",
             "random_seed": random_seed,
             "warnings": [],
         }
-
-    from rdkit import Chem
-    from rdkit.Chem.Scaffolds import MurckoScaffold
 
     scaffold_groups: Dict[str, List[int]] = {}
     for index, smiles in enumerate(smiles_list):
@@ -180,6 +210,77 @@ def _split_indices(
     }
 
 
+def _prepare_training_labels(
+    values: List[Any],
+    *,
+    task_type: str,
+    classification_threshold: float | None = None,
+    classification_direction: str | None = None,
+) -> List[float]:
+    """Validate labels and make any continuous-to-classification transform explicit."""
+    task = str(task_type).strip().lower()
+    if task not in {"regression", "classification"}:
+        raise ValueError("task_type must be 'regression' or 'classification'")
+    if any(type(value) not in (int, float) or not np.isfinite(float(value)) for value in values):
+        raise ValueError("Training labels must be finite numeric values")
+    numeric = [float(value) for value in values]
+    if task == "regression":
+        return numeric
+
+    binary = set(numeric) <= {0.0, 1.0}
+    if binary and classification_threshold is None and classification_direction is None:
+        prepared = numeric
+    else:
+        if classification_threshold is None or classification_direction not in {
+            "greater_or_equal", "less_or_equal"
+        }:
+            raise ValueError(
+                "Continuous classification labels require an explicit threshold and direction"
+            )
+        if not np.isfinite(float(classification_threshold)):
+            raise ValueError("classification_threshold must be finite")
+        if classification_direction == "greater_or_equal":
+            prepared = [float(value >= classification_threshold) for value in numeric]
+        else:
+            prepared = [float(value <= classification_threshold) for value in numeric]
+    if len(set(prepared)) < 2:
+        raise ValueError("Classification labels must contain both classes")
+    return prepared
+
+
+def _seed_training(seed: int, torch_module) -> dict:
+    """Seed every RNG used by the training loop and describe limitations."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch_module.manual_seed(seed)
+    cuda_available = bool(torch_module.cuda.is_available())
+    if cuda_available:
+        torch_module.cuda.manual_seed_all(seed)
+    try:
+        from rdkit import rdBase
+        rdkit_version = rdBase.rdkitVersion
+    except Exception:
+        rdkit_version = "unavailable"
+    return {
+        "seed": seed,
+        "python_random": True,
+        "numpy_random": True,
+        "torch_random": True,
+        "cuda_random": cuda_available,
+        "runtime": {
+            "python": sys.version.split()[0],
+            "platform": platform.platform(),
+            "torch": getattr(torch_module, "__version__", "unknown"),
+            "rdkit": rdkit_version,
+        },
+        "deterministic_algorithms": False,
+        "limitations": [
+            "GPU kernels and library implementations may remain nondeterministic",
+            "reproducibility requires the recorded runtime and dependency versions",
+        ],
+    }
+
+
 def _build_model_metadata(
     *,
     model_id: str,
@@ -198,6 +299,9 @@ def _build_model_metadata(
     split_warnings: List[str] | None = None,
     created_at: float | None = None,
     prepared_metadata: dict | None = None,
+    classification_threshold: float | None = None,
+    classification_direction: str | None = None,
+    reproducibility: dict | None = None,
 ) -> dict:
     """Build legacy metadata or attach an explicitly validated endpoint contract.
 
@@ -220,6 +324,7 @@ def _build_model_metadata(
         "random_seed": random_seed,
         "split_warnings": list(split_warnings or []),
         "model_config": dict(model_config),
+        "model_implementation_version": MODEL_IMPLEMENTATION_VERSION,
         "model_format": "pytorch_state_dict",
         "weights_sha256": _sha256_file(get_activity_models_dir() / weights_file),
         "metrics": metrics,
@@ -230,7 +335,11 @@ def _build_model_metadata(
         "weights_file": weights_file,
         "scientific_readiness": "legacy_unvalidated",
         "name": f"{target_column} ({task_type}) - {time.strftime('%Y%m%d%H%M', time.localtime(created_at))}",
+        "reproducibility": dict(reproducibility or {}),
     }
+    if classification_threshold is not None:
+        metadata["classification_threshold"] = float(classification_threshold)
+        metadata["classification_direction"] = classification_direction
     if prepared_metadata is not None:
         from src.activity.model_registry import (
             ENDPOINT_METADATA_FIELDS, validate_endpoint_metadata,
@@ -307,22 +416,29 @@ class ActivityTrainer:
                        lr_scheduler: str = "Cosine",
                        split_strategy: str = "scaffold",
                        random_seed: int = 42,
+                       smiles_column: str = "smiles",
+                       classification_threshold: float | None = None,
+                       classification_direction: str | None = None,
                        prepared_manifest_path: str | None = None):
         
         thread = threading.Thread(
             target=self._train_loop, 
             args=(file_path, target_column, task_type, epochs, lr, batch_size, dropout, 
                   num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler,
-                  split_strategy, random_seed),
+                  split_strategy, random_seed, smiles_column,
+                  classification_threshold, classification_direction),
             kwargs={"prepared_manifest_path": prepared_manifest_path}
         )
         thread.start()
         
     def _train_loop(self, file_path, target_column, task_type, total_epochs, lr, batch_size, dropout,
                     num_layers, hidden_size, weight_decay, patience, loss_metric, lr_scheduler,
-                    split_strategy, random_seed, prepared_manifest_path=None):
+                    split_strategy, random_seed, smiles_column="smiles",
+                    classification_threshold=None, classification_direction=None,
+                    prepared_manifest_path=None):
         start_time = time.time()
         self.status["state"] = "running"
+        task_type = str(task_type).strip().lower()
         if prepared_manifest_path is not None:
             try:
                 from src.activity.prepared_training import run_prepared_training
@@ -355,6 +471,8 @@ class ActivityTrainer:
         from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
         
         try:
+            reproducibility = _seed_training(random_seed, torch)
+            self.status["reproducibility"] = reproducibility
             # 1. Load Data
             self._log(f"Loading data from {file_path}...")
             df = None
@@ -373,38 +491,26 @@ class ActivityTrainer:
             df.columns = [str(col).strip() for col in df.columns]
             self._log(f"CSV Columns exactly found: {list(df.columns)}")
             
-            # Find SMILES column
-            smiles_col = None
-            # 1. Try aliases
-            for col in df.columns:
-                if col.lower() in ['smiles', 'smile', 'canonical_smiles', 'canon_smiles', 'smiles_string', 'structure', 'mol', 'molecule']:
-                    smiles_col = col
-                    break
-            
-            # 2. Fallback: looking for columns with SMILES patterns if no alias matches
-            if not smiles_col:
-                for col in df.columns:
-                    if df[col].dtype == object and len(df) > 0:
-                        first_val = str(df[col].iloc[0])
-                        # A very crude check: does it contains 'C' or 'c' and no spaces?
-                        if ('c' in first_val.lower() or 'n' in first_val.lower()) and ' ' not in first_val:
-                           smiles_col = col
-                           break
-            
-            # 3. Final fallback: first object column
-            if not smiles_col:
-                for col in df.columns:
-                    if df[col].dtype == object and len(df) > 0:
-                        smiles_col = col
-                        break
-                        
+            smiles_column = str(smiles_column).strip()
             target_column = str(target_column).strip()
-            if not smiles_col or target_column not in df.columns:
-                raise ValueError(f"Could not find SMILES column or target '{target_column}'. Found columns: {list(df.columns)}")
+            if not smiles_column:
+                raise ValueError("smiles_column must be explicitly selected")
+            selected = [col for col in df.columns if str(col).casefold() == smiles_column.casefold()]
+            if len(selected) != 1 or target_column not in df.columns:
+                raise ValueError(
+                    f"Could not find selected SMILES column '{smiles_column}' or target "
+                    f"'{target_column}'. Found columns: {list(df.columns)}"
+                )
+            smiles_col = selected[0]
             
             df = df.dropna(subset=[smiles_col, target_column])
             smiles_list = df[smiles_col].tolist()
-            targets = df[target_column].tolist()
+            targets = _prepare_training_labels(
+                df[target_column].tolist(),
+                task_type=task_type,
+                classification_threshold=classification_threshold,
+                classification_direction=classification_direction,
+            )
             
             # 2. Extract features
             self._log(f"Found {len(smiles_list)} valid molecules. Starting featurization...")
@@ -423,7 +529,7 @@ class ActivityTrainer:
                     rg_data.y = torch.tensor([float(y)], dtype=torch.float)
                     valid_atom_data.append(atom_data)
                     valid_rg_data.append(rg_data)
-                    valid_y.append(y)
+                    valid_y.append(float(y))
                     valid_smiles.append(str(smi))
                     
             if len(valid_atom_data) < 10:
@@ -475,7 +581,8 @@ class ActivityTrainer:
                          num_passing_pool=1,
                          num_passing_rg=1,
                          num_passing_mol=1,
-                         dropout=dropout).to(self.device)
+                         dropout=dropout,
+                         implementation_version=MODEL_IMPLEMENTATION_VERSION).to(self.device)
             
             optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=float(weight_decay))
             
@@ -529,7 +636,7 @@ class ActivityTrainer:
                     
                     if task_type == "classification":
                         # Convert target to 0 or 1 roughly if not already
-                        target = (target > 0.5).float()
+                        target = target.float()
                         
                     loss = criterion(out, target)
                     loss.backward()
@@ -552,7 +659,7 @@ class ActivityTrainer:
                         out, _ = model(a_batch, r_batch)
                         target = a_batch.y.view(-1)
                         if task_type == "classification":
-                            target = (target > 0.5).float()
+                            target = target.float()
                         loss = criterion(out, target)
                         val_loss += loss.item() * a_batch.num_graphs
                         v_batches += a_batch.num_graphs
@@ -641,6 +748,7 @@ class ActivityTrainer:
                     "num_passing_rg": 1,
                     "num_passing_mol": 1,
                     "dropout": dropout,
+                    "implementation_version": MODEL_IMPLEMENTATION_VERSION,
                 }
                 info = _build_model_metadata(
                     model_id=self.job_id,
@@ -657,6 +765,9 @@ class ActivityTrainer:
                     actual_split_strategy=split_info["actual_strategy"],
                     random_seed=split_info["random_seed"],
                     split_warnings=split_info["warnings"],
+                    classification_threshold=classification_threshold,
+                    classification_direction=classification_direction,
+                    reproducibility=reproducibility,
                 )
                 try:
                     save_model_info(self.job_id, info)

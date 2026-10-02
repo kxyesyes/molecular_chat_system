@@ -322,6 +322,38 @@ check(
 const activityHtml = read("src/web/templates/activity_prediction.html");
 const safeRenderScript = "/static/js/shared/safe_render.js";
 const modelManagerScript = "/static/js/activity_prediction/model_manager.js";
+const resultsRendererSource = read(
+  "src/web/static/js/activity_prediction/results_renderer.js",
+);
+const chartsSource = read("src/web/static/js/activity_prediction/charts.js");
+const utilsSource = read("src/web/static/js/activity_prediction/utils.js");
+
+check(
+  resultsRendererSource.includes("item.task_type === \"classification\"") &&
+    resultsRendererSource.includes("item.probability") &&
+    resultsRendererSource.includes("item.value"),
+  "Results renderer must consume canonical classification probability and regression value fields",
+);
+check(
+  resultsRendererSource.includes("item.model_provenance") &&
+    resultsRendererSource.includes("const provenance = item.provenance || item.model_provenance"),
+  "Results renderer must display canonical model provenance when no family provenance exists",
+);
+check(
+  activityHtml.includes('id="classificationThreshold"') &&
+    activityHtml.includes('id="classificationDirection"') &&
+    read("src/web/static/js/activity_prediction/main.js").includes("classification_threshold"),
+  "Training UI must expose explicit continuous-to-classification threshold and direction",
+);
+check(
+  !chartsSource.includes("Number(item.activity_score || 0)"),
+  "Activity histogram must not turn missing activity values into zero",
+);
+check(
+  utilsSource.includes('normalized === "inactive"') ||
+    utilsSource.includes("normalized === 'inactive'"),
+  "Activity tag classification must handle inactive before active substring matching",
+);
 const safeRenderIndex = activityHtml.indexOf(safeRenderScript);
 const modelManagerIndex = activityHtml.indexOf(modelManagerScript);
 
@@ -453,6 +485,11 @@ try {
       },
       ActivityUtils: {
         animateNumber() {},
+        getPredictionValue(item) {
+          if (item.task_type === "classification") return item.probability;
+          if (item.task_type === "regression") return item.value;
+          return item.activity_score;
+        },
         getTagClass() {
           return "tag-neutral";
         },

@@ -109,6 +109,8 @@ window.ActivityMain = (function () {
       dropout: document.getElementById("dropout").value,
       target_column: document.getElementById("targetColumn").value,
       smiles_column: document.getElementById("smilesColumn").value,
+      classification_threshold: document.getElementById("classificationThreshold").value,
+      classification_direction: document.getElementById("classificationDirection").value,
       split_strategy: normalizeSplitStrategy(
         document.getElementById("splitStrategy").value,
       ),
@@ -151,6 +153,12 @@ window.ActivityMain = (function () {
           }
           if (cfg.smiles_column) {
             document.getElementById("smilesColumn").value = cfg.smiles_column;
+          }
+          if (cfg.classification_threshold !== undefined) {
+            document.getElementById("classificationThreshold").value = cfg.classification_threshold;
+          }
+          if (cfg.classification_direction) {
+            document.getElementById("classificationDirection").value = cfg.classification_direction;
           }
           if (cfg.split_strategy) {
             selectSplitStrategy(cfg.split_strategy);
@@ -210,7 +218,16 @@ window.ActivityMain = (function () {
     const formData = new FormData();
     formData.append("file", trainFile);
     formData.append("target_column", targetColumn);
+    formData.append("smiles_column", document.getElementById("smilesColumn").value.trim());
     formData.append("task_type", taskType);
+    const classificationThreshold = document.getElementById("classificationThreshold").value.trim();
+    const classificationDirection = document.getElementById("classificationDirection").value;
+    if (taskType === "classification" && classificationThreshold !== "") {
+      formData.append("classification_threshold", classificationThreshold);
+    }
+    if (taskType === "classification" && classificationDirection !== "") {
+      formData.append("classification_direction", classificationDirection);
+    }
     formData.append("split_strategy", splitStrategy);
     formData.append("epochs", totalEpochs);
     formData.append("learning_rate", document.getElementById("learningRate").value);

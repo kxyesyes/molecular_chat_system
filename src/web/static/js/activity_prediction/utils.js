@@ -45,21 +45,37 @@ window.ActivityUtils = (function () {
   }
 
   function formatScore(score) {
-    return Number(score || 0).toFixed(3);
+    return Number.isFinite(score) ? Number(score).toFixed(3) : "不可用";
+  }
+
+  function getPredictionValue(item) {
+    if (!item || typeof item !== "object") return null;
+    const value = item.task_type === "classification" ? item.probability
+      : item.task_type === "regression" ? item.value
+      : item.activity_score;
+    return typeof value === "number" && Number.isFinite(value) ? value : null;
   }
 
   function getTagClass(label, score, success, taskType, rangeConfig) {
     if (success === false) return "tag-error";
 
-    const normalized = String(label || "").toLowerCase();
-    if (normalized.includes("high") || normalized.includes("active")) {
+    const normalized = String(label || "").trim().toLowerCase();
+    if (normalized === "inactive" || normalized === "无活性"
+        || normalized === "low" || normalized === "低") {
+      return "tag-low";
+    }
+    if (normalized === "active" || normalized === "有活性"
+        || normalized === "high" || normalized === "高") {
       return "tag-high";
     }
     if (normalized.includes("medium") || normalized.includes("moderate")) {
       return "tag-medium";
     }
-    if (normalized.includes("low") || normalized.includes("inactive")) {
+    if (normalized.includes("inactive") || normalized.includes("无活性")) {
       return "tag-low";
+    }
+    if (normalized.includes("high") || normalized.includes("active")) {
+      return "tag-high";
     }
 
     if (taskType === "classification") {
@@ -128,6 +144,7 @@ window.ActivityUtils = (function () {
     animateNumber: animateNumber,
     setText: setText,
     formatScore: formatScore,
+    getPredictionValue: getPredictionValue,
     getTagClass: getTagClass,
     finalizeHistogramBins: finalizeHistogramBins,
     buildHistogramBins: buildHistogramBins,

@@ -437,7 +437,13 @@ def test_all_null_family_rows_cannot_claim_observations(boundary, status, succes
 def test_family_presence_validation_does_not_change_legacy_task_rows(row):
     from src.agent.contracts import ToolResult
     from src.agent.validators.domain_validators import ActivityResultValidator
-    assert ActivityResultValidator().validate(ToolResult("activity_predictor", row["success"], "", data=[row])) is None
+    result = ActivityResultValidator().validate(
+        ToolResult("activity_predictor", row["success"], "", data=[row])
+    )
+    if row["success"]:
+        assert result is not None
+    else:
+        assert result is None
 
 
 @pytest.mark.parametrize("rows", [

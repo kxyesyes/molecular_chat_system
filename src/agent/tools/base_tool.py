@@ -239,8 +239,15 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
         if isinstance(raw_result, dict):
             status = None
             if raw_result.get("status") is not None:
+                # Activity and a few legacy domain tools historically used
+                # ``passed`` for a successful batch.  Normalize that transport
+                # alias at the compat boundary; all ToolResult consumers still
+                # receive the canonical ObservationStatus enum.
+                raw_status = {
+                    "passed": ObservationStatus.SUCCEEDED.value,
+                }.get(raw_result["status"], raw_result["status"])
                 try:
-                    status = ObservationStatus(raw_result["status"])
+                    status = ObservationStatus(raw_status)
                 except (ValueError, TypeError):
                     return ToolResult.error_result(tool_name, AgentErrorCode.INVALID_OUTPUT,
                                                    "Invalid observation status")

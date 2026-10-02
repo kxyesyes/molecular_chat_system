@@ -14,6 +14,12 @@ from torch_geometric.utils import softmax
 from torch_geometric.nn import GATConv, MessagePassing, global_add_pool
 
 
+# Keep direct constructor callers on the historical semantics.  New training
+# writes version 2 explicitly in model_config; loaders infer the version for
+# metadata-poor checkpoints from their residual projection keys.
+RGNN_IMPLEMENTATION_VERSION = 1
+
+
 def glorot(tensor):
     if tensor is not None:
         stdv = math.sqrt(6.0 / (tensor.size(-2) + tensor.size(-1)))
@@ -129,7 +135,10 @@ class GNN(torch.nn.Module):
         
         # Atom Embedding:
         x = F.leaky_relu_(self.lin1(x)) 
-        res0 = F.leaky_relu_(self.atom_res_lins[0](x)) 
+        # Historical GNN checkpoints have no residual projection for a
+        # one-layer atom stack. Keep their state-dict layout and use the
+        # already projected representation as the residual seed.
+        res0 = F.leaky_relu_(self.atom_res_lins[0](x)) if self.atom_res_lins else x
         m = F.elu_(self.atom_convs[0](x, edge_index, edge_attr))
         m = F.dropout(m, p=self.dropout, training=self.training)
         x = (F.leaky_relu_(self.atom_lins[0](x)) + m).relu_()       
@@ -164,9 +173,16 @@ class RGNN(torch.nn.Module):
                  num_passing_pool=2,
                  num_passing_rg=2,
                  num_passing_mol=2,
-                 dropout=0.0):
+                 dropout=0.0,
+                 implementation_version=RGNN_IMPLEMENTATION_VERSION):
         super(RGNN, self).__init__()
 
+        if implementation_version not in (1, 2):
+            raise ValueError("Unsupported RGNN implementation_version")
+        if num_passing_atom < 1 or num_passing_rg < 1 or num_passing_pool < 1 or num_passing_mol < 1:
+            raise ValueError("RGNN layer counts must be positive")
+
+        self.implementation_version = implementation_version
         self.num_passing_atom = num_passing_atom
         self.num_passing_pool = num_passing_pool
         self.num_passing_rg = num_passing_rg
@@ -184,12 +200,14 @@ class RGNN(torch.nn.Module):
         self.atom_lins = torch.nn.ModuleList([lin])
         self.atom_res_lins = torch.nn.ModuleList()
 
+        residual_count = num_passing_atom if implementation_version >= 2 else num_passing_atom - 1
         for _ in range(num_passing_atom - 1):
             conv = GATConv(channels, channels, dropout=dropout,
                            add_self_loops=False, negative_slope=0.01)
             self.atom_convs.append(conv)
             self.atom_lins.append(lin)
-            self.atom_res_lins.append(res_lin)  
+        for _ in range(residual_count):
+            self.atom_res_lins.append(res_lin)
 
         # atom-RG
         self.pconv = GATConv(channels, channels, 
@@ -242,12 +260,22 @@ class RGNN(torch.nn.Module):
         
         # atom-level
         x = F.leaky_relu_(self.lin1(x)) 
-        res0 = F.leaky_relu_(self.atom_res_lins[0](x))
+        if self.implementation_version >= 2:
+            res0 = F.leaky_relu_(self.atom_res_lins[0](x))
+        else:
+            # Version 1 checkpoints had no residual projection for a
+            # single-layer atom stack. Preserve that state-dict shape.
+            res0 = F.leaky_relu_(self.atom_res_lins[0](x)) if self.atom_res_lins else x
         m = F.elu_(self.atom_convs[0](x, edge_index, edge_attr))
         m = F.dropout(m, p=self.dropout, training=self.training)
         x = (F.leaky_relu_(self.atom_lins[0](x)) + m).relu_()       
 
-        for conv, lin, res_lin in zip(self.atom_convs[1:], self.atom_lins[1:], self.atom_res_lins[1:]):
+        residual_layers = (self.atom_res_lins[1:] if self.implementation_version >= 2
+                           else self.atom_res_lins[1:])
+        if self.implementation_version == 1:
+            # Preserve the historical execution semantics for old weights.
+            residual_layers = self.atom_res_lins[1:]
+        for conv, lin, res_lin in zip(self.atom_convs[1:], self.atom_lins[1:], residual_layers):
             res = F.leaky_relu_(res_lin(x) )
             m = F.elu_(conv(x, edge_index))
             m = F.dropout(m, p=self.dropout, training=self.training)

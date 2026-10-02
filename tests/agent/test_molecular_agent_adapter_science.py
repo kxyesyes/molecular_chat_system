@@ -78,14 +78,13 @@ def activity_result(*, demo=False):
         "demo_mode": demo,
         "fallback_used": False,
     }
-    return success([
-        {
+    rows = [{
             "smiles": "CCO", "success": True, "task_type": "regression",
             "endpoint": "Ki", "units": "nM", "value": 7.125,
-            "activity_score": 7.125,
             "model_provenance": provenance,
-        }
-    ], formatted="SYNTHETIC_ACTIVITY_CLAIM", quality={
+        }]
+    return success(rows, evidence=[{"prediction": deepcopy(rows[0])}],
+                   formatted="SYNTHETIC_ACTIVITY_CLAIM", quality={
         "model_provenance": {
             "model_path": "synthetic-unloaded-model", "demo_mode": demo,
         }
