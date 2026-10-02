@@ -156,6 +156,73 @@ class ReverseTargetHealthTest(unittest.TestCase):
             self.assertEqual(getter_thread_id, predict_thread_id)
             self.assertNotEqual(route_thread_ids[index], getter_thread_id)
 
+    def test_stats_similar_and_3d_load_predictor_in_worker_threads(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
+        from src.reverse_target import predictor as predictor_module
+        from src.web.routes import api_routes
+
+        route_thread_ids = []
+        predictor_thread_events = []
+
+        async def recording_run_in_threadpool(func, *args, **kwargs):
+            route_thread_ids.append(threading.get_ident())
+            return await starlette_run_in_threadpool(func, *args, **kwargs)
+
+        class FakePredictor:
+            def get_stats(self):
+                predictor_thread_events.append(("stats", threading.get_ident()))
+                return {"record_count": 0}
+
+            def get_similar_molecules(self, **kwargs):
+                predictor_thread_events.append(("similar", threading.get_ident()))
+                return []
+
+            def get_raw_similar_molecules(self, **kwargs):
+                predictor_thread_events.append(("raw", threading.get_ident()))
+                return []
+
+        fake_predictor = FakePredictor()
+
+        def fake_get_predictor():
+            predictor_thread_events.append(("get_predictor", threading.get_ident()))
+            return fake_predictor
+
+        app = FastAPI()
+        api_routes.setup_api_routes(app)
+
+        with patch.object(
+            api_routes,
+            "run_in_threadpool",
+            new=recording_run_in_threadpool,
+            create=True,
+        ), patch.object(predictor_module, "get_predictor", new=fake_get_predictor):
+            with TestClient(app) as client:
+                stats = client.get("/api/reverse_target/stats")
+                similar = client.get(
+                    "/api/reverse_target/similar_molecules",
+                    params={"smiles": "CCO", "target_name": "T"},
+                )
+                refined = client.post(
+                    "/api/reverse_target/predict_3d",
+                    data={"smiles": "CCO", "threshold": "0.5", "top_k": "1"},
+                )
+
+        self.assertEqual(stats.status_code, 200, stats.text)
+        self.assertEqual(similar.status_code, 200, similar.text)
+        self.assertEqual(refined.status_code, 200, refined.text)
+        self.assertEqual(
+            [event for event, _ in predictor_thread_events],
+            ["get_predictor", "stats", "get_predictor", "similar", "get_predictor", "raw"],
+        )
+        self.assertEqual(len(route_thread_ids), 3)
+        for index in range(3):
+            getter_thread_id = predictor_thread_events[index * 2][1]
+            operation_thread_id = predictor_thread_events[index * 2 + 1][1]
+            self.assertEqual(getter_thread_id, operation_thread_id)
+            self.assertNotEqual(route_thread_ids[index], getter_thread_id)
+
     def test_reverse_batch_rejects_upload_over_configured_limit(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -182,6 +249,28 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 413, response.text)
         self.assertNotIn("CCO", response.text)
+
+    def test_reverse_batch_rejects_missing_result_rows_instead_of_reordering_silently(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.reverse_target import predictor as predictor_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        class ShortPredictor:
+            def predict_batch(self, **kwargs):
+                return [{"row_index": 0, "success": True, "status": "completed"}]
+
+        app = FastAPI()
+        setup_api_routes(app)
+        with patch.object(predictor_module, "get_predictor", return_value=ShortPredictor()):
+            response = TestClient(app).post(
+                "/api/reverse_target/batch_predict",
+                files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
+                data={"threshold": "0.6", "top_k": "10"},
+            )
+
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertIn("输入行数不一致", response.json()["detail"])
 
     @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
     def test_global_predictor_uses_configured_data_dir(self):

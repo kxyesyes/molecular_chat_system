@@ -96,7 +96,9 @@ const RtResults = (() => {
   //  构建单行得分列 HTML
   // ──────────────────────────────────────
   function _buildScoreCell(result, is3DMode) {
-    if (is3DMode && result.pharm_combined_3d != null) {
+    const isRefined3D = is3DMode && result.pharm_refinement_status === "refined"
+      && result.pharm_combined_3d != null && result.final_3d_score != null;
+    if (isRefined3D) {
       return `<div style="display:flex;flex-direction:column;gap:4px;">
         <div style="display:flex;align-items:center;gap:6px;">
           <span style="font-size:11px;color:#6d28d9;">🔬 3D</span>
@@ -124,33 +126,43 @@ const RtResults = (() => {
         </div>
       </div>`;
     }
+    const fallbackLabel = is3DMode && result.pharm_refinement_status !== "refined"
+      ? "2D fallback"
+      : "综合";
     return `<div class="similarity-wrapper">
         <div class="similarity-bar" style="width:${result.final_similarity * 100}%"></div>
       </div>
       <div style="display:flex;justify-content:space-between;font-size:12px;color:#64748b;margin-top:4px;">
-        <span>综合: ${(result.final_similarity * 100).toFixed(1)}%</span>
+        <span>${fallbackLabel}: ${(result.final_similarity * 100).toFixed(1)}%</span>
         <span>(Morgan: ${(result.morgan_similarity * 100).toFixed(0)}%)</span>
       </div>`;
   }
 
   function _buildCompactScorePanel(result, is3DMode) {
-    const finalScore = is3DMode && result.final_3d_score != null
+    const isRefined3D = is3DMode && result.pharm_refinement_status === "refined"
+      && result.final_3d_score != null;
+    const finalScore = isRefined3D
       ? Number(result.final_3d_score)
       : Number(result.final_similarity || 0);
     const percent = Math.max(0, Math.min(100, finalScore * 100));
-    const scoreLabel = is3DMode ? "3D 综合" : "综合";
+    const scoreLabel = isRefined3D
+      ? "3D 综合"
+      : (is3DMode && result.pharm_refinement_status !== "refined" ? "2D fallback" : "综合");
     const details = [];
-    if (is3DMode && result.pharm_similarity != null) {
+    if (isRefined3D && result.pharm_similarity != null) {
       details.push(`药效团 ${Math.round(Number(result.pharm_similarity) * 100)}%`);
     }
-    if (is3DMode && (result.alignment_score != null || result.spatial_score != null)) {
+    if (isRefined3D && (result.alignment_score != null || result.spatial_score != null)) {
       details.push(`叠合 ${Math.round(Number(result.alignment_score ?? result.spatial_score) * 100)}%`);
     }
-    if (is3DMode && result.alignment_rmsd != null) {
+    if (isRefined3D && result.alignment_rmsd != null) {
       details.push(`RMSD ${Number(result.alignment_rmsd).toFixed(2)} Å`);
     }
     if (result.final_similarity != null) {
       details.push(`2D ${Math.round(Number(result.final_similarity) * 100)}%`);
+    }
+    if (is3DMode && result.pharm_refinement_status && result.pharm_refinement_status !== "refined") {
+      details.push(result.pharm_error ? `未精修：${result.pharm_error}` : "未完成 3D 精修");
     }
 
     return `
@@ -167,7 +179,10 @@ const RtResults = (() => {
   }
 
   function _confidenceMeta(result, is3DMode) {
-    const score = is3DMode && result.final_3d_score != null
+    const isRefined3D = is3DMode && result.pharm_refinement_status === "refined"
+      && result.final_3d_score != null;
+    if (is3DMode && !isRefined3D) return { label: "2D参考", cls: "low" };
+    const score = isRefined3D
       ? Number(result.final_3d_score)
       : Number(result.final_similarity || 0);
     if (score >= 0.85) return { label: "高可信", cls: "high" };
@@ -179,9 +194,11 @@ const RtResults = (() => {
     const parts = [];
     parts.push(`相似分子 ${result.similar_count || 1} 个`);
     if (result.standard_type) parts.push(`${result.standard_type} ${Number(result.standard_value || 0).toFixed(1)} nM`);
-    if (is3DMode && result.final_3d_score != null) {
+    if (is3DMode && result.pharm_refinement_status === "refined" && result.final_3d_score != null) {
       parts.push(`3D ${(Number(result.final_3d_score) * 100).toFixed(1)}%`);
       if (result.alignment_rmsd != null) parts.push(`RMSD ${Number(result.alignment_rmsd).toFixed(2)} Å`);
+    } else if (is3DMode && result.pharm_refinement_status && result.pharm_refinement_status !== "refined") {
+      parts.push("2D fallback");
     }
     return escapeHtml(parts.join(" · "));
   }

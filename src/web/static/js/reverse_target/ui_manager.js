@@ -146,9 +146,12 @@ const RtUI = (() => {
 
     const headers = [
       "row_index",
+      "original_row_index",
       "query_smiles",
       "status",
       "error",
+      "pharm_refinement_status",
+      "pharm_error",
       "target_name",
       "organism",
       "molecule_chembl_id",
@@ -186,6 +189,7 @@ const RtUI = (() => {
         if (item.targets.length === 0) {
           rows.push({
             row_index: item.row_index,
+            original_row_index: item.original_row_index ?? item.row_index,
             query_smiles: item.query_smiles || "",
             status: item.status || "no_match",
             error: item.error || "未找到匹配靶点",
@@ -194,6 +198,7 @@ const RtUI = (() => {
           item.targets.forEach((target) => {
             rows.push({
               row_index: item.row_index,
+              original_row_index: item.original_row_index ?? item.row_index,
               query_smiles: item.query_smiles || "",
               status: item.status || "completed",
               error: item.error || "",
@@ -204,6 +209,7 @@ const RtUI = (() => {
       } else if (item && item.target_name) {
         rows.push({
           row_index: item.row_index,
+          original_row_index: item.original_row_index ?? item.row_index,
           query_smiles: window.currentQuerySmiles || "",
           status: item.status || "completed",
           error: item.error || "",
@@ -212,6 +218,7 @@ const RtUI = (() => {
       } else if (item) {
         rows.push({
           row_index: item.row_index,
+          original_row_index: item.original_row_index ?? item.row_index,
           query_smiles: item.query_smiles || "",
           status: item.status || (item.success ? "completed" : "failed"),
           error: item.error || "",

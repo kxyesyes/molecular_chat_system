@@ -482,7 +482,37 @@ def _feature_distance_cutoff(family: str, fallback: float) -> float:
     return max(float(fallback), FEATURE_DISTANCE_CUTOFFS.get(family, float(fallback)))
 
 
+def _apply_2d_fallback(candidate: Dict, status: str, error: str = "") -> Dict:
+    """Mark a row as 2D-only so it can never be ranked as a 3D result."""
+    candidate["final_3d_score"] = None
+    candidate["rank_score"] = candidate.get("final_similarity", 0.0)
+    candidate["score_semantics"] = "2d_similarity_fallback"
+    candidate["pharm_combined_3d"] = None
+    candidate["pharm_similarity"] = None
+    candidate["alignment_score"] = None
+    candidate["spatial_score"] = None
+    candidate["pharm_score_method"] = None
+    candidate["pharm_matching_method"] = None
+    candidate["pharm_features"] = []
+    candidate["pharm_refinement_status"] = status
+    if error:
+        candidate["pharm_error"] = error
+    return candidate
+
+
+_MATCH_BEAM_WIDTH = 32
+
+
 def _best_family_matches(query_group: List[Dict], hit_group: List[Dict], distance_cutoff: float, check=None) -> List[Dict]:
+    """Match same-family features with a bounded, interruptible beam search.
+
+    The previous implementation exhaustively enumerated every compatible
+    matching.  Highly symmetric molecules make that search exponential and
+    allow a single request to consume an unbounded amount of CPU.  The bounded
+    beam keeps the best partial matchings by cardinality and distance, so the
+    work is polynomial in the number of candidate edges while ``check`` still
+    provides the caller's deadline/cancellation boundary.
+    """
     if not query_group or not hit_group:
         return []
 
@@ -498,67 +528,59 @@ def _best_family_matches(query_group: List[Dict], hit_group: List[Dict], distanc
     if not distances:
         return []
 
-    distances.sort(key=lambda item: item[0])
-    if len(distances) > 120:
-        matched = []
-        used_query = set()
-        used_hit = set()
-        for distance, query, hit in distances:
-            if query["index"] in used_query or hit["index"] in used_hit:
-                continue
-            used_query.add(query["index"])
-            used_hit.add(hit["index"])
-            matched.append({
-                "query_index": query["index"],
-                "hit_index": hit["index"],
-                "family": query["family"],
-                "distance": round(distance, 4),
-            })
-        return matched
+    distances.sort(key=lambda item: (item[0], item[1]["index"], item[2]["index"]))
 
-    best_matches: List[Dict] = []
-    best_distance = float("inf")
-
-    def backtrack(position: int, used_query: set, used_hit: set, chosen: List[tuple], total_distance: float):
+    # State: (used query ids, used hit ids, chosen edges, total distance).
+    beam = [(frozenset(), frozenset(), tuple(), 0.0)]
+    for distance, query, hit in distances:
         if check:
             check()
-        nonlocal best_matches, best_distance
-        if position >= len(distances):
-            if len(chosen) > len(best_matches) or (
-                len(chosen) == len(best_matches) and total_distance < best_distance
-            ):
-                best_matches = [
-                    {
-                        "query_index": query["index"],
-                        "hit_index": hit["index"],
-                        "family": query["family"],
-                        "distance": round(distance, 4),
-                    }
-                    for distance, query, hit in chosen
-                ]
-                best_distance = total_distance
-            return
-
-        remaining = len(distances) - position
-        if len(chosen) + remaining < len(best_matches):
-            return
-
-        distance, query, hit = distances[position]
+        next_states = list(beam)  # skip this edge
         query_id = query["index"]
         hit_id = hit["index"]
-        if query_id not in used_query and hit_id not in used_hit:
-            used_query.add(query_id)
-            used_hit.add(hit_id)
-            chosen.append((distance, query, hit))
-            backtrack(position + 1, used_query, used_hit, chosen, total_distance + distance)
-            chosen.pop()
-            used_hit.remove(hit_id)
-            used_query.remove(query_id)
+        for used_query, used_hit, chosen, total_distance in beam:
+            if check:
+                check()
+            if query_id in used_query or hit_id in used_hit:
+                continue
+            next_states.append(
+                (
+                    used_query | {query_id},
+                    used_hit | {hit_id},
+                    chosen + ((distance, query, hit),),
+                    total_distance + distance,
+                )
+            )
 
-        backtrack(position + 1, used_query, used_hit, chosen, total_distance)
+        # Equivalent used-id sets need only their shortest partial matching.
+        deduplicated = {}
+        for state in next_states:
+            key = (state[0], state[1])
+            previous = deduplicated.get(key)
+            if previous is None or (len(state[2]), -state[3]) > (len(previous[2]), -previous[3]):
+                deduplicated[key] = state
+        beam = sorted(
+            deduplicated.values(),
+            key=lambda state: (-len(state[2]), state[3], tuple(
+                (edge[1]["index"], edge[2]["index"]) for edge in state[2]
+            )),
+        )[:_MATCH_BEAM_WIDTH]
 
-    backtrack(0, set(), set(), [], 0.0)
-    return best_matches
+    best = min(
+        beam,
+        key=lambda state: (-len(state[2]), state[3], tuple(
+            (edge[1]["index"], edge[2]["index"]) for edge in state[2]
+        )),
+    )
+    return [
+        {
+            "query_index": query["index"],
+            "hit_index": hit["index"],
+            "family": query["family"],
+            "distance": round(distance, 4),
+        }
+        for distance, query, hit in best[2]
+    ]
 
 
 def _score_transformed_alignment(
@@ -610,6 +632,7 @@ def _score_transformed_alignment(
         "possible_pair_count": possible_count,
         "alignment_coverage": round(coverage, 4),
         "alignment_pairs": matched,
+        "matching_method": "bounded_beam_search",
     }
 
 
@@ -810,6 +833,7 @@ def compute_pharm3d_score(smiles_query: str, smiles_hit: str) -> Dict:
         "alignment_pairs":  alignment.get("alignment_pairs", []),
         "alignment_coverage": alignment.get("alignment_coverage", 0.0),
         "score_method":     alignment.get("score_method", "feature_distribution_score"),
+        "matching_method":   alignment.get("matching_method"),
         "combined_3d_score": combined,
         "query_features":   feats_q,
         "hit_features":     feats_h,
@@ -859,27 +883,22 @@ def refine_with_pharmacophore(
         logger.warning(f"Query pharmacophore failed: {q_result.get('error')}")
         # 退化为 2D 结果
         for c in candidates:
-            c["final_3d_score"] = c.get("final_similarity", 0.0)
-            c["pharm_combined_3d"] = None
-            c["pharm_similarity"] = None
-            c["alignment_score"] = None
-            c["spatial_score"] = None
-            c["pharm_error"] = q_result.get("error", "")
+            _apply_2d_fallback(c, "fallback", q_result.get("error", ""))
         return candidates
 
     feats_q = q_result["features"]
     refined = []
-    t_start = time.time()
+    t_start = time.monotonic()
     deadline = t_start + max(0.0, float(timeout_seconds))
 
     def check_deadline():
-        if time.time() >= deadline:
+        if time.monotonic() >= deadline:
             raise TimeoutError("3D pharmacophore matching deadline exceeded")
 
     to_process = candidates[:max_to_refine]
 
     for index, cand in enumerate(to_process):
-        if time.time() - t_start > timeout_seconds:
+        if time.monotonic() >= deadline:
             logger.warning(
                 "Pharmacophore refinement timeout reached after %s/%s candidates; "
                 "returning partial 3D results with 2D fallback for remaining candidates",
@@ -888,37 +907,23 @@ def refine_with_pharmacophore(
             )
             # 超时后一次性收尾，避免每个候选分子重复刷 warning。
             for pending in to_process[index:]:
-                pending["final_3d_score"] = pending.get("final_similarity", 0.0)
-                pending["pharm_combined_3d"] = None
-                pending["pharm_similarity"] = None
-                pending["alignment_score"] = None
-                pending["spatial_score"] = None
-                pending["pharm_features"] = []
-                pending["pharm_refinement_status"] = "timeout_fallback"
-                pending["pharm_error"] = "3D pharmacophore refinement timed out before this candidate was processed"
-                refined.append(pending)
+                refined.append(_apply_2d_fallback(
+                    pending,
+                    "timeout_fallback",
+                    "3D pharmacophore refinement timed out before this candidate was processed",
+                ))
             break
 
         hit_smiles = cand.get("canonical_smiles", "")
         if not hit_smiles:
-            cand["final_3d_score"] = cand.get("final_similarity", 0.0)
-            cand["pharm_combined_3d"] = None
-            cand["pharm_refinement_status"] = "missing_smiles"
-            refined.append(cand)
+            refined.append(_apply_2d_fallback(cand, "missing_smiles", "candidate SMILES is missing"))
             continue
 
         h_result = get_molecule_pharmacophore(hit_smiles)
 
         if not h_result["success"]:
             # 3D 失败，仅用 2D 分数
-            cand["final_3d_score"] = cand.get("final_similarity", 0.0)
-            cand["pharm_combined_3d"] = None
-            cand["pharm_similarity"] = None
-            cand["alignment_score"] = None
-            cand["spatial_score"] = None
-            cand["pharm_features"] = []
-            cand["pharm_error"] = h_result.get("error", "")
-            cand["pharm_refinement_status"] = "fallback"
+            _apply_2d_fallback(cand, "fallback", h_result.get("error", ""))
         else:
             feats_h = h_result["features"]
             pharm_sim = pharmacophore_similarity(feats_q, feats_h)
@@ -930,15 +935,11 @@ def refine_with_pharmacophore(
                     len(refined), len(to_process),
                 )
                 for pending in to_process[index:]:
-                    pending["final_3d_score"] = pending.get("final_similarity", 0.0)
-                    pending["pharm_combined_3d"] = None
-                    pending["pharm_similarity"] = None
-                    pending["alignment_score"] = None
-                    pending["spatial_score"] = None
-                    pending["pharm_features"] = []
-                    pending["pharm_refinement_status"] = "timeout_fallback"
-                    pending["pharm_error"] = "3D pharmacophore matching timed out"
-                    refined.append(pending)
+                    refined.append(_apply_2d_fallback(
+                        pending,
+                        "timeout_fallback",
+                        "3D pharmacophore matching timed out",
+                    ))
                 break
             alignment_s = alignment["score"]
             combined_3d = round(0.6 * pharm_sim + 0.4 * alignment_s, 4)
@@ -955,28 +956,42 @@ def refine_with_pharmacophore(
             cand["alignment_pairs"]    = alignment.get("alignment_pairs", [])
             cand["alignment_coverage"] = alignment.get("alignment_coverage", 0.0)
             cand["pharm_score_method"] = alignment.get("score_method", "feature_distribution_score")
+            cand["pharm_matching_method"] = alignment.get("matching_method")
             cand["final_3d_score"]     = final_3d
+            cand["rank_score"]          = final_3d
+            cand["score_semantics"]     = "2d_3d_composite"
             cand["pharm_features"]     = feats_h
             cand["pharm_feature_counts"] = h_result["feature_counts"]
             cand["pharm_refinement_status"] = "refined"
 
         refined.append(cand)
 
-    # 按 final_3d_score 重新排序
-    refined.sort(key=lambda x: x.get("final_3d_score", 0.0), reverse=True)
+    # 仅在同一评分语义内排序；2D fallback 不能与 3D 综合分数混排。
+    refined_3d = [
+        row for row in refined
+        if row.get("pharm_refinement_status") == "refined"
+        and row.get("final_3d_score") is not None
+    ]
+    fallback = [
+        row for row in refined
+        if not (
+            row.get("pharm_refinement_status") == "refined"
+            and row.get("final_3d_score") is not None
+        )
+    ]
+    refined_3d.sort(key=lambda row: row.get("final_3d_score", 0.0), reverse=True)
+    fallback.sort(key=lambda row: row.get("final_similarity", 0.0), reverse=True)
+    refined = refined_3d + fallback
 
     # 把剩余（未精修，在 max_to_refine 之外）的候选追加到末尾
     if len(candidates) > max_to_refine:
         rest = candidates[max_to_refine:]
         for c in rest:
-            c["final_3d_score"] = c.get("final_similarity", 0.0)
-            c["pharm_combined_3d"] = None
-            c["pharm_similarity"] = None
-            c["alignment_score"] = None
-            c["spatial_score"] = None
-            c["pharm_features"] = []
-            c["pharm_refinement_status"] = "not_refined"
-            refined.append(c)
+            refined.append(_apply_2d_fallback(c, "not_refined", "candidate was outside max_refine"))
 
-    logger.info(f"Pharmacophore refinement done: {len(refined)} candidates in {time.time()-t_start:.1f}s")
+    logger.info(
+        "Pharmacophore refinement done: %s candidates in %.1fs",
+        len(refined),
+        time.monotonic() - t_start,
+    )
     return refined

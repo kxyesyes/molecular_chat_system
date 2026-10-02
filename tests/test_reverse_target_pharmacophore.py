@@ -98,6 +98,51 @@ class PharmacophoreAlignmentTest(unittest.TestCase):
         self.assertEqual(result["matched_pair_count"], 3)
         self.assertLess(result["alignment_rmsd"], 0.1)
 
+    def test_family_matching_uses_bounded_search_for_high_symmetry_features(self):
+        from src.reverse_target.pharmacophore_refiner import _best_family_matches
+        import numpy as np
+
+        query = [
+            {"index": index, "family": "Donor", "pos": np.array([float(index), 0.0, 0.0])}
+            for index in range(8)
+        ]
+        hit = [
+            {"index": index, "family": "Donor", "aligned_pos": np.array([float(index), 0.0, 0.0])}
+            for index in range(8)
+        ]
+        checks = 0
+
+        def check():
+            nonlocal checks
+            checks += 1
+
+        matched = _best_family_matches(query, hit, distance_cutoff=10.0, check=check)
+
+        self.assertEqual(len(matched), 8)
+        self.assertLess(checks, 5000)
+
+    def test_alignment_reports_bounded_matching_method(self):
+        from src.reverse_target.pharmacophore_refiner import _score_transformed_alignment
+        import numpy as np
+
+        features = [
+            {"index": 0, "family": "Donor", "pos": np.array([0.0, 0.0, 0.0])},
+            {"index": 1, "family": "Acceptor", "pos": np.array([1.0, 0.0, 0.0])},
+            {"index": 2, "family": "Aromatic", "pos": np.array([0.0, 1.0, 0.0])},
+        ]
+
+        result = _score_transformed_alignment(
+            features,
+            [{**feature, "aligned_pos": feature["pos"]} for feature in features],
+            rotation=np.eye(3),
+            hit_center=np.zeros(3),
+            query_center=np.zeros(3),
+            distance_cutoff=0.25,
+        )
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["matching_method"], "bounded_beam_search")
+
     def test_hydrophobe_alignment_allows_wider_cutoff_than_polar_features(self):
         from src.reverse_target.pharmacophore_refiner import _score_transformed_alignment
         import numpy as np
@@ -265,7 +310,8 @@ class ReverseTargetPharm3DApiTest(unittest.TestCase):
         payload = response.json()
         self.assertTrue(payload["success"])
         self.assertEqual(payload["pharmacophore_refinement_status"], "timeout")
-        self.assertEqual(payload["results"][0]["final_3d_score"], 0.72)
+        self.assertIsNone(payload["results"][0]["final_3d_score"])
+        self.assertEqual(payload["results"][0]["score_semantics"], "2d_similarity_fallback")
         self.assertTrue(payload["message"])
 
     def test_predict_3d_decouples_return_count_from_refine_count(self):
@@ -324,7 +370,8 @@ class ReverseTargetPharm3DApiTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["success"])
-        self.assertEqual(payload["count"], 20)
+        self.assertEqual(payload["count"], 5)
+        self.assertEqual(len(payload["fallback_results"]), 20)
         self.assertEqual(observed["limit"], 400)
         self.assertEqual(observed["max_to_refine"], 5)
         self.assertEqual(payload["pharmacophore_refinement_status"], "partial")
@@ -332,6 +379,63 @@ class ReverseTargetPharm3DApiTest(unittest.TestCase):
         self.assertEqual(payload["raw_candidate_count"], 400)
         self.assertEqual(payload["unique_target_count_before_top_k"], 400)
         self.assertEqual(payload["requested_top_k"], 20)
+
+    def test_predict_3d_separates_refined_and_fallback_rankings(self):
+        from src.web.routes import api_routes as support
+
+        candidates = [
+            {"target_name": "refined-target", "final_similarity": 0.61},
+            {"target_name": "fallback-target", "final_similarity": 0.99},
+        ]
+        predictor_module = types.ModuleType("src.reverse_target.predictor")
+        predictor_module.get_predictor = lambda: types.SimpleNamespace(
+            get_raw_similar_molecules=lambda **kwargs: candidates
+        )
+        predictor_module._aggregate_by_target = (
+            lambda rows, top_k, score_field: sorted(
+                rows, key=lambda row: row.get(score_field) or 0, reverse=True
+            )[:top_k]
+        )
+        sys.modules["src.reverse_target.predictor"] = predictor_module
+
+        refiner_module = types.ModuleType("src.reverse_target.pharmacophore_refiner")
+
+        def refine(**kwargs):
+            return [
+                dict(candidates[0], final_3d_score=0.7,
+                     pharm_combined_3d=0.75, pharm_refinement_status="refined"),
+                dict(candidates[1], final_3d_score=None,
+                     pharm_combined_3d=0.88, pharm_similarity=0.91,
+                     alignment_score=0.87, pharm_refinement_status="not_refined",
+                     pharm_error="candidate limit")
+            ]
+
+        refiner_module.refine_with_pharmacophore = refine
+        refiner_module.get_molecule_pharmacophore = lambda smiles: {
+            "success": True, "features": [], "feature_counts": {}, "properties": {}
+        }
+        sys.modules["src.reverse_target.pharmacophore_refiner"] = refiner_module
+
+        from src.web.routes.api_routes import setup_api_routes
+
+        app = FastAPI()
+        setup_api_routes(app)
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/reverse_target/predict_3d",
+                data={"smiles": "CCO", "threshold": "0.5", "top_k": "2", "max_refine": "1"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["ranking_mode"], "3d_refined_with_2d_fallback")
+        self.assertEqual([row["target_name"] for row in payload["results"]], ["refined-target"])
+        self.assertEqual([row["target_name"] for row in payload["fallback_results"]], ["fallback-target"])
+        self.assertIsNone(payload["fallback_results"][0]["final_3d_score"])
+        self.assertIsNone(payload["fallback_results"][0]["pharm_combined_3d"])
+        self.assertIsNone(payload["fallback_results"][0]["pharm_similarity"])
+        self.assertIsNone(payload["fallback_results"][0]["alignment_score"])
+        self.assertEqual(payload["fallback_count"], 1)
 
 
 if __name__ == "__main__":

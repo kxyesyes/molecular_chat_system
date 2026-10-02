@@ -92,6 +92,18 @@ def setup_reverse_target_routes(app, *, _support):
                 )
 
             results = await _support._invoke_in_threadpool(run_batch_prediction)
+            if not isinstance(results, list) or (
+                results and len(results) != len(rows)
+            ):
+                raise HTTPException(
+                    status_code=502,
+                    detail="批量预测结果与输入行数不一致，已拒绝返回不完整结果",
+                )
+            for result, input_row in zip(results, rows):
+                # Keep the source row identity explicit even when the
+                # predictor changes its internal list representation.
+                result["original_row_index"] = input_row["row_index"]
+                result["row_index"] = input_row["row_index"]
             
             _support.logger.info(f"批量反向寻靶预测完成: {len(results)} 个分子")
             
@@ -116,8 +128,11 @@ def setup_reverse_target_routes(app, *, _support):
         """获取反向寻靶数据库统计信息"""
         try:
             from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            stats = await _support._invoke_in_threadpool(predictor.get_stats)
+
+            def load_stats():
+                return get_predictor().get_stats()
+
+            stats = await _support._invoke_in_threadpool(load_stats)
             return {"success": True, "stats": stats}
         except Exception as e:
             _support.logger.error(f"获取统计信息失败: {e}")
@@ -157,16 +172,19 @@ def setup_reverse_target_routes(app, *, _support):
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
             
             from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            
-            results = await _support._invoke_in_threadpool(
-                lambda: predictor.get_similar_molecules(
+
+            def load_similar():
+                predictor = get_predictor()
+                return predictor.get_similar_molecules(
                     smiles=smiles.strip(),
                     target_name=target_name.strip(),
                     threshold=threshold,
                     limit=limit,
                     organism_filter=organism_filter,
                 )
+
+            results = await _support._invoke_in_threadpool(
+                load_similar
             )
             
             return {
@@ -227,16 +245,19 @@ def setup_reverse_target_routes(app, *, _support):
 
             # Step 1: 2D 预筛选。返回数量(top_k)和 3D 精修数量(max_refine)解耦。
             from src.reverse_target.predictor import get_predictor
-            predictor = get_predictor()
-            
+
+            def load_candidates():
+                predictor = get_predictor()
+                return predictor.get_raw_similar_molecules(
+                    smiles=smiles,
+                    threshold=prefilter_threshold,
+                    limit=candidate_limit,
+                    organism_filter=organism_filter,
+                )
+
             # 降低阈值保证候选数量，提升召回
             prefilter_threshold = max(0.0, threshold - 0.2)
-            raw_candidates = predictor.get_raw_similar_molecules(
-                smiles=smiles,
-                threshold=prefilter_threshold,
-                limit=candidate_limit,
-                organism_filter=organism_filter,
-            )
+            raw_candidates = await _support._invoke_in_threadpool(load_candidates)
             raw_candidate_count = len(raw_candidates)
             unique_target_count_before_top_k = len(
                 {
@@ -335,9 +356,50 @@ def setup_reverse_target_routes(app, *, _support):
                     _support.logger.warning(f"查询分子药效团提取失败，继续返回精修结果: {e}")
                     query_pharm = None
 
-            # Step 3: 按靶点聚合，选 top_k 靶点
+            # Step 3: 按结果状态分别聚合，禁止把 2D fallback 当作 3D 结果排序。
             from src.reverse_target.predictor import _aggregate_by_target
-            final_results = _aggregate_by_target(refined, top_k=top_k, score_field="final_3d_score")
+            refined_rows = [
+                row for row in refined
+                if row.get("pharm_refinement_status") == "refined"
+                and row.get("final_3d_score") is not None
+            ]
+            fallback_rows = [
+                row for row in refined
+                if row.get("pharm_refinement_status") != "refined"
+            ]
+            for row in fallback_rows:
+                # Treat the refiner as an untrusted boundary: an adapter or
+                # legacy implementation must not smuggle a 2D value through
+                # the 3D score field.
+                row["final_3d_score"] = None
+                row["rank_score"] = row.get("final_similarity", 0.0)
+                row["score_semantics"] = "2d_similarity_fallback"
+                row["pharm_combined_3d"] = None
+                row["pharm_similarity"] = None
+                row["alignment_score"] = None
+                row["spatial_score"] = None
+                row["alignment_rmsd"] = None
+                row["alignment_pairs"] = []
+                row["alignment_coverage"] = 0.0
+                row["pharm_score_method"] = None
+                row["pharm_matching_method"] = None
+                row["pharm_features"] = []
+            refined_results = _aggregate_by_target(
+                refined_rows, top_k=top_k, score_field="final_3d_score"
+            ) if refined_rows else []
+            fallback_results = _aggregate_by_target(
+                fallback_rows, top_k=top_k, score_field="final_similarity"
+            ) if fallback_rows else []
+            fallback_count = len(fallback_results)
+            if refined_results:
+                final_results = refined_results
+                ranking_mode = "3d_refined_with_2d_fallback" if fallback_results else "3d_refined"
+            else:
+                # If no candidate reached a valid 3D result, expose the 2D
+                # ranking explicitly instead of returning an empty answer.
+                final_results = fallback_results
+                fallback_results = []
+                ranking_mode = "2d_fallback"
 
             _support.logger.info(f"3D精修完成, 返回 {len(final_results)} 个靶点")
 
@@ -346,6 +408,9 @@ def setup_reverse_target_routes(app, *, _support):
                 "mode": "2d+3d",
                 "count": len(final_results),
                 "results": final_results,
+                "fallback_results": fallback_results,
+                "ranking_mode": ranking_mode,
+                "fallback_count": fallback_count,
                 "query_pharmacophore": query_pharm if query_pharm and query_pharm.get("success") else None,
                 "pharmacophore_refinement_status": refinement_status,
                 "message": refinement_message,
