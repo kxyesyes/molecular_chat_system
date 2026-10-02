@@ -15,6 +15,12 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.reverse_target.config import configure_console_output, get_reverse_target_data_dir
+from src.reverse_target.data_quality import (
+    apply_activity_quality_flags,
+    deduplicate_activity_rows,
+    quality_filter_for_training,
+    training_columns,
+)
 
 
 class ChEMBLAPIFetcher:
@@ -65,8 +71,14 @@ class ChEMBLAPIFetcher:
                                 'standard_type': act.get('standard_type'),
                                 'standard_value': act.get('standard_value'),
                                 'standard_units': act.get('standard_units'),
+                                'standard_relation': act.get('standard_relation'),
                                 'pchembl_value': act.get('pchembl_value'),
-                                'target_organism': act.get('target_organism')
+                                'target_organism': act.get('target_organism'),
+                                'assay_id': act.get('assay_id'),
+                                'assay_confidence_score': act.get('assay_confidence_score'),
+                                'assay_chembl_id': act.get('assay_chembl_id'),
+                                'document_chembl_id': act.get('document_chembl_id'),
+                                'taxon_id': act.get('target_tax_id'),
                             }
                             
                             # 过滤无效数据
@@ -102,8 +114,9 @@ class ChEMBLAPIFetcher:
                                 'target_pref_name', 'standard_type', 'standard_value'])
         print(f"移除空值后: {len(df)} 条")
         
-        # 移除重复
-        df = df.drop_duplicates(subset=['molecule_chembl_id', 'target_pref_name', 'standard_type'])
+        # 只移除完全相同的观测；不同 assay、物种或文献不能合并
+        df = deduplicate_activity_rows(df.rename(columns={'target_pref_name': 'target_name'}))
+        df = df.rename(columns={'target_name': 'target_pref_name'})
         print(f"移除重复后: {len(df)} 条")
         
         # 转换数值
@@ -114,30 +127,8 @@ class ChEMBLAPIFetcher:
         df = df[(df['standard_value'] > 0) & (df['standard_value'] < 1e8)]
         print(f"过滤异常值后: {len(df)} 条")
         
-        # 标准化单位为 nM
-        def convert_to_nm(row):
-            value = row['standard_value']
-            unit = row.get('standard_units', 'nM')
-            
-            if pd.isna(unit):
-                return value
-            
-            unit = unit.lower().strip()
-            
-            if unit in ['nm', 'nanomolar']:
-                return value
-            elif unit in ['um', 'µm', 'micromolar', 'μm']:
-                return value * 1000
-            elif unit in ['mm', 'millimolar']:
-                return value * 1000000
-            elif unit in ['m', 'molar']:
-                return value * 1000000000
-            elif unit in ['pm', 'picomolar']:
-                return value / 1000
-            else:
-                return value
-        
-        df['standard_value_nm'] = df.apply(convert_to_nm, axis=1)
+        df = df.rename(columns={'target_pref_name': 'target_name'})
+        df = apply_activity_quality_flags(df)
         
         # 标准化生物体名称
         df['organism'] = df['target_organism'].apply(
@@ -151,25 +142,11 @@ class ChEMBLAPIFetcher:
         """保存训练数据"""
         print("\n保存训练数据...")
         
-        # 选择需要的列
-        training_df = df[[
-            'molecule_chembl_id',
-            'canonical_smiles',
-            'target_pref_name',
-            'standard_type',
-            'standard_value_nm',
-            'organism'
-        ]].copy()
-        
-        # 重命名
-        training_df.columns = [
-            'molecule_chembl_id',
-            'canonical_smiles',
-            'target_name',
-            'standard_type',
-            'standard_value',
-            'organism'
-        ]
+        audit_path = self.output_dir / "chembl_quality_audit.tsv"
+        df.to_csv(audit_path, sep='\t', index=False)
+        training_source = quality_filter_for_training(df)
+        training_df = training_source[training_columns(training_source)].copy()
+        training_df = training_df.rename(columns={'standard_value_nm': 'standard_value'})
         
         # 保存
         output_path = self.output_dir / "chembl_training_data.tsv"

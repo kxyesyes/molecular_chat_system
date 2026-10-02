@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 
 FEATURE_DISTANCE_CUTOFFS = {
     "Hydrophobe": 2.7,
+    "LumpedHydrophobe": 3.0,
     "Aromatic": 2.5,
     "Donor": 2.0,
     "Acceptor": 2.0,
@@ -150,7 +151,7 @@ FEATURE_PRIORITY = ["Aromatic", "Donor", "Acceptor", "Hydrophobe", "LumpedHydrop
 # ─────────────────────────────────────────
 #   核心功能：3D 构象生成 + 药效团提取
 # ─────────────────────────────────────────
-def generate_3d_conformer(mol: Chem.Mol, num_confs: int = 5) -> Optional[Chem.Mol]:
+def generate_3d_conformer_with_status(mol: Chem.Mol, num_confs: int = 5):
     """
     生成优化后的 3D 构象，返回带最优构象的分子 (含氢)，失败返回 None。
 
@@ -161,6 +162,13 @@ def generate_3d_conformer(mol: Chem.Mol, num_confs: int = 5) -> Optional[Chem.Mo
     4. 若 ETKDGv3 失败，降级到 ETKDG
     """
     _require_rdkit()
+    status = {
+        "conformer_status": "failed",
+        "embedding_method": None,
+        "forcefield": "MMFF94",
+        "mmff_converged": False,
+        "conformer_energy": None,
+    }
     try:
         # 确保分子已 Sanitize
         mol = Chem.RWMol(mol)
@@ -174,22 +182,36 @@ def generate_3d_conformer(mol: Chem.Mol, num_confs: int = 5) -> Optional[Chem.Mo
         params.enforceChirality = True
 
         conf_ids = list(AllChem.EmbedMultipleConfs(mol_h, numConfs=num_confs, params=params))
+        status["embedding_method"] = "ETKDGv3"
 
         if len(conf_ids) == 0:
             # 降级：单构象 ETKDG
             ret = AllChem.EmbedMolecule(mol_h, randomSeed=42)
             if ret < 0:
-                return None
+                status["conformer_status"] = "embedding_failed"
+                return None, status
+            status["embedding_method"] = "ETKDG_fallback"
             conf_ids = [0]
 
-        # MMFF94 力场优化，选择能量最低构象
+        if not AllChem.MMFFHasAllMoleculeParams(mol_h):
+            status["conformer_status"] = "forcefield_parameters_missing"
+            return None, status
+
+        # MMFF94 力场优化；只有明确收敛且能量有限的构象才可进入后续分析
         res = AllChem.MMFFOptimizeMoleculeConfs(mol_h, numThreads=1)
-        # res: list of (converged, energy) per conf
-        energies = [(e, idx) for idx, (converged, e) in enumerate(res) if e > -1e9]
-        if energies:
-            best_idx = sorted(energies)[0][1]
-        else:
-            best_idx = 0
+        # RDKit returns (not_converged, energy); zero means convergence.
+        energies = [
+            (float(energy), idx)
+            for idx, (not_converged, energy) in enumerate(res)
+            if int(not_converged) == 0 and np.isfinite(energy)
+        ]
+        if not energies:
+            status["conformer_status"] = "optimization_not_converged"
+            return None, status
+        best_energy, best_idx = min(energies)
+        status["mmff_converged"] = True
+        status["conformer_energy"] = round(best_energy, 6)
+        status["conformer_status"] = "optimized"
 
         # 把最优构象移到 0 号
         if best_idx != 0 and mol_h.GetNumConformers() > best_idx:
@@ -202,11 +224,18 @@ def generate_3d_conformer(mol: Chem.Mol, num_confs: int = 5) -> Optional[Chem.Mo
             mol_h.RemoveAllConformers()
             mol_h.AddConformer(keep, assignId=True)
 
-        return mol_h
+        return mol_h, status
 
     except Exception as e:
         logger.warning(f"3D conformer generation failed: {e}")
-        return None
+        status["conformer_status"] = "failed"
+        return None, status
+
+
+def generate_3d_conformer(mol: Chem.Mol, num_confs: int = 5) -> Optional[Chem.Mol]:
+    """Backward-compatible molecule-only wrapper around the statusful path."""
+    conformer, _ = generate_3d_conformer_with_status(mol, num_confs=num_confs)
+    return conformer
 
 
 def extract_pharmacophore_features(mol_3d: Chem.Mol) -> List[Dict]:
@@ -262,7 +291,7 @@ def get_molecule_pharmacophore(smiles: str) -> Dict:
     """
     # 尝试磁盘缓存
     cached = _try_load_cache(smiles)
-    if cached:
+    if cached and cached.get("conformer_status") == "optimized":
         logger.debug(f"Loaded pharmacophore from cache: {smiles[:20]}...")
         return cached
 
@@ -274,11 +303,15 @@ def get_molecule_pharmacophore(smiles: str) -> Dict:
 
         # 3D 构象生成
         t0 = time.time()
-        mol_3d = generate_3d_conformer(mol)
+        mol_3d, conformer_status = generate_3d_conformer_with_status(mol)
         t1 = time.time()
 
         if mol_3d is None:
-            return {"success": False, "error": "3D 构象生成失败，分子可能过于复杂"}
+            return {
+                "success": False,
+                "error": "3D 构象生成失败或 MMFF94 未收敛",
+                **conformer_status,
+            }
 
         # 药效团特征提取
         features = extract_pharmacophore_features(mol_3d)
@@ -312,6 +345,7 @@ def get_molecule_pharmacophore(smiles: str) -> Dict:
             "mol_block":      mol_block,
             "properties":     properties,
             "conformer_time_ms": round((t1 - t0) * 1000, 1),
+            **conformer_status,
         }
 
         _save_cache(smiles, result)
@@ -448,13 +482,15 @@ def _feature_distance_cutoff(family: str, fallback: float) -> float:
     return max(float(fallback), FEATURE_DISTANCE_CUTOFFS.get(family, float(fallback)))
 
 
-def _best_family_matches(query_group: List[Dict], hit_group: List[Dict], distance_cutoff: float) -> List[Dict]:
+def _best_family_matches(query_group: List[Dict], hit_group: List[Dict], distance_cutoff: float, check=None) -> List[Dict]:
     if not query_group or not hit_group:
         return []
 
     distances = []
     for query in query_group:
         for hit in hit_group:
+            if check:
+                check()
             distance = float(np.linalg.norm(query["pos"] - hit["aligned_pos"]))
             if distance <= _feature_distance_cutoff(query["family"], distance_cutoff):
                 distances.append((distance, query, hit))
@@ -484,6 +520,8 @@ def _best_family_matches(query_group: List[Dict], hit_group: List[Dict], distanc
     best_distance = float("inf")
 
     def backtrack(position: int, used_query: set, used_hit: set, chosen: List[tuple], total_distance: float):
+        if check:
+            check()
         nonlocal best_matches, best_distance
         if position >= len(distances):
             if len(chosen) > len(best_matches) or (
@@ -530,6 +568,7 @@ def _score_transformed_alignment(
     hit_center: np.ndarray,
     query_center: np.ndarray,
     distance_cutoff: float,
+    check=None,
 ) -> Dict:
     transformed_hits = [
         {
@@ -544,7 +583,7 @@ def _score_transformed_alignment(
     for family in families:
         query_group = [feature for feature in query_features if feature["family"] == family]
         hit_group = [feature for feature in transformed_hits if feature["family"] == family]
-        matched.extend(_best_family_matches(query_group, hit_group, distance_cutoff))
+        matched.extend(_best_family_matches(query_group, hit_group, distance_cutoff, check=check))
 
     possible_count = min(len(query_features), len(hit_features))
     if not matched or possible_count == 0:
@@ -616,6 +655,7 @@ def align_pharmacophore_features(
     feats_hit: List[Dict],
     max_anchor_combinations: int = 2500,
     distance_cutoff: float = 1.8,
+    check=None,
 ) -> Dict:
     """
     自动寻找同类药效团特征点配对，并执行轻量 3D 刚性叠合。
@@ -666,6 +706,8 @@ def align_pharmacophore_features(
     checked = 0
 
     for anchors in itertools.combinations(candidate_pairs, 3):
+        if check:
+            check()
         query_ids = [q["index"] for q, _ in anchors]
         hit_ids = [h["index"] for _, h in anchors]
         if len(set(query_ids)) < 3 or len(set(hit_ids)) < 3:
@@ -682,6 +724,7 @@ def align_pharmacophore_features(
             hit_center,
             query_center,
             distance_cutoff=distance_cutoff,
+            check=check,
         )
         if result["success"] and (
             best is None
@@ -827,6 +870,11 @@ def refine_with_pharmacophore(
     feats_q = q_result["features"]
     refined = []
     t_start = time.time()
+    deadline = t_start + max(0.0, float(timeout_seconds))
+
+    def check_deadline():
+        if time.time() >= deadline:
+            raise TimeoutError("3D pharmacophore matching deadline exceeded")
 
     to_process = candidates[:max_to_refine]
 
@@ -874,7 +922,24 @@ def refine_with_pharmacophore(
         else:
             feats_h = h_result["features"]
             pharm_sim = pharmacophore_similarity(feats_q, feats_h)
-            alignment = align_pharmacophore_features(feats_q, feats_h)
+            try:
+                alignment = align_pharmacophore_features(feats_q, feats_h, check=check_deadline)
+            except TimeoutError:
+                logger.warning(
+                    "Pharmacophore matching deadline reached after %s/%s candidates",
+                    len(refined), len(to_process),
+                )
+                for pending in to_process[index:]:
+                    pending["final_3d_score"] = pending.get("final_similarity", 0.0)
+                    pending["pharm_combined_3d"] = None
+                    pending["pharm_similarity"] = None
+                    pending["alignment_score"] = None
+                    pending["spatial_score"] = None
+                    pending["pharm_features"] = []
+                    pending["pharm_refinement_status"] = "timeout_fallback"
+                    pending["pharm_error"] = "3D pharmacophore matching timed out"
+                    refined.append(pending)
+                break
             alignment_s = alignment["score"]
             combined_3d = round(0.6 * pharm_sim + 0.4 * alignment_s, 4)
 

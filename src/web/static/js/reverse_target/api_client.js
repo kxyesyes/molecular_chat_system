@@ -66,7 +66,7 @@ const RtApi = (() => {
   /**
    * 获取相似分子列表
    */
-  async function fetchSimilarMolecules(smiles, targetName, threshold, limit = 50) {
+  async function fetchSimilarMolecules(smiles, targetName, threshold, limit = 50, signal) {
     const params = new URLSearchParams({
       smiles,
       target_name: targetName,
@@ -76,7 +76,7 @@ const RtApi = (() => {
     if (window.lastOrganismFilter) {
       params.set("organism_filter", window.lastOrganismFilter);
     }
-    const resp = await fetch(`${RT_CONFIG.API.SIMILAR_MOLECULES}?${params}`);
+    const resp = await fetch(`${RT_CONFIG.API.SIMILAR_MOLECULES}?${params}`, { signal });
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || "获取失败");
     return data;

@@ -507,7 +507,15 @@ def test_actual_reverse_target_proof_does_not_invent_assay_extensions(strict_sou
     assert record['assay'] == {'type': 'IC50', 'value': 1.0}
     assert 'target_chembl_id' not in record and 'standard_units' not in record
     entry = result['evidence'][0]
-    assert len(entry['records'][0]) == 13
+    # Reverse-target records now carry explicit rank semantics and provenance;
+    # the closed producer envelope remains the source of truth for the exact
+    # record set, while the consumer must retain these audit fields.
+    assert {
+        'score_semantics', 'similarity_metric', 'evidence', 'provenance',
+        'row_index', 'chembl_search_url', 'uniprot_search_url',
+    }.issubset(entry['records'][0])
+    assert entry['records'][0]['score_semantics'] == '2d_structure_similarity_rank_only'
+    assert entry['records'][0]['provenance']['source_file'] == 'chembl_data_with_fps.tsv'
     assert entry['prediction_receipt']['record_count'] == len(result['data'])
 
 
