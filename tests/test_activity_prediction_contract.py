@@ -399,9 +399,9 @@ def test_agent_tool_requires_target_before_selecting_a_model() -> None:
 
     result = tool.execute("predict activity for CCO")
 
-    assert result["success"] is False
-    assert result["status"] == "invalid_input"
-    assert "靶点" in result["message"]
+    assert result.success is False
+    assert result.status.value == "invalid_input"
+    assert "靶点" in result.message
 
 
 def test_activity_api_uses_task8_threadpool_for_cold_start_and_prediction(
