@@ -108,6 +108,68 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         self.assertEqual(len(route_thread_ids), 3)
         self.assertTrue(all(worker_id not in route_thread_ids for worker_id in service_thread_ids))
 
+    def test_molecule_utility_rdkit_operations_run_in_worker_threads(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
+        from src.web.routes import api_routes, molecule_utility_routes
+
+        route_thread_ids = []
+        worker_thread_ids = []
+
+        async def recording_run_in_threadpool(func, *args, **kwargs):
+            route_thread_ids.append(threading.get_ident())
+            return await starlette_run_in_threadpool(func, *args, **kwargs)
+
+        original_3d = molecule_utility_routes._smiles_to_3d_sync
+        original_image = molecule_utility_routes._smiles_to_image_sync
+        original_mcs = molecule_utility_routes._mcs_sync
+
+        def recording_3d(smiles):
+            worker_thread_ids.append(threading.get_ident())
+            return original_3d(smiles)
+
+        def recording_image(smiles, width, height):
+            worker_thread_ids.append(threading.get_ident())
+            return original_image(smiles, width, height)
+
+        def recording_mcs(smiles1, smiles2, width, height, timeout):
+            worker_thread_ids.append(threading.get_ident())
+            return original_mcs(smiles1, smiles2, width, height, timeout)
+
+        app = FastAPI()
+        api_routes.setup_api_routes(app)
+
+        with patch.object(api_routes, "run_in_threadpool", new=recording_run_in_threadpool, create=True), \
+             patch.object(molecule_utility_routes, "_smiles_to_3d_sync", new=recording_3d), \
+             patch.object(molecule_utility_routes, "_smiles_to_image_sync", new=recording_image), \
+             patch.object(molecule_utility_routes, "_mcs_sync", new=recording_mcs):
+            with TestClient(app) as client:
+                three_d = client.post("/api/docking/smiles_to_3d", json={"smiles": "CCO"})
+                image = client.get("/api/utils/smiles_to_image?smiles=CCO")
+                mcs = client.get("/api/utils/mcs?smiles1=CCO&smiles2=CCC")
+
+        self.assertEqual(three_d.status_code, 200, three_d.text)
+        self.assertEqual(image.status_code, 200, image.text)
+        self.assertEqual(mcs.status_code, 200, mcs.text)
+        self.assertIn("HETATM", three_d.json()["pdb_data"])
+        self.assertTrue(image.content.startswith(b"\x89PNG"))
+        mcs_body = mcs.json()
+        self.assertEqual(mcs_body["mcs_smarts"], "[#6&!R]-&!@[#6&!R]")
+        self.assertEqual(mcs_body["query_highlight_atoms"], [0, 1])
+        self.assertEqual(mcs_body["hit_highlight_atoms"], [0, 1])
+        self.assertEqual(mcs_body["query_highlight_bonds"], [0])
+        self.assertEqual(mcs_body["hit_highlight_bonds"], [0])
+        self.assertTrue(mcs_body["query_svg"].startswith("<?xml"))
+        self.assertTrue(mcs_body["hit_svg"].startswith("<?xml"))
+        self.assertIn("bond-0 atom-0 atom-1", mcs_body["query_svg"])
+        self.assertIn("bond-0 atom-0 atom-1", mcs_body["hit_svg"])
+        self.assertIn("#33B2E5", mcs_body["query_svg"])
+        self.assertIn("#33B2E5", mcs_body["hit_svg"])
+        self.assertEqual(len(worker_thread_ids), 3)
+        self.assertEqual(len(route_thread_ids), 3)
+        self.assertTrue(all(worker_id not in route_thread_ids for worker_id in worker_thread_ids))
+
     def test_utility_query_resource_bounds_return_422(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
