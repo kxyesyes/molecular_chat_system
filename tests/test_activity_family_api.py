@@ -291,27 +291,20 @@ def test_summary_ignores_nonlist_warnings_without_losing_observations(warnings):
 
 
 @pytest.mark.parametrize("endpoint", ["predict", "batch_predict"])
-def test_absent_target_retains_legacy_rows(client, monkeypatch, endpoint):
-    from types import SimpleNamespace
-    from src.activity import prediction_service, predictor
+def test_absent_target_rejects_without_global_model(client, monkeypatch, endpoint):
+    from src.activity import predictor
 
-    rows = [{"smiles": "CCO", "success": True, "task_type": "regression",
-             "endpoint": "pIC50", "value": 0.0, "units": "log10(mol/L)"}]
-    calls = []
-
-    def predict(smiles):
-        calls.append(smiles)
-        return rows
-
-    def no_family():
-        pytest.fail("Absent target must preserve the legacy selection path")
-
-    monkeypatch.setattr(predictor, "get_predictor", lambda: SimpleNamespace(predict=predict))
-    monkeypatch.setattr(prediction_service, "get_family_predictor", no_family)
+    monkeypatch.setattr(
+        predictor, "get_predictor",
+        lambda: pytest.fail("Absent target must not load the global activity model"),
+    )
     response = _post_prediction(client, endpoint)
     assert response.status_code == 200
-    assert response.json() == {"success": True, "status": "passed", "results": rows, "warnings": []}
-    assert calls == (["CCO"] if endpoint == "predict" else [["CCO"]])
+    data = response.json()
+    assert data["success"] is False
+    assert data["status"] == "failed"
+    assert data["results"][0]["errors"] == {"target": "explicit_target_required"}
+    assert data["results"][0]["predicted_pIC50"] is None
 
 
 def test_factory_lru_is_bounded_to_two_directories(monkeypatch, tmp_path):
