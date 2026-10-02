@@ -22,6 +22,12 @@ from src.agent.validators.domain_validators import ActivityResultValidator
 from .adapters import LegacyPythonToolAdapter
 
 
+def _legacy_status(value):
+    if value in {"passed", "partial", "failed", "unavailable", "invalid_input", "rejected", "cancelled", "succeeded"}:
+        return "passed" if value == "passed" else ObservationStatus(value)
+    return value
+
+
 class ActivityStructuredInput(BaseModel):
     model_config = ConfigDict(strict=True, extra="allow", revalidate_instances="always")
     query: str = ""
@@ -137,7 +143,13 @@ class ActivityRawOutput(BaseModel):
     model_config = ConfigDict(strict=True, extra="allow", revalidate_instances="always")
     tool_name: Literal["activity_predictor"] = "activity_predictor"
     success: bool = False
-    status: ObservationStatus | None = Field(default=None, strict=False)
+    # ``passed`` is a legacy wire value emitted by the activity service.  It
+    # is accepted only while validating the raw legacy envelope; the adapter
+    # normalizes it to ObservationStatus.SUCCEEDED before it enters the agent.
+    status: Annotated[
+        ObservationStatus | Literal["passed"] | None,
+        BeforeValidator(_legacy_status),
+    ] = None
     data: list[Annotated[dict[str, Any], BeforeValidator(_require_dict)]] | None = None
     error: str | Annotated[ActivityErrorFields, BeforeValidator(_require_dict)] | None = None
     message: str = ""
@@ -159,7 +171,7 @@ class ActivityRawOutput(BaseModel):
     def consistent_observations(self):
         if self.success:
             if (self.error is not None or self.status not in {
-                    None, ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL,
+                    None, "passed", ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL,
             } or not self.data or not any(row["success"] for row in self.data)):
                 raise ValueError("Invalid activity success")
         elif self.status is ObservationStatus.SUCCEEDED:
@@ -176,7 +188,8 @@ class ActivityRawOutput(BaseModel):
             _validate_prediction_row(row)
         observation = ToolResult("activity_predictor", self.success, "",
                                  data=(self.data or []) + predictions,
-                                 quality=self.quality or {})
+                                 quality=self.quality or {},
+                                 evidence=self.evidence or [])
         if ActivityResultValidator().validate(observation):
             raise ValueError("Invalid activity domain observation")
         if self.data and any(_is_family(row) for row in self.data):

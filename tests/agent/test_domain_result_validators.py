@@ -399,25 +399,42 @@ def test_activity_validator_rejects_pic50_without_real_model_provenance():
 
     assert validated.success is False
     assert validated.error.code == AgentErrorCode.INVALID_OUTPUT
-    assert "model provenance" in validated.message.lower()
+    assert "canonical" in validated.message.lower()
 
 
 def test_activity_validator_accepts_real_model_provenance():
     result = ToolResult.success_result(
         "activity_predictor",
-        data=[
-            {
+            data=[
+                {
+                    "smiles": "CCO",
+                    "success": True,
+                    "task_type": "regression",
+                    "endpoint": "pIC50",
+                    "value": 6.1,
+                    "units": "pIC50",
+                    "model_provenance": {
+                        "model_id": "model-1",
+                        "weights_sha256": "a" * 64,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                }
+            ],
+            quality={
+                "model_provenance": {
+                    "model_id": "model-1",
+                    "weights_sha256": "a" * 64,
+                    "model_path": "data/activity/models/model.pt",
+                    "demo_mode": False,
+                    "fallback_used": False,
+                }
+            },
+            evidence=[{"prediction": {
                 "smiles": "CCO",
-                "success": True,
-                "activity_score": 6.1,
-            }
-        ],
-        quality={
-            "model_provenance": {
-                "model_path": "data/activity/models/model.pt",
-                "demo_mode": False,
-            }
-        },
+                "task_type": "regression",
+                "value": 6.1,
+            }}],
     )
 
     validated = AgentResultValidator().validate_tool_result(result)

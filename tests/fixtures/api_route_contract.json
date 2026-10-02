@@ -214,7 +214,7 @@
       "path": "/api/activity/batch_predict",
       "name": "activity_batch_predict",
       "status_code": null,
-      "parameters": "file: UploadFile=File(...), target: Optional[str]=Form(None)"
+      "parameters": "file: UploadFile=File(...), target: Optional[str]=Form(None), smiles_column: Optional[str]=Form(None)"
     },
     {
       "methods": [
@@ -223,7 +223,7 @@
       "path": "/api/activity/train",
       "name": "start_activity_training",
       "status_code": null,
-      "parameters": "file: UploadFile=File(...), target_column: str=Form(...), task_type: str=Form('regression'), epochs: int=Form(50, ge=1, le=1000), learning_rate: float=Form(0.001, gt=0, le=1), batch_size: int=Form(32, ge=1, le=4096), dropout: float=Form(0.2, ge=0, le=0.9), num_layers: int=Form(5, ge=1, le=32), hidden_size: int=Form(256, ge=8, le=4096), weight_decay: float=Form(0.0001, ge=0, le=1), patience: int=Form(12, ge=1, le=1000), loss_metric: str=Form('MSE'), lr_scheduler: str=Form('Cosine'), split_strategy: str=Form('scaffold'), random_seed: int=Form(42, ge=0, le=2147483647)"
+      "parameters": "file: UploadFile=File(...), target_column: str=Form(...), smiles_column: str=Form('smiles'), task_type: str=Form('regression'), epochs: int=Form(50, ge=1, le=1000), learning_rate: float=Form(0.001, gt=0, le=1), batch_size: int=Form(32, ge=1, le=4096), dropout: float=Form(0.2, ge=0, le=0.9), num_layers: int=Form(5, ge=1, le=32), hidden_size: int=Form(256, ge=8, le=4096), weight_decay: float=Form(0.0001, ge=0, le=1), patience: int=Form(12, ge=1, le=1000), loss_metric: str=Form('MSE'), lr_scheduler: str=Form('Cosine'), split_strategy: str=Form('scaffold'), random_seed: int=Form(42, ge=0, le=2147483647), classification_threshold: float | None=Form(None), classification_direction: str | None=Form(None)"
     },
     {
       "methods": [
@@ -1496,6 +1496,17 @@
                 }
               ],
               "title": "Target"
+            },
+            "smiles_column": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Smiles Column"
             }
           },
           "type": "object",
@@ -1652,6 +1663,11 @@
               "type": "string",
               "title": "Target Column"
             },
+            "smiles_column": {
+              "type": "string",
+              "title": "Smiles Column",
+              "default": "smiles"
+            },
             "task_type": {
               "type": "string",
               "title": "Task Type",
@@ -1734,6 +1750,28 @@
               "minimum": 0,
               "title": "Random Seed",
               "default": 42
+            },
+            "classification_threshold": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Classification Threshold"
+            },
+            "classification_direction": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Classification Direction"
             }
           },
           "type": "object",

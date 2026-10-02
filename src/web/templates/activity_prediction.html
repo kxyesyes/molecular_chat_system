@@ -184,6 +184,11 @@
                 style="display: none"
                 required
               />
+              <div class="form-group" style="margin-bottom: 24px">
+                <label for="batchSmilesColumn">CSV / TSV 的 SMILES 列名</label>
+                <input id="batchSmilesColumn" name="smiles_column" type="text" value="smiles" placeholder="例如 smiles 或 structure" />
+                <p class="panel-desc">每行一个 SMILES 的 .smi/.txt 文件无需填写；CSV/TSV 会跳过表头并按此列读取。</p>
+              </div>
 
 
 
@@ -279,6 +284,18 @@
                   <div class="form-group">
                     <label>特征组合</label>
                     <select id="trainFeatureMix"><option>Graph + Morgan</option><option>Graph only</option><option>Descriptors only</option></select>
+                  </div>
+                  <div class="form-group">
+                    <label for="classificationThreshold">连续标签分类阈值</label>
+                    <input id="classificationThreshold" type="number" step="any" placeholder="仅分类任务需要" />
+                  </div>
+                  <div class="form-group">
+                    <label for="classificationDirection">阈值方向</label>
+                    <select id="classificationDirection">
+                      <option value="">请选择（连续标签必填）</option>
+                      <option value="greater_or_equal">≥ 阈值为有活性</option>
+                      <option value="less_or_equal">≤ 阈值为有活性</option>
+                    </select>
                   </div>
                 </div>
               </details>

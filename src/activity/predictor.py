@@ -7,9 +7,11 @@ import sys
 import logging
 import inspect
 import math
+import threading
+import copy
 from pathlib import Path
 from typing import List, Dict, Any, Union, Optional, Tuple
-from rdkit import Chem
+from rdkit import Chem, rdBase
 from rdkit.Chem.SaltRemover import SaltRemover
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,9 @@ class ActivityPredictor:
         self.current_model_path = None
         self.current_model_metadata = None
         self.model_unavailable_reason = None
+        # Lifecycle mutations (switch/invalidate/reload) must not change the
+        # objects already captured by an in-flight inference request.
+        self._lifecycle_lock = threading.RLock()
         
         # Try to check if torch is available
         try:
@@ -141,13 +146,14 @@ class ActivityPredictor:
         return None
 
     def invalidate(self) -> None:
-        self.model = None
-        self._loaded = False
-        self.demo_mode = False
-        self.model_config = None
-        self.current_model_path = None
-        self.current_model_metadata = None
-        self.model_unavailable_reason = None
+        with self._lifecycle_lock:
+            self.model = None
+            self._loaded = False
+            self.demo_mode = False
+            self.model_config = None
+            self.current_model_path = None
+            self.current_model_metadata = None
+            self.model_unavailable_reason = None
 
     def _mark_unavailable(self, reason: str) -> None:
         self.demo_mode = True
@@ -177,6 +183,11 @@ class ActivityPredictor:
         channels = int(lin1_weight.shape[0])
         edge_dim = int(atom_conv0_lin1_weight.shape[1] - channels)
 
+        residual_indices = {
+            int(key.split(".")[1])
+            for key in state_dict
+            if key.startswith("atom_res_lins.")
+        }
         return {
             "in_channels": int(lin1_weight.shape[1]),
             "channels": channels,
@@ -187,9 +198,18 @@ class ActivityPredictor:
             "num_passing_rg": max(rg_conv_indices) + 1 if rg_conv_indices else 1,
             "num_passing_mol": 1,
             "dropout": 0.0,
+            # Version 2 has one residual projection per configured atom layer;
+            # old checkpoints have one fewer.  This lets metadata-poor legacy
+            # checkpoints load without silently changing their architecture.
+            "implementation_version": 2 if len(residual_indices) >= max(atom_conv_indices or {0}) + 1 else 1,
         }
         
     def load(self):
+        """Load one model generation atomically with lifecycle changes."""
+        with self._lifecycle_lock:
+            return self._load_unlocked()
+
+    def _load_unlocked(self):
         """
         加载 RG-MPNN 模型
         """
@@ -272,6 +292,7 @@ class ActivityPredictor:
                     num_passing_rg=model_config.get("num_passing_rg", 1),
                     num_passing_mol=model_config.get("num_passing_mol", 1),
                     dropout=model_config.get("dropout", 0.0),
+                    implementation_version=model_config.get("implementation_version", 1),
                 ).to(self.device)
 
                 self.model.load_state_dict(state_dict)
@@ -372,19 +393,38 @@ class ActivityPredictor:
         if not self._loaded:
             self.load()
 
+        # Capture one immutable request snapshot.  A later model switch or
+        # invalidation may change predictor attributes, but cannot change the
+        # model, metadata, device, or provenance used by this request.
+        with self._lifecycle_lock:
+            request_model = self.model
+            request_metadata = copy.deepcopy(self.current_model_metadata)
+            request_demo_mode = self.demo_mode
+            request_device = self.device
+            request_model_path = self.current_model_path
+            request_model_config = copy.deepcopy(self.model_config) or {}
+            request_unavailable_reason = self.model_unavailable_reason
+
         smiles_list = [smiles] if isinstance(smiles, str) else list(smiles)
-        if self.demo_mode:
-            return self._predict_demo(smiles_list)
+        if request_demo_mode:
+            reason = request_unavailable_reason or (
+                "RG-MPNN model weights are unavailable; no prediction was calculated."
+            )
+            return [
+                {"smiles": smi, "success": False, "error": reason,
+                 "model_provenance": {"demo_mode": True, "fallback_used": True}}
+                for smi in smiles_list
+            ]
 
         try:
-            metadata = _validate_prediction_metadata(self.current_model_metadata)
+            metadata = _validate_prediction_metadata(request_metadata)
         except ValueError as exc:
             return [
                 {"smiles": smi, "success": False, "error": str(exc)}
                 for smi in smiles_list
             ]
 
-        if self.model is None:
+        if request_model is None:
             return [
                 {
                     "smiles": smi,
@@ -407,7 +447,23 @@ class ActivityPredictor:
                 results[index] = {
                     "smiles": smi,
                     "success": False,
-                    "error": "Invalid SMILES or processing error",
+                    "error": "invalid_smiles",
+                }
+                continue
+            with rdBase.BlockLogs():
+                molecule = Chem.MolFromSmiles(smi.strip())
+            if molecule is None:
+                results[index] = {
+                    "smiles": smi,
+                    "success": False,
+                    "error": "invalid_smiles",
+                }
+                continue
+            if molecule.GetNumBonds() == 0:
+                results[index] = {
+                    "smiles": smi,
+                    "success": False,
+                    "error": "unsupported_no_bond_structure",
                 }
                 continue
             processed = self.process_smiles(smi.strip())
@@ -415,7 +471,7 @@ class ActivityPredictor:
                 results[index] = {
                     "smiles": smi,
                     "success": False,
-                    "error": "Invalid SMILES or processing error",
+                    "error": "structure_featurization_failed",
                 }
                 continue
             atom_data, rg_data = processed
@@ -428,10 +484,10 @@ class ActivityPredictor:
             import torch
 
             try:
-                atom_batch = Batch.from_data_list(valid_atom_data).to(self.device)
-                rg_batch = Batch.from_data_list(valid_rg_data).to(self.device)
+                atom_batch = Batch.from_data_list(valid_atom_data).to(request_device)
+                rg_batch = Batch.from_data_list(valid_rg_data).to(request_device)
                 with torch.no_grad():
-                    output, _fingerprint = self.model(atom_batch, rg_batch)
+                    output, _fingerprint = request_model(atom_batch, rg_batch)
                     # Sigmoid can conceal infinite logits as finite probabilities.
                     # Validate raw outputs before any task-specific transform.
                     if not torch.isfinite(output).all().item():
@@ -458,6 +514,19 @@ class ActivityPredictor:
                     value = float(raw_value)
                     if not math.isfinite(value):
                         raise ValueError("Model returned a non-finite prediction")
+                    provenance = {
+                        "model_id": metadata["model_id"],
+                        "weights_sha256": metadata["weights_sha256"].lower(),
+                        "model_path": request_model_path,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    }
+                    implementation_version = request_model_config.get(
+                        "implementation_version",
+                        metadata.get("model_implementation_version"),
+                    )
+                    if implementation_version is not None:
+                        provenance["implementation_version"] = implementation_version
                     results[index] = {
                         "smiles": smiles_list[index],
                         "success": True,
@@ -465,6 +534,7 @@ class ActivityPredictor:
                         "endpoint": metadata["endpoint"],
                         output_key: value,
                         "units": metadata["units"],
+                        "model_provenance": provenance,
                     }
             except Exception as exc:
                 logger.error("Inference batch failed: %s", exc)

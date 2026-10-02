@@ -32,7 +32,17 @@ class Recorder:
     name = NAME
 
     def __init__(self, result):
-        self.result = result
+        self.result = deepcopy(result)
+        if (isinstance(self.result, dict) and self.result.get("success") is True
+                and self.result.get("data") and "evidence" not in self.result):
+            rows = self.result["data"]
+            canonical = [
+                row for row in rows if isinstance(row, dict)
+                and row.get("success") is True
+                and any(key in row for key in ("task_type", "value", "probability"))
+            ]
+            if canonical:
+                self.result["evidence"] = [{"prediction": deepcopy(row)} for row in canonical]
         self.inputs = []
         self.closed = 0
 
@@ -46,7 +56,9 @@ class Recorder:
 
 @pytest.fixture
 def boundary():
-    tool = Recorder({"success": True, "data": [single_row()]})
+    row = single_row()
+    tool = Recorder({"success": True, "data": [row],
+                     "evidence": [{"prediction": deepcopy(row)}]})
     registry = build_tool_registry([tool])
     try:
         yield registry.resolve(NAME), tool
@@ -410,7 +422,9 @@ def test_validation_reuses_domain_helpers_without_loading_models(boundary, monke
     assert adapter.execute({"query": "CCO"}).success
     tool.result["data"] = [family_row()]
     assert adapter.execute({"query": "CCO"}).success
-    assert calls == {"domain": 4, "summary": 2, "metadata": 2}
+    # Canonical evidence snapshots are validated as independent observations;
+    # the family result validates both pinned model records as well.
+    assert calls == {"domain": 4, "summary": 2, "metadata": 6}
     assert tool.inputs == ["CCO", "CCO"]
 
 

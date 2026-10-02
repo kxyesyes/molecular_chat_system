@@ -65,10 +65,11 @@ window.ActivityResults = (function () {
   }
 
   function renderSingleSummary(item) {
-    if (!isNumber(item.activity_score) || item.success === false) return;
-    const score = item.activity_score;
-    const label = item.class || "Unknown";
-    const taskType = ActivityModels.getTaskType();
+    const score = ActivityUtils.getPredictionValue(item);
+    if (!isNumber(score) || item.success === false) return;
+    const taskType = item.task_type || ActivityModels.getTaskType();
+    const label = item.activity_class || item.class ||
+      (taskType === "classification" ? (score >= 0.5 ? "有活性" : "无活性") : "Unknown");
     const range = ActivityModels.getRangeConfig();
     const markerPct = Math.max(
       0,
@@ -84,9 +85,10 @@ window.ActivityResults = (function () {
       "singleTaskTypeValue",
       taskType === "classification" ? "分类" : "回归",
     );
+    const modelProvenance = item.model_provenance || {};
     ActivityUtils.setText(
       "singleModelMeta",
-      `结果靶点：${item.requested_target || item.target || "不可用"} / 模型：${item.model_id || "不可用"}`,
+      `结果靶点：${item.requested_target || item.target || "不可用"} / 模型：${item.model_id || modelProvenance.model_id || "不可用"}`,
     );
     ActivityUtils.setText(
       "activityBandSubtitle",
@@ -139,8 +141,8 @@ window.ActivityResults = (function () {
     tbody.replaceChildren();
 
     dataList.forEach(function (item, index) {
-      const score = item.activity_score;
-      const cls = item.class || (item.success === false ? "Failed" : "Unknown");
+      const score = ActivityUtils.getPredictionValue(item);
+      const cls = item.activity_class || item.class || (item.success === false ? "Failed" : "Unknown");
 
       const rowId = `row-score-${index}`;
       const row = document.createElement("tr");
@@ -165,7 +167,8 @@ window.ActivityResults = (function () {
         );
       } else if (!isNumber(score)) {
         row.append(smilesCell, createCell("不可用"),
-          createTagCell(cls, "tag tag-neutral"), createCell(formatProbability(item.confidence)));
+          createTagCell(cls, "tag tag-neutral"), createCell(item.task_type === "classification"
+            ? formatProbability(score) : formatProbability(item.confidence)));
       } else {
         const scoreCell = createCell(
           "0.000",
@@ -183,7 +186,8 @@ window.ActivityResults = (function () {
           smilesCell,
           scoreCell,
           createTagCell(cls, `tag ${tagClass}`),
-          createCell(formatProbability(item.confidence)),
+          createCell(item.task_type === "classification"
+            ? formatProbability(score) : formatProbability(item.confidence)),
         );
         animatedScoreCell = scoreCell;
       }
@@ -221,7 +225,7 @@ window.ActivityResults = (function () {
     }
     setHeaders(["SMILES", "预测活性值", "分类", "置信度"]);
     const successfulResults = data.results.filter(function (item) {
-      return item && item.success !== false && isNumber(item.activity_score);
+      return item && item.success !== false && isNumber(ActivityUtils.getPredictionValue(item));
     });
     const isSingleRequest = Boolean(options && options.isSingleRequest);
 
@@ -272,7 +276,7 @@ window.ActivityResults = (function () {
         : "分类与回归结果不一致，需复核；执行状态或来源未确认，已保留返回数值。");
     }
     const cell = createCell(notes.join("；") || "—", "word-break: break-word;");
-    const provenance = item.provenance || {};
+    const provenance = item.provenance || item.model_provenance || {};
     const source = document.createElement("details");
     const summary = document.createElement("summary");
     summary.textContent = "查看本次预测来源";

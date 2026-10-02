@@ -150,10 +150,76 @@ class DockingResultValidator:
 
 
 class ActivityResultValidator:
+    @staticmethod
+    def _canonical_provenance(result: ToolResult, entry: dict[str, Any]) -> dict[str, Any] | None:
+        candidate = entry.get("model_provenance")
+        if candidate is None:
+            candidate = result.quality.get("model_provenance")
+        return candidate if isinstance(candidate, dict) else None
+
+    @classmethod
+    def _validate_canonical_entry(
+        cls, result: ToolResult, entry: dict[str, Any]
+    ) -> str | None:
+        if entry.get("success") is not True:
+            if entry.get("success") is False and isinstance(entry.get("error"), str):
+                return None
+            return "Activity result has no explicit success or failure evidence"
+
+        task_type = entry.get("task_type")
+        if task_type not in {"regression", "classification"}:
+            return "Activity result is missing a valid task_type"
+        for field in ("endpoint", "units"):
+            if not isinstance(entry.get(field), str) or not entry[field].strip():
+                return f"Activity result is missing {field}"
+
+        key = "value" if task_type == "regression" else "probability"
+        value = entry.get(key)
+        if type(value) not in (int, float) or not math.isfinite(float(value)):
+            return "Activity result contains a non-finite or missing prediction"
+        if task_type == "classification" and not 0 <= float(value) <= 1:
+            return "Activity probability is outside the unit interval"
+        other_key = "probability" if key == "value" else "value"
+        if entry.get(other_key) is not None:
+            return "Activity result contains an ambiguous prediction field"
+
+        provenance = cls._canonical_provenance(result, entry)
+        if not isinstance(provenance, dict):
+            return "Activity result lacks model provenance"
+        if (not isinstance(provenance.get("model_id"), str)
+                or not provenance["model_id"].strip()
+                or not isinstance(provenance.get("weights_sha256"), str)
+                or _SHA256_PATTERN.fullmatch(provenance["weights_sha256"].lower()) is None
+                or provenance.get("demo_mode") is not False
+                or provenance.get("fallback_used", False) is not False):
+            return "Activity result lacks real model provenance"
+        return None
+
     def validate(self, result: ToolResult) -> str | None:
         if result.tool_name != "activity_predictor":
             return None
         entries = result.data if isinstance(result.data, list) else []
+        if any(
+            isinstance(entry, dict)
+            and any(entry.get(key) is not None for key in ("activity_score", "pic50", "pIC50"))
+            for entry in entries
+        ):
+            return "Activity result must use the canonical task/value contract"
+        canonical_entries = [
+            entry for entry in entries
+            if isinstance(entry, dict)
+            and not any(key in entry for key in ("family_id", "predicted_pIC50", "activity_probability", "activity_class"))
+            and any(key in entry for key in ("task_type", "value", "probability"))
+        ]
+        if canonical_entries:
+            for entry in canonical_entries:
+                invalid = self._validate_canonical_entry(result, entry)
+                if invalid:
+                    return invalid
+            if result.success is True and (not isinstance(result.evidence, list) or not result.evidence):
+                return "Activity result lacks evidence"
+            return None
+
         for entry in entries:
             if not isinstance(entry, dict) or not any(
                 key in entry for key in ("family_id", "predicted_pIC50", "activity_probability", "activity_class")
@@ -218,23 +284,6 @@ class ActivityResultValidator:
                         or model.get("demo_mode") is not False
                         or model.get("fallback_used") is not False):
                     return "Family activity result lacks real two-model provenance"
-        has_activity_claim = any(
-            isinstance(entry, dict)
-            and (
-                entry.get("activity_score") is not None
-                or entry.get("pic50") is not None
-                or entry.get("pIC50") is not None
-            )
-            for entry in entries
-        )
-        if not has_activity_claim:
-            return None
-        provenance = result.quality.get("model_provenance", {})
-        if (
-            not provenance.get("model_path")
-            or provenance.get("demo_mode") is not False
-        ):
-            return "Activity result lacks real model provenance"
         return None
 
 

@@ -257,7 +257,7 @@ window.ActivityCharts = (function () {
         return item && item.success !== false;
       })
       .map(function (item) {
-        return Number(item.activity_score || 0);
+        return ActivityUtils.getPredictionValue(item);
       })
       .filter(function (value) {
         return Number.isFinite(value);

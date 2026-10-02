@@ -220,15 +220,18 @@ def test_targetless_evidence_cannot_satisfy_later_target_obligation(setup_loop):
             self.inputs.append(query)
             # This test needs a valid targetless observation before resuming;
             # property-shaped data cannot establish an activity observation.
-            return ToolResult.success_result(self.name, [{
+            row = {
                 'smiles': 'CCO', 'success': True, 'task_type': 'regression',
                 'endpoint': 'pIC50', 'units': 'pIC50', 'value': 5.1,
                 'model_provenance': {
                     'model_id': 'synthetic-targetless', 'weights_sha256': 'a' * 64,
                     'task_type': 'regression', 'endpoint': 'pIC50', 'units': 'pIC50',
-                    'demo_mode': False,
+                    'demo_mode': False, 'fallback_used': False,
                 },
-            }])
+            }
+            return ToolResult.success_result(
+                self.name, [row], evidence=[{'prediction': deepcopy(row)}]
+            )
 
     activity = SyntheticActivity('activity_predictor')
     b = setup_loop([], [activity])
