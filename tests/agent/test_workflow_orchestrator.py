@@ -1,7 +1,12 @@
 import time
 
-from src.agent.contracts import AgentContext, AgentErrorCode, ToolResult
+import threading
+
+from src.agent.contracts import AgentContext, AgentErrorCode, RunOutcome, ToolResult
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
+from src.agent.persistence import SQLiteAgentStateStore
+from src.agent.runtime.run_session import WorkflowRunSession
+from src.agent.runtime.task_state import TaskEventType
 
 
 class FakeTool:
@@ -443,6 +448,239 @@ def test_step_timeout_returns_tool_timeout_and_stops_required_workflow():
 
     assert result.success is False
     assert result.tool_results[0].error.code == AgentErrorCode.TOOL_TIMEOUT
+
+
+def test_cancelled_workflow_does_not_dispatch_the_next_tool():
+    cancel = threading.Event()
+    cancel.set()
+
+    class ShouldNotRun:
+        name = "should_not_run"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _query):
+            self.calls += 1
+            return {"success": True, "data": {"value": 1}}
+
+    tool = ShouldNotRun()
+    result = WorkflowOrchestrator().run(
+        context=AgentContext(query="CCO", trace_id="cancel-before-dispatch"),
+        steps=[WorkflowStep("activity", "should_not_run", "CCO")],
+        tools={"should_not_run": tool},
+        cancel_event=cancel,
+    )
+
+    assert result.success is False
+    assert result.outcome is RunOutcome.CANCELLED
+    assert result.error.code is AgentErrorCode.CANCELLED
+    assert result.tool_results[0].status.value == "cancelled"
+    assert result.tool_results[0].quality["cancelled"] is True
+    assert tool.calls == 0
+
+
+def test_cancelled_workflow_discards_a_late_success_and_forwards_signal():
+    cancel = threading.Event()
+    entered = threading.Event()
+
+    class CooperativeTool:
+        name = "cooperative"
+
+        def execute(self, _query, *, cancel_event):
+            entered.set()
+            assert cancel_event.wait(1.0)
+            return {"success": True, "message": "late success", "data": {"value": 1}}
+
+    def request_cancel():
+        assert entered.wait(1.0)
+        cancel.set()
+
+    threading.Thread(target=request_cancel, daemon=True).start()
+    result = WorkflowOrchestrator().run(
+        context=AgentContext(query="CCO", trace_id="cancel-late-success"),
+        steps=[WorkflowStep("activity", "cooperative", "CCO", timeout_seconds=1.0)],
+        tools={"cooperative": CooperativeTool()},
+        cancel_event=cancel,
+    )
+
+    assert result.success is False
+    assert result.outcome is RunOutcome.CANCELLED
+    assert result.error.code is AgentErrorCode.CANCELLED
+    assert result.tool_results[0].success is False
+    assert result.tool_results[0].error.code is AgentErrorCode.CANCELLED
+    assert result.tool_results[0].data is None
+
+
+def test_cancelled_started_event_does_not_dispatch_the_tool():
+    cancel = threading.Event()
+
+    class CancellingBus:
+        def emit(self, **kwargs):
+            if kwargs["event"] is TaskEventType.TOOL_STARTED:
+                cancel.set()
+
+    class Tool:
+        name = "event_cancelled"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _query):
+            self.calls += 1
+            return {"success": True, "data": {"value": 1}}
+
+    tool = Tool()
+    result = WorkflowOrchestrator(event_bus=CancellingBus()).run(
+        context=AgentContext(query="CCO", trace_id="cancel-after-event"),
+        steps=[WorkflowStep("activity", "event_cancelled", "CCO")],
+        tools={"event_cancelled": tool},
+        cancel_event=cancel,
+    )
+
+    assert result.outcome is RunOutcome.CANCELLED
+    assert tool.calls == 0
+
+
+def test_cancellation_aware_step_dispatch_receives_signal_and_discards_late_success():
+    cancel = threading.Event()
+    observed = []
+
+    class Dispatch:
+        def authorize(self, _tool, _step):
+            return None
+
+        @staticmethod
+        def decorate_result(_result, _context, _reused_steps):
+            return None
+
+        def __call__(self, _tool, _input_data, _step, *, cancel_event):
+            observed.append(cancel_event)
+            cancel_event.set()
+            return ToolResult.success_result("delegated", {"value": 1})
+
+    orchestrator = WorkflowOrchestrator()
+    orchestrator.step_dispatch = Dispatch()
+    result = orchestrator.run(
+        context=AgentContext(query="CCO", trace_id="cancel-dispatch"),
+        steps=[WorkflowStep("delegated", "delegated", "CCO")],
+        tools={"delegated": object()},
+        cancel_event=cancel,
+    )
+
+    assert observed == [cancel]
+    assert result.outcome is RunOutcome.CANCELLED
+    assert result.tool_results[0].error.code is AgentErrorCode.CANCELLED
+
+
+def test_cancelled_checkpoint_cannot_be_reused():
+    cancel = threading.Event()
+
+    class CheckpointWorkflow(WorkflowOrchestrator):
+        def _compatible_checkpoint(self, *args, **kwargs):
+            cancel.set()
+            return {"checkpoint": True}
+
+        def _result_from_checkpoint(self, tool_name, checkpoint):
+            return ToolResult.success_result(tool_name, {"stale": True})
+
+    class Tool:
+        name = "checkpointed"
+
+        def __init__(self):
+            self.calls = 0
+
+        def execute(self, _query):
+            self.calls += 1
+            return {"success": True, "data": {"fresh": True}}
+
+    tool = Tool()
+    result = CheckpointWorkflow().run(
+        context=AgentContext(query="CCO", trace_id="cancel-checkpoint"),
+        steps=[WorkflowStep("activity", "checkpointed", "CCO")],
+        tools={"checkpointed": tool},
+        cancel_event=cancel,
+    )
+
+    assert result.outcome is RunOutcome.CANCELLED
+    assert tool.calls == 0
+    assert result.tool_results[0].quality["scientific_result_discarded"] is True
+
+
+def test_cancellation_during_observation_prepare_cannot_publish_success():
+    cancel = threading.Event()
+
+    def prepare(_result, _step):
+        cancel.set()
+
+    class Tool:
+        name = "prepared"
+
+        def execute(self, _query):
+            return {"success": True, "data": {"value": 1}}
+
+    session = WorkflowRunSession(
+        WorkflowOrchestrator(),
+        AgentContext(query="CCO", trace_id="cancel-prepare"),
+        [],
+        {"prepared": Tool()},
+        dynamic=True,
+        cancel_event=cancel,
+        observation_prepare=prepare,
+    )
+    session.start()
+    session.append_step(WorkflowStep("activity", "prepared", "CCO"))
+    session.execute_step(0)
+    result = session.finish_dynamic("")
+
+    assert result.outcome is RunOutcome.CANCELLED
+    assert result.success is False
+
+
+def test_late_observation_cancel_does_not_relabel_committed_success(tmp_path):
+    cancel = threading.Event()
+
+    class Tool:
+        name = "committed"
+
+        def execute(self, _query):
+            return {"success": True, "data": {"value": 1}}
+
+    store = SQLiteAgentStateStore(tmp_path / "late-cancel.sqlite")
+    session = WorkflowRunSession(
+        WorkflowOrchestrator(state_store=store),
+        AgentContext(query="CCO", trace_id="late-cancel"),
+        [],
+        {"committed": Tool()},
+        dynamic=True,
+        observation_capture=lambda _result: cancel.set(),
+        cancel_event=cancel,
+    )
+    session.start()
+    session.append_step(WorkflowStep("committed", "committed", "CCO"))
+    session.execute_step(0)
+    result = session.finish_dynamic("")
+
+    assert result.outcome is RunOutcome.COMPLETED
+    assert store.latest_checkpoint("late-cancel", "committed")["status"] == "succeeded"
+    assert store.get_tool_executions("late-cancel")[0]["status"] == "succeeded"
+
+
+def test_cancelled_session_preserves_legacy_three_argument_dispatch_override():
+    cancel = threading.Event()
+
+    class LegacyWorkflow(WorkflowOrchestrator):
+        def _execute_step(self, tool, input_data, step):
+            return super()._execute_step(tool, input_data, step)
+
+    result = LegacyWorkflow().run(
+        context=AgentContext(query="CCO", trace_id="cancel-legacy-hook"),
+        steps=[WorkflowStep("activity", "legacy", "CCO")],
+        tools={"legacy": FakeTool("legacy")},
+        cancel_event=cancel,
+    )
+
+    assert result.success is True
 
 
 def test_workflow_state_redacts_sensitive_context_metadata():

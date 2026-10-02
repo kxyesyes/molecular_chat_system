@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import inspect
 from typing import Any
 
-from src.agent.contracts import AgentErrorCode, AgentResult, ToolResult
+from src.agent.contracts import AgentErrorCode, AgentResult, ObservationStatus, ToolResult
 from src.agent.specialists import AgentTask
 from src.agent.tooling import TOOL_AGENT_OWNERS, RetryPolicy
 from .run_session import RunClaimConflict
@@ -61,10 +62,14 @@ class SpecialistDispatch:
             raise RunClaimConflict(status)
         return False
 
-    def __call__(self, tool, input_data, step):
+    def __call__(self, tool, input_data, step, *, cancel_event=None):
+        if cancel_event is not None and cancel_event.is_set():
+            return self._cancelled_result(step)
         denial = self.authorize(tool, step)
         if denial is not None:
             return denial
+        if cancel_event is not None and cancel_event.is_set():
+            return self._cancelled_result(step)
         owner = TOOL_AGENT_OWNERS.get(step.tool_name)
         specialist = self.specialists.get(owner)
         if specialist is None:
@@ -82,7 +87,9 @@ class SpecialistDispatch:
             metadata=deepcopy(step.metadata),
         )
         try:
-            response = specialist.execute_task(task, self.registry)
+            response = self._execute_specialist(
+                specialist, task, self.registry, cancel_event,
+            )
             if len(response.tool_results) != 1:
                 return ToolResult.error_result(step.tool_name, AgentErrorCode.INVALID_OUTPUT,
                                                "Specialist must return one observation per step")
@@ -90,10 +97,53 @@ class SpecialistDispatch:
             if not isinstance(result, ToolResult) or result.tool_name != step.tool_name:
                 return ToolResult.error_result(step.tool_name, AgentErrorCode.INVALID_OUTPUT,
                                                "Specialist observation identity mismatch")
+            if cancel_event is not None and cancel_event.is_set():
+                return self._cancelled_result(step)
             return result
         except Exception:
             return ToolResult.error_result(step.tool_name, AgentErrorCode.INTERNAL_ERROR,
                                            "Specialist dispatch failed")
+
+    @staticmethod
+    def _cancelled_result(step):
+        return ToolResult.error_result(
+            step.tool_name,
+            AgentErrorCode.CANCELLED,
+            "Specialist dispatch was cancelled before a scientific result was produced",
+            details={"step": step.name, "cancelled": True},
+            quality={
+                "cancelled": True,
+                "scientific_result_discarded": True,
+                "invocation_may_still_be_running": True,
+            },
+            status=ObservationStatus.CANCELLED,
+        )
+
+    @staticmethod
+    def _execute_specialist(specialist, task, registry, cancel_event):
+        if cancel_event is None:
+            return specialist.execute_task(task, registry)
+        try:
+            signature = inspect.signature(specialist.execute_task)
+        except (TypeError, ValueError):
+            signature = None
+        parameter = signature.parameters.get("cancel_event") if signature else None
+        accepts_cancel = bool(
+            parameter is not None
+            and parameter.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+            or signature is not None and any(
+                item.kind is inspect.Parameter.VAR_KEYWORD
+                for item in signature.parameters.values()
+            )
+        )
+        if accepts_cancel:
+            return specialist.execute_task(
+                task, registry, cancel_event=cancel_event,
+            )
+        return specialist.execute_task(task, registry)
 
     @staticmethod
     def decorate_result(result: AgentResult, context, reused_steps) -> None:
