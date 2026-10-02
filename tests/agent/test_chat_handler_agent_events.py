@@ -274,6 +274,58 @@ class RagSearchAgentSystem(FakeAgentSystem):
         }
 
 
+class TargetDesignAgentSystem(FakeAgentSystem):
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        return {
+            "success": True,
+            "final_answer": "## PDE5A 候选分子设计结果",
+            "tools_used": [
+                "target_database_search",
+                "llm_molecular_generator",
+                "property_calculator",
+            ],
+            "active_skill": "target_driven_design",
+            "tool_results": {},
+            "agent_events": [],
+            "metadata": {
+                "presentation": {
+                    "kind": "molecule_candidates",
+                    "molecules": [
+                        {
+                            "smiles": "CCO",
+                            "model": "gmm-llama:latest",
+                            "source": "llm",
+                            "properties": {"qed": 0.41},
+                            "validation": {
+                                "valid": True,
+                                "method": "RDKit",
+                            },
+                        },
+                        {
+                            "smiles": "CCN",
+                            "model": "gmm-llama:latest",
+                            "source": "llm",
+                            "properties": {"qed": 0.42},
+                            "validation": {
+                                "valid": True,
+                                "method": "RDKit",
+                            },
+                        },
+                    ],
+                }
+            },
+            "workflow_plan": {"workflow_name": "target_driven_design"},
+        }
+
+
+class EmptyTargetDesignAgentSystem(TargetDesignAgentSystem):
+    def execute(self, message, temperature=0.7, mol_count=5, active_skill=None):
+        result = super().execute(message, temperature, mol_count, active_skill)
+        result["final_answer"] = "未获得有效候选。SMILES: C1CC"
+        result["metadata"]["presentation"]["molecules"] = []
+        return result
+
+
 def test_chat_handler_forwards_agent_events_before_agent_result():
     model = FakeModel()
     handler = ChatHandler(
@@ -399,6 +451,73 @@ def test_chat_handler_uses_canonical_rag_search_result_for_rag_cards():
     assert len(rag_messages) == 1
     assert rag_messages[0]["molecules"][0]["smiles"] == "CCO"
     assert rag_messages[0]["molecules"][0]["similarity"] == 0.91
+
+
+def test_chat_handler_sends_only_structured_target_design_candidates_on_complete():
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=TargetDesignAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="针对 PDE5A 设计 10 个候选分子",
+            enable_rag=False,
+            enable_tools=True,
+            mol_count=10,
+        )
+    )
+
+    assert websocket.messages[-1] == {
+        "type": "complete",
+        "content": "## PDE5A 候选分子设计结果",
+        "molecules": [
+            {
+                "smiles": "CCO",
+                "model": "gmm-llama:latest",
+                "source": "llm",
+                "properties": {"qed": 0.41},
+                "validation": {"valid": True, "method": "RDKit"},
+            },
+            {
+                "smiles": "CCN",
+                "model": "gmm-llama:latest",
+                "source": "llm",
+                "properties": {"qed": 0.42},
+                "validation": {"valid": True, "method": "RDKit"},
+            },
+        ],
+    }
+
+
+def test_chat_handler_preserves_empty_structured_candidate_contract_on_complete():
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=EmptyTargetDesignAgentSystem(),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="针对 PDE5A 设计 10 个候选分子",
+            enable_rag=False,
+            enable_tools=True,
+            mol_count=10,
+        )
+    )
+
+    assert websocket.messages[-1] == {
+        "type": "complete",
+        "content": "未获得有效候选。SMILES: C1CC",
+        "molecules": [],
+    }
 
 
 def test_agent_context_defaults_capabilities_and_preserves_overrides_with_skill():

@@ -367,7 +367,7 @@
           break;
 
         case "complete":
-          completeLastMessage(message.content);
+          completeLastMessage(message.content, message.molecules);
           clearToolStatus(); // 清除工具状态显示
           break;
 
@@ -1591,7 +1591,7 @@
   }
 
   // 完成最后一条消息
-  function completeLastMessage(content) {
+  function completeLastMessage(content, molecules) {
     const hadTypingIndicator = Boolean(
       elements.chatContainer.querySelector(".typing-indicator-wrapper")
     );
@@ -1652,7 +1652,7 @@
     updateToolbarControlStates();
 
     // ✨ 检测并渲染SMILES分子结构
-    detectAndRenderMolecules(lastMessage, finalContent);
+    detectAndRenderMolecules(lastMessage, finalContent, molecules);
   }
 
   // 显示状态消息 - 美化版
@@ -3714,108 +3714,44 @@
     return "#64748b";
   }
 
-  // 🧬 检测并渲染SMILES分子结构 (2D可视化)
-  function detectAndRenderMolecules(messageElement, content) {
-    console.log("🔍 开始检测SMILES分子结构...");
-    console.log("📄 消息内容长度:", content.length);
-    console.log("📝 内容预览:", content.substring(0, 300));
+  function selectMoleculeCandidates(content, structuredMolecules) {
+    const selected = [];
+    const seen = new Set();
 
-    if (!window.SmilesDrawer) {
-      console.error("❌ SmilesDrawer库未加载，无法渲染分子结构");
-      console.log(
-        '💡 请检查 <script src="https://unpkg.com/smiles-drawer@2.0.1/dist/smiles-drawer.min.js"></script> 是否正确加载'
-      );
-      return;
-    }
-    console.log("✅ SmilesDrawer库已加载");
-
-    // SMILES检测模式：匹配典型的SMILES结构
-    // 1. 在反引号中: `CCO`, `CC(=O)O` 等
-    // 2. 在SMILES:标签后: SMILES: CCO
-    // 3. 单独一行的复杂结构
-    const smilesPatterns = [
-      /`([A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\\/:]{4,})`/g, // 反引号包裹
-      /SMILES[:\s]+([A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\\/:]{4,})/gi, // SMILES:标签
-      /\b([A-Z][A-Za-z0-9@+\-\[\]\(\)=#]{8,})\b/g, // 复杂结构(较长)
-    ];
-
-    const detectedSmiles = new Set();
-
-    // 提取所有SMILES
-    smilesPatterns.forEach((pattern, idx) => {
-      console.log(`🔎 使用模式 ${idx + 1} 检测...`);
-      let match;
-      while ((match = pattern.exec(content)) !== null) {
-        const smiles = match[1] || match[0];
-        console.log(`  发现候选SMILES: "${smiles}"`);
-
-        // 增强的SMILES验证逻辑
-        // 1. 基本长度检查
-        if (smiles.length < 4 || smiles.length > 200) {
-          console.log(`  ❌ 长度不符: ${smiles.length}`);
-          continue;
-        }
-
-        // 2. 必须包含化学元素符号
-        if (!/[CNOSPFClBrI]/.test(smiles)) {
-          console.log(`  ❌ 缺少化学元素`);
-          continue;
-        }
-
-        // 3. 排除常见的非SMILES字符串
-        const excludePatterns = [
-          /SMILES/i,
-          /http/i,
-          /scaffold/i,
-          /canonical/i,
-          /NumRotBonds/i,
-          /^[A-Z][a-z]+$/, // 单个单词
-          /\s{2,}/, // 多个空格
-          /^[A-Z_]+$/, // 全大写变量名
-          /\.\.\./, // 包含省略号(通常是被截断的SMILES)
-        ];
-
-        if (excludePatterns.some((pattern) => pattern.test(smiles))) {
-          console.log(`  ❌ 匹配排除模式`);
-          continue;
-        }
-
-        // 4. 检查括号匹配
-        const openParens = (smiles.match(/\(/g) || []).length;
-        const closeParens = (smiles.match(/\)/g) || []).length;
-        if (openParens !== closeParens) {
-          console.log(`  ❌ 括号不匹配: (${openParens}) vs )${closeParens})`);
-          continue;
-        }
-
-        // 5. 检查方括号匹配
-        const openBrackets = (smiles.match(/\[/g) || []).length;
-        const closeBrackets = (smiles.match(/\]/g) || []).length;
-        if (openBrackets !== closeBrackets) {
-          console.log(`  ❌ 方括号不匹配`);
-          continue;
-        }
-
-        // 6. 必须以字母或数字开头
-        if (!/^[A-Za-z0-9]/.test(smiles)) {
-          console.log(`  ❌ 开头字符无效`);
-          continue;
-        }
-
-        detectedSmiles.add(smiles.trim());
-        console.log(`  ✅ 验证通过: "${smiles}"`);
+    function addCandidate(candidate, requireBackendValidation) {
+      if (!candidate || typeof candidate.smiles !== "string") return;
+      if (
+        requireBackendValidation &&
+        (!candidate.validation ||
+          candidate.validation.valid !== true ||
+          candidate.validation.method !== "RDKit")
+      ) {
+        return;
       }
-    });
-
-    if (detectedSmiles.size === 0) {
-      console.log("📭 未检测到有效的SMILES分子结构");
-      return;
+      const smiles = candidate.smiles.trim();
+      if (!smiles || seen.has(smiles)) return;
+      seen.add(smiles);
+      selected.push({ ...candidate, smiles });
     }
 
-    console.log(
-      `🎯 成功检测到 ${detectedSmiles.size} 个分子结构:`,
-      Array.from(detectedSmiles)
+    // 工作流 complete 帧一旦提供结构化契约，就绝不再从 Markdown 猜测结构。
+    if (Array.isArray(structuredMolecules)) {
+      structuredMolecules.forEach((item) => addCandidate(item, true));
+      return selected;
+    }
+    // 不从自然语言或 Markdown 猜测结构；卡片只接受后端 RDKit 验证契约。
+    return selected;
+  }
+
+  // 🧬 渲染结构化验证后的SMILES分子结构 (2D可视化)
+  function detectAndRenderMolecules(messageElement, content, structuredMolecules) {
+    const moleculeCandidates = selectMoleculeCandidates(
+      content,
+      structuredMolecules
     );
+    if (moleculeCandidates.length === 0) {
+      return;
+    }
 
     // 创建分子结构容器
     const moleculeContainer = document.createElement("div");
@@ -3848,15 +3784,15 @@
     title.innerHTML = `
       <div style="width: 32px; height: 32px; background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%); border-radius: 8px; display: flex; align-items: center; justify-content: center; color: white; font-size: 18px; box-shadow: 0 4px 6px -1px rgba(59, 130, 246, 0.3);">🧬</div>
       <div style="flex: 1;">
-        <div style="line-height: 1.2;">分子结构可视化</div>
-        <div style="font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;">检测到 ${detectedSmiles.size} 个分子结构</div>
+        <div style="line-height: 1.2;">已验证候选结构</div>
+        <div style="font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;">共 ${moleculeCandidates.length} 个有效且唯一候选</div>
       </div>
     `;
     moleculeContainer.appendChild(title);
 
     // 创建分子网格 - 根据分子数量动态调整（方案A+C）
-    const moleculeCount = detectedSmiles.size;
-    const moleculesArray = Array.from(detectedSmiles);
+    const moleculeCount = moleculeCandidates.length;
+    const moleculesArray = moleculeCandidates;
 
     // 横向滑动布局参数（统一固定比例，避免随数量突变）
     const minCardWidth = "260px";
@@ -3894,7 +3830,8 @@
       const endIdx = Math.min(startIdx + itemsPerPage, moleculeCount);
       const pageMolecules = moleculesArray.slice(startIdx, endIdx);
 
-      pageMolecules.forEach((smiles, pageIndex) => {
+      pageMolecules.forEach((molecule, pageIndex) => {
+        const smiles = molecule.smiles;
         const globalIndex = startIdx + pageIndex;
         const molCard = document.createElement("div");
         molCard.className = "molecule-card";
@@ -3939,7 +3876,9 @@
           <div style="font-weight: 700; color: #4f46e5; font-size: 16px;">#${
             globalIndex + 1
           }</div>
-          <div style="background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;">工具生成</div>
+          <div style="background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;">${
+            molecule.validation?.valid ? "RDKit 已验证" : "SMILES"
+          }</div>
         `;
         molCard.appendChild(cardHeader);
 
@@ -3993,18 +3932,32 @@
       `;
         infoSection.appendChild(propertiesContainer);
 
-        // 异步获取分子属性
-        fetchMoleculePropertiesForToolMolecule(smiles, propertiesContainer);
+        // 优先复用工作流已计算的属性，避免重复请求和结果漂移。
+        if (
+          molecule.properties &&
+          Object.keys(molecule.properties).length > 0
+        ) {
+          displayToolMoleculeProperties(
+            { basic: molecule.properties },
+            propertiesContainer
+          );
+        } else {
+          fetchMoleculePropertiesForToolMolecule(smiles, propertiesContainer);
+        }
 
         // SMILES 折叠区域
         const smilesDetails = document.createElement("details");
         smilesDetails.style.cssText = `margin-top: 4px;`;
-        smilesDetails.innerHTML = `
-        <summary style="cursor: pointer; color: #64748b; font-size: 12px; user-select: none;">显示 SMILES</summary>
-        <div style="margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;">
-          ${smiles}
-        </div>
-      `;
+        const smilesSummary = document.createElement("summary");
+        smilesSummary.style.cssText =
+          "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
+        smilesSummary.textContent = "显示 SMILES";
+        const smilesValue = document.createElement("div");
+        smilesValue.style.cssText =
+          "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
+        smilesValue.textContent = smiles;
+        smilesDetails.appendChild(smilesSummary);
+        smilesDetails.appendChild(smilesValue);
         infoSection.appendChild(smilesDetails);
 
         molCard.appendChild(infoSection);

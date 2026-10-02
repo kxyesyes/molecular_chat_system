@@ -29,8 +29,8 @@ if (missing.length) {
 }
 
 const completionSnippets = [
-  "completeLastMessage(message.content);",
-  "function completeLastMessage(content)",
+  "completeLastMessage(message.content, message.molecules);",
+  "function completeLastMessage(content, molecules)",
   "resolveCompletionAction({",
   "removeTypingIndicator();",
 ];
@@ -46,7 +46,9 @@ if (missingCompletionSnippets.length) {
   process.exit(1);
 }
 
-const completionStart = source.indexOf("function completeLastMessage(content)");
+const completionStart = source.indexOf(
+  "function completeLastMessage(content, molecules)"
+);
 const completionEnd = source.indexOf("// 显示状态消息", completionStart);
 const completionBody =
   completionStart >= 0 && completionEnd > completionStart

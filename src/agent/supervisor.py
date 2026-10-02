@@ -19,6 +19,7 @@ from src.agent.persistence.base import AgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.runtime.workflow_executor import WorkflowExecutor
+from src.agent.reporting import present_target_design_result
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
 
 
@@ -168,6 +169,11 @@ class SupervisorAgent:
                 },
             }
         result = execution.result
+        self._present_workflow_result(
+            execution.plan.workflow_name,
+            execution.plan.metadata,
+            result,
+        )
         legacy_result = result.to_legacy_dict()
         return {
             "success": result.success or result.partial,
@@ -181,6 +187,7 @@ class SupervisorAgent:
             "trace_id": result.trace_id,
             "agent_result": result,
             "agent_events": execution.events,
+            "metadata": legacy_result["metadata"],
             "workflow_plan": {
                 "workflow_name": execution.plan.workflow_name,
                 "steps": [
@@ -322,12 +329,26 @@ class SupervisorAgent:
             idempotency_key=idempotency_key,
             plan=workflow_plan,
         )
+        self._present_workflow_result(
+            execution.plan.workflow_name,
+            execution.plan.metadata,
+            execution.result,
+        )
         return self._format_run_result(
             execution.plan.workflow_name,
             execution.plan.metadata,
             execution.plan.steps,
             execution.result,
         )
+
+    @staticmethod
+    def _present_workflow_result(
+        workflow_name: str,
+        plan_metadata: Mapping[str, Any],
+        result: AgentResult,
+    ) -> None:
+        if workflow_name == "target_driven_design":
+            present_target_design_result(result, plan_metadata)
 
     def _run_delegated(
         self,

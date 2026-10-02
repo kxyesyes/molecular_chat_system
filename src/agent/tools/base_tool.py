@@ -35,6 +35,26 @@ class BaseMolecularTool:
         """统一的SMILES提取方法 - 优化版，减少误匹配"""
         candidates = []
 
+        # 工作流会以“一行一个 canonical SMILES”的形式传递上游候选。
+        # 这类结构化文本必须优先按整行解析，避免后续宽松正则从一个
+        # 合法分子中再截取出同样合法的片段，造成下游候选数膨胀。
+        exact_lines = [
+            line.strip().strip("`'\".,;")
+            for line in str(text or "").splitlines()
+            if line.strip()
+        ]
+        if exact_lines and all(
+            not re.search(r"\s", line) and self.validate_smiles(line)
+            for line in exact_lines
+        ):
+            normalized_lines = exact_lines
+            if RDKIT_AVAILABLE:
+                normalized_lines = [
+                    Chem.MolToSmiles(Chem.MolFromSmiles(line), canonical=True)
+                    for line in exact_lines
+                ]
+            return list(dict.fromkeys(normalized_lines))
+
         # 方法1: 完整SMILES结构优先检查（提高准确性）
         # 匹配复杂分子结构模式
         complex_smiles_pattern = r'[A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\/:]{5,}'

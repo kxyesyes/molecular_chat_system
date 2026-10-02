@@ -26,7 +26,7 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '/static/js/home/main.js?v=20260713-workflow-complete-v2'
+    '/static/js/home/main.js?v=20260714-target-design-v2'
   ),
   "homepage must cache-bust the workflow completion fix"
 );
@@ -48,6 +48,8 @@ function extractFunction(functionName) {
 
 const resolverSource = extractFunction("resolveCompletionAction");
 const resolveCompletionAction = vm.runInNewContext(`(${resolverSource})`);
+const selectorSource = extractFunction("selectMoleculeCandidates");
+const selectMoleculeCandidates = vm.runInNewContext(`(${selectorSource})`);
 
 function resolve(overrides = {}) {
   return resolveCompletionAction({
@@ -136,6 +138,55 @@ assert.strictEqual(
 assert.ok(
   source.includes("resolveCompletionAction({"),
   "completeLastMessage() must consume the tested state resolver"
+);
+
+assert.deepStrictEqual(
+  Array.from(
+    selectMoleculeCandidates(
+      "PDE5A O76074 `1T9R` SMILES: CCO",
+      [
+        { smiles: "CCO", validation: { valid: true, method: "RDKit" } },
+        { smiles: "CCO", validation: { valid: true, method: "RDKit" } },
+        { smiles: "CCN", validation: { valid: true, method: "RDKit" } },
+      ]
+    ),
+    (item) => item.smiles
+  ),
+  ["CCO", "CCN"],
+  "structured workflow candidates must be deduplicated without mining target identifiers from Markdown"
+);
+
+assert.deepStrictEqual(
+  Array.from(
+    selectMoleculeCandidates(
+      "Target PDE5A, UniProt O76074, structure `1T9R`; SMILES: CCO",
+      undefined
+    ),
+    (item) => item.smiles
+  ),
+  [],
+  "unvalidated text must never create molecule cards"
+);
+
+assert.deepStrictEqual(
+  Array.from(
+    selectMoleculeCandidates("SMILES: C1CC", undefined),
+    (item) => item.smiles
+  ),
+  [],
+  "chemically invalid text SMILES must not create molecule cards"
+);
+
+assert.ok(
+  source.includes("completeLastMessage(message.content, message.molecules);"),
+  "complete frames must forward structured molecule candidates"
+);
+
+assert.ok(
+  source.includes(
+    "detectAndRenderMolecules(lastMessage, finalContent, molecules);"
+  ),
+  "completion rendering must pass the structured candidate contract"
 );
 
 console.log("Homepage workflow completion behavior checks passed");

@@ -298,10 +298,17 @@ class ChatHandler:
             and not summarize_workflow
         ):
             full_response = agent_response
-            await websocket.send_text(json.dumps({
+            completion_payload = {
                 "type": "complete",
                 "content": full_response,
-            }, ensure_ascii=False))
+            }
+            workflow_molecules = self._workflow_molecules(agent_result)
+            if workflow_molecules is not None:
+                completion_payload["molecules"] = workflow_molecules
+            await websocket.send_text(json.dumps(
+                completion_payload,
+                ensure_ascii=False,
+            ))
             history.append({
                 "user": message,
                 "agent_used": True,
@@ -397,6 +404,47 @@ class ChatHandler:
         # 只保留最近20条对话
         if len(history) > 20:
             del history[:-20]
+
+    @staticmethod
+    def _workflow_molecules(
+        agent_result: Dict[str, Any] | None,
+    ) -> List[Dict[str, Any]] | None:
+        """Return only backend-validated candidates from the presentation contract."""
+        if not isinstance(agent_result, dict):
+            return None
+        metadata = agent_result.get("metadata")
+        if not isinstance(metadata, dict):
+            return None
+        presentation = metadata.get("presentation")
+        if not isinstance(presentation, dict):
+            return None
+        if presentation.get("kind") != "molecule_candidates":
+            return None
+
+        molecules = presentation.get("molecules")
+        if not isinstance(molecules, list):
+            return None
+        accepted: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in molecules:
+            if not isinstance(item, dict):
+                continue
+            smiles = item.get("smiles")
+            validation = item.get("validation")
+            if (
+                not isinstance(smiles, str)
+                or not smiles.strip()
+                or not isinstance(validation, dict)
+                or validation.get("valid") is not True
+                or validation.get("method") != "RDKit"
+            ):
+                continue
+            smiles = smiles.strip()
+            if smiles in seen:
+                continue
+            seen.add(smiles)
+            accepted.append({**item, "smiles": smiles})
+        return accepted
     
     async def _execute_agent(
         self,
