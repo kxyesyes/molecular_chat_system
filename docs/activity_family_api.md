@@ -14,6 +14,21 @@
 靶点、未选用模型组或组文件损坏不会退回全局模型。该字段接受受控标识，不是自由文本规划。
 批量输入沿用现有解析方式与上传上限，保留有效解析行的顺序和重复 SMILES。
 
+### 请求预算与并发边界
+
+活性预测入口有独立的进程内资源闸门，默认最多同时接纳 2 个计算请求；可用
+`MEDCHAT_ACTIVITY_MAX_CONCURRENCY` 调整。单次批量请求默认最多 100 行，可用
+`MEDCHAT_ACTIVITY_MAX_BATCH_ROWS` 调整。超出并发容量返回 HTTP 429、错误码
+`ACTIVITY_CAPACITY_EXCEEDED`；超出批量上限返回 HTTP 413、错误码
+`ACTIVITY_BATCH_LIMIT_EXCEEDED`。这些限制在进入模型推理前生效。
+
+请求等待活性计算的默认上限为 60 秒，可用 `MEDCHAT_ACTIVITY_TIMEOUT_SECONDS` 调整。
+超时返回 HTTP 504、错误码 `ACTIVITY_REQUEST_TIMEOUT`，并明确标记
+`compute_disposition=draining`：这表示请求停止等待，但不能安全地强制终止正在执行的
+RDKit/PyTorch 线程。该线程会被继续观察，只有实际退出后才释放并发槽位；因此超时不会
+被当作科学成功，也不会让超时请求无限制地继续占用新槽位。若计算尚未开始就被取消，
+则会在队列包装层阻止实际函数执行并立即释放槽位。
+
 ## 结果与状态
 
 响应保留 `results`，增加 `status` 和汇总 `warnings`。外层 `success` 表示科学步骤完成情况，
