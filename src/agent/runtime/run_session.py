@@ -35,6 +35,20 @@ if TYPE_CHECKING:
     from src.agent.orchestrators.workflow import WorkflowOrchestrator
 
 
+def copy_checkpoint_warnings(value: Any) -> list[dict[str, str]]:
+    """Validate and detach execution-audit warnings crossing a resume boundary."""
+    if type(value) is not list or len(value) > 128:
+        raise ValueError("invalid checkpoint warnings")
+    copied = []
+    for entry in value:
+        if (type(entry) is not dict or set(entry) != {"step", "reason"}
+                or any(type(entry[key]) is not str or not entry[key].strip() or len(entry[key]) > 256
+                       for key in ("step", "reason"))):
+            raise ValueError("invalid checkpoint warnings")
+        copied.append({"step": entry["step"], "reason": entry["reason"]})
+    return copied
+
+
 @dataclass(frozen=True)
 class StepAdvance:
     step_id: str
@@ -390,6 +404,7 @@ class WorkflowRunSession:
     def restore_observations(
         self, results: list[ToolResult], tool_attempt_count: int,
         *, binding_proofs: dict[str, dict[str, Any]] | None = None,
+        checkpoint_warnings: list[dict[str, str]] | None = None,
     ) -> None:
         """Atomically install caller-PREVALIDATED settled observations.
 
@@ -409,6 +424,9 @@ class WorkflowRunSession:
             raise SessionLifecycleError("restored attempt count must be a nonnegative integer")
 
         proofs = {}
+        restored_checkpoint_warnings = copy_checkpoint_warnings(
+            [] if checkpoint_warnings is None else checkpoint_warnings
+        )
         if binding_proofs is not None:
             if type(binding_proofs) is not dict or len(binding_proofs) > 128:
                 raise SessionLifecycleError("invalid restored binding proofs")
@@ -468,6 +486,7 @@ class WorkflowRunSession:
         self.results = restored
         self._restored_step_ids = step_ids
         self._tool_attempt_count = tool_attempt_count
+        self.checkpoint_warnings = restored_checkpoint_warnings
         self._observations_restored = True
 
     def append_step(self, step: WorkflowStep) -> None:

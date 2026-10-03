@@ -88,6 +88,7 @@ def snapshot_payload(state, session, fingerprint, *, resolver, journal, created_
         raise DecisionBoundaryError('task_deadline_exceeded')
     reserve = min(30.0, remaining / 4)
     resolver.verify_binding_closure()
+    from src.agent.runtime.run_session import copy_checkpoint_warnings
     for result in session.results:
         verify_observation_integrity(result, session)
     snapshot = dict(decision_protocol_revision=REVISION, binding_profile=B1_PROFILE_REVISION,
@@ -99,6 +100,7 @@ def snapshot_payload(state, session, fingerprint, *, resolver, journal, created_
         input_queries=list(session.input_queries), remaining_seconds=remaining - reserve,
         pre_finalization_remaining_seconds=remaining, finalization_reserve_seconds=reserve,
         tool_attempt_count=session.tool_attempt_count, task_acceptance=state.task_acceptance,
+        checkpoint_warnings=copy_checkpoint_warnings(session.checkpoint_warnings),
         results=[{'tool_name': r.tool_name, **r.to_legacy_dict()} for r in session.results])
     payload = dict(schema=1, id=uuid4().hex, configuration=fingerprint, snapshot=snapshot)
     validate_json(payload, max_bytes=LIMIT - 80, reason='continuation_snapshot_not_persistable')
@@ -217,10 +219,13 @@ def validate_continuation(loop, session, fingerprint, nonce, reply, *, requireme
     if len(reply.encode('utf-8')) > 16384 or contains_secret_material(reply):
         raise ValueError('invalid clarification')
     saved = payload['snapshot']
+    if isinstance(saved, dict) and 'checkpoint_warnings' not in saved:
+        saved = {**saved, 'checkpoint_warnings': []}
     keys = {'decision_protocol_revision', 'binding_profile', 'task_requirements', 'binding_input_journal',
         'binding_records', 'observation_seals', *_COUNTERS, 'messages', 'proposals', 'call_ids',
         'current_query', 'input_queries', 'remaining_seconds', 'pre_finalization_remaining_seconds',
-        'finalization_reserve_seconds', 'tool_attempt_count', 'task_acceptance', 'results'}
+        'finalization_reserve_seconds', 'tool_attempt_count', 'task_acceptance',
+        'checkpoint_warnings', 'results'}
     if (type(saved) is not dict or set(saved) != keys
             or type(saved['decision_protocol_revision']) is not int or saved['decision_protocol_revision'] != REVISION
             or saved['binding_profile'] != B1_PROFILE_REVISION
@@ -260,6 +265,8 @@ def validate_continuation(loop, session, fingerprint, nonce, reply, *, requireme
             or type(saved['observation_seals']) is not dict
             or len(saved['observation_seals']) != len(saved['results'])):
         raise ValueError('invalid settled action count')
+    from src.agent.runtime.run_session import copy_checkpoint_warnings
+    saved['checkpoint_warnings'] = copy_checkpoint_warnings(saved['checkpoint_warnings'])
     projection = WorkflowRunSession(session.orchestrator, journal.context(0), [], {}, dynamic=True)
     projection.ledger = EvidenceLedger(context.trace_id)
     projection._decision_observation_seals = MappingProxyType({})
