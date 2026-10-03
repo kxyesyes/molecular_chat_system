@@ -4,6 +4,8 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.activity.family_contract import resolve_activity_family
+
 
 class CandidateRanker:
     """Rank validated generated molecules from available scientific evidence."""
@@ -42,6 +44,7 @@ class CandidateRanker:
             activity = self._evidence_by_candidate(
                 outputs.get("activity"), candidates, "activity"
             )
+            self._validate_activity_scope(activity.values(), metadata)
         except _RankingInputError as exc:
             return self._error(exc.code, str(exc))
 
@@ -309,6 +312,97 @@ class CandidateRanker:
             return None
         return min(max(float(value), 0.0), 1.0)
 
+    @classmethod
+    def _validate_activity_scope(
+        cls, records: Sequence[Mapping[str, Any]], metadata: Mapping[str, Any]
+    ) -> None:
+        """Reject successful activity evidence from a different scientific scope.
+
+        PDE subtypes intentionally share the configured PDE-family model, so
+        target comparison is family-level rather than exact target-id matching.
+        When a workflow supplies scope metadata, a successful activity record
+        must carry matching target-family, endpoint, and units provenance before
+        its value can affect ranking.
+        """
+        expected_target = metadata.get("target") or metadata.get("target_hint")
+        expected_endpoint = metadata.get("endpoint")
+        expected_units = metadata.get("units")
+        expected_family = cls._activity_family(expected_target)
+        observed_scopes: set[tuple[Any, Any, Any]] = set()
+        for record in records:
+            if record.get("success") is not True:
+                continue
+            actual_family, actual_endpoint, actual_units = cls._activity_scope(record)
+            observed_scopes.add((actual_family, actual_endpoint, actual_units))
+            if not any(value is not None for value in (expected_target, expected_endpoint, expected_units)):
+                continue
+            if expected_target is not None:
+                if expected_family is None or actual_family is None or expected_family != actual_family:
+                    raise _RankingInputError(
+                        "activity_scope_mismatch",
+                        "Activity evidence target family does not match ranking target",
+                    )
+            if expected_endpoint is not None and not cls._same_scope_value(
+                actual_endpoint, expected_endpoint
+            ):
+                raise _RankingInputError(
+                    "activity_scope_mismatch",
+                    "Activity evidence endpoint does not match ranking endpoint",
+                )
+            if expected_units is not None and not cls._same_scope_value(
+                actual_units, expected_units
+            ):
+                raise _RankingInputError(
+                    "activity_scope_mismatch",
+                    "Activity evidence units do not match ranking units",
+                )
+        if not any(value is not None for value in (expected_target, expected_endpoint, expected_units)) and len(observed_scopes) > 1:
+            raise _RankingInputError(
+                "activity_scope_mismatch",
+                "Activity evidence mixes targets, endpoints, or units",
+            )
+
+    @classmethod
+    def _activity_scope(cls, record: Mapping[str, Any]) -> tuple[str | None, str | None, str | None]:
+        provenance = record.get("provenance") or record.get("model_provenance")
+        request = provenance.get("request") if isinstance(provenance, Mapping) else None
+        actual_target = (
+            record.get("requested_target")
+            or record.get("target")
+            or (request.get("target") if isinstance(request, Mapping) else None)
+            or (request.get("family_id") if isinstance(request, Mapping) else None)
+        )
+        actual_endpoint = record.get("endpoint") or (
+            request.get("endpoint") if isinstance(request, Mapping) else None
+        )
+        actual_units = record.get("units") or (
+            request.get("units") if isinstance(request, Mapping) else None
+        )
+        # Family prediction rows historically expose pIC50 as their units;
+        # for p-activity units that is also the endpoint identity.  Derive
+        # only this unambiguous case, never an arbitrary missing endpoint.
+        if actual_endpoint is None and actual_units in {"pIC50", "pKi", "pEC50", "pKd"}:
+            actual_endpoint = actual_units
+        normalize = lambda value: value.strip().casefold() if isinstance(value, str) else None
+        return cls._activity_family(actual_target), normalize(actual_endpoint), normalize(actual_units)
+
+    @staticmethod
+    def _activity_family(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            return resolve_activity_family(value)
+        except ValueError:
+            return value.strip().casefold()
+
+    @staticmethod
+    def _same_scope_value(actual: Any, expected: Any) -> bool:
+        return (
+            isinstance(actual, str)
+            and isinstance(expected, str)
+            and actual.strip().casefold() == expected.strip().casefold()
+        )
+
     @staticmethod
     def _trusted_activity_provenance(provenance: Mapping[str, Any] | None) -> bool:
         if not isinstance(provenance, Mapping):
@@ -390,7 +484,7 @@ class CandidateRanker:
     ) -> dict[str, Any]:
         normalized_code = (
             "invalid_output"
-            if code in {"invalid_candidate_set", "invalid_candidate_evidence"}
+            if code in {"invalid_candidate_set", "invalid_candidate_evidence", "activity_scope_mismatch"}
             else "invalid_input"
             if code in {"invalid_input", "invalid_top_n"}
             else "internal_error"

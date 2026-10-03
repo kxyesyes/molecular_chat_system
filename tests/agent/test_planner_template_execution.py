@@ -195,7 +195,8 @@ def test_target_design_passes_evidence_and_validated_candidates_to_ranking(optio
             assert [row["candidate_id"] for row in outputs[key]] == [
                 row["candidate_id"] for row in candidates]
     assert inputs["candidate_ranker"] == {
-        "query": TARGET_QUERY, "metadata": {"docking_top_n": 3},
+        "query": TARGET_QUERY,
+        "metadata": {"docking_top_n": 3, "target": "PDE5A", "endpoint": "pIC50", "units": "pIC50"},
         "outputs": {key: outputs.get(key, [])
                     for key in ("molecules", "properties", "admet", "activity")},
     }
