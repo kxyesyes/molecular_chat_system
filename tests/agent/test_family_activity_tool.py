@@ -28,6 +28,15 @@ def family_row(**changes):
                                              "demo_mode": False, "fallback_used": False}
                                       for task in ("classification", "regression")}})
     row.update(changes)
+    if "provenance" not in changes and isinstance(row.get("provenance"), dict):
+        from src.activity.request_selection import ActivityModelRequest, request_identity
+        provenance = row["provenance"]
+        request = ActivityModelRequest(
+            family_id=row["family_id"], endpoint="pIC50", units="pIC50",
+            species=provenance["request"].get("species"), validation="endpoint_ready",
+        )
+        provenance["request"]["identity"] = request_identity(
+            request, provenance.get("bundle_id"), provenance.get("models", {}))
     return row
 
 
@@ -49,6 +58,13 @@ def boundary(monkeypatch):
                 row["provenance"]["request"]["family_id"] = row["family_id"]
                 for model in row["provenance"]["models"].values():
                     model["target_id"] = row["family_id"]
+                from src.activity.request_selection import ActivityModelRequest, request_identity
+                request = ActivityModelRequest(
+                    family_id=row["family_id"], endpoint="pIC50", units="pIC50",
+                    species=row["provenance"]["request"].get("species"),
+                    validation="endpoint_ready")
+                row["provenance"]["request"]["identity"] = request_identity(
+                    request, row["provenance"]["bundle_id"], row["provenance"]["models"])
         return dict(success=state["status"] == "passed", status=state["status"],
                     results=rows, warnings=["服务边界提示"])
 
@@ -107,6 +123,13 @@ def test_structured_model_request_is_forwarded_to_shared_service(boundary, monke
     def predict(smiles, *, target=None, model_request=None):
         seen.update(smiles=smiles, target=target, model_request=model_request)
         row = family_row(requested_target=target)
+        row["provenance"]["request"]["species"] = "human"
+        from src.activity.request_selection import ActivityModelRequest, request_identity
+        request = ActivityModelRequest(
+            family_id=row["family_id"], endpoint="pIC50", units="pIC50",
+            species="human", validation="endpoint_ready")
+        row["provenance"]["request"]["identity"] = request_identity(
+            request, row["provenance"]["bundle_id"], row["provenance"]["models"])
         return {"success": True, "status": "passed", "results": [row], "warnings": []}
 
     monkeypatch.setattr(prediction_service, "predict_activity", predict)
@@ -126,8 +149,12 @@ def test_tool_provenance_binds_request_model_identity(boundary):
     row = family_row()
     row["provenance"]["request"] = {
         "family_id": "pde-family", "endpoint": "pIC50", "units": "pIC50",
-        "species": "human", "validation": "endpoint_ready", "identity": "request-identity",
+        "species": "human", "validation": "endpoint_ready",
     }
+    from src.activity.request_selection import ActivityModelRequest, request_identity
+    row["provenance"]["request"]["identity"] = request_identity(
+        ActivityModelRequest("pde-family", "pIC50", "pIC50", "human", "endpoint_ready"),
+        row["provenance"]["bundle_id"], row["provenance"]["models"])
     state["rows"] = [row]
 
     result = execute_tool_compat(tool, {
@@ -136,7 +163,7 @@ def test_tool_provenance_binds_request_model_identity(boundary):
     })
 
     assert result.success
-    assert result.provenance.model_version == "request-identity"
+    assert result.provenance.model_version == row["provenance"]["request"]["identity"]
 
 
 @pytest.mark.parametrize("request_payload", [
@@ -163,6 +190,38 @@ def test_complete_family_claims_require_request_bound_identity(boundary, request
 
     assert result.error.code.value == "invalid_output"
     assert result.data is None
+
+
+def test_complete_family_claims_reject_identity_not_bound_to_model_metadata(boundary):
+    tool, _, state = boundary
+    row = family_row()
+    row["provenance"]["request"]["identity"] = "f" * 64
+    state["rows"] = [row]
+
+    result = execute_tool_compat(tool, {"smiles": "CCO", "target": "PDE5A"})
+
+    assert result.error.code.value == "invalid_output"
+    assert result.data is None
+
+
+def test_activity_validator_rejects_mixed_canonical_and_family_schemas():
+    from src.agent.contracts import ToolResult
+    from src.agent.validators.domain_validators import ActivityResultValidator
+
+    canonical = {
+        "smiles": "CCO", "success": True, "task_type": "regression",
+        "endpoint": "pIC50", "units": "pIC50", "value": 4.2,
+        "model_provenance": {
+            "model_id": "synthetic-canonical", "weights_sha256": "a" * 64,
+            "demo_mode": False, "fallback_used": False,
+        },
+    }
+    result = ToolResult.success_result(
+        "activity_predictor", data=[canonical, family_row()],
+        evidence=[{"prediction": canonical}],
+    )
+
+    assert ActivityResultValidator().validate(result) is not None
 
 
 @pytest.mark.parametrize("metric", ["pIC50", "IC50", "pic50", "PIC50"])

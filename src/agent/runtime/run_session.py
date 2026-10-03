@@ -939,21 +939,32 @@ class WorkflowRunSession:
                     journal.result = denial
                     journal.checkpoint_checked = True
                     return
-            try:
-                checkpoint = self.orchestrator._compatible_checkpoint(
-                    self.context.trace_id,
-                    step,
-                    journal.input_hash,
-                    journal.tool_version,
-                    journal.model_version,
-                    adapter_version=journal.adapter_version,
-                )
-            except json.JSONDecodeError:
+            if getattr(tool, "checkpoint_reuse_requires_runtime_identity", False):
                 checkpoint = None
-                journal.checkpoint_warning = f"Ignored incompatible checkpoint for {step.name}"
+                journal.checkpoint_warning = (
+                    f"Ignored checkpoint for {step.name}; request-bound model identity "
+                    "must be revalidated at execution"
+                )
                 journal.checkpoint_warning_entry = {
-                    "step": step.name, "reason": "checkpoint_deserialization_failed",
+                    "step": step.name,
+                    "reason": "request_bound_model_identity_required",
                 }
+            else:
+                try:
+                    checkpoint = self.orchestrator._compatible_checkpoint(
+                        self.context.trace_id,
+                        step,
+                        journal.input_hash,
+                        journal.tool_version,
+                        journal.model_version,
+                        adapter_version=journal.adapter_version,
+                    )
+                except json.JSONDecodeError:
+                    checkpoint = None
+                    journal.checkpoint_warning = f"Ignored incompatible checkpoint for {step.name}"
+                    journal.checkpoint_warning_entry = {
+                        "step": step.name, "reason": "checkpoint_deserialization_failed",
+                    }
             if self._cancel_requested():
                 self._prepare_cancelled_step(step, tool, journal)
                 return

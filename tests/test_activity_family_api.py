@@ -34,7 +34,7 @@ def _complete_summary_row(**changes):
             "request": {
                 "family_id": "pde-family", "endpoint": "pIC50", "units": "pIC50",
                 "species": None, "validation": "endpoint_ready",
-                "identity": "synthetic-request",
+                "identity": "",
             },
             "models": {
                 task: {
@@ -50,6 +50,13 @@ def _complete_summary_row(**changes):
         },
     }
     row.update(changes)
+    if "provenance" not in changes:
+        from src.activity.request_selection import ActivityModelRequest, request_identity
+        request = ActivityModelRequest(
+            family_id="pde-family", endpoint="pIC50", units="pIC50",
+            species=None, validation="endpoint_ready")
+        row["provenance"]["request"]["identity"] = request_identity(
+            request, row["provenance"]["bundle_id"], row["provenance"]["models"])
     return row
 
 

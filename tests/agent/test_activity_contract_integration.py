@@ -12,7 +12,7 @@ from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 
 
 def synthetic_row(smiles, target, family):
-    return {
+    row = {
         "smiles": smiles, "requested_target": target, "family_id": family,
         "bundle_id": "synthetic-integration", "success": True, "status": "passed",
         "activity_class": "无活性", "activity_probability": 0.2,
@@ -23,7 +23,7 @@ def synthetic_row(smiles, target, family):
         "provenance": {"bundle_id": "synthetic-integration", "request": {
             "family_id": family, "endpoint": "pIC50", "units": "pIC50",
             "species": None, "validation": "endpoint_ready",
-            "identity": "synthetic-integration-request"}, "models": {
+            "identity": ""}, "models": {
             task: {"model_id": "synthetic-" + task, "task_type": task,
                    "target_id": family, "weights_sha256": "a" * 64,
                    "model_card_sha256": "b" * 64,
@@ -31,6 +31,13 @@ def synthetic_row(smiles, target, family):
                    "demo_mode": False, "fallback_used": False}
             for task in ("classification", "regression")}},
     }
+    from src.activity.request_selection import ActivityModelRequest, request_identity
+    request = ActivityModelRequest(
+        family_id=family, endpoint="pIC50", units="pIC50",
+        species=None, validation="endpoint_ready")
+    row["provenance"]["request"]["identity"] = request_identity(
+        request, row["provenance"]["bundle_id"], row["provenance"]["models"])
+    return row
 
 
 @pytest.fixture

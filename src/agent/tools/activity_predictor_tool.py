@@ -6,6 +6,7 @@
 """
 
 from copy import deepcopy
+from src.activity.family_contract import resolve_activity_family
 from src.agent.contracts import (
     AgentErrorCode,
     AgentExecutionError,
@@ -15,10 +16,21 @@ from src.agent.contracts import (
 )
 from .activity_input import activity_intent_requested, parse_activity_input, requested_activity_endpoint
 from .base_tool import BaseMolecularTool
+from src.activity.request_selection import (
+    ActivityModelRequest,
+    ModelSelectionError,
+    request_provenance_matches,
+)
 
 
 class ActivityPredictorTool(BaseMolecularTool):
     """活性预测工具：输入 SMILES → 输出 RG-MPNN 活性预测得分"""
+
+    # The selected family bundle is only known after request-local validation.
+    # Reusing a generic checkpoint before that point could replay a stale model
+    # after bundle activation or accept a pre-contract checkpoint without the
+    # request-bound identity.
+    checkpoint_reuse_requires_runtime_identity = True
 
     def __init__(self):
         super().__init__(
@@ -109,16 +121,36 @@ class ActivityPredictorTool(BaseMolecularTool):
                     "模型请求参数必须是结构化对象。",
                     status=ObservationStatus.INVALID_INPUT,
                 )
+            request_payload = dict(request_model or {})
+            request_payload.setdefault("target", target)
+            if endpoint is not None:
+                request_payload.setdefault("endpoint", endpoint)
+            expected_request = ActivityModelRequest.from_mapping(request_payload)
+            if expected_request.family_id != resolve_activity_family(target):
+                return ToolResult.error_result(
+                    self.name, AgentErrorCode.INVALID_INPUT,
+                    "模型请求靶点家族与当前预测靶点不一致。",
+                    status=ObservationStatus.INVALID_INPUT,
+                )
+            if expected_request.endpoint != "pIC50":
+                return ToolResult.error_result(
+                    self.name, AgentErrorCode.MODEL_UNAVAILABLE,
+                    f"当前真实活性模型仅登记为 pIC50，无法直接提供 {expected_request.endpoint}。",
+                    status=ObservationStatus.UNAVAILABLE,
+                )
             if request_model is None:
                 summary = predict_activity(smiles, target=target)
             else:
                 summary = predict_activity(smiles, target=target, model_request=request_model)
+        except ModelSelectionError as exc:
+            return ToolResult.error_result(
+                self.name, AgentErrorCode.INVALID_INPUT, str(exc),
+                status=ObservationStatus.INVALID_INPUT)
         except Exception:
             return ToolResult.error_result(
                 self.name, AgentErrorCode.MODEL_UNAVAILABLE,
                 "家族活性预测服务不可用；未使用其他模型替代。",
                 status=ObservationStatus.UNAVAILABLE)
-        from src.activity.family_contract import resolve_activity_family
         from src.activity.prediction_service import summarize_predictions
 
         try:
@@ -137,6 +169,14 @@ class ActivityPredictorTool(BaseMolecularTool):
             if (not aligned or summary["status"] != expected["status"]
                     or summary["success"] is not expected["success"]):
                 raise ValueError("Family result contract mismatch")
+            for row in rows:
+                has_claim = any(row.get(key) is not None for key in (
+                    "predicted_pIC50", "activity_probability", "activity_class"))
+                row_provenance = row.get("provenance")
+                if has_claim or (isinstance(row_provenance, dict)
+                                 and row_provenance.get("request") is not None):
+                    if not request_provenance_matches(row_provenance, expected_request):
+                        raise ValueError("Family result request identity mismatch")
         except (KeyError, TypeError, ValueError):
             return ToolResult.error_result(self.name, AgentErrorCode.INVALID_OUTPUT,
                                           "家族活性结果与请求或阶段状态不一致。")

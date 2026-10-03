@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import math
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
 
+from src.activity.request_selection import request_provenance_matches
 from src.agent.contracts import ToolResult, WorkflowArtifact
 from src.task_runtime.secure_io import read_file_snapshot
 
@@ -211,6 +212,13 @@ class ActivityResultValidator:
             and not any(key in entry for key in ("family_id", "predicted_pIC50", "activity_probability", "activity_class"))
             and any(key in entry for key in ("task_type", "value", "probability"))
         ]
+        family_entries = [
+            entry for entry in entries
+            if isinstance(entry, dict)
+            and any(key in entry for key in ("family_id", "predicted_pIC50", "activity_probability", "activity_class"))
+        ]
+        if canonical_entries and family_entries:
+            return "Activity result mixes canonical and family schemas"
         if canonical_entries:
             for entry in canonical_entries:
                 invalid = self._validate_canonical_entry(result, entry)
@@ -270,14 +278,10 @@ class ActivityResultValidator:
             if (not isinstance(provenance, dict) or not provenance.get("bundle_id")
                     or provenance["bundle_id"] != entry.get("bundle_id")):
                 return "Family activity result lacks pinned two-model provenance"
-            request = provenance.get("request")
-            if (not isinstance(request, dict)
-                    or request.get("family_id") != entry.get("family_id")
-                    or request.get("endpoint") != "pIC50"
-                    or request.get("units") != "pIC50"
-                    or request.get("validation") != "endpoint_ready"
-                    or not isinstance(request.get("identity"), str)
-                    or not request["identity"].strip()):
+            request = provenance.get("request") if isinstance(provenance, dict) else None
+            if (not request_provenance_matches(provenance)
+                    or not isinstance(request, dict)
+                    or request.get("family_id") != entry.get("family_id")):
                 return "Family activity result lacks request-bound model identity"
             models = provenance.get("models")
             if not isinstance(models, dict):

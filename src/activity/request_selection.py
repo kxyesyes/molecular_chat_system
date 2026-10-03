@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import re
 from typing import Any, Mapping
 
 from src.target_identifiers import BUCHE_ALIASES, PDE_ALIASES
@@ -32,6 +33,7 @@ _ENDPOINT_ALIASES = {
     "kd": "Kd",
 }
 _P_ACTIVITY = frozenset({"pIC50", "pKi", "pEC50", "pKd"})
+_IDENTITY_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 def _resolve_family(value: Any) -> str:
@@ -130,6 +132,70 @@ class SelectedActivityModel:
     identity: str
 
 
+def request_identity(
+    request: ActivityModelRequest,
+    bundle_id: Any,
+    models: Mapping[str, Any],
+) -> str:
+    """Create the canonical identity for one request/model pair.
+
+    This is an integrity binding for metadata produced inside the application;
+    it is not a cryptographic signature of the model files. File hashes and
+    registry verification remain the source of artifact authenticity.
+    """
+    identity_payload = {
+        "family_id": request.family_id,
+        "bundle_id": bundle_id,
+        "endpoint": request.endpoint,
+        "units": request.units,
+        "species": request.species,
+        "validation": request.validation,
+        "models": {
+            task: {
+                "model_id": model.get("model_id"),
+                "weights_sha256": model.get("weights_sha256"),
+                "model_card_sha256": model.get("model_card_sha256"),
+            }
+            for task, model in sorted(models.items())
+            if isinstance(model, Mapping)
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(identity_payload, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    ).hexdigest()
+
+
+def request_provenance_matches(
+    provenance: Mapping[str, Any] | None,
+    expected: ActivityModelRequest | None = None,
+) -> bool:
+    """Validate request fields and identity against the emitted model metadata."""
+    if not isinstance(provenance, Mapping):
+        return False
+    request_data = provenance.get("request")
+    models = provenance.get("models")
+    if not isinstance(request_data, Mapping) or not isinstance(models, Mapping):
+        return False
+    if set(models) != {"classification", "regression"}:
+        return False
+    try:
+        actual = ActivityModelRequest.from_mapping({
+            "target": request_data.get("family_id"),
+            "endpoint": request_data.get("endpoint"),
+            "units": request_data.get("units"),
+            "species": request_data.get("species"),
+            "validation": request_data.get("validation"),
+        })
+    except ModelSelectionError:
+        return False
+    if expected is not None and actual != expected:
+        return False
+    identity = request_data.get("identity")
+    if not isinstance(identity, str) or _IDENTITY_PATTERN.fullmatch(identity) is None:
+        return False
+    return identity == request_identity(actual, provenance.get("bundle_id"), models)
+
+
 def select_family_bundle(bundle: Mapping[str, Any], request: ActivityModelRequest) -> SelectedActivityModel:
     """Fail closed unless both stages satisfy the exact request contract."""
     if request.validation != "endpoint_ready":
@@ -156,25 +222,7 @@ def select_family_bundle(bundle: Mapping[str, Any], request: ActivityModelReques
         if model.get("endpoint") != expected_endpoint or model.get("units") != expected_units:
             raise ModelSelectionError("endpoint: no model matches requested endpoint or units")
 
-    identity_payload = {
-        "family_id": request.family_id,
-        "bundle_id": bundle.get("bundle_id"),
-        "endpoint": request.endpoint,
-        "units": request.units,
-        "species": request.species,
-        "validation": request.validation,
-        "models": {
-            task: {
-                "model_id": model.get("model_id"),
-                "weights_sha256": model.get("weights_sha256"),
-                "model_card_sha256": model.get("model_card_sha256"),
-            }
-            for task, model in sorted(models.items())
-        },
-    }
-    identity = hashlib.sha256(
-        json.dumps(identity_payload, sort_keys=True, ensure_ascii=False, allow_nan=False).encode("utf-8")
-    ).hexdigest()
+    identity = request_identity(request, bundle.get("bundle_id"), models)
     return SelectedActivityModel(
         family_id=request.family_id,
         endpoint=request.endpoint,
