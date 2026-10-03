@@ -214,10 +214,10 @@ def test_targetless_batch_requires_explicit_target_before_inference():
     tool = ActivityPredictorTool()
     raw = tool.execute({"smiles": ["CCO", "CCN"]})
 
-    assert raw["success"] is False
-    assert raw["status"] == "invalid_input"
-    assert raw["error_code"] == "invalid_input"
-    assert "靶点" in raw["message"]
+    assert raw.success is False
+    assert raw.status.value == "invalid_input"
+    assert raw.error.code.value == "invalid_input"
+    assert "靶点" in raw.message
 
 
 def test_targetless_single_request_is_rejected_without_scientific_values():
@@ -226,11 +226,12 @@ def test_targetless_single_request_is_rejected_without_scientific_values():
     tool = ActivityPredictorTool()
     raw = tool.execute({"smiles": "CCO"})
 
-    assert raw["success"] is False
-    assert raw["status"] == "invalid_input"
-    assert raw["error_code"] == "invalid_input"
-    assert raw["data"] is None
-    assert "value" not in raw and "probability" not in raw
+    assert raw.success is False
+    assert raw.status.value == "invalid_input"
+    assert raw.error.code.value == "invalid_input"
+    assert raw.data is None
+    assert raw.to_legacy_dict()["data"] is None
+    assert "value" not in raw.to_legacy_dict() and "probability" not in raw.to_legacy_dict()
 
 
 def test_activity_batch_csv_uses_selected_smiles_column_and_skips_header():

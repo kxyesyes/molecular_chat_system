@@ -1,6 +1,7 @@
 """Activity-specific context must not weaken complete-structure validation."""
 import pytest
 
+from src.agent.contracts import ToolResult
 from src.agent.contracts import ObservationStatus
 from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
 from src.agent.tools.base_tool import execute_tool_compat
@@ -117,9 +118,10 @@ def test_unlabelled_invalid_full_structures_cannot_fall_back_global(boundary, pa
 def test_targetless_activity_request_requires_explicit_target(query):
     tool = ActivityPredictorTool()
     result = tool.execute(query)
-    assert isinstance(result, dict) and result["success"] is False
-    assert result["status"] == "invalid_input"
-    assert "靶点" in result["message"]
+    assert isinstance(result, ToolResult)
+    assert result.success is False
+    assert result.status == ObservationStatus.INVALID_INPUT
+    assert "靶点" in result.message
 
 
 @pytest.mark.parametrize("payload", [

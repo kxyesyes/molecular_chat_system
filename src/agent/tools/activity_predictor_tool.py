@@ -55,13 +55,12 @@ class ActivityPredictorTool(BaseMolecularTool):
             )
         if target is None:
             message = "活性预测需要明确的靶点（PDE 或 BuChE）；未选择默认或全局模型。"
-            return {
-                **self._create_base_result(text),
-                "status": ObservationStatus.INVALID_INPUT.value,
-                "error_code": AgentErrorCode.INVALID_INPUT.value,
-                "error": {"code": AgentErrorCode.INVALID_INPUT.value, "message": message},
-                "message": message,
-            }
+            return ToolResult.error_result(
+                self.name,
+                AgentErrorCode.INVALID_INPUT,
+                message,
+                status=ObservationStatus.INVALID_INPUT,
+            )
         try:
             from src.activity.prediction_service import predict_activity
             request_model = query.get("model_request") if isinstance(query, dict) else None
