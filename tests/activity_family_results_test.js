@@ -168,6 +168,17 @@ test("failed rows remain visible without invented numbers", () => {
   assert.equal(h.ids.singleSummary.style.display, "none");
 });
 
+test("failed rows do not display a stale activity classification", () => {
+  const h = setup();
+  h.render([family({success: false, status: "failed", activity_class: "有活性",
+    activity_probability: null, predicted_pIC50: null,
+    errors: {bundle: "unavailable"}})], {}, {status: "failed", success: false});
+  const row = cells(h.ids.resultsBody.children[0]);
+  assert.equal(row[2], "不可用");
+  assert.equal(row[3], "不可用");
+  assert.match(row[4], /失败/);
+});
+
 test("empty response clears earlier rows and shows explicit failure, not a zero row", () => {
   const h = setup();
   h.render([family()]);

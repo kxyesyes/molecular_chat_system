@@ -142,7 +142,9 @@ window.ActivityResults = (function () {
 
     dataList.forEach(function (item, index) {
       const score = ActivityUtils.getPredictionValue(item);
-      const cls = item.activity_class || item.class || (item.success === false ? "Failed" : "Unknown");
+      const cls = rowStatus(item) === "failed"
+        ? "不可用"
+        : item.activity_class || item.class || "Unknown";
 
       const rowId = `row-score-${index}`;
       const row = document.createElement("tr");
@@ -307,7 +309,7 @@ window.ActivityResults = (function () {
       row.append(
         createCell(item.smiles || "—", "word-break: break-all;"),
         createCell(status !== "failed" && isNumber(value) ? value.toFixed(4) : "不可用"),
-        createCell(item.activity_class || "不可用"),
+        createCell(status === "failed" ? "不可用" : item.activity_class || "不可用"),
         createCell(status !== "failed" ? formatProbability(item.activity_probability) : "不可用"),
         createCell(needsReview(item) ? "需复核" : statusLabel(status)), resultDetails(item),
       );
