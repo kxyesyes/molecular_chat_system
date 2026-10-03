@@ -1357,6 +1357,37 @@ def test_agent_execution_exception_uses_safe_terminal_fallback_without_secret():
     )
 
 
+def test_failed_scientific_agent_cannot_publish_model_generated_activity_number():
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=FailedScientificAgentSystem(
+            final_answer="pIC50=7.1；binding energy=-8.4 kcal/mol",
+        ),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="预测 CCO 的 pIC50",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert websocket.messages[-1]["content"] == (
+        "科学计算未成功完成，请检查输入或工具状态后重试。"
+    )
+    serialized = json.dumps(websocket.messages, ensure_ascii=False)
+    assert "pIC50=7.1" not in serialized
+    assert "binding energy=-8.4 kcal/mol" not in serialized
+
+
 @pytest.mark.parametrize(
     "malformed_result",
     [None, [], "not-an-agent-result", InvalidAgentMapping()],

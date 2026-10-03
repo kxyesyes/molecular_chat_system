@@ -2,6 +2,7 @@
 
 from collections.abc import Callable, Mapping
 from typing import Any, Dict
+import re
 
 from src.agent.contracts import AgentResult
 from src.agent.persistence.redaction import (
@@ -16,6 +17,19 @@ _AGENT_FAILURE_FALLBACK = "科学计算未成功完成，请检查输入或工�
 _AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
 _AGENT_FAILURE_WARNING_MAX_CHARS = 256
 _AGENT_FAILURE_WARNING_LIMIT = 20
+_UNVERIFIED_SCIENTIFIC_NUMBER = re.compile(
+    r"(?:"
+    r"p(?:ic50|ki|kd|ec50)"
+    r"|binding\s+(?:energy|affinity)"
+    r"|docking\s+(?:score|energy|affinity)"
+    r"|结合能|结合亲和力|对接(?:评分|能量)"
+    r")"
+    r"\s*(?:[:=：]|为|是|约|≈)?\s*"
+    r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)"
+    r"(?:\s*(?:kcal\s*/\s*mol|kcal/mol))?"
+    r"\b",
+    re.IGNORECASE,
+)
 
 
 def failure_envelope() -> Dict[str, Any]:
@@ -244,6 +258,14 @@ def failure_content(
 
     final_answer, sensitive = safe_content(agent_result.get("final_answer"))
     if sensitive:
+        return _AGENT_FAILURE_FALLBACK
+    if (
+        agent_result.get("status") in {"failed", "rejected", "cancelled"}
+        and _UNVERIFIED_SCIENTIFIC_NUMBER.search(final_answer)
+    ):
+        # A terminal scientific failure is not an authorization to publish a
+        # model-generated number.  The tool/error envelope remains the only
+        # authoritative source for the failure explanation below.
         return _AGENT_FAILURE_FALLBACK
     if final_answer and final_answer.casefold() not in {
         "workflow failed", "no workflow steps were executed"

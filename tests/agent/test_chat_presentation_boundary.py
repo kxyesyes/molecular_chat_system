@@ -121,6 +121,30 @@ def test_failure_content_selection(result_api, value, expected):
     assert value == before
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        "pIC50=7.1",
+        "预测 pIC50: 6.2",
+        "binding energy=-8.4 kcal/mol",
+    ],
+)
+def test_failed_agent_body_cannot_publish_unverified_scientific_numbers(
+    result_api, body,
+):
+    value = {
+        "success": False,
+        "status": "failed",
+        "final_answer": body,
+        "error": {
+            "code": "model_unavailable",
+            "message": "真实科学模型不可用，未生成预测结果。",
+        },
+    }
+
+    assert result_api.failure_content(value) == FALLBACK
+
+
 def test_partial_exact_content_metadata_and_typed_skips(result_api):
     typed = AgentResult("typed", True, "synthetic", metadata={"skipped_steps": [
         {"step_id": "dock", "status": "skipped_precondition", "reason": "blocked_by:rank"}]})
