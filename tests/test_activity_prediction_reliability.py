@@ -13,6 +13,9 @@ def _provenance(**overrides):
         "model_id": "model-1",
         "weights_sha256": "a" * 64,
         "model_path": "data/activity/models/model-1.pt",
+        "task_type": "regression",
+        "endpoint": "pIC50",
+        "units": "pIC50",
         "demo_mode": False,
         "fallback_used": False,
     }
