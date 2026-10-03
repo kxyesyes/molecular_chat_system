@@ -2,8 +2,10 @@
 
 from collections.abc import Callable, Mapping
 from typing import Any, Dict
+import re
 
 from src.agent.contracts import AgentResult
+from src.agent.harness.ordinary_chat_policy import scan_claim_risks
 from src.agent.persistence.redaction import (
     contains_secret_material,
     contains_sensitive_text,
@@ -11,13 +13,19 @@ from src.agent.persistence.redaction import (
     sanitize_sensitive_text,
 )
 
+_SCIENTIFIC_CLAIM_ALIAS = re.compile(
+    r"(?:p(?:ic50|ki|kd|ec50)|ic50|binding\s+(?:energy|affinity)|"
+    r"docking\s+(?:score|energy|affinity)|binding_energy|结合能|结合亲和力|"
+    r"对接(?:评分|能量))\s*(?:[:=：]|为|是|约|≈)?\s*"
+    r"[+−-]?(?:\d+(?:\.\d+)?|\.\d+|[零〇一二两三四五六七八九十百千万亿]+点?[零〇一二两三四五六七八九十百千万亿]*)",
+    re.IGNORECASE,
+)
+
 
 _AGENT_FAILURE_FALLBACK = "科学计算未成功完成，请检查输入或工具状态后重试。"
 _AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
 _AGENT_FAILURE_WARNING_MAX_CHARS = 256
 _AGENT_FAILURE_WARNING_LIMIT = 20
-
-
 def failure_envelope() -> Dict[str, Any]:
     return {
         "success": False,
@@ -52,6 +60,7 @@ def sanitize_failure_text(
 
 def sanitize_warnings(
     raw_warnings: Any, *, sanitize_text: Callable = sanitize_failure_text,
+    reject_claims: bool = False,
 ) -> list[str]:
     warnings = []
     if not isinstance(raw_warnings, list):
@@ -65,10 +74,20 @@ def sanitize_warnings(
             sensitive
             or not sanitized
             or sanitized.casefold() == "[redacted]"
+            or (reject_claims and failure_claim_risk(warning))
         ):
             continue
         warnings.append(sanitized)
     return warnings
+
+
+def failure_claim_risk(value: Any) -> bool:
+    """Return whether text can publish an unverified scientific claim."""
+    if not isinstance(value, str):
+        return False
+    return bool(
+        scan_claim_risks(value) or _SCIENTIFIC_CLAIM_ALIAS.search(value)
+    )
 
 
 def presentation_status(agent_result: Mapping[str, Any]) -> str:
@@ -242,9 +261,28 @@ def failure_content(
             max_chars=_AGENT_FAILURE_CONTENT_MAX_CHARS,
         )
 
-    final_answer, sensitive = safe_content(agent_result.get("final_answer"))
+    def claim_risk(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        # Scan before sanitization/truncation.  The shared ordinary-chat
+        # policy catches tables, source claims, and completed-action claims;
+        # this small alias set also covers activity/docking labels that the
+        # ordinary-chat vocabulary intentionally does not classify.
+        return failure_claim_risk(value)
+
+    raw_final_answer = agent_result.get("final_answer")
+    final_answer, sensitive = safe_content(raw_final_answer)
     if sensitive:
         return _AGENT_FAILURE_FALLBACK
+    terminal = (
+        agent_result.get("status") in {"failed", "rejected", "cancelled"}
+        or agent_result.get("success") is False
+    )
+    if terminal and claim_risk(raw_final_answer):
+        # A terminal scientific failure is not an authorization to publish a
+        # model-generated claim.  Discard only the untrusted prose and keep
+        # looking for an authoritative error/step message below.
+        final_answer = ""
     if final_answer and final_answer.casefold() not in {
         "workflow failed", "no workflow steps were executed"
     }:
@@ -252,10 +290,11 @@ def failure_content(
 
     error = agent_result.get("error")
     if isinstance(error, Mapping):
-        error_message, sensitive = safe_content(error.get("message"))
+        raw_error_message = error.get("message")
+        error_message, sensitive = safe_content(raw_error_message)
         if sensitive:
             return _AGENT_FAILURE_FALLBACK
-        if error_message:
+        if error_message and (not terminal or not claim_risk(raw_error_message)):
             return error_message
 
     sequence = agent_result.get("tool_result_sequence")
@@ -268,10 +307,11 @@ def failure_content(
             ) in {"failed", "rejected", "cancelled"}
             if not is_failed:
                 continue
-            result_message, sensitive = safe_content(result.get("message"))
+            raw_result_message = result.get("message")
+            result_message, sensitive = safe_content(raw_result_message)
             if sensitive:
                 return _AGENT_FAILURE_FALLBACK
-            if result_message:
+            if result_message and (not terminal or not claim_risk(raw_result_message)):
                 return result_message
 
     return _AGENT_FAILURE_FALLBACK

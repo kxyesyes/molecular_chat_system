@@ -364,6 +364,7 @@ class ChatHandler:
         # 接收 Agent 事件并等待执行结果
         retrieved_molecules = []
         rag_context = ""
+        agent_result = None
         
         if agent_task:
             try:
@@ -454,7 +455,29 @@ class ChatHandler:
                 logger.error(
                     "Agent result processing failed; exception details omitted"
                 )
-                agent_result = self._agent_failure_envelope()
+                if isinstance(agent_result, Mapping):
+                    # A projection/reference failure must not erase the
+                    # already-settled trace, error, or successful observations.
+                    # Stop presenting it as completed, but retain the record
+                    # for the terminal envelope.
+                    try:
+                        preserved_result = dict(agent_result)
+                    except Exception:
+                        preserved_result = None
+                    if preserved_result is None:
+                        agent_result = self._agent_failure_envelope()
+                    else:
+                        preserved_result["success"] = False
+                        preserved_result["status"] = "failed"
+                        preserved_result["final_answer"] = ""
+                        if not isinstance(preserved_result.get("error"), Mapping):
+                            preserved_result["error"] = {
+                                "code": "presentation_error",
+                                "message": "结果展示失败，但执行记录已保留。",
+                            }
+                        agent_result = preserved_result
+                else:
+                    agent_result = self._agent_failure_envelope()
                 await self._finish_terminal_agent_failure(
                     websocket,
                     agent_result,
@@ -791,9 +814,12 @@ class ChatHandler:
         return result_presentation.sanitize_failure_text(value, max_chars=max_chars)
 
     @classmethod
-    def _sanitize_agent_warnings(cls, raw_warnings: Any) -> list[str]:
+    def _sanitize_agent_warnings(
+        cls, raw_warnings: Any, *, reject_claims: bool = False,
+    ) -> list[str]:
         return result_presentation.sanitize_warnings(
             raw_warnings, sanitize_text=cls._sanitize_agent_failure_text,
+            reject_claims=reject_claims,
         )
 
     @classmethod
@@ -872,17 +898,56 @@ class ChatHandler:
         )
         if skill_sensitive:
             active_skill = ""
-        warnings = self._sanitize_agent_warnings(agent_result.get("warnings"))
+        warnings = self._sanitize_agent_warnings(
+            agent_result.get("warnings"), reject_claims=True,
+        )
+
+        public_error = {}
+        raw_error = agent_result.get("error")
+        if isinstance(raw_error, Mapping):
+            code, code_sensitive = self._sanitize_agent_failure_text(
+                raw_error.get("code"), max_chars=128,
+            )
+            error_message, message_sensitive = self._sanitize_agent_failure_text(
+                raw_error.get("message"), max_chars=_AGENT_FAILURE_CONTENT_MAX_CHARS,
+            )
+            if not code_sensitive:
+                public_error["code"] = code
+            if not message_sensitive and not result_presentation.failure_claim_risk(
+                raw_error.get("message")
+            ):
+                public_error["message"] = error_message
+
+        successful_observations = []
+        raw_sequence = agent_result.get("tool_result_sequence")
+        if isinstance(raw_sequence, list):
+            for observation in raw_sequence:
+                if not isinstance(observation, Mapping) or observation.get("success") is not True:
+                    continue
+                safe_observation = self._sanitize_agent_event_keys(dict(observation))
+                safe_observation, _ = sanitize_bounded(
+                    redact_sensitive(safe_observation),
+                    max_depth=_AGENT_EVENT_MAX_DEPTH,
+                    max_items=_AGENT_EVENT_MAX_ITEMS,
+                    max_text_chars=_AGENT_EVENT_TEXT_MAX_CHARS,
+                )
+                if isinstance(safe_observation, Mapping):
+                    successful_observations.append(dict(safe_observation))
 
         await self._send_status(websocket, f"⚠️ 代理执行失败: {content}")
-        await websocket.send_text(json.dumps({
+        result_payload = {
             "type": "agent_result",
             "message": content,
             "active_skill": active_skill,
             "trace_id": trace_id,
             "status": status,
             "warnings": warnings,
-        }, ensure_ascii=False))
+        }
+        if public_error:
+            result_payload["error"] = public_error
+        if successful_observations:
+            result_payload["tool_result_sequence"] = successful_observations
+        await websocket.send_text(json.dumps(result_payload, ensure_ascii=False))
         await websocket.send_text(json.dumps({
             "type": "complete",
             "content": content,
@@ -1113,6 +1178,8 @@ class ChatHandler:
 
         key_safe_event = cls._sanitize_agent_event_keys(event)
         redacted_event = redact_sensitive(key_safe_event)
+        if is_failure_event:
+            redacted_event = cls._scrub_failure_event_claims(redacted_event)
         sanitized_event, _ = sanitize_bounded(
             redacted_event,
             max_depth=_AGENT_EVENT_MAX_DEPTH,
@@ -1124,6 +1191,36 @@ class ChatHandler:
         if is_failure_event and message_sensitive:
             sanitized_event["message"] = _AGENT_FAILURE_FALLBACK
         return sanitized_event
+
+    @classmethod
+    def _scrub_failure_event_claims(
+        cls, value: Any, *, depth: int = 0,
+    ) -> Any:
+        if isinstance(value, str):
+            return (
+                _AGENT_FAILURE_FALLBACK
+                if result_presentation.failure_claim_risk(value)
+                else value
+            )
+        if depth >= _AGENT_EVENT_MAX_DEPTH:
+            return "[omitted]" if isinstance(value, (Mapping, list, tuple)) else value
+        if isinstance(value, Mapping):
+            return {
+                key: cls._scrub_failure_event_claims(child, depth=depth + 1)
+                for index, (key, child) in enumerate(value.items())
+                if index < _AGENT_EVENT_MAX_ITEMS
+            }
+        if isinstance(value, list):
+            return [
+                cls._scrub_failure_event_claims(child, depth=depth + 1)
+                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+            ]
+        if isinstance(value, tuple):
+            return tuple(
+                cls._scrub_failure_event_claims(child, depth=depth + 1)
+                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+            )
+        return value
 
     @classmethod
     async def _send_agent_event(

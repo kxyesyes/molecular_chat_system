@@ -613,7 +613,7 @@ class SensitiveLiveEventAgentSystem(FakeAgentSystem):
                 "C:\\Users\\reviewer\\private\\key.txt": "unsafe-live-user-path",
                 "D:\\MedChat\\private\\key.json": "unsafe-live-drive-path",
                 "error": {
-                    "message": "sk-liveevent123456789",
+                    "message": "pIC50=7.1; sk-liveevent123456789",
                     "debug_path": "D:\\MedChat\\private\\debug.json",
                 },
             },
@@ -621,11 +621,14 @@ class SensitiveLiveEventAgentSystem(FakeAgentSystem):
         event_callback({
             "type": "agent_event",
             "event": "task_failed",
-            "message": "Task failed token=live-task-token-789",
+            "message": "Task failed pIC50=7.1 token=live-task-token-789",
             "trace_id": "live-sensitive-trace",
             "tool": None,
             "progress": 0.75,
-            "payload": {"path": "C:\\Users\\reviewer\\private\\task.log"},
+            "payload": {
+                "path": "C:\\Users\\reviewer\\private\\task.log",
+                "error": {"message": "binding energy=-8.4 kcal/mol"},
+            },
         })
         event_callback({
             "type": "agent_event",
@@ -659,7 +662,7 @@ class SensitiveBufferedEventAgentSystem(FakeAgentSystem):
                 {
                     "type": "tool_failed",
                     "message": (
-                        "Buffered tool failure api_key=buffered-key-123 "
+                        "Buffered tool failure pIC50=7.1 api_key=buffered-key-123 "
                         "D:\\MedChat\\private\\buffered.log"
                     ),
                     "trace_id": "buffered-sensitive-trace",
@@ -690,7 +693,10 @@ class SensitiveBufferedEventAgentSystem(FakeAgentSystem):
                             "unsafe-buffered-drive-path"
                         ),
                         "error": {
-                            "message": _fake_openai_key("bufferedevent123456789"),
+                            "message": (
+                                "binding energy=-8.4 kcal/mol; "
+                                + _fake_openai_key("bufferedevent123456789")
+                            ),
                             "details": {
                                 "output_path": "D:\\MedChat\\private\\output.json"
                             },
@@ -1357,6 +1363,79 @@ def test_agent_execution_exception_uses_safe_terminal_fallback_without_secret():
     )
 
 
+def test_failed_scientific_agent_cannot_publish_model_generated_activity_number():
+    model = FakeModel()
+    handler = ChatHandler(
+        model=model,
+        rag_service=FakeRagService(),
+        agent_system=FailedScientificAgentSystem(
+            final_answer="pIC50=7.1；binding energy=-8.4 kcal/mol",
+        ),
+        config={"inference": {"stream": False}},
+    )
+    websocket = FakeWebSocket()
+
+    asyncio.run(
+        handler._process_message(
+            websocket=websocket,
+            message="预测 CCO 的 pIC50",
+            enable_rag=False,
+            enable_tools=True,
+        )
+    )
+
+    assert model.generate_calls == 0
+    assert websocket.messages[-1]["type"] == "complete"
+    assert websocket.messages[-1]["content"] == "SMILES 验证失败。"
+    serialized = json.dumps(websocket.messages, ensure_ascii=False)
+    assert "pIC50=7.1" not in serialized
+    assert "binding energy=-8.4 kcal/mol" not in serialized
+
+
+def test_projection_failure_preserves_settled_agent_record(monkeypatch):
+    result = {
+        "success": True,
+        "status": "completed",
+        "final_answer": "validated property observation",
+        "tools_used": ["property_calculator"],
+        "active_skill": "admet_assessment",
+        "trace_id": "trace-preserve-after-projection-error",
+        "tool_results": {},
+        "tool_result_sequence": [{
+            "success": True,
+            "status": "succeeded",
+            "tool_name": "property_calculator",
+            "data": {"molecular_weight": 46.069},
+        }],
+        "agent_events": [],
+    }
+    handler = ChatHandler(
+        model=FakeModel(),
+        rag_service=FakeRagService(),
+        agent_system=FixedResultAgentSystem(result),
+        config={"inference": {"stream": False}},
+    )
+
+    async def fail_projection(*args, **kwargs):
+        raise RuntimeError("synthetic projection failure")
+
+    monkeypatch.setattr(handler, "_send_reference_candidate_events", fail_projection)
+    websocket = FakeWebSocket()
+    asyncio.run(handler._process_message(
+        websocket=websocket,
+        message="分析 CCO",
+        enable_rag=False,
+        enable_tools=True,
+    ))
+
+    envelope = next(item for item in websocket.messages if item["type"] == "agent_result")
+    assert envelope["status"] == "failed"
+    assert envelope["trace_id"] == "trace-preserve-after-projection-error"
+    assert envelope["error"]["code"] == "presentation_error"
+    assert envelope["tool_result_sequence"][0]["success"] is True
+    assert websocket.messages[-1]["content"] == "结果展示失败，但执行记录已保留。"
+
+
 @pytest.mark.parametrize(
     "malformed_result",
     [None, [], "not-an-agent-result", InvalidAgentMapping()],
@@ -1447,9 +1526,8 @@ def test_post_agent_processing_exception_is_safe_terminal_without_fallback():
     assert model.generate_calls == 0
     assert websocket.messages[-1]["type"] == "complete"
     assert websocket.messages[-1]["status"] == "failed"
-    assert websocket.messages[-1]["content"] == (
-        "科学计算未成功完成，请检查输入或工具状态后重试。"
-    )
+    assert websocket.messages[-1]["content"] == "结果展示失败，但执行记录已保留。"
+    assert websocket.messages[-1]["trace_id"] == "trace-post-processing"
     serialized = json.dumps(
         {"messages": websocket.messages, "history": history},
         ensure_ascii=False,
@@ -1476,6 +1554,7 @@ def test_sensitive_agent_failure_content_uses_generic_terminal_message(
         "tool_result_sequence": [],
         "warnings": [
             "safe scientific warning",
+            "binding energy=-8.4 kcal/mol",
             "api_key=warning-test-key-123",
             "token=warning-test-token-456",
             _fake_openai_key("warningtest123456789"),
@@ -1529,6 +1608,7 @@ def test_sensitive_agent_failure_content_uses_generic_terminal_message(
         _fake_openai_key("testfailure123456789"),
         "warning-test-key-123",
         "warning-test-token-456",
+        "binding energy=-8.4 kcal/mol",
         _fake_openai_key("warningtest123456789"),
         "C:/Users/",
         "D:\\MedChat\\private",
@@ -1626,6 +1706,8 @@ def test_live_failure_agent_events_are_recursively_sanitized():
         "sk-livekey123456789",
         "live-nested-key-123",
         "live-nested-token-456",
+        "pIC50=7.1",
+        "binding energy=-8.4 kcal/mol",
         "must-not-overwrite-live-normal-value",
         "C:\\Users\\",
         "D:\\MedChat\\private",
@@ -1692,6 +1774,8 @@ def test_buffered_failure_agent_events_are_recursively_sanitized():
         _fake_openai_key("bufferedkey123456789"),
         "buffered-nested-key-123",
         "buffered-nested-token-456",
+        "pIC50=7.1",
+        "binding energy=-8.4 kcal/mol",
         "must-not-overwrite-buffered-normal-value",
         "C:\\Users\\",
         "D:\\MedChat\\private",

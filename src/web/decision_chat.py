@@ -156,6 +156,19 @@ def _result_frame(handler, result, display_changed):
     envelope = result.to_legacy_dict()
     envelope.update(type='agent_result', trace_id=result.trace_id,
                     final_answer=result.final_answer or result.message)
+    terminal_status = envelope.get('status')
+    terminal_failure = terminal_status in {'failed', 'rejected', 'cancelled'} or (
+        result.success is False and not result.partial
+        and not result.metadata.get('waiting_for_input')
+    )
+    if terminal_failure:
+        # decision_a2 has its own transport serializer, so apply the same
+        # terminal claim boundary as the legacy ChatHandler path before any
+        # frame is sent to the browser.
+        envelope['final_answer'] = handler._agent_failure_content(envelope)
+        envelope['warnings'] = handler._sanitize_agent_warnings(
+            envelope.get('warnings'), reject_claims=True,
+        )
     if result.metadata.get('waiting_for_input'):
         envelope['status'] = 'waiting_for_input'
     # Bound before recursive sanitization/equality; never recurse over raw cycles.
