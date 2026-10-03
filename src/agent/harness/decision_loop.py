@@ -614,7 +614,12 @@ class ModelDecisionLoop:
                 return _finalization.invalidate(*postclaim_failure)
             try:
                 await owned(lambda: replay.verify_claim(prior_payload))
-                session.restore_observations(replay.results, restored['tool_attempt_count'], binding_proofs=replay.proofs)
+                session.restore_observations(
+                    replay.results,
+                    restored['tool_attempt_count'],
+                    binding_proofs=replay.proofs,
+                    checkpoint_warnings=restored.get('checkpoint_warnings', []),
+                )
                 await owned(lambda: replay.verify_claim(prior_payload))
                 # Bounded native comparison and fresh sealing are one
                 # synchronous block: no callback scheduling gap between them.
@@ -646,7 +651,11 @@ class ModelDecisionLoop:
             state.ordinary_admission = admission_metadata(admission_carry, decision_requests=0)
         if restored is not None:
             if not binding:
-                session.restore_observations(previous_results, restored['tool_attempt_count'])
+                session.restore_observations(
+                    previous_results,
+                    restored['tool_attempt_count'],
+                    checkpoint_warnings=restored.get('checkpoint_warnings', []),
+                )
             # claim_continuation validated the decoded observations and their
             # complete semantic history before sealing them, before the CAS.
             for observed in session.results:

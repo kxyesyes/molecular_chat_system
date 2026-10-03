@@ -68,6 +68,7 @@ def snapshot_payload(state, session, fingerprint, *, created_at=None):
     if getattr(session, '_decision_binding_profile', None) is not None:
         raise DecisionBoundaryError('continuation_rejected')
     from .decision_inputs import verify_observation_integrity
+    from src.agent.runtime.run_session import copy_checkpoint_warnings
     for result in session.results:
         verify_observation_integrity(result, session)
     ordinary = getattr(state, 'ordinary_admission', None)
@@ -82,6 +83,7 @@ def snapshot_payload(state, session, fingerprint, *, created_at=None):
         'input_queries': list(getattr(session, 'input_queries', [session.context.query])),
         'remaining_seconds': max(0, state.deadline - created_at),
         'tool_attempt_count': session.tool_attempt_count,
+        'checkpoint_warnings': copy_checkpoint_warnings(getattr(session, 'checkpoint_warnings', [])),
         'results': [{'tool_name': r.tool_name, **r.to_legacy_dict()} for r in session.results],
     }
     payload = {'schema': 1, 'id': uuid4().hex, 'configuration': fingerprint, 'snapshot': snapshot}
@@ -192,6 +194,8 @@ def claim_continuation(loop, session, fingerprint, continuation_id, clarified_qu
                 raise ValueError('invalid semantic admission history')
         elif any(key in snapshot for key in ('ordinary_admission', 'intent_requests', 'total_model_requests')):
             raise ValueError('unexpected semantic admission')
+        from src.agent.runtime.run_session import copy_checkpoint_warnings
+        copy_checkpoint_warnings(snapshot.get('checkpoint_warnings', []))
         specs = {name: tool.adapter.spec for name, tool in session.tools.items()}
         results = decode_results(snapshot, session, specs)
         if snapshot['tool_attempt_count'] != len(results):

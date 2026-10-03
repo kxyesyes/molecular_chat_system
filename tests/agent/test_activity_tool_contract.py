@@ -468,12 +468,44 @@ def test_family_records_validate_overlapping_single_model_claims(boundary, kind,
                              status=ObservationStatus({"passed": "succeeded", "partial": "partial",
                                                        "failed": "failed"}[summary["status"]]))
     result = adapter.execute({"query": "CCO"})
-    if claim in {"nonfinite", "demo"}:
+    if claim != "none":
         assert_invalid(result)
     else:
         expected = deepcopy(tool.result)
         expected.elapsed_ms = result.elapsed_ms
         assert result == expected
+
+
+def test_family_row_with_canonical_prediction_fields_is_rejected(boundary):
+    adapter, tool = boundary
+    row = family_rows("complete")[0]
+    row.update(
+        task_type="regression",
+        endpoint="pIC50",
+        units="pIC50",
+        value=7.0,
+        model_provenance={
+            "model_id": "synthetic-overlap",
+            "weights_sha256": "a" * 64,
+            "task_type": "regression",
+            "endpoint": "pIC50",
+            "units": "pIC50",
+            "demo_mode": False,
+        },
+    )
+    from src.activity.prediction_service import summarize_predictions
+
+    summary = summarize_predictions([row])
+    tool.result = ToolResult(
+        NAME,
+        summary["success"],
+        "synthetic",
+        data=[row],
+        status=ObservationStatus({"passed": "succeeded", "partial": "partial",
+                                  "failed": "failed"}[summary["status"]]),
+    )
+
+    assert_invalid(adapter.execute({"query": "CCO"}))
 
 
 @pytest.mark.parametrize("bad", [False, True])

@@ -62,6 +62,44 @@ def test_reopen_store_resume_preserves_budget_evidence_and_cached_action(setup_l
     assert b.store.get_run('owned-trace')['status'] == 'succeeded'
 
 
+def test_continuation_preserves_checkpoint_warnings(setup_loop, monkeypatch):
+    b = setup_loop([])
+    monkeypatch.setattr(b.tools[0], 'checkpoint_reuse_requires_runtime_identity', True, raising=False)
+    waiting = start(b, [tool(), clarify()])
+    saved = b.store.get_run('owned-trace')['metadata']['decision_continuation']['snapshot']
+
+    assert saved['checkpoint_warnings'] == [{
+        'step': waiting.tool_results[0].quality['step_id'],
+        'reason': 'request_bound_model_identity_required',
+    }]
+
+    fresh(b, [tool(), finish_last])
+    result = invoke(b, continuation_id=waiting.metadata['continuation_id'], clarified_query='SMILES: CCO')
+    assert result.success
+    assert result.metadata['checkpoint_warnings'] == saved['checkpoint_warnings']
+    assert 'request_bound_model_identity_required' not in result.warnings
+
+
+@pytest.mark.parametrize('audit', [None, False, {}, 'bad', [{'step': 'x'}],
+    [{'step': 'x', 'reason': 1}], [{'step': 'x', 'reason': 'y', 'extra': 'z'}]])
+def test_malformed_checkpoint_audit_rejected_before_claim(setup_loop, monkeypatch, audit):
+    from copy import deepcopy
+    from src.agent.evidence import EvidenceLedger
+
+    b = setup_loop([])
+    waiting = start(b, [tool(), clarify()])
+    fresh(b, [tool(), finish_last])
+    record = deepcopy(b.store.get_run('owned-trace'))
+    payload = record['metadata']['decision_continuation']
+    payload['snapshot']['checkpoint_warnings'] = audit
+    payload['checksum'] = EvidenceLedger.output_digest({k: v for k, v in payload.items() if k != 'checksum'})
+    monkeypatch.setattr(b.store, 'get_run', lambda *a, **k: deepcopy(record))
+    monkeypatch.setattr(b.store, 'transition_decision_continuation',
+        lambda *a, **k: pytest.fail('malformed audit must not reach CAS'))
+    result = invoke(b, continuation_id=waiting.metadata['continuation_id'], clarified_query='SMILES: CCO')
+    assert result.metadata['stop_reason'] == 'continuation_rejected'
+
+
 @pytest.mark.parametrize('change', ['owner', 'session', 'nonce', 'permissions', 'required', 'version', 'adapter_version', 'budget', 'corrupt'])
 def test_invalid_resume_leaves_waiting_state_unchanged(setup_loop, change, monkeypatch):
     b = setup_loop([])

@@ -129,6 +129,39 @@ def test_sqlite_revision8_new_loop_reuses_original_scientific_chain(loop_case, s
     assert context == original_context
 
 
+def test_revision8_continuation_preserves_checkpoint_warnings(loop_case, monkeypatch):
+    monkeypatch.setattr(PropertyCalculator, 'checkpoint_reuse_requires_runtime_identity', True, raising=False)
+    case, context, nonce = start_property_waiting(loop_case)
+    saved = case.store.get_run(context.trace_id)['metadata']['decision_continuation']['snapshot']
+
+    assert saved['checkpoint_warnings'] == [{
+        'step': saved['results'][0]['quality']['step_id'],
+        'reason': 'request_bound_model_identity_required',
+    }]
+
+    resumed = invoke(case, context, required={'property_calculator'},
+        continuation_id=nonce, clarified_query='继续')
+    assert resumed.outcome == RunOutcome.COMPLETED
+    assert resumed.metadata['checkpoint_warnings'] == saved['checkpoint_warnings']
+    assert not resumed.warnings
+
+
+@pytest.mark.parametrize('audit', [None, False, {}, 'bad', [{'step': 'x'}],
+    [{'step': 'x', 'reason': 1}], [{'step': 'x', 'reason': 'y', 'extra': 'z'}]])
+def test_revision8_malformed_checkpoint_audit_rejected_before_claim(loop_case, monkeypatch, audit):
+    case, context, nonce = start_property_waiting(loop_case)
+    record = deepcopy(case.store.get_run(context.trace_id))
+    payload = record['metadata']['decision_continuation']
+    payload['snapshot']['checkpoint_warnings'] = audit
+    resign(payload)
+    monkeypatch.setattr(case.store, 'get_run', lambda *a, **k: deepcopy(record))
+    monkeypatch.setattr(case.store, 'transition_decision_continuation',
+        lambda *a, **k: pytest.fail('malformed audit must not reach CAS'))
+    result = invoke(case, context, required={'property_calculator'},
+        continuation_id=nonce, clarified_query='继续')
+    assert result.metadata['stop_reason'] == 'continuation_rejected'
+
+
 def start_property_waiting(loop_case, *, mode='native'):
     case = loop_case([], [PropertyCalculator()], mode=mode)
     case.model = case.loop.model = ContinuationModel([tool(), clarify()])

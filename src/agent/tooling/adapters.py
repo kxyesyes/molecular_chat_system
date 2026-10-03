@@ -267,6 +267,16 @@ class ToolAdapter(ABC):
 
 
 class LegacyPythonToolAdapter(ToolAdapter):
+    @property
+    def checkpoint_reuse_requires_runtime_identity(self) -> bool:
+        """Forward request-bound checkpoint policy from the producer.
+
+        Activity model identity is known by the underlying producer, while the
+        workflow session receives this adapter.  Keep the value request-local
+        and dynamic so a wrapper cannot accidentally re-enable stale reuse.
+        """
+        return bool(getattr(self.tool, "checkpoint_reuse_requires_runtime_identity", False))
+
     def health(self) -> dict[str, Any]:
         health = super().health()
         health["readiness"] = "not_probed" if self.readiness_unknown else "adapter_ready"

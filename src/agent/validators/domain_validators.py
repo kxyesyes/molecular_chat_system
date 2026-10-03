@@ -151,6 +151,13 @@ class DockingResultValidator:
 
 
 class ActivityResultValidator:
+    _FAMILY_FIELDS = frozenset({
+        "family_id", "predicted_pIC50", "activity_probability", "activity_class",
+    })
+    _CANONICAL_FIELDS = frozenset({
+        "task_type", "value", "probability", "model_provenance",
+    })
+
     @staticmethod
     def _canonical_provenance(result: ToolResult, entry: dict[str, Any]) -> dict[str, Any] | None:
         candidate = entry.get("model_provenance")
@@ -200,6 +207,12 @@ class ActivityResultValidator:
         if result.tool_name != "activity_predictor":
             return None
         entries = result.data if isinstance(result.data, list) else []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            fields = set(entry)
+            if fields & self._FAMILY_FIELDS and fields & self._CANONICAL_FIELDS:
+                return "Activity result row mixes canonical and family schemas"
         if any(
             isinstance(entry, dict)
             and any(entry.get(key) is not None for key in ("activity_score", "pic50", "pIC50"))
