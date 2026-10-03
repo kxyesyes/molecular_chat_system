@@ -142,7 +142,51 @@ def test_failed_agent_body_cannot_publish_unverified_scientific_numbers(
         },
     }
 
-    assert result_api.failure_content(value) == FALLBACK
+    assert result_api.failure_content(value) == value["error"]["message"]
+
+
+@pytest.mark.parametrize('field', ['final_answer', 'error', 'step'])
+@pytest.mark.parametrize('body', [
+    '**pIC50**: 7.1', '| pIC50 |\n| --- |\n| 7.1 |',
+    'pKi = 8.2', 'IC50: 20 nM', '结合能为−8.4千卡每摩尔',
+    'binding_energy: -8.4', 'docking score = -8.4',
+    'pIC50 为七点一', 'pIC50=7.1有效',
+    '本次已成功预测活性', 'PMID: 12345678 证实活性',
+    '说明。' * 600 + 'pIC50: 7.1',
+])
+def test_failure_claim_guard_checks_original_text_at_every_reason_source(
+    result_api, field, body,
+):
+    result = {'success': False, 'status': 'failed'}
+    if field == 'error':
+        result['error'] = {'message': body}
+    elif field == 'step':
+        result['tool_result_sequence'] = [{'success': False, 'message': body}]
+    else:
+        result[field] = body
+    before = copy.deepcopy(result)
+    assert result_api.failure_content(result) == FALLBACK
+    assert result == before
+
+
+def test_risky_summary_preserves_safe_error_and_step_reason(result_api):
+    result = {'success': False, 'status': 'failed', 'final_answer': '**pIC50**=7.1',
+              'error': {'message': '模型权重不可用；未进行预测。'},
+              'tool_result_sequence': [{'success': False, 'message': 'tool timeout'}]}
+    assert result_api.failure_content(result) == result['error']['message']
+    result['error']['message'] = 'pIC50=7.1'
+    assert result_api.failure_content(result) == 'tool timeout'
+
+
+@pytest.mark.parametrize('message', [
+    'pIC50 模型不可用，未生成数值。', 'PDE5A model unavailable',
+    '模型权重哈希不匹配。', '模型超时，等待上限 60 秒。',
+    '输入第 2 行 SMILES 无效。', 'HTTP 503',
+])
+def test_safe_failure_reasons_are_preserved(result_api, message):
+    assert result_api.failure_content({
+        'success': False, 'status': 'failed', 'final_answer': message,
+    }) == message
 
 
 def test_partial_exact_content_metadata_and_typed_skips(result_api):

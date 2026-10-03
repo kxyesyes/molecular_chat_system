@@ -1380,9 +1380,7 @@ def test_failed_scientific_agent_cannot_publish_model_generated_activity_number(
 
     assert model.generate_calls == 0
     assert websocket.messages[-1]["type"] == "complete"
-    assert websocket.messages[-1]["content"] == (
-        "科学计算未成功完成，请检查输入或工具状态后重试。"
-    )
+    assert websocket.messages[-1]["content"] == "SMILES 验证失败。"
     serialized = json.dumps(websocket.messages, ensure_ascii=False)
     assert "pIC50=7.1" not in serialized
     assert "binding energy=-8.4 kcal/mol" not in serialized
