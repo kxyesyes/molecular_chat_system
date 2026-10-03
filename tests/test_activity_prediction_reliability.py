@@ -229,9 +229,55 @@ def test_targetless_single_request_is_rejected_without_scientific_values():
     assert raw.success is False
     assert raw.status.value == "invalid_input"
     assert raw.error.code.value == "invalid_input"
+    assert len(raw.data) == 1
+    assert raw.data[0]["smiles"] == "CCO"
+    assert raw.data[0]["status"] == "failed"
+    legacy = raw.to_legacy_dict()
+    assert legacy["data"] == raw.data
+    assert "value" not in legacy and "probability" not in legacy
+
+
+def test_targetless_batch_preserves_one_failure_row_per_candidate():
+    from src.agent.contracts import ToolResult
+    from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
+
+    tool = ActivityPredictorTool()
+    raw = tool.execute({
+        "query": "预测活性",
+        "smiles": ["CCO", "CCN"],
+        "candidate_ids": ["cand-001", "cand-002"],
+    })
+
+    assert isinstance(raw, ToolResult)
+    assert raw.success is False
+    assert [(row["smiles"], row["candidate_id"], row["status"])
+            for row in raw.data] == [
+        ("CCO", "cand-001", "failed"),
+        ("CCN", "cand-002", "failed"),
+    ]
+    assert all(
+        row.get(field) is None
+        for row in raw.data
+        for field in ("value", "probability", "predicted_pIC50")
+    )
+    assert "靶点" in raw.message
+
+
+def test_targetless_candidate_id_count_mismatch_is_rejected_without_dropping_rows():
+    from src.agent.contracts import ObservationStatus, ToolResult
+    from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
+
+    raw = ActivityPredictorTool().execute({
+        "query": "预测活性",
+        "smiles": ["CCO", "CCN"],
+        "candidate_ids": ["cand-001"],
+    })
+
+    assert isinstance(raw, ToolResult)
+    assert raw.success is False
+    assert raw.status == ObservationStatus.INVALID_INPUT
     assert raw.data is None
-    assert raw.to_legacy_dict()["data"] is None
-    assert "value" not in raw.to_legacy_dict() and "probability" not in raw.to_legacy_dict()
+    assert "一一对应" in raw.message
 
 
 def test_activity_batch_csv_uses_selected_smiles_column_and_skips_header():
