@@ -248,6 +248,42 @@ def _prepare_training_labels(
     return prepared
 
 
+def _prepare_training_frame(
+    frame: pd.DataFrame,
+    *,
+    smiles_column: str,
+    target_column: str,
+) -> tuple[pd.DataFrame, dict[str, int]]:
+    """Remove unusable required fields and return an explicit input audit.
+
+    The legacy training loop used ``dropna`` inline, which made rows disappear
+    without leaving any trace in the job status or model metadata. Blank
+    strings are treated like missing values, while non-numeric labels and
+    invalid SMILES remain visible to their dedicated validators/featurizer.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+    for column in (smiles_column, target_column):
+        if column not in frame.columns:
+            raise ValueError(f"training column missing: {column}")
+
+    def missing_required(value: Any) -> bool:
+        if pd.isna(value):
+            return True
+        return isinstance(value, str) and not value.strip()
+
+    missing_mask = frame[smiles_column].map(missing_required) | frame[target_column].map(
+        missing_required
+    )
+    cleaned = frame.loc[~missing_mask].copy()
+    audit = {
+        "input_rows": int(len(frame.index)),
+        "rows_dropped_missing_required_fields": int(missing_mask.sum()),
+        "rows_after_required_field_validation": int(len(cleaned.index)),
+    }
+    return cleaned, audit
+
+
 def _seed_training(seed: int, torch_module) -> dict:
     """Seed every RNG used by the training loop and describe limitations."""
     random.seed(seed)
@@ -503,7 +539,20 @@ class ActivityTrainer:
                 )
             smiles_col = selected[0]
             
-            df = df.dropna(subset=[smiles_col, target_column])
+            df, input_audit = _prepare_training_frame(
+                df,
+                smiles_column=smiles_col,
+                target_column=target_column,
+            )
+            self.status.update(input_audit)
+            if input_audit["rows_dropped_missing_required_fields"]:
+                warning = (
+                    "Training input dropped "
+                    f"{input_audit['rows_dropped_missing_required_fields']} row(s) "
+                    "with missing required SMILES or label fields"
+                )
+                self.status.setdefault("warnings", []).append(warning)
+                self._log(warning)
             smiles_list = df[smiles_col].tolist()
             targets = _prepare_training_labels(
                 df[target_column].tolist(),
@@ -531,6 +580,18 @@ class ActivityTrainer:
                     valid_rg_data.append(rg_data)
                     valid_y.append(float(y))
                     valid_smiles.append(str(smi))
+
+            invalid_smiles_count = len(smiles_list) - len(valid_smiles)
+            self.status["rows_attempted_featurization"] = len(smiles_list)
+            self.status["rows_rejected_invalid_smiles"] = invalid_smiles_count
+            self.status["rows_used_for_training"] = len(valid_smiles)
+            if invalid_smiles_count:
+                warning = (
+                    f"Training input rejected {invalid_smiles_count} row(s) "
+                    "because the selected SMILES could not be featurized"
+                )
+                self.status.setdefault("warnings", []).append(warning)
+                self._log(warning)
                     
             if len(valid_atom_data) < 10:
                 raise ValueError(f"Not enough valid molecules to train. Processed: {len(valid_atom_data)}")
@@ -813,6 +874,12 @@ def submit_training_job(**kwargs):
         "train_loss": None,
         "val_loss": None,
         "learning_rate": None,
+        "input_rows": 0,
+        "rows_dropped_missing_required_fields": 0,
+        "rows_after_required_field_validation": 0,
+        "rows_attempted_featurization": 0,
+        "rows_rejected_invalid_smiles": 0,
+        "rows_used_for_training": 0,
         "logs": [],
         "warnings": [],
         "elapsed": 0

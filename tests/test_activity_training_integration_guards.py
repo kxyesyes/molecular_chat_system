@@ -10,11 +10,78 @@ import inspect
 from pathlib import Path
 
 import pytest
+import pandas as pd
 
 from src.activity import trainer
 from src.activity.model_registry import ActivityModelRegistry
 from src.activity.predictor import ActivityPredictor
 from tests.activity_test_support import legacy_metadata, write_card, write_endpoint_model
+
+
+def test_training_frame_audits_missing_and_blank_required_fields():
+    frame = pd.DataFrame(
+        {
+            "structure": ["CCO", None, "", "CCN"],
+            "pIC50": [5.1, 5.2, 5.3, "  "],
+        }
+    )
+
+    cleaned, audit = trainer._prepare_training_frame(
+        frame,
+        smiles_column="structure",
+        target_column="pIC50",
+    )
+
+    assert cleaned["structure"].tolist() == ["CCO"]
+    assert audit == {
+        "input_rows": 4,
+        "rows_dropped_missing_required_fields": 3,
+        "rows_after_required_field_validation": 1,
+    }
+
+
+def test_training_frame_does_not_hide_non_numeric_labels_or_invalid_smiles():
+    frame = pd.DataFrame(
+        {
+            "smiles": ["CCO", "not-a-smiles"],
+            "label": ["not-a-number", 5.0],
+        }
+    )
+
+    cleaned, audit = trainer._prepare_training_frame(
+        frame,
+        smiles_column="smiles",
+        target_column="label",
+    )
+
+    assert len(cleaned) == 2
+    assert audit["rows_dropped_missing_required_fields"] == 0
+    with pytest.raises(ValueError, match="finite numeric"):
+        trainer._prepare_training_labels(
+            cleaned["label"].tolist(),
+            task_type="regression",
+        )
+
+
+def test_new_training_job_exposes_input_audit_fields_before_worker_runs(monkeypatch):
+    class Thread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(trainer.threading, "Thread", Thread)
+    job_id = trainer.submit_training_job(file_path="unused.csv")
+    try:
+        status = trainer.get_job_status(job_id)
+        assert status is not None
+        assert status["input_rows"] == 0
+        assert status["rows_dropped_missing_required_fields"] == 0
+        assert status["rows_rejected_invalid_smiles"] == 0
+        assert status["rows_used_for_training"] == 0
+    finally:
+        trainer.training_jobs.pop(job_id, None)
 
 
 HISTORICAL_PATHS = (
