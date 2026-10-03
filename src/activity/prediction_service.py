@@ -3,14 +3,17 @@
 An explicit target never selects a legacy/global checkpoint. Scientific statuses
 describe observations, not merely successful HTTP transport.
 """
+from collections.abc import Mapping
 from functools import lru_cache
 import math
+import re
 from threading import Lock
 
 from .family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD
 
 
 _factory_lock = Lock()
+_SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 
 
 @lru_cache(maxsize=2)
@@ -29,6 +32,56 @@ def get_family_predictor():
         return _family_predictor(directory)
 
 
+def _is_complete_family_prediction(row):
+    """Return whether a row contains a complete, pinned scientific result.
+
+    The predictor and Agent validator both use this family-row contract.  The
+    summary boundary must not promote a transport-shaped ``success`` flag when
+    its numeric values or model provenance are absent.
+    """
+    if not isinstance(row, Mapping):
+        return False
+    if (row.get("success") is not True or row.get("status") != "passed"
+            or row.get("execution_status", "passed") != "passed"
+            or row.get("units") != "pIC50"
+            or row.get("label_threshold") != LABEL_THRESHOLD
+            or row.get("probability_threshold") != PROBABILITY_THRESHOLD
+            or row.get("classification_regression_consistent") is not True):
+        return False
+    probability = row.get("activity_probability")
+    value = row.get("predicted_pIC50")
+    if (type(probability) not in (int, float) or not math.isfinite(float(probability))
+            or not 0 <= probability <= 1
+            or type(value) not in (int, float) or not math.isfinite(float(value))):
+        return False
+    if row.get("activity_class") != ("有活性" if probability >= PROBABILITY_THRESHOLD else "无活性"):
+        return False
+    if not isinstance(row.get("errors"), Mapping) or row["errors"]:
+        return False
+    provenance = row.get("provenance")
+    if (not isinstance(provenance, Mapping)
+            or not provenance.get("bundle_id")
+            or provenance.get("bundle_id") != row.get("bundle_id")):
+        return False
+    models = provenance.get("models")
+    if not isinstance(models, Mapping):
+        return False
+    for task in ("classification", "regression"):
+        model = models.get(task)
+        if (not isinstance(model, Mapping)
+                or not isinstance(model.get("model_id"), str)
+                or not model["model_id"].strip()
+                or model.get("task_type") != task
+                or model.get("target_id") != row.get("family_id")
+                or any(not isinstance(model.get(field), str)
+                       or _SHA256_PATTERN.fullmatch(model[field]) is None
+                       for field in ("weights_sha256", "model_card_sha256", "prepared_dataset_sha256"))
+                or model.get("demo_mode") is not False
+                or model.get("fallback_used") is not False):
+            return False
+    return True
+
+
 def summarize_predictions(rows):
     if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
         raise ValueError("Invalid prediction result contract")
@@ -43,9 +96,8 @@ def summarize_predictions(rows):
                 and (probability >= PROBABILITY_THRESHOLD) != (value >= LABEL_THRESHOLD))
 
     conflicts = [conflict(row) for row in rows]
-    complete = [row for row, needs_review in zip(rows, conflicts) if not needs_review
-                and row.get("execution_status", "passed") == "passed"
-                and row.get("success") is True and row.get("status", "passed") == "passed"]
+    complete = [row for row, needs_review in zip(rows, conflicts)
+                if not needs_review and _is_complete_family_prediction(row)]
     observed = complete or any(conflicts) or any(row.get("status") == "partial"
                 and row.get("execution_status") != "failed" for row in rows)
     status = "passed" if rows and len(complete) == len(rows) else "partial" if observed else "failed"
