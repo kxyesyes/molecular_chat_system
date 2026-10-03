@@ -37,6 +37,8 @@ class FakeTool:
         if data is None:
             data = {"query": query, "tool": self.name}
         result = {"success": True, "message": "ok", "data": data}
+        if self.name == "activity_predictor":
+            result["evidence"] = [{"type": "synthetic_activity_prediction"}]
         if self.quality is not None:
             result["quality"] = self.quality
         return result
@@ -93,6 +95,24 @@ def build_registry(excluded=(), target_output=None, target_quality=None):
             output = [{"smiles": "CCO"}]
         elif name == "reverse_target_predictor":
             output = [{"gene_symbol": "EGFR", "final_similarity": 0.91}]
+        elif name == "activity_predictor":
+            output = [{
+                "smiles": "CCO",
+                "success": True,
+                "task_type": "regression",
+                "endpoint": "pIC50",
+                "units": "pIC50",
+                "value": 5.0,
+                "model_provenance": {
+                    "model_id": "synthetic-contract-model",
+                    "weights_sha256": "a" * 64,
+                    "task_type": "regression",
+                    "endpoint": "pIC50",
+                    "units": "pIC50",
+                    "demo_mode": False,
+                    "fallback_used": False,
+                },
+            }]
         elif name == "candidate_ranker":
             output = {"top_candidates": [{"canonical_smiles": "CCO", "score": 0.5}]}
         else:

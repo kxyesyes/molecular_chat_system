@@ -49,6 +49,55 @@ def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
     assert check["reason"] == "generated_candidates_not_unique"
 
 
+def test_generation_truth_check_rejects_empty_successful_generation():
+    check = check_generated_candidate_truth(
+        {
+            "tool_results": [
+                {
+                    "tool_name": "llm_molecular_generator",
+                    "success": True,
+                    "data": [],
+                    "quality": {
+                        "requested_count": 5,
+                        "valid_count": 0,
+                        "unique_count": 0,
+                        "validation_method": "RDKit",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert check == {
+        "passed": False,
+        "reason": "no_valid_generated_candidates",
+    }
+
+
+def test_generation_truth_check_rejects_failed_generator_even_with_quality_counts():
+    check = check_generated_candidate_truth(
+        {
+            "tool_results": [
+                {
+                    "tool_name": "llm_molecular_generator",
+                    "success": False,
+                    "data": [{"smiles": "CCO"}],
+                    "quality": {
+                        "valid_count": 1,
+                        "unique_count": 1,
+                        "validation_method": "RDKit",
+                    },
+                }
+            ]
+        }
+    )
+
+    assert check == {
+        "passed": False,
+        "reason": "generator_not_successful",
+    }
+
+
 def test_real_acceptance_tool_registry_includes_candidate_ranker(tmp_path):
     runner = scientific.ScientificAcceptanceRunner(
         dataset_dir=tmp_path,

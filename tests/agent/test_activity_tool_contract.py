@@ -12,6 +12,7 @@ from src.agent.contracts import (
 )
 from src.agent.tooling.factory import LegacyQueryInput, build_tool_registry
 from src.agent.tools.base_tool import execute_tool_compat
+from src.agent.validators.domain_validators import ActivityResultValidator
 from tests.agent.test_family_activity_tool import family_row
 
 
@@ -280,6 +281,18 @@ def test_empty_or_fake_success_rejected(boundary, data):
     adapter, tool = boundary
     tool.result["data"] = data
     assert_invalid(adapter.execute("CCO"))
+
+
+def test_activity_validator_rejects_empty_successful_tool_result():
+    result = ToolResult.success_result(
+        NAME,
+        data=[],
+        evidence=[{"type": "model_prediction"}],
+    )
+
+    assert ActivityResultValidator().validate(result) == (
+        "Activity result success envelope contains no prediction rows"
+    )
 
 
 @pytest.mark.parametrize("canonical", [False, True])
