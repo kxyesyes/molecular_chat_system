@@ -76,6 +76,11 @@ class SingleAttemptTool:
         self.version = adapter.spec.version
         self._dispatch_guard = dispatch_guard
 
+    @property
+    def checkpoint_reuse_requires_runtime_identity(self) -> bool:
+        """Preserve adapter checkpoint policy through request-local wrappers."""
+        return bool(getattr(self.adapter, "checkpoint_reuse_requires_runtime_identity", False))
+
     def execute(self, input_data):
         # No inner retry may survive an outer deadline/cancellation. Keep the
         # original adapter's schema validation, concurrency slot and timeout.

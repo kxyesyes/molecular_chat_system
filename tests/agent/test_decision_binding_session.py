@@ -11,6 +11,7 @@ import pytest
 from src.agent.contracts import AgentContext, AgentErrorCode, ObservationStatus, ToolResult, WorkflowArtifact
 from src.agent.evidence import EvidenceLedger
 from src.agent.harness import decision_execution
+from src.agent.harness.decision_execution import SingleAttemptTool
 from src.agent.harness.decision_inputs import seal_observation, verify_observation_integrity
 from src.agent.harness.decision_policy import DecisionBoundaryError
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
@@ -110,6 +111,45 @@ def test_activity_checkpoint_reuse_requires_request_bound_identity(build, monkey
         "step": "activity",
         "reason": "request_bound_model_identity_required",
     }]
+
+
+def test_activity_checkpoint_guard_survives_registry_and_attempt_wrappers(build, monkeypatch):
+    old, _, _, _, _, _ = build()
+    from src.agent.tooling import build_tool_registry
+
+    raw_tool = CountingTool("activity_predictor")
+    raw_tool.checkpoint_reuse_requires_runtime_identity = True
+    registry = build_tool_registry([raw_tool])
+    try:
+        adapter = registry.resolve("activity_predictor")
+        wrapped = SingleAttemptTool(adapter)
+        assert getattr(adapter, "checkpoint_reuse_requires_runtime_identity", False) is True
+        assert getattr(wrapped, "checkpoint_reuse_requires_runtime_identity", False) is True
+
+        session = WorkflowRunSession(
+            old.orchestrator,
+            AgentContext("fixture", "activity-wrapped-checkpoint"),
+            [],
+            {wrapped.name: wrapped},
+            dynamic=True,
+        )
+        session.start()
+        session.append_step(WorkflowStep("activity", wrapped.name, "fixture", output_key="activity"))
+        monkeypatch.setattr(
+            session.orchestrator,
+            "_compatible_checkpoint",
+            lambda *args, **kwargs: pytest.fail("wrapped activity checkpoint must not be reused"),
+        )
+
+        session.execute_step(0)
+        assert raw_tool.calls == ["fixture"]
+        assert session.reused_steps == []
+        assert session.checkpoint_warnings == [{
+            "step": "activity",
+            "reason": "request_bound_model_identity_required",
+        }]
+    finally:
+        registry.close()
 
 
 BASE = dict(request_input_digest='request', input_evidence_ids=[], operation_key='initial')

@@ -941,10 +941,11 @@ class WorkflowRunSession:
                     return
             if getattr(tool, "checkpoint_reuse_requires_runtime_identity", False):
                 checkpoint = None
-                journal.checkpoint_warning = (
-                    f"Ignored checkpoint for {step.name}; request-bound model identity "
-                    "must be revalidated at execution"
-                )
+                # This is an execution-audit condition, not a scientific
+                # warning. Keep it in ``metadata.checkpoint_warnings`` below;
+                # adding it to the tool observation would make a valid result
+                # look like it carried a provider/domain warning.
+                journal.checkpoint_warning = None
                 journal.checkpoint_warning_entry = {
                     "step": step.name,
                     "reason": "request_bound_model_identity_required",
