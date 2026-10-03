@@ -204,6 +204,104 @@ def test_candidate_ranker_uses_trusted_family_activity_probability():
     assert ethanol["ranking_evidence"]["activity_score"] == pytest.approx(0.91)
 
 
+def test_candidate_ranker_rejects_activity_evidence_from_another_target():
+    payload = _payload(top_n=1)
+    payload["metadata"].update({"target": "BuChE", "endpoint": "pIC50", "units": "pIC50"})
+    payload["outputs"]["activity"] = [
+        {
+            "smiles": "CCO",
+            "success": True,
+            "activity_probability": 0.99,
+            "requested_target": "PDE5A",
+            "units": "pIC50",
+            "provenance": {
+                "request": {"family_id": "pde-family", "endpoint": "pIC50", "units": "pIC50"},
+                "models": {
+                    "classification": {
+                        "model_id": "pde-classifier",
+                        "weights_sha256": "a" * 64,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                    "regression": {
+                        "model_id": "pde-regressor",
+                        "weights_sha256": "b" * 64,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                },
+            },
+        }
+    ]
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is False
+    assert result["error_code"] == "activity_scope_mismatch"
+    assert result["data"] is None
+
+
+@pytest.mark.parametrize(
+    ("field", "actual"),
+    [("endpoint", "pKi"), ("units", "nM")],
+)
+def test_candidate_ranker_rejects_activity_evidence_from_another_endpoint_or_unit(field, actual):
+    payload = _payload(top_n=1)
+    payload["metadata"].update({"target": "PDE5A", "endpoint": "pIC50", "units": "pIC50"})
+    payload["outputs"]["activity"] = [
+        {
+            "smiles": "CCO",
+            "success": True,
+            "activity_probability": 0.99,
+            "requested_target": "PDE5A",
+            "endpoint": actual if field == "endpoint" else "pIC50",
+            "units": actual if field == "units" else "pIC50",
+            "provenance": {
+                "models": {
+                    "classification": {
+                        "model_id": "pde-classifier",
+                        "weights_sha256": "a" * 64,
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    }
+                }
+            },
+        }
+    ]
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is False
+    assert result["error_code"] == "activity_scope_mismatch"
+
+
+def test_candidate_ranker_rejects_mixed_activity_scopes_without_expected_scope():
+    payload = _payload(top_n=1)
+    first = {
+        "smiles": "CCO",
+        "success": True,
+        "activity_probability": 0.99,
+        "requested_target": "PDE5A",
+        "units": "pIC50",
+        "provenance": {
+            "models": {
+                "classification": {
+                    "model_id": "pde-classifier",
+                    "weights_sha256": "a" * 64,
+                    "demo_mode": False,
+                    "fallback_used": False,
+                }
+            }
+        },
+    }
+    payload["outputs"]["activity"] = [first, {**first, "smiles": "CCN", "requested_target": "BuChE"}]
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is False
+    assert result["error_code"] == "activity_scope_mismatch"
+
+
 def test_candidate_ranker_ignores_demo_or_fallback_admet_scores():
     payload = _payload(top_n=1)
     payload["outputs"]["admet"] = [

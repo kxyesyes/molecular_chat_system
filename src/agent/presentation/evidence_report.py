@@ -115,9 +115,13 @@ def _ranking(accepted, outputs, generators, run, displayed):
     rank = ranks[0]
     try:
         meta = rank["metadata"]
+        workflow_metadata_keys = meta.get("workflow_metadata_keys")
         _check(meta.get("workflow_output_keys") == ["molecules", "properties", "admet", "activity"]
                and meta.get("workflow_optional_output_keys") == ["admet", "activity"]
-               and meta.get("workflow_metadata_keys") == ["docking_top_n"])
+               and isinstance(workflow_metadata_keys, list)
+               and workflow_metadata_keys[:1] == ["docking_top_n"]
+               and set(workflow_metadata_keys).issubset({"docking_top_n", "target", "endpoint", "units"})
+               and len(workflow_metadata_keys) == len(set(workflow_metadata_keys)))
         generators = [g for g in generators if g["raw"]["quality"].get("output_key") == "molecules"]
         _check(len(generators) == 1)
         generator = generators[0]
@@ -125,11 +129,18 @@ def _ranking(accepted, outputs, generators, run, displayed):
         props = [s for s in accepted.values() if s["raw"]["quality"].get("output_key") == "properties"]
         _check(len(props) == 1 and props[0]["source"]["tool_name"] == "property_calculator")
         _property_rows(props[0], generator, run)
-        request = {"query": run["query"], "metadata": {"docking_top_n": meta["docking_top_n"]}}
+        request = {
+            "query": run["query"],
+            "metadata": {
+                key: meta[key]
+                for key in workflow_metadata_keys
+                if key in meta
+            },
+        }
         bound = BindingResolver().resolve("$.workflow", "identity", request, outputs,
             workflow_output_keys=meta["workflow_output_keys"],
             workflow_optional_output_keys=meta["workflow_optional_output_keys"],
-            workflow_metadata_keys=meta["workflow_metadata_keys"])
+            workflow_metadata_keys=workflow_metadata_keys)
         _check(WorkflowOrchestrator._input_hash(bound) == rank["checkpoint"]["input_hash"])
         raw = rank["raw"]["data"]
         _check(rank["raw"]["quality"].get("output_contract") == "CandidateRanking@1")
