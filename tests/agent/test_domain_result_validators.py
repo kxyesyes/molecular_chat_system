@@ -416,6 +416,9 @@ def test_activity_validator_accepts_real_model_provenance():
                     "model_provenance": {
                         "model_id": "model-1",
                         "weights_sha256": "a" * 64,
+                        "task_type": "regression",
+                        "endpoint": "pIC50",
+                        "units": "pIC50",
                         "demo_mode": False,
                         "fallback_used": False,
                     },
@@ -426,6 +429,9 @@ def test_activity_validator_accepts_real_model_provenance():
                     "model_id": "model-1",
                     "weights_sha256": "a" * 64,
                     "model_path": "data/activity/models/model.pt",
+                    "task_type": "regression",
+                    "endpoint": "pIC50",
+                    "units": "pIC50",
                     "demo_mode": False,
                     "fallback_used": False,
                 }
@@ -440,6 +446,49 @@ def test_activity_validator_accepts_real_model_provenance():
     validated = AgentResultValidator().validate_tool_result(result)
 
     assert validated.success is True
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("task_type", "classification"),
+        ("endpoint", "Ki"),
+        ("units", "nM"),
+    ],
+)
+def test_activity_validator_rejects_provenance_mismatched_with_result_contract(field, value):
+    provenance = {
+        "model_id": "model-1",
+        "weights_sha256": "a" * 64,
+        "task_type": "regression",
+        "endpoint": "pIC50",
+        "units": "pIC50",
+        "demo_mode": False,
+        "fallback_used": False,
+    }
+    provenance[field] = value
+    result = ToolResult.success_result(
+        "activity_predictor",
+        data=[
+            {
+                "smiles": "CCO",
+                "success": True,
+                "task_type": "regression",
+                "endpoint": "pIC50",
+                "value": 6.1,
+                "units": "pIC50",
+                "model_provenance": provenance,
+            }
+        ],
+        quality={"model_provenance": provenance},
+        evidence=[{"prediction": {"smiles": "CCO", "value": 6.1}}],
+    )
+
+    validated = AgentResultValidator().validate_tool_result(result)
+
+    assert validated.success is False
+    assert validated.error.code == AgentErrorCode.INVALID_OUTPUT
+    assert "provenance" in validated.message.lower()
 
 
 def test_admet_validator_requires_prediction_method():

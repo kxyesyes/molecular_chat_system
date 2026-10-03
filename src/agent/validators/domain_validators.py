@@ -201,6 +201,12 @@ class ActivityResultValidator:
                 or provenance.get("demo_mode") is not False
                 or provenance.get("fallback_used", False) is not False):
             return "Activity result lacks real model provenance"
+        if (
+            provenance.get("task_type") != task_type
+            or provenance.get("endpoint") != entry["endpoint"]
+            or provenance.get("units") != entry["units"]
+        ):
+            return "Activity model provenance does not match result task, endpoint, or units"
         return None
 
     def validate(self, result: ToolResult) -> str | None:
