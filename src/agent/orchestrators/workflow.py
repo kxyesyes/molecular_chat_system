@@ -349,6 +349,17 @@ class WorkflowOrchestrator:
         }
         if any(str(checkpoint.get(key) or "") != str(value or "") for key, value in expected.items()):
             return None
+        # Reject a registry-change race: a request-bound scientific result
+        # must carry the same model identity in its observation as in the
+        # checkpoint envelope.
+        output = checkpoint.get("output")
+        if isinstance(output, Mapping):
+            provenance = output.get("provenance")
+            if isinstance(provenance, Mapping):
+                output_model_version = provenance.get("model_version")
+                if (output_model_version is not None
+                        and str(output_model_version or "") != str(model_version or "")):
+                    return None
         return checkpoint
 
     @staticmethod

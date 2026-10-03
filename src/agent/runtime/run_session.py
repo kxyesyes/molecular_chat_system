@@ -612,6 +612,15 @@ class WorkflowRunSession:
                 result,
                 trusted_checkpoint=journal.checkpoint_reused,
             )
+            # The registry may change between checkpoint preflight and tool
+            # execution. Persist the identity observed in the accepted result
+            # so a later resume cannot treat a v2 result as a v1 checkpoint.
+            observed_model_version = (
+                result.provenance.model_version
+                if result.provenance is not None else None
+            )
+            if isinstance(observed_model_version, str) and observed_model_version:
+                journal.model_version = observed_model_version
             candidate_source = step.metadata.get("candidate_source")
             if candidate_source and result.success:
                 result = align_candidate_results(
@@ -1019,7 +1028,26 @@ class WorkflowRunSession:
                         "reason": "checkpoint_deserialization_failed",
                     }
                 else:
-                    journal.checkpoint_reused = True
+                    result_validator = getattr(tool, "validate_checkpoint_result", None)
+                    if callable(result_validator):
+                        try:
+                            accepted = bool(result_validator(journal.input_data, journal.result))
+                        except Exception:
+                            accepted = False
+                        if not accepted:
+                            journal.result = None
+                            checkpoint = None
+                            journal.checkpoint_warning = (
+                                f"Ignored incompatible checkpoint for {step.name}"
+                            )
+                            journal.checkpoint_warning_entry = {
+                                "step": step.name,
+                                "reason": "checkpoint_result_binding_mismatch",
+                            }
+                        else:
+                            journal.checkpoint_reused = True
+                    else:
+                        journal.checkpoint_reused = True
             if self._cancel_requested():
                 self._prepare_cancelled_step(step, tool, journal)
                 return

@@ -85,6 +85,10 @@ class SingleAttemptTool:
         resolver = getattr(self.adapter, "checkpoint_model_version", None)
         return resolver(input_data) if callable(resolver) else None
 
+    def validate_checkpoint_result(self, input_data, result):
+        validator = getattr(self.adapter, "validate_checkpoint_result", None)
+        return validator(input_data, result) if callable(validator) else True
+
     def execute(self, input_data):
         # No inner retry may survive an outer deadline/cancellation. Keep the
         # original adapter's schema validation, concurrency slot and timeout.

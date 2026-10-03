@@ -279,7 +279,15 @@ class LegacyPythonToolAdapter(ToolAdapter):
 
     def checkpoint_model_version(self, input_data):
         resolver = getattr(self.tool, "checkpoint_model_version", None)
-        return resolver(input_data) if callable(resolver) else None
+        if not callable(resolver):
+            return None
+        return resolver(self._validate_input(input_data))
+
+    def validate_checkpoint_result(self, input_data, result):
+        validator = getattr(self.tool, "validate_checkpoint_result", None)
+        if not callable(validator):
+            return True
+        return bool(validator(self._validate_input(input_data), result))
 
     def health(self) -> dict[str, Any]:
         health = super().health()

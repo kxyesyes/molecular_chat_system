@@ -75,6 +75,41 @@ class ActivityPredictorTool(BaseMolecularTool):
         except Exception:
             return None
 
+    def validate_checkpoint_result(self, input_data, result):
+        """Accept a restored result only when it is bound to this request."""
+        try:
+            _, smiles, target = parse_activity_input(input_data, self)
+            if target is None or not isinstance(result.data, list) or len(result.data) != len(smiles):
+                return False
+            candidate_ids = input_data.get("candidate_ids") if isinstance(input_data, dict) else None
+            if candidate_ids is not None and (
+                not isinstance(candidate_ids, list) or len(candidate_ids) != len(smiles)
+            ):
+                return False
+            request_model = input_data.get("model_request") if isinstance(input_data, dict) else None
+            if request_model is not None and not isinstance(request_model, dict):
+                return False
+            request_payload = dict(request_model or {})
+            request_payload.setdefault("target", target)
+            endpoint = requested_activity_endpoint(input_data)
+            if endpoint is not None:
+                request_payload.setdefault("endpoint", endpoint)
+            expected = ActivityModelRequest.from_mapping(request_payload)
+            if expected.family_id != resolve_activity_family(target):
+                return False
+            for index, row in enumerate(result.data):
+                if not isinstance(row, dict) or row.get("smiles") != smiles[index]:
+                    return False
+                if row.get("requested_target") != target:
+                    return False
+                if candidate_ids is not None and row.get("candidate_id") != candidate_ids[index]:
+                    return False
+                if not request_provenance_matches(row.get("provenance"), expected):
+                    return False
+            return True
+        except Exception:
+            return False
+
     def execute(self, query):
         candidate_ids = query.get("candidate_ids") if isinstance(query, dict) else None
         if candidate_ids is not None and (
