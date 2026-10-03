@@ -19,6 +19,35 @@ def client(monkeypatch, tmp_path):
     return TestClient(app)
 
 
+def _complete_summary_row(**changes):
+    row = {
+        "smiles": "CCO", "requested_target": "PDE5A", "family_id": "pde-family",
+        "bundle_id": "synthetic-bundle", "success": True, "status": "passed",
+        "execution_status": "passed", "activity_class": "无活性",
+        "activity_probability": 0.2, "predicted_pIC50": 4.2,
+        "units": "pIC50", "label_threshold": 5.0,
+        "probability_threshold": 0.5,
+        "classification_regression_consistent": True,
+        "errors": {}, "warnings": [],
+        "provenance": {
+            "bundle_id": "synthetic-bundle",
+            "models": {
+                task: {
+                    "model_id": f"synthetic-{task}", "task_type": task,
+                    "target_id": "pde-family",
+                    "weights_sha256": "a" * 64,
+                    "model_card_sha256": "b" * 64,
+                    "prepared_dataset_sha256": "c" * 64,
+                    "demo_mode": False, "fallback_used": False,
+                }
+                for task in ("classification", "regression")
+            },
+        },
+    }
+    row.update(changes)
+    return row
+
+
 def test_missing_bundle_fails_without_global_fallback(client, monkeypatch, tmp_path):
     monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(tmp_path))
     response = client.post("/api/activity/predict", data={"smiles": "CCO", "target": "PDE5A"})
@@ -44,12 +73,39 @@ def test_unknown_explicit_target_does_not_use_global_model(client):
 ])
 def test_aggregate_scientific_status(statuses, expected):
     from src.activity.prediction_service import summarize_predictions
-    rows = [dict(status=s, success=s == "passed", warnings=["test warning"]) for s in statuses]
+    rows = [(_complete_summary_row(warnings=["test warning"]) if s == "passed"
+             else dict(status=s, success=False, warnings=["test warning"]))
+            for s in statuses]
     result = summarize_predictions(rows)
     assert result["status"] == expected
     assert result["success"] is (expected == "passed")
     assert result["results"] == rows
     assert result["warnings"] == (["test warning"] if rows else [])
+
+
+def test_summary_does_not_promote_empty_success_row_to_passed():
+    from src.activity.prediction_service import summarize_predictions
+
+    result = summarize_predictions([{"success": True, "status": "passed"}])
+
+    assert result["status"] == "failed"
+    assert result["success"] is False
+
+
+@pytest.mark.parametrize("change", [
+    {"activity_probability": None},
+    {"predicted_pIC50": None},
+    {"classification_regression_consistent": None},
+    {"provenance": {}},
+    {"provenance": {"bundle_id": "synthetic-bundle", "models": {}}},
+])
+def test_summary_requires_complete_numeric_and_pinned_provenance(change):
+    from src.activity.prediction_service import summarize_predictions
+
+    result = summarize_predictions([_complete_summary_row(**change)])
+
+    assert result["status"] == "failed"
+    assert result["success"] is False
 
 
 @pytest.mark.parametrize("marker", [False, True, None])
@@ -247,9 +303,9 @@ def _post_prediction(client, endpoint, *, target=None, smiles="CCO"):
 
 
 @pytest.mark.parametrize("rows,expected", [
-    ([{"success": True}], "passed"),
+    ([{"success": True}], "failed"),
     ([{"success": False}], "failed"),
-    ([{"success": True}, {"success": False}], "partial"),
+    ([_complete_summary_row(), {"success": False}], "partial"),
     ([{"success": True, "status": "partial"}], "partial"),
     ([{"success": False, "status": "passed"}], "failed"),
     ([{"success": 1, "status": "passed"}], "failed"),
