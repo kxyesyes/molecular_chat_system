@@ -113,6 +113,41 @@ def test_activity_checkpoint_reuse_requires_request_bound_identity(build, monkey
     }]
 
 
+def test_activity_checkpoint_reuses_only_after_runtime_identity_is_bound(build, monkeypatch):
+    old, _, _, _, _, _ = build()
+    tool = CountingTool("activity_predictor")
+    tool.checkpoint_reuse_requires_runtime_identity = True
+    tool.checkpoint_model_version = lambda input_data: "request-model-v1"
+    session = WorkflowRunSession(
+        old.orchestrator,
+        AgentContext("fixture", "activity-checkpoint-bound"),
+        [],
+        {tool.name: tool},
+        dynamic=True,
+    )
+    session.start()
+    session.append_step(WorkflowStep("activity", tool.name, "fixture", output_key="activity"))
+    observed = {}
+
+    def compatible(*args, **kwargs):
+        observed["model_version"] = args[4]
+        return {"checkpoint": "same-request"}
+
+    monkeypatch.setattr(session.orchestrator, "_compatible_checkpoint", compatible)
+    monkeypatch.setattr(
+        session.orchestrator,
+        "_result_from_checkpoint",
+        lambda *args, **kwargs: ToolResult.success_result(tool.name, {"reused": True}),
+    )
+
+    session.execute_step(0)
+
+    assert observed["model_version"] == "request-model-v1"
+    assert tool.calls == []
+    assert session.reused_steps == ["activity"]
+    assert session.checkpoint_warnings == []
+
+
 def test_activity_checkpoint_guard_survives_registry_and_attempt_wrappers(build, monkeypatch):
     old, _, _, _, _, _ = build()
     from src.agent.tooling import build_tool_registry

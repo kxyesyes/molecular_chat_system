@@ -144,6 +144,49 @@ def test_structured_model_request_is_forwarded_to_shared_service(boundary, monke
     assert seen["model_request"]["species"] == "human"
 
 
+def test_checkpoint_model_version_resolves_request_bound_family_identity(monkeypatch):
+    from src.activity import prediction_service
+
+    seen = {}
+
+    class Predictor:
+        def request_identity(self, *, target, model_request=None):
+            seen.update(target=target, model_request=model_request)
+            return "a" * 64
+
+    monkeypatch.setattr(prediction_service, "get_family_predictor", lambda: Predictor())
+    tool = ActivityPredictorTool()
+
+    identity = tool.checkpoint_model_version({
+        "query": "预测 PDE5A 活性",
+        "smiles": "CCO",
+        "target": "PDE5A",
+        "model_request": {"target": "PDE5A", "species": "human", "endpoint": "pIC50"},
+    })
+
+    assert identity == "a" * 64
+    assert seen == {
+        "target": "PDE5A",
+        "model_request": {
+            "target": "PDE5A", "species": "human", "endpoint": "pIC50"
+        },
+    }
+
+
+def test_checkpoint_model_version_fails_closed_without_explicit_target(monkeypatch):
+    from src.activity import prediction_service
+
+    monkeypatch.setattr(
+        prediction_service,
+        "get_family_predictor",
+        lambda: pytest.fail("family predictor must not load without a target"),
+    )
+    assert ActivityPredictorTool().checkpoint_model_version({
+        "query": "预测活性",
+        "smiles": "CCO",
+    }) is None
+
+
 def test_tool_provenance_binds_request_model_identity(boundary):
     tool, _, state = boundary
     row = family_row()
