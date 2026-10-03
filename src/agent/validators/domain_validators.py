@@ -270,6 +270,15 @@ class ActivityResultValidator:
             if (not isinstance(provenance, dict) or not provenance.get("bundle_id")
                     or provenance["bundle_id"] != entry.get("bundle_id")):
                 return "Family activity result lacks pinned two-model provenance"
+            request = provenance.get("request")
+            if (not isinstance(request, dict)
+                    or request.get("family_id") != entry.get("family_id")
+                    or request.get("endpoint") != "pIC50"
+                    or request.get("units") != "pIC50"
+                    or request.get("validation") != "endpoint_ready"
+                    or not isinstance(request.get("identity"), str)
+                    or not request["identity"].strip()):
+                return "Family activity result lacks request-bound model identity"
             models = provenance.get("models")
             if not isinstance(models, dict):
                 return "Family activity result lacks pinned two-model provenance"

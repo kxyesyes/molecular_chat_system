@@ -15,8 +15,12 @@ def family_row(**changes):
                units="pIC50", label_threshold=5.0, probability_threshold=0.5,
                classification_regression_consistent=True,
                warnings=["synthetic-domain-warning"], errors={},
-               provenance={"bundle_id": "synthetic-bundle", "source_sha256": "a" * 64,
-                           "models": {task: {"model_id": "synthetic-" + task,
+                provenance={"bundle_id": "synthetic-bundle", "source_sha256": "a" * 64,
+                            "request": {"family_id": "pde-family", "endpoint": "pIC50",
+                                         "units": "pIC50", "species": None,
+                                         "validation": "endpoint_ready",
+                                         "identity": "synthetic-request"},
+                            "models": {task: {"model_id": "synthetic-" + task,
                                              "weights_sha256": "b" * 64,
                                              "model_card_sha256": "c" * 64,
                                              "prepared_dataset_sha256": "d" * 64,
@@ -42,6 +46,7 @@ def boundary(monkeypatch):
             rows = [family_row(smiles=s, requested_target=target,
                                family_id=resolve_activity_family(target)) for s in smiles]
             for row in rows:
+                row["provenance"]["request"]["family_id"] = row["family_id"]
                 for model in row["provenance"]["models"].values():
                     model["target_id"] = row["family_id"]
         return dict(success=state["status"] == "passed", status=state["status"],
@@ -132,6 +137,32 @@ def test_tool_provenance_binds_request_model_identity(boundary):
 
     assert result.success
     assert result.provenance.model_version == "request-identity"
+
+
+@pytest.mark.parametrize("request_payload", [
+    None,
+    {"family_id": "buche-family", "endpoint": "pIC50", "units": "pIC50",
+     "validation": "endpoint_ready", "identity": "request-identity"},
+    {"family_id": "pde-family", "endpoint": "pKi", "units": "pKi",
+     "validation": "endpoint_ready", "identity": "request-identity"},
+    {"family_id": "pde-family", "endpoint": "pIC50", "units": "pIC50",
+     "validation": "legacy_unvalidated", "identity": "request-identity"},
+    {"family_id": "pde-family", "endpoint": "pIC50", "units": "pIC50",
+     "validation": "endpoint_ready", "identity": ""},
+])
+def test_complete_family_claims_require_request_bound_identity(boundary, request_payload):
+    tool, _, state = boundary
+    row = family_row()
+    if request_payload is None:
+        row["provenance"].pop("request")
+    else:
+        row["provenance"]["request"] = request_payload
+    state["rows"] = [row]
+
+    result = execute_tool_compat(tool, {"smiles": "CCO", "target": "PDE5A"})
+
+    assert result.error.code.value == "invalid_output"
+    assert result.data is None
 
 
 @pytest.mark.parametrize("metric", ["pIC50", "IC50", "pic50", "PIC50"])

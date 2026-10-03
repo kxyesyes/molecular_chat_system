@@ -66,6 +66,15 @@ def _is_complete_family_prediction(row):
     models = provenance.get("models")
     if not isinstance(models, Mapping):
         return False
+    request = provenance.get("request")
+    if (not isinstance(request, Mapping)
+            or request.get("family_id") != row.get("family_id")
+            or request.get("endpoint") != "pIC50"
+            or request.get("units") != "pIC50"
+            or request.get("validation") != "endpoint_ready"
+            or not isinstance(request.get("identity"), str)
+            or not request["identity"].strip()):
+        return False
     for task in ("classification", "regression"):
         model = models.get(task)
         if (not isinstance(model, Mapping)

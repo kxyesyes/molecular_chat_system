@@ -20,7 +20,10 @@ def synthetic_row(smiles, target, family):
         "probability_threshold": 0.5, "classification_regression_consistent": True,
         "warnings": ["synthetic inference, not real weights"], "errors": {},
         "extension": {"retained": [1, "evidence"]},
-        "provenance": {"bundle_id": "synthetic-integration", "models": {
+        "provenance": {"bundle_id": "synthetic-integration", "request": {
+            "family_id": family, "endpoint": "pIC50", "units": "pIC50",
+            "species": None, "validation": "endpoint_ready",
+            "identity": "synthetic-integration-request"}, "models": {
             task: {"model_id": "synthetic-" + task, "task_type": task,
                    "target_id": family, "weights_sha256": "a" * 64,
                    "model_card_sha256": "b" * 64,
