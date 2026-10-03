@@ -154,3 +154,22 @@ def test_actual_targetless_tool_requires_explicit_target(payload):
     assert not result.success
     assert result.status == ObservationStatus.INVALID_INPUT
     assert "靶点" in result.message
+
+
+@pytest.mark.parametrize("delegated", [False, True])
+def test_targetless_failure_rows_survive_real_adapter_and_specialist(integrated_activity, delegated):
+    adapter, dispatch, calls, _, _ = integrated_activity
+    payload = {"smiles": ["CCO", "CCN", "CCO"],
+               "candidate_ids": ["a", "b", "c"]}
+    result = dispatch(payload) if delegated else adapter.execute(payload)
+    assert result.status == ObservationStatus.INVALID_INPUT, result.message
+    assert result.error.code == AgentErrorCode.INVALID_INPUT
+    assert not result.success
+    assert [(row["smiles"], row["candidate_id"]) for row in result.data] == [
+        ("CCO", "a"), ("CCN", "b"), ("CCO", "c")]
+    assert all(row["error"] == "explicit_target_required" for row in result.data)
+    assert all(row.get(key) is None for row in result.data
+               for key in ("value", "probability", "predicted_pIC50", "activity_probability"))
+    assert result.evidence == [{"prediction": row} for row in result.data]
+    assert result.quality["model_loaded"] is False
+    assert calls == []

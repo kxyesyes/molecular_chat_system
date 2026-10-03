@@ -6,7 +6,13 @@
 """
 
 from copy import deepcopy
-from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolProvenance, ToolResult
+from src.agent.contracts import (
+    AgentErrorCode,
+    AgentExecutionError,
+    ObservationStatus,
+    ToolProvenance,
+    ToolResult,
+)
 from .activity_input import activity_intent_requested, parse_activity_input, requested_activity_endpoint
 from .base_tool import BaseMolecularTool
 
@@ -47,6 +53,13 @@ class ActivityPredictorTool(BaseMolecularTool):
             return ToolResult.error_result(
                 self.name, AgentErrorCode.INVALID_INPUT, str(exc),
                 status=ObservationStatus.INVALID_INPUT)
+        if candidate_ids is not None and len(candidate_ids) != len(smiles):
+            return ToolResult.error_result(
+                self.name,
+                AgentErrorCode.INVALID_INPUT,
+                "候选 ID 必须与 SMILES 一一对应。",
+                status=ObservationStatus.INVALID_INPUT,
+            )
         if endpoint is not None and endpoint != "pIC50":
             return ToolResult.error_result(
                 self.name, AgentErrorCode.MODEL_UNAVAILABLE,
@@ -55,10 +68,36 @@ class ActivityPredictorTool(BaseMolecularTool):
             )
         if target is None:
             message = "活性预测需要明确的靶点（PDE 或 BuChE）；未选择默认或全局模型。"
-            return ToolResult.error_result(
-                self.name,
-                AgentErrorCode.INVALID_INPUT,
-                message,
+            # Keep one structured failure row per input.  This is a validation
+            # rejection, not an inference call, so no model is loaded and no
+            # scientific value is populated.
+            rows = [{
+                "smiles": smi,
+                "candidate_id": candidate_id,
+                "requested_target": None,
+                "success": False,
+                "status": "failed",
+                "execution_status": "failed",
+                "error": "explicit_target_required",
+                "errors": {"target": "explicit_target_required"},
+                "warnings": [message],
+            } for smi, candidate_id in zip(smiles, candidate_ids or [None] * len(smiles))]
+            return ToolResult(
+                tool_name=self.name,
+                success=False,
+                message=message,
+                data=rows,
+                error=AgentExecutionError(
+                    code=AgentErrorCode.INVALID_INPUT,
+                    message=message,
+                ),
+                warnings=[message],
+                evidence=[{"prediction": deepcopy(row)} for row in rows],
+                quality={
+                    "prediction_status": "failed",
+                    "candidate_ids_bound": candidate_ids is not None,
+                    "model_loaded": False,
+                },
                 status=ObservationStatus.INVALID_INPUT,
             )
         try:
