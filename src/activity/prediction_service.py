@@ -10,6 +10,7 @@ import re
 from threading import Lock
 
 from .family_contract import LABEL_THRESHOLD, PROBABILITY_THRESHOLD
+from .request_selection import request_provenance_matches
 
 
 _factory_lock = Lock()
@@ -65,6 +66,12 @@ def _is_complete_family_prediction(row):
         return False
     models = provenance.get("models")
     if not isinstance(models, Mapping):
+        return False
+    request = provenance.get("request")
+    request_data = provenance.get("request") if isinstance(provenance, Mapping) else None
+    if (not request_provenance_matches(provenance)
+            or not isinstance(request_data, Mapping)
+            or request_data.get("family_id") != row.get("family_id")):
         return False
     for task in ("classification", "regression"):
         model = models.get(task)

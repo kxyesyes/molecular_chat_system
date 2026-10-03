@@ -78,6 +78,40 @@ def test_reference_guard_replaces_provisional_checkpoint_before_reentry(build, m
     assert not session.reused_steps and not session._step_journals[0].checkpoint_reused
 
 
+def test_activity_checkpoint_reuse_requires_request_bound_identity(build, monkeypatch):
+    old, _, _, _, _, _ = build()
+    tool = CountingTool("activity_predictor")
+    tool.checkpoint_reuse_requires_runtime_identity = True
+    session = WorkflowRunSession(
+        old.orchestrator,
+        AgentContext("fixture", "activity-checkpoint"),
+        [],
+        {tool.name: tool},
+        dynamic=True,
+    )
+    session.start()
+    session.append_step(WorkflowStep("activity", tool.name, "fixture", output_key="activity"))
+    monkeypatch.setattr(
+        session.orchestrator,
+        "_compatible_checkpoint",
+        lambda *args, **kwargs: pytest.fail("activity checkpoint must not be reused"),
+    )
+    monkeypatch.setattr(
+        session.orchestrator,
+        "_result_from_checkpoint",
+        lambda *args, **kwargs: pytest.fail("activity checkpoint must not be restored"),
+    )
+
+    session.execute_step(0)
+
+    assert len(tool.calls) == 1
+    assert session.reused_steps == []
+    assert session.checkpoint_warnings == [{
+        "step": "activity",
+        "reason": "request_bound_model_identity_required",
+    }]
+
+
 BASE = dict(request_input_digest='request', input_evidence_ids=[], operation_key='initial')
 
 

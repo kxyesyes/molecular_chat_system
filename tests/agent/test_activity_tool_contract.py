@@ -420,11 +420,13 @@ def test_validation_reuses_domain_helpers_without_loading_models(boundary, monke
     monkeypatch.setattr(predictor, "get_predictor", lambda: pytest.fail("no model loads"))
     monkeypatch.setattr(prediction_service, "get_family_predictor", lambda: pytest.fail("no family loads"))
     assert adapter.execute({"query": "CCO"}).success
-    tool.result["data"] = [family_row()]
+    family = family_row()
+    tool.result["data"] = [family]
+    tool.result["evidence"] = [{"prediction": deepcopy(family)}]
     assert adapter.execute({"query": "CCO"}).success
     # Canonical evidence snapshots are validated as independent observations;
     # the family result validates both pinned model records as well.
-    assert calls == {"domain": 4, "summary": 2, "metadata": 6}
+    assert calls == {"domain": 4, "summary": 2, "metadata": 4}
     assert tool.inputs == ["CCO", "CCO"]
 
 

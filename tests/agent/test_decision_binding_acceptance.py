@@ -211,7 +211,7 @@ def test_activity_target_bound_provenance(build, kind):
             model['target_id'] = 'buche-family'
     case = build('target: PDE; SMILES: CCO', tools=[Recorder(dict(success=True, data=[row]))])
     result = execute(case, decision('activity_predictor'))
-    assert result.success
+    assert result.success is (kind != 'conflicting_family')
     report = evaluate(case, required_tools=['activity_predictor'], evidence_ids=[eid(result)])
     assert report['finish_eligible'] is (kind == 'family_alias')
     if kind == 'single_unproven':
@@ -612,8 +612,12 @@ def test_cited_family_conflict_with_unsupported_sibling_preserves_empty_provenan
                     for s in smiles]
 
     predictor = FamilyActivityPredictor(None)
-    monkeypatch.setattr(predictor, '_pair', lambda family: (bundle, {
-        task: Stage(task) for task in ('classification', 'regression')}))
+    from src.activity.request_selection import SelectedActivityModel
+    selected = SelectedActivityModel(
+        family_id='pde-family', endpoint='pIC50', units='pIC50', species=None,
+        validation='endpoint_ready', identity=bundle['request']['identity'])
+    monkeypatch.setattr(predictor, '_pair', lambda family, request: (
+        bundle, {task: Stage(task) for task in ('classification', 'regression')}, selected))
     monkeypatch.setattr(prediction_service, 'get_family_predictor', lambda: predictor)
     case = build('target: PDE5A; SMILES: CCO; SMILES: C', tools=[ActivityPredictorTool()])
     result = execute(case, decision('activity_predictor'))
