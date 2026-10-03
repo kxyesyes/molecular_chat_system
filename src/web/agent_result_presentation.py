@@ -60,6 +60,7 @@ def sanitize_failure_text(
 
 def sanitize_warnings(
     raw_warnings: Any, *, sanitize_text: Callable = sanitize_failure_text,
+    reject_claims: bool = False,
 ) -> list[str]:
     warnings = []
     if not isinstance(raw_warnings, list):
@@ -73,10 +74,20 @@ def sanitize_warnings(
             sensitive
             or not sanitized
             or sanitized.casefold() == "[redacted]"
+            or (reject_claims and failure_claim_risk(warning))
         ):
             continue
         warnings.append(sanitized)
     return warnings
+
+
+def failure_claim_risk(value: Any) -> bool:
+    """Return whether text can publish an unverified scientific claim."""
+    if not isinstance(value, str):
+        return False
+    return bool(
+        scan_claim_risks(value) or _SCIENTIFIC_CLAIM_ALIAS.search(value)
+    )
 
 
 def presentation_status(agent_result: Mapping[str, Any]) -> str:
@@ -257,7 +268,7 @@ def failure_content(
         # policy catches tables, source claims, and completed-action claims;
         # this small alias set also covers activity/docking labels that the
         # ordinary-chat vocabulary intentionally does not classify.
-        return bool(scan_claim_risks(value) or _SCIENTIFIC_CLAIM_ALIAS.search(value))
+        return failure_claim_risk(value)
 
     raw_final_answer = agent_result.get("final_answer")
     final_answer, sensitive = safe_content(raw_final_answer)

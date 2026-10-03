@@ -8,7 +8,9 @@ import pytest
 from test_decision_loop import setup_loop, tool, finish, finish_last, clarify
 from test_decision_inputs import downstream
 from test_decision_requirements import requirements
-from src.agent.contracts import AgentContext
+from src.agent.contracts import (
+    AgentContext, AgentErrorCode, AgentExecutionError, AgentResult, RunOutcome,
+)
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from src.web.chat_handler import ChatHandler
@@ -121,6 +123,38 @@ def test_unexpected_error_completes_without_leaking_details():
     result = asyncio.run(invoke(Bundle(), ws))
     assert not result.success and terminal(ws)['status'] == 'failed'
     assert 'synthetic-private-error' not in json.dumps(ws.messages)
+
+
+def test_failed_decision_result_cannot_publish_unverified_scientific_claim():
+    class FailedLoop:
+        store = None
+
+        async def run(self, *args, **kwargs):
+            return AgentResult(
+                trace_id=context().trace_id,
+                success=False,
+                message='模型权重不可用，未进行预测。',
+                final_answer='pIC50=7.1；binding energy=-8.4 kcal/mol',
+                error=AgentExecutionError(
+                    AgentErrorCode.MODEL_UNAVAILABLE,
+                    '模型权重不可用，未进行预测。',
+                ),
+                warnings=['safe warning', 'pIC50=7.1'],
+                outcome=RunOutcome.FAILED,
+            )
+
+    class Bundle:
+        loop = FailedLoop()
+
+    ws = Socket()
+    result = asyncio.run(invoke(Bundle(), ws))
+    assert not result.success
+    assert terminal(ws)['content'] == '模型权重不可用，未进行预测。'
+    envelope = next(item for item in ws.messages if item['type'] == 'agent_result')
+    assert envelope['warnings'] == ['safe warning']
+    serialized = json.dumps(ws.messages, ensure_ascii=False)
+    assert 'pIC50=7.1' not in serialized
+    assert 'binding energy=-8.4 kcal/mol' not in serialized
 
 
 def test_events_are_delivered_before_model_finishes(setup_loop):
