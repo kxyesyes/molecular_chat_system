@@ -1,12 +1,128 @@
 """Activity prediction route registration."""
+import asyncio
 import csv
 import io
+import math
+import os
 from pathlib import Path
+import threading
 from typing import Optional
 from fastapi import UploadFile, File, Form, HTTPException
 
 
 _SMILES_COLUMN_ALIASES = {"smiles", "smile", "canonical_smiles", "structure"}
+_DEFAULT_ACTIVITY_TIMEOUT_SECONDS = 60.0
+_DEFAULT_ACTIVITY_MAX_BATCH_ROWS = 100
+_DEFAULT_ACTIVITY_MAX_CONCURRENCY = 2
+
+
+def _positive_float_env(name: str, default: float, *, minimum: float = 0.1) -> float:
+    try:
+        value = float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value >= minimum else default
+
+
+def _positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+# A timed-out request must not release capacity while its worker is still
+# running.  A thread semaphore keeps admission non-blocking for the event loop
+# and bounds the number of in-flight calculations even when a worker cannot be
+# force-cancelled safely.
+_ACTIVITY_ADMISSION = threading.BoundedSemaphore(
+    _positive_int_env("MEDCHAT_ACTIVITY_MAX_CONCURRENCY", _DEFAULT_ACTIVITY_MAX_CONCURRENCY)
+)
+
+
+_ACTIVITY_WORKERS: set[asyncio.Task] = set()
+
+
+class _ActivityLease:
+    """Release on physical exit, not on cancellation of an asyncio wrapper."""
+
+    def __init__(self, slots):
+        self.slots = slots
+        self.lock = threading.Lock()
+        self.state = "pending"
+
+    def abandon_pending(self):
+        with self.lock:
+            if self.state == "pending":
+                self.state = "finished"
+                self.slots.release()
+
+    def run(self, function):
+        with self.lock:
+            if self.state != "pending":
+                return None  # timed out/cancelled while queued: do not compute
+            self.state = "running"
+        try:
+            return function()
+        finally:
+            with self.lock:
+                self.state = "finished"
+                self.slots.release()
+
+    def observe(self, worker):
+        _ACTIVITY_WORKERS.discard(worker)
+        self.abandon_pending()  # dispatch failure before the worker started
+        if not worker.cancelled():
+            worker.exception()  # consume late exceptions; never log raw input
+
+
+async def _invoke_activity_with_budget(_support, function, *, operation: str):
+    """Run one activity computation with bounded admission and request timeout.
+
+    ``asyncio`` cannot safely stop arbitrary RDKit/PyTorch work running in a
+    thread.  On timeout we therefore stop waiting for the request, keep the
+    worker drained in the background, and retain its admission slot until it
+    finishes.  This distinguishes request timeout from computation
+    cancellation without allowing timed-out requests to multiply indefinitely.
+    """
+    slots = _ACTIVITY_ADMISSION
+    if not slots.acquire(blocking=False):
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "code": "ACTIVITY_CAPACITY_EXCEEDED",
+                "message": "活性预测并发资源已满，请稍后重试。",
+                "operation": operation,
+            },
+        )
+
+    lease = _ActivityLease(slots)
+    timeout = _positive_float_env(
+        "MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", _DEFAULT_ACTIVITY_TIMEOUT_SECONDS
+    )
+    try:
+        worker = asyncio.create_task(_support._invoke_in_threadpool(lambda: lease.run(function)))
+        _ACTIVITY_WORKERS.add(worker)
+        worker.add_done_callback(lease.observe)
+        # Unlike wait_for, wait distinguishes worker TimeoutError from deadline
+        # expiry and does not cancel a physical calculation on request timeout.
+        done, _ = await asyncio.wait((worker,), timeout=timeout)
+        if done:
+            return await worker
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "code": "ACTIVITY_REQUEST_TIMEOUT",
+                "message": "活性预测超过请求时间限制，未返回科学结果。请求已停止等待，后台计算仍受并发上限约束。",
+                "operation": operation,
+                "compute_disposition": "draining",
+            },
+        ) from None
+    finally:
+        # Cancel queued execution; running work owns its slot until run() exits,
+        # even if the loop is closed or its asyncio wrapper is cancelled.
+        lease.abandon_pending()
 
 
 def _parse_batch_smiles(content: str, *, filename: str, smiles_column: str | None = None) -> list[str]:
@@ -62,7 +178,9 @@ def setup_activity_prediction_routes(app, *, _support):
                 from src.activity.prediction_service import predict_activity
                 return predict_activity(smiles, target=target)
 
-            return await _support._invoke_in_threadpool(run_activity_prediction)
+            return await _invoke_activity_with_budget(
+                _support, run_activity_prediction, operation="predict"
+            )
         except HTTPException:
             raise
         except Exception:
@@ -84,12 +202,27 @@ def setup_activity_prediction_routes(app, *, _support):
                 filename=file.filename or "",
                 smiles_column=smiles_column,
             )
+            max_rows = _positive_int_env(
+                "MEDCHAT_ACTIVITY_MAX_BATCH_ROWS", _DEFAULT_ACTIVITY_MAX_BATCH_ROWS
+            )
+            if len(smiles_list) > max_rows:
+                raise HTTPException(
+                    status_code=413,
+                    detail={
+                        "code": "ACTIVITY_BATCH_LIMIT_EXCEEDED",
+                        "message": f"批量活性预测最多支持 {max_rows} 行。",
+                        "max_rows": max_rows,
+                        "received_rows": len(smiles_list),
+                    },
+                )
             
             def run_activity_batch_prediction():
                 from src.activity.prediction_service import predict_activity
                 return predict_activity(smiles_list, target=target)
 
-            return await _support._invoke_in_threadpool(run_activity_batch_prediction)
+            return await _invoke_activity_with_budget(
+                _support, run_activity_batch_prediction, operation="batch_predict"
+            )
         except HTTPException:
             raise
         except UnicodeDecodeError:

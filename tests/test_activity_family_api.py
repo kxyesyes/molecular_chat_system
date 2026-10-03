@@ -182,6 +182,21 @@ def test_empty_batch_not_success(client):
     assert response.json()["status"] == "failed"
 
 
+def test_activity_batch_rejects_before_model_execution_when_row_limit_exceeded(client, monkeypatch):
+    from src.activity import prediction_service
+    monkeypatch.setattr(prediction_service, "predict_activity",
+                        lambda *a, **kw: pytest.fail("oversized batch reached model"))
+    monkeypatch.setenv("MEDCHAT_ACTIVITY_MAX_BATCH_ROWS", "2")
+    response = client.post(
+        "/api/activity/batch_predict",
+        data={"target": "PDE"},
+        files={"file": ("too-many.smi", b"CCO\nCCN\nCCC\n", "text/plain")},
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "ACTIVITY_BATCH_LIMIT_EXCEEDED"
+
+
 def test_family_service_runs_in_worker_and_preserves_partial(client, monkeypatch):
     from src.activity import prediction_service
     state = {"inside": False, "calls": 0}
