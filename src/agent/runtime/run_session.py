@@ -958,18 +958,34 @@ class WorkflowRunSession:
                     journal.result = denial
                     journal.checkpoint_checked = True
                     return
-            if getattr(tool, "checkpoint_reuse_requires_runtime_identity", False):
-                checkpoint = None
-                # This is an execution-audit condition, not a scientific
-                # warning. Keep it in ``metadata.checkpoint_warnings`` below;
-                # adding it to the tool observation would make a valid result
-                # look like it carried a provider/domain warning.
-                journal.checkpoint_warning = None
-                journal.checkpoint_warning_entry = {
-                    "step": step.name,
-                    "reason": "request_bound_model_identity_required",
-                }
-            else:
+            requires_runtime_identity = getattr(
+                tool, "checkpoint_reuse_requires_runtime_identity", False
+            )
+            runtime_identity = None
+            if requires_runtime_identity:
+                resolver = getattr(tool, "checkpoint_model_version", None)
+                if callable(resolver):
+                    try:
+                        candidate = resolver(journal.input_data)
+                        if isinstance(candidate, str) and candidate:
+                            runtime_identity = candidate
+                            journal.model_version = candidate
+                    except Exception:
+                        runtime_identity = None
+                if runtime_identity is None:
+                    checkpoint = None
+                    # This is an execution-audit condition, not a scientific
+                    # warning. Keep it in ``metadata.checkpoint_warnings``
+                    # below; adding it to the tool observation would make a
+                    # valid result look like it carried a provider warning.
+                    journal.checkpoint_warning = None
+                    journal.checkpoint_warning_entry = {
+                        "step": step.name,
+                        "reason": "request_bound_model_identity_required",
+                    }
+                else:
+                    checkpoint = None
+            if not requires_runtime_identity or runtime_identity is not None:
                 try:
                     checkpoint = self.orchestrator._compatible_checkpoint(
                         self.context.trace_id,

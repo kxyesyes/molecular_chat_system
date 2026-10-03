@@ -184,6 +184,25 @@ class FamilyActivityPredictor:
             return (*self._pair(family), None)
         return self._pair(family, request)
 
+    def request_identity(self, *, target, model_request=None):
+        """Resolve the exact model identity for a request without predicting.
+
+        Checkpoint reuse must be bound to the same verified family bundle,
+        endpoint, units and optional species as inference.  Reuse the normal
+        bundle-selection path here so a checkpoint cannot be admitted merely
+        because a family name happens to match.
+        """
+        family = resolve_activity_family(target)
+        payload = dict(model_request or {})
+        payload.setdefault("target", target)
+        request = ActivityModelRequest.from_mapping(payload)
+        if request.family_id != family:
+            raise ValueError("Activity request family mismatch")
+        _, _, selected = self._pair_for_request(family, request)
+        if selected is None:
+            raise ValueError("Activity request identity unavailable")
+        return selected.identity
+
     def predict(self, smiles, *, target, model_request=None):
         inputs = [smiles] if isinstance(smiles, str) else list(smiles)
         rows = [_row(smi, target) for smi in inputs]

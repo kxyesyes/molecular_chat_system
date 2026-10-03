@@ -277,6 +277,10 @@ class LegacyPythonToolAdapter(ToolAdapter):
         """
         return bool(getattr(self.tool, "checkpoint_reuse_requires_runtime_identity", False))
 
+    def checkpoint_model_version(self, input_data):
+        resolver = getattr(self.tool, "checkpoint_model_version", None)
+        return resolver(input_data) if callable(resolver) else None
+
     def health(self) -> dict[str, Any]:
         health = super().health()
         health["readiness"] = "not_probed" if self.readiness_unknown else "adapter_ready"

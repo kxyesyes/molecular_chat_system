@@ -27,9 +27,8 @@ class ActivityPredictorTool(BaseMolecularTool):
     """活性预测工具：输入 SMILES → 输出 RG-MPNN 活性预测得分"""
 
     # The selected family bundle is only known after request-local validation.
-    # Reusing a generic checkpoint before that point could replay a stale model
-    # after bundle activation or accept a pre-contract checkpoint without the
-    # request-bound identity.
+    # WorkflowRunSession uses checkpoint_model_version to bind reuse to that
+    # exact request; if it cannot resolve an identity, reuse remains disabled.
     checkpoint_reuse_requires_runtime_identity = True
 
     def __init__(self):
@@ -46,6 +45,35 @@ class ActivityPredictorTool(BaseMolecularTool):
         has_keyword = activity_intent_requested(text)
         has_smiles = bool(smiles)
         return has_keyword and has_smiles
+
+    def checkpoint_model_version(self, input_data):
+        """Return the request-bound model identity used for checkpoint reuse.
+
+        This performs registry/bundle validation only; it does not run either
+        prediction stage.  Returning ``None`` fails closed and preserves the
+        old no-reuse behavior when the request cannot be bound to a verified
+        model pair.
+        """
+        try:
+            _, _, target = parse_activity_input(input_data, self)
+            endpoint = requested_activity_endpoint(input_data)
+            if target is None:
+                return None
+            request_model = input_data.get("model_request") if isinstance(input_data, dict) else None
+            if request_model is not None and not isinstance(request_model, dict):
+                return None
+            request_payload = dict(request_model or {})
+            request_payload.setdefault("target", target)
+            if endpoint is not None:
+                request_payload.setdefault("endpoint", endpoint)
+            expected = ActivityModelRequest.from_mapping(request_payload)
+            if expected.family_id != resolve_activity_family(target):
+                return None
+            from src.activity.prediction_service import get_family_predictor
+            return get_family_predictor().request_identity(
+                target=target, model_request=request_payload)
+        except Exception:
+            return None
 
     def execute(self, query):
         candidate_ids = query.get("candidate_ids") if isinstance(query, dict) else None
