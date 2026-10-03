@@ -51,12 +51,23 @@ def check_generated_candidate_truth(result: dict[str, Any]) -> dict[str, Any]:
     )
     if not generator:
         return {"passed": False, "reason": "generator_result_missing"}
+    if generator.get("success") is not True:
+        return {"passed": False, "reason": "generator_not_successful"}
     quality = generator.get("quality") or {}
     if quality.get("validation_method") != "RDKit":
         return {"passed": False, "reason": "rdkit_validation_missing"}
-    if int(quality.get("unique_count") or 0) < int(
-        quality.get("valid_count") or 0
-    ):
+    try:
+        valid_count = int(quality.get("valid_count") or 0)
+        unique_count = int(quality.get("unique_count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return {"passed": False, "reason": "invalid_generation_quality"}
+    if valid_count <= 0 or unique_count <= 0:
+        return {"passed": False, "reason": "no_valid_generated_candidates"}
+    data = generator.get("data")
+    records = data.get("candidates") if isinstance(data, Mapping) else data
+    if not isinstance(records, list) or not records:
+        return {"passed": False, "reason": "no_generated_candidate_records"}
+    if unique_count < valid_count:
         return {
             "passed": False,
             "reason": "generated_candidates_not_unique",

@@ -7,6 +7,30 @@ class FakeTool:
         self.name = name
 
     def execute(self, query):
+        if self.name == "activity_predictor":
+            return {
+                "success": True,
+                "message": "synthetic activity completed",
+                "data": [{
+                    "smiles": "CCO",
+                    "success": True,
+                    "task_type": "regression",
+                    "endpoint": "pIC50",
+                    "units": "pIC50",
+                    "value": 5.0,
+                    "model_provenance": {
+                        "model_id": "synthetic-contract-model",
+                        "weights_sha256": "a" * 64,
+                        "task_type": "regression",
+                        "endpoint": "pIC50",
+                        "units": "pIC50",
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                }],
+                "evidence": [{"type": "synthetic_activity_prediction"}],
+                "formatted": f"{self.name} result",
+            }
         return {
             "success": True,
             "message": f"{self.name} completed",

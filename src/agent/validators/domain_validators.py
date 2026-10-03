@@ -207,6 +207,8 @@ class ActivityResultValidator:
         if result.tool_name != "activity_predictor":
             return None
         entries = result.data if isinstance(result.data, list) else []
+        if result.success is True and not entries:
+            return "Activity result success envelope contains no prediction rows"
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
