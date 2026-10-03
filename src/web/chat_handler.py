@@ -1193,22 +1193,33 @@ class ChatHandler:
         return sanitized_event
 
     @classmethod
-    def _scrub_failure_event_claims(cls, value: Any) -> Any:
+    def _scrub_failure_event_claims(
+        cls, value: Any, *, depth: int = 0,
+    ) -> Any:
         if isinstance(value, str):
             return (
                 _AGENT_FAILURE_FALLBACK
                 if result_presentation.failure_claim_risk(value)
                 else value
             )
+        if depth >= _AGENT_EVENT_MAX_DEPTH:
+            return "[omitted]" if isinstance(value, (Mapping, list, tuple)) else value
         if isinstance(value, Mapping):
             return {
-                key: cls._scrub_failure_event_claims(child)
-                for key, child in value.items()
+                key: cls._scrub_failure_event_claims(child, depth=depth + 1)
+                for index, (key, child) in enumerate(value.items())
+                if index < _AGENT_EVENT_MAX_ITEMS
             }
         if isinstance(value, list):
-            return [cls._scrub_failure_event_claims(child) for child in value]
+            return [
+                cls._scrub_failure_event_claims(child, depth=depth + 1)
+                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+            ]
         if isinstance(value, tuple):
-            return tuple(cls._scrub_failure_event_claims(child) for child in value)
+            return tuple(
+                cls._scrub_failure_event_claims(child, depth=depth + 1)
+                for child in value[:_AGENT_EVENT_MAX_ITEMS]
+            )
         return value
 
     @classmethod

@@ -157,7 +157,11 @@ def _result_frame(handler, result, display_changed):
     envelope.update(type='agent_result', trace_id=result.trace_id,
                     final_answer=result.final_answer or result.message)
     terminal_status = envelope.get('status')
-    if terminal_status in {'failed', 'rejected', 'cancelled'}:
+    terminal_failure = terminal_status in {'failed', 'rejected', 'cancelled'} or (
+        result.success is False and not result.partial
+        and not result.metadata.get('waiting_for_input')
+    )
+    if terminal_failure:
         # decision_a2 has its own transport serializer, so apply the same
         # terminal claim boundary as the legacy ChatHandler path before any
         # frame is sent to the browser.
