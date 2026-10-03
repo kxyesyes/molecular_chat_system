@@ -83,7 +83,7 @@ def snapshot_payload(state, session, fingerprint, *, created_at=None):
         'input_queries': list(getattr(session, 'input_queries', [session.context.query])),
         'remaining_seconds': max(0, state.deadline - created_at),
         'tool_attempt_count': session.tool_attempt_count,
-        'checkpoint_warnings': copy_checkpoint_warnings(session.checkpoint_warnings),
+        'checkpoint_warnings': copy_checkpoint_warnings(getattr(session, 'checkpoint_warnings', [])),
         'results': [{'tool_name': r.tool_name, **r.to_legacy_dict()} for r in session.results],
     }
     payload = {'schema': 1, 'id': uuid4().hex, 'configuration': fingerprint, 'snapshot': snapshot}

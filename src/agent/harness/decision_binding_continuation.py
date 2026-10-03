@@ -100,7 +100,7 @@ def snapshot_payload(state, session, fingerprint, *, resolver, journal, created_
         input_queries=list(session.input_queries), remaining_seconds=remaining - reserve,
         pre_finalization_remaining_seconds=remaining, finalization_reserve_seconds=reserve,
         tool_attempt_count=session.tool_attempt_count, task_acceptance=state.task_acceptance,
-        checkpoint_warnings=copy_checkpoint_warnings(session.checkpoint_warnings),
+        checkpoint_warnings=copy_checkpoint_warnings(getattr(session, 'checkpoint_warnings', [])),
         results=[{'tool_name': r.tool_name, **r.to_legacy_dict()} for r in session.results])
     payload = dict(schema=1, id=uuid4().hex, configuration=fingerprint, snapshot=snapshot)
     validate_json(payload, max_bytes=LIMIT - 80, reason='continuation_snapshot_not_persistable')
