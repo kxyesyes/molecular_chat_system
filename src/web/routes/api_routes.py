@@ -22,6 +22,7 @@ from .reverse_target_routes import setup_reverse_target_routes
 from .activity_prediction_routes import setup_activity_prediction_routes
 from .activity_model_routes import setup_activity_model_routes
 from .molecule_properties_routes import setup_molecule_properties_routes
+from .admet_routes import setup_admet_routes
 from .agent_metrics_routes import setup_agent_metrics_routes
 
 logger = logging.getLogger(__name__)
@@ -196,4 +197,5 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     setup_activity_prediction_routes(app, _support=support)
     setup_activity_model_routes(app, _support=support)
     setup_molecule_properties_routes(app, _support=support)
+    setup_admet_routes(app, _support=support)
     setup_agent_metrics_routes(app, _support=support)

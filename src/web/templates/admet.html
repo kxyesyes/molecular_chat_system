@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>ADMET 研究控制台 · MedChat</title>
+  <link rel="stylesheet" href="/static/css/admet.css?v=20261004">
+  <script defer src="/static/js/admet.js?v=20261004"></script>
+</head>
+<body class="admet-page">
+  <a class="skip-link" href="#workspace">跳到评估工作区</a>
+  <header class="console-header">
+    <a class="brand" href="/" aria-label="MedChat 首页"><span class="brand-symbol" aria-hidden="true">m<span>·</span></span> MedChat <span class="brand-divider">/</span> <span class="brand-module">ADMET</span></a>
+    <a class="back-link" href="/">返回工作台 <span aria-hidden="true">↗</span></a>
+  </header>
+
+  <main>
+    <section class="page-intro" aria-labelledby="page-title">
+      <div>
+        <p class="edition">Molecular research / ADMET</p>
+        <h1 id="page-title">ADMET <span>研究控制台</span></h1>
+        <p class="intro-copy">从分子结构出发，查看预测端点、计算来源与结果边界。</p>
+      </div>
+      <div class="intro-note"><span class="note-dot" aria-hidden="true"></span><p>本地科学工具执行<br><span>不使用聊天模型生成预测数值</span></p></div>
+    </section>
+
+    <div class="workspace" id="workspace">
+      <aside class="input-panel" aria-labelledby="input-title">
+        <div class="panel-heading"><h2 id="input-title">分子输入</h2><span class="quiet-tag">单分子</span></div>
+        <p class="panel-description">输入完整 SMILES，保留电荷与立体化学信息。</p>
+        <form id="admet-form">
+          <label for="smiles-input">SMILES <span class="required-label">必填</span></label>
+          <textarea id="smiles-input" name="smiles" maxlength="8192" rows="6" required spellcheck="false" autocapitalize="off" autocomplete="off" aria-describedby="input-hint" placeholder="在此粘贴分子结构…"></textarea>
+          <p id="input-hint" class="field-hint">每次一个结构，最多 8192 个字符。完整有效性由服务端校验。</p>
+          <button type="button" id="load-example" class="example-button">填入阿司匹林示例 <span aria-hidden="true">↗</span></button>
+          <div class="form-actions">
+            <button type="submit" id="run-admet" class="primary-button"><span>运行 ADMET 评估</span><span aria-hidden="true">→</span></button>
+            <button type="button" id="reset-admet" class="reset-button">清空输入与结果</button>
+          </div>
+        </form>
+        <div class="input-footnote"><span aria-hidden="true">ⓘ</span><p>首次调用可能需要加载本地权重。模型未配置或依赖不可用时，将明确返回原因。</p></div>
+        <noscript><p class="error-note">请启用 JavaScript 后提交评估；本页不会显示预设预测结果。</p></noscript>
+      </aside>
+
+      <section class="results-panel" aria-labelledby="results-title" aria-busy="false" id="results-panel">
+        <div class="results-header"><div><p class="section-caption">评估工作区</p><h2 id="results-title">预测结果</h2></div><span id="status-badge" class="status-badge state-not-calculated">尚未运行</span></div>
+        <p id="run-status" class="run-status" role="status" aria-live="polite" aria-atomic="true">等待输入分子结构。提交后将在此显示实际工具结果。</p>
+        <div id="admet-overview" class="admet-overview"></div>
+        <div id="empty-state" class="empty-state">
+          <div class="empty-monogram" aria-hidden="true">A<span>D</span>M<span>E</span>T<span class="monogram-dot">.</span></div>
+          <h3>一份评估，保留每一项依据。</h3>
+          <p>提交左侧分子后，结果会按端点类别展开。<br>没有返回的项目保持未计算，不用默认值补齐。</p>
+          <dl class="endpoint-guide">
+            <div><dt>A</dt><dd>吸收<span>Absorption</span></dd></div>
+            <div><dt>D</dt><dd>分布<span>Distribution</span></dd></div>
+            <div><dt>M</dt><dd>代谢<span>Metabolism</span></dd></div>
+            <div><dt>E</dt><dd>排泄<span>Excretion</span></dd></div>
+            <div><dt>T</dt><dd>毒性<span>Toxicity</span></dd></div>
+          </dl>
+        </div>
+        <div id="endpoint-groups" class="endpoint-groups"></div>
+        <div class="results-footer"><span class="legend-dot" aria-hidden="true"></span><span>RDKit 计算与模型预测分开标注；概率不是安全性结论。</span></div>
+      </section>
+
+      <aside class="evidence-sidebar" aria-labelledby="evidence-title">
+        <div class="panel-heading"><h2 id="evidence-title">来源与边界</h2><span class="evidence-mark" aria-hidden="true">↗</span></div>
+        <div id="evidence-panel" class="evidence-panel"><p class="evidence-empty">尚无运行记录。完成调用后，这里会保留工具、模型版本、权重标识和警告。</p></div>
+        <section class="reading-note"><h3>如何阅读结果</h3><p>物化端点来自 RDKit 计算，其余端点以返回的实际来源为准。</p><p>风险提示仅用于初步筛选。预测值不等于实验结果，不能单独证明分子的安全性或体内表现。</p></section>
+      </aside>
+    </div>
+    <footer class="page-footer"><span>MedChat · 计算药物化学研究平台</span><span>结构完整 · 结果可追溯</span></footer>
+  </main>
+</body>
+</html>
