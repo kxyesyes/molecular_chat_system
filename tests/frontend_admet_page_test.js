@@ -25,6 +25,12 @@ const template = read('src/web/templates/admet.html');
 assert(!source.includes('innerHTML'));
 assert(!/on(?:click|submit)=/.test(template));
 assert(!template.includes('/kermt-admet'));
+assert(template.includes('/static/css/subpage_header.css'), 'reuse the shared subpage header');
+assert(template.includes('class="header"'), 'use the shared tool-page header');
+assert(template.includes('class="logo-section"'), 'use the shared brand layout');
+assert(template.includes('class="back-btn"'), 'use the shared back button');
+assert(!template.includes('console-header'), 'remove the page-specific header shell');
+assert(!source.includes('#182421'), 'ADMET page should not keep the standalone dark theme');
 assert(!/setTimeout\([^]*2500/.test(source), 'no fake prediction delay');
 assert(!template.includes('res-caco2'), 'no legacy hardcoded endpoint cards');
 

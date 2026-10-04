@@ -1,144 +1,157 @@
+/* ADMET uses the same light workspace language as the molecular tools. */
 .admet-page {
-  --canvas: #182421; --surface: #fbfcfa; --paper: #f0f4f0; --line: #dce3dc;
-  --ink: #25382f; --muted: #63766b; --accent: #badd94; --verified: #286149;
-  --warning: #7e581b; --failure: #a43631; --uncomputed: #6a776f;
-  margin: 0; color: var(--ink); background: var(--canvas);
-  font-family: "Segoe UI", "Microsoft YaHei", sans-serif; line-height: 1.65;
-  -webkit-font-smoothing: antialiased; color-scheme: light;
+  --page-bg: #f1f5f9;
+  --surface: #ffffff;
+  --surface-muted: #f8fafc;
+  --line: #e2e8f0;
+  --line-strong: #cbd5e1;
+  --ink: #1e293b;
+  --muted: #64748b;
+  --primary: #6366f1;
+  --primary-dark: #4f46e5;
+  --success: #15803d;
+  --success-bg: #ecfdf3;
+  --warning: #a16207;
+  --warning-bg: #fffbeb;
+  --danger: #b91c1c;
+  --danger-bg: #fef2f2;
+  margin: 0;
+  color: var(--ink);
+  background: var(--page-bg);
+  font-family: "Segoe UI", "Microsoft YaHei", sans-serif;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  color-scheme: light;
 }
 .admet-page *, .admet-page *::before, .admet-page *::after { box-sizing: border-box; }
 .admet-page [hidden] { display: none !important; }
 .admet-page a { color: inherit; text-decoration: none; }
 .admet-page button, .admet-page textarea { font: inherit; }
 .admet-page button { cursor: pointer; }
-.admet-page :focus-visible { outline: 3px solid #76a68b; outline-offset: 4px; }
-.admet-page button:disabled { cursor: wait; opacity: .55; }
-.admet-page .skip-link { position: absolute; top: -100px; left: 20px; z-index: 3; padding: 10px; background: white; }
-.admet-page .skip-link:focus { top: 10px; }
-.admet-page .console-header { height: 80px; margin: 0 4%; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #36463e; color: #f0f5ec; }
-.admet-page .brand { display: flex; align-items: center; gap: 12px; font-size: 21px; font-weight: 600; }
-.admet-page .brand-symbol { font: italic 34px Georgia, serif; color: var(--accent); }
-.admet-page .brand-symbol span { color: #7eac9a; }
-.admet-page .brand-divider { color: #718477; margin: 0 8px; font-weight: 400; }
-.admet-page .brand-module { font: 13px Consolas, monospace; color: #bdcbbf; }
-.admet-page .back-link { font-size: 13px; color: #d2ddd1; }
-.admet-page .back-link span { margin-left: 14px; color: var(--accent); font-size: 20px; }
-.admet-page main { width: 92%; max-width: 1800px; margin: 0 auto; }
-.admet-page .page-intro { padding: 42px 0 35px; display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; color: #f0f4ec; }
-.admet-page .edition { font: 12px Consolas, monospace; color: #b3c7b7; margin: 0 0 12px; }
-.admet-page h1 { font-size: clamp(27px, 2.5vw, 42px); letter-spacing: -.04em; font-weight: 500; line-height: 1.3; margin: 0; }
-.admet-page h1 span { font-weight: 400; margin-left: 8px; }
-.admet-page .intro-copy { color: #b4c3b7; font-size: 14px; margin: 14px 0 0; }
-.admet-page .intro-note { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; flex-shrink: 0; padding-bottom: 3px; }
+.admet-page :focus-visible { outline: 3px solid #a5b4fc; outline-offset: 3px; }
+.admet-page button:disabled { cursor: wait; opacity: .58; }
+.admet-page .header { position: sticky; top: 0; z-index: 5; }
+.admet-page .current-tool { color: #c7d2fe; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.admet-page .back-btn { margin-left: 4px; }
+.admet-page .skip-link { position: absolute; top: -100px; left: 20px; z-index: 10; padding: 10px 14px; color: var(--ink); background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgb(15 23 42 / 12%); }
+.admet-page .skip-link:focus { top: 12px; }
+
+.admet-page main { width: min(1440px, calc(100% - 48px)); margin: 0 auto; }
+.admet-page .page-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 34px 0 24px; }
+.admet-page .edition, .admet-page .section-caption { margin: 0 0 6px; color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.admet-page h1 { margin: 0; color: var(--ink); font-size: clamp(28px, 3vw, 40px); font-weight: 700; letter-spacing: -.035em; line-height: 1.2; }
+.admet-page .intro-copy { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
+.admet-page .intro-note { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0 3px; color: var(--muted); font-size: 12px; text-align: right; }
 .admet-page .intro-note p { margin: 0; }
-.admet-page .intro-note p span { color: #a8b9ad; }
-.admet-page .note-dot { width: 6px; height: 6px; background: var(--accent); border-radius: 50%; margin-top: 8px; }
-.admet-page .workspace { display: grid; grid-template-columns: minmax(245px, 290px) minmax(0, 1fr) minmax(210px, 255px); align-items: start; gap: 1px; background: #ccd7cd; border: 1px solid #ccd7cd; border-radius: 12px; overflow: hidden; }
-.admet-page .input-panel, .admet-page .evidence-sidebar { background: var(--paper); padding: 26px 22px; align-self: stretch; min-width: 0; }
-.admet-page .results-panel { background: var(--surface); min-height: 630px; padding: 26px 30px 0; min-width: 0; }
-.admet-page .panel-heading, .admet-page .results-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.admet-page h2 { font-weight: 600; font-size: 17px; margin: 0; }
-.admet-page .quiet-tag { border: 1px solid #cad6ca; padding: 2px 7px; border-radius: 4px; font-size: 11px; color: #506558; }
-.admet-page .panel-description { margin: 14px 0 25px; color: var(--muted); font-size: 12px; }
-.admet-page label { font-size: 12px; font-weight: 600; display: flex; justify-content: space-between; margin-bottom: 8px; }
-.admet-page .required-label { color: var(--muted); font-weight: 400; font-size: 11px; }
-.admet-page textarea { resize: vertical; min-height: 160px; max-height: 440px; width: 100%; border: 1px solid #c4d0c4; border-radius: 6px; background: #fff; color: var(--ink); padding: 14px; font: 13px/1.8 Consolas, "Microsoft YaHei", monospace; word-break: break-all; }
-.admet-page textarea::placeholder { color: #7b8b80; }
-.admet-page .field-hint { font-size: 11px; color: var(--muted); margin: 8px 0 12px; }
-.admet-page .example-button { background: transparent; color: var(--verified); border: 0; border-bottom: 1px solid #a8c3ae; padding: 4px 0; font-size: 12px; }
+.admet-page .intro-note p span { color: #94a3b8; }
+.admet-page .note-dot { width: 8px; height: 8px; margin-top: 7px; background: #34d399; border-radius: 50%; box-shadow: 0 0 0 4px #d1fae5; }
+
+.admet-page .workspace { display: grid; grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(235px, 285px); align-items: stretch; gap: 16px; }
+.admet-page .input-panel, .admet-page .results-panel, .admet-page .evidence-sidebar { min-width: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 16px rgb(15 23 42 / 5%); }
+.admet-page .input-panel, .admet-page .evidence-sidebar { padding: 22px; }
+.admet-page .results-panel { min-height: 620px; padding: 24px 26px 0; }
+.admet-page .panel-heading, .admet-page .results-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.admet-page h2 { margin: 0; font-size: 17px; font-weight: 700; }
+.admet-page .results-header h2 { font-size: 22px; }
+.admet-page .quiet-tag { padding: 3px 8px; color: var(--primary-dark); background: #eef2ff; border-radius: 999px; font-size: 11px; font-weight: 600; }
+.admet-page .panel-description { margin: 10px 0 22px; color: var(--muted); font-size: 12px; }
+.admet-page label { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--ink); font-size: 12px; font-weight: 700; }
+.admet-page .required-label { color: var(--muted); font-weight: 400; }
+.admet-page textarea { width: 100%; min-height: 154px; max-height: 440px; resize: vertical; padding: 13px; color: var(--ink); background: var(--surface-muted); border: 1px solid var(--line-strong); border-radius: 9px; font: 13px/1.8 Consolas, "Microsoft YaHei", monospace; overflow-wrap: anywhere; }
+.admet-page textarea:focus { background: #fff; border-color: #818cf8; box-shadow: 0 0 0 3px #e0e7ff; outline: 0; }
+.admet-page textarea::placeholder { color: #94a3b8; }
+.admet-page .field-hint { margin: 8px 0 12px; color: var(--muted); font-size: 11px; }
+.admet-page .example-button { padding: 5px 0; color: var(--primary-dark); background: transparent; border: 0; border-bottom: 1px solid #c7d2fe; font-size: 12px; }
 .admet-page .example-button span { margin-left: 8px; }
-.admet-page .form-actions { margin-top: 32px; display: grid; gap: 8px; }
-.admet-page .primary-button { border: 1px solid #2a4d3e; background: #2a4d3e; color: #f1f8eb; border-radius: 6px; min-height: 48px; padding: 10px 15px; display: flex; align-items: center; justify-content: space-between; font-size: 13px; font-weight: 600; transition: background 160ms ease-out; }
-.admet-page .primary-button:hover:not(:disabled) { background: #37674d; }
-.admet-page .primary-button span:last-child { color: var(--accent); font-size: 20px; }
-.admet-page .reset-button { border: 0; background: transparent; color: #63756a; padding: 10px; font-size: 12px; min-height: 40px; }
-.admet-page .reset-button:hover:not(:disabled) { color: var(--ink); }
-.admet-page .input-footnote { border-top: 1px solid #d3ddd2; margin-top: 30px; padding-top: 18px; display: flex; gap: 9px; color: var(--muted); font-size: 11px; }
+.admet-page .form-actions { display: grid; gap: 8px; margin-top: 28px; }
+.admet-page .primary-button { display: flex; align-items: center; justify-content: space-between; min-height: 46px; padding: 10px 14px; color: #fff; background: var(--primary); border: 1px solid var(--primary); border-radius: 9px; font-size: 13px; font-weight: 700; transition: background 160ms ease, transform 160ms ease; }
+.admet-page .primary-button:hover:not(:disabled) { background: var(--primary-dark); transform: translateY(-1px); }
+.admet-page .primary-button span:last-child { color: #e0e7ff; font-size: 20px; }
+.admet-page .reset-button { min-height: 38px; padding: 8px; color: var(--muted); background: transparent; border: 0; font-size: 12px; }
+.admet-page .reset-button:hover:not(:disabled) { color: var(--primary-dark); }
+.admet-page .input-footnote { display: flex; gap: 9px; margin-top: 26px; padding-top: 16px; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
 .admet-page .input-footnote p { margin: 0; }
-.admet-page .section-caption { margin: 0 0 3px; font-size: 11px; color: var(--muted); }
-.admet-page .results-header h2 { font-size: 23px; font-weight: 500; }
-.admet-page .status-badge { font-size: 11px; padding: 5px 10px; border-radius: 4px; white-space: nowrap; }
-.admet-page .state-not-calculated { color: #647368; background: #edf1eb; }
-.admet-page .state-success { color: #1e6046; background: #e6f0e8; }
-.admet-page .state-partial, .admet-page .state-unavailable { color: #805417; background: #f8efdb; }
-.admet-page .state-timeout { color: #805417; background: #f8efdb; }
-.admet-page .state-failed { color: #9d3730; background: #f8e7e2; }
-.admet-page .state-running { color: #286149; background: #e6efe8; }
-.admet-page .state-running::before { content: ''; display: inline-block; width: 7px; height: 7px; border: 1px solid currentColor; border-radius: 50%; margin-right: 7px; animation: status-pulse 1.4s ease-in-out infinite; }
-.admet-page .run-status { margin: 20px 0 0; padding: 14px 0; border-top: 1px solid var(--line); color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
-.admet-page .empty-state { padding: 42px 0 32px; text-align: center; }
-.admet-page .empty-monogram { font: 500 clamp(40px, 4.8vw, 72px)/1.2 Georgia, serif; letter-spacing: .06em; color: #375545; margin-bottom: 24px; }
-.admet-page .empty-monogram span { color: #98afa0; }
-.admet-page .empty-monogram .monogram-dot { color: #568366; }
-.admet-page .empty-state h3 { font-size: 16px; font-weight: 500; margin: 0 0 12px; }
-.admet-page .empty-state p { color: var(--muted); font-size: 12px; line-height: 1.9; margin: 0; }
-.admet-page .endpoint-guide { display: flex; margin: 36px 0 8px; border-top: 1px solid var(--line); padding-top: 20px; justify-content: space-around; gap: 8px; }
-.admet-page .endpoint-guide dt { font: 19px Georgia, serif; margin-bottom: 8px; color: #3c664b; }
-.admet-page .endpoint-guide dd { margin: 0; font-size: 11px; }
-.admet-page .endpoint-guide dd span { display: block; color: var(--muted); font: 9px/2 Consolas, monospace; }
-.admet-page .results-footer { border-top: 1px solid var(--line); padding: 16px 0; color: var(--muted); font-size: 11px; display: flex; gap: 9px; align-items: flex-start; margin-top: 20px; }
-.admet-page .legend-dot { flex-shrink: 0; margin-top: 6px; width: 5px; height: 5px; border-radius: 50%; background: #729482; }
-.admet-page .evidence-mark { color: #779781; font-size: 20px; }
-.admet-page .evidence-empty { color: var(--muted); font-size: 12px; margin: 18px 0 28px; }
-.admet-page .reading-note { border-top: 1px solid #d3ddd2; padding-top: 18px; margin-top: 24px; }
-.admet-page .reading-note h3 { font-size: 12px; font-weight: 600; margin: 0 0 12px; }
-.admet-page .reading-note p { font-size: 11px; color: var(--muted); margin: 8px 0; }
-.admet-page .page-footer { display: flex; justify-content: space-between; gap: 16px; color: #b0bfb2; font-size: 11px; padding: 22px 0 30px; }
-.admet-page .molecule-result { margin-top: 18px; }
-.admet-page .molecule-heading { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 13px 0; }
-.admet-page .molecule-heading h3 { font: 13px Consolas, monospace; margin: 0; overflow-wrap: anywhere; }
-.admet-page .smiles-record { display: block; font: 12px/1.8 Consolas, monospace; color: #4c6959; background: #edf2ec; padding: 12px; border-radius: 5px; overflow-wrap: anywhere; margin: 0 0 15px; }
-.admet-page .endpoint-section { margin-top: 22px; }
-.admet-page .endpoint-section h4 { font-size: 13px; font-weight: 600; margin: 0; padding: 8px 0; border-bottom: 1px solid #cfdccf; }
-.admet-page .table-scroll { overflow-x: auto; }
-.admet-page table { border-collapse: collapse; width: 100%; font-size: 12px; }
-.admet-page th { color: var(--muted); font-size: 10px; font-weight: 400; text-align: left; padding: 10px 8px 8px 0; }
-.admet-page td { padding: 12px 8px 12px 0; border-bottom: 1px solid #e5ebe2; vertical-align: top; overflow-wrap: anywhere; }
-.admet-page td:first-child { width: 38%; }
-.admet-page .endpoint-value { font-family: Consolas, monospace; font-weight: 600; min-width: 80px; }
-.admet-page .endpoint-id { display: block; color: var(--muted); font: 10px/1.8 Consolas, monospace; }
-.admet-page .endpoint-source { font-size: 10px; min-width: 66px; color: #4c6959; }
-.admet-page .endpoint-unit { display: block; font-size: 10px; color: var(--muted); font-weight: 400; }
-.admet-page .endpoint-risk { color: var(--warning); display: block; font-size: 10px; }
-.admet-page .error-note { font-size: 12px; color: var(--failure); background: #faeee9; padding: 12px; border-radius: 5px; overflow-wrap: anywhere; }
-.admet-page .evidence-record { margin: 16px 0; font-size: 11px; }
-.admet-page .evidence-record dt { color: var(--muted); margin: 12px 0 2px; }
-.admet-page .evidence-record dd { margin: 0; font: 11px/1.8 Consolas, "Microsoft YaHei", monospace; overflow-wrap: anywhere; }
-.admet-page .warning-list { font-size: 11px; color: #765519; padding-left: 16px; overflow-wrap: anywhere; }
-.admet-page .warning-list li { margin: 7px 0; }
-.admet-page .evidence-details { border-top: 1px solid var(--line); padding: 10px 0; font-size: 11px; }
-.admet-page .evidence-details summary { cursor: pointer; }
-.admet-page .evidence-details pre { white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.8 Consolas, monospace; max-height: 360px; overflow: auto; }
-.admet-page .admet-overview { font-size: 12px; color: var(--muted); }
+.admet-page .error-note { margin: 12px 0; padding: 11px 12px; color: var(--danger); background: var(--danger-bg); border: 1px solid #fecaca; border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
+
+.admet-page .status-badge { padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
+.admet-page .state-not-calculated { color: #475569; background: #f1f5f9; }
+.admet-page .state-success { color: var(--success); background: var(--success-bg); }
+.admet-page .state-partial, .admet-page .state-unavailable, .admet-page .state-timeout { color: var(--warning); background: var(--warning-bg); }
+.admet-page .state-failed { color: var(--danger); background: var(--danger-bg); }
+.admet-page .state-running { color: var(--primary-dark); background: #eef2ff; }
+.admet-page .state-running::before { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border: 1px solid currentColor; border-radius: 50%; content: ""; animation: status-pulse 1.4s ease-in-out infinite; }
+.admet-page .run-status { min-height: 48px; margin: 18px 0 0; padding: 13px 0; color: var(--muted); border-top: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
+.admet-page .admet-overview { color: var(--muted); font-size: 12px; }
 .admet-page .admet-overview p { margin: 4px 0; }
-@keyframes status-pulse { 50% { opacity: .3; } }
-@media (max-width: 1150px) {
-  .admet-page .workspace { grid-template-columns: 260px minmax(0, 1fr); }
-  .admet-page .evidence-sidebar { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 24px; }
-  .admet-page .reading-note { border-top: 0; margin: 0; padding: 0; }
-  .admet-page .intro-note { display: none; }
+.admet-page .empty-state { padding: 62px 18px 42px; text-align: center; }
+.admet-page .empty-monogram { margin-bottom: 20px; color: #6366f1; font: 700 clamp(42px, 5vw, 72px)/1.1 "Segoe UI", sans-serif; letter-spacing: .08em; }
+.admet-page .empty-monogram span { color: #a5b4fc; }
+.admet-page .empty-monogram .monogram-dot { color: #c7d2fe; }
+.admet-page .empty-state h3 { margin: 0 0 10px; font-size: 16px; font-weight: 700; }
+.admet-page .empty-state p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
+.admet-page .endpoint-guide { display: flex; justify-content: space-around; gap: 8px; margin: 34px 0 8px; padding-top: 18px; border-top: 1px solid var(--line); }
+.admet-page .endpoint-guide dt { margin-bottom: 6px; color: var(--primary); font-size: 18px; font-weight: 800; }
+.admet-page .endpoint-guide dd { margin: 0; font-size: 11px; }
+.admet-page .endpoint-guide dd span { display: block; color: #94a3b8; font-size: 9px; }
+.admet-page .results-footer { display: flex; align-items: flex-start; gap: 9px; margin-top: 20px; padding: 15px 0; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
+.admet-page .legend-dot { width: 6px; height: 6px; flex-shrink: 0; margin-top: 6px; background: #818cf8; border-radius: 50%; }
+
+.admet-page .evidence-mark { color: var(--primary); font-size: 18px; }
+.admet-page .evidence-empty { margin: 18px 0 26px; color: var(--muted); font-size: 12px; }
+.admet-page .reading-note { margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
+.admet-page .reading-note h3 { margin: 0 0 10px; font-size: 12px; }
+.admet-page .reading-note p { margin: 8px 0; color: var(--muted); font-size: 11px; }
+.admet-page .evidence-record { margin: 14px 0; font-size: 11px; }
+.admet-page .evidence-record dt { margin: 11px 0 2px; color: var(--muted); }
+.admet-page .evidence-record dd { margin: 0; font: 11px/1.7 Consolas, "Microsoft YaHei", monospace; overflow-wrap: anywhere; }
+.admet-page .warning-list { padding-left: 16px; color: var(--warning); font-size: 11px; overflow-wrap: anywhere; }
+.admet-page .warning-list li { margin: 7px 0; }
+.admet-page .evidence-details { padding: 10px 0; border-top: 1px solid var(--line); font-size: 11px; }
+.admet-page .evidence-details summary { cursor: pointer; color: var(--primary-dark); }
+.admet-page .evidence-details pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 10px/1.8 Consolas, monospace; }
+
+.admet-page .molecule-result { margin-top: 18px; }
+.admet-page .molecule-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 13px 0; border-bottom: 1px solid var(--line); }
+.admet-page .molecule-heading h3 { margin: 0; font: 13px Consolas, monospace; overflow-wrap: anywhere; }
+.admet-page .smiles-record { display: block; margin: 14px 0; padding: 11px 12px; color: #475569; background: var(--surface-muted); border: 1px solid var(--line); border-radius: 8px; font: 12px/1.8 Consolas, monospace; overflow-wrap: anywhere; }
+.admet-page .endpoint-section { margin-top: 20px; }
+.admet-page .endpoint-section h4 { margin: 0; padding: 8px 0; color: var(--ink); border-bottom: 1px solid var(--line); font-size: 13px; }
+.admet-page .table-scroll { overflow-x: auto; }
+.admet-page table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.admet-page th { padding: 10px 8px 8px 0; color: var(--muted); font-size: 10px; font-weight: 700; text-align: left; }
+.admet-page td { padding: 12px 8px 12px 0; border-bottom: 1px solid #eef2f7; vertical-align: top; overflow-wrap: anywhere; }
+.admet-page td:first-child { width: 38%; }
+.admet-page .endpoint-value { min-width: 80px; font-family: Consolas, monospace; font-weight: 700; }
+.admet-page .endpoint-id { display: block; color: var(--muted); font: 10px/1.8 Consolas, monospace; }
+.admet-page .endpoint-source { min-width: 66px; color: var(--primary-dark); font-size: 10px; }
+.admet-page .endpoint-unit { display: block; color: var(--muted); font-size: 10px; font-weight: 400; }
+.admet-page .endpoint-risk { display: block; color: var(--warning); font-size: 10px; }
+.admet-page .page-footer { display: flex; justify-content: space-between; gap: 16px; padding: 22px 0 30px; color: #94a3b8; font-size: 11px; }
+.admet-page .error-note + .error-note { margin-top: 8px; }
+
+@keyframes status-pulse { 50% { opacity: .35; } }
+@media (max-width: 1180px) {
+  .admet-page .workspace { grid-template-columns: minmax(230px, 280px) minmax(0, 1fr); }
+  .admet-page .evidence-sidebar { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 2fr; gap: 24px; }
+  .admet-page .reading-note { margin: 0; padding: 0; border-top: 0; }
 }
 @media (max-width: 720px) {
-  .admet-page .console-header { height: 66px; margin: 0 5%; }
-  .admet-page main { width: 90%; }
-  .admet-page .brand { font-size: 18px; gap: 8px; }
-  .admet-page .brand-divider { margin: 0 3px; }
-  .admet-page .back-link { font-size: 11px; }
-  .admet-page .back-link span { margin-left: 3px; }
-  .admet-page .page-intro { padding: 28px 0; }
-  .admet-page h1 { font-size: 27px; }
-  .admet-page .intro-copy { font-size: 12px; }
+  .admet-page main { width: min(100% - 28px, 620px); }
+  .admet-page .header { padding: 12px 16px; }
+  .admet-page .logo-section .logo-item span { display: none; }
+  .admet-page .nav-section .current-tool { display: none; }
+  .admet-page .page-intro { align-items: flex-start; padding: 26px 0 20px; }
+  .admet-page .intro-note { display: none; }
   .admet-page .workspace { display: block; }
-  .admet-page .input-panel, .admet-page .results-panel, .admet-page .evidence-sidebar { padding: 22px 20px; }
-  .admet-page .results-panel { border-top: 1px solid var(--line); min-height: auto; }
-  .admet-page .evidence-sidebar { display: block; border-top: 1px solid var(--line); }
+  .admet-page .results-panel { min-height: auto; margin-top: 14px; }
+  .admet-page .evidence-sidebar { display: block; margin-top: 14px; }
+  .admet-page .reading-note { margin-top: 20px; padding-top: 17px; border-top: 1px solid var(--line); }
+  .admet-page .input-panel, .admet-page .results-panel, .admet-page .evidence-sidebar { padding: 20px; }
+  .admet-page textarea { min-height: 128px; }
   .admet-page .form-actions { margin-top: 20px; }
-  .admet-page textarea { min-height: 125px; }
-  .admet-page .input-footnote { margin-top: 15px; }
-  .admet-page .reading-note { border-top: 1px solid var(--line); margin-top: 20px; padding-top: 18px; }
+  .admet-page .empty-state { padding: 34px 10px 28px; }
   .admet-page .endpoint-guide dd span { display: none; }
-  .admet-page .empty-state { padding-top: 25px; }
-  .admet-page .page-footer { display: block; font-size: 10px; }
+  .admet-page .page-footer { display: block; }
   .admet-page .page-footer span { display: block; }
 }
 @media (prefers-reduced-motion: reduce) {

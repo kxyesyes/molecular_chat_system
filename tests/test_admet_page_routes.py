@@ -19,7 +19,8 @@ def test_admet_page_is_the_only_admet_entrypoint():
     with TestClient(app) as client:
         response = client.get("/admet")
     assert response.status_code == 200
-    assert "ADMET 研究控制台" in response.text
+    assert "ADMET 预测" in response.text
+    assert "/static/css/subpage_header.css" in response.text
 
 
 def test_page_routes_inventory_has_no_removed_path():

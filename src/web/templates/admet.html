@@ -3,26 +3,41 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="color-scheme" content="light dark">
-  <title>ADMET 研究控制台 · MedChat</title>
-  <link rel="stylesheet" href="/static/css/admet.css?v=20261004">
-  <script defer src="/static/js/admet.js?v=20261004"></script>
+  <meta name="color-scheme" content="light">
+  <title>ADMET 预测 · MedChat</title>
+  <link rel="stylesheet" href="/static/css/subpage_header.css?v=20261005">
+  <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20261005">
+  <link rel="stylesheet" href="/static/css/admet.css?v=20261005">
+  <script defer src="/static/js/admet.js?v=20261005"></script>
 </head>
 <body class="admet-page">
   <a class="skip-link" href="#workspace">跳到评估工作区</a>
-  <header class="console-header">
-    <a class="brand" href="/" aria-label="MedChat 首页"><span class="brand-symbol" aria-hidden="true">m<span>·</span></span> MedChat <span class="brand-divider">/</span> <span class="brand-module">ADMET</span></a>
-    <a class="back-link" href="/">返回工作台 <span aria-hidden="true">↗</span></a>
+  <header class="header">
+    <div class="logo-section">
+      <a class="logo-item" href="/" aria-label="海南大学药学院">
+        <img src="/static/images/logo.png" alt="海南大学药学院">
+        <span>海南大学药学院</span>
+      </a>
+      <span class="logo-divider" aria-hidden="true"></span>
+      <a class="logo-item" href="/" aria-label="MedChat 首页">
+        <img src="/static/images/logo2.png" alt="MedChat">
+        <span>MedChat</span>
+      </a>
+    </div>
+    <div class="nav-section">
+      <span class="current-tool">ADMET 预测</span>
+      <a class="back-btn" href="/">返回主页</a>
+    </div>
   </header>
 
   <main>
     <section class="page-intro" aria-labelledby="page-title">
       <div>
-        <p class="edition">Molecular research / ADMET</p>
-        <h1 id="page-title">ADMET <span>研究控制台</span></h1>
-        <p class="intro-copy">从分子结构出发，查看预测端点、计算来源与结果边界。</p>
+        <p class="edition">MOLECULAR PROPERTY &amp; RISK</p>
+        <h1 id="page-title">ADMET 预测</h1>
+        <p class="intro-copy">输入一个分子结构，查看物化性质、ADMET 端点和结果来源。</p>
       </div>
-      <div class="intro-note"><span class="note-dot" aria-hidden="true"></span><p>本地科学工具执行<br><span>不使用聊天模型生成预测数值</span></p></div>
+      <div class="intro-note"><span class="note-dot" aria-hidden="true"></span><p>真实工具结果<br><span>保留模型状态与证据</span></p></div>
     </section>
 
     <div class="workspace" id="workspace">
