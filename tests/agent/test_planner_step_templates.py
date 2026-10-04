@@ -70,7 +70,7 @@ CASES = [
               input_transform="smiles_text", output_key="properties", metadata={"candidate_source": "molecules"},
               capability="molecule.properties", output_contract="PropertyAssessmentSet@1"),
         _step("admet", "admet_predictor", input_from="molecules", input_binding="$.outputs.molecules",
-              input_transform="smiles_text", output_key="admet", metadata={"candidate_source": "molecules"},
+              input_transform="molecule_batch", output_key="admet", metadata={"candidate_source": "molecules"},
               capability="molecule.admet", output_contract="AdmetAssessmentSet@1", required=False, continue_on_error=True),
         _step("activity", "activity_predictor", input_from="molecules", input_binding="$.outputs.molecules",
               input_transform="smiles_text", output_key="activity",

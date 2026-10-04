@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ADMET属性预测工具 - 基于adme_py库
-移除毒性评估，专注于ADME属性预测
+ADMET属性预测工具 - 基于本地 ADMET-AI 1.4.0
+
+The legacy ``adme_py`` and RDKit-rule helpers remain available only for
+explicit compatibility fixtures and formatting tests; ``execute`` never uses
+them as a production fallback.
 """
 
 from importlib import metadata as importlib_metadata
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from collections.abc import Mapping
+from hashlib import sha256
 from typing import Dict, List, Optional, Any
 from urllib.parse import urlsplit
 import logging
@@ -41,6 +47,7 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from .admet_ai_backend import admet_ai_backend_error, get_admet_ai_backend
 from .molecular_input import MolecularInputUnavailable, parse_molecular_smiles
 from src.agent.persistence.redaction import contains_secret_material, sanitize_bounded
 
@@ -182,13 +189,21 @@ def _rule_details_text(value):
 
 
 class ADMETPredictor(BaseMolecularTool):
-    """ADMET属性预测工具 - 基于adme_py库"""
+    """ADMET-AI 1.4.0 predictor with explicit non-fabricating failure states."""
 
-    def __init__(self):
+    def __init__(self, *, backend=None, timeout_seconds: float = 180.0):
         super().__init__(
             name="admet_predictor",
-            description="Predict ADME properties from SMILES using adme_py library"
+            description="Predict ADMET endpoints with the local ADMET-AI 1.4.0 model"
         )
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self.timeout_seconds = float(timeout_seconds)
+        # A backend can be injected for deterministic contract tests.  The
+        # default is lazy and cached, so starting the Agent does not load model
+        # weights; actual ADMET use does.
+        self.backend = backend
+        self._owns_backend = backend is not None
 
         # 触发关键词 (移除毒性相关)
         self.trigger_words = [
@@ -220,16 +235,13 @@ class ADMETPredictor(BaseMolecularTool):
 
         return result
 
-    def execute(self, query: str) -> Dict[str, Any]:
+    def execute(self, query: Any) -> Dict[str, Any]:
         """执行ADMET预测"""
         result = self._create_base_result(query)
 
-        if not self._check_adme_backend(result):
-            return result
-
         try:
             # 提取SMILES
-            smiles_list = parse_molecular_smiles(query, self, prose_pattern=_ADMET_PROSE_PATTERN)
+            smiles_list, molecule_ids = self._parse_input(query)
         except ValueError as e:
             result['message'] = str(e)
             result['reasoning'] = (
@@ -243,59 +255,174 @@ class ADMETPredictor(BaseMolecularTool):
             result['reasoning'] = "无法确认完整结构，不将校验服务异常判断为分子无效。"
             return result
 
+        # Validate the complete molecular input before checking model
+        # availability.  An unavailable model must not mask a malformed SMILES
+        # request, and a valid request must never fall back to RDKit rules.
+        if not self._check_adme_backend(result):
+            return result
+
         try:
-            # 为所有SMILES计算ADMET属性
-            calculated_results = []
-            formatted_outputs = []
-
-            for smiles in smiles_list:
-                admet_props = self.predict_admet_with_adme_py(smiles)
-                if admet_props and self._has_observations(admet_props):
-                    calculated_results.append({'smiles': smiles, 'admet': admet_props})
-                    formatted_outputs.append(self.format_admet_result(smiles, admet_props))
-                elif isinstance(admet_props, dict):
-                    diagnostic = _diagnostic_metadata(admet_props)
-                    if diagnostic:
-                        result.setdefault('quality', {}).setdefault('unassessed_admet', []).append(diagnostic)
-
-            if not calculated_results:
-                result['message'] = "未获得可用的ADME计算结果；未形成评估。"
-                result['reasoning'] = "后端未返回可用观测，不能据此判断结构无效或分子安全。"
-                return result
-
-            # 成功 - 准备结果
-            result['success'] = True
-            result['data'] = calculated_results
-            result['formatted'] = "\n\n".join(formatted_outputs)
-
-            # 添加推理用于模型增强
-            if len(calculated_results) == 1:
-                smiles = calculated_results[0]['smiles']
-                admet_props = calculated_results[0]['admet']
-                result['reasoning'] = f"已返回 {smiles} 的已计算性质/规则估计；缺失项目未知。{self._generate_brief_reasoning(admet_props)}"
-                result['formatted'] += "\n\n" + self._generate_interpretation(smiles, admet_props)
+            rows = self._predict_batch_with_timeout(smiles_list, molecule_ids)
+            self._validate_batch_rows(rows, smiles_list, molecule_ids)
+            successful = [row for row in rows if row.get("status") == "succeeded"]
+            failed = [row for row in rows if row.get("status") != "succeeded"]
+            result['data'] = rows
+            result['warnings'] = [warning for row in rows for warning in row.get("warnings", [])]
+            result['quality'] = {
+                "backend": "admet_ai",
+                "model_version": getattr(self.backend, "version", "1.4.0"),
+                "weights_id": getattr(self.backend, "weights_id", None),
+                "input_count": len(smiles_list),
+                "success_count": len(successful),
+                "failure_count": len(failed),
+            }
+            if successful:
+                result['success'] = True
+                result['status'] = 'partial' if failed else 'succeeded'
+                result['formatted'] = "\n\n".join(
+                    self.format_admet_result(row['smiles'], row['admet'])
+                    for row in successful
+                )
+                result['reasoning'] = (
+                    "结果来自本地 ADMET-AI 1.4.0 权重；物化端点标记为 RDKit 计算，"
+                    "其余端点为模型预测，不等于实验结论。"
+                )
+                result['message'] = (
+                    f"ADMET-AI 已完成 {len(successful)}/{len(rows)} 个分子；"
+                    "模型预测不等于实验结果。"
+                )
+                if failed:
+                    result['message'] += f" {len(failed)} 个分子失败，详见逐项状态。"
             else:
-                result['reasoning'] = f"已返回 {len(calculated_results)} 个分子的已计算性质/规则估计；缺失项目未知。"
+                result['success'] = False
+                result['status'] = 'failed'
+                result['message'] = "ADMET-AI 未返回任何可用模型结果；未形成评估。"
+                result['reasoning'] = "所有分子均失败，未用 RDKit 规则或模拟值替代模型结果。"
 
-            result['message'] = f"已返回 {len(calculated_results)} 个分子的已计算性质/规则估计；缺失项目未知。"
+            result['provenance'] = self._provenance(smiles_list, rows)
 
+        except TimeoutError as e:
+            logger.warning("ADMET-AI prediction timed out: %s", e)
+            result['message'] = f"ADMET-AI prediction timeout: {e}"
+            result['reasoning'] = "模型超时，未返回或补齐任何科学数值。"
+            result['status'] = 'failed'
         except Exception as e:
             logger.error(f"ADME预测失败: {e}")
-            result['message'] = f"预测失败: {str(e)}"
-            result['reasoning'] = "在预测过程中发生了意外错误。"
+            result['message'] = f"ADMET-AI 预测失败: {str(e)}"
+            result['reasoning'] = "模型调用失败，未使用规则或模拟值补齐科学结果。"
+            result['status'] = 'failed'
 
         return result
 
+    def _parse_input(self, query: Any) -> tuple[list[str], list[str]]:
+        """Parse text strictly, or accept a structured candidate batch.
+
+        Structured workflow inputs deliberately defer per-item SMILES validity
+        to the real backend so one malformed generated candidate is reported as
+        a failed row without losing the other candidates or their IDs.
+        """
+        if isinstance(query, Mapping):
+            values = query.get("smiles")
+            supplied_ids = query.get("molecule_ids")
+            if not isinstance(values, (list, tuple)) or not 1 <= len(values) <= 100:
+                raise ValueError("结构化 ADMET 输入缺少 smiles 列表。")
+            if any(not isinstance(value, str) or len(value) > 8192 for value in values):
+                raise ValueError("结构化 ADMET 输入包含不支持的 SMILES 字段。")
+            if supplied_ids is not None and (
+                not isinstance(supplied_ids, (list, tuple))
+                or len(supplied_ids) != len(values)
+                or any(not isinstance(value, str) or not value.strip() for value in supplied_ids)
+            ):
+                raise ValueError("结构化 ADMET 输入的 molecule_ids 与 smiles 不匹配。")
+            smiles_list = [value.strip() for value in values if isinstance(value, str) and value.strip()]
+            if len(smiles_list) != len(values):
+                raise ValueError("结构化 ADMET 输入包含空的 SMILES。")
+            molecule_ids = [
+                str(value) for value in supplied_ids
+            ] if supplied_ids is not None else [
+                f"molecule-{index:03d}" for index in range(1, len(smiles_list) + 1)
+            ]
+            if len(set(molecule_ids)) != len(molecule_ids):
+                raise ValueError("结构化 ADMET 输入包含重复 molecule_id。")
+            return smiles_list, molecule_ids
+        smiles_list = parse_molecular_smiles(query, self, prose_pattern=_ADMET_PROSE_PATTERN)
+        return smiles_list, [
+            f"molecule-{index:03d}" for index in range(1, len(smiles_list) + 1)
+        ]
+
     def _check_adme_backend(self, result: Dict[str, Any]) -> bool:
-        """Check whether either the preferred or fallback ADME backend is usable."""
-        if not ADME_PY_AVAILABLE and not RDKIT_AVAILABLE:
-            result['message'] = "ADME prediction requires adme_py or RDKit."
-            result['reasoning'] = "No supported ADME calculation backend is available."
+        """Only the real ADMET-AI backend can produce ADMET model results."""
+        if self.backend is None:
+            self.backend = get_admet_ai_backend()
+            self._owns_backend = False
+        if self.backend is None:
+            detail = admet_ai_backend_error()
+            result['message'] = "ADMET-AI 1.4.0 backend unavailable; no model prediction was produced."
+            if detail:
+                result['quality'] = {"backend_error": sanitize_bounded(detail)[0]}
+            result['reasoning'] = "模型不可用；RDKit 描述符/规则不能冒充 ADMET 模型预测。"
+            result['status'] = 'unavailable'
             return False
         return True
 
+    def close(self):
+        if not self._owns_backend:
+            return
+        close = getattr(self.backend, "close", None)
+        if callable(close):
+            close()
+
+    def _predict_batch_with_timeout(self, smiles_list, molecule_ids):
+        executor = ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(self.backend.predict_batch, smiles_list, molecule_ids)
+        try:
+            return future.result(timeout=self.timeout_seconds)
+        except FutureTimeoutError as exc:
+            future.cancel()
+            raise TimeoutError(
+                f"ADMET-AI inference timed out after {self.timeout_seconds:g} seconds"
+            ) from exc
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    @staticmethod
+    def _validate_batch_rows(rows, smiles_list, molecule_ids):
+        if not isinstance(rows, list) or len(rows) != len(smiles_list):
+            raise ValueError("ADMET-AI returned an invalid batch shape")
+        for row, smiles, molecule_id in zip(rows, smiles_list, molecule_ids):
+            if not isinstance(row, dict) or row.get("molecule_id") != molecule_id:
+                raise ValueError("ADMET-AI result molecule IDs do not match the request")
+            if row.get("smiles") != smiles:
+                raise ValueError("ADMET-AI result SMILES do not match the request")
+            if row.get("status") == "succeeded":
+                admet = row.get("admet")
+                if not isinstance(admet, dict) or admet.get("prediction_method") != "admet_ai":
+                    raise ValueError("ADMET-AI success row lacks model provenance")
+                if admet.get("demo_mode") is not False or admet.get("fallback_used") is not False:
+                    raise ValueError("ADMET-AI success row is marked demo/fallback")
+            elif not row.get("error"):
+                raise ValueError("ADMET-AI failure row lacks an error")
+
+    @staticmethod
+    def _provenance(smiles_list, rows):
+        def digest(value):
+            return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')).hexdigest()
+
+        successful = [row for row in rows if row.get("status") == "succeeded"]
+        first = successful[0].get("admet", {}) if successful else {}
+        return {
+            "tool_name": "admet_predictor",
+            "tool_version": "2",
+            "model_name": "ADMET-AI",
+            "model_version": first.get("model_version", "1.4.0"),
+            "demo_mode": False,
+            "fallback_used": False,
+            "input_digest": digest(smiles_list),
+            "output_digest": digest(rows),
+        }
+
     def predict_admet_with_adme_py(self, smiles: str) -> Optional[Dict[str, Any]]:
-        """Predict ADME properties with adme_py, falling back to RDKit rules."""
+        """Legacy fixture helper; production execution never uses this fallback."""
         if not ADME_PY_AVAILABLE:
             return self._predict_admet_with_rdkit(smiles)
 
@@ -501,6 +628,8 @@ class ADMETPredictor(BaseMolecularTool):
 
     def format_admet_result(self, smiles: str, admet_props: Dict) -> str:
         """格式化ADME预测结果 - 优化版本"""
+        if admet_props.get("prediction_method") == "admet_ai":
+            return self._format_admet_ai_result(smiles, admet_props)
         # 获取数据并处理N/A值
         def safe_get(data, key, default='未知', format_type=None):
             value = data.get(key, default)
@@ -575,6 +704,46 @@ class ADMETPredictor(BaseMolecularTool):
 {self._generate_comprehensive_assessment(admet_props)}
 """
         return output.strip()
+
+    @staticmethod
+    def _format_admet_ai_result(smiles: str, admet_props: Dict) -> str:
+        """Render model endpoints without relabelling them as rules or experiments."""
+        endpoints = admet_props.get("endpoints")
+        if not isinstance(endpoints, dict):
+            endpoints = {}
+        grouped: dict[str, list[str]] = {}
+        for endpoint_id, endpoint in endpoints.items():
+            if not isinstance(endpoint, dict) or not _finite_number(endpoint.get("value")):
+                continue
+            category = str(endpoint.get("category") or "Other")
+            value = f"{float(endpoint['value']):.6g}"
+            unit = str(endpoint.get("unit") or "unknown")
+            task_type = str(endpoint.get("task_type") or "unknown")
+            label = f"{endpoint_id} = {value} {unit}（{task_type}）"
+            grouped.setdefault(category, []).append(label)
+        lines = [
+            "## ADMET-AI 1.4.0 本地模型结果",
+            "",
+            f"**分子结构：** `{smiles}`",
+            "**模型：** ADMET-AI 1.4.0（本地 Chemprop-RDKit ensemble）",
+            f"**权重标识：** `{admet_props.get('weights_id', '未知')}`",
+            "**结果边界：** 端点为模型预测；物化端点由 ADMET-AI 内部 RDKit 计算；均不等于实验结论。",
+            "",
+        ]
+        for category, values in grouped.items():
+            lines.append(f"### {category}")
+            lines.extend(f"- {value}" for value in values)
+        if not grouped:
+            lines.append("未返回有限的 ADMET-AI 端点值。")
+        risk_count = admet_props.get("risk_count")
+        total_endpoints = admet_props.get("total_endpoints")
+        if type(risk_count) is int and type(total_endpoints) is int:
+            lines.extend([
+                "",
+                f"**筛选提示：** {risk_count}/{total_endpoints} 个预定义不良分类端点概率 ≥ 0.5；"
+                "这只是排序启发式，不是安全结论。",
+            ])
+        return "\n".join(lines)
 
     def _translate_solubility(self, class_esol: str) -> str:
         """Translate whole labels only, never a substring such as 'Soluble'."""

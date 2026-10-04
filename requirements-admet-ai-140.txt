@@ -1,0 +1,6 @@
+# Dedicated Python 3.10 environment for the ADMET-AI 1.4.0 worker.
+# Keep this separate from the MedChat/RG-MPNN environment: ADMET-AI pins a
+# different Torch/Chemprop stack and must not replace the production stack.
+admet-ai==1.4.0
+httpx==0.25.2
+pydantic==2.5.0

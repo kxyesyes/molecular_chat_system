@@ -31,6 +31,25 @@ class AnalysisInput(_View):
     query: str
 
 
+class ADMETBatch(_View):
+    smiles: Annotated[list[Annotated[str, Field(min_length=1, max_length=8192)]], Field(min_length=1, max_length=100)]
+    molecule_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] | None = None
+
+    @model_validator(mode="after")
+    def identities(self):
+        if self.molecule_ids is not None and (
+            len(self.molecule_ids) != len(self.smiles)
+            or len(set(self.molecule_ids)) != len(self.molecule_ids)
+        ):
+            raise ValueError("ADMET molecule IDs must be unique and match the batch")
+        return self
+
+
+class ADMETInput(_View):
+    """ADMET accepts text requests and identity-preserving candidate batches."""
+    query: str | ADMETBatch
+
+
 # Shared strict leaf views keep rule-detail dictionaries readable without one
 # DTO per descriptor/rule/section. Validate only; never return coerced values.
 _NUMBER = TypeAdapter(Annotated[float, Field(allow_inf_nan=False)])
@@ -41,6 +60,7 @@ _SA = TypeAdapter(Annotated[float, Field(allow_inf_nan=False, ge=1, le=10)])
 _VIOLATIONS = TypeAdapter(Annotated[int, Field(ge=0, le=4)])
 _TEXT = TypeAdapter(str)
 _IDENTIFIER = TypeAdapter(Annotated[str, Field(min_length=1)])
+_OPTIONAL_TEXT = TypeAdapter(str | None)
 _BOOL = TypeAdapter(bool)
 _UNCOMPUTED_ALERT = TypeAdapter(bool | None)
 _DICT = TypeAdapter(dict[str, Any])
@@ -111,14 +131,53 @@ _ADMET_SECTIONS = {
     "medicinal": dict(pains=_UNCOMPUTED_ALERT, brenk=_UNCOMPUTED_ALERT, zinc=_UNCOMPUTED_ALERT,
                       synthetic_accessibility=_SA, leadlikeness=_DICT),
 }
-_METHOD = TypeAdapter(Literal["rdkit_rules", "adme_py"])
+_METHOD = TypeAdapter(Literal["rdkit_rules", "adme_py", "admet_ai"])
+
+
+def _admet_ai(value):
+    """Validate the model-specific envelope without interpreting endpoints."""
+    _fields(value, {
+        "model_name": _IDENTIFIER,
+        "model_version": _IDENTIFIER,
+        "weights_id": _IDENTIFIER,
+        "demo_mode": _BOOL,
+        "fallback_used": _BOOL,
+        "physicochemical_source": _IDENTIFIER,
+        "endpoints": _DICT,
+        "units": _DICT,
+        "risk_count": _COUNT,
+        "total_endpoints": _COUNT,
+        "risk_endpoint_ids": _STRINGS,
+        "risk_threshold": _UNIT,
+        "risk_summary_method": _IDENTIFIER,
+    })
+    if value["demo_mode"] is not False or value["fallback_used"] is not False:
+        raise ValueError("ADMET-AI result cannot be demo or fallback")
+    endpoints = value["endpoints"]
+    if not endpoints:
+        raise ValueError("ADMET-AI result has no endpoint values")
+    for endpoint_id, endpoint in endpoints.items():
+        _IDENTIFIER.validate_python(endpoint_id, strict=True)
+        _fields(endpoint, {
+            "value": _NUMBER,
+            "unit": _TEXT,
+            "task_type": _TEXT,
+            "source": _IDENTIFIER,
+        }, required=True)
+        _fields(endpoint, {"category": _TEXT, "name": _TEXT}, required=False)
+    if value["risk_count"] > value["total_endpoints"]:
+        raise ValueError("ADMET-AI risk count exceeds endpoint count")
 
 
 def _admet(value):
-    _fields(value, dict(prediction_method=_METHOD, backend_version=_IDENTIFIER,
-                        **dict.fromkeys(_ADMET_SECTIONS, _DICT)))
+    _fields(value, dict(prediction_method=_METHOD, backend_version=_IDENTIFIER))
+    for section in _ADMET_SECTIONS:
+        _fields(value, {section: _DICT}, required=value["prediction_method"] in {"rdkit_rules", "adme_py"})
     for section, fields in _ADMET_SECTIONS.items():
-        _fields(value[section], fields, required=value["prediction_method"] == "rdkit_rules")
+        if section in value:
+            _fields(value[section], fields, required=value["prediction_method"] == "rdkit_rules")
+    if value["prediction_method"] == "admet_ai":
+        _admet_ai(value)
 
 
 _PAYLOADS = {
@@ -182,8 +241,18 @@ class _AnalysisRawOutput(_View):
                 raise ValueError("Invalid analysis provenance identity")
         slot, validate = _PAYLOADS[name]
         for row in self.data or []:
-            _fields(row, {"smiles": _IDENTIFIER, slot: _DICT})
-            validate(row[slot])
+            _fields(row, {"smiles": _IDENTIFIER})
+            _fields(row, {
+                "smiles": _IDENTIFIER,
+                "molecule_id": _IDENTIFIER,
+                "canonical_smiles": _OPTIONAL_TEXT,
+                "status": _TEXT,
+                "error": _TEXT,
+            }, required=False)
+            status = row.get("status", "succeeded")
+            _fields(row, {slot: _DICT})
+            if status not in {"failed", "invalid_input", "unavailable"}:
+                validate(row[slot])
         if self.success:
             if (not self.data or self.error is not None or self.status not in
                     {None, ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL}):
@@ -234,12 +303,15 @@ class _InvalidAnalysisOutput(Exception):
 
 
 class AnalysisToolAdapter(LegacyPythonToolAdapter):
-    def _validate_input(self, input_data: Any) -> str:
+    def _validate_input(self, input_data: Any) -> Any:
         if isinstance(input_data, str):
             input_data = {"query": input_data}
         elif isinstance(input_data, Mapping):
             input_data = dict(input_data)
-        return self.spec.input_schema.model_validate(input_data).query
+            if self.spec.name == "admet_predictor" and "smiles" in input_data and "query" not in input_data:
+                input_data = {"query": input_data}
+        query = self.spec.input_schema.model_validate(input_data).query
+        return query.model_dump() if isinstance(query, ADMETBatch) else query
 
     def _input_validation_error(self, exc: ValidationError) -> ToolResult:
         return ToolResult.error_result(self.spec.name, AgentErrorCode.INVALID_INPUT,
