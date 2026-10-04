@@ -37,18 +37,13 @@
 .admet-page .skip-link:focus { top: 12px; }
 
 .admet-page main { width: min(1440px, calc(100% - 48px)); margin: 0 auto; }
-.admet-page .page-intro { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 34px 0 24px; }
-.admet-page .edition, .admet-page .section-caption { margin: 0 0 6px; color: var(--primary); font-size: 11px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.admet-page .page-intro { padding: 34px 0 24px; }
 .admet-page h1 { margin: 0; color: var(--ink); font-size: clamp(28px, 3vw, 40px); font-weight: 700; letter-spacing: -.035em; line-height: 1.2; }
 .admet-page .intro-copy { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
-.admet-page .intro-note { display: flex; align-items: flex-start; gap: 10px; padding: 9px 0 3px; color: var(--muted); font-size: 12px; text-align: right; }
-.admet-page .intro-note p { margin: 0; }
-.admet-page .intro-note p span { color: #94a3b8; }
-.admet-page .note-dot { width: 8px; height: 8px; margin-top: 7px; background: #34d399; border-radius: 50%; box-shadow: 0 0 0 4px #d1fae5; }
 
-.admet-page .workspace { display: grid; grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(235px, 285px); align-items: stretch; gap: 16px; }
-.admet-page .input-panel, .admet-page .results-panel, .admet-page .evidence-sidebar { min-width: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 16px rgb(15 23 42 / 5%); }
-.admet-page .input-panel, .admet-page .evidence-sidebar { padding: 22px; }
+.admet-page .workspace { display: grid; grid-template-columns: minmax(250px, 300px) minmax(0, 1fr); align-items: stretch; gap: 16px; }
+.admet-page .input-panel, .admet-page .results-panel { min-width: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 16px rgb(15 23 42 / 5%); }
+.admet-page .input-panel { padding: 22px; }
 .admet-page .results-panel { min-height: 620px; padding: 24px 26px 0; }
 .admet-page .panel-heading, .admet-page .results-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .admet-page h2 { margin: 0; font-size: 17px; font-weight: 700; }
@@ -60,7 +55,6 @@
 .admet-page textarea { width: 100%; min-height: 154px; max-height: 440px; resize: vertical; padding: 13px; color: var(--ink); background: var(--surface-muted); border: 1px solid var(--line-strong); border-radius: 9px; font: 13px/1.8 Consolas, "Microsoft YaHei", monospace; overflow-wrap: anywhere; }
 .admet-page textarea:focus { background: #fff; border-color: #818cf8; box-shadow: 0 0 0 3px #e0e7ff; outline: 0; }
 .admet-page textarea::placeholder { color: #94a3b8; }
-.admet-page .field-hint { margin: 8px 0 12px; color: var(--muted); font-size: 11px; }
 .admet-page .example-button { padding: 5px 0; color: var(--primary-dark); background: transparent; border: 0; border-bottom: 1px solid #c7d2fe; font-size: 12px; }
 .admet-page .example-button span { margin-left: 8px; }
 .admet-page .form-actions { display: grid; gap: 8px; margin-top: 28px; }
@@ -69,8 +63,6 @@
 .admet-page .primary-button span:last-child { color: #e0e7ff; font-size: 20px; }
 .admet-page .reset-button { min-height: 38px; padding: 8px; color: var(--muted); background: transparent; border: 0; font-size: 12px; }
 .admet-page .reset-button:hover:not(:disabled) { color: var(--primary-dark); }
-.admet-page .input-footnote { display: flex; gap: 9px; margin-top: 26px; padding-top: 16px; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
-.admet-page .input-footnote p { margin: 0; }
 .admet-page .error-note { margin: 12px 0; padding: 11px 12px; color: var(--danger); background: var(--danger-bg); border: 1px solid #fecaca; border-radius: 8px; font-size: 12px; overflow-wrap: anywhere; }
 
 .admet-page .status-badge { padding: 5px 10px; border-radius: 999px; font-size: 11px; font-weight: 700; white-space: nowrap; }
@@ -93,14 +85,10 @@
 .admet-page .endpoint-guide dt { margin-bottom: 6px; color: var(--primary); font-size: 18px; font-weight: 800; }
 .admet-page .endpoint-guide dd { margin: 0; font-size: 11px; }
 .admet-page .endpoint-guide dd span { display: block; color: #94a3b8; font-size: 9px; }
-.admet-page .results-footer { display: flex; align-items: flex-start; gap: 9px; margin-top: 20px; padding: 15px 0; color: var(--muted); border-top: 1px solid var(--line); font-size: 11px; }
-.admet-page .legend-dot { width: 6px; height: 6px; flex-shrink: 0; margin-top: 6px; background: #818cf8; border-radius: 50%; }
-
-.admet-page .evidence-mark { color: var(--primary); font-size: 18px; }
-.admet-page .evidence-empty { margin: 18px 0 26px; color: var(--muted); font-size: 12px; }
-.admet-page .reading-note { margin-top: 22px; padding-top: 17px; border-top: 1px solid var(--line); }
-.admet-page .reading-note h3 { margin: 0 0 10px; font-size: 12px; }
-.admet-page .reading-note p { margin: 8px 0; color: var(--muted); font-size: 11px; }
+.admet-page .evidence-disclosure { margin-top: 22px; border-top: 1px solid var(--line); }
+.admet-page .evidence-disclosure summary { padding: 14px 0; color: var(--primary-dark); cursor: pointer; font-size: 12px; font-weight: 700; list-style-position: inside; }
+.admet-page .evidence-panel { padding: 0 0 8px; }
+.admet-page .evidence-empty { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
 .admet-page .evidence-record { margin: 14px 0; font-size: 11px; }
 .admet-page .evidence-record dt { margin: 11px 0 2px; color: var(--muted); }
 .admet-page .evidence-record dd { margin: 0; font: 11px/1.7 Consolas, "Microsoft YaHei", monospace; overflow-wrap: anywhere; }
@@ -126,14 +114,11 @@
 .admet-page .endpoint-source { min-width: 66px; color: var(--primary-dark); font-size: 10px; }
 .admet-page .endpoint-unit { display: block; color: var(--muted); font-size: 10px; font-weight: 400; }
 .admet-page .endpoint-risk { display: block; color: var(--warning); font-size: 10px; }
-.admet-page .page-footer { display: flex; justify-content: space-between; gap: 16px; padding: 22px 0 30px; color: #94a3b8; font-size: 11px; }
 .admet-page .error-note + .error-note { margin-top: 8px; }
 
 @keyframes status-pulse { 50% { opacity: .35; } }
 @media (max-width: 1180px) {
   .admet-page .workspace { grid-template-columns: minmax(230px, 280px) minmax(0, 1fr); }
-  .admet-page .evidence-sidebar { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 2fr; gap: 24px; }
-  .admet-page .reading-note { margin: 0; padding: 0; border-top: 0; }
 }
 @media (max-width: 720px) {
   .admet-page main { width: min(100% - 28px, 620px); }
@@ -141,18 +126,13 @@
   .admet-page .logo-section .logo-item span { display: none; }
   .admet-page .nav-section .current-tool { display: none; }
   .admet-page .page-intro { align-items: flex-start; padding: 26px 0 20px; }
-  .admet-page .intro-note { display: none; }
   .admet-page .workspace { display: block; }
   .admet-page .results-panel { min-height: auto; margin-top: 14px; }
-  .admet-page .evidence-sidebar { display: block; margin-top: 14px; }
-  .admet-page .reading-note { margin-top: 20px; padding-top: 17px; border-top: 1px solid var(--line); }
-  .admet-page .input-panel, .admet-page .results-panel, .admet-page .evidence-sidebar { padding: 20px; }
+  .admet-page .input-panel, .admet-page .results-panel { padding: 20px; }
   .admet-page textarea { min-height: 128px; }
   .admet-page .form-actions { margin-top: 20px; }
   .admet-page .empty-state { padding: 34px 10px 28px; }
   .admet-page .endpoint-guide dd span { display: none; }
-  .admet-page .page-footer { display: block; }
-  .admet-page .page-footer span { display: block; }
 }
 @media (prefers-reduced-motion: reduce) {
   .admet-page *, .admet-page *::before, .admet-page *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
