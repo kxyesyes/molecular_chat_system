@@ -34,14 +34,13 @@
     <section class="page-intro" aria-labelledby="page-title">
       <div>
         <h1 id="page-title">ADMET 预测</h1>
-        <p class="intro-copy">输入一个分子结构，查看物化性质、ADMET 端点和结果来源。</p>
+        <p class="intro-copy">输入一个分子结构，查看物化性质和 ADMET 端点。</p>
       </div>
     </section>
 
     <div class="workspace" id="workspace">
       <aside class="input-panel" aria-labelledby="input-title">
-        <div class="panel-heading"><h2 id="input-title">分子输入</h2><span class="quiet-tag">单分子</span></div>
-        <p class="panel-description">输入完整 SMILES，保留电荷与立体化学信息。</p>
+        <div class="panel-heading"><h2 id="input-title">分子输入</h2></div>
         <form id="admet-form">
           <label for="smiles-input">SMILES <span class="required-label">必填</span></label>
           <textarea id="smiles-input" name="smiles" maxlength="8192" rows="6" required spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="在此粘贴分子结构…"></textarea>
@@ -60,21 +59,11 @@
         <div id="admet-overview" class="admet-overview"></div>
         <div id="empty-state" class="empty-state">
           <div class="empty-monogram" aria-hidden="true">A<span>D</span>M<span>E</span>T<span class="monogram-dot">.</span></div>
-          <h3>一份评估，保留每一项依据。</h3>
-          <p>提交左侧分子后，结果会按端点类别展开。<br>没有返回的项目保持未计算，不用默认值补齐。</p>
-          <dl class="endpoint-guide">
-            <div><dt>A</dt><dd>吸收<span>Absorption</span></dd></div>
-            <div><dt>D</dt><dd>分布<span>Distribution</span></dd></div>
-            <div><dt>M</dt><dd>代谢<span>Metabolism</span></dd></div>
-            <div><dt>E</dt><dd>排泄<span>Excretion</span></dd></div>
-            <div><dt>T</dt><dd>毒性<span>Toxicity</span></dd></div>
-          </dl>
+          <h3>等待输入分子结构</h3>
+          <p>提交后显示实际工具结果。</p>
         </div>
         <div id="endpoint-groups" class="endpoint-groups"></div>
-        <details class="evidence-disclosure">
-          <summary>结果来源</summary>
-          <div id="evidence-panel" class="evidence-panel"><p class="evidence-empty">运行后显示工具、模型版本、权重标识和警告。</p></div>
-        </details>
+        <div id="evidence-panel" class="evidence-panel" hidden aria-hidden="true"></div>
       </section>
     </div>
   </main>

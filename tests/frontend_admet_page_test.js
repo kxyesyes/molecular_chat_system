@@ -31,7 +31,8 @@ assert(template.includes('class="logo-section"'), 'use the shared brand layout')
 assert(template.includes('class="back-btn"'), 'use the shared back button');
 assert(!template.includes('console-header'), 'remove the page-specific header shell');
 assert(!template.includes('evidence-sidebar'), 'remove the oversized right evidence column');
-assert(template.includes('class="evidence-disclosure"'), 'keep provenance in a compact result disclosure');
+assert(!template.includes('evidence-disclosure'), 'do not show provenance in the primary workspace');
+assert(template.includes('id="evidence-panel"'), 'retain a non-visible evidence sink for the renderer contract');
 assert(!template.includes('input-footnote'), 'remove non-essential input footnote');
 assert(!template.includes('results-footer'), 'remove non-essential results footer');
 assert(!template.includes('page-footer'), 'remove non-essential page footer');

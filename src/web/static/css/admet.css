@@ -48,8 +48,6 @@
 .admet-page .panel-heading, .admet-page .results-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .admet-page h2 { margin: 0; font-size: 17px; font-weight: 700; }
 .admet-page .results-header h2 { font-size: 22px; }
-.admet-page .quiet-tag { padding: 3px 8px; color: var(--primary-dark); background: #eef2ff; border-radius: 999px; font-size: 11px; font-weight: 600; }
-.admet-page .panel-description { margin: 10px 0 22px; color: var(--muted); font-size: 12px; }
 .admet-page label { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--ink); font-size: 12px; font-weight: 700; }
 .admet-page .required-label { color: var(--muted); font-weight: 400; }
 .admet-page textarea { width: 100%; min-height: 154px; max-height: 440px; resize: vertical; padding: 13px; color: var(--ink); background: var(--surface-muted); border: 1px solid var(--line-strong); border-radius: 9px; font: 13px/1.8 Consolas, "Microsoft YaHei", monospace; overflow-wrap: anywhere; }
@@ -81,13 +79,6 @@
 .admet-page .empty-monogram .monogram-dot { color: #c7d2fe; }
 .admet-page .empty-state h3 { margin: 0 0 10px; font-size: 16px; font-weight: 700; }
 .admet-page .empty-state p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
-.admet-page .endpoint-guide { display: flex; justify-content: space-around; gap: 8px; margin: 34px 0 8px; padding-top: 18px; border-top: 1px solid var(--line); }
-.admet-page .endpoint-guide dt { margin-bottom: 6px; color: var(--primary); font-size: 18px; font-weight: 800; }
-.admet-page .endpoint-guide dd { margin: 0; font-size: 11px; }
-.admet-page .endpoint-guide dd span { display: block; color: #94a3b8; font-size: 9px; }
-.admet-page .evidence-disclosure { margin-top: 22px; border-top: 1px solid var(--line); }
-.admet-page .evidence-disclosure summary { padding: 14px 0; color: var(--primary-dark); cursor: pointer; font-size: 12px; font-weight: 700; list-style-position: inside; }
-.admet-page .evidence-panel { padding: 0 0 8px; }
 .admet-page .evidence-empty { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
 .admet-page .evidence-record { margin: 14px 0; font-size: 11px; }
 .admet-page .evidence-record dt { margin: 11px 0 2px; color: var(--muted); }
@@ -132,7 +123,6 @@
   .admet-page textarea { min-height: 128px; }
   .admet-page .form-actions { margin-top: 20px; }
   .admet-page .empty-state { padding: 34px 10px 28px; }
-  .admet-page .endpoint-guide dd span { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .admet-page *, .admet-page *::before, .admet-page *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
