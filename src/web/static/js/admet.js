@@ -55,7 +55,10 @@
       badge.textContent = stateText[safeStatus];
     }
     if (runStatus) runStatus.textContent = message || stateText[safeStatus];
-    if (results) results.setAttribute("aria-busy", safeStatus === "running" ? "true" : "false");
+    if (results) {
+      results.setAttribute("aria-busy", safeStatus === "running" ? "true" : "false");
+      results.setAttribute("data-state", safeStatus);
+    }
   }
   function setError(message) {
     const groups = get("endpoint-groups");
@@ -220,8 +223,16 @@
     renderEvidence(response || {}, displayRows);
     if (empty) empty.hidden = displayRows.length > 0;
     if (status === "succeeded" && displayRows.length === 0) {
+      if (empty) empty.hidden = true;
       setStatus("failed", "服务未返回可用分子记录，未形成评估。");
       setError("没有可展示的 ADMET 结果。请检查模型状态后重试。");
+      return;
+    }
+    if (!displayRows.length && ["failed", "unavailable", "invalid_input", "timeout", "busy"].includes(status)) {
+      if (empty) empty.hidden = true;
+      const message = response?.message || stateText[status];
+      setError(message);
+      setStatus(status, stateText[status] + "：" + message);
       return;
     }
     renderEndpointGroups(displayRows);

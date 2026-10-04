@@ -37,7 +37,8 @@ assert(template.includes('id="evidence-panel"'), 'retain a non-visible evidence 
 assert(!template.includes('input-footnote'), 'remove non-essential input footnote');
 assert(!template.includes('results-footer'), 'remove non-essential results footer');
 assert(!template.includes('page-footer'), 'remove non-essential page footer');
-assert(styles.includes('min-height: 460px'), 'keep the empty workspace compact');
+assert(template.includes('class="empty-workflow"'), 'show a meaningful initial workflow instead of empty space');
+assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
 assert(!source.includes('#182421'), 'ADMET page should not keep the standalone dark theme');
 assert(!/setTimeout\([^]*2500/.test(source), 'no fake prediction delay');
@@ -120,6 +121,10 @@ async function main() {
     ui.renderResponse(failure);
     assert(!elements['endpoint-groups'].textContent.includes('46.07'), 'failure must clear old and unexpected numeric results');
   }
+  const emptyFailure = { success: false, status: 'unavailable', message: 'ADMET backend unavailable', data: [], warnings: [] };
+  ui.renderResponse(emptyFailure);
+  assert.equal(elements['empty-state'].hidden, true, 'failure state must not keep the empty placeholder');
+  assert(elements['endpoint-groups'].textContent.includes('ADMET backend unavailable'));
   ui.renderResponse({ success: true, status: 'succeeded', data: [] });
   assert(!elements['run-status'].textContent.includes('评估完成'), 'empty success is not a computed result');
 

@@ -44,7 +44,8 @@
 .admet-page .workspace { display: grid; grid-template-columns: minmax(250px, 300px) minmax(0, 1fr); align-items: stretch; gap: 16px; }
 .admet-page .input-panel, .admet-page .results-panel { min-width: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 4px 16px rgb(15 23 42 / 5%); }
 .admet-page .input-panel { padding: 22px; }
-.admet-page .results-panel { min-height: 460px; padding: 24px 26px 0; }
+.admet-page .results-panel { min-height: 0; padding: 24px 26px 0; }
+.admet-page .results-panel[data-state="not_calculated"], .admet-page .results-panel[data-state="running"] { min-height: max(460px, calc(100vh - 260px)); }
 .admet-page .panel-heading, .admet-page .results-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .admet-page h2 { margin: 0; font-size: 17px; font-weight: 700; }
 .admet-page .results-header h2 { font-size: 22px; }
@@ -73,12 +74,17 @@
 .admet-page .run-status { min-height: 48px; margin: 18px 0 0; padding: 13px 0; color: var(--muted); border-top: 1px solid var(--line); font-size: 12px; overflow-wrap: anywhere; }
 .admet-page .admet-overview { color: var(--muted); font-size: 12px; }
 .admet-page .admet-overview p { margin: 4px 0; }
-.admet-page .empty-state { padding: 42px 18px 34px; text-align: center; }
+.admet-page .empty-state { display: flex; min-height: 420px; flex-direction: column; align-items: center; justify-content: center; padding: 34px 18px 40px; text-align: center; }
 .admet-page .empty-monogram { margin-bottom: 20px; color: #6366f1; font: 700 clamp(42px, 5vw, 72px)/1.1 "Segoe UI", sans-serif; letter-spacing: .08em; }
 .admet-page .empty-monogram span { color: #a5b4fc; }
 .admet-page .empty-monogram .monogram-dot { color: #c7d2fe; }
 .admet-page .empty-state h3 { margin: 0 0 10px; font-size: 16px; font-weight: 700; }
 .admet-page .empty-state p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.9; }
+.admet-page .empty-workflow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; width: min(100%, 560px); margin-top: 30px; text-align: left; }
+.admet-page .workflow-step { display: grid; grid-template-columns: auto 1fr; column-gap: 9px; padding: 13px 14px; background: var(--surface-muted); border: 1px solid var(--line); border-radius: 10px; }
+.admet-page .workflow-step > span { grid-row: span 2; color: var(--primary); font: 700 12px/1.4 Consolas, monospace; }
+.admet-page .workflow-step strong { color: var(--ink); font-size: 12px; }
+.admet-page .workflow-step em { margin-top: 2px; color: var(--muted); font-size: 10px; font-style: normal; overflow-wrap: anywhere; }
 .admet-page .evidence-empty { margin: 0 0 14px; color: var(--muted); font-size: 12px; }
 .admet-page .evidence-record { margin: 14px 0; font-size: 11px; }
 .admet-page .evidence-record dt { margin: 11px 0 2px; color: var(--muted); }
@@ -122,7 +128,9 @@
   .admet-page .input-panel, .admet-page .results-panel { padding: 20px; }
   .admet-page textarea { min-height: 128px; }
   .admet-page .form-actions { margin-top: 20px; }
-  .admet-page .empty-state { padding: 30px 10px 24px; }
+  .admet-page .results-panel[data-state="not_calculated"], .admet-page .results-panel[data-state="running"] { min-height: 0; }
+  .admet-page .empty-state { min-height: 360px; padding: 30px 10px 24px; }
+  .admet-page .empty-workflow { grid-template-columns: 1fr; width: min(100%, 320px); margin-top: 24px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .admet-page *, .admet-page *::before, .admet-page *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }

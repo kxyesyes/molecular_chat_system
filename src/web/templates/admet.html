@@ -53,7 +53,7 @@
         <noscript><p class="error-note">请启用 JavaScript 后提交评估；本页不会显示预设预测结果。</p></noscript>
       </aside>
 
-      <section class="results-panel" aria-labelledby="results-title" aria-busy="false" id="results-panel">
+      <section class="results-panel" aria-labelledby="results-title" aria-busy="false" data-state="not_calculated" id="results-panel">
         <div class="results-header"><h2 id="results-title">预测结果</h2><span id="status-badge" class="status-badge state-not-calculated">尚未运行</span></div>
         <p id="run-status" class="run-status" role="status" aria-live="polite" aria-atomic="true">等待输入分子结构。提交后将在此显示实际工具结果。</p>
         <div id="admet-overview" class="admet-overview"></div>
@@ -61,6 +61,11 @@
           <div class="empty-monogram" aria-hidden="true">A<span>D</span>M<span>E</span>T<span class="monogram-dot">.</span></div>
           <h3>等待输入分子结构</h3>
           <p>提交后显示实际工具结果。</p>
+          <div class="empty-workflow" aria-label="ADMET 评估流程">
+            <div class="workflow-step"><span>01</span><strong>输入结构</strong><em>SMILES</em></div>
+            <div class="workflow-step"><span>02</span><strong>执行计算</strong><em>RDKit · ADMET-AI</em></div>
+            <div class="workflow-step"><span>03</span><strong>查看结果</strong><em>端点与状态</em></div>
+          </div>
         </div>
         <div id="endpoint-groups" class="endpoint-groups"></div>
         <div id="evidence-panel" class="evidence-panel" hidden aria-hidden="true"></div>
