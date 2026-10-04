@@ -22,6 +22,7 @@ class Element {
 
 const source = read('src/web/static/js/admet.js');
 const template = read('src/web/templates/admet.html');
+const styles = read('src/web/static/css/admet.css');
 assert(!source.includes('innerHTML'));
 assert(!/on(?:click|submit)=/.test(template));
 assert(!template.includes('/kermt-admet'));
@@ -36,6 +37,8 @@ assert(template.includes('id="evidence-panel"'), 'retain a non-visible evidence 
 assert(!template.includes('input-footnote'), 'remove non-essential input footnote');
 assert(!template.includes('results-footer'), 'remove non-essential results footer');
 assert(!template.includes('page-footer'), 'remove non-essential page footer');
+assert(styles.includes('min-height: 460px'), 'keep the empty workspace compact');
+assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
 assert(!source.includes('#182421'), 'ADMET page should not keep the standalone dark theme');
 assert(!/setTimeout\([^]*2500/.test(source), 'no fake prediction delay');
 assert(!template.includes('res-caco2'), 'no legacy hardcoded endpoint cards');
