@@ -15,6 +15,7 @@ class Element {
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this._text = ''; this.children = children; }
   setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
   addEventListener(name, callback) { this.events[name] = callback; }
   focus() { this.focused = true; }
   async dispatch(name) { return this.events[name]?.({preventDefault() {}}); }
@@ -38,6 +39,14 @@ assert(!template.includes('input-footnote'), 'remove non-essential input footnot
 assert(!template.includes('results-footer'), 'remove non-essential results footer');
 assert(!template.includes('page-footer'), 'remove non-essential page footer');
 assert(template.includes('class="empty-workflow"'), 'show a meaningful initial workflow instead of empty space');
+assert(template.includes('id="smiles-count"'), 'show the SMILES input count');
+assert(template.includes('class="example-chip"'), 'provide compact molecule examples');
+assert(template.includes('id="metric-cards"'), 'reserve a data-backed summary area');
+assert(template.includes('id="endpoint-tabs"'), 'provide endpoint category navigation');
+assert(template.includes('id="completed-at"'), 'show the actual completion timestamp');
+assert(template.includes('id="rerun-admet"'), 'allow rerunning from the result header');
+assert(template.includes('id="structure-preview"'), 'show a real RDKit structure preview when available');
+assert(!template.includes('置信度'), 'do not imply a confidence score that the API does not return');
 assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
 assert(!source.includes('#182421'), 'ADMET page should not keep the standalone dark theme');
@@ -71,8 +80,22 @@ async function main() {
   assert(!elements['endpoint-groups'].textContent.includes('46.07'), 'initial state has no results');
   ui.renderResponse(response());
   let text = elements['endpoint-groups'].textContent;
-  assert(text.includes('46.07') && text.includes('0.21') && text.includes('Novel endpoint'));
-  assert(text.includes('RDKit') && text.includes('模型预测'));
+  assert(text.includes('46.07'), 'the first endpoint category is visible by default');
+  assert(text.includes('RDKit'));
+  assert(elements['metric-cards'].textContent.includes('预测指标'));
+  assert(elements['metric-cards'].textContent.includes('风险项'));
+  assert(elements['metric-cards'].textContent.includes('1'), 'summary must use the actual endpoint count');
+  assert(elements['endpoint-tabs'].textContent.includes('物化性质'));
+  assert(elements['endpoint-tabs'].textContent.includes('毒性'));
+  assert(elements['completed-at'].textContent !== '尚未运行');
+  const toxicityTab = elements['endpoint-tabs'].children.find(child => child.textContent.includes('毒性'));
+  await toxicityTab.events.click();
+  text = elements['endpoint-groups'].textContent;
+  assert(text.includes('0.21') && text.includes('模型预测'));
+  const otherTab = elements['endpoint-tabs'].children.find(child => child.textContent.includes('其他端点'));
+  await otherTab.events.click();
+  text = elements['endpoint-groups'].textContent;
+  assert(text.includes('Novel endpoint'));
   assert(!text.includes('安全'));
   assert(elements['evidence-panel'].textContent.includes('sha256:'));
   assert(elements['evidence-panel'].textContent.includes('fixture warning'));
@@ -100,11 +123,15 @@ async function main() {
   const invalid = response(); invalid.data[0].admet.endpoints.hERG.value = NaN;
   ui.renderResponse(invalid);
   assert(!elements['endpoint-groups'].textContent.includes('NaN'));
+  const invalidToxicityTab = elements['endpoint-tabs'].children.find(child => child.textContent.includes('毒性'));
+  await invalidToxicityTab.events.click();
   assert(elements['endpoint-groups'].textContent.includes('未计算'));
 
   const hostile = response();
   hostile.data[0].admet.endpoints.hERG.name = '<img src=x onerror=alert(1)>';
   ui.renderResponse(hostile);
+  const hostileToxicityTab = elements['endpoint-tabs'].children.find(child => child.textContent.includes('毒性'));
+  await hostileToxicityTab.events.click();
   assert(elements['endpoint-groups'].textContent.includes('<img src=x onerror=alert(1)>'));
   const allChildren = el => [el, ...el.children.flatMap(allChildren)];
   assert(!allChildren(elements['endpoint-groups']).some(el => el.tagName === 'img'));
@@ -152,6 +179,8 @@ async function main() {
   assert.equal(calls.length, 1, 'empty input must not call API');
   await app.elements['load-example'].dispatch('click');
   assert(app.elements['smiles-input'].value.length > 0);
+  assert.equal(app.elements['structure-preview'].hidden, false, 'example loading prepares the real structure preview');
+  assert(app.elements['structure-preview-image'].attributes.src.includes('/api/utils/smiles_to_image?'), 'preview uses the existing RDKit image endpoint');
   assert.equal(calls.length, 1, 'loading an example does not run prediction');
 
   for (const [httpStatus, status, message] of [

@@ -12,6 +12,7 @@
     Druglikeness: "药物相似性",
   };
   const DEFAULT_GROUP = "其他端点";
+  const GROUP_ORDER = ["物化性质", "药物相似性", "吸收", "分布", "代谢", "排泄", "毒性", "其他端点"];
   const stateText = {
     succeeded: "评估完成",
     partial: "部分完成",
@@ -63,20 +64,57 @@
   function setError(message) {
     const groups = get("endpoint-groups");
     clear(groups);
+    const tabs = get("endpoint-tabs");
+    clear(tabs);
+    if (tabs) tabs.hidden = true;
     const error = document.createElement("p");
     error.className = "error-note";
     error.textContent = message;
     if (groups) groups.append(error);
   }
+  function formatCount(value) {
+    return Number.isInteger(value) && value >= 0 ? String(value) : "未计算";
+  }
+  function summaryRows(rows) {
+    return rows.filter(row => row && row.status === "succeeded" && trustedAdmet(row.admet));
+  }
+  function appendMetric(root, label, value, detail, tone) {
+    const card = document.createElement("article");
+    card.className = "metric-card metric-" + tone;
+    appendText(card, "span", label, "metric-label");
+    appendText(card, "strong", value, "metric-value");
+    appendText(card, "span", detail, "metric-detail");
+    root.append(card);
+  }
+  function renderMetrics(response, rows) {
+    const root = get("metric-cards");
+    clear(root);
+    if (!root) return;
+    const trustedRows = summaryRows(rows);
+    const status = normalizedStatus(response || {});
+    const first = trustedRows[0]?.admet || {};
+    const totalEndpoints = trustedRows.reduce((sum, row) => {
+      const count = row.admet && row.admet.total_endpoints;
+      return sum + (Number.isInteger(count) && count >= 0 ? count : endpointEntries(row.admet).length);
+    }, 0);
+    const riskCount = trustedRows.reduce((sum, row) => {
+      const count = row.admet && row.admet.risk_count;
+      return sum + (Number.isInteger(count) && count >= 0 ? count : 0);
+    }, 0);
+    const hasCounts = trustedRows.length > 0;
+    appendMetric(root, "综合评估", stateText[status] || "未计算", response?.message || "依据本次工具状态", status === "succeeded" ? "success" : status === "partial" ? "warning" : "neutral");
+    appendMetric(root, "预测指标", hasCounts ? formatCount(totalEndpoints) : "未计算", hasCounts ? "工具返回的端点数量" : "尚未形成可信结果", "primary");
+    appendMetric(root, "风险项", hasCounts ? formatCount(riskCount) : "未计算", hasCounts ? "工具标记的风险端点" : "未形成风险判断", riskCount > 0 ? "danger" : "success");
+    const model = first.model_name || first.model_version || first.prediction_method;
+    appendMetric(root, "模型状态", model || (status === "unavailable" ? "不可用" : "未提供"), first.model_version ? "版本 " + first.model_version : "来源见结果记录", model ? "primary" : "neutral");
+  }
   function renderOverview(response, rows) {
     const overview = get("admet-overview");
     clear(overview);
+    renderMetrics(response, rows);
     if (!overview) return;
-    if (response && response.message) appendText(overview, "p", response.message);
-    if (rows.length) {
-      const successCount = rows.filter(row => row && row.status === "succeeded").length;
-      appendText(overview, "p", "返回 " + successCount + "/" + rows.length + " 个分子记录。");
-    }
+    const successCount = rows.filter(row => row && row.status === "succeeded").length;
+    if (rows.length && successCount !== rows.length) appendText(overview, "p", "已保留成功记录，并明确显示未完成步骤。");
   }
   function endpointEntries(admet) {
     if (!admet || typeof admet !== "object" || !admet.endpoints || typeof admet.endpoints !== "object") return [];
@@ -97,7 +135,45 @@
   function sourceLabel(endpoint) {
     return endpoint && endpoint.source === "rdkit_calculation" ? "RDKit 计算" : "模型预测";
   }
-  function renderEndpointGroups(rows) {
+  function groupedEndpoints(rows) {
+    const groups = new Map();
+    rows.forEach(row => {
+      if (!row || row.status !== "succeeded" || !trustedAdmet(row.admet)) return;
+      endpointEntries(row.admet).forEach(([id, endpoint]) => {
+        const group = GROUP_LABELS[endpoint.category] || DEFAULT_GROUP;
+        if (!groups.has(group)) groups.set(group, []);
+        groups.get(group).push({ row, id, endpoint });
+      });
+    });
+    return groups;
+  }
+  function renderTabs(rows, activeGroup) {
+    const tabs = get("endpoint-tabs");
+    clear(tabs);
+    if (!tabs) return "";
+    const groups = groupedEndpoints(rows);
+    const names = [...groups.keys()].sort((a, b) => {
+      const ai = GROUP_ORDER.indexOf(a); const bi = GROUP_ORDER.indexOf(b);
+      return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi);
+    });
+    if (!names.length) { tabs.hidden = true; return ""; }
+    tabs.hidden = false;
+    const selected = names.includes(activeGroup) ? activeGroup : names[0];
+    names.forEach(name => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "endpoint-tab" + (name === selected ? " is-active" : "");
+      button.setAttribute("aria-selected", name === selected ? "true" : "false");
+      button.textContent = name + " " + groups.get(name).length;
+      button.addEventListener("click", () => {
+        renderTabs(rows, name);
+        renderEndpointGroups(rows, name);
+      });
+      tabs.append(button);
+    });
+    return selected;
+  }
+  function renderEndpointGroups(rows, activeGroup) {
     const root = get("endpoint-groups");
     clear(root);
     if (!root) return;
@@ -136,15 +212,17 @@
         grouped.get(group).push([id, endpoint]);
       });
       grouped.forEach((entries, groupName) => {
+        if (activeGroup && groupName !== activeGroup) return;
         const section = document.createElement("section");
         section.className = "endpoint-section";
+        section.setAttribute("data-category", groupName);
         appendText(section, "h4", groupName);
         const scroll = document.createElement("div");
         scroll.className = "table-scroll";
         const table = document.createElement("table");
         const head = document.createElement("thead");
         const headRow = document.createElement("tr");
-        ["端点", "返回值", "来源"].forEach(value => appendText(headRow, "th", value));
+        ["指标名称", "预测值", "风险标记", "来源"].forEach(value => appendText(headRow, "th", value));
         head.append(headRow);
         table.append(head);
         const body = document.createElement("tbody");
@@ -156,10 +234,12 @@
           const valueCell = document.createElement("td");
           appendText(valueCell, "span", endpoint.value, "endpoint-value");
           appendText(valueCell, "span", endpoint.unit, "endpoint-unit");
+          const riskCell = document.createElement("td");
+          const isRisk = Array.isArray(admet.risk_endpoint_ids) && admet.risk_endpoint_ids.includes(id);
+          appendText(riskCell, "span", isRisk ? "风险项" : "未标记", isRisk ? "endpoint-risk" : "endpoint-clear");
           const sourceCell = document.createElement("td");
           appendText(sourceCell, "span", sourceLabel(endpoint), "endpoint-source");
-          if (Array.isArray(admet.risk_endpoint_ids) && admet.risk_endpoint_ids.includes(id)) appendText(sourceCell, "span", "筛选提示", "endpoint-risk");
-          tr.append(nameCell, valueCell, sourceCell);
+          tr.append(nameCell, valueCell, riskCell, sourceCell);
           body.append(tr);
         });
         table.append(body);
@@ -219,6 +299,8 @@
     const status = normalizedStatus(response || {});
     const displayRows = ["failed", "unavailable", "invalid_input"].includes(status)
       ? rows.filter(row => row.status !== "succeeded") : rows;
+    const completedAt = get("completed-at");
+    if (completedAt) completedAt.textContent = new Date().toLocaleString("zh-CN", { hour12: false });
     renderOverview(response || {}, displayRows);
     renderEvidence(response || {}, displayRows);
     if (empty) empty.hidden = displayRows.length > 0;
@@ -235,16 +317,42 @@
       setStatus(status, stateText[status] + "：" + message);
       return;
     }
-    renderEndpointGroups(displayRows);
+    activeGroup = renderTabs(displayRows, activeGroup);
+    renderEndpointGroups(displayRows, activeGroup);
     const evidenceInsufficient = displayRows.some(row => row && row.status === "succeeded" && !trustedAdmet(row.admet));
     const message = evidenceInsufficient ? "证据不足，未展示为真实模型结果。" : response?.message || stateText[status];
     const displayStatus = evidenceInsufficient ? "partial" : status;
     setStatus(displayStatus, displayStatus === "succeeded" ? message : stateText[displayStatus] + "：" + message);
   }
   let inFlight = false;
+  let activeGroup = "";
+  function updateSmilesCount() {
+    const input = get("smiles-input");
+    const counter = get("smiles-count");
+    if (input && counter) counter.textContent = String(input.value.length) + "/" + String(input.maxLength || 8192);
+  }
+  function updatePreview(smiles) {
+    const preview = get("structure-preview");
+    const image = get("structure-preview-image");
+    const message = get("structure-preview-message");
+    if (!preview || !image) return;
+    const value = String(smiles || "").trim();
+    if (!value) { preview.hidden = true; return; }
+    image.setAttribute("src", "/api/utils/smiles_to_image?smiles=" + encodeURIComponent(value) + "&width=300&height=180");
+    image.addEventListener("error", () => {
+      preview.hidden = false;
+      image.hidden = true;
+      if (message) { message.hidden = false; message.textContent = "无法生成结构预览，请检查 SMILES。"; }
+    }, { once: true });
+    image.addEventListener("load", () => {
+      image.hidden = false;
+      if (message) message.hidden = true;
+    }, { once: true });
+    preview.hidden = false;
+  }
   function setInFlight(value) {
     inFlight = value;
-    ["run-admet", "reset-admet", "load-example", "smiles-input"].forEach(id => {
+    ["run-admet", "rerun-admet", "reset-admet", "load-example", "load-example-caffeine", "load-example-ibuprofen", "smiles-input"].forEach(id => {
       const element = get(id);
       if (element) element.disabled = value;
     });
@@ -262,7 +370,15 @@
     setInFlight(true);
     clear(get("endpoint-groups"));
     clear(get("admet-overview"));
+    clear(get("metric-cards"));
+    clear(get("endpoint-tabs"));
+    const tabs = get("endpoint-tabs");
+    if (tabs) tabs.hidden = true;
     clear(get("evidence-panel"));
+    const empty = get("empty-state");
+    if (empty) empty.hidden = true;
+    activeGroup = "";
+    updatePreview(value);
     setStatus("running", "正在调用本地 ADMET 工具，等待结构化结果。");
     try {
       const response = await fetch("/api/admet/predict", {
@@ -306,23 +422,35 @@
     clear(get("admet-overview"));
     const empty = get("empty-state");
     if (empty) empty.hidden = false;
+    updatePreview("");
+    const completedAt = get("completed-at");
+    if (completedAt) completedAt.textContent = "尚未运行";
     const evidence = get("evidence-panel");
     clear(evidence);
     if (evidence) appendText(evidence, "p", "尚无运行记录。完成调用后，这里会保留工具、模型版本、权重标识和警告。", "evidence-empty");
+    updateSmilesCount();
     setStatus("not_calculated", "等待输入分子结构。提交后将在此显示实际工具结果。");
   }
-  function loadExample() {
+  function loadExample(smiles) {
     if (inFlight) return;
     const input = get("smiles-input");
-    if (input) { input.value = EXAMPLE_SMILES; input.focus(); }
+    if (input) { input.value = smiles || EXAMPLE_SMILES; updateSmilesCount(); updatePreview(input.value); input.focus(); }
   }
   function init() {
     const form = get("admet-form");
     const example = get("load-example");
+    const caffeine = get("load-example-caffeine");
+    const ibuprofen = get("load-example-ibuprofen");
     const resetButton = get("reset-admet");
+    const rerunButton = get("rerun-admet");
+    const input = get("smiles-input");
     if (form) form.addEventListener("submit", submit);
-    if (example) example.addEventListener("click", loadExample);
+    if (example) example.addEventListener("click", () => loadExample(EXAMPLE_SMILES));
+    if (caffeine) caffeine.addEventListener("click", () => loadExample("Cn1c(=O)c2c(ncn2C)n(C)c1=O"));
+    if (ibuprofen) ibuprofen.addEventListener("click", () => loadExample("CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O"));
     if (resetButton) resetButton.addEventListener("click", reset);
+    if (rerunButton) rerunButton.addEventListener("click", () => submit());
+    if (input) { input.addEventListener("input", updateSmilesCount); updateSmilesCount(); }
   }
   const api = { init, renderResponse, submit, reset };
   if (typeof window !== "undefined") {
