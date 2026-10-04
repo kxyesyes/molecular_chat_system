@@ -373,6 +373,9 @@ class ADMETPredictor(BaseMolecularTool):
             close()
 
     def _predict_batch_with_timeout(self, smiles_list, molecule_ids):
+        predict_with_timeout = getattr(self.backend, "predict_batch_with_timeout", None)
+        if callable(predict_with_timeout):
+            return predict_with_timeout(smiles_list, molecule_ids, self.timeout_seconds)
         executor = ThreadPoolExecutor(max_workers=1)
         future = executor.submit(self.backend.predict_batch, smiles_list, molecule_ids)
         try:

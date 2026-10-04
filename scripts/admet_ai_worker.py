@@ -34,6 +34,7 @@ def main() -> int:
             "ready": True,
             "version": backend.version,
             "weights_id": backend.weights_id,
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
         }), flush=True)
     except Exception as exc:
         print(json.dumps({"ready": False, "error": str(exc)}), flush=True)

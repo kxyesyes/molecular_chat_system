@@ -879,7 +879,11 @@ class MolecularChatApp:
 
     async def shutdown(self):
         # A cancelled server shutdown must still finish closing every resource.
-        await finish_on_cancel(self._shutdown())
+        try:
+            await finish_on_cancel(self._shutdown())
+        finally:
+            from src.agent.tools.admet_ai_backend import reset_admet_ai_backend_cache
+            reset_admet_ai_backend_cache()
 
     async def _shutdown(self):
         """Stop application-owned background tasks."""

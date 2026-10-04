@@ -22,7 +22,9 @@ $env:ADMET_AI_PYTHON = "<venv-dir>\admet-ai-140\Scripts\python.exe"
 python main.py
 ```
 
-`ADMET_AI_PYTHON` 是运行时配置，不写入 `.env`、日志或验收报告。没有该配置且主环境未安装精确版本时，工具会返回明确的不可用状态。
+`ADMET_AI_PYTHON` 是运行时配置，不写入 `.env`、日志或验收报告。生产调用必须显式配置该 Python 3.10 worker；缺少配置、版本不符或 worker 无法启动时，工具会返回明确的不可用状态，不会改用主进程或规则值。
+
+worker 请求受单批 100 个分子和调用超时约束；超时会终止并回收 worker。应用 shutdown/reload 会清理缓存 worker。ADMET-AI 的可选分子缓存关闭，避免在长生命周期服务中无界增长。
 
 ## 输出契约
 

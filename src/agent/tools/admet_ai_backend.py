@@ -15,7 +15,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
-from threading import RLock, Thread
+from threading import RLock, Thread, current_thread
 from typing import Any
 
 import math
@@ -120,7 +120,9 @@ class ADMETAIBackend:
                 for _, row in info.iterrows()
             }
             return cls(
-                model=ADMETModel(num_workers=0, cache_molecules=True),
+                # The persistent service must not retain an unbounded molecule
+                # cache across requests.  Batch size is bounded by the tool.
+                model=ADMETModel(num_workers=0, cache_molecules=False),
                 package_version=ADMET_AI_VERSION,
                 weights_id=_weight_digest(package_root),
                 endpoint_info=endpoint_info,
@@ -268,6 +270,7 @@ class ADMETAISubprocessBackend:
     def __init__(self, python_executable: str, worker_script: str | Path | None = None):
         if not python_executable or not Path(python_executable).is_file():
             raise RuntimeError("ADMET_AI_PYTHON does not point to a Python executable")
+        self._assert_python310(python_executable)
         if worker_script is None:
             worker_script = Path(__file__).resolve().parents[3] / "scripts" / "admet_ai_worker.py"
         self.python_executable = str(python_executable)
@@ -297,9 +300,30 @@ class ADMETAISubprocessBackend:
             raise RuntimeError(str(ready.get("error") or "ADMET-AI worker failed to start"))
         self.version = str(ready.get("version") or ADMET_AI_VERSION)
         self.weights_id = str(ready.get("weights_id") or "")
-        if self.version != ADMET_AI_VERSION or not self.weights_id.startswith("sha256:"):
+        worker_python = str(ready.get("python_version") or "")
+        if (
+            self.version != ADMET_AI_VERSION
+            or not self.weights_id.startswith("sha256:")
+            or worker_python != "3.10"
+        ):
             self.close()
-            raise RuntimeError("ADMET-AI worker reported invalid model identity")
+            raise RuntimeError("ADMET-AI worker reported invalid model identity or Python version")
+
+    @staticmethod
+    def _assert_python310(python_executable: str) -> None:
+        try:
+            result = subprocess.run(
+                [python_executable, "-c", "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("Unable to verify ADMET_AI_PYTHON Python version") from exc
+        version = result.stdout.strip()
+        if version != "3.10":
+            raise RuntimeError(f"ADMET_AI_PYTHON must use Python 3.10; found {version or 'unknown'}")
 
     def _read_responses(self) -> None:
         stdout = self._process.stdout
@@ -314,7 +338,13 @@ class ADMETAISubprocessBackend:
                 self._responses.put(value)
         self._responses.put({"ok": False, "error": "ADMET-AI worker exited"})
 
-    def predict_batch(self, smiles: list[str], molecule_ids: list[str]) -> list[dict[str, Any]]:
+    def predict_batch(
+        self,
+        smiles: list[str],
+        molecule_ids: list[str],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
         with self._lock:
             if self._process.poll() is not None or self._process.stdin is None:
                 raise RuntimeError("ADMET-AI worker is not running")
@@ -323,7 +353,13 @@ class ADMETAISubprocessBackend:
                 "molecule_ids": molecule_ids,
             }, ensure_ascii=False) + "\n")
             self._process.stdin.flush()
-            response = self._responses.get()
+            try:
+                response = self._responses.get(timeout=timeout_seconds)
+            except queue.Empty as exc:
+                self.close()
+                raise TimeoutError(
+                    f"ADMET-AI worker inference timed out after {timeout_seconds:g} seconds"
+                ) from exc
             if response.get("ok") is not True:
                 raise RuntimeError(str(response.get("error") or "ADMET-AI worker prediction failed"))
             rows = response.get("rows")
@@ -331,20 +367,37 @@ class ADMETAISubprocessBackend:
                 raise RuntimeError("ADMET-AI worker returned no result rows")
             return rows
 
+    def predict_batch_with_timeout(
+        self,
+        smiles: list[str],
+        molecule_ids: list[str],
+        timeout_seconds: float,
+    ) -> list[dict[str, Any]]:
+        return self.predict_batch(
+            smiles,
+            molecule_ids,
+            timeout_seconds=timeout_seconds,
+        )
+
     def close(self) -> None:
         process = getattr(self, "_process", None)
-        if process is None or process.poll() is not None:
+        if process is None:
             return
-        try:
-            if process.stdin is not None:
-                process.stdin.close()
-        except OSError:
-            pass
-        process.terminate()
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
+        if process.poll() is None:
+            try:
+                if process.stdin is not None:
+                    process.stdin.close()
+            except OSError:
+                pass
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        reader = getattr(self, "_reader", None)
+        if reader is not None and reader is not current_thread():
+            reader.join(timeout=5)
 
     def __del__(self):  # pragma: no cover - interpreter shutdown cleanup
         try:
@@ -361,19 +414,17 @@ def get_admet_ai_backend() -> ADMETAIBackend | None:
             return _DEFAULT_BACKEND
         if _DEFAULT_BACKEND_ERROR is not None:
             return None
+        worker_python = os.environ.get("ADMET_AI_PYTHON", "").strip()
+        if not worker_python:
+            _DEFAULT_BACKEND_ERROR = (
+                "ADMET_AI_PYTHON is required; configure the isolated Python 3.10 worker"
+            )
+            return None
         try:
-            _DEFAULT_BACKEND = ADMETAIBackend.from_installed_package()
+            _DEFAULT_BACKEND = ADMETAISubprocessBackend(worker_python)
         except Exception as exc:
-            errors = [str(exc)]
-            worker_python = os.environ.get("ADMET_AI_PYTHON", "").strip()
-            if worker_python:
-                try:
-                    _DEFAULT_BACKEND = ADMETAISubprocessBackend(worker_python)
-                except Exception as worker_exc:
-                    errors.append(str(worker_exc))
-            if _DEFAULT_BACKEND is None:
-                _DEFAULT_BACKEND_ERROR = "; ".join(errors)
-                return None
+            _DEFAULT_BACKEND_ERROR = str(exc)
+            return None
         return _DEFAULT_BACKEND
 
 
