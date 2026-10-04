@@ -18,7 +18,7 @@ class BindingResolver:
     OUTPUT = re.compile(r"^\$\.outputs\.([A-Za-z0-9_-]+)$")
     REQUEST_QUERY = "$.request.query"
     WORKFLOW = "$.workflow"
-    SUPPORTED_TRANSFORMS = frozenset({"identity", "smiles_text"})
+    SUPPORTED_TRANSFORMS = frozenset({"identity", "smiles_text", "molecule_batch"})
 
     @classmethod
     def derive_selector(cls, input_binding: Any, input_from: Any) -> str | None:
@@ -144,6 +144,8 @@ class BindingResolver:
             return value
         if transform == "smiles_text":
             return self._smiles_text(value)
+        if transform == "molecule_batch":
+            return self._molecule_batch(value)
         raise BindingResolutionError(f"Unsupported input transform: {transform}")
 
     @staticmethod
@@ -207,3 +209,37 @@ class BindingResolver:
 
         collect(value)
         return "\n".join(dict.fromkeys(smiles))
+
+    @classmethod
+    def _molecule_batch(cls, value: Any) -> dict[str, list[str]]:
+        """Preserve candidate identity while binding generated molecules.
+
+        ``smiles_text`` remains the compatibility transform for tools that only
+        accept text.  ADMET needs the identity channel as well, otherwise a
+        reordered/filtered candidate list cannot be traced back to its source.
+        """
+        records: list[tuple[str, str | None]] = []
+
+        def collect(item: Any) -> None:
+            if isinstance(item, Mapping):
+                direct_smiles = item.get("smiles")
+                if isinstance(direct_smiles, str) and direct_smiles.strip():
+                    identity = item.get("candidate_id") or item.get("molecule_id")
+                    records.append((direct_smiles.strip(), str(identity) if identity else None))
+                    return
+                for key in ("candidates", "molecules", "data"):
+                    if key in item:
+                        collect(item[key])
+            elif isinstance(item, (list, tuple)):
+                for child in item:
+                    collect(child)
+            elif isinstance(item, str) and item.strip():
+                records.append((item.strip(), None))
+
+        collect(value)
+        if not records:
+            raise BindingResolutionError("Molecule batch contains no SMILES")
+        ids = [identity or f"molecule-{index:03d}" for index, (_, identity) in enumerate(records, 1)]
+        if len(set(ids)) != len(ids):
+            raise BindingResolutionError("Molecule batch contains duplicate molecule IDs")
+        return {"smiles": [smiles for smiles, _ in records], "molecule_ids": ids}

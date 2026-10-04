@@ -39,6 +39,24 @@ def analysis_rows(name, smiles=("CCO",)):
     return rows
 
 
+def producer_fixture_result(name, query="CCO"):
+    """Use explicit in-memory fixtures; never make contract tests depend on model weights."""
+    if name == "admet_predictor":
+        try:
+            rows = analysis_rows(name, (query,))
+        except Exception:
+            return PRODUCERS[name]().execute(query)
+        return {
+            "query": query,
+            "success": True,
+            "status": "succeeded",
+            "data": rows,
+            "message": "fixture",
+            "formatted": "fixture",
+        }
+    return PRODUCERS[name]().execute(query)
+
+
 @pytest.mark.parametrize("leaf", ["pains", "brenk", "zinc"])
 @pytest.mark.parametrize("value", [None, False, True])
 @pytest.mark.parametrize("form", ["raw", "normalized", "snapshot"])
@@ -133,7 +151,7 @@ class CountingTool:
 def boundary(request, monkeypatch):
     monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
     name = request.param
-    raw = PRODUCERS[name]().execute("CCO")
+    raw = producer_fixture_result(name)
     assert raw["success"], raw["message"]
     tool = CountingTool(name, raw)
     registry = build_tool_registry([tool])
@@ -174,7 +192,7 @@ def test_registration_only_selects_contract_without_execution(boundary):
 @pytest.mark.parametrize("query", ["CCO", ASPIRIN])
 def test_actual_rdkit_characterization(boundary, query):
     adapter, tool = boundary
-    raw = PRODUCERS[tool.name]().execute(query)
+    raw = producer_fixture_result(tool.name, query)
     assert raw["success"] and len(raw["data"]) == 1
     assert raw["data"][0]["smiles"] == query
     if tool.name == "property_calculator":
@@ -295,7 +313,7 @@ BAD_LEAVES = [
 @pytest.mark.parametrize("missing", [False, True])
 def test_known_leaves_required_and_strict(monkeypatch, name, path, value, missing):
     monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
-    raw = PRODUCERS[name]().execute("CCO")
+    raw = producer_fixture_result(name)
     parent = raw["data"][0]
     *parts, leaf = path.split(".")
     for part in parts:
@@ -520,6 +538,7 @@ def test_every_output_validation_owns_worker_and_slot(boundary, monkeypatch, sta
         tool.raw["status"] = "partial"
     elif state == "failure":
         tool.raw["success"] = False
+        tool.raw["status"] = "failed"
     original = adapter._validate_observation
     caller_thread, checks = get_ident(), []
     def check(raw):
@@ -672,8 +691,9 @@ def test_registry_real_producers_never_compute_invalid_whole_input(monkeypatch, 
 @pytest.mark.parametrize("failure", [False, True])
 def test_admet_domain_gate_reused_including_failure_rows(monkeypatch, failure):
     monkeypatch.setattr(admet_module, "ADME_PY_AVAILABLE", False)
-    raw = ADMETPredictor().execute("CCO")
+    raw = producer_fixture_result("admet_predictor")
     raw["success"] = not failure
+    raw["status"] = "failed" if failure else "succeeded"
     seen = []
     def reject(self, result):
         seen.append(result.data)

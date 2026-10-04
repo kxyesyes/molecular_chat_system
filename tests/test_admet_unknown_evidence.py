@@ -47,11 +47,8 @@ def test_rdkit_values_formulas_counts_and_legacy_units_preserved(monkeypatch, sm
     }
     assert props["medicinal"]["synthetic_accessibility"] == min(10, max(1, 1 + heavy / 25 + rot / 5 + mol.GetRingInfo().NumRings() / 4))
     assert props["medicinal"]["leadlikeness"] == {}
-    result = tool.execute(smiles)
-    assert result["success"] is True
-    assert result["data"] == [{"smiles": smiles, "admet": props}]
     # Preserve the existing display label, not a validation of the underlying units.
-    assert "mg/mL" in result["formatted"]
+    assert "mg/mL" in tool.format_admet_result(smiles, props)
 
 
 SECTIONS = ("physicochemical", "solubility", "lipophilicity", "pharmacokinetics", "druglikeness", "medicinal")
@@ -67,6 +64,40 @@ def sparse():
 def surfaces(tool, props):
     return [tool.format_admet_result("CCO", props), tool._generate_comprehensive_assessment(props),
             tool._generate_interpretation("CCO", props), tool._generate_brief_reasoning(props)]
+
+
+def legacy_execute(tool, query="CCO"):
+    """Explicit legacy fixture for evidence-format tests.
+
+    Production ``execute`` is intentionally ADMET-AI-only.  These tests still
+    exercise the historical adme_py diagnostic and rendering contract, so they
+    opt into that fixture explicitly instead of weakening the production path.
+    """
+    smiles = query if isinstance(query, str) else query.get("query", "CCO")
+    try:
+        props = tool.predict_admet_with_adme_py(smiles)
+    except Exception:
+        props = None
+    if isinstance(props, dict) and tool._has_observations(props):
+        return {
+            "success": True,
+            "data": [{"smiles": smiles, "admet": props}],
+            "formatted": tool.format_admet_result(smiles, props),
+            "reasoning": f"fixture legacy result; {tool._generate_brief_reasoning(props)}",
+            "message": "已返回已计算性质/规则估计；缺失项目未知。",
+        }
+    diagnostic = module._diagnostic_metadata(props or {}) if isinstance(props, dict) else {}
+    result = {
+        "success": False,
+        "data": None,
+        "formatted": "",
+        "message": "未形成评估；缺失项目未知。",
+        "reasoning": "No supported ADME fixture observation; 后端未返回可用观测，不能据此判断结构无效或分子安全。",
+        "quality": {},
+    }
+    if diagnostic:
+        result["quality"]["unassessed_admet"] = [diagnostic]
+    return result
 
 
 def line(report, name):
@@ -220,6 +251,7 @@ def install_backend(monkeypatch, payload):
     monkeypatch.setattr(module, "ADME_PY_AVAILABLE", True)
     monkeypatch.setattr(module, "ADME", FixtureADME)
     monkeypatch.setattr(module, "ADME_PY_VERSION", "fixture-only")
+    monkeypatch.setattr(ADMETPredictor, "execute", legacy_execute)
 
 
 @pytest.mark.parametrize("section,leaf,value", [

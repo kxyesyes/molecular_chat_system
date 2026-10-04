@@ -8,6 +8,7 @@ from src.agent.tooling import build_tool_registry
 from src.agent.tools.candidate_ranker import CandidateRanker
 from tests.agent.test_family_activity_tool import family_row
 from tests.agent.test_analysis_contract import analysis_rows
+from tests.agent.test_admet_ai_integration import _prediction
 
 
 class FakeTool:
@@ -42,7 +43,12 @@ def build_tools():
         ),
         FakeTool("llm_molecular_generator", [{"smiles": s} for s in ("CCO", "CCN", "CCC")]),
         FakeTool("property_calculator", analysis_rows("property_calculator", ("CCO", "CCN", "CCC"))),
-        FakeTool("admet_predictor", analysis_rows("admet_predictor", ("CCO", "CCN", "CCC"))),
+        # Explicit structured ADMET-AI fixture; no model weights are loaded in
+        # this lifecycle test, but the production provenance contract remains exercised.
+        FakeTool("admet_predictor", [
+            _prediction(s, molecule_id=f"molecule-{index:03d}")
+            for index, s in enumerate(("CCO", "CCN", "CCC"), 1)
+        ]),
         # Explicit synthetic family observations; no model assets or inference.
         FakeTool("activity_predictor", [family_row(smiles=s, requested_target="PDE5")
                                         for s in ("CCO", "CCN", "CCC")]),

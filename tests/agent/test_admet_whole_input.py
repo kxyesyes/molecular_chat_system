@@ -4,22 +4,59 @@ import pytest
 from src.agent.tools import admet_predictor as module
 
 
+class RecordingBackend:
+    version = "1.4.0"
+    weights_id = "sha256:" + "a" * 64
+
+    def __init__(self, calls):
+        self.calls = calls
+
+    def predict_batch(self, smiles, molecule_ids):
+        self.calls.extend(smiles)
+        return [
+            {
+                "molecule_id": molecule_id,
+                "smiles": value,
+                "canonical_smiles": value,
+                "status": "succeeded",
+                "admet": {
+                    "prediction_method": "admet_ai",
+                    "backend_version": "1.4.0",
+                    "model_name": "ADMET-AI",
+                    "model_version": "1.4.0",
+                    "weights_id": self.weights_id,
+                    "demo_mode": False,
+                    "fallback_used": False,
+                    "physicochemical_source": "rdkit_calculation",
+                    "endpoints": {"HIA_Hou": {
+                        "value": 0.9, "unit": "-", "task_type": "classification",
+                        "source": "admet_ai_model",
+                    }},
+                    "units": {"HIA_Hou": "-"},
+                    "risk_endpoint_ids": [],
+                    "risk_count": 0,
+                    "total_endpoints": 1,
+                    "risk_threshold": 0.5,
+                    "risk_summary_method": "fixture",
+                },
+                "warnings": [],
+            }
+            for value, molecule_id in zip(smiles, molecule_ids)
+        ]
+
+
+def recording_predictor(calls):
+    return module.ADMETPredictor(backend=RecordingBackend(calls))
+
+
 def test_admet_receives_every_complete_input_not_just_known_ethanol(monkeypatch):
-    monkeypatch.setattr(module, "ADME_PY_AVAILABLE", False)
-    predictor = module.ADMETPredictor()
     calls = []
-    original = predictor.predict_admet_with_adme_py
-
-    def observe(smiles):
-        calls.append(smiles)
-        return original(smiles)
-
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", observe)
+    predictor = recording_predictor(calls)
     result = predictor.execute("CCO\nOCC\nCCN")
     assert calls == ["CCO", "OCC", "CCN"]
     assert result["success"]
     assert [row["smiles"] for row in result["data"]] == calls
-    assert all(row["admet"]["prediction_method"] == "rdkit_rules" for row in result["data"])
+    assert all(row["admet"]["prediction_method"] == "admet_ai" for row in result["data"])
 
 
 @pytest.mark.parametrize("query", [
@@ -56,13 +93,11 @@ def test_admet_trigger_uses_same_whole_input_contract(query, expected):
 
 
 def test_missing_rdkit_validation_cannot_fall_back_to_lexical_acceptance(monkeypatch):
-    import sys
-
-    predictor = module.ADMETPredictor()
-    monkeypatch.setattr(module, "ADME_PY_AVAILABLE", True)
-    monkeypatch.setitem(sys.modules, "rdkit", None)
+    monkeypatch.setattr(module, "parse_molecular_smiles", lambda *args, **kwargs: (_ for _ in ()).throw(
+        module.MolecularInputUnavailable("RDKit 不可用，无法验证 SMILES。")
+    ))
     calls = []
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", lambda value: calls.append(value))
+    predictor = recording_predictor(calls)
     result = predictor.execute("SMILES: CCO")
     assert not result["success"] and result["data"] is None and calls == []
     assert "RDKit" in result["message"]
@@ -93,16 +128,8 @@ def test_parser_failure_is_unavailable_not_a_structure_diagnosis(monkeypatch):
     ("BBB\nCNS\nCCO", ["BBB", "CNS", "CCO"]),
 ])
 def test_admet_prose_terms_do_not_add_molecules_but_explicit_fields_remain(monkeypatch, query, expected):
-    monkeypatch.setattr(module, "ADME_PY_AVAILABLE", False)
-    predictor = module.ADMETPredictor()
     calls = []
-    original = predictor.predict_admet_with_adme_py
-
-    def observe(smiles):
-        calls.append(smiles)
-        return original(smiles)
-
-    monkeypatch.setattr(predictor, "predict_admet_with_adme_py", observe)
+    predictor = recording_predictor(calls)
     result = predictor.execute(query)
     assert calls == expected
     assert result["success"]

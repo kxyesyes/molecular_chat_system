@@ -56,7 +56,7 @@ def test_selection_prepares_with_target_guard_and_generated_candidate_bindings(q
         step = steps[name]
         assert step.input_from == generator.output_key
         assert step.input_binding == '$.outputs.molecules'
-        assert step.input_transform == 'smiles_text'
+        assert step.input_transform == ('molecule_batch' if name == 'admet_predictor' else 'smiles_text')
         assert generator.name in prepared.compiled.dependencies[step.name]
     ranker = steps['candidate_ranker']
     assert ranker.input_binding == '$.workflow'

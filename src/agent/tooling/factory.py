@@ -9,7 +9,7 @@ from src.agent.capabilities.catalog import TOOL_ALIASES
 
 from .adapters import LegacyPythonToolAdapter
 from .activity_contract import ActivityPredictInput, ActivityPredictOutput, ActivityToolAdapter
-from .analysis_contract import ANALYSIS_OUTPUT_SCHEMAS, AnalysisInput, AnalysisToolAdapter
+from .analysis_contract import ANALYSIS_OUTPUT_SCHEMAS, ADMETInput, AnalysisInput, AnalysisToolAdapter
 from .docking_contract import DockingInput, DockingOutput, DockingToolAdapter
 from .rag_contract import RAGSearchInput, RAGSearchOutput, RAGToolAdapter
 from .generation_ranking_contract import (
@@ -86,6 +86,7 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
                           ReverseTargetInput if name == "reverse_target_predictor" else
                           DockingInput if name == "molecular_docking" else
                           ActivityPredictInput if name == "activity_predictor" else
+                          ADMETInput if name == "admet_predictor" else
                           AnalysisInput if name in ANALYSIS_OUTPUT_SCHEMAS else LegacyQueryInput),
             output_schema=(RAGSearchOutput if name == "rag_search" else
                            GenerationOutput if name == "llm_molecular_generator" else

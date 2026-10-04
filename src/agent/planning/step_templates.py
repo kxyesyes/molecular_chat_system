@@ -119,7 +119,7 @@ def target_design_steps(
             "admet_predictor",
             input_from="molecules",
             input_binding="$.outputs.molecules",
-            input_transform="smiles_text",
+            input_transform="molecule_batch",
             continue_on_error=True,
             required=False,
             output_key="admet",

@@ -322,6 +322,49 @@ class ActivityResultValidator:
 
 
 class ADMETResultValidator:
+    @staticmethod
+    def _valid_admet_ai(admet: dict[str, Any]) -> bool:
+        required = (
+            "model_name", "model_version", "weights_id", "demo_mode",
+            "fallback_used", "endpoints", "units", "risk_count",
+            "total_endpoints",
+        )
+        if any(key not in admet for key in required):
+            return False
+        if (
+            admet.get("model_name") != "ADMET-AI"
+            or admet.get("model_version") != "1.4.0"
+            or not isinstance(admet.get("weights_id"), str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", admet["weights_id"])
+            or admet.get("demo_mode") is not False
+            or admet.get("fallback_used") is not False
+            or not isinstance(admet.get("endpoints"), dict)
+            or not isinstance(admet.get("units"), dict)
+            or type(admet.get("risk_count")) is not int
+            or type(admet.get("total_endpoints")) is not int
+            or admet["risk_count"] < 0
+            or admet["total_endpoints"] < 0
+            or admet["risk_count"] > admet["total_endpoints"]
+        ):
+            return False
+        endpoints = admet["endpoints"]
+        if not endpoints:
+            return False
+        for endpoint_id, endpoint in endpoints.items():
+            if not isinstance(endpoint_id, str) or not isinstance(endpoint, dict):
+                return False
+            value = endpoint.get("value")
+            if type(value) not in (int, float) or not math.isfinite(float(value)):
+                return False
+            if not all(isinstance(endpoint.get(key), str) and endpoint[key].strip()
+                       for key in ("unit", "task_type", "source")):
+                return False
+            if endpoint["source"] not in {"admet_ai_model", "rdkit_calculation"}:
+                return False
+            if admet["units"].get(endpoint_id) != endpoint["unit"]:
+                return False
+        return True
+
     def validate(self, result: ToolResult) -> str | None:
         if result.tool_name != "admet_predictor":
             return None
@@ -332,10 +375,25 @@ class ADMETResultValidator:
         )
         if not has_admet_claim:
             return None
+        molecule_ids: set[str] = set()
         for entry in entries:
+            if not isinstance(entry, dict):
+                return "ADMET result contains an invalid molecule row"
+            status = entry.get("status", "succeeded")
+            if status in {"failed", "invalid_input", "unavailable"}:
+                if not entry.get("error"):
+                    return "ADMET failed row lacks an item error"
+                continue
             admet = entry.get("admet") if isinstance(entry, dict) else None
             if not isinstance(admet, dict) or not admet.get("prediction_method"):
                 return "ADMET result lacks prediction-method provenance"
+            molecule_id = entry.get("molecule_id")
+            if molecule_id is not None:
+                if not isinstance(molecule_id, str) or molecule_id in molecule_ids:
+                    return "ADMET result contains duplicate or invalid molecule IDs"
+                molecule_ids.add(molecule_id)
+            if admet.get("prediction_method") == "admet_ai" and not self._valid_admet_ai(admet):
+                return "ADMET-AI result lacks complete real-model provenance"
         return None
 
 
