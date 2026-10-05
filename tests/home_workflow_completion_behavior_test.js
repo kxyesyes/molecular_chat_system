@@ -26,7 +26,7 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '<script src="/static/js/home/main.js?v=20261006-model-header-v1"></script>'
+    '<script src="/static/js/home/main.js?v=20261006-model-header-v2"></script>'
   ),
   "homepage must cache-bust the current main script"
 );

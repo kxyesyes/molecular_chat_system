@@ -15,7 +15,7 @@ assert(!mainSource.includes("未选择科研引用"), "首页不得渲染科研�
 assert(!mainSource.includes("清除科研选择"), "首页不得渲染清除科研选择控件");
 assert(!mainSource.includes("scientific-reference-controls"), "首页不得创建科研引用控件容器");
 assert(
-  indexSource.includes("/static/js/home/main.js?v=20261006-model-header-v1"),
+  indexSource.includes("/static/js/home/main.js?v=20261006-model-header-v2"),
   "首页必须使用本次更新后的 main.js 缓存版本",
 );
 

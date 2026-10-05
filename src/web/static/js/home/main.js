@@ -1346,9 +1346,9 @@
   // 获取模型显示名称
   function getModelDisplayName(modelKey) {
     const modelNames = {
-      deepseek: "DeepSeek (官方)",
-      glm4: "GLM-4.6 (魔搭社区)",
-      qwen3: "Qwen3-235B (魔搭社区)",
+      deepseek: "DeepSeek",
+      glm4: "GLM-4.6",
+      qwen3: "Qwen3-235B",
     };
     return modelNames[modelKey] || modelKey;
   }
