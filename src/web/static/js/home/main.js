@@ -882,7 +882,7 @@
           throw new Error(result.message || "读取配置失败");
         }
         fillLlmSettingsForm(result.config || {});
-        setLlmSettingsStatus("配置已读取。API Key 不会回传明文。");
+        setLlmSettingsStatus("");
       } catch (error) {
         console.error("读取 LLM 配置失败:", error);
         setLlmSettingsStatus(`读取配置失败：${error.message}`, true);
@@ -906,8 +906,8 @@
       if (elements.llmClearApiKey) elements.llmClearApiKey.checked = false;
       if (elements.llmApiKeyHint) {
         elements.llmApiKeyHint.textContent = config.api_key_configured
-          ? "已保存，无需重复填写。同一服务商和接口地址下，留空保存会保留已保存的 Key；更换服务商或接口地址需填写新 Key。"
-          : "未配置 API Key。外部 API 请填写 Key，本地 Ollama 可留空。";
+          ? "已保存"
+          : "未配置";
       }
     }
 

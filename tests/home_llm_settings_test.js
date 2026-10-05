@@ -13,8 +13,8 @@ const defaults = {
   model_name: "deepseek-v4-pro",
   stream: true,
 };
-const savedHint = "已保存，无需重复填写。同一服务商和接口地址下，留空保存会保留已保存的 Key；更换服务商或接口地址需填写新 Key。";
-const emptyHint = "未配置 API Key。外部 API 请填写 Key，本地 Ollama 可留空。";
+const savedHint = "已保存";
+const emptyHint = "未配置";
 
 // Execute production declarations, not copies of their implementation. Boundaries
 // use sibling declarations so braces inside strings/templates cannot truncate them.
@@ -212,12 +212,10 @@ test("initial markup selects compatible provider and shows DeepSeek placeholders
   assert.match(html, /id="llmApiKey" type="password" autocomplete="off"/);
 });
 
-test("markup explains user-directory persistence, account boundary and explicit clear", () => {
+test("markup keeps the concise key control without unrelated persistence copy", () => {
   const settings = html.slice(html.indexOf('<div class="llm-settings-overlay"'), html.indexOf('id="saveLlmConfig"'));
-  assert.match(settings, /用户配置目录/);
-  assert.match(settings, /保存一次/);
-  assert.match(settings, /同一台电脑.*同一操作系统账号/);
-  assert.match(settings, /重启.*更新代码.*切换工作树/);
-  assert.match(settings, /勾选.*保存.*清除/);
+  assert.match(settings, /清除已保存的 API Key/);
+  assert.doesNotMatch(settings, /用户配置目录/);
+  assert.doesNotMatch(settings, /同一台电脑.*同一操作系统账号/);
   assert.doesNotMatch(settings, /本机 \.env/);
 });
