@@ -46,6 +46,10 @@ assert(template.includes('id="endpoint-tabs"'), 'provide endpoint category navig
 assert(template.includes('id="completed-at"'), 'show the actual completion timestamp');
 assert(template.includes('id="rerun-admet"'), 'allow rerunning from the result header');
 assert(template.includes('id="structure-preview"'), 'show a real RDKit structure preview when available');
+assert(template.includes('class="input-mode-tabs"'), 'provide SMILES and file input modes');
+assert(template.includes('id="structure-file"'), 'provide a real file input');
+assert(template.includes('id="file-help"'), 'explain supported upload formats');
+assert(styles.includes('align-items: stretch'), 'keep both workspace columns at the same row height');
 assert(!template.includes('置信度'), 'do not imply a confidence score that the API does not return');
 assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
@@ -182,6 +186,8 @@ async function main() {
   assert.equal(app.elements['structure-preview'].hidden, false, 'example loading prepares the real structure preview');
   assert(app.elements['structure-preview-image'].attributes.src.includes('/api/utils/smiles_to_image?'), 'preview uses the existing RDKit image endpoint');
   assert.equal(calls.length, 1, 'loading an example does not run prediction');
+  assert.equal(app.ui.extractUploadedSmiles('aspirin.smi', 'CCO aspirin\n'), 'CCO', 'read the first SMILES from a text structure file');
+  assert.equal(app.ui.extractUploadedSmiles('molecules.csv', 'name,smiles\nethanol,CCO\n'), 'CCO', 'read the SMILES column from CSV uploads');
 
   for (const [httpStatus, status, message] of [
     [503, 'unavailable', 'Model weights unavailable'],

@@ -45,19 +45,35 @@
             <h2 id="input-title">分子输入</h2>
             <p class="panel-caption">输入结构，开始 ADMET 评估</p>
           </div>
-          <span class="input-mode-label">SMILES</span>
+          <span id="input-mode-label" class="input-mode-label">SMILES</span>
         </div>
         <form id="admet-form">
-          <label for="smiles-input"><span>SMILES</span><span class="required-label">必填</span></label>
-          <div class="textarea-wrap">
-            <textarea id="smiles-input" name="smiles" maxlength="8192" rows="6" required spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="在此粘贴分子结构…"></textarea>
-            <span id="smiles-count" class="smiles-count" aria-live="polite">0/8192</span>
+          <div class="input-mode-tabs" role="tablist" aria-label="分子输入方式">
+            <button type="button" id="smiles-mode" class="input-mode-tab is-active" role="tab" aria-selected="true" aria-controls="smiles-input-panel">SMILES</button>
+            <button type="button" id="file-mode" class="input-mode-tab" role="tab" aria-selected="false" aria-controls="file-input-panel">上传文件</button>
           </div>
-          <div class="examples-heading"><span>示例分子</span><span>点击填入</span></div>
-          <div class="example-chips" aria-label="示例分子">
-            <button type="button" class="example-chip" id="load-example" data-smiles="CC(=O)Oc1ccccc1C(=O)O">阿司匹林</button>
-            <button type="button" class="example-chip" id="load-example-caffeine" data-smiles="Cn1c(=O)c2c(ncn2C)n(C)c1=O">咖啡因</button>
-            <button type="button" class="example-chip" id="load-example-ibuprofen" data-smiles="CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O">布洛芬</button>
+          <div id="smiles-input-panel" class="input-mode-panel">
+            <label for="smiles-input"><span>SMILES</span><span class="required-label">必填</span></label>
+            <div class="textarea-wrap">
+              <textarea id="smiles-input" name="smiles" maxlength="8192" rows="6" required spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="在此粘贴分子结构…"></textarea>
+              <span id="smiles-count" class="smiles-count" aria-live="polite">0/8192</span>
+            </div>
+            <div class="examples-heading"><span>示例分子</span><span>点击填入</span></div>
+            <div class="example-chips" aria-label="示例分子">
+              <button type="button" class="example-chip" id="load-example" data-smiles="CC(=O)Oc1ccccc1C(=O)O">阿司匹林</button>
+              <button type="button" class="example-chip" id="load-example-caffeine" data-smiles="Cn1c(=O)c2c(ncn2C)n(C)c1=O">咖啡因</button>
+              <button type="button" class="example-chip" id="load-example-ibuprofen" data-smiles="CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O">布洛芬</button>
+            </div>
+          </div>
+          <div id="file-input-panel" class="input-mode-panel" hidden>
+            <label for="structure-file"><span>结构文件</span><span class="required-label">单个结构</span></label>
+            <label class="file-dropzone" for="structure-file">
+              <span class="file-drop-icon" aria-hidden="true">↑</span>
+              <strong id="file-name">选择结构文件</strong>
+              <span id="file-help">支持 .smi、.smiles、.txt、.csv</span>
+              <input id="structure-file" type="file" accept=".smi,.smiles,.txt,.csv,text/plain,text/csv">
+            </label>
+            <p id="file-status" class="file-status" role="status" aria-live="polite">文件中的第一个结构将用于本次评估。</p>
           </div>
           <div id="structure-preview" class="structure-preview" hidden>
             <div class="preview-heading"><span>结构预览</span><span>RDKit</span></div>

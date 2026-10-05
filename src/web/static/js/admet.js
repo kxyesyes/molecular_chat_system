@@ -42,6 +42,27 @@
     return element;
   }
   function clear(element) { if (element) element.replaceChildren(); }
+  function extractUploadedSmiles(filename, content) {
+    const name = String(filename || "").toLowerCase();
+    const lines = String(content || "").split(/\r?\n/).map(line => line.trim()).filter(line => line && !/^(#|;|\/\/)/.test(line));
+    if (!lines.length) return "";
+    if (/\.csv$/.test(name)) {
+      const cells = line => line.split(",").map(value => value.trim().replace(/^\"|\"$/g, ""));
+      const header = cells(lines[0]);
+      const smilesIndex = header.findIndex(value => /^(canonical_)?smiles$/i.test(value));
+      const dataLines = smilesIndex >= 0 ? lines.slice(1) : lines;
+      for (const line of dataLines) {
+        const value = cells(line)[smilesIndex >= 0 ? smilesIndex : 0];
+        if (value && !/^(canonical_)?smiles$/i.test(value)) return value;
+      }
+      return "";
+    }
+    for (const line of lines) {
+      const candidate = line.split(/[\t\s,;]+/)[0].trim();
+      if (candidate && !/^(smiles|canonical_smiles)$/i.test(candidate)) return candidate;
+    }
+    return "";
+  }
   function normalizedStatus(response) {
     const status = response && typeof response.status === "string" ? response.status : "failed";
     return stateText[status] ? status : "failed";
@@ -326,10 +347,49 @@
   }
   let inFlight = false;
   let activeGroup = "";
+  let activeInputMode = "smiles";
   function updateSmilesCount() {
     const input = get("smiles-input");
     const counter = get("smiles-count");
     if (input && counter) counter.textContent = String(input.value.length) + "/" + String(input.maxLength || 8192);
+  }
+  function activateInputMode(mode) {
+    const smilesMode = get("smiles-mode");
+    const fileMode = get("file-mode");
+    const smilesPanel = get("smiles-input-panel");
+    const filePanel = get("file-input-panel");
+    const label = get("input-mode-label");
+    const isFile = mode === "file";
+    activeInputMode = isFile ? "file" : "smiles";
+    if (smilesMode) { smilesMode.className = "input-mode-tab" + (isFile ? "" : " is-active"); smilesMode.setAttribute("aria-selected", isFile ? "false" : "true"); }
+    if (fileMode) { fileMode.className = "input-mode-tab" + (isFile ? " is-active" : ""); fileMode.setAttribute("aria-selected", isFile ? "true" : "false"); }
+    if (smilesPanel) smilesPanel.hidden = isFile;
+    if (filePanel) filePanel.hidden = !isFile;
+    if (label) label.textContent = isFile ? "文件" : "SMILES";
+    const input = get("smiles-input");
+    if (input) input.required = !isFile;
+  }
+  async function handleFileChange(event) {
+    if (inFlight) return;
+    const file = event && event.target && event.target.files && event.target.files[0];
+    const status = get("file-status");
+    const name = get("file-name");
+    if (!file) return;
+    if (name) name.textContent = file.name || "已选择文件";
+    try {
+      const content = await file.text();
+      const smiles = extractUploadedSmiles(file.name, content);
+      if (!smiles) throw new Error("文件中没有可读取的 SMILES");
+      const input = get("smiles-input");
+      if (input) input.value = smiles;
+      updateSmilesCount();
+      updatePreview(smiles);
+      if (status) status.textContent = "已读取第一个结构，可直接运行评估。";
+    } catch (error) {
+      if (status) status.textContent = error && error.message ? error.message : "文件读取失败，请检查文件格式。";
+      setStatus("invalid_input", "文件输入无效。");
+      setError(status ? status.textContent : "文件读取失败，请检查文件格式。");
+    }
   }
   function updatePreview(smiles) {
     const preview = get("structure-preview");
@@ -352,7 +412,7 @@
   }
   function setInFlight(value) {
     inFlight = value;
-    ["run-admet", "rerun-admet", "reset-admet", "load-example", "load-example-caffeine", "load-example-ibuprofen", "smiles-input"].forEach(id => {
+    ["run-admet", "rerun-admet", "reset-admet", "load-example", "load-example-caffeine", "load-example-ibuprofen", "smiles-mode", "file-mode", "structure-file", "smiles-input"].forEach(id => {
       const element = get(id);
       if (element) element.disabled = value;
     });
@@ -362,6 +422,12 @@
     if (inFlight) return;
     const input = get("smiles-input");
     const value = input ? input.value.trim() : "";
+    const fileInput = get("structure-file");
+    if (activeInputMode === "file" && !(fileInput && fileInput.files && fileInput.files[0])) {
+      setStatus("invalid_input", "请选择一个结构文件。");
+      setError("未选择结构文件，未调用 ADMET 工具。");
+      return;
+    }
     if (!value) {
       setStatus("invalid_input", "请输入一个完整的 SMILES 结构。");
       setError("缺少 SMILES，未调用 ADMET 工具。");
@@ -420,6 +486,17 @@
     if (input) input.value = "";
     clear(get("endpoint-groups"));
     clear(get("admet-overview"));
+    clear(get("metric-cards"));
+    clear(get("endpoint-tabs"));
+    const tabs = get("endpoint-tabs");
+    if (tabs) tabs.hidden = true;
+    const fileInput = get("structure-file");
+    if (fileInput) fileInput.value = "";
+    const fileName = get("file-name");
+    if (fileName) fileName.textContent = "选择结构文件";
+    const fileStatus = get("file-status");
+    if (fileStatus) fileStatus.textContent = "文件中的第一个结构将用于本次评估。";
+    activateInputMode("smiles");
     const empty = get("empty-state");
     if (empty) empty.hidden = false;
     updatePreview("");
@@ -444,15 +521,22 @@
     const resetButton = get("reset-admet");
     const rerunButton = get("rerun-admet");
     const input = get("smiles-input");
+    const smilesMode = get("smiles-mode");
+    const fileMode = get("file-mode");
+    const fileInput = get("structure-file");
     if (form) form.addEventListener("submit", submit);
     if (example) example.addEventListener("click", () => loadExample(EXAMPLE_SMILES));
     if (caffeine) caffeine.addEventListener("click", () => loadExample("Cn1c(=O)c2c(ncn2C)n(C)c1=O"));
     if (ibuprofen) ibuprofen.addEventListener("click", () => loadExample("CC(C)Cc1ccc(cc1)[C@@H](C)C(=O)O"));
     if (resetButton) resetButton.addEventListener("click", reset);
     if (rerunButton) rerunButton.addEventListener("click", () => submit());
+    if (smilesMode) smilesMode.addEventListener("click", () => activateInputMode("smiles"));
+    if (fileMode) fileMode.addEventListener("click", () => activateInputMode("file"));
+    if (fileInput) fileInput.addEventListener("change", handleFileChange);
     if (input) { input.addEventListener("input", updateSmilesCount); updateSmilesCount(); }
+    activateInputMode("smiles");
   }
-  const api = { init, renderResponse, submit, reset };
+  const api = { init, renderResponse, submit, reset, extractUploadedSmiles };
   if (typeof window !== "undefined") {
     window.MedChatADMET = api;
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init, { once: true });

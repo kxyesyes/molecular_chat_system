@@ -41,8 +41,8 @@
 .admet-page h1 { margin: 0; color: var(--ink); font-size: clamp(28px, 3vw, 40px); font-weight: 700; letter-spacing: -.035em; line-height: 1.2; }
 .admet-page .intro-copy { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
 
-.admet-page .workspace { display: grid; grid-template-columns: minmax(280px, 304px) minmax(0, 1fr); align-items: start; gap: 18px; }
-.admet-page .input-panel, .admet-page .results-panel { min-width: 0; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 2px 8px rgb(15 23 42 / 4%); }
+.admet-page .workspace { display: grid; grid-template-columns: minmax(280px, 304px) minmax(0, 1fr); align-items: stretch; gap: 18px; }
+.admet-page .input-panel, .admet-page .results-panel { min-width: 0; height: 100%; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: 0 2px 8px rgb(15 23 42 / 4%); }
 .admet-page .input-panel { padding: 20px 18px 18px; }
 .admet-page .results-panel { min-height: 0; padding: 22px 28px 26px; }
 .admet-page .results-panel[data-state="not_calculated"], .admet-page .results-panel[data-state="running"] { min-height: max(460px, calc(100vh - 260px)); }
@@ -51,6 +51,19 @@
 .admet-page .results-header h2 { font-size: 22px; }
 .admet-page .panel-caption { margin: 3px 0 0; color: var(--muted); font-size: 11px; }
 .admet-page .input-mode-label { padding: 4px 8px; color: var(--primary-dark); background: #eef2ff; border-radius: 6px; font: 700 10px Consolas, monospace; }
+.admet-page .input-mode-tabs { display: flex; gap: 18px; margin: 17px 0 14px; border-bottom: 1px solid var(--line); }
+.admet-page .input-mode-tab { position: relative; min-height: 34px; padding: 5px 2px; color: var(--muted); background: transparent; border: 0; font-size: 12px; font-weight: 600; }
+.admet-page .input-mode-tab::after { position: absolute; right: 0; bottom: -1px; left: 0; height: 2px; background: transparent; content: ""; }
+.admet-page .input-mode-tab.is-active { color: var(--primary-dark); }
+.admet-page .input-mode-tab.is-active::after { background: var(--primary); }
+.admet-page .input-mode-panel[hidden] { display: none; }
+.admet-page .file-dropzone { position: relative; display: flex; min-height: 132px; flex-direction: column; align-items: center; justify-content: center; gap: 6px; margin: 0; padding: 20px; color: var(--muted); background: var(--surface-muted); border: 1px dashed var(--line-strong); border-radius: 9px; text-align: center; cursor: pointer; font-weight: 400; transition: border-color 160ms ease, background 160ms ease; }
+.admet-page .file-dropzone:hover { background: #eef2ff; border-color: #a5b4fc; }
+.admet-page .file-drop-icon { display: grid; width: 28px; height: 28px; place-items: center; color: var(--primary-dark); background: #eef2ff; border-radius: 50%; font-size: 18px; line-height: 1; }
+.admet-page .file-dropzone strong { color: var(--ink); font-size: 12px; }
+.admet-page .file-dropzone span:last-of-type { font-size: 10px; }
+.admet-page .file-dropzone input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; }
+.admet-page .file-status { margin: 9px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .admet-page label { display: flex; justify-content: space-between; margin-bottom: 8px; color: var(--ink); font-size: 12px; font-weight: 700; }
 .admet-page .required-label { color: var(--muted); font-weight: 400; }
 .admet-page .textarea-wrap { position: relative; }
