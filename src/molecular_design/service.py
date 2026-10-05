@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -46,12 +47,22 @@ class MolecularDesignService:
     ) -> Dict[str, Any]:
         return calculate_properties(smiles, command=command, reference_smiles=reference_smiles)
 
+    def recommend_fragments(self, command: str) -> list[Dict[str, Any]]:
+        return self.fragments.recommend_for_command(command)
+
     @model_request
-    async def ai_recommend(self, command: str, current_smiles: str, current_props: Dict[str, Any]) -> Dict[str, Any]:
+    async def ai_recommend(
+        self,
+        command: str,
+        current_smiles: str,
+        current_props: Dict[str, Any],
+        recommended_fragments: Optional[list[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
         # Resolve once per request. The application owns the borrowed client;
         # switching configuration must not mutate an in-flight recommendation.
         model = self.model_provider() if self.model_provider is not None else self.model
-        recommended_fragments = self.fragments.recommend_for_command(command)
+        if recommended_fragments is None:
+            recommended_fragments = await asyncio.to_thread(self.recommend_fragments, command)
         return await ai.recommend(
             model=model,
             command=command,

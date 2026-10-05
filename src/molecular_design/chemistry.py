@@ -94,6 +94,21 @@ def _find_single_connection_point(mol, label: str):
     return dummy.GetIdx(), dummy.GetNeighbors()[0].GetIdx()
 
 
+def canonicalize_connection_fragment(smiles: str) -> str:
+    """Canonicalize a fragment only when its connection contract is valid.
+
+    Fragment recommendations and substitution must use the same fail-closed
+    connection-point rules.  Keeping this check beside the substitution
+    implementation prevents the UI from presenting fragments that can never
+    be applied safely.
+    """
+    from rdkit import Chem
+
+    mol = _mol_from_smiles(smiles, "片段 SMILES")
+    _find_single_connection_point(mol, "片段")
+    return Chem.MolToSmiles(mol, canonical=True)
+
+
 def _do_substitution(parent_mol, fragment_mol):
     from rdkit import Chem
 

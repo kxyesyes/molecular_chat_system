@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 
+from .chemistry import canonicalize_connection_fragment
 
 LEGACY_TAG_TO_LABEL = {
     "lipophilic": "label_lipophilic",
@@ -100,6 +101,7 @@ class FragmentRepository:
     def __init__(self, csv_path: str | Path):
         self.csv_path = Path(csv_path)
         self._df: Optional[pd.DataFrame] = None
+        self._safe_df: Optional[pd.DataFrame] = None
         self._lock = threading.Lock()
 
     def load(self) -> pd.DataFrame:
@@ -114,6 +116,37 @@ class FragmentRepository:
                 self._df = pd.read_csv(self.csv_path)
             return self._df
 
+    def _load_safe(self) -> pd.DataFrame:
+        """Return only fragments that satisfy the substitution contract.
+
+        The CSV is an input asset, not proof that a row is chemically usable.
+        Validate once and cache eligible rows so query and recommendation
+        endpoints cannot expose fragments that the substitution service rejects.
+        """
+        if self._safe_df is not None:
+            return self._safe_df
+        raw = self.load()
+        with self._lock:
+            if self._safe_df is not None:
+                return self._safe_df
+            if raw.empty or "fragment_smiles" not in raw.columns:
+                self._safe_df = pd.DataFrame(columns=raw.columns)
+                return self._safe_df
+
+            valid_rows = []
+            for smiles in raw["fragment_smiles"]:
+                try:
+                    canonicalize_connection_fragment(str(smiles))
+                except ValueError:
+                    valid_rows.append(False)
+                else:
+                    valid_rows.append(True)
+            # Preserve the literal library spelling for search and metadata;
+            # do not trust dummy_atoms metadata in place of RDKit validation.
+            # Dependency failures propagate and must not cache an empty library.
+            self._safe_df = raw.loc[valid_rows].copy()
+            return self._safe_df
+
     def query(
         self,
         page: int = 1,
@@ -126,7 +159,7 @@ class FragmentRepository:
         page = max(int(page or 1), 1)
         page_size = min(max(int(page_size or 20), 1), 100)
 
-        df = self.load().copy()
+        df = self._load_safe().copy()
         if df.empty:
             return {"success": True, "fragments": [], "total": 0, "page": page, "page_size": page_size}
 
@@ -157,7 +190,7 @@ class FragmentRepository:
         }
 
     def recommend_for_command(self, command: str, limit: int = 6) -> List[Dict[str, Any]]:
-        df = self.load()
+        df = self._load_safe()
         if df.empty:
             return []
 
