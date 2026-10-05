@@ -756,9 +756,7 @@
       const model = String(config.model_name || "").trim();
       const baseUrl = String(config.base_url || "").toLowerCase();
       const key = /deepseek/i.test(model) || baseUrl.includes("api.deepseek.com")
-        ? "deepseek"
-        : provider === "modelscope" && /qwen/i.test(model) ? "qwen3"
-          : provider === "modelscope" && /glm/i.test(model) ? "glm4" : "";
+        ? "deepseek" : "";
       if (key) {
         elements.modelSelect.value = key;
         return;

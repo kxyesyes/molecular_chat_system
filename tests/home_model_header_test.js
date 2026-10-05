@@ -8,15 +8,14 @@ const main = fs.readFileSync(path.join(root, "src", "web", "static", "js", "home
 
 const modelSelect = html.match(/<select id="modelSelect">([\s\S]*?)<\/select>/)?.[1] || "";
 assert.match(modelSelect, /<option value="deepseek" selected>DeepSeek<\/option>/);
-assert.match(modelSelect, /<option value="glm4">GLM-5\.1<\/option>/);
-assert.match(modelSelect, /<option value="qwen3">Qwen3-235B<\/option>/);
+assert.doesNotMatch(modelSelect, /GLM-5\.1|Qwen3-235B|官方|魔搭|社区/);
 assert.doesNotMatch(modelSelect, /官方|魔搭|社区/);
-assert.doesNotMatch(modelSelect, /<option value="glm4" selected>/);
 
 assert.match(main, /function syncModelSelector\(/);
 assert.match(main, /fetch\("\/api\/llm\/config"\)/);
 assert.match(main, /deepseek/);
 assert.match(main, /elements\.modelSelect\.value/);
-assert.match(html, /\/static\/js\/home\/main\.js\?v=20261006-model-header-v2/);
+assert.match(main, /currentOption\.value = "active"/);
+assert.match(html, /\/static\/js\/home\/main\.js\?v=20261006-model-header-v3/);
 
 console.log("home_model_header_test: passed");

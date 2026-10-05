@@ -148,7 +148,7 @@ async function restoredVisibilityTest(payload) {
   assert.equal(chatVisible, false, "a connection without a valid restored view must keep the welcome screen");
   renderRestore(payload);
   const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
-  assert(template.includes('/static/js/home/main.js?v=20261006-model-header-v2'),
+  assert(template.includes('/static/js/home/main.js?v=20261006-model-header-v3'),
     "homepage control removal must invalidate the previous cached main script and preserve restoration visibility");
 }
 
