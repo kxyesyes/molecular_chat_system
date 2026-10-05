@@ -17,7 +17,7 @@ PAGES = [
     ("/reverse-docking", "reverse_target.html", "Reverse Target Prediction System"),
     ("/reverse-target", "reverse_target.html", "Reverse Target Prediction System"),
     ("/activity-prediction", "activity_prediction.html", "Activity Prediction System"),
-    ("/kermt-admet", "kermt_admet.html", "KERMT ADMET Prediction System"),
+    ("/admet", "admet.html", "ADMET Research Console"),
     ("/molecular-design", "molecular_design.html", "Molecular Design System"),
     ("/target-search", "target_search.html", "Target Search Demo"),
 ]

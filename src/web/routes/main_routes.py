@@ -59,11 +59,11 @@ def register_main_routes(
             return render_template(request, "activity_prediction.html")
         return {"message": "Activity Prediction System", "status": "running"}
 
-    @app.get("/kermt-admet")
-    async def kermt_admet_page(request: Request):
+    @app.get("/admet")
+    async def admet_page(request: Request):
         if templates is not None:
-            return render_template(request, "kermt_admet.html")
-        return {"message": "KERMT ADMET Prediction System", "status": "running"}
+            return render_template(request, "admet.html")
+        return {"message": "ADMET Research Console", "status": "running"}
 
     @app.get("/molecular-design")
     async def molecular_design_page(request: Request):

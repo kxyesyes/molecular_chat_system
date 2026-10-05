@@ -33,6 +33,7 @@ DOMAINS = [
     ("activity_prediction", 2),
     ("activity_model", 5),
     ("molecule_properties", 1),
+    ("admet", 1),
     ("agent_metrics", 1),
 ]
 CONTRACT_PATH = Path(__file__).parent / "fixtures/api_route_contract.json"
@@ -106,12 +107,49 @@ def test_registration_contract():
     expected_path = contract_path_for_versions(version("fastapi"), version("pydantic"))
     expected = json.loads(expected_path.read_text(encoding="utf-8"))
     actual = registration_contract(registered_app())
-    assert actual == expected
-    assert len(actual["operations"]) == 31
-    assert Counter(row["methods"][0] for row in actual["operations"]) == {
+    admet_operations = [
+        row for row in actual["operations"] if row["path"] == "/api/admet/predict"
+    ]
+    assert len(admet_operations) == 1
+    assert admet_operations[0]["methods"] == ["POST"]
+    historic = {
+        "operations": [
+            row for row in actual["operations"] if row["path"] != "/api/admet/predict"
+        ],
+        "openapi": dict(actual["openapi"]),
+    }
+    historic["openapi"]["paths"] = {
+        path: value for path, value in actual["openapi"]["paths"].items()
+        if path != "/api/admet/predict"
+    }
+    historic["openapi"]["components"] = dict(actual["openapi"]["components"])
+    historic["openapi"]["components"]["schemas"] = {
+        name: value
+        for name, value in actual["openapi"]["components"]["schemas"].items()
+        if name != "AdmetPredictRequest"
+    }
+    assert historic == expected
+    assert len(historic["operations"]) == 31
+    assert Counter(row["methods"][0] for row in historic["operations"]) == {
         "POST": 14, "GET": 14, "DELETE": 3,
     }
-    assert len(actual["openapi"]["paths"]) == 30
+    assert len(historic["openapi"]["paths"]) == 30
+    assert len(actual["operations"]) == 32
+    assert len(actual["openapi"]["paths"]) == 31
+
+
+def test_admet_endpoint_openapi_request_schema_is_strict_and_explicit():
+    app = registered_app()
+    with TestClient(app):
+        schema = app.openapi()
+    operation = schema["paths"]["/api/admet/predict"]["post"]
+    request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
+
+    assert request_schema == {"$ref": "#/components/schemas/AdmetPredictRequest"}
+    admet_schema = schema["components"]["schemas"]["AdmetPredictRequest"]
+    assert admet_schema["additionalProperties"] is False
+    assert admet_schema["required"] == ["smiles"]
+    assert set(admet_schema["properties"]) == {"smiles", "molecule_id"}
 
 
 @pytest.mark.parametrize("domain,count", DOMAINS)
@@ -123,10 +161,13 @@ def test_domain_module_owns_operations(domain, count):
     from src.web.routes import api_routes as support
     app = FastAPI()
     assert setup(app, _support=support) is None
-    routes = api_routes(app)
-    assert len(routes) == count
-    assert all(route.endpoint.__module__ == module.__name__ for route in routes)
-    full_routes = api_routes(registered_app())
+    with TestClient(app):
+        routes = api_routes(app)
+        assert len(routes) == count
+        assert all(route.endpoint.__module__ == module.__name__ for route in routes)
+    full_app = registered_app()
+    with TestClient(full_app):
+        full_routes = api_routes(full_app)
     offset = sum(n for d, n in DOMAINS[:[d for d, _ in DOMAINS].index(domain)])
     assert [r.name for r in routes] == [r.name for r in full_routes[offset:offset + count]]
     tree = ast.parse(inspect.getsource(module))

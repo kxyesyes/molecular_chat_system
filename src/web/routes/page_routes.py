@@ -15,7 +15,7 @@ _MAIN_PAGE_PATHS = {
     "/reverse-docking",
     "/reverse-target",
     "/activity-prediction",
-    "/kermt-admet",
+    "/admet",
     "/molecular-design",
     "/target-search",
 }

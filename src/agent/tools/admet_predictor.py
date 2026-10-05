@@ -302,13 +302,17 @@ class ADMETPredictor(BaseMolecularTool):
             result['provenance'] = self._provenance(smiles_list, rows)
 
         except TimeoutError as e:
-            logger.warning("ADMET-AI prediction timed out: %s", e)
-            result['message'] = f"ADMET-AI prediction timeout: {e}"
+            logger.warning("ADMET-AI prediction timed out; exception details omitted")
+            result['message'] = "ADMET-AI prediction timeout; no scientific result was produced."
             result['reasoning'] = "模型超时，未返回或补齐任何科学数值。"
-            result['status'] = 'failed'
+            result['status'] = 'timeout'
+            result['error'] = {
+                'code': 'ADMET_TIMEOUT',
+                'message': 'ADMET-AI prediction timed out.',
+            }
         except Exception as e:
-            logger.error(f"ADME预测失败: {e}")
-            result['message'] = f"ADMET-AI 预测失败: {str(e)}"
+            logger.error("ADMET-AI prediction failed; exception details omitted")
+            result['message'] = "ADMET-AI prediction failed; no scientific result was produced."
             result['reasoning'] = "模型调用失败，未使用规则或模拟值补齐科学结果。"
             result['status'] = 'failed'
 
@@ -386,7 +390,10 @@ class ADMETPredictor(BaseMolecularTool):
                 f"ADMET-AI inference timed out after {self.timeout_seconds:g} seconds"
             ) from exc
         finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+            # Do not close a backend while an in-flight inference thread still
+            # owns it.  Waiting here is preferable to a use-after-close race;
+            # the public route already reports timeout only after this cleanup.
+            executor.shutdown(wait=True, cancel_futures=True)
 
     @staticmethod
     def _validate_batch_rows(rows, smiles_list, molecule_ids):
