@@ -21,17 +21,7 @@ var HistoryManager = (function () {
 
   /** 恢复某条历史 */
   async function restoreHist(smi) {
-    S.mutationSeq = (S.mutationSeq || 0) + 1;
-    S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
-    S.curProps = null;
-    S.prevProps = null;
-    S.curGoals = null;
-    S.propsSmiles = "";
-    await MoleculeEditor.setSMILES(smi);
-    S.smiles = smi;
-    document.getElementById("curSmiles").textContent = smi;
-    await PropertiesPanel.calcProps(smi);
-    UI.toast("已恢复", "info");
+    return MoleculeEditor.restoreCandidate(smi);
   }
 
   /** 清空历史 */

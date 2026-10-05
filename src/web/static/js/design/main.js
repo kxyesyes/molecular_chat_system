@@ -57,8 +57,8 @@
       await Props.calcProps(requestedSmiles, "", requestToken);
     } finally {
       S.propsCalcInFlight = false;
-      if (S.pendingPropsSmiles !== requestedSmiles) {
-        schedulePropsCalculation(S.pendingPropsSmiles);
+      if (requestToken !== S.propsRequestSeq || S.pendingPropsSmiles !== requestedSmiles) {
+        if (S.pendingPropsSmiles) schedulePropsCalculation(S.pendingPropsSmiles);
       }
     }
   }
@@ -73,6 +73,7 @@
       if (S.editorWriteInFlight) return;
       if (writeSeq !== (S.editorWriteSeq || 0)) return;
       if (smi !== S.smiles) {
+        S.mutationSeq = (S.mutationSeq || 0) + 1;
         S.smiles = smi;
         Editor.resetConnectionState();
         updateCurrentSmilesText(smi);
@@ -174,18 +175,17 @@
   function handleUpload(event) {
     var file = event && event.target && event.target.files && event.target.files[0];
     if (!file) return;
+    var mutationToken = S.mutationSeq;
     var reader = new FileReader();
     reader.onload = function () {
+      if (mutationToken !== S.mutationSeq) return;
       var text = String(reader.result || "").trim();
       var lines = text.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
       var smiles = lines[0] || "";
       if (lines.length > 1 && /^\s*(name\s*,\s*)?smiles\s*$/i.test(lines[0])) smiles = lines[1].split(",").pop().trim();
       if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
-      Editor.setSMILES(smiles).then(function () {
-        S.smiles = smiles;
-        updateCurrentSmilesText(smiles);
-        schedulePropsCalculation(smiles);
-        UI.toast("已导入分子", "success");
+      Editor.restoreCandidate(smiles, "已导入分子，属性已更新。").then(function (success) {
+        if (success) UI.toast("已导入分子", "success");
       }).catch(function () { UI.toast("文件中的 SMILES 无法载入", "error"); });
     };
     reader.readAsText(file);

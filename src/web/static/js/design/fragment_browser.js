@@ -50,13 +50,13 @@ var FragmentBrowser = (function () {
       function (f) {
         return (
           '<div class="common-chip" onclick="selFrag(\'' +
-          UI.esc(f.s) +
+          UI.escInlineJs(f.s) +
           "','" +
-          f.l +
+          UI.escInlineJs(f.l) +
           '\',this)" title="' +
-          f.s +
+          UI.escText(f.s) +
           '">' +
-          f.l +
+          UI.escText(f.l) +
           "</div>"
         );
       },
@@ -80,15 +80,15 @@ var FragmentBrowser = (function () {
           "&width=120&height=60";
         return (
           '<div class="fragment-card" onclick="selFrag(\'' +
-          UI.esc(smi) +
+          UI.escInlineJs(smi) +
           "','" +
-          UI.esc(label) +
+          UI.escInlineJs(label) +
           "',this)\">" +
           '<img style="height:50px;object-fit:contain;" loading="lazy" src="' +
           imgUrl +
           '">' +
           '<div class="frag-formula">' +
-          label +
+          UI.escText(label) +
           "</div></div>"
         );
       })
@@ -134,9 +134,9 @@ var FragmentBrowser = (function () {
     S.selectedFrag = { smi: smi, label: label };
     var substituteButton = document.getElementById("subBtn");
     if (substituteButton) {
-      substituteButton.disabled = S.detectedSiteCount !== 1;
+      substituteButton.disabled = S.detectedSiteCount !== 1 || S.detectedSitesSmiles !== S.smiles;
     }
-    if (S.detectedSiteCount !== 1) {
+    if (S.detectedSiteCount !== 1 || S.detectedSitesSmiles !== S.smiles) {
       UI.setFeedback("请先识别连接点，并确保母体恰好包含一个可用的 [*] 单键连接点。", "warn");
     }
     UI.toast("已选: " + label, "info");

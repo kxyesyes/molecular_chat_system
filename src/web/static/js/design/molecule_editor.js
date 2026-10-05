@@ -25,21 +25,28 @@ var MoleculeEditor = (function () {
 
   async function setSMILES(smi) {
     var k = getK();
-    if (!k) return;
+    if (!k) return Promise.resolve();
     S.editorWriteSeq = (S.editorWriteSeq || 0) + 1;
     S.editorWriteDepth = (S.editorWriteDepth || 0) + 1;
     S.editorWriteInFlight = true;
-    try {
-      await k.setMolecule(smi);
-    } finally {
-      S.editorWriteDepth = Math.max(0, (S.editorWriteDepth || 1) - 1);
-      S.editorWriteInFlight = S.editorWriteDepth > 0;
-    }
+    var previous = S.editorWriteQueue || Promise.resolve();
+    var operation = previous.catch(function () {}).then(async function () {
+      try {
+        await k.setMolecule(smi);
+      } finally {
+        S.editorWriteDepth = Math.max(0, (S.editorWriteDepth || 1) - 1);
+        S.editorWriteInFlight = S.editorWriteDepth > 0;
+      }
+    });
+    S.editorWriteQueue = operation.catch(function () {});
+    return operation;
   }
 
   function resetConnectionState() {
     S.selectedFrag = null;
     S.detectedSiteCount = null;
+    S.detectedSitesSmiles = null;
+    S.siteRequestSeq = (S.siteRequestSeq || 0) + 1;
     var substituteButton = document.getElementById("subBtn");
     if (substituteButton) substituteButton.disabled = true;
     if (document.querySelectorAll) {
@@ -109,13 +116,13 @@ var MoleculeEditor = (function () {
             '<div class="candidate-row-top"><strong>#' +
             c.step +
             " " +
-            UI.esc(c.fragmentLabel || "fragment") +
+            UI.escText(c.fragmentLabel || "fragment") +
             "</strong>" +
             '<button class="ghost-mini" onclick="restoreCandidate(\'' +
-            UI.esc(c.smiles) +
+            UI.escInlineJs(c.smiles) +
             "')\">恢复</button></div>" +
             '<div class="candidate-smiles">' +
-            UI.esc(c.smiles || "") +
+            UI.escText(c.smiles || "") +
             "</div>" +
             '<div class="candidate-metrics">' +
             renderDelta("QED", c.beforeProps, c.props, "qed") +
@@ -154,20 +161,26 @@ var MoleculeEditor = (function () {
     renderCandidateBoard();
   }
 
-  async function restoreCandidate(smiles) {
+  async function restoreCandidate(smiles, successMessage) {
     if (!smiles) return;
     resetConnectionState();
-    S.mutationSeq = (S.mutationSeq || 0) + 1;
+    var mutationToken = (S.mutationSeq || 0) + 1;
+    S.mutationSeq = mutationToken;
     S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
     S.curProps = null;
     S.prevProps = null;
     S.curGoals = null;
     S.propsSmiles = "";
+    S.pendingPropsSmiles = "";
     await setSMILES(smiles);
+    if (mutationToken !== S.mutationSeq) return;
     S.smiles = smiles;
     document.getElementById("curSmiles").textContent = smiles;
-    await PropertiesPanel.calcProps(smiles);
-    UI.setFeedback("已恢复候选分子，可继续选择片段做下一轮设计。", "success");
+    var result = await PropertiesPanel.calcProps(smiles);
+    if (mutationToken !== S.mutationSeq) return;
+    if (!result || result.stale || !result.success) return;
+    UI.setFeedback(successMessage || "已恢复候选分子，可继续选择片段做下一轮设计。", "success");
+    return true;
   }
 
   function resetCandidateComparison() {
@@ -177,15 +190,25 @@ var MoleculeEditor = (function () {
 
   /* ── 位点检测 ── */
   async function detectSites() {
+    var requestSeq = (S.siteRequestSeq || 0) + 1;
+    S.siteRequestSeq = requestSeq;
+    var writeSeq = S.editorWriteSeq;
     var smi = await getSMILES();
-    if (!smi) return;
+    if (!smi || requestSeq !== S.siteRequestSeq || writeSeq !== S.editorWriteSeq || S.editorWriteInFlight) return;
     S.smiles = smi;
+    S.detectedSiteCount = null;
+    S.detectedSitesSmiles = null;
+    document.getElementById("subBtn").disabled = true;
     document.getElementById("curSmiles").textContent = smi;
     try {
       var d = await Api.detectSites(smi);
+      if (requestSeq !== S.siteRequestSeq) return;
+      var currentSmiles = await getSMILES();
+      if (requestSeq !== S.siteRequestSeq || writeSeq !== S.editorWriteSeq || currentSmiles !== smi || S.smiles !== smi) return;
       if (d.success) {
         var n = d.sites.length;
         S.detectedSiteCount = n;
+        S.detectedSitesSmiles = smi;
         document.getElementById("siteText").textContent =
           n > 0 ? "检测到 " + n + " 个位点" : "请标记[*]";
         var substituteButton = document.getElementById("subBtn");
@@ -204,16 +227,20 @@ var MoleculeEditor = (function () {
 
   /* ── 执行取代 ── */
   async function execSubstitute() {
+    var startMutation = S.mutationSeq;
+    var writeSeq = S.editorWriteSeq;
     var smi = await getSMILES();
+    if (startMutation !== S.mutationSeq || writeSeq !== S.editorWriteSeq || S.editorWriteInFlight) return;
     if (!smi || !S.selectedFrag) {
       UI.setFeedback("请先绘制分子并选择一个片段。", "warn");
       return;
     }
-    if (S.detectedSiteCount !== 1) {
+    if (S.detectedSiteCount !== 1 || S.detectedSitesSmiles !== smi) {
       UI.setFeedback("请先识别连接点，并确保母体恰好包含一个可用的 [*] 单键连接点。", "warn");
       return;
     }
     var beforeProps = S.propsSmiles === smi && S.curProps ? Object.assign({}, S.curProps) : null;
+    var fragment = Object.assign({}, S.selectedFrag);
     // Capture the editor's current value before the request. The polling loop
     // may not have observed a just-drawn molecule yet.
     S.smiles = smi;
@@ -223,13 +250,16 @@ var MoleculeEditor = (function () {
     var ov = document.getElementById("loadingOverlay");
     ov.style.display = "flex";
     try {
-      var d = await Api.substitute(smi, S.selectedFrag.smi);
+      var d = await Api.substitute(smi, fragment.smi);
+      if (mutationToken !== S.mutationSeq) return;
       if (d.success) {
         if (mutationToken !== S.mutationSeq || S.smiles !== smi) return;
         S.smiles = d.new_smiles;
         document.getElementById("curSmiles").textContent = d.new_smiles;
         await setSMILES(d.new_smiles);
+        if (mutationToken !== S.mutationSeq) return;
         var propertyResult = await PropertiesPanel.calcProps(d.new_smiles, smi);
+        if (mutationToken !== S.mutationSeq) return;
         if (!propertyResult || propertyResult.success !== true || propertyResult.stale || !S.curProps || S.propsSmiles !== d.new_smiles) {
           resetConnectionState();
           UI.setFeedback("结构取代已完成，但属性计算失败；该候选未加入历史，请检查计算工具后重试。", "warn");
@@ -239,7 +269,7 @@ var MoleculeEditor = (function () {
         var iterEl = document.getElementById("iterCount");
         if (iterEl) iterEl.textContent = S.iter;
         HistoryManager.addHist(d.new_smiles, S.curProps);
-        renderCandidateComparison(beforeProps, S.curProps, d.new_smiles, S.selectedFrag.label);
+        renderCandidateComparison(beforeProps, S.curProps, d.new_smiles, fragment.label);
         resetConnectionState();
         UI.setFeedback("取代完成，候选分子的属性变化已更新。", "success");
         UI.toast("取代成功", "success");
@@ -248,11 +278,12 @@ var MoleculeEditor = (function () {
         UI.toast("取代失败: " + (d.error || "未知错误"), "error");
       }
     } catch (e) {
+      if (mutationToken !== S.mutationSeq) return;
       console.error("execSubstitute error:", e);
       UI.setFeedback("取代请求异常：" + e.message, "error");
       UI.toast("取代异常: " + e.message, "error");
     } finally {
-      ov.style.display = "none";
+      if (mutationToken === S.mutationSeq) ov.style.display = "none";
     }
   }
 
@@ -260,18 +291,7 @@ var MoleculeEditor = (function () {
   async function confirmImport() {
     var smi = document.getElementById("importInput").value.trim();
     if (smi) {
-      resetConnectionState();
-      S.mutationSeq = (S.mutationSeq || 0) + 1;
-      S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
-      S.curProps = null;
-      S.prevProps = null;
-      S.curGoals = null;
-      S.propsSmiles = "";
-      await setSMILES(smi);
-      S.smiles = smi;
-      document.getElementById("curSmiles").textContent = smi;
-      await PropertiesPanel.calcProps(smi, "", S.propsRequestSeq);
-      UI.closeImport();
+      if (await restoreCandidate(smi, "已导入分子，属性已更新。")) UI.closeImport();
     }
   }
 
@@ -305,12 +325,13 @@ var MoleculeEditor = (function () {
     S.prevProps = null;
     S.curGoals = null;
     resetConnectionState();
-    await setSMILES("");
+    document.getElementById("loadingOverlay").style.display = "none";
     HistoryManager.clearHist();
     document.getElementById("curSmiles").textContent = "等待绘制...";
     PropertiesPanel.clearPropsUI();
     resetCandidateComparison();
     UI.setFeedback("", "info");
+    await setSMILES("");
   }
 
   return {
