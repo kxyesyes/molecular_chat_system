@@ -73,9 +73,17 @@ var DesignUI = (function () {
     });
   }
 
-  /* ── 转义单引号 (用于 onclick 属性) ── */
-  function esc(s) {
-    return s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+  /* ── 分离 HTML 文本与 inline-JS 参数的转义 ── */
+  function escText(s) {
+    var safe = typeof MedChatSafeRender !== "undefined" && MedChatSafeRender;
+    if (safe && safe.escapeHtml) return safe.escapeHtml(s);
+    return String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function escInlineJs(s) {
+    var safe = typeof MedChatSafeRender !== "undefined" && MedChatSafeRender;
+    if (safe && safe.escapeInlineJsString) return safe.escapeInlineJsString(s);
+    return String(s || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   }
 
   return {
@@ -85,6 +93,8 @@ var DesignUI = (function () {
     toggleAcc: toggleAcc,
     updateAccBadges: updateAccBadges,
     setFeedback: setFeedback,
-    esc: esc,
+    esc: escInlineJs,
+    escText: escText,
+    escInlineJs: escInlineJs,
   };
 })();

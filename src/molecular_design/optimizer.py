@@ -118,16 +118,32 @@ def parse_optimization_goals(command: str = "") -> GoalSpec:
     """Return only targets explicitly stated by the user."""
 
     goals: GoalSpec = {}
+    seen_numeric: set[tuple[str, str, float]] = set()
+    numeric_metrics: set[str] = set()
+    directions: dict[str, str] = {}
     for raw_metric, operator, threshold in _iter_numeric_goal_matches(command):
         metric = _canonical_metric(raw_metric)
         if not metric:
             continue
-        direction = operator if threshold is None else _direction_from_operator(operator)
-        key = metric
-        suffix = 2
-        while key in goals:
-            key = f"{metric}#{suffix}"
-            suffix += 1
+        if threshold is not None:
+            numeric_metrics.add(metric)
+            identity = (metric, operator, float(threshold))
+            if identity in seen_numeric:
+                continue
+            seen_numeric.add(identity)
+            direction = _direction_from_operator(operator)
+            key = metric if metric not in goals else f"{metric}#{sum(1 for item in goals.values() if item['metric'] == metric) + 1}"
+        else:
+            direction = operator
+            if metric in numeric_metrics:
+                continue
+            previous = directions.get(metric)
+            if previous is not None and previous != direction:
+                raise ValueError(f"优化目标冲突：{LABELS.get(metric, metric)}同时要求提高和降低")
+            if previous is not None:
+                continue
+            directions[metric] = direction
+            key = metric
         goals[key] = {
             "metric": metric,
             "label": _goal_label(metric, direction, threshold, operator if threshold is not None else None),

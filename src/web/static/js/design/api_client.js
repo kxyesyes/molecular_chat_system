@@ -53,20 +53,6 @@ var DesignApi = (function () {
     return r.json();
   }
 
-  /** AI 推荐 */
-  async function aiRecommend(command, currentSmiles, currentProps) {
-    var r = await fetch(_BASE + "/ai_recommend", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        command: command,
-        current_smiles: currentSmiles,
-        current_props: currentProps,
-      }),
-    });
-    return r.json();
-  }
-
   /** 保存分子 */
   async function saveMolecule(smiles, properties) {
     var r = await fetch(_BASE + "/save_molecule", {
@@ -91,7 +77,6 @@ var DesignApi = (function () {
     detectSites: detectSites,
     substitute: substitute,
     calcProperties: calcProperties,
-    aiRecommend: aiRecommend,
     saveMolecule: saveMolecule,
     exportHistory: exportHistory,
   };

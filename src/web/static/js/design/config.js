@@ -25,6 +25,13 @@ var DesignState = {
   pendingPropsSmiles: "",
   propsSmiles: "",
   mutationSeq: 0,
+  editorWriteSeq: 0,
+  editorWriteDepth: 0,
+  editorWriteInFlight: false,
+  editorWriteQueue: null,
+  detectedSiteCount: null,
+  detectedSitesSmiles: null,
+  siteRequestSeq: 0,
   ketcherReady: false,
 };
 

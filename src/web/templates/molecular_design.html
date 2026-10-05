@@ -63,10 +63,11 @@
             <div class="frag-pagination"><button class="page-btn" id="prevBtn" onclick="changePage(-1)" disabled>上一页</button><button class="page-btn" id="nextBtn" onclick="changePage(1)">下一页</button></div>
           </section>
 
-          <section class="ai-bar">
-            <div class="section-heading"><div><div class="panel-kicker">OPTIONAL</div><h3>设计建议</h3></div><span class="source-note" id="aiSourceNote">未运行</span></div>
-            <div class="ai-input-row"><input class="ai-input" id="aiInput" type="text" placeholder="例如：降低 LogP，提高 QED" onkeydown="if(event.key==='Enter')sendAI();" /><button class="ai-send-btn" id="aiSendBtn" onclick="sendAI()">生成建议</button></div>
+          <section class="goal-bar">
+            <div class="section-heading"><div><div class="panel-kicker">OPTIONAL CONSTRAINTS</div><h3>优化目标</h3></div><span class="source-note">仅按明确输入计算</span></div>
+            <div class="goal-input-row"><input class="goal-input" id="optimizationInput" type="text" placeholder="例如：LogP ≤ 3，QED ≥ 0.7" onkeydown="if(event.key==='Enter')applyOptimizationCommand();" /><button class="goal-apply-btn" onclick="applyOptimizationCommand()">应用目标</button></div>
           </section>
+
           <div class="design-feedback" id="designFeedback" style="display:none"></div>
         </div>
       </section>
