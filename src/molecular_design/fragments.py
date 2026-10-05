@@ -77,6 +77,8 @@ def infer_label_filters(command: str, available_columns: Iterable[str]) -> List[
     command_lower = re.sub(r"\s+", "", command or "").lower()
     lowers_logp = any(keyword in command_lower for keyword in ("降低logp", "reducelogp", "logp下降"))
     raises_logp = any(keyword in command_lower for keyword in ("提高logp", "increaselogp", "logp上升"))
+    if lowers_logp and raises_logp:
+        raise ValueError("优化目标冲突：LogP同时要求提高和降低")
     labels: List[str] = []
     for keywords, label in COMMAND_KEYWORD_LABELS:
         # Directional LogP wording is more specific than generic “亲脂” or
@@ -87,7 +89,7 @@ def infer_label_filters(command: str, available_columns: Iterable[str]) -> List[
             continue
         if label == "label_hydrophilic" and raises_logp:
             continue
-        if label in available and any(keyword in command_lower for keyword in keywords):
+        if label in available and label not in labels and any(keyword in command_lower for keyword in keywords):
             labels.append(label)
     return labels
 
