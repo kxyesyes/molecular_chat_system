@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 import os
 import threading
 from pathlib import Path
@@ -57,12 +58,14 @@ class DesignStorage:
             if key not in calculated or supplied in (None, "") or calculated.get(key) is None:
                 continue
             try:
-                if abs(float(supplied) - float(calculated[key])) > 1e-4:
-                    raise ValueError(f"属性 {key} 与当前 SMILES 不一致，未保存")
+                supplied_value = float(supplied)
+                calculated_value = float(calculated[key])
             except (TypeError, ValueError) as exc:
-                if isinstance(exc, ValueError) and "未保存" in str(exc):
-                    raise
-                continue
+                raise ValueError(f"属性 {key} 不是可验证的数值，未保存") from exc
+            if not math.isfinite(supplied_value) or not math.isfinite(calculated_value):
+                raise ValueError(f"属性 {key} 不是有限数值，未保存")
+            if abs(supplied_value - calculated_value) > 1e-4:
+                raise ValueError(f"属性 {key} 与当前 SMILES 不一致，未保存")
 
         self.save_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.save_dir / "saved_molecules.csv"

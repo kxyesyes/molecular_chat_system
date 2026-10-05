@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import html
+import math
+import operator as comparisons
 import re
 from typing import Any, Dict, Iterable, Mapping
 
@@ -43,11 +45,11 @@ def _canonical_metric(raw_metric: str) -> str | None:
     return METRIC_ALIASES.get(raw_metric.strip().lower())
 
 
-def _goal_label(metric: str, direction: str, threshold: float | None) -> str:
+def _goal_label(metric: str, direction: str, threshold: float | None, operator: str | None = None) -> str:
     label = LABELS.get(metric, metric)
     if threshold is None:
         return f"{label} {'提高' if direction == 'max' else '降低'}"
-    comparator = ">=" if direction == "max" else "<="
+    comparator = operator or (">=" if direction == "max" else "<=")
     value = int(threshold) if float(threshold).is_integer() else threshold
     suffix = " Da" if metric == "mw" else ""
     return f"{label} {comparator} {value}{suffix}"
@@ -63,7 +65,7 @@ def _iter_numeric_goal_matches(command: str) -> Iterable[tuple[str, str, float |
     command = html.unescape(command or "")
     metric_pattern = r"(QED|MW|LogP|cLogP|TPSA|SA\s*Score|SAScore|SA|分子量)"
     number_pattern = r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))"
-    operator_pattern = r"(<=|>=|<|>|≤|≥|不超过|低于|小于|高于|大于|至少|不低于)"
+    operator_pattern = r"(<=|>=|<|>|≤|≥|不超过|不高于|不大于|不低于|不少于|不小于|低于|小于|高于|大于|至少)"
 
     forward = re.compile(
         metric_pattern + r"\s*" + operator_pattern + r"\s*" + number_pattern,
@@ -73,10 +75,14 @@ def _iter_numeric_goal_matches(command: str) -> Iterable[tuple[str, str, float |
     for match in forward.finditer(command):
         raw_metric, operator, value = match.groups()
         normalized = operator.replace("≤", "<=").replace("≥", ">=")
-        if normalized in ("不超过", "低于", "小于"):
+        if normalized in ("不超过", "不高于", "不大于"):
             normalized = "<="
-        elif normalized in ("高于", "大于", "至少", "不低于"):
+        elif normalized in ("至少", "不低于", "不少于", "不小于"):
             normalized = ">="
+        elif normalized in ("低于", "小于"):
+            normalized = "<"
+        elif normalized in ("高于", "大于"):
+            normalized = ">"
         parsed = (match.span(), raw_metric, normalized, float(value))
         forward_matches.append(parsed)
         yield raw_metric, normalized, float(value)
@@ -124,7 +130,8 @@ def parse_optimization_goals(command: str = "") -> GoalSpec:
             suffix += 1
         goals[key] = {
             "metric": metric,
-            "label": _goal_label(metric, direction, threshold),
+            "label": _goal_label(metric, direction, threshold, operator if threshold is not None else None),
+            "operator": operator if threshold is not None else None,
             "direction": direction,
             "threshold": threshold,
             "source": "command",
@@ -140,6 +147,8 @@ def evaluate_goals(properties: Mapping[str, Any], goals: GoalSpec | None = None)
         raw_value = properties.get(metric)
         try:
             value = float(raw_value)
+            if not math.isfinite(value):
+                value = None
         except (TypeError, ValueError):
             value = None
 
@@ -147,10 +156,9 @@ def evaluate_goals(properties: Mapping[str, Any], goals: GoalSpec | None = None)
         evaluated = value is not None and threshold is not None
         passed = None
         if evaluated:
-            if goal.get("direction") == "max":
-                passed = value >= float(threshold)
-            else:
-                passed = value <= float(threshold)
+            operator = goal.get("operator") or (">=" if goal.get("direction") == "max" else "<=")
+            compare = {"<": comparisons.lt, "<=": comparisons.le, ">": comparisons.gt, ">=": comparisons.ge}[operator]
+            passed = compare(value, float(threshold))
 
         items.append(
             {

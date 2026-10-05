@@ -103,8 +103,11 @@ async def test_design_route_snapshots_current_model(tmp_path, monkeypatch):
     assert calls == ['A', 'B']
     assert len(resolutions) == 2
     assert previous.status_code == new.status_code == 200
-    assert 'A recommendation' in previous.text
-    assert 'B recommendation' in new.text
+    for response in (previous, new):
+        assert response.json()['recommendation_mode'] == 'local_rule'
+        assert response.json()['fallback_used'] is True
+        assert 'A recommendation' not in response.text
+        assert 'B recommendation' not in response.text
 
 
 @pytest.mark.anyio
@@ -191,7 +194,8 @@ async def test_application_constructs_once_and_switches_both_consumers(tmp_path,
         assert len(constructed) == 1
         payload = {'command': '降低 LogP', 'current_smiles': 'CCO'}
         first = await client.post('/api/design/ai_recommend', json=payload)
-        assert constructed[0].model_name + ' recommendation' in first.text
+        assert first.json()['recommendation_mode'] == 'local_rule'
+        assert first.json()['fallback_used'] is True
         response = await client.post('/api/llm/config', json={
             'provider': 'openai_compatible', 'model_name': 'B',
             'base_url': 'https://example.invalid/v1', 'api_key': '', 'stream': False,
@@ -201,7 +205,9 @@ async def test_application_constructs_once_and_switches_both_consumers(tmp_path,
         assert len(constructed) == 2
         assert application.chat_handler.model is constructed[1]
         assert application.molecular_generator_model is generator
-        assert 'B recommendation' in (await client.post('/api/design/ai_recommend', json=payload)).text
+        second = await client.post('/api/design/ai_recommend', json=payload)
+        assert second.json()['recommendation_mode'] == 'local_rule'
+        assert second.json()['fallback_used'] is True
 
         class Socket:
             def __init__(self):

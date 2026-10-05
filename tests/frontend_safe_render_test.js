@@ -469,12 +469,8 @@ assert(chatSinkFailures.length === 0, chatSinkFailures.join("\n"));
 
 const designMain = read("src/web/static/js/design/main.js");
 assert(
-  !designMain.includes('modeBadge + "<br>" + d.reply'),
-  "Design AI reply must not concatenate raw backend text into innerHTML",
-);
-assert(
-  designMain.includes("Safe.escapeHtml(d.reply"),
-  "Design AI reply must escape backend text with the shared helper",
+  !designMain.includes("d.reply") && !designMain.includes("aiReply"),
+  "Design UI must not render verbose model prose into the result surface",
 );
 
 const dockingUi = read("src/web/static/js/docking/ui_manager.js");

@@ -75,6 +75,25 @@ def test_lower_logp_does_not_create_contradictory_fragment_labels():
     assert labels == ["label_hydrophilic"]
 
 
+@pytest.mark.parametrize("command, expected", [
+    ("LogP &lt; 3", False), ("LogP &gt; 3", False),
+    ("LogP &lt;= 3", True), ("LogP &gt;= 3", True),
+    ("LogP 小于 3", False), ("LogP 大于 3", False),
+    ("LogP 不高于 3", True), ("LogP 不低于 3", True),
+])
+def test_goal_boundaries_preserve_comparison_operator(command, expected):
+    result = evaluate_goals({"logp": 3}, parse_optimization_goals(command))
+    assert len(result["items"]) == 1
+    assert result["items"][0]["passed"] is expected
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), None])
+def test_nonfinite_goals_are_unavailable(value):
+    item = evaluate_goals({"logp": value}, parse_optimization_goals("LogP < 3"))["items"][0]
+    assert item["available"] is False
+    assert item["passed"] is None
+
+
 def test_properties_expose_full_molecule_similarity_with_explicit_name():
     result = calculate_properties("CCO", reference_smiles="CCN")
     assert "morgan_similarity" in result["properties"]
@@ -109,6 +128,25 @@ def test_recommendation_mode_distinguishes_llm_from_local_rules():
     assert local_result["recommendation_mode"] == "local_rule"
 
 
+def test_invalid_llm_payload_uses_explicit_local_rule_fallback():
+    class InvalidModel:
+        def generate(self, prompt, **kwargs):
+            return "这是一段不能作为结构化片段依据的自然语言。"
+
+    result = asyncio.run(
+        recommend(
+            model=InvalidModel(),
+            command="降低 LogP",
+            current_smiles="c1ccccc1[*]",
+            current_props={},
+            recommended_fragments=[{"fragment_smiles": "[*]N", "source": "local_rule"}],
+        )
+    )
+    assert result["recommendation_mode"] == "local_rule"
+    assert result["fallback_used"] is True
+    assert "规则推荐模式" in result["reply"]
+
+
 def test_storage_uses_fixed_history_columns_and_rejects_invalid_smiles(tmp_path):
     storage = DesignStorage(tmp_path)
     filename, content = storage.export_history_csv(
@@ -130,3 +168,15 @@ def test_storage_uses_fixed_history_columns_and_rejects_invalid_smiles(tmp_path)
     ]
     with pytest.raises(ValueError, match="无效|SMILES"):
         storage.export_history_csv([{"step": 2, "smi": "not a smiles", "props": {}}])
+
+
+def test_storage_rejects_nonfinite_supplied_properties(tmp_path):
+    storage = DesignStorage(tmp_path)
+    with pytest.raises(ValueError, match="有限数值"):
+        storage.save_molecule("CCO", {"mw": float("nan")})
+
+
+def test_storage_rejects_properties_from_a_different_smiles(tmp_path):
+    storage = DesignStorage(tmp_path)
+    with pytest.raises(ValueError, match="不一致"):
+        storage.save_molecule("CCO", {"mw": 30.0})

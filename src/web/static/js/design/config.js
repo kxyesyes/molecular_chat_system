@@ -23,6 +23,8 @@ var DesignState = {
   propsTimer: null,
   propsRequestSeq: 0,
   pendingPropsSmiles: "",
+  propsSmiles: "",
+  mutationSeq: 0,
   ketcherReady: false,
 };
 
