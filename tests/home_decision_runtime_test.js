@@ -376,10 +376,10 @@ async function run() {
     assert(newer.sent.every(f => f.type === "ping"));
     h.ready("decision_a2"); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
   });
-  await test("active main script cache version points to Task8 implementation", () => {
+  await test("active main script cache version points to the current homepage implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20260925-decision-runtime-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261005-home-reference-controls-v1"]);
   });
   await test("strict candidate trace is socket-bound and receive is not mounted ACK", async () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);

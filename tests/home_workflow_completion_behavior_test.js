@@ -26,9 +26,9 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '<script src="/static/js/home/main.js?v=20260925-decision-runtime-v1"></script>'
+    '<script src="/static/js/home/main.js?v=20261005-home-reference-controls-v1"></script>'
   ),
-  "homepage must cache-bust the task terminal labels fix"
+  "homepage must cache-bust the current main script"
 );
 
 function extractFunction(functionName) {
