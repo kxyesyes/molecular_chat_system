@@ -7,6 +7,10 @@ var PropertiesPanel = (function () {
   var MISSING = "—";
 
   function clearPropsUI() {
+    S.curProps = null;
+    S.prevProps = null;
+    S.curGoals = null;
+    S.propsSmiles = "";
     ["pLogP", "pMW", "pQED", "pTPSA", "pSAS"].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
@@ -16,10 +20,6 @@ var PropertiesPanel = (function () {
     ["dLogP", "dMW", "dQED", "dTPSA", "dSAS"].forEach(function (id) {
       var el = document.getElementById(id);
       if (el) el.textContent = "";
-    });
-    ["bLogP", "bMW", "bQED", "bTPSA", "bSAS"].forEach(function (id) {
-      var bar = document.getElementById(id);
-      if (bar) { bar.style.width = "0%"; bar.className = "prop-bar"; }
     });
     var ro5 = document.getElementById("ro5Grid");
     if (ro5) ro5.innerHTML = ["MW ≤ 500", "LogP ≤ 5", "HBD ≤ 5", "HBA ≤ 10", "RotB ≤ 10", "TPSA ≤ 140"].map(function (label) {
@@ -41,7 +41,12 @@ var PropertiesPanel = (function () {
       if (token !== S.propsRequestSeq || smi !== S.smiles) return { stale: true };
       if (d.success) {
         S.prevProps = S.curProps;
-        S.curProps = d.properties || {};
+        S.curProps = Object.assign({}, d.properties || {});
+        var propertyStatus = d.property_status || {};
+        Object.keys(propertyStatus).forEach(function (key) {
+          if (propertyStatus[key] === "unavailable" || propertyStatus[key] === "failed") S.curProps[key] = null;
+        });
+        S.propsSmiles = smi;
         S.curGoals = d.goals || null;
         renderProps(S.curProps, S.prevProps);
         renderRo5(S.curProps);
@@ -52,6 +57,7 @@ var PropertiesPanel = (function () {
         if (caption) caption.textContent = "性质来自 RDKit；不可用项不会被填充为数值。";
       } else {
         S.curProps = null;
+        S.propsSmiles = "";
         clearPropsUI();
         UI.toast(d.error || "属性计算失败", "error");
       }
@@ -59,6 +65,7 @@ var PropertiesPanel = (function () {
     } catch (e) {
       if (token !== S.propsRequestSeq || smi !== S.smiles) return { stale: true };
       S.curProps = null;
+      S.propsSmiles = "";
       clearPropsUI();
       UI.toast("属性计算请求失败", "error");
       return { success: false, error: e.message };
@@ -66,13 +73,14 @@ var PropertiesPanel = (function () {
   }
 
   function numeric(value) {
+    if (value == null || typeof value === "boolean" || (typeof value === "string" && !value.trim())) return null;
     var n = Number(value);
     return Number.isFinite(n) ? n : null;
   }
 
   function renderProps(p, prev) {
     p = p || {};
-    function setP(vid, value, prevValue, bid, maxValue, warnValue, deltaId, lowerBetter) {
+    function setP(vid, value, prevValue, deltaId, warnValue, lowerBetter) {
       var el = document.getElementById(vid);
       var n = numeric(value);
       if (!el) return;
@@ -82,8 +90,6 @@ var PropertiesPanel = (function () {
         el.className = "ph";
         var missingDelta = document.getElementById(deltaId);
         if (missingDelta) missingDelta.textContent = "";
-        var missingBar = document.getElementById(bid);
-        if (missingBar) { missingBar.style.width = "0%"; missingBar.className = "prop-bar"; }
         return;
       }
       el.textContent = n.toFixed(2);
@@ -97,18 +103,12 @@ var PropertiesPanel = (function () {
       var delta = previous === null ? null : n - previous;
       var deltaEl = document.getElementById(deltaId);
       if (deltaEl) deltaEl.textContent = delta === null || Math.abs(delta) <= .001 ? "" : (delta >= 0 ? "+" : "") + delta.toFixed(2);
-      var bar = document.getElementById(bid);
-      if (bar) {
-        bar.style.width = Math.min(Math.max((n / maxValue) * 100, 0), 100) + "%";
-        bar.className = "prop-bar";
-        if (warnValue != null) bar.classList.add(lowerBetter ? (n <= warnValue ? "good" : n <= warnValue * 1.2 ? "warn" : "danger") : (n >= warnValue ? "good" : n >= warnValue * .6 ? "warn" : "danger"));
-      }
     }
-    setP("pLogP", p.logp, prev && prev.logp, "bLogP", 10, 5, "dLogP", true);
-    setP("pMW", p.mw, prev && prev.mw, "bMW", 600, 500, "dMW", true);
-    setP("pQED", p.qed, prev && prev.qed, "bQED", 1, .7, "dQED", false);
-    setP("pTPSA", p.tpsa, prev && prev.tpsa, "bTPSA", 200, 140, "dTPSA", true);
-    setP("pSAS", p.sa_score, prev && prev.sa_score, "bSAS", 10, 3.5, "dSAS", true);
+    setP("pLogP", p.logp, prev && prev.logp, "dLogP", 5, true);
+    setP("pMW", p.mw, prev && prev.mw, "dMW", 500, true);
+    setP("pQED", p.qed, prev && prev.qed, "dQED", .7, false);
+    setP("pTPSA", p.tpsa, prev && prev.tpsa, "dTPSA", 140, true);
+    setP("pSAS", p.sa_score, prev && prev.sa_score, "dSAS", 3.5, true);
   }
 
   function renderRo5(p) {
@@ -131,5 +131,5 @@ var PropertiesPanel = (function () {
     }).join("");
   }
 
-  return { clearPropsUI: clearPropsUI, calcProps: calcProps, renderProps: renderProps, renderRo5: renderRo5, renderGoals: renderGoals };
+  return { numeric: numeric, clearPropsUI: clearPropsUI, calcProps: calcProps, renderProps: renderProps, renderRo5: renderRo5, renderGoals: renderGoals };
 })();

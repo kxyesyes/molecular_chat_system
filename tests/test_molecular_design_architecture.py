@@ -87,7 +87,7 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertFalse(response.json()["success"])
         self.assertIn("连接点", response.json()["error"])
 
-    def test_ai_recommendation_escapes_model_html(self):
+    def test_ai_recommendation_returns_explicit_local_rule_payload_when_model_is_unavailable(self):
         response = self._client().post(
             "/api/design/ai_recommend",
             json={"command": "提高 QED", "current_smiles": "CCO", "current_props": {}},
@@ -96,7 +96,8 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertTrue(payload["success"])
-        self.assertIn("&lt;script&gt;", payload["reply"])
+        self.assertEqual(payload["recommendation_mode"], "local_rule")
+        self.assertTrue(payload["fallback_used"])
         self.assertNotIn("<script>", payload["reply"])
 
     def test_empty_ai_recommendation_command_returns_400(self):

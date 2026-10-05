@@ -250,11 +250,13 @@ async def recommend(
     if not response_failed:
         structured_fragments = parse_structured_fragments(reply_text)
 
+    used_local_rules = response_failed or not structured_fragments
     if response_failed:
         warning = "AI model response was unavailable, fallback enabled"
         reply_text = build_fallback_reply(command, current_smiles, current_props, recommended_fragments)
     elif not structured_fragments:
         warning = "AI model response did not contain valid fragment JSON; local fragments appended"
+        reply_text = build_fallback_reply(command, current_smiles, current_props, recommended_fragments)
 
     merged_fragments = _merge_recommendations(structured_fragments, recommended_fragments)
     recommendation_mode = "llm" if structured_fragments else "local_rule"
@@ -266,6 +268,6 @@ async def recommend(
         "structured_fragments": structured_fragments,
         "command": command,
         "warning": warning,
-        "fallback_used": response_failed,
-        "recommendation_mode": recommendation_mode,
+        "fallback_used": used_local_rules,
+        "recommendation_mode": "local_rule" if used_local_rules else "llm",
     }

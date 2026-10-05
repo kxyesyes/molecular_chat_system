@@ -13,11 +13,15 @@ assert.ok(template.includes('id="candidateCompare"'), "candidate result area mus
 assert.ok(!template.includes('class="props-panel"'), "the old persistent third property column must be removed");
 assert.ok(!template.includes("<footer>"), "the design workspace must not reserve a giant unrelated footer");
 assert.ok(!template.includes("综合评分") && !template.includes("Top 10"), "fixed candidate scoring must be removed");
+assert.ok(!template.includes("prop-bar-track") && !properties.includes("prop-bar"), "decorative property progress bars must be removed");
 assert.ok(css.includes("grid-template-columns: minmax(300px, 360px) minmax(0, 1fr)"), "workspace must use a compact two-column layout");
 
 assert.ok(main.includes("propsRequestSeq"), "property requests must be versioned");
 assert.ok(main.includes("pendingPropsSmiles"), "property requests must converge on the latest molecule");
+assert.ok(main.includes("propsSmiles !== smi"), "saving must require properties for the same SMILES");
+assert.ok(editor.includes("mutationSeq"), "substitution and clearing must invalidate obsolete mutations");
 assert.ok(properties.includes("—"), "unavailable properties must render as an em dash");
+assert.ok(properties.includes('propertyStatus[key] === "unavailable"'), "backend unavailable status must override numeric placeholders");
 assert.ok(!properties.includes("p.logp ?? 0"), "missing LogP must not be rendered as zero");
 assert.ok(!properties.includes("p.qed ?? 0"), "missing QED must not be rendered as zero");
 assert.ok(!editor.includes("candidateScore"), "candidate board must not use a fixed weighted score");

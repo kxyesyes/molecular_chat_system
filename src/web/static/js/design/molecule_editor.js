@@ -29,27 +29,23 @@ var MoleculeEditor = (function () {
   }
 
   function formatProp(value) {
-    if (value === undefined || value === null || value === "") return "—";
-    var n = Number(value);
-    return Number.isFinite(n) ? n.toFixed(2) : "—";
+    var n = PropertiesPanel.numeric(value);
+    return n === null ? "—" : n.toFixed(2);
   }
 
   function metricDelta(beforeProps, afterProps, key) {
-    var beforeValue = beforeProps ? Number(beforeProps[key]) : NaN;
-    var afterValue = afterProps ? Number(afterProps[key]) : NaN;
-    var hasDelta = Number.isFinite(beforeValue) && Number.isFinite(afterValue);
+    var beforeValue = PropertiesPanel.numeric(beforeProps && beforeProps[key]);
+    var afterValue = PropertiesPanel.numeric(afterProps && afterProps[key]);
+    var hasDelta = beforeValue !== null && afterValue !== null;
     return hasDelta ? afterValue - beforeValue : null;
   }
 
-  function renderDelta(label, beforeProps, afterProps, key, lowerBetter) {
-    var afterValue = afterProps ? Number(afterProps[key]) : NaN;
+  function renderDelta(label, beforeProps, afterProps, key) {
+    var afterValue = afterProps && afterProps[key];
     var delta = metricDelta(beforeProps, afterProps, key);
     var hasDelta = delta !== null;
-    var good = lowerBetter ? delta <= 0 : delta >= 0;
     return (
-      '<div class="candidate-metric ' +
-      (hasDelta ? (good ? "good" : "warn") : "") +
-      '">' +
+      '<div class="candidate-metric">' +
       '<span class="metric-label">' +
       label +
       "</span>" +
@@ -58,7 +54,7 @@ var MoleculeEditor = (function () {
       "</strong>" +
       (hasDelta
         ? '<span class="metric-delta">' + (delta >= 0 ? "+" : "") + delta.toFixed(2) + "</span>"
-        : '<span class="metric-delta">new</span>') +
+        : '<span class="metric-delta">—</span>') +
       "</div>"
     );
   }
@@ -101,10 +97,10 @@ var MoleculeEditor = (function () {
             UI.esc(c.smiles || "") +
             "</div>" +
             '<div class="candidate-metrics">' +
-            renderDelta("QED", c.beforeProps, c.props, "qed", false) +
-            renderDelta("LogP", c.beforeProps, c.props, "logp", true) +
-            renderDelta("MW", c.beforeProps, c.props, "mw", true) +
-            renderDelta("TPSA", c.beforeProps, c.props, "tpsa", true) +
+            renderDelta("QED", c.beforeProps, c.props, "qed") +
+            renderDelta("LogP", c.beforeProps, c.props, "logp") +
+            renderDelta("MW", c.beforeProps, c.props, "mw") +
+            renderDelta("TPSA", c.beforeProps, c.props, "tpsa") +
             "</div></div>"
           );
         })
@@ -133,6 +129,12 @@ var MoleculeEditor = (function () {
 
   async function restoreCandidate(smiles) {
     if (!smiles) return;
+    S.mutationSeq = (S.mutationSeq || 0) + 1;
+    S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
+    S.curProps = null;
+    S.prevProps = null;
+    S.curGoals = null;
+    S.propsSmiles = "";
     await setSMILES(smiles);
     S.smiles = smiles;
     document.getElementById("curSmiles").textContent = smiles;
@@ -159,10 +161,10 @@ var MoleculeEditor = (function () {
       UI.esc(smiles || "") +
       "</div>" +
       '<div class="candidate-metrics">' +
-      renderDelta("QED", beforeProps, afterProps, "qed", false) +
-      renderDelta("LogP", beforeProps, afterProps, "logp", true) +
-      renderDelta("MW", beforeProps, afterProps, "mw", true) +
-      renderDelta("TPSA", beforeProps, afterProps, "tpsa", true) +
+      renderDelta("QED", beforeProps, afterProps, "qed") +
+      renderDelta("LogP", beforeProps, afterProps, "logp") +
+      renderDelta("MW", beforeProps, afterProps, "mw") +
+      renderDelta("TPSA", beforeProps, afterProps, "tpsa") +
       "</div>";
   }
 
@@ -198,11 +200,18 @@ var MoleculeEditor = (function () {
       return;
     }
     var beforeProps = S.curProps ? Object.assign({}, S.curProps) : null;
+    // Capture the editor's current value before the request. The polling loop
+    // may not have observed a just-drawn molecule yet.
+    S.smiles = smi;
+    document.getElementById("curSmiles").textContent = smi;
+    var mutationToken = (S.mutationSeq || 0) + 1;
+    S.mutationSeq = mutationToken;
     var ov = document.getElementById("loadingOverlay");
     ov.style.display = "flex";
     try {
       var d = await Api.substitute(smi, S.selectedFrag.smi);
       if (d.success) {
+        if (mutationToken !== S.mutationSeq || S.smiles !== smi) return;
         S.smiles = d.new_smiles;
         document.getElementById("curSmiles").textContent = d.new_smiles;
         await setSMILES(d.new_smiles);
@@ -231,9 +240,14 @@ var MoleculeEditor = (function () {
   async function confirmImport() {
     var smi = document.getElementById("importInput").value.trim();
     if (smi) {
+      S.mutationSeq = (S.mutationSeq || 0) + 1;
+      S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
+      S.curProps = null;
+      S.prevProps = null;
+      S.curGoals = null;
+      S.propsSmiles = "";
       await setSMILES(smi);
       S.smiles = smi;
-      S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
       document.getElementById("curSmiles").textContent = smi;
       await PropertiesPanel.calcProps(smi, "", S.propsRequestSeq);
       UI.closeImport();
@@ -262,9 +276,16 @@ var MoleculeEditor = (function () {
 
   function clearCanvas() {
     setSMILES("");
+    S.mutationSeq = (S.mutationSeq || 0) + 1;
     S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
     S.pendingPropsSmiles = "";
     S.smiles = "";
+    S.propsSmiles = "";
+    S.curProps = null;
+    S.prevProps = null;
+    S.curGoals = null;
+    S.selectedFrag = null;
+    HistoryManager.clearHist();
     document.getElementById("curSmiles").textContent = "等待绘制...";
     PropertiesPanel.clearPropsUI();
     resetCandidateComparison();

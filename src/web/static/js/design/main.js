@@ -8,7 +8,6 @@
   var Editor = MoleculeEditor;
   var Props = PropertiesPanel;
   var Hist = HistoryManager;
-  var Safe = window.MedChatSafeRender;
   var SMILES_POLL_INTERVAL_MS = 2000;
   var PROPS_DEBOUNCE_MS = 350;
 
@@ -108,38 +107,27 @@
     }
 
     S.optimizationCommand = cmd;
-    var replyEl = document.getElementById("aiReply");
-    replyEl.style.display = "block";
-    replyEl.textContent = "思考中...";
+    var sourceEl = document.getElementById("aiSourceNote");
+    if (sourceEl) sourceEl.textContent = "分析中…";
     setFeedback("正在分析当前分子和片段库...", "info");
 
     try {
       var d = await Api.aiRecommend(cmd, S.smiles, S.curProps || {});
       if (d.success) {
-        var modeBadge = d.recommendation_mode === "llm"
-          ? "AI 推荐"
-          : "本地规则推荐";
-        replyEl.innerHTML = "<strong>" + modeBadge + "</strong><br>" + Safe.escapeHtml(d.reply || "");
-        if (d.fallback_used) {
-          setFeedback("AI 模型暂不可用，已切换为本地规则推荐。", "warn");
-        } else {
-          setFeedback("已生成推荐，并同步刷新左侧候选片段。", "success");
-        }
+        var modeBadge = d.recommendation_mode === "llm" ? "AI 推荐" : "本地规则推荐";
+        if (sourceEl) sourceEl.textContent = modeBadge;
+        setFeedback(d.fallback_used ? "未采用模型片段，已明确切换为本地规则推荐。" : "已生成模型推荐，并同步刷新候选片段。", d.fallback_used ? "warn" : "success");
         if (d.warning) UI.toast(d.warning, "info");
         if (d.recommended_fragments && d.recommended_fragments.length) {
           Frag.renderFragGrid(d.recommended_fragments);
         }
       } else {
-        replyEl.innerHTML =
-          "<strong>AI建议:</strong><br>" +
-          Safe.escapeHtml(d.error || "AI 推荐暂时不可用，请稍后重试。");
+        if (sourceEl) sourceEl.textContent = "不可用";
         setFeedback(d.error || "AI 推荐失败，请稍后重试。", "error");
         UI.toast(d.error || "AI 推荐失败", "error");
       }
     } catch (_) {
-      replyEl.innerHTML =
-        "<strong>AI建议:</strong><br>" +
-        Safe.escapeHtml("网络异常，请稍后重试。");
+      if (sourceEl) sourceEl.textContent = "不可用";
       setFeedback("网络异常，AI 推荐没有完成。", "error");
       UI.toast("网络错误", "error");
     }
@@ -153,6 +141,11 @@
     var smi = await Editor.getSMILES();
     if (!smi) {
       UI.toast("请先绘制分子", "error");
+      return;
+    }
+    if (S.propsSmiles !== smi || !S.curProps) {
+      setFeedback("当前分子的真实属性尚未完成，暂不保存，避免 SMILES 与属性错配。", "warn");
+      UI.toast("请等待当前分子属性计算完成", "warn");
       return;
     }
 

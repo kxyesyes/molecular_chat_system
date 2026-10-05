@@ -64,9 +64,8 @@
           </section>
 
           <section class="ai-bar">
-            <div class="section-heading"><div><div class="panel-kicker">OPTIONAL</div><h3>设计建议</h3></div><span class="source-note">AI / 本地规则</span></div>
+            <div class="section-heading"><div><div class="panel-kicker">OPTIONAL</div><h3>设计建议</h3></div><span class="source-note" id="aiSourceNote">未运行</span></div>
             <div class="ai-input-row"><input class="ai-input" id="aiInput" type="text" placeholder="例如：降低 LogP，提高 QED" onkeydown="if(event.key==='Enter')sendAI();" /><button class="ai-send-btn" id="aiSendBtn" onclick="sendAI()">生成建议</button></div>
-            <div id="aiReply" class="ai-reply" style="display:none"></div>
           </section>
           <div class="design-feedback" id="designFeedback" style="display:none"></div>
         </div>
@@ -81,11 +80,11 @@
           <section class="property-summary">
             <div class="section-heading"><div><div class="panel-kicker">CALCULATED BY RDKIT</div><h3>当前分子性质</h3></div><span class="source-note">不可用项显示 —</span></div>
             <div class="property-grid">
-              <div class="property-card"><span>LogP</span><strong id="pLogP">—</strong><small id="dLogP"></small><div class="prop-bar-track"><div class="prop-bar" id="bLogP"></div></div></div>
-              <div class="property-card"><span>MW</span><strong id="pMW">—</strong><small id="dMW"></small><div class="prop-bar-track"><div class="prop-bar" id="bMW"></div></div></div>
-              <div class="property-card"><span>QED</span><strong id="pQED">—</strong><small id="dQED"></small><div class="prop-bar-track"><div class="prop-bar" id="bQED"></div></div></div>
-              <div class="property-card"><span>TPSA</span><strong id="pTPSA">—</strong><small id="dTPSA"></small><div class="prop-bar-track"><div class="prop-bar" id="bTPSA"></div></div></div>
-              <div class="property-card"><span>SA Score</span><strong id="pSAS">—</strong><small id="dSAS"></small><div class="prop-bar-track"><div class="prop-bar" id="bSAS"></div></div></div>
+              <div class="property-card"><span>LogP</span><strong id="pLogP">—</strong><small id="dLogP"></small></div>
+              <div class="property-card"><span>MW</span><strong id="pMW">—</strong><small id="dMW"></small></div>
+              <div class="property-card"><span>QED</span><strong id="pQED">—</strong><small id="dQED"></small></div>
+              <div class="property-card"><span>TPSA</span><strong id="pTPSA">—</strong><small id="dTPSA"></small></div>
+              <div class="property-card"><span>SA Score</span><strong id="pSAS">—</strong><small id="dSAS"></small></div>
             </div>
           </section>
 
