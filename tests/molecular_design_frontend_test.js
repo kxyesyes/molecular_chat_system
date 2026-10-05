@@ -28,6 +28,7 @@ assert.ok(editor.includes("editorWriteQueue"), "editor writes must be serialized
 assert.ok(editor.includes("detectedSitesSmiles"), "site detection must be bound to the inspected SMILES");
 assert.ok(main.includes("requestToken !== S.propsRequestSeq"), "same-SMILES goal changes must invalidate in-flight property work");
 assert.ok(main.includes("if (S.pendingPropsSmiles)"), "obsolete property work must not clear a newer result");
+assert.ok(main.includes("releaseObsoleteOperationOverlay();"), "editor polling must release an obsolete operation overlay");
 assert.ok(uiManager.includes("function escText"), "HTML text must use text escaping");
 assert.ok(uiManager.includes("function escInlineJs"), "onclick arguments must use inline-JS escaping");
 assert.ok(properties.includes("—"), "unavailable properties must render as an em dash");

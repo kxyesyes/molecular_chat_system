@@ -34,6 +34,11 @@
       smi || "等待绘制分子...";
   }
 
+  function releaseObsoleteOperationOverlay() {
+    var overlay = document.getElementById("loadingOverlay");
+    if (overlay) overlay.style.display = "none";
+  }
+
   function schedulePropsCalculation(smi) {
     S.pendingPropsSmiles = smi;
     S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
@@ -74,6 +79,7 @@
       if (writeSeq !== (S.editorWriteSeq || 0)) return;
       if (smi !== S.smiles) {
         S.mutationSeq = (S.mutationSeq || 0) + 1;
+        releaseObsoleteOperationOverlay();
         S.smiles = smi;
         Editor.resetConnectionState();
         updateCurrentSmilesText(smi);
