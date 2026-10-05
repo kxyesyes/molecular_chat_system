@@ -48,6 +48,45 @@ test("candidate changes are neutral and missing values have no fabricated delta"
   assert.match(html, /\+20\.00/);
 });
 
+test("repeated candidate keeps one entry in generation order", () => {
+  const { E, S, elements } = setup();
+  S.iter = 1;
+  E.addCandidateComparison({ logp: 2 }, { logp: 1 }, "CCO", "first");
+  S.iter = 2;
+  E.addCandidateComparison({ logp: 2 }, { logp: 1 }, "CCO", "repeat");
+  assert.equal(S.candidates.length, 1);
+  assert.equal(S.candidates[0].step, 1);
+  assert.match(elements.get("candidateCompare").innerHTML, /#1/);
+});
+
+test("substitution requires a fresh single-site detection", async () => {
+  const { context, E, S, elements } = setup();
+  let calls = 0;
+  context.DesignApi.substitute = async () => { calls += 1; return { success: true, new_smiles: "CCO" }; };
+  context.DesignApi.calcProperties = async () => ({ success: false, error: "not expected" });
+  const frame = context.document.getElementById("ketcher-frame");
+  frame.contentWindow.ketcher.getSmiles = async () => "CC[*]";
+  S.smiles = "CC[*]";
+  S.selectedFrag = { smi: "[*]O", label: "O" };
+  S.detectedSiteCount = null;
+  await E.execSubstitute();
+  assert.equal(calls, 0);
+});
+
+test("property failure after substitution is not recorded as a successful candidate", async () => {
+  const { context, E, S, elements } = setup();
+  context.DesignApi.substitute = async () => ({ success: true, new_smiles: "CCO" });
+  context.DesignApi.calcProperties = async () => ({ success: false, error: "property tool unavailable" });
+  const frame = context.document.getElementById("ketcher-frame");
+  frame.contentWindow.ketcher.getSmiles = async () => "CC[*]";
+  S.smiles = "CC[*]";
+  S.selectedFrag = { smi: "[*]O", label: "O" };
+  S.detectedSiteCount = 1;
+  await E.execSubstitute();
+  assert.equal(S.candidates.length, 0);
+  assert.equal(S.history.length, 0);
+});
+
 test("old property success cannot overwrite a newer molecule", async () => {
   const { P, requests, S } = setup();
   S.smiles = "CC";
@@ -105,6 +144,7 @@ test("clearing while substitution runs never restores the obsolete product", asy
   context.document.getElementById("ketcher-frame").contentWindow.ketcher.getSmiles = async () => "CC*";
   S.smiles = "CC*";
   S.selectedFrag = { smi: "*O", label: "O" };
+  S.detectedSiteCount = 1;
   const pending = E.execSubstitute();
   for (let i = 0; i < 10 && !resolve; i++) await Promise.resolve();
   await E.clearCanvas();

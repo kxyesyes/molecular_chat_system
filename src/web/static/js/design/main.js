@@ -67,10 +67,14 @@
     if (document.hidden || S.propsPollInFlight) return;
 
     S.propsPollInFlight = true;
+    var writeSeq = S.editorWriteSeq || 0;
     try {
       var smi = await Editor.getSMILES();
+      if (S.editorWriteInFlight) return;
+      if (writeSeq !== (S.editorWriteSeq || 0)) return;
       if (smi !== S.smiles) {
         S.smiles = smi;
+        Editor.resetConnectionState();
         updateCurrentSmilesText(smi);
         schedulePropsCalculation(smi);
       }
@@ -99,44 +103,6 @@
     if (S.ketcherReady) syncSmilesFromEditor();
   });
 
-  async function sendAI() {
-    var cmd = document.getElementById("aiInput").value.trim();
-    if (!cmd) {
-      setFeedback("请输入优化指令，例如：提高QED、降低LogP、增加水溶性。", "warn");
-      return;
-    }
-
-    S.optimizationCommand = cmd;
-    var sourceEl = document.getElementById("aiSourceNote");
-    if (sourceEl) sourceEl.textContent = "分析中…";
-    setFeedback("正在分析当前分子和片段库...", "info");
-
-    try {
-      var d = await Api.aiRecommend(cmd, S.smiles, S.curProps || {});
-      if (d.success) {
-        var modeBadge = d.recommendation_mode === "llm" ? "AI 推荐" : "本地规则推荐";
-        if (sourceEl) sourceEl.textContent = modeBadge;
-        setFeedback(d.fallback_used ? "未采用模型片段，已明确切换为本地规则推荐。" : "已生成模型推荐，并同步刷新候选片段。", d.fallback_used ? "warn" : "success");
-        if (d.warning) UI.toast(d.warning, "info");
-        if (d.recommended_fragments && d.recommended_fragments.length) {
-          Frag.renderFragGrid(d.recommended_fragments);
-        }
-      } else {
-        if (sourceEl) sourceEl.textContent = "不可用";
-        setFeedback(d.error || "AI 推荐失败，请稍后重试。", "error");
-        UI.toast(d.error || "AI 推荐失败", "error");
-      }
-    } catch (_) {
-      if (sourceEl) sourceEl.textContent = "不可用";
-      setFeedback("网络异常，AI 推荐没有完成。", "error");
-      UI.toast("网络错误", "error");
-    }
-  }
-
-  function fillAI(btn) {
-    document.getElementById("aiInput").value = btn.textContent;
-  }
-
   async function saveMol() {
     var smi = await Editor.getSMILES();
     if (!smi) {
@@ -162,6 +128,18 @@
       setFeedback("网络异常，分子保存没有完成。", "error");
       UI.toast("网络错误", "error");
     }
+  }
+
+  function applyOptimizationCommand() {
+    var input = document.getElementById("optimizationInput");
+    var command = input ? input.value.trim() : "";
+    S.optimizationCommand = command;
+    if (!S.smiles) {
+      setFeedback(command ? "目标已保存；输入母体分子后将按该约束计算。" : "已清除优化目标。", "info");
+      return;
+    }
+    setFeedback(command ? "正在按明确目标重新计算当前分子。" : "已清除优化目标，正在重新计算当前分子。", "info");
+    schedulePropsCalculation(S.smiles);
   }
 
   async function exportAll() {
@@ -228,12 +206,11 @@
   window.detectSites = Editor.detectSites;
   window.execSubstitute = Editor.execSubstitute;
   window.restoreCandidate = Editor.restoreCandidate;
+  window.applyOptimizationCommand = applyOptimizationCommand;
 
   window.clearHist = Hist.clearHist;
   window.restoreHist = Hist.restoreHist;
 
-  window.sendAI = sendAI;
-  window.fillAI = fillAI;
   window.handleUpload = handleUpload;
   window.saveMol = saveMol;
   window.exportAll = exportAll;

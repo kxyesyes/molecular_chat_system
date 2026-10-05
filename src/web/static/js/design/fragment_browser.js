@@ -132,7 +132,13 @@ var FragmentBrowser = (function () {
       });
     el.classList.add("selected");
     S.selectedFrag = { smi: smi, label: label };
-    document.getElementById("subBtn").disabled = false;
+    var substituteButton = document.getElementById("subBtn");
+    if (substituteButton) {
+      substituteButton.disabled = S.detectedSiteCount !== 1;
+    }
+    if (S.detectedSiteCount !== 1) {
+      UI.setFeedback("请先识别连接点，并确保母体恰好包含一个可用的 [*] 单键连接点。", "warn");
+    }
     UI.toast("已选: " + label, "info");
   }
 

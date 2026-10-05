@@ -57,6 +57,17 @@ def test_optimization_parser_does_not_let_loose_match_overwrite_explicit_match()
     assert goals["qed"]["direction"] == "max"
 
 
+@pytest.mark.parametrize(
+    "command",
+    ["LogP < 3，提高 LogP", "提高 LogP，LogP < 3"],
+)
+def test_optimization_parser_keeps_one_explicit_constraint_per_metric(command):
+    goals = parse_optimization_goals(command)
+    assert list(goals) == ["logp"]
+    assert goals["logp"]["operator"] == "<"
+    assert goals["logp"]["threshold"] == 3
+
+
 def test_fragment_search_treats_user_text_as_literal(tmp_path):
     csv_path = tmp_path / "fragments.csv"
     pd.DataFrame(
@@ -72,6 +83,14 @@ def test_fragment_search_treats_user_text_as_literal(tmp_path):
 
 def test_lower_logp_does_not_create_contradictory_fragment_labels():
     labels = infer_label_filters("降低 LogP", ["label_lipophilic", "label_hydrophilic"])
+    assert labels == ["label_hydrophilic"]
+
+
+def test_lower_logp_takes_precedence_over_generic_lipophilic_wording():
+    labels = infer_label_filters(
+        "降低 LogP，同时避免亲脂片段",
+        ["label_lipophilic", "label_hydrophilic"],
+    )
     assert labels == ["label_hydrophilic"]
 
 

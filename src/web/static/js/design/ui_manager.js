@@ -75,7 +75,9 @@ var DesignUI = (function () {
 
   /* ── 转义单引号 (用于 onclick 属性) ── */
   function esc(s) {
-    return s.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+    var safe = typeof MedChatSafeRender !== "undefined" && MedChatSafeRender;
+    if (safe && safe.escapeInlineJsString) return safe.escapeInlineJsString(s);
+    return String(s || "").replace(/\\/g, "\\\\").replace(/'/g, "\\'");
   }
 
   return {

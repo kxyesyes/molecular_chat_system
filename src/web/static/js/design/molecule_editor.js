@@ -25,7 +25,28 @@ var MoleculeEditor = (function () {
 
   async function setSMILES(smi) {
     var k = getK();
-    if (k) await k.setMolecule(smi);
+    if (!k) return;
+    S.editorWriteSeq = (S.editorWriteSeq || 0) + 1;
+    S.editorWriteDepth = (S.editorWriteDepth || 0) + 1;
+    S.editorWriteInFlight = true;
+    try {
+      await k.setMolecule(smi);
+    } finally {
+      S.editorWriteDepth = Math.max(0, (S.editorWriteDepth || 1) - 1);
+      S.editorWriteInFlight = S.editorWriteDepth > 0;
+    }
+  }
+
+  function resetConnectionState() {
+    S.selectedFrag = null;
+    S.detectedSiteCount = null;
+    var substituteButton = document.getElementById("subBtn");
+    if (substituteButton) substituteButton.disabled = true;
+    if (document.querySelectorAll) {
+      document.querySelectorAll(".fragment-card.selected,.common-chip.selected").forEach(function (el) {
+        el.classList.remove("selected");
+      });
+    }
   }
 
   function formatProp(value) {
@@ -115,7 +136,13 @@ var MoleculeEditor = (function () {
       return candidate.smiles === smiles;
     });
     if (existingIndex >= 0) {
-      S.candidates.splice(existingIndex, 1);
+      // A repeated structure is not a new design result. Refresh its
+      // evidence in place so the list remains unique and generation-ordered.
+      S.candidates[existingIndex].beforeProps = beforeProps || {};
+      S.candidates[existingIndex].props = Object.assign({}, afterProps);
+      S.candidates[existingIndex].fragmentLabel = fragmentLabel;
+      renderCandidateBoard();
+      return;
     }
     S.candidates.push({
       step: S.iter,
@@ -129,6 +156,7 @@ var MoleculeEditor = (function () {
 
   async function restoreCandidate(smiles) {
     if (!smiles) return;
+    resetConnectionState();
     S.mutationSeq = (S.mutationSeq || 0) + 1;
     S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
     S.curProps = null;
@@ -147,27 +175,6 @@ var MoleculeEditor = (function () {
     renderCandidateBoard();
   }
 
-  function renderLegacyCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel) {
-    var box = document.getElementById("candidateCompare");
-    if (!box || !afterProps) return;
-    box.innerHTML =
-      '<div class="candidate-compare-head">' +
-      '<div><span class="mini-label">Latest candidate</span><strong>' +
-      UI.esc(fragmentLabel || "Selected fragment") +
-      "</strong></div>" +
-      '<button class="ghost-mini" onclick="copySmiles()">Copy SMILES</button>' +
-      "</div>" +
-      '<div class="candidate-smiles">' +
-      UI.esc(smiles || "") +
-      "</div>" +
-      '<div class="candidate-metrics">' +
-      renderDelta("QED", beforeProps, afterProps, "qed") +
-      renderDelta("LogP", beforeProps, afterProps, "logp") +
-      renderDelta("MW", beforeProps, afterProps, "mw") +
-      renderDelta("TPSA", beforeProps, afterProps, "tpsa") +
-      "</div>";
-  }
-
   /* ── 位点检测 ── */
   async function detectSites() {
     var smi = await getSMILES();
@@ -178,8 +185,11 @@ var MoleculeEditor = (function () {
       var d = await Api.detectSites(smi);
       if (d.success) {
         var n = d.sites.length;
+        S.detectedSiteCount = n;
         document.getElementById("siteText").textContent =
           n > 0 ? "检测到 " + n + " 个位点" : "请标记[*]";
+        var substituteButton = document.getElementById("subBtn");
+        if (substituteButton) substituteButton.disabled = n !== 1 || !S.selectedFrag;
         var ind = document.getElementById("siteInd");
         ind.style.opacity = "1";
         setTimeout(function () {
@@ -199,7 +209,11 @@ var MoleculeEditor = (function () {
       UI.setFeedback("请先绘制分子并选择一个片段。", "warn");
       return;
     }
-    var beforeProps = S.curProps ? Object.assign({}, S.curProps) : null;
+    if (S.detectedSiteCount !== 1) {
+      UI.setFeedback("请先识别连接点，并确保母体恰好包含一个可用的 [*] 单键连接点。", "warn");
+      return;
+    }
+    var beforeProps = S.propsSmiles === smi && S.curProps ? Object.assign({}, S.curProps) : null;
     // Capture the editor's current value before the request. The polling loop
     // may not have observed a just-drawn molecule yet.
     S.smiles = smi;
@@ -215,12 +229,18 @@ var MoleculeEditor = (function () {
         S.smiles = d.new_smiles;
         document.getElementById("curSmiles").textContent = d.new_smiles;
         await setSMILES(d.new_smiles);
+        var propertyResult = await PropertiesPanel.calcProps(d.new_smiles, smi);
+        if (!propertyResult || propertyResult.success !== true || propertyResult.stale || !S.curProps || S.propsSmiles !== d.new_smiles) {
+          resetConnectionState();
+          UI.setFeedback("结构取代已完成，但属性计算失败；该候选未加入历史，请检查计算工具后重试。", "warn");
+          return;
+        }
         S.iter++;
         var iterEl = document.getElementById("iterCount");
         if (iterEl) iterEl.textContent = S.iter;
-        await PropertiesPanel.calcProps(d.new_smiles, smi);
         HistoryManager.addHist(d.new_smiles, S.curProps);
         renderCandidateComparison(beforeProps, S.curProps, d.new_smiles, S.selectedFrag.label);
+        resetConnectionState();
         UI.setFeedback("取代完成，候选分子的属性变化已更新。", "success");
         UI.toast("取代成功", "success");
       } else {
@@ -240,6 +260,7 @@ var MoleculeEditor = (function () {
   async function confirmImport() {
     var smi = document.getElementById("importInput").value.trim();
     if (smi) {
+      resetConnectionState();
       S.mutationSeq = (S.mutationSeq || 0) + 1;
       S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
       S.curProps = null;
@@ -274,8 +295,7 @@ var MoleculeEditor = (function () {
     }
   }
 
-  function clearCanvas() {
-    setSMILES("");
+  async function clearCanvas() {
     S.mutationSeq = (S.mutationSeq || 0) + 1;
     S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
     S.pendingPropsSmiles = "";
@@ -284,7 +304,8 @@ var MoleculeEditor = (function () {
     S.curProps = null;
     S.prevProps = null;
     S.curGoals = null;
-    S.selectedFrag = null;
+    resetConnectionState();
+    await setSMILES("");
     HistoryManager.clearHist();
     document.getElementById("curSmiles").textContent = "等待绘制...";
     PropertiesPanel.clearPropsUI();
@@ -296,6 +317,7 @@ var MoleculeEditor = (function () {
     getK: getK,
     getSMILES: getSMILES,
     setSMILES: setSMILES,
+    resetConnectionState: resetConnectionState,
     addCandidateComparison: addCandidateComparison,
     renderCandidateComparison: renderCandidateComparison,
     restoreCandidate: restoreCandidate,

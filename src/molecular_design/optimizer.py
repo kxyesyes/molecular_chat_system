@@ -122,13 +122,14 @@ def parse_optimization_goals(command: str = "") -> GoalSpec:
         metric = _canonical_metric(raw_metric)
         if not metric:
             continue
+        # Keep one goal per metric. Numeric constraints are yielded before
+        # direction-only phrases, so an explicit bound always wins over a
+        # later phrase such as “提高 LogP”. This prevents a repeated metric
+        # from silently becoming a second, contradictory target.
+        if metric in goals:
+            continue
         direction = operator if threshold is None else _direction_from_operator(operator)
-        key = metric
-        suffix = 2
-        while key in goals:
-            key = f"{metric}#{suffix}"
-            suffix += 1
-        goals[key] = {
+        goals[metric] = {
             "metric": metric,
             "label": _goal_label(metric, direction, threshold, operator if threshold is not None else None),
             "operator": operator if threshold is not None else None,
