@@ -743,6 +743,7 @@ class MolecularChatApp:
             await self._refresh_llm_config_from_env()
             model_key = str(payload.get("model") or "").strip()
             model_map = {
+                "deepseek": "deepseek-v4-pro",
                 "glm4": "ZhipuAI/GLM-5.1", "glm5.1": "ZhipuAI/GLM-5.1",
                 "qwen3": "Qwen/Qwen3-235B-A22B-Instruct-2507", "gmm-llama": "gmm-llama:latest",
             }

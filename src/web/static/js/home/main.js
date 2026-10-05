@@ -340,6 +340,9 @@
     // 绑定事件
     bindEvents();
 
+    // 顶部模型选择器必须反映实际生效的用户配置，而不是模板中的旧默认值。
+    void syncModelSelector();
+
     // 初始化UI状态
     updateToggleStates();
 
@@ -742,6 +745,39 @@
   }
 
   // 绑定事件处理器
+  async function syncModelSelector() {
+    if (!elements.modelSelect) return;
+    try {
+      const response = await fetch("/api/llm/config");
+      const result = await response.json();
+      if (!response.ok || result.success !== true) return;
+      const config = result.config || {};
+      const provider = String(config.provider || "").toLowerCase();
+      const model = String(config.model_name || "").trim();
+      const baseUrl = String(config.base_url || "").toLowerCase();
+      const key = /deepseek/i.test(model) || baseUrl.includes("api.deepseek.com")
+        ? "deepseek"
+        : provider === "modelscope" && /qwen/i.test(model) ? "qwen3"
+          : provider === "modelscope" && /glm/i.test(model) ? "glm4" : "";
+      if (key) {
+        elements.modelSelect.value = key;
+        return;
+      }
+      if (!model) return;
+      let currentOption = Array.from(elements.modelSelect.options || [])
+        .find(option => option.value === "active");
+      if (!currentOption) {
+        currentOption = document.createElement("option");
+        currentOption.value = "active";
+        elements.modelSelect.appendChild(currentOption);
+      }
+      currentOption.textContent = model;
+      elements.modelSelect.value = "active";
+    } catch (error) {
+      console.warn("无法同步顶部模型显示", error);
+    }
+  }
+
   function bindEvents() {
     console.log("🔗 绑定事件处理器");
 
@@ -1310,6 +1346,7 @@
   // 获取模型显示名称
   function getModelDisplayName(modelKey) {
     const modelNames = {
+      deepseek: "DeepSeek (官方)",
       glm4: "GLM-4.6 (魔搭社区)",
       qwen3: "Qwen3-235B (魔搭社区)",
     };
