@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
@@ -33,15 +34,17 @@ LEGACY_TAG_TO_LABEL = {
     "bioisostere": "label_bioisostere",
 }
 
-COMMAND_KEYWORD_LABELS = {
-    ("脂溶", "亲脂", "logp", "lipo"): "label_lipophilic",
-    ("水溶", "亲水", "极性", "tpsa", "降低logp"): "label_hydrophilic",
-    ("碱性", "胺", "amine"): "label_basic",
-    ("酸性", "羧酸", "cooh"): "label_acidic",
-    ("芳香", "aromatic", "苯环"): "label_has_aromatic_ring",
-    ("卤素", "halogen", "氟", "氯"): "label_has_halogen",
-    ("杂环", "heterocycle"): "label_has_heterocycle",
-}
+COMMAND_KEYWORD_LABELS = (
+    (("降低logp", "reducelogp", "logp下降"), "label_hydrophilic"),
+    (("提高logp", "increaselogp", "logp上升"), "label_lipophilic"),
+    (("脂溶", "亲脂", "lipo"), "label_lipophilic"),
+    (("水溶", "亲水", "极性"), "label_hydrophilic"),
+    (("碱性", "胺", "amine"), "label_basic"),
+    (("酸性", "羧酸", "cooh"), "label_acidic"),
+    (("芳香", "aromatic", "苯环"), "label_has_aromatic_ring"),
+    (("卤素", "halogen", "氟", "氯"), "label_has_halogen"),
+    (("杂环", "heterocycle"), "label_has_heterocycle"),
+)
 
 
 def _json_safe(value: Any) -> Any:
@@ -71,9 +74,9 @@ def parse_legacy_tags(tags: str, available_columns: Iterable[str]) -> List[str]:
 
 def infer_label_filters(command: str, available_columns: Iterable[str]) -> List[str]:
     available = set(available_columns)
-    command_lower = (command or "").lower()
+    command_lower = re.sub(r"\s+", "", command or "").lower()
     labels: List[str] = []
-    for keywords, label in COMMAND_KEYWORD_LABELS.items():
+    for keywords, label in COMMAND_KEYWORD_LABELS:
         if label in available and any(keyword in command_lower for keyword in keywords):
             labels.append(label)
     return labels
@@ -117,7 +120,11 @@ class FragmentRepository:
 
         effective_search = search or q
         if effective_search and "fragment_smiles" in df.columns:
-            df = df[df["fragment_smiles"].str.contains(effective_search, case=False, na=False)]
+            df = df[
+                df["fragment_smiles"].astype("string").str.contains(
+                    effective_search, case=False, na=False, regex=False
+                )
+            ]
 
         for label in parse_legacy_tags(tags, df.columns):
             df = df[df[label] == 1]
@@ -151,4 +158,9 @@ class FragmentRepository:
 
         if "frequency" in sub.columns:
             sub = sub.sort_values("frequency", ascending=False)
-        return [_row_to_dict(row) for _, row in sub.head(limit).iterrows()]
+        results = []
+        for _, row in sub.head(limit).iterrows():
+            item = _row_to_dict(row)
+            item["source"] = "local_rule"
+            results.append(item)
+        return results

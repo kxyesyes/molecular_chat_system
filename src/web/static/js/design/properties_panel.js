@@ -1,266 +1,135 @@
-/* ═══════════════════════════════════════════════════════════
-   分子设计模块 – 属性面板
-   calcProps / renderProps / Ro5 / Goals / Advice / clearUI
-   ═══════════════════════════════════════════════════════════ */
 "use strict";
 
 var PropertiesPanel = (function () {
   var S = DesignState;
   var Api = DesignApi;
   var UI = DesignUI;
+  var MISSING = "—";
 
-  /* ── 清空属性 UI ── */
   function clearPropsUI() {
     ["pLogP", "pMW", "pQED", "pTPSA", "pSAS"].forEach(function (id) {
       var el = document.getElementById(id);
-      el.textContent = "-";
-      el.classList.add("ph");
+      if (!el) return;
+      el.textContent = MISSING;
+      el.className = "ph";
     });
     ["dLogP", "dMW", "dQED", "dTPSA", "dSAS"].forEach(function (id) {
-      document.getElementById(id).style.display = "none";
+      var el = document.getElementById(id);
+      if (el) el.textContent = "";
     });
     ["bLogP", "bMW", "bQED", "bTPSA", "bSAS"].forEach(function (id) {
-      var b = document.getElementById(id);
-      b.style.width = "0%";
-      b.classList.remove("good", "warn", "danger");
+      var bar = document.getElementById(id);
+      if (bar) { bar.style.width = "0%"; bar.className = "prop-bar"; }
     });
-    document.getElementById("ro5Grid").innerHTML =
-      '<div class="ro5-item"><div class="ro5-dot"></div>MW ≤ 500</div>' +
-      '<div class="ro5-item"><div class="ro5-dot"></div>LogP ≤ 5</div>' +
-      '<div class="ro5-item"><div class="ro5-dot"></div>HBD ≤ 5</div>' +
-      '<div class="ro5-item"><div class="ro5-dot"></div>HBA ≤ 10</div>' +
-      '<div class="ro5-item"><div class="ro5-dot"></div>RotB ≤ 10</div>' +
-      '<div class="ro5-item"><div class="ro5-dot"></div>TPSA ≤ 140</div>';
-    document.getElementById("goalList").innerHTML =
-      '<div class="goal-item"><span>QED ≥ 0.7</span> <span class="goal-status pend">待计算</span></div>' +
-      '<div class="goal-item"><span>MW ≤ 500 Da</span> <span class="goal-status pend">待计算</span></div>' +
-      '<div class="goal-item"><span>LogP ≤ 5</span> <span class="goal-status pend">待计算</span></div>' +
-      '<div class="goal-item"><span>SA Score ≤ 3.5</span> <span class="goal-status pend">待计算</span></div>';
-    var adviceEl = document.getElementById("aiAdvice");
-    if (adviceEl) {
-      adviceEl.textContent = "绘制分子后，系统将自动给出优化建议...";
-    }
+    var ro5 = document.getElementById("ro5Grid");
+    if (ro5) ro5.innerHTML = ["MW ≤ 500", "LogP ≤ 5", "HBD ≤ 5", "HBA ≤ 10", "RotB ≤ 10", "TPSA ≤ 140"].map(function (label) {
+      return '<div class="ro5-item"><span class="ro5-dot"></span>' + label + ' · ' + MISSING + '</div>';
+    }).join("");
+    var goals = document.getElementById("goalList");
+    if (goals) goals.innerHTML = '<div class="empty-inline">未指定优化目标</div>';
   }
 
-  /* ── 计算属性 ── */
-  async function calcProps(smi, referenceSmiles) {
-    if (!smi) return;
+  async function calcProps(smi, referenceSmiles, requestToken) {
+    if (!smi) return { stale: true };
+    var token = requestToken == null ? ++S.propsRequestSeq : requestToken;
     try {
       var d = await Api.calcProperties(smi, {
         command: S.optimizationCommand || "",
         reference_smiles: referenceSmiles || "",
       });
+      // A late response is data for an old molecule, never for the current UI.
+      if (token !== S.propsRequestSeq || smi !== S.smiles) return { stale: true };
       if (d.success) {
         S.prevProps = S.curProps;
-        S.curProps = d.properties;
-        S.curGoals = d.goals;
-        renderProps(d.properties, S.prevProps);
-        renderRo5(d.properties);
-        renderGoals(d.goals || d.properties);
-        renderAdvice(d.properties);
+        S.curProps = d.properties || {};
+        S.curGoals = d.goals || null;
+        renderProps(S.curProps, S.prevProps);
+        renderRo5(S.curProps);
+        renderGoals(d.goals || {});
+        var status = document.getElementById("designStatus");
+        if (status) status.textContent = "已计算";
+        var caption = document.getElementById("resultCaption");
+        if (caption) caption.textContent = "性质来自 RDKit；不可用项不会被填充为数值。";
       } else {
         S.curProps = null;
         clearPropsUI();
         UI.toast(d.error || "属性计算失败", "error");
       }
+      return d;
     } catch (e) {
-      console.error("calcProps error:", e);
+      if (token !== S.propsRequestSeq || smi !== S.smiles) return { stale: true };
       S.curProps = null;
       clearPropsUI();
       UI.toast("属性计算请求失败", "error");
+      return { success: false, error: e.message };
     }
   }
 
-  /* ── 渲染属性值、delta 箭头、进度条 ── */
-  function renderProps(p, prev) {
-    function asNumber(value) {
-      var n = Number(value);
-      return Number.isFinite(n) ? n : null;
-    }
+  function numeric(value) {
+    var n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
 
-    function setP(
-      vid,
-      val,
-      unit,
-      prevV,
-      bid,
-      maxV,
-      warnV,
-      deltaId,
-      lowerBetter,
-    ) {
+  function renderProps(p, prev) {
+    p = p || {};
+    function setP(vid, value, prevValue, bid, maxValue, warnValue, deltaId, lowerBetter) {
       var el = document.getElementById(vid);
-      val = asNumber(val);
-      if (val === null) {
-        el.textContent = "-";
-        el.classList.add("ph");
+      var n = numeric(value);
+      if (!el) return;
+      el.className = "";
+      if (n === null) {
+        el.textContent = MISSING;
+        el.className = "ph";
         var missingDelta = document.getElementById(deltaId);
-        if (missingDelta) missingDelta.style.display = "none";
+        if (missingDelta) missingDelta.textContent = "";
         var missingBar = document.getElementById(bid);
-        if (missingBar) {
-          missingBar.style.width = "0%";
-          missingBar.classList.remove("good", "warn", "danger");
-        }
+        if (missingBar) { missingBar.style.width = "0%"; missingBar.className = "prop-bar"; }
         return;
       }
-      el.textContent = val.toFixed(2) + unit;
-      el.classList.remove("ph", "warn", "danger");
-      // 数值颜色
-      if (warnV != null) {
-        if (lowerBetter) {
-          if (val > warnV * 1.2) el.classList.add("danger");
-          else if (val > warnV) el.classList.add("warn");
-        } else {
-          if (val < warnV * 0.6) el.classList.add("danger");
-          else if (val < warnV) el.classList.add("warn");
-        }
+      el.textContent = n.toFixed(2);
+      if (warnValue != null) {
+        if (lowerBetter && n > warnValue * 1.2) el.className = "danger";
+        else if (lowerBetter && n > warnValue) el.className = "warn";
+        else if (!lowerBetter && n < warnValue * .6) el.className = "danger";
+        else if (!lowerBetter && n < warnValue) el.className = "warn";
       }
-      // delta 箭头
-      var del = document.getElementById(deltaId);
-      if (prev && prevV !== undefined) {
-        var d = val - prevV;
-        if (Math.abs(d) > 0.001) {
-          del.textContent = (d > 0 ? "↑" : "↓") + Math.abs(d).toFixed(2);
-          del.className = "prop-delta " + (d > 0 ? "up" : "down");
-          del.style.display = "";
-        } else {
-          del.style.display = "none";
-        }
-      }
-      // 进度条
+      var previous = numeric(prevValue);
+      var delta = previous === null ? null : n - previous;
+      var deltaEl = document.getElementById(deltaId);
+      if (deltaEl) deltaEl.textContent = delta === null || Math.abs(delta) <= .001 ? "" : (delta >= 0 ? "+" : "") + delta.toFixed(2);
       var bar = document.getElementById(bid);
       if (bar) {
-        bar.style.width = Math.min((val / maxV) * 100, 100) + "%";
-        bar.classList.remove("good", "warn", "danger");
-        if (warnV != null) {
-          if (lowerBetter) {
-            bar.classList.add(
-              val <= warnV ? "good" : val <= warnV * 1.2 ? "warn" : "danger",
-            );
-          } else {
-            bar.classList.add(
-              val >= warnV ? "good" : val >= warnV * 0.6 ? "warn" : "danger",
-            );
-          }
-        } else {
-          bar.classList.add("good");
-        }
+        bar.style.width = Math.min(Math.max((n / maxValue) * 100, 0), 100) + "%";
+        bar.className = "prop-bar";
+        if (warnValue != null) bar.classList.add(lowerBetter ? (n <= warnValue ? "good" : n <= warnValue * 1.2 ? "warn" : "danger") : (n >= warnValue ? "good" : n >= warnValue * .6 ? "warn" : "danger"));
       }
     }
-    setP("pLogP", p.logp ?? 0, "", prev?.logp, "bLogP", 10, 5, "dLogP", true);
-    setP("pMW", p.mw ?? 0, "", prev?.mw, "bMW", 600, 500, "dMW", true);
-    setP("pQED", p.qed ?? 0, "", prev?.qed, "bQED", 1, 0.7, "dQED", false);
-    setP(
-      "pTPSA",
-      p.tpsa ?? 0,
-      "",
-      prev?.tpsa,
-      "bTPSA",
-      200,
-      140,
-      "dTPSA",
-      true,
-    );
-    if (p.sa_score !== undefined && p.sa_score !== null) {
-      setP(
-        "pSAS",
-        p.sa_score,
-        "",
-        prev?.sa_score,
-        "bSAS",
-        10,
-        3.5,
-        "dSAS",
-        true,
-      );
-    } else {
-      setP("pSAS", null, "", null, "bSAS", 10, 3.5, "dSAS", true);
-    }
+    setP("pLogP", p.logp, prev && prev.logp, "bLogP", 10, 5, "dLogP", true);
+    setP("pMW", p.mw, prev && prev.mw, "bMW", 600, 500, "dMW", true);
+    setP("pQED", p.qed, prev && prev.qed, "bQED", 1, .7, "dQED", false);
+    setP("pTPSA", p.tpsa, prev && prev.tpsa, "bTPSA", 200, 140, "dTPSA", true);
+    setP("pSAS", p.sa_score, prev && prev.sa_score, "bSAS", 10, 3.5, "dSAS", true);
   }
 
-  /* ── Lipinski Ro5 ── */
   function renderRo5(p) {
-    var rules = [
-      { l: "MW ≤ 500", p: (p.mw ?? 999) <= 500 },
-      { l: "LogP ≤ 5", p: (p.logp ?? 99) <= 5 },
-      { l: "HBD ≤ 5", p: (p.hbd ?? 99) <= 5 },
-      { l: "HBA ≤ 10", p: (p.hba ?? 99) <= 10 },
-      { l: "RotB ≤ 10", p: (p.rotbonds ?? 99) <= 10 },
-      { l: "TPSA ≤ 140", p: (p.tpsa ?? 999) <= 140 },
-    ];
-    document.getElementById("ro5Grid").innerHTML = rules
-      .map(function (r) {
-        return (
-          '<div class="ro5-item"><div class="ro5-dot ' +
-          (r.p ? "pass" : "fail") +
-          '"></div>' +
-          r.l +
-          "</div>"
-        );
-      })
-      .join("");
+    p = p || {};
+    var rules = [{ l: "MW ≤ 500", v: p.mw, ok: function (v) { return v <= 500; } }, { l: "LogP ≤ 5", v: p.logp, ok: function (v) { return v <= 5; } }, { l: "HBD ≤ 5", v: p.hbd, ok: function (v) { return v <= 5; } }, { l: "HBA ≤ 10", v: p.hba, ok: function (v) { return v <= 10; } }, { l: "RotB ≤ 10", v: p.rotbonds, ok: function (v) { return v <= 10; } }, { l: "TPSA ≤ 140", v: p.tpsa, ok: function (v) { return v <= 140; } }];
+    var el = document.getElementById("ro5Grid");
+    if (!el) return;
+    el.innerHTML = rules.map(function (r) { var n = numeric(r.v); return '<div class="ro5-item"><span class="ro5-dot ' + (n === null ? "" : r.ok(n) ? "pass" : "fail") + '"></span>' + r.l + ' · ' + (n === null ? MISSING : (r.ok(n) ? "通过" : "超限")) + '</div>'; }).join("");
   }
 
-  /* ── 优化目标 ── */
-  function renderGoals(goalResultOrProps) {
-    var goals;
-    if (goalResultOrProps && Array.isArray(goalResultOrProps.items)) {
-      goals = goalResultOrProps.items.map(function (item) {
-        return {
-          l: item.label || item.metric,
-          p: !!item.passed,
-          available: item.available !== false,
-        };
-      });
-    } else {
-      var p = goalResultOrProps || {};
-      goals = [
-        { l: "QED ≥ 0.7", p: (p.qed ?? 0) >= 0.7, available: p.qed != null },
-        { l: "MW ≤ 500 Da", p: (p.mw ?? 999) <= 500, available: p.mw != null },
-        { l: "LogP ≤ 5", p: (p.logp ?? 99) <= 5, available: p.logp != null },
-        {
-          l: "SA Score ≤ 3.5",
-          p: (p.sa_score ?? 99) <= 3.5,
-          available: p.sa_score != null,
-        },
-      ];
-    }
-    document.getElementById("goalList").innerHTML = goals
-      .map(function (g) {
-        var status = !g.available ? "pend" : g.p ? "pass" : "fail";
-        var text = !g.available ? "待计算" : g.p ? "达成" : "未达成";
-        return (
-          '<div class="goal-item"><span>' +
-          g.l +
-          '</span> <span class="goal-status ' +
-          status +
-          '">' +
-          text +
-          "</span></div>"
-        );
-      })
-      .join("");
+  function renderGoals(result) {
+    var el = document.getElementById("goalList");
+    if (!el) return;
+    var items = result && Array.isArray(result.items) ? result.items : [];
+    if (!items.length) { el.innerHTML = '<div class="empty-inline">未指定优化目标</div>'; return; }
+    el.innerHTML = items.map(function (item) {
+      var status = item.passed === true ? "pass" : item.passed === false ? "fail" : "pend";
+      var text = item.passed === true ? "达成" : item.passed === false ? "未达成" : "待比较";
+      return '<div class="goal-item"><span>' + item.label + '</span><span class="goal-status ' + status + '">' + text + '</span></div>';
+    }).join("");
   }
 
-  /* ── AI 建议 ── */
-  function renderAdvice(p) {
-    var issues = [];
-    if ((p.mw ?? 0) > 500) issues.push("分子量偏大");
-    if ((p.logp ?? 0) > 5) issues.push("LogP过高");
-    if ((p.qed ?? 0) < 0.5) issues.push("QED偏低");
-    var adviceEl = document.getElementById("aiAdvice");
-    if (adviceEl) {
-      adviceEl.innerHTML =
-        issues.length === 0 ? "✅ 属性良好" : "⚠️ 建议：" + issues.join(", ");
-    }
-  }
-
-  return {
-    clearPropsUI: clearPropsUI,
-    calcProps: calcProps,
-    renderProps: renderProps,
-    renderRo5: renderRo5,
-    renderGoals: renderGoals,
-    renderAdvice: renderAdvice,
-  };
+  return { clearPropsUI: clearPropsUI, calcProps: calcProps, renderProps: renderProps, renderRo5: renderRo5, renderGoals: renderGoals };
 })();

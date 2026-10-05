@@ -21,6 +21,8 @@ var DesignState = {
   curProps: null,
   curGoals: null,
   propsTimer: null,
+  propsRequestSeq: 0,
+  pendingPropsSmiles: "",
   ketcherReady: false,
 };
 

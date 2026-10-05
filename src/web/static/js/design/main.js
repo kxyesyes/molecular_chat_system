@@ -37,6 +37,7 @@
 
   function schedulePropsCalculation(smi) {
     S.pendingPropsSmiles = smi;
+    S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
     if (S.propsDebounceTimer) clearTimeout(S.propsDebounceTimer);
     S.propsDebounceTimer = setTimeout(runLatestPropsCalculation, PROPS_DEBOUNCE_MS);
   }
@@ -52,8 +53,9 @@
     }
 
     S.propsCalcInFlight = true;
+    var requestToken = S.propsRequestSeq;
     try {
-      await Props.calcProps(requestedSmiles);
+      await Props.calcProps(requestedSmiles, "", requestToken);
     } finally {
       S.propsCalcInFlight = false;
       if (S.pendingPropsSmiles !== requestedSmiles) {
@@ -112,12 +114,12 @@
     setFeedback("正在分析当前分子和片段库...", "info");
 
     try {
-      var d = await Api.aiRecommend(cmd, S.smiles, S.curProps);
+      var d = await Api.aiRecommend(cmd, S.smiles, S.curProps || {});
       if (d.success) {
-        var modeBadge = d.fallback_used
-          ? '<span class="ai-status fallback">规则推荐</span>'
-          : '<span class="ai-status">AI 推荐</span>';
-        replyEl.innerHTML = modeBadge + "<br>" + Safe.escapeHtml(d.reply || "");
+        var modeBadge = d.recommendation_mode === "llm"
+          ? "AI 推荐"
+          : "本地规则推荐";
+        replyEl.innerHTML = "<strong>" + modeBadge + "</strong><br>" + Safe.escapeHtml(d.reply || "");
         if (d.fallback_used) {
           setFeedback("AI 模型暂不可用，已切换为本地规则推荐。", "warn");
         } else {
@@ -141,11 +143,6 @@
       setFeedback("网络异常，AI 推荐没有完成。", "error");
       UI.toast("网络错误", "error");
     }
-  }
-
-  function aiQuickRec() {
-    document.getElementById("aiInput").value = "优化QED";
-    sendAI();
   }
 
   function fillAI(btn) {
@@ -203,11 +200,31 @@
     }
   }
 
+  function handleUpload(event) {
+    var file = event && event.target && event.target.files && event.target.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var text = String(reader.result || "").trim();
+      var lines = text.split(/\r?\n/).map(function (line) { return line.trim(); }).filter(Boolean);
+      var smiles = lines[0] || "";
+      if (lines.length > 1 && /^\s*(name\s*,\s*)?smiles\s*$/i.test(lines[0])) smiles = lines[1].split(",").pop().trim();
+      if (!smiles) { UI.toast("文件中没有找到 SMILES", "error"); return; }
+      Editor.setSMILES(smiles).then(function () {
+        S.smiles = smiles;
+        updateCurrentSmilesText(smiles);
+        schedulePropsCalculation(smiles);
+        UI.toast("已导入分子", "success");
+      }).catch(function () { UI.toast("文件中的 SMILES 无法载入", "error"); });
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  }
+
   window.onSearch = Frag.onSearch;
   window.toggleFilter = Frag.toggleFilter;
   window.changePage = Frag.changePage;
   window.selFrag = Frag.selFrag;
-  window.aiQuickRec = aiQuickRec;
 
   window.showImport = UI.showImport;
   window.closeImport = UI.closeImport;
@@ -224,6 +241,7 @@
 
   window.sendAI = sendAI;
   window.fillAI = fillAI;
+  window.handleUpload = handleUpload;
   window.saveMol = saveMol;
   window.exportAll = exportAll;
 

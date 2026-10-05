@@ -1,45 +1,16 @@
-"""Goal parsing and scoring helpers for molecular design optimization."""
+"""Explicit optimization-goal parsing for molecular design."""
 
 from __future__ import annotations
 
+import html
 import re
 from typing import Any, Dict, Iterable, Mapping
 
 
 GoalSpec = Dict[str, Dict[str, Any]]
 
-
-DEFAULT_GOALS: GoalSpec = {
-    "qed": {
-        "metric": "qed",
-        "label": "QED >= 0.7",
-        "direction": "max",
-        "threshold": 0.7,
-        "source": "default",
-    },
-    "mw": {
-        "metric": "mw",
-        "label": "MW <= 500 Da",
-        "direction": "min",
-        "threshold": 500,
-        "source": "default",
-    },
-    "logp": {
-        "metric": "logp",
-        "label": "LogP <= 5",
-        "direction": "min",
-        "threshold": 5,
-        "source": "default",
-    },
-    "sa_score": {
-        "metric": "sa_score",
-        "label": "SA Score <= 3.5",
-        "direction": "min",
-        "threshold": 3.5,
-        "source": "default",
-    },
-}
-
+# Compatibility symbol only. A design request must explicitly provide a target.
+DEFAULT_GOALS: GoalSpec = {}
 
 METRIC_ALIASES = {
     "qed": "qed",
@@ -55,7 +26,6 @@ METRIC_ALIASES = {
     "sascore": "sa_score",
 }
 
-
 LABELS = {
     "qed": "QED",
     "mw": "MW",
@@ -66,80 +36,93 @@ LABELS = {
 
 
 def _copy_default_goals() -> GoalSpec:
-    return {key: value.copy() for key, value in DEFAULT_GOALS.items()}
+    return {}
 
 
 def _canonical_metric(raw_metric: str) -> str | None:
-    normalized = raw_metric.strip().lower()
-    return METRIC_ALIASES.get(normalized)
+    return METRIC_ALIASES.get(raw_metric.strip().lower())
 
 
-def _goal_label(metric: str, direction: str, threshold: float) -> str:
+def _goal_label(metric: str, direction: str, threshold: float | None) -> str:
+    label = LABELS.get(metric, metric)
+    if threshold is None:
+        return f"{label} {'提高' if direction == 'max' else '降低'}"
     comparator = ">=" if direction == "max" else "<="
     value = int(threshold) if float(threshold).is_integer() else threshold
     suffix = " Da" if metric == "mw" else ""
-    return f"{LABELS.get(metric, metric)} {comparator} {value}{suffix}"
+    return f"{label} {comparator} {value}{suffix}"
 
 
-def _direction_from_operator(operator: str, metric: str) -> str:
-    if operator in (">", ">="):
-        return "max"
-    if operator in ("<", "<="):
-        return "min"
-    return DEFAULT_GOALS.get(metric, {}).get("direction", "min")
+def _direction_from_operator(operator: str) -> str:
+    return "max" if operator in (">", ">=") else "min"
 
 
-def _iter_numeric_goal_matches(command: str) -> Iterable[tuple[str, str, float]]:
+def _iter_numeric_goal_matches(command: str) -> Iterable[tuple[str, str, float | None]]:
+    """Yield explicit constraints in source order without loose duplicates."""
+
+    command = html.unescape(command or "")
     metric_pattern = r"(QED|MW|LogP|cLogP|TPSA|SA\s*Score|SAScore|SA|分子量)"
-    number_pattern = r"([0-9]+(?:\.[0-9]+)?)"
+    number_pattern = r"([+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))"
     operator_pattern = r"(<=|>=|<|>|≤|≥|不超过|低于|小于|高于|大于|至少|不低于)"
 
-    # Example: MW < 300, LogP <= 3, QED >= 0.7
     forward = re.compile(
         metric_pattern + r"\s*" + operator_pattern + r"\s*" + number_pattern,
         re.IGNORECASE,
     )
-    # Example: 分子量控制在 300 以下, QED 提高到 0.7 以上
+    forward_matches: list[tuple[tuple[int, int], str, str, float]] = []
+    for match in forward.finditer(command):
+        raw_metric, operator, value = match.groups()
+        normalized = operator.replace("≤", "<=").replace("≥", ">=")
+        if normalized in ("不超过", "低于", "小于"):
+            normalized = "<="
+        elif normalized in ("高于", "大于", "至少", "不低于"):
+            normalized = ">="
+        parsed = (match.span(), raw_metric, normalized, float(value))
+        forward_matches.append(parsed)
+        yield raw_metric, normalized, float(value)
+
+    # Bound the natural-language match so a later metric is never consumed.
     loose = re.compile(
         metric_pattern
-        + r".{0,8}?"
+        + r"[^\n,，;；。]{0,8}?"
         + number_pattern
-        + r"\s*(以下|以内|以内|以上|左右)?",
+        + r"\s*(以下|以内|以上)",
         re.IGNORECASE,
     )
-
-    for metric, operator, value in forward.findall(command or ""):
-        normalized_operator = operator.replace("≤", "<=").replace("≥", ">=")
-        if normalized_operator in ("不超过", "低于", "小于"):
-            normalized_operator = "<="
-        elif normalized_operator in ("高于", "大于", "至少", "不低于"):
-            normalized_operator = ">="
-        yield metric, normalized_operator, float(value)
-
-    for metric, value, suffix in loose.findall(command or ""):
-        if forward.search(metric):
+    for match in loose.finditer(command):
+        if any(
+            match.start() < span[1] and match.end() > span[0]
+            for span, *_ in forward_matches
+        ):
             continue
-        operator = ">=" if suffix == "以上" else "<="
-        canonical = _canonical_metric(metric)
-        if canonical == "qed" and suffix not in ("以下", "以内"):
-            operator = ">="
-        yield metric, operator, float(value)
+        raw_metric, value, suffix = match.groups()
+        yield raw_metric, (">=" if suffix == "以上" else "<="), float(value)
+
+    direction_only = re.compile(
+        r"(提高|增加|提升|改善|降低|减少|控制|减小)\s*" + metric_pattern,
+        re.IGNORECASE,
+    )
+    for match in direction_only.finditer(command):
+        verb, raw_metric = match.groups()
+        direction = "max" if verb in ("提高", "增加", "提升", "改善") else "min"
+        yield raw_metric, direction, None
 
 
 def parse_optimization_goals(command: str = "") -> GoalSpec:
-    """Parse simple numeric optimization goals from a user command.
+    """Return only targets explicitly stated by the user."""
 
-    The parser intentionally stays conservative: it keeps default demo goals and
-    only overrides metrics where users provide clear numeric thresholds.
-    """
-
-    goals = _copy_default_goals()
-    for raw_metric, operator, threshold in _iter_numeric_goal_matches(command or ""):
+    goals: GoalSpec = {}
+    for raw_metric, operator, threshold in _iter_numeric_goal_matches(command):
         metric = _canonical_metric(raw_metric)
         if not metric:
             continue
-        direction = _direction_from_operator(operator, metric)
-        goals[metric] = {
+        direction = operator if threshold is None else _direction_from_operator(operator)
+        key = metric
+        suffix = 2
+        while key in goals:
+            key = f"{metric}#{suffix}"
+            suffix += 1
+        goals[key] = {
             "metric": metric,
             "label": _goal_label(metric, direction, threshold),
             "direction": direction,
@@ -150,64 +133,47 @@ def parse_optimization_goals(command: str = "") -> GoalSpec:
 
 
 def evaluate_goals(properties: Mapping[str, Any], goals: GoalSpec | None = None) -> Dict[str, Any]:
-    goals = goals or _copy_default_goals()
+    goals = _copy_default_goals() if goals is None else goals
     items = []
-    for metric, goal in goals.items():
+    for _key, goal in goals.items():
+        metric = goal["metric"]
         raw_value = properties.get(metric)
         try:
             value = float(raw_value)
         except (TypeError, ValueError):
             value = None
 
-        passed = False
-        if value is not None:
+        threshold = goal.get("threshold")
+        evaluated = value is not None and threshold is not None
+        passed = None
+        if evaluated:
             if goal.get("direction") == "max":
-                passed = value >= float(goal["threshold"])
+                passed = value >= float(threshold)
             else:
-                passed = value <= float(goal["threshold"])
+                passed = value <= float(threshold)
 
         items.append(
             {
                 "metric": metric,
-                "label": goal.get("label") or _goal_label(metric, goal.get("direction", "min"), goal["threshold"]),
+                "label": goal.get("label") or _goal_label(metric, goal.get("direction", "min"), threshold),
                 "value": value,
-                "threshold": goal.get("threshold"),
+                "threshold": threshold,
                 "direction": goal.get("direction"),
-                "source": goal.get("source", "default"),
+                "source": goal.get("source", "command"),
                 "passed": passed,
-                "available": value is not None,
+                "available": evaluated,
+                "requires_comparison": threshold is None,
             }
         )
 
-    passed_count = sum(1 for item in items if item["passed"])
+    passed_count = sum(1 for item in items if item["passed"] is True)
+    evaluated_count = sum(1 for item in items if item["available"])
     return {
         "items": items,
         "summary": {
             "passed_count": passed_count,
+            "evaluated": evaluated_count,
             "total": len(items),
-            "all_passed": passed_count == len(items) and bool(items),
+            "all_passed": bool(items) and evaluated_count == len(items) and passed_count == evaluated_count,
         },
     }
-
-
-def score_candidate(before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> float:
-    if not after:
-        return 0.0
-    before = before or {}
-    score = 0.0
-    weights = {
-        "qed": 30.0,
-        "logp": -4.0,
-        "mw": -0.02,
-        "tpsa": -0.03,
-        "sa_score": -5.0,
-    }
-    for key, weight in weights.items():
-        try:
-            before_value = float(before.get(key, after.get(key, 0)) or 0)
-            after_value = float(after.get(key, 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        delta = after_value - before_value
-        score += delta * weight
-    return round(score, 4)
