@@ -247,7 +247,16 @@ def setup_design_routes(app, model=None, config=None, *, model_provider=None, mo
             return _error_response("指令不能为空", status_code=400)
 
         try:
-            return await design_service.ai_recommend(command, current_smi, current_props)
+            recommended_fragments = await run_in_threadpool(
+                design_service.recommend_fragments,
+                command,
+            )
+            return await design_service.ai_recommend(
+                command,
+                current_smi,
+                current_props,
+                recommended_fragments=recommended_fragments,
+            )
         except ValueError as e:
             return _error_response(str(e), status_code=400)
         except Exception as e:

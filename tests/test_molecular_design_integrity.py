@@ -7,7 +7,7 @@ import asyncio
 import pandas as pd
 import pytest
 
-from src.molecular_design.ai import recommend
+from src.molecular_design.ai import recommend, validate_fragment_smiles
 from src.molecular_design.chemistry import calculate_properties, substitute_fragment
 from src.molecular_design.fragments import FragmentRepository, infer_label_filters
 from src.molecular_design.optimizer import evaluate_goals, parse_optimization_goals
@@ -30,6 +30,23 @@ def test_substitution_removes_all_dummies_and_preserves_a_valid_product():
     assert result["success"] is True
     assert "*" not in result["new_smiles"]
     assert result["new_smiles"] == "Cc1ccccc1"
+
+
+@pytest.mark.parametrize(
+    "smiles",
+    [
+        "[*]C[*]",
+        "[*]C.[*]O",
+        "[*]=O",
+        "C.[*]O",
+    ],
+)
+def test_ai_fragment_validation_requires_one_connected_single_bond_connection(smiles):
+    assert validate_fragment_smiles(smiles) is None
+
+
+def test_ai_fragment_validation_returns_canonical_single_connection_fragment():
+    assert validate_fragment_smiles("C[*]") == "*C"
 
 
 def test_optimization_goals_are_empty_without_explicit_user_targets():
@@ -92,6 +109,25 @@ def test_fragment_search_treats_user_text_as_literal(tmp_path):
     result = FragmentRepository(csv_path).query(search="[z")
     assert result["success"] is True
     assert result["fragments"] == []
+
+
+def test_fragment_repository_excludes_fragments_that_substitution_rejects(tmp_path):
+    csv_path = tmp_path / "fragments.csv"
+    pd.DataFrame(
+        [
+            {"fragment_smiles": "[*]N", "frequency": 3},
+            {"fragment_smiles": "[*]C[*]", "frequency": 100},
+            {"fragment_smiles": "[*]=O", "frequency": 90},
+        ]
+    ).to_csv(csv_path, index=False)
+
+    repository = FragmentRepository(csv_path)
+    queried = repository.query(page_size=20)
+    recommended = repository.recommend_for_command("降低 LogP", limit=20)
+
+    assert [row["fragment_smiles"] for row in queried["fragments"]] == ["[*]N"]
+    assert [row["fragment_smiles"] for row in recommended] == ["[*]N"]
+    assert repository.query(search="[*]N")["total"] == 1
 
 
 def test_lower_logp_does_not_create_contradictory_fragment_labels():
@@ -167,6 +203,87 @@ def test_recommendation_mode_distinguishes_llm_from_local_rules():
 
     assert llm_result["recommendation_mode"] == "llm"
     assert local_result["recommendation_mode"] == "local_rule"
+
+
+def test_llm_reply_only_mentions_fragments_that_pass_validation():
+    class Model:
+        def generate(self, prompt, **kwargs):
+            return (
+                '{"fragments": ['
+                '{"fragment_smiles": "[*]N", "name": "valid"},'
+                '{"fragment_smiles": "[*]C[*]", "name": "invalid"}'
+                ']}'
+            )
+
+    result = asyncio.run(
+        recommend(
+            model=Model(),
+            command="降低 LogP",
+            current_smiles="c1ccccc1[*]",
+            current_props={},
+            recommended_fragments=[],
+        )
+    )
+
+    assert result["recommendation_mode"] == "llm"
+    assert "*N" in result["reply"]
+    assert "*C*" not in result["reply"]
+
+
+def test_recommendation_merge_rejects_invalid_repository_fragments():
+    result = asyncio.run(
+        recommend(
+            model=None,
+            command="降低 LogP",
+            current_smiles="c1ccccc1[*]",
+            current_props={},
+            recommended_fragments=[
+                {"fragment_smiles": "[*]C[*]", "source": "local_rule"},
+                {"fragment_smiles": "[*]N", "source": "local_rule"},
+            ],
+        )
+    )
+
+    assert [item["fragment_smiles"] for item in result["recommended_fragments"]] == ["*N"]
+    assert "[*]C[*]" not in result["reply"]
+
+
+def test_library_dependency_failure_is_not_cached_as_empty(tmp_path, monkeypatch):
+    import src.molecular_design.fragments as fragments
+
+    path = tmp_path / "fragments.csv"
+    pd.DataFrame([{"fragment_smiles": "[*]N", "dummy_atoms": 9}]).to_csv(path, index=False)
+    repository = FragmentRepository(path)
+    validator = fragments.canonicalize_connection_fragment
+
+    def unavailable(smiles):
+        raise ImportError("RDKit unavailable")
+
+    monkeypatch.setattr(fragments, "canonicalize_connection_fragment", unavailable)
+    with pytest.raises(ImportError):
+        repository.query()
+    monkeypatch.setattr(fragments, "canonicalize_connection_fragment", validator)
+    assert repository.query()["total"] == 1
+
+
+def test_recommendation_library_validation_runs_off_event_loop(tmp_path):
+    import threading
+    from src.molecular_design.service import MolecularDesignService
+
+    request_thread = threading.get_ident()
+    called_on = []
+
+    class Repository:
+        def recommend_for_command(self, command):
+            called_on.append(threading.get_ident())
+            return []
+
+    service = MolecularDesignService(
+        tmp_path / "absent.csv", tmp_path, fragment_repository=Repository()
+    )
+    asyncio.run(service.ai_recommend("降低 LogP", "CCO", {}))
+    assert len(called_on) == 1
+    assert called_on[0] != request_thread
 
 
 def test_invalid_llm_payload_uses_explicit_local_rule_fallback():

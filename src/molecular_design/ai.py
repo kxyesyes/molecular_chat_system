@@ -8,6 +8,7 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from .chemistry import canonicalize_connection_fragment
 from .fragments import infer_label_filters
 
 
@@ -56,17 +57,10 @@ def looks_like_llm_failure(reply_text: str) -> bool:
 def validate_fragment_smiles(smiles: str) -> Optional[str]:
     """Return a canonical fragment SMILES when it is usable for substitution."""
 
-    if not smiles or "[*]" not in smiles:
+    if not smiles:
         return None
     try:
-        from rdkit import Chem
-
-        mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return None
-        if not any(atom.GetAtomicNum() == 0 for atom in mol.GetAtoms()):
-            return None
-        return Chem.MolToSmiles(mol, canonical=True)
+        return canonicalize_connection_fragment(smiles)
     except Exception:
         return None
 
@@ -144,12 +138,13 @@ def _merge_recommendations(
     seen = set()
     for fragment in [*structured_fragments, *repository_fragments]:
         smiles = fragment.get("fragment_smiles") or fragment.get("smi")
-        if not smiles or smiles in seen:
+        canonical = validate_fragment_smiles(str(smiles).strip()) if smiles else None
+        if not canonical or canonical in seen:
             continue
-        seen.add(smiles)
+        seen.add(canonical)
         next_fragment = dict(fragment)
-        next_fragment.setdefault("fragment_smiles", smiles)
-        next_fragment.setdefault("smi", smiles)
+        next_fragment["fragment_smiles"] = canonical
+        next_fragment["smi"] = canonical
         next_fragment.setdefault("source", "fragment_db")
         merged.append(next_fragment)
     return merged
@@ -223,6 +218,33 @@ def build_fallback_reply(
     return "\n".join(lines)
 
 
+def build_validated_reply(
+    command: str,
+    current_smiles: str,
+    fragments: List[Dict[str, Any]],
+) -> str:
+    """Build display text from validated structures only.
+
+    Do not pass the model's raw JSON/text to the UI: it may mention a fragment
+    that was rejected by the same validator used for the structure cards.
+    """
+    lines = [
+        "AI 已返回结构化片段建议。",
+        f"优化目标：{command}",
+    ]
+    if current_smiles:
+        lines.append(f"当前母体：{current_smiles}")
+    if fragments:
+        lines.append("已通过连接点校验的片段：")
+        lines.extend(
+            f"{index}. {fragment['fragment_smiles']}"
+            for index, fragment in enumerate(fragments[:5], start=1)
+        )
+    else:
+        lines.append("AI 未返回可直接用于取代的片段。")
+    return "\n".join(lines)
+
+
 def to_safe_html(text: str) -> str:
     return html.escape(text or "").replace("\n", "<br>").replace("  ", "&nbsp;&nbsp;")
 
@@ -238,6 +260,7 @@ async def recommend(
     if not command:
         raise ValueError("指令不能为空")
 
+    recommended_fragments = _merge_recommendations([], recommended_fragments)
     prompt = build_prompt(command, current_smiles, current_props)
     warning: Optional[str] = None
     try:
@@ -257,6 +280,8 @@ async def recommend(
     elif not structured_fragments:
         warning = "AI model response did not contain valid fragment JSON; local fragments appended"
         reply_text = build_fallback_reply(command, current_smiles, current_props, recommended_fragments)
+    else:
+        reply_text = build_validated_reply(command, current_smiles, structured_fragments)
 
     merged_fragments = _merge_recommendations(structured_fragments, recommended_fragments)
     recommendation_mode = "llm" if structured_fragments else "local_rule"
