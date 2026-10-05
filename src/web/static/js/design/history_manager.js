@@ -9,39 +9,14 @@ var HistoryManager = (function () {
 
   /** 添加一条历史 */
   function addHist(smi, props) {
-    S.history.push({ smi: smi, props: props, step: S.iter });
+    S.history.push({ smi: smi, props: props || {}, step: S.iter });
     renderHist();
   }
 
   /** 渲染历史列表 */
   function renderHist() {
-    var list = document.getElementById("histList");
-    if (!S.history.length) {
-      list.innerHTML =
-        '<div style="text-align:center;padding:12px;font-size:12px;">暂无</div>';
-      return;
-    }
-    list.innerHTML = S.history
-      .slice()
-      .reverse()
-      .map(function (h) {
-        return (
-          '<div class="h-item" onclick="restoreHist(\'' +
-          UI.esc(h.smi) +
-          "')\">" +
-          '<div class="h-preview">⚗️</div>' +
-          '<div class="h-info"><div class="h-step">轮 ' +
-          h.step +
-          "</div>" +
-          '<div class="h-smiles">' +
-          h.smi.substring(0, 20) +
-          "...</div></div>" +
-          '<div class="h-qed">' +
-          (h.props?.qed ?? 0).toFixed(2) +
-          "</div></div>"
-        );
-      })
-      .join("");
+    // Candidate comparison is the single visible iteration history.  Keeping
+    // a second list caused two divergent sources of truth in the old layout.
   }
 
   /** 恢复某条历史 */

@@ -257,6 +257,7 @@ async def recommend(
         warning = "AI model response did not contain valid fragment JSON; local fragments appended"
 
     merged_fragments = _merge_recommendations(structured_fragments, recommended_fragments)
+    recommendation_mode = "llm" if structured_fragments else "local_rule"
 
     return {
         "success": True,
@@ -266,4 +267,5 @@ async def recommend(
         "command": command,
         "warning": warning,
         "fallback_used": response_failed,
+        "recommendation_mode": recommendation_mode,
     }

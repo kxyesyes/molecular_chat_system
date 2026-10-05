@@ -71,42 +71,34 @@ def detect_sites(smiles: str) -> Dict[str, Any]:
     return {"success": True, "sites": sites, "total": len(sites)}
 
 
-def auto_mark_site(smiles: str) -> Optional[str]:
+def _find_single_connection_point(mol, label: str):
+    """Return the only explicit ``[*]`` point, or fail closed.
+
+    Guessing an aromatic atom is unsafe: it can silently change the research
+    object.  A wildcard is accepted only when it has exactly one neighbour and
+    that neighbour bond is a single bond.
+    """
     from rdkit import Chem
 
-    mol = _mol_from_smiles(smiles)
-    for atom in mol.GetAtoms():
-        if atom.GetAtomicNum() == 6 and atom.GetIsAromatic() and atom.GetTotalNumHs() > 0:
-            rw = Chem.RWMol(mol)
-            target_atom = rw.GetAtomWithIdx(atom.GetIdx())
-            target_atom.SetNoImplicit(True)
-            target_atom.SetNumExplicitHs(0)
-            dummy_idx = rw.AddAtom(Chem.Atom(0))
-            rw.AddBond(atom.GetIdx(), dummy_idx, Chem.BondType.SINGLE)
-            try:
-                Chem.SanitizeMol(rw)
-                return Chem.MolToSmiles(rw.GetMol(), canonical=True)
-            except Exception:
-                continue
-    return None
-
-
-def _find_dummy_and_neighbor(mol):
-    for atom in mol.GetAtoms():
-        if atom.GetAtomicNum() == 0:
-            neighbors = atom.GetNeighbors()
-            if neighbors:
-                return atom.GetIdx(), neighbors[0].GetIdx()
-    return None, None
+    points = [atom for atom in mol.GetAtoms() if atom.GetAtomicNum() == 0]
+    if len(points) != 1:
+        raise ValueError(f"{label}必须包含且只能包含一个[*]连接点")
+    dummy = points[0]
+    if dummy.GetDegree() != 1:
+        raise ValueError(f"{label}的[*]连接点必须只连接一个原子")
+    bond = dummy.GetBonds()[0]
+    if bond.GetBondType() != Chem.BondType.SINGLE:
+        raise ValueError(f"{label}的[*]连接点只支持单键")
+    if len(Chem.GetMolFrags(mol)) != 1:
+        raise ValueError(f"{label}必须是单一连通结构")
+    return dummy.GetIdx(), dummy.GetNeighbors()[0].GetIdx()
 
 
 def _do_substitution(parent_mol, fragment_mol):
     from rdkit import Chem
 
-    parent_dummy, parent_connect = _find_dummy_and_neighbor(parent_mol)
-    fragment_dummy, fragment_connect = _find_dummy_and_neighbor(fragment_mol)
-    if parent_dummy is None or fragment_dummy is None:
-        return None
+    parent_dummy, parent_connect = _find_single_connection_point(parent_mol, "母体分子")
+    fragment_dummy, fragment_connect = _find_single_connection_point(fragment_mol, "片段")
 
     combo = Chem.CombineMols(parent_mol, fragment_mol)
     parent_atom_count = parent_mol.GetNumAtoms()
@@ -119,27 +111,24 @@ def _do_substitution(parent_mol, fragment_mol):
         rw.RemoveAtom(dummy_idx)
 
     try:
-        Chem.SanitizeMol(rw)
+        product = rw.GetMol()
+        Chem.SanitizeMol(product)
+        if any(atom.GetAtomicNum() == 0 for atom in product.GetAtoms()):
+            raise ValueError("产物仍包含未解析的[*]连接点")
+        if len(Chem.GetMolFrags(product)) != 1:
+            raise ValueError("产物不是单一连通结构")
     except Exception as exc:
         raise ValueError(
             "化学取代失败：生成产物未通过 RDKit 结构校验，"
             "可能存在价态、芳香性或连接点不兼容。请尝试更换片段或手动标记 [*] 位点。"
         ) from exc
-    return rw.GetMol()
+    return product
 
 
 def substitute_fragment(parent_smiles: str, fragment_smiles: str) -> Dict[str, Any]:
     from rdkit import Chem
 
     parent_mol = _mol_from_smiles(parent_smiles, "母体分子 SMILES")
-    has_dummy = any(atom.GetAtomicNum() == 0 for atom in parent_mol.GetAtoms())
-    if not has_dummy:
-        marked = auto_mark_site(parent_smiles)
-        if not marked:
-            raise ValueError("未找到取代位点，请在 SMILES 中插入 [*] 或在编辑器中标记原子")
-        parent_smiles = marked
-        parent_mol = _mol_from_smiles(parent_smiles, "母体分子 SMILES")
-
     fragment_mol = _mol_from_smiles(fragment_smiles, "片段 SMILES")
     product = _do_substitution(parent_mol, fragment_mol)
     if product is None:
@@ -153,7 +142,7 @@ def substitute_fragment(parent_smiles: str, fragment_smiles: str) -> Dict[str, A
     }
 
 
-def calculate_scaffold_similarity(reference_smiles: str, candidate_smiles: str) -> Optional[float]:
+def calculate_morgan_similarity(reference_smiles: str, candidate_smiles: str) -> Optional[float]:
     if not reference_smiles or not candidate_smiles:
         return None
     try:
@@ -217,9 +206,9 @@ def calculate_properties(
         props["sa_score"] = None
         property_status["sa_score"] = "unavailable"
 
-    scaffold_similarity = calculate_scaffold_similarity(reference_smiles, smiles)
-    if scaffold_similarity is not None:
-        props["scaffold_similarity"] = scaffold_similarity
+    morgan_similarity = calculate_morgan_similarity(reference_smiles, smiles)
+    if morgan_similarity is not None:
+        props["morgan_similarity"] = morgan_similarity
 
     goals = parse_optimization_goals(command)
 

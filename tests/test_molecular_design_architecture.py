@@ -77,16 +77,15 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         self.assertIn("SMILES", response.json()["error"])
 
     @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real fragment substitution")
-    def test_unmarked_aromatic_parent_can_be_auto_marked_for_substitution(self):
+    def test_unmarked_aromatic_parent_is_rejected_without_explicit_connection_point(self):
         response = self._client().post(
             "/api/design/substitute",
             json={"parent_smiles": "c1ccccc1", "fragment_smiles": "[*]C"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        payload = response.json()
-        self.assertTrue(payload["success"])
-        self.assertEqual(payload["new_smiles"], "Cc1ccccc1")
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(response.json()["success"])
+        self.assertIn("连接点", response.json()["error"])
 
     def test_ai_recommendation_escapes_model_html(self):
         response = self._client().post(
@@ -117,7 +116,10 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
 
         self.assertEqual(goals["mw"]["threshold"], 300)
         self.assertEqual(goals["logp"]["threshold"], 3)
-        self.assertTrue(result["items"][0]["passed"])
+        by_metric = {item["metric"]: item for item in result["items"]}
+        self.assertIsNone(by_metric["qed"]["passed"])
+        self.assertFalse(by_metric["mw"]["passed"])
+        self.assertTrue(by_metric["logp"]["passed"])
         self.assertFalse(result["summary"]["all_passed"])
 
     def test_ai_recommendation_parses_valid_json_fragments_and_filters_invalid_ones(self):
@@ -178,7 +180,10 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
 
         self.assertIn('id="designFeedback"', template)
         self.assertIn('id="candidateCompare"', template)
-        self.assertIn("候选分子对比", template)
+        self.assertIn("候选比较", template)
+        self.assertIn('id="uploadInput"', template)
+        self.assertNotIn('class="props-panel"', template)
+        self.assertNotIn("<footer>", template)
         self.assertIn("candidates: []", config_js)
         self.assertIn("addCandidateComparison", editor_js)
         self.assertIn("renderCandidateComparison", editor_js)
@@ -191,28 +196,28 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         css = (PROJECT_ROOT / "src/web/static/css/molecular_design.css").read_text(encoding="utf-8")
         template = (PROJECT_ROOT / "src/web/templates/molecular_design.html").read_text(encoding="utf-8")
 
-        self.assertIn("--design-workspace-offset", css)
-        self.assertIn("--design-workspace-min-height", css)
-        self.assertIn("--design-console-height", css)
-        self.assertIn('class="optimization-console"', template)
-        self.assertIn(".optimization-console", css)
-        self.assertIn("grid-template-columns: minmax(260px, 1fr) minmax(320px, 1.2fr) minmax(240px, 0.9fr)", css)
-        self.assertIn("margin-top: var(--design-workspace-offset)", css)
-        self.assertIn("min-height: min(var(--design-workspace-min-height), calc(100vh - 84px))", css)
-        self.assertIn("height: var(--design-console-height)", css)
-        self.assertIn("--design-workspace-offset: 0px", css)
+        self.assertIn("grid-template-columns: minmax(300px, 360px) minmax(0, 1fr)", css)
+        self.assertIn("align-items: stretch", css)
+        self.assertIn("min-height: 760px", css)
+        self.assertIn('id="uploadInput"', template)
+        self.assertNotIn('class="props-panel"', template)
+        self.assertNotIn("<footer>", template)
 
-    def test_design_frontend_uses_backend_goals_and_deduped_candidate_ranking(self):
+    def test_design_frontend_uses_backend_goals_and_generation_order(self):
         properties_js = (PROJECT_ROOT / "src/web/static/js/design/properties_panel.js").read_text(encoding="utf-8")
         editor_js = (PROJECT_ROOT / "src/web/static/js/design/molecule_editor.js").read_text(encoding="utf-8")
         api_js = (PROJECT_ROOT / "src/web/static/js/design/api_client.js").read_text(encoding="utf-8")
+        main_js = (PROJECT_ROOT / "src/web/static/js/design/main.js").read_text(encoding="utf-8")
 
         self.assertIn("d.goals", properties_js)
         self.assertIn("renderGoals(d.goals", properties_js)
         self.assertIn("reference_smiles", api_js)
-        self.assertIn("candidateScore", editor_js)
+        self.assertIn("requestToken", properties_js)
+        self.assertIn("propsRequestSeq", main_js)
+        self.assertNotIn("candidateScore", editor_js)
         self.assertIn("findIndex", editor_js)
-        self.assertIn("sort(function (a, b)", editor_js)
+        self.assertNotIn("candidates.sort", editor_js)
+        self.assertIn("S.candidates.push", editor_js)
 
     def test_design_smiles_polling_is_debounced_visibility_aware_and_non_reentrant(self):
         main_js = (PROJECT_ROOT / "src/web/static/js/design/main.js").read_text(encoding="utf-8")

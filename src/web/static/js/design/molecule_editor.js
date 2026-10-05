@@ -29,9 +29,9 @@ var MoleculeEditor = (function () {
   }
 
   function formatProp(value) {
-    if (value === undefined || value === null || value === "") return "-";
+    if (value === undefined || value === null || value === "") return "—";
     var n = Number(value);
-    return Number.isFinite(n) ? n.toFixed(2) : String(value);
+    return Number.isFinite(n) ? n.toFixed(2) : "—";
   }
 
   function metricDelta(beforeProps, afterProps, key) {
@@ -67,31 +67,13 @@ var MoleculeEditor = (function () {
     addCandidateComparison(beforeProps, afterProps, smiles, fragmentLabel);
   }
 
-  function candidateScore(beforeProps, afterProps) {
-    if (!afterProps) return 0;
-    beforeProps = beforeProps || {};
-    function delta(key) {
-      var beforeValue = Number(beforeProps[key]);
-      var afterValue = Number(afterProps[key]);
-      if (!Number.isFinite(beforeValue) || !Number.isFinite(afterValue)) return 0;
-      return afterValue - beforeValue;
-    }
-    var score = 0;
-    score += delta("qed") * 30;
-    score -= delta("logp") * 4;
-    score -= delta("mw") * 0.02;
-    score -= delta("tpsa") * 0.03;
-    score -= delta("sa_score") * 5;
-    return Number(score.toFixed(4));
-  }
-
   function renderCandidateBoard() {
     var box = document.getElementById("candidateCompare");
     if (!box) return;
     var candidates = S.candidates || [];
     var header =
       '<div class="candidate-compare-title">' +
-      "<span>候选分子对比</span><small>按综合分保留 Top 10</small>" +
+      "<span>候选分子对比</span><small>按生成顺序</small>" +
       "</div>";
     if (!candidates.length) {
       box.innerHTML =
@@ -104,8 +86,6 @@ var MoleculeEditor = (function () {
       '<div class="candidate-list">' +
       candidates
         .map(function (c) {
-          var qedDelta = metricDelta(c.beforeProps, c.props, "qed");
-          var logpDelta = metricDelta(c.beforeProps, c.props, "logp");
           return (
             '<div class="candidate-row">' +
             '<div class="candidate-row-main">' +
@@ -125,14 +105,6 @@ var MoleculeEditor = (function () {
             renderDelta("LogP", c.beforeProps, c.props, "logp", true) +
             renderDelta("MW", c.beforeProps, c.props, "mw", true) +
             renderDelta("TPSA", c.beforeProps, c.props, "tpsa", true) +
-            "</div></div>" +
-            '<div class="candidate-score">' +
-            '<span>QED ' +
-            (qedDelta === null ? "new" : (qedDelta >= 0 ? "+" : "") + qedDelta.toFixed(2)) +
-            "</span>" +
-            '<span>LogP ' +
-            (logpDelta === null ? "new" : (logpDelta >= 0 ? "+" : "") + logpDelta.toFixed(2)) +
-            "</span>" +
             "</div></div>"
           );
         })
@@ -149,18 +121,13 @@ var MoleculeEditor = (function () {
     if (existingIndex >= 0) {
       S.candidates.splice(existingIndex, 1);
     }
-    S.candidates.unshift({
+    S.candidates.push({
       step: S.iter,
       smiles: smiles,
       fragmentLabel: fragmentLabel,
       beforeProps: beforeProps || {},
       props: Object.assign({}, afterProps),
-      score: candidateScore(beforeProps, afterProps),
     });
-    S.candidates.sort(function (a, b) {
-      return (b.score || 0) - (a.score || 0);
-    });
-    S.candidates = S.candidates.slice(0, 10);
     renderCandidateBoard();
   }
 
@@ -261,13 +228,14 @@ var MoleculeEditor = (function () {
   }
 
   /* ── 导入确认 ── */
-  function confirmImport() {
+  async function confirmImport() {
     var smi = document.getElementById("importInput").value.trim();
     if (smi) {
-      setSMILES(smi);
+      await setSMILES(smi);
       S.smiles = smi;
+      S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
       document.getElementById("curSmiles").textContent = smi;
-      PropertiesPanel.calcProps(smi);
+      await PropertiesPanel.calcProps(smi, "", S.propsRequestSeq);
       UI.closeImport();
     }
   }
@@ -294,6 +262,8 @@ var MoleculeEditor = (function () {
 
   function clearCanvas() {
     setSMILES("");
+    S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
+    S.pendingPropsSmiles = "";
     S.smiles = "";
     document.getElementById("curSmiles").textContent = "等待绘制...";
     PropertiesPanel.clearPropsUI();

@@ -1,4 +1,4 @@
-"""Persistence helpers for molecular design results."""
+"""Fixed-schema persistence helpers for molecular design results."""
 
 from __future__ import annotations
 
@@ -6,11 +6,43 @@ import datetime
 import os
 import threading
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Mapping
 
 import pandas as pd
 
-from .chemistry import canonicalize_smiles
+from .chemistry import calculate_properties, canonicalize_smiles
+
+
+PROPERTY_KEYS = (
+    "mw",
+    "logp",
+    "qed",
+    "tpsa",
+    "hbd",
+    "hba",
+    "rotbonds",
+    "sa_score",
+    "morgan_similarity",
+)
+HISTORY_COLUMNS = ["step", "smiles", *[f"prop_{key}" for key in PROPERTY_KEYS]]
+MOLECULE_COLUMNS = ["timestamp", "smiles", *[f"prop_{key}" for key in PROPERTY_KEYS]]
+
+
+def _fixed_property_values(properties: Mapping[str, Any] | None) -> Dict[str, Any]:
+    properties = properties or {}
+    return {f"prop_{key}": properties.get(key) for key in PROPERTY_KEYS}
+
+
+def _canonical_history_row(item: Mapping[str, Any]) -> Dict[str, Any]:
+    smiles = str(item.get("smi") or item.get("smiles") or "").strip()
+    if not smiles:
+        raise ValueError("历史记录缺少 SMILES")
+    canonical = canonicalize_smiles(smiles)
+    return {
+        "step": item.get("step", 0),
+        "smiles": canonical,
+        **_fixed_property_values(item.get("props") or {}),
+    }
 
 
 class DesignStorage:
@@ -20,35 +52,40 @@ class DesignStorage:
 
     def save_molecule(self, smiles: str, properties: Dict[str, Any]) -> Dict[str, Any]:
         canonical_smiles = canonicalize_smiles(smiles)
+        calculated = calculate_properties(canonical_smiles)["properties"]
+        for key, supplied in (properties or {}).items():
+            if key not in calculated or supplied in (None, "") or calculated.get(key) is None:
+                continue
+            try:
+                if abs(float(supplied) - float(calculated[key])) > 1e-4:
+                    raise ValueError(f"属性 {key} 与当前 SMILES 不一致，未保存")
+            except (TypeError, ValueError) as exc:
+                if isinstance(exc, ValueError) and "未保存" in str(exc):
+                    raise
+                continue
+
         self.save_dir.mkdir(parents=True, exist_ok=True)
         file_path = self.save_dir / "saved_molecules.csv"
-
         row = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "smiles": canonical_smiles,
-            **{f"prop_{key}": value for key, value in (properties or {}).items()},
+            **_fixed_property_values(calculated),
         }
 
         with self._lock:
-            df = pd.DataFrame([row])
-            df.to_csv(file_path, mode="a" if file_path.exists() else "w", header=not file_path.exists(), index=False)
+            existing = pd.read_csv(file_path) if file_path.exists() else pd.DataFrame(columns=MOLECULE_COLUMNS)
+            existing = existing.reindex(columns=MOLECULE_COLUMNS)
+            combined = pd.concat([existing, pd.DataFrame([row], columns=MOLECULE_COLUMNS)], ignore_index=True)
+            temp_path = file_path.with_suffix(".csv.tmp")
+            combined.to_csv(temp_path, index=False)
+            os.replace(temp_path, file_path)
 
-        return {"success": True, "message": f"分子已保存到 {os.path.basename(file_path)}", "smiles": canonical_smiles}
+        return {"success": True, "message": f"分子已保存到 {file_path.name}", "smiles": canonical_smiles}
 
     def export_history_csv(self, history: List[Dict[str, Any]]) -> tuple[str, str]:
         if not history:
             raise ValueError("历史记录为空，无法导出")
-
-        rows = []
-        for item in history:
-            row = {
-                "step": item.get("step", 0),
-                "smiles": item.get("smi", ""),
-            }
-            for key, value in (item.get("props", {}) or {}).items():
-                row[f"prop_{key}"] = value
-            rows.append(row)
-
-        csv_content = pd.DataFrame(rows).to_csv(index=False)
+        rows = [_canonical_history_row(item) for item in history]
+        csv_content = pd.DataFrame(rows, columns=HISTORY_COLUMNS).to_csv(index=False)
         filename = f"molecular_design_history_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
         return filename, csv_content
