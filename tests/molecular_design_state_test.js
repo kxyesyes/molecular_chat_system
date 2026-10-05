@@ -273,3 +273,46 @@ test("clearing during import prevents obsolete structure and properties", async 
   assert.equal(S.smiles, "");
   assert.equal(requests.length, 0);
 });
+
+test("direct editor edits invalidate an in-flight substitution", async () => {
+  const { context, E, S } = setup();
+  let resolveSubstitution;
+  let currentSmiles = "CC[*]";
+  const ketcher = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  ketcher.getSmiles = async () => currentSmiles;
+  ketcher.setMolecule = async smi => { currentSmiles = smi; };
+  context.DesignApi.substitute = () => new Promise(resolve => { resolveSubstitution = resolve; });
+  context.DesignApi.calcProperties = async () => ({ success: false, error: "not expected" });
+  S.smiles = "CC[*]";
+  S.selectedFrag = { smi: "[*]O", label: "O" };
+  S.detectedSiteCount = 1;
+  S.detectedSitesSmiles = "CC[*]";
+  const pending = E.execSubstitute();
+  for (let i = 0; i < 10 && !resolveSubstitution; i++) await Promise.resolve();
+  currentSmiles = "CCN";
+  resolveSubstitution({ success: true, new_smiles: "CCO" });
+  await pending;
+  assert.equal(currentSmiles, "CCN");
+  assert.equal(S.smiles, "CC[*]");
+});
+
+test("a newer restore owns the loading overlay after substitution is cancelled", async () => {
+  const { context, E, S, elements } = setup();
+  let resolveSubstitution;
+  context.DesignApi.substitute = () => new Promise(resolve => { resolveSubstitution = resolve; });
+  context.DesignApi.calcProperties = async () => ({ success: true, properties: { mw: 46 } });
+  const ketcher = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  ketcher.getSmiles = async () => "CC[*]";
+  ketcher.setMolecule = async () => {};
+  S.smiles = "CC[*]";
+  S.selectedFrag = { smi: "[*]O", label: "O" };
+  S.detectedSiteCount = 1;
+  S.detectedSitesSmiles = "CC[*]";
+  const pending = E.execSubstitute();
+  for (let i = 0; i < 10 && !resolveSubstitution; i++) await Promise.resolve();
+  assert.equal(elements.get("loadingOverlay").style.display, "flex");
+  await E.restoreCandidate("CCN");
+  assert.equal(elements.get("loadingOverlay").style.display, "none");
+  resolveSubstitution({ success: true, new_smiles: "CCO" });
+  await pending;
+});

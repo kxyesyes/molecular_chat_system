@@ -166,6 +166,8 @@ var MoleculeEditor = (function () {
     resetConnectionState();
     var mutationToken = (S.mutationSeq || 0) + 1;
     S.mutationSeq = mutationToken;
+    var loadingOverlay = document.getElementById("loadingOverlay");
+    if (loadingOverlay) loadingOverlay.style.display = "none";
     S.propsRequestSeq = (S.propsRequestSeq || 0) + 1;
     S.curProps = null;
     S.prevProps = null;
@@ -253,6 +255,8 @@ var MoleculeEditor = (function () {
       var d = await Api.substitute(smi, fragment.smi);
       if (mutationToken !== S.mutationSeq) return;
       if (d.success) {
+        var currentEditorSmiles = await getSMILES();
+        if (currentEditorSmiles !== smi || mutationToken !== S.mutationSeq) return;
         if (mutationToken !== S.mutationSeq || S.smiles !== smi) return;
         S.smiles = d.new_smiles;
         document.getElementById("curSmiles").textContent = d.new_smiles;
