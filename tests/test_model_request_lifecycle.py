@@ -325,7 +325,12 @@ async def test_application_switch_drains_design_request_and_closes_clients(tmp_p
             assert (await switch).json()['success']
             assert models[0].closed == 1
             assert app.molecular_generator_model is generator
-            assert 'B recommendation' in (await client.post('/api/design/ai_recommend', json=payload)).text
+            assert app.model.model_name == 'B'
+            second = await client.post('/api/design/ai_recommend', json=payload)
+            second_payload = second.json()
+            assert second_payload['recommendation_mode'] == 'local_rule'
+            assert second_payload['fallback_used'] is True
+            assert 'B recommendation' not in second.text
         await app.shutdown()
         assert models[-1].closed == 1
         await app.shutdown()
