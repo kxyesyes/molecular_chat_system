@@ -52,6 +52,19 @@ def test_frozen_training_configuration():
     assert runner.TASKS == ("classification", "regression")
 
 
+def test_explicit_prepared_package_version_is_forwarded(tmp_path, monkeypatch):
+    runner = module()
+    captured = {}
+
+    def execute(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(runner, "_execute", execute)
+    result = runner.run("synthetic", root=tmp_path, package_version="v2")
+    assert result["status"] == "preflight"
+    assert captured["package_version"] == "v2"
+
+
 def test_baselines_use_only_training_values():
     runner = module()
     r = runner.baseline_metrics("regression", [2., 4.], [1., 5.])

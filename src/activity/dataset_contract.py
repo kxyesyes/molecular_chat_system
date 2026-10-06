@@ -119,7 +119,8 @@ _REJECTED_COLUMNS = [
     "rejection_reason",
 ]
 _SPLIT_NAMES = ("train", "validation", "test")
-_SPLIT_ALGORITHM = "deterministic_scaffold_greedy_v2"
+_SPLIT_ALGORITHM = "deterministic_feature_identity_greedy_v1"
+_LEGACY_SPLIT_ALGORITHM = "deterministic_scaffold_greedy_v2"
 _SPLIT_REQUIRED_COLUMNS = (
     "canonical_smiles",
     "normalized_value",
@@ -769,6 +770,88 @@ def _scaffold_identity(molecule: Any) -> str:
         raise ValueError("RDKit scaffold processing failed") from None
 
 
+def _feature_identity(molecule: Any) -> tuple[str, str]:
+    """Return the molecule/scaffold identities seen by the RG-MPNN features.
+
+    Dataset validation keeps the source scaffold's stereochemical identity for
+    provenance.  The current RG-MPNN featurizer, however, strips salts,
+    neutralises charges and does not encode stereochemistry.  Splits must use
+    the same identity or a stereoisomer can cross the train/evaluation boundary
+    and only be discovered after expensive featurization.
+    """
+    try:
+        from src.activity.rg_mpnn.molecular_network.util.wash import NeutraliseCharges
+
+        processed = _SALT_REMOVER.StripMol(
+            Chem.Mol(molecule),
+            dontRemoveEverything=True,
+        )
+        if processed is None or processed.GetNumAtoms() == 0:
+            raise ValueError("empty feature molecule")
+        processed = NeutraliseCharges(processed)
+        if processed is None or processed.GetNumAtoms() == 0:
+            raise ValueError("empty neutralized molecule")
+        Chem.RemoveStereochemistry(processed)
+        identity = Chem.MolToSmiles(
+            processed,
+            canonical=True,
+            isomericSmiles=False,
+        )
+        scaffold = _scaffold_identity(processed)
+        if not identity:
+            raise ValueError("empty feature identity")
+        return identity, scaffold
+    except Exception:
+        raise ValueError("RG-MPNN feature identity processing failed") from None
+
+
+def _feature_groups(prepared: pd.DataFrame) -> dict[str, tuple[int, ...]]:
+    """Build connected leakage groups from source and featurized identities."""
+    parent = list(range(len(prepared)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    key_owner: dict[tuple[str, str], int] = {}
+    row_keys: list[tuple[tuple[str, str], ...]] = []
+    for index, row in prepared.reset_index(drop=True).iterrows():
+        molecule = Chem.MolFromSmiles(row["canonical_smiles"])
+        if molecule is None:
+            raise ValueError("Invalid canonical_smiles for feature split")
+        identity, feature_scaffold = _feature_identity(molecule)
+        keys = [
+            ("source_scaffold", str(row["scaffold_smiles"])),
+            ("molecule", identity),
+        ]
+        if feature_scaffold:
+            keys.append(("feature_scaffold", feature_scaffold))
+        row_keys.append(tuple(keys))
+        for key in keys:
+            previous = key_owner.setdefault(key, index)
+            union(index, previous)
+
+    components: dict[int, list[int]] = {}
+    for index in range(len(prepared)):
+        components.setdefault(find(index), []).append(index)
+
+    groups: dict[str, tuple[int, ...]] = {}
+    for indices in components.values():
+        keys = sorted({key for index in indices for key in row_keys[index]})
+        group_id = "feature-group:" + hashlib.sha256(
+            _compact_json(keys).encode("utf-8")
+        ).hexdigest()
+        groups[group_id] = tuple(indices)
+    return groups
+
+
 def _reject_valid_group(
     group: list[dict[str, Any]],
     reason: str,
@@ -1325,6 +1408,8 @@ def _sorted_prepared_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def _verify_split_invariants(
     prepared: pd.DataFrame,
     frames: Mapping[str, pd.DataFrame],
+    *,
+    check_feature_identity: bool = False,
 ) -> None:
     canonical_sets = {
         name: set(frame["canonical_smiles"].tolist())
@@ -1340,6 +1425,27 @@ def _verify_split_invariants(
                 raise ValueError("Canonical SMILES overlap across dataset splits")
             if scaffold_sets[left_name] & scaffold_sets[right_name]:
                 raise ValueError("Scaffold overlap across dataset splits")
+
+    if check_feature_identity:
+        feature_owners: dict[tuple[str, str], str] = {}
+        for split_name in _SPLIT_NAMES:
+            for smiles in frames[split_name]["canonical_smiles"]:
+                molecule = Chem.MolFromSmiles(smiles)
+                if molecule is None:
+                    raise ValueError("Invalid canonical_smiles for feature split")
+                identity, feature_scaffold = _feature_identity(molecule)
+                for kind, value in (
+                    ("molecule", identity),
+                    ("scaffold", feature_scaffold),
+                ):
+                    if not value:
+                        continue
+                    key = (kind, value)
+                    previous = feature_owners.setdefault(key, split_name)
+                    if previous != split_name:
+                        raise ValueError(
+                            f"Featurized {kind} overlap between {previous} and {split_name}"
+                        )
 
     emitted = pd.concat(
         [frames[name] for name in _SPLIT_NAMES],
@@ -1492,21 +1598,45 @@ def split_prepared_dataset(
     seed: int = 42,
     ratios: tuple[float, float, float] = (0.70, 0.15, 0.15),
 ) -> DatasetSplitResult:
-    """Partition canonical rows by complete scaffold groups without leakage."""
+    """Partition rows by source scaffolds and actual RG-MPNN identities."""
+    return _split_prepared_dataset(
+        prepared, seed=seed, ratios=ratios, algorithm=_SPLIT_ALGORITHM,
+    )
+
+
+def _split_prepared_dataset(
+    prepared: pd.DataFrame,
+    *,
+    seed: int,
+    ratios: tuple[float, float, float],
+    algorithm: str,
+) -> DatasetSplitResult:
+    """Replay a declared algorithm; legacy support is for existing snapshots.
+
+    New public preparation always uses feature-aware groups. Loading an old
+    snapshot preserves its historical assignment; the independent training
+    guard still rejects overlap after actual graph featurization.
+    """
+    if algorithm not in (_SPLIT_ALGORITHM, _LEGACY_SPLIT_ALGORITHM):
+        raise ValueError("Invalid split provenance algorithm")
 
     prepared_snapshot = _validate_split_input(prepared)
     seed, normalized_ratios = _validated_split_parameters(seed, ratios)
 
     positional = prepared_snapshot.reset_index(drop=True)
-    scaffold_groups = {
-        scaffold: tuple(group.index.tolist())
-        for scaffold, group in positional.groupby("scaffold_smiles", sort=False)
-    }
-    if len(scaffold_groups) < len(_SPLIT_NAMES):
-        raise ValueError("Prepared dataset requires at least three distinct scaffold identities")
+    feature_groups = (
+        _feature_groups(positional) if algorithm == _SPLIT_ALGORITHM else {
+            scaffold: tuple(group.index.tolist())
+            for scaffold, group in positional.groupby("scaffold_smiles", sort=False)
+        }
+    )
+    if len(feature_groups) < len(_SPLIT_NAMES):
+        raise ValueError(
+            "Prepared dataset requires at least three distinct scaffolds or feature identities"
+        )
 
     ordered_groups = sorted(
-        scaffold_groups.items(),
+        feature_groups.items(),
         key=lambda item: (
             -len(item[1]),
             _stable_split_token(seed, item[0]),
@@ -1547,14 +1677,14 @@ def split_prepared_dataset(
 
     _improve_scaffold_assignments(
         assignments,
-        {scaffold: len(indices) for scaffold, indices in ordered_groups},
+        {group: len(indices) for group, indices in ordered_groups},
         counts,
         target_counts,
         seed,
     )
     assigned_indices = {name: [] for name in _SPLIT_NAMES}
-    for scaffold, indices in ordered_groups:
-        assigned_indices[assignments[scaffold]].extend(indices)
+    for group, indices in ordered_groups:
+        assigned_indices[assignments[group]].extend(indices)
 
     frames = {
         name: _sorted_prepared_frame(
@@ -1564,13 +1694,27 @@ def split_prepared_dataset(
     }
     if any(frame.empty for frame in frames.values()):
         raise ValueError("Scaffold split could not preserve nonempty partitions")
-    _verify_split_invariants(prepared_snapshot, frames)
+    _verify_split_invariants(
+        prepared_snapshot,
+        frames,
+        check_feature_identity=algorithm == _SPLIT_ALGORITHM,
+    )
 
     scaffold_counts = {
         name: int(frames[name]["scaffold_smiles"].nunique(dropna=False))
         for name in _SPLIT_NAMES
     }
-    ordered_assignments = dict(sorted(assignments.items()))
+    # Public assignments remain keyed by the stored source scaffold for
+    # compatibility with paired family datasets. Feature-connected groups
+    # guarantee that each source scaffold maps to exactly one split.
+    scaffold_assignments: dict[str, str] = {}
+    for group, indices in ordered_groups:
+        split_name = assignments[group]
+        for scaffold in positional.iloc[list(indices)]["scaffold_smiles"].unique():
+            previous = scaffold_assignments.setdefault(str(scaffold), split_name)
+            if previous != split_name:
+                raise ValueError("Source scaffold assignment became ambiguous")
+    ordered_assignments = dict(sorted(scaffold_assignments.items()))
     ratio_mapping = dict(zip(_SPLIT_NAMES, normalized_ratios))
     achieved_ratios = {
         name: counts[name] / len(prepared_snapshot) for name in _SPLIT_NAMES
@@ -1580,7 +1724,7 @@ def split_prepared_dataset(
         for name in _SPLIT_NAMES
     }
     provenance = {
-        "algorithm": _SPLIT_ALGORITHM,
+        "algorithm": algorithm,
         "seed": seed,
         "ratios": ratio_mapping,
         "counts": counts,
@@ -2001,7 +2145,8 @@ def _normalized_split_provenance(
     provenance = split_result.provenance
     if not isinstance(provenance, Mapping):
         raise ValueError("Invalid split provenance")
-    if provenance.get("algorithm") != _SPLIT_ALGORITHM:
+    algorithm = provenance.get("algorithm")
+    if algorithm not in (_SPLIT_ALGORITHM, _LEGACY_SPLIT_ALGORITHM):
         raise ValueError("Invalid split provenance algorithm")
 
     seed = provenance.get("seed")
@@ -2068,16 +2213,17 @@ def _normalized_split_provenance(
     if provenance.get("assignments_sha256") != assignments_sha256:
         raise ValueError("Split provenance assignments_sha256 does not match assignments")
 
-    recomputed = split_prepared_dataset(
+    recomputed = _split_prepared_dataset(
         prepared,
         seed=seed,
         ratios=ratio_values,
+        algorithm=algorithm,
     )
     if dict(recomputed.assignments) != actual_assignments:
         raise ValueError("Split provenance seed/ratios do not match assignments")
 
     return {
-        "algorithm": _SPLIT_ALGORITHM,
+        "algorithm": algorithm,
         "seed": seed,
         "ratios": normalized_ratios,
         "counts": counts,
@@ -2106,7 +2252,13 @@ def _validate_result_matches_split(
             raise ValueError("Split frame does not match normalized prepared schema")
         if split_result.frames[name].empty:
             raise ValueError("Split frames must all be nonempty")
-    _verify_split_invariants(validation_result.accepted, split_result.frames)
+    _verify_split_invariants(
+        validation_result.accepted,
+        split_result.frames,
+        check_feature_identity=(
+            split_result.provenance.get("algorithm") == _SPLIT_ALGORITHM
+        ),
+    )
     normalized_provenance = _normalized_split_provenance(
         validation_result.accepted,
         split_result,

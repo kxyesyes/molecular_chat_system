@@ -3,6 +3,46 @@
 This is a partial audit, not full-goal acceptance. Work is on
 `fix/agent-runtime-integrity`; no production activation or main merge occurred.
 
+## 2026-10-06 activity split repair and real training update
+
+The PDE failure was reproduced rather than bypassed. The prepared dataset used
+stereochemistry-aware source Murcko scaffolds, while the RG-MPNN featurizer
+strips salts, neutralizes charges, and has no stereochemical identity channel.
+That allowed a source molecule/scaffold pair to cross a split and caused the
+training-time `Featurized scaffold overlap` guard to stop the run.
+
+`src/activity/dataset_contract.py` now creates connected leakage groups from
+source scaffold, neutralized feature molecule, and feature scaffold identities.
+The public split algorithm is `deterministic_feature_identity_greedy_v1`.
+Prepared artifacts retain the original source `scaffold_smiles` for provenance;
+the split assignment is only changed so the actual model inputs remain
+disjoint. Existing `deterministic_scaffold_greedy_v2` snapshots remain readable
+for compatibility, but the training-time feature guard still refuses a leaked
+legacy snapshot.
+
+New local-only packages were prepared without overwriting the previous assets:
+
+- `pde-family-v2`: 2642 accepted unique molecules from 4012 rows;
+- `buche-family-v2`: 2285 accepted unique molecules from 2361 rows, with 26
+  ambiguous multifragment rows rejected.
+
+The real CUDA run `pde-buche-20261006-r2` completed all four jobs in an
+isolated run directory. The held-out metrics are recorded in the ignored local
+report; they are one scaffold/feature-split baseline, not experimental or
+clinical validation. The bundles were not activated. The training runner now
+accepts `--package-version v2` while retaining `v1` as its default for older
+callers.
+
+Focused verification after the repair:
+
+```text
+python -m pytest tests/test_activity_feature_split_integrity.py tests/test_activity_dataset_contract.py tests/test_activity_family_dataset.py tests/test_activity_prepared_training_data.py tests/test_activity_prepared_training_loop.py -q
+420 passed, 5 skipped, 2 warnings
+
+python -m pytest tests/test_family_training_run.py -q
+103 passed, 1 warning
+```
+
 ## Batch activity upload: missed route fixed
 
 The earlier training-column fix did not fix the batch prediction endpoint.
@@ -65,16 +105,13 @@ validation; they must not be force-registered merely to make health checks green
 
 ## Still required before full goal acceptance
 
-1. Resolve or explicitly disposition the preparation/feature scaffold mismatch
-   without relaxing leakage checks, overwriting existing packages or silently
-   dropping rows; do not automatically repeat successful training jobs.
-2. Audit evidence identity and required-goal enforcement through the full
+1. Audit evidence identity and required-goal enforcement through the full
    candidate-ranking and lead-optimization flows, not only individual tools.
-3. Verify request parameters and protocol semantics on both legacy and model
+2. Verify request parameters and protocol semantics on both legacy and model
    decision paths, including failed stream fallback and persistent message state.
-4. Verify status lookup after disconnect and physical cancellation semantics
+3. Verify status lookup after disconnect and physical cancellation semantics
    across actual long-running scientific tasks; passing wrapper tests alone is
    not proof that a computation stopped.
-5. Finish the bounded, isolated real-chain acceptance and deliver a requirement-
+4. Finish the bounded, isolated real-chain acceptance and deliver a requirement-
    by-requirement report. Previous broad pytest counts do not prove these missing
    end-to-end requirements and must not be used as a completion claim.
