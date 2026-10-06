@@ -208,6 +208,9 @@ test("initial markup selects compatible provider and shows DeepSeek placeholders
 
 test("settings markup omits verbose persistence and API-key instructions", () => {
   const settings = html.slice(html.indexOf('<div class="llm-settings-overlay"'), html.indexOf('id="saveLlmConfig"'));
-  assert.doesNotMatch(settings, /用户配置目录|保存一次|同一台电脑|重启.*更新代码|勾选.*保存|本机 \.env/);
+  assert.doesNotMatch(
+    settings,
+    /用户配置目录|仓库之外|保存一次|已保存|无需重复填写|同一台电脑|同一服务商|接口地址下|重启.*更新代码|勾选.*保存|清除.*API Key|本机 \.env|配置已读取/
+  );
   assert.doesNotMatch(settings, /id="llmApiKeyHint"|id="clearLlmApiKey"|llm-key-clear/);
 });
