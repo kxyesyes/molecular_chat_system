@@ -135,14 +135,15 @@ def _parse_batch_smiles(content: str, *, filename: str, smiles_column: str | Non
         except csv.Error:
             dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
         reader = csv.DictReader(io.StringIO(content), dialect=dialect)
-        headers = [str(header).strip() for header in (reader.fieldnames or []) if header is not None]
+        # Normalize only for matching; DictReader rows retain the original keys.
+        headers = [header for header in (reader.fieldnames or []) if header is not None]
         if not headers:
             raise ValueError("CSV 缺少表头，无法定位 SMILES 列")
         requested = str(smiles_column or "").strip()
         if requested:
-            matches = [header for header in headers if header.casefold() == requested.casefold()]
+            matches = [header for header in headers if header.strip().casefold() == requested.casefold()]
         else:
-            matches = [header for header in headers if header.casefold() in _SMILES_COLUMN_ALIASES]
+            matches = [header for header in headers if header.strip().casefold() in _SMILES_COLUMN_ALIASES]
         if len(matches) != 1:
             raise ValueError("CSV 必须明确且唯一地提供 SMILES 列")
         selected = matches[0]

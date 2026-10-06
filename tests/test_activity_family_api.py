@@ -194,6 +194,56 @@ def test_empty_batch_not_success(client):
     assert response.json()["status"] == "failed"
 
 
+@pytest.mark.parametrize("filename,header,column,delimiter", [
+    ("batch.csv", "  SMILES  ", None, ","),
+    ("batch.csv", "sMiLeS", None, ","),
+    ("batch.csv", "  My Molecule  ", " my molecule ", ","),
+    ("batch.tsv", "  CANONICAL_SMILES  ", None, "\t"),
+])
+def test_batch_upload_resolves_original_header_and_preserves_rows(
+    client, filename, header, column, delimiter
+):
+    # Actual upload/parser/service, with an isolated empty model registry:
+    # valid structures must reach bundle lookup, not become invalid blank input.
+    data = {"target": "PDE5A"}
+    if column is not None:
+        data["smiles_column"] = column
+    text = delimiter.join(["id", header]) + "\n"
+    text += "\n".join(delimiter.join([str(i), smi]) for i, smi in
+                      enumerate(["CCO", "CC(C)((", "CCO"]))
+    response = client.post("/api/activity/batch_predict", data=data,
+        files={"file": (filename, ("\ufeff" + text).encode("utf-8"), "text/plain")})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["success"] is False
+    rows = result["results"]
+    assert [row["smiles"] for row in rows] == ["CCO", "CC(C)((", "CCO"]
+    assert "input" not in rows[0]["errors"]
+    assert "input" in rows[1]["errors"]
+    assert all(row["predicted_pIC50"] is None for row in rows)
+
+
+@pytest.mark.parametrize("header,column", [
+    ("SMILES,SMILES", None),
+    ("SMILES, smiles ", None),
+    (" Structure ,structure", " STRUCTURE "),
+])
+def test_batch_upload_rejects_duplicate_matching_headers_before_prediction(
+    client, monkeypatch, header, column
+):
+    from src.activity import prediction_service
+    monkeypatch.setattr(prediction_service, "predict_activity",
+                        lambda *a, **kw: pytest.fail("ambiguous CSV reached prediction"))
+    data = {"target": "PDE"}
+    if column is not None:
+        data["smiles_column"] = column
+    response = client.post("/api/activity/batch_predict", data=data,
+        files={"file": ("batch.csv", (header + "\nCCO,CCN\n").encode("utf-8"), "text/csv")})
+    assert response.status_code == 400
+    assert "唯一" in response.json()["detail"]
+
+
 def test_activity_batch_rejects_before_model_execution_when_row_limit_exceeded(client, monkeypatch):
     from src.activity import prediction_service
     monkeypatch.setattr(prediction_service, "predict_activity",
