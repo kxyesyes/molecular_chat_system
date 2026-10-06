@@ -869,7 +869,7 @@
           throw new Error(result.message || "读取配置失败");
         }
         fillLlmSettingsForm(result.config || {});
-        setLlmSettingsStatus("配置已读取");
+        setLlmSettingsStatus("");
       } catch (error) {
         console.error("读取 LLM 配置失败:", error);
         setLlmSettingsStatus(`读取配置失败：${error.message}`, true);

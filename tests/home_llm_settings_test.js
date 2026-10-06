@@ -133,6 +133,16 @@ test("opening without persisted config uses defaults; reopening never refills pa
   assert.deepEqual(storageAccess, []);
 });
 
+test("opening settings does not show an unnecessary loaded-configuration message", async () => {
+  const { context, elements } = harness([
+    { success: true, config: { ...defaults, api_key_configured: true } },
+  ]);
+
+  await context.openLlmSettings();
+
+  assert.equal(elements.llmSettingsStatus.textContent, "");
+});
+
 test("collect fallback provider is compatible when provider element is absent", () => {
   const { context, elements } = harness();
   elements.llmProvider = null;
@@ -204,6 +214,7 @@ test("initial markup selects compatible provider and shows DeepSeek placeholders
   assert.match(html, /id="llmBaseUrl"[^>]*placeholder="https:\/\/api\.deepseek\.com\/chat\/completions"/);
   assert.match(html, /id="llmModelName"[^>]*placeholder="deepseek-v4-pro"/);
   assert.match(html, /id="llmApiKey" type="password" autocomplete="off"/);
+  assert.match(html, /\/static\/js\/home\/main\.js\?v=20261006-llm-settings-clean-v1/);
 });
 
 test("settings markup omits verbose persistence and API-key instructions", () => {
