@@ -43,6 +43,26 @@ python -m pytest tests/test_family_training_run.py -q
 103 passed, 1 warning
 ```
 
+The full Agent regression and the opt-in real-weight family acceptance then
+passed without changing the production registry:
+
+```text
+python -m pytest tests/agent -q
+12774 passed, 3 skipped, 7 warnings
+
+MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE=1 \
+MEDCHAT_FAMILY_ACCEPTANCE_MODELS_DIR=data/activity/models/pde-buche-20261006-r2 \
+MEDCHAT_FAMILY_ACCEPTANCE_PDE_BUNDLE_ID=pde-buche-20261006-r2-pde-family \
+MEDCHAT_FAMILY_ACCEPTANCE_BUCHE_BUNDLE_ID=pde-buche-20261006-r2-buche-family \
+python -m pytest tests/test_activity_family_real_acceptance.py -q
+1 passed
+```
+
+The real-weight acceptance copied each family bundle into a fresh owned
+temporary directory, ran the classification-to-regression chain, checked the
+bound model identity and cleaned the directory. It is isolated acceptance
+evidence, not a production activation or an experimental accuracy claim.
+
 ## Batch activity upload: missed route fixed
 
 The earlier training-column fix did not fix the batch prediction endpoint.
