@@ -2052,27 +2052,6 @@
       gap: 12px;
     }
 
-    .llm-key-hint {
-      font-size: 12px;
-      color: #64748b;
-    }
-
-    .llm-key-clear {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      width: fit-content;
-      cursor: pointer;
-      font-weight: 500;
-    }
-
-    .llm-settings-field .llm-key-clear input {
-      width: 16px;
-      height: 16px;
-      padding: 0;
-      accent-color: #4f46e5;
-    }
-
     .llm-settings-actions {
       display: flex;
       gap: 10px;
@@ -2167,7 +2146,6 @@
       <div class="llm-settings-header">
         <div>
           <strong id="llmSettingsTitle">模型接入设置</strong>
-          <span>配置外部 API Key 或本地 Ollama，让 MedChat 接入可用 LLM</span>
         </div>
         <button class="llm-settings-close" type="button" id="closeLlmSettings" aria-label="关闭">×</button>
       </div>
@@ -2201,13 +2179,7 @@
         <div class="llm-settings-field">
           <label for="llmApiKey">API Key</label>
           <input id="llmApiKey" type="password" autocomplete="off" placeholder="本地 Ollama 可留空；外部 API 请填写 Key" />
-          <div class="llm-key-hint" id="llmApiKeyHint">未读取配置</div>
-          <label class="llm-key-clear" for="clearLlmApiKey">
-            <input id="clearLlmApiKey" type="checkbox" />
-            <span>勾选后点击“保存并启用”，清除本机用户配置目录中已保存的 API Key</span>
-          </label>
         </div>
-        <div class="llm-key-hint">配置保存在仓库之外的本机用户配置目录，不写入项目 .env。保存一次后，同一台电脑、同一操作系统账号下，重启应用、更新代码或切换工作树均可继续使用。删除用户配置目录、重装系统或更换电脑/账号后需重新配置。API Key 以明文保存在受本机访问权限保护的配置文件中，不存入浏览器存储。</div>
         <div class="llm-settings-status" id="llmSettingsStatus"></div>
         <div class="llm-settings-actions">
           <button class="llm-test-btn" type="button" id="testLlmConfig">测试连接</button>

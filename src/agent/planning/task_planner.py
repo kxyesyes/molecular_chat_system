@@ -195,13 +195,17 @@ class TaskPlanner:
                 classification=generation_request_error_details(exc),
             )
         docking_top_n = self._extract_top_n(query, default=min(5, requested_count))
+        ranking_evidence = self._requested_ranking_evidence(query)
+        target_step_kwargs = {
+            "target_hint": target_hint,
+            "generation_request": build_generation_request(query, requested_count),
+            "docking_top_n": docking_top_n,
+        }
+        if ranking_evidence:
+            target_step_kwargs["required_evidence"] = ranking_evidence
         return WorkflowPlan(
             workflow_name="target_driven_design",
-            steps=step_templates.target_design_steps(
-                target_hint=target_hint,
-                generation_request=build_generation_request(query, requested_count),
-                docking_top_n=docking_top_n,
-            ),
+            steps=step_templates.target_design_steps(**target_step_kwargs),
             metadata={
                 "target_hint": target_hint,
                 "requested_count": requested_count,
@@ -328,3 +332,15 @@ class TaskPlanner:
     @staticmethod
     def _wants_admet(query: str) -> bool:
         return request_parsing.wants_admet(query)
+
+    @staticmethod
+    def _requested_ranking_evidence(query: str) -> tuple[str, ...]:
+        required = ["properties"]
+        if request_parsing.wants_admet(query):
+            required.append("admet")
+        if request_parsing.wants_activity(query):
+            required.append("activity")
+        # Properties are always the mandatory base evidence in CandidateRanker;
+        # only add optional evidence to the step metadata when the user asked
+        # for it, keeping ordinary target design backward-compatible.
+        return tuple(required) if len(required) > 1 else ()

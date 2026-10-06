@@ -100,6 +100,23 @@ CASES = [
               input_binding="$.outputs.candidates", input_transform="smiles_text", output_key="candidate_properties",
               metadata={"candidate_source": "candidates"}, capability="molecule.properties",
               output_contract="PropertyAssessmentSet@1"),
+        _step("candidate_admet", "admet_predictor", input_from="candidates",
+              input_binding="$.outputs.candidates", input_transform="molecule_batch",
+              output_key="candidate_admet", metadata={"candidate_source": "candidates"},
+              capability="molecule.admet", output_contract="AdmetAssessmentSet@1",
+              required=False, continue_on_error=True),
+        _step("candidate_activity", "activity_predictor", input_from="candidates",
+              input_binding="$.outputs.candidates", input_transform="smiles_text", output_key="candidate_activity",
+              metadata={"candidate_source": "candidates"}, capability="molecule.activity",
+              output_contract="ActivityPredictionSet@1", required=False, continue_on_error=True),
+        _step("optimization_verification", "lead_optimization_verifier", input_binding="$.workflow",
+              output_key="verification", input_transform="identity",
+              metadata={"query": LEAD_QUERY,
+                        "workflow_output_keys": ("baseline", "baseline_admet", "baseline_activity", "candidates",
+                                                   "candidate_properties", "candidate_admet", "candidate_activity"),
+                        "workflow_optional_output_keys": ("baseline_admet", "baseline_activity",
+                                                            "candidate_admet", "candidate_activity")},
+              capability="molecule.optimization.verify", output_contract="LeadOptimizationVerification@1"),
     ]),
 ]
 
@@ -144,9 +161,18 @@ def test_explicit_count_override_preserved(skill, query, count):
     original = deepcopy(metadata)
     plan = TaskPlanner().plan(_context(skill, query, metadata))
     assert plan.metadata["requested_count"] == count
-    generator = next(step for step in plan.steps if step.tool_name == "llm_molecular_generator")
-    assert generator.input_data == _request(query, count)
+    if skill == "hit_to_lead_optimization":
+        generator = next(step for step in plan.steps if step.tool_name == "llm_molecular_generator")
+        assert generator.input_data == _request(query, count)
     assert metadata == original
+
+
+def test_target_ranking_carries_explicit_admet_and_activity_requirements():
+    query = "针对 PDE5A 设计 2 个分子，并用 ADMET 和活性筛选前 1 个"
+    plan = TaskPlanner().plan(_context("target_driven_design", query))
+
+    ranking = next(step for step in plan.steps if step.tool_name == "candidate_ranker")
+    assert ranking.metadata["required_evidence"] == ("properties", "admet", "activity")
 
 
 @pytest.mark.parametrize("skill,query", [

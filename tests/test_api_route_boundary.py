@@ -232,7 +232,7 @@ OPERATION_CASES = [
     ("POST", "/api/docking/report/job", {"json": {"format": "md"}}, 200, None),
     ("POST", "/api/reverse_target/predict", {"data": {"smiles": "CC"}}, 200, {"results": [], "count": 0}),
     ("POST", "/api/reverse_target/batch_predict", {"files": {"file": ("x.txt", b"CC\nCCC")}},
-     200, {"results": [], "count": 0}),
+     200, {"count": 2, "row_count": 2}),
     ("GET", "/api/reverse_target/stats", {}, 200, {"stats": {"controlled": True}}),
     ("GET", "/api/reverse_target/health", {}, 200, {"ready": False, "controlled": True}),
     ("GET", "/api/reverse_target/similar_molecules",
@@ -276,7 +276,11 @@ def controlled_app(monkeypatch, tmp_path):
         parse_vina_results=lambda path: [],
     )
     predictor = SimpleNamespace(
-        predict=lambda **kw: [], predict_batch=lambda **kw: [],
+        predict=lambda **kw: [],
+        predict_batch=lambda **kw: [
+            {"smiles": smiles, "success": True, "targets": []}
+            for smiles in kw["smiles_list"]
+        ],
         get_stats=lambda: {"controlled": True},
         get_similar_molecules=lambda **kw: [], get_raw_similar_molecules=lambda **kw: [],
     )

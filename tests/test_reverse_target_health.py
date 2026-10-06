@@ -115,7 +115,10 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
             def predict_batch(self, **kwargs):
                 predictor_thread_events.append(("predict_batch", threading.get_ident()))
-                return []
+                return [
+                    {"smiles": smiles, "success": True, "targets": []}
+                    for smiles in kwargs["smiles_list"]
+                ]
 
         fake_predictor = FakePredictor()
 
@@ -271,6 +274,28 @@ class ReverseTargetHealthTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502, response.text)
         self.assertIn("输入行数不一致", response.json()["detail"])
+
+    def test_reverse_batch_rejects_empty_downstream_results_for_nonempty_input(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.reverse_target import predictor as predictor_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        class EmptyPredictor:
+            def predict_batch(self, **kwargs):
+                return []
+
+        app = FastAPI()
+        setup_api_routes(app)
+        with patch.object(predictor_module, "get_predictor", return_value=EmptyPredictor()):
+            response = TestClient(app).post(
+                "/api/reverse_target/batch_predict",
+                files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
+                data={"threshold": "0.6", "top_k": "10"},
+            )
+
+        assert response.status_code == 502, response.text
+        assert "输入行数不一致" in response.json()["detail"]
 
     @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
     def test_global_predictor_uses_configured_data_dir(self):

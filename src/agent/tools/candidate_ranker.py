@@ -34,6 +34,7 @@ class CandidateRanker:
             return self._error("invalid_top_n", "Top-N must be a positive integer")
 
         try:
+            required_evidence = self._required_evidence(metadata)
             candidates = self._validated_candidates(outputs.get("molecules"))
             properties = self._evidence_by_candidate(
                 outputs.get("properties"), candidates, "properties"
@@ -54,6 +55,7 @@ class CandidateRanker:
         missing_property_count = 0
         ignored_admet_count = 0
         ignored_activity_count = 0
+        missing_required_count = 0
 
         for canonical_smiles, candidate in candidates.items():
             property_record = properties.get(canonical_smiles)
@@ -79,13 +81,27 @@ class CandidateRanker:
                 missing_evidence.append("activity")
                 ignored_activity_count += 1
 
-            available = [(property_score, 0.50)]
+            missing_required_evidence = [
+                evidence_name
+                for evidence_name in required_evidence
+                if evidence_name in missing_evidence
+            ]
+            if missing_required_evidence:
+                assessment_status = "requirements_not_met"
+                missing_required_count += 1
+            elif missing_evidence:
+                assessment_status = "needs_assessment"
+            else:
+                assessment_status = "complete"
+
+            # Keep the configured weights fixed.  Missing evidence is not
+            # reweighted into a stronger score; the status and sort order make
+            # incomplete assessments ineligible to outrank complete ones.
+            score = property_score * 0.50
             if admet_score is not None:
-                available.append((admet_score, 0.25))
+                score += admet_score * 0.25
             if activity_score is not None:
-                available.append((activity_score, 0.25))
-            total_weight = sum(weight for _, weight in available)
-            score = sum(value * weight for value, weight in available) / total_weight
+                score += activity_score * 0.25
             ranking_evidence = {
                 "property_score": round(property_score, 6),
                 "admet_score": (
@@ -97,13 +113,9 @@ class CandidateRanker:
                     else None
                 ),
                 "weights_used": {
-                    "properties": 0.50 / total_weight,
-                    "admet": (
-                        0.25 / total_weight if admet_score is not None else None
-                    ),
-                    "activity": (
-                        0.25 / total_weight if activity_score is not None else None
-                    ),
+                    "properties": 0.50,
+                    "admet": 0.25 if admet_score is not None else None,
+                    "activity": 0.25 if activity_score is not None else None,
                 },
                 "missing_evidence": list(missing_evidence),
             }
@@ -114,11 +126,24 @@ class CandidateRanker:
                     "score": round(score, 6),
                     "ranking_evidence": ranking_evidence,
                     "missing_evidence": list(missing_evidence),
-                    "docking_ready_for_preparation": True,
+                    "missing_required_evidence": list(missing_required_evidence),
+                    "assessment_status": assessment_status,
+                    "docking_ready_for_preparation": not missing_required_evidence,
                 }
             )
 
-        ranked.sort(key=lambda item: (-item["score"], item["canonical_smiles"]))
+        status_order = {
+            "complete": 0,
+            "needs_assessment": 1,
+            "requirements_not_met": 2,
+        }
+        ranked.sort(
+            key=lambda item: (
+                status_order[item["assessment_status"]],
+                -item["score"],
+                item["canonical_smiles"],
+            )
+        )
         for rank, item in enumerate(ranked, start=1):
             item["rank"] = rank
 
@@ -138,6 +163,11 @@ class CandidateRanker:
                 "Activity evidence was absent, demo, fallback, or unusable for "
                 f"{ignored_activity_count} ranked candidate(s)"
             )
+        if missing_required_count:
+            warnings.append(
+                f"Required evidence was missing for {missing_required_count} "
+                "candidate(s); those candidates are not assessment-complete"
+            )
 
         if not ranked:
             return self._error(
@@ -148,10 +178,21 @@ class CandidateRanker:
 
         data = {
             "requested_top_n": top_n,
+            "required_evidence": list(required_evidence),
             "ranked_candidate_count": len(ranked),
             "top_candidates": ranked[:top_n],
             "ranked_candidates": ranked,
             "unrankable_candidates": unrankable,
+            "assessment_summary": {
+                "complete": sum(item["assessment_status"] == "complete" for item in ranked),
+                "needs_assessment": sum(
+                    item["assessment_status"] == "needs_assessment" for item in ranked
+                ),
+                "requirements_not_met": sum(
+                    item["assessment_status"] == "requirements_not_met"
+                    for item in ranked
+                ),
+            },
         }
         return {
             "success": True,
@@ -162,7 +203,7 @@ class CandidateRanker:
             "evidence": [
                 {
                     "type": "deterministic_candidate_ranking",
-                    "method": "property_admet_activity_weighted_normalization",
+                    "method": "property_admet_activity_fixed_weight_prioritization",
                     "ranked_candidate_count": len(ranked),
                 }
             ],
@@ -213,6 +254,27 @@ class CandidateRanker:
                 "invalid_candidate_set", "Validated molecule set is empty"
             )
         return candidates
+
+    @staticmethod
+    def _required_evidence(metadata: Mapping[str, Any]) -> tuple[str, ...]:
+        value = metadata.get("required_evidence", ())
+        if value is None:
+            return ()
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            raise _RankingInputError(
+                "invalid_required_evidence",
+                "Required evidence must be a list of evidence names",
+            )
+        allowed = {"properties", "admet", "activity"}
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or item not in allowed or item in normalized:
+                raise _RankingInputError(
+                    "invalid_required_evidence",
+                    "Required evidence contains an unknown or duplicate evidence name",
+                )
+            normalized.append(item)
+        return tuple(normalized)
 
     @classmethod
     def _evidence_by_candidate(

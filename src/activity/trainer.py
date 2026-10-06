@@ -7,6 +7,7 @@ import logging
 import random
 import platform
 import sys
+import csv
 from pathlib import Path
 from typing import Dict, Any, List
 import pandas as pd
@@ -284,6 +285,69 @@ def _prepare_training_frame(
     return cleaned, audit
 
 
+def _column_key(value: Any) -> str:
+    """Return the user-facing column identity used by training selection."""
+    return str(value).strip().casefold()
+
+
+def _resolve_training_columns(
+    frame: pd.DataFrame,
+    *,
+    smiles_column: str,
+    target_column: str,
+) -> tuple[Any, Any]:
+    """Resolve requested columns without losing the DataFrame's real labels.
+
+    CSV headers are user input.  Selection is whitespace/case insensitive, but
+    the returned names are the exact labels held by pandas so row access cannot
+    silently switch back to an unnormalised header.  Ambiguous headers are
+    rejected instead of allowing pandas' duplicate-column behavior to choose a
+    value implicitly.
+    """
+    if not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be a pandas DataFrame")
+
+    by_key: dict[str, list[Any]] = {}
+    for column in frame.columns:
+        key = _column_key(column)
+        if key:
+            by_key.setdefault(key, []).append(column)
+
+    def resolve(requested: str, label: str) -> Any:
+        key = _column_key(requested)
+        if not key:
+            raise ValueError(f"{label} column must be explicitly selected")
+        matches = by_key.get(key, [])
+        if len(matches) > 1:
+            raise ValueError(
+                f"ambiguous {label} column '{str(requested).strip()}': "
+                f"multiple headers match after whitespace/case normalization"
+            )
+        if not matches:
+            raise ValueError(
+                f"Could not find selected {label} column '{str(requested).strip()}'. "
+                f"Found columns: {list(frame.columns)}"
+            )
+        return matches[0]
+
+    smiles_col = resolve(smiles_column, "SMILES")
+    target_col = resolve(target_column, "target")
+    if smiles_col == target_col:
+        raise ValueError("SMILES and target columns must be different")
+    return smiles_col, target_col
+
+
+def _validate_csv_header(file_path: str, encoding: str) -> None:
+    """Reject duplicate normalized headers before pandas can rename them."""
+    with open(file_path, "r", encoding=encoding, newline="") as handle:
+        fields = next(csv.reader(handle), [])
+    normalized = [_column_key(field) for field in fields]
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(
+            "CSV contains duplicate column names after whitespace/case normalization"
+        )
+
+
 def _seed_training(seed: int, torch_module) -> dict:
     """Seed every RNG used by the training loop and describe limitations."""
     random.seed(seed)
@@ -515,34 +579,26 @@ class ActivityTrainer:
             for enc in ['utf-8-sig', 'utf-8', 'gbk', 'gb18030', 'latin1']:
                 try:
                     df = pd.read_csv(file_path, encoding=enc)
-                    self._log(f"Successfully read CSV with {enc} encoding.")
-                    break
                 except Exception:
                     continue
+                _validate_csv_header(file_path, enc)
+                self._log(f"Successfully read CSV with {enc} encoding.")
+                break
             
             if df is None:
                 raise ValueError("Could not decode CSV file. Please ensure it is saved as UTF-8/GBK.")
             
-            # Strip whitespace from column names just in case
-            df.columns = [str(col).strip() for col in df.columns]
             self._log(f"CSV Columns exactly found: {list(df.columns)}")
-            
-            smiles_column = str(smiles_column).strip()
-            target_column = str(target_column).strip()
-            if not smiles_column:
-                raise ValueError("smiles_column must be explicitly selected")
-            selected = [col for col in df.columns if str(col).casefold() == smiles_column.casefold()]
-            if len(selected) != 1 or target_column not in df.columns:
-                raise ValueError(
-                    f"Could not find selected SMILES column '{smiles_column}' or target "
-                    f"'{target_column}'. Found columns: {list(df.columns)}"
-                )
-            smiles_col = selected[0]
+            smiles_col, target_col = _resolve_training_columns(
+                df,
+                smiles_column=smiles_column,
+                target_column=target_column,
+            )
             
             df, input_audit = _prepare_training_frame(
                 df,
                 smiles_column=smiles_col,
-                target_column=target_column,
+                target_column=target_col,
             )
             self.status.update(input_audit)
             if input_audit["rows_dropped_missing_required_fields"]:
@@ -555,7 +611,7 @@ class ActivityTrainer:
                 self._log(warning)
             smiles_list = df[smiles_col].tolist()
             targets = _prepare_training_labels(
-                df[target_column].tolist(),
+                df[target_col].tolist(),
                 task_type=task_type,
                 classification_threshold=classification_threshold,
                 classification_direction=classification_direction,

@@ -163,6 +163,74 @@ def test_candidate_ranker_uses_trusted_normalized_activity_and_explicit_admet_ri
     assert evidence["missing_evidence"] == []
 
 
+def test_candidate_ranker_does_not_promote_missing_optional_evidence():
+    payload = {
+        "metadata": {"docking_top_n": 2},
+        "outputs": {
+            "molecules": [
+                {"candidate_id": "candidate-incomplete", "smiles": "CCO"},
+                {"candidate_id": "candidate-complete", "smiles": "CCN"},
+            ],
+            "properties": [
+                {"smiles": "CCO", "properties": {"qed": 0.95, "logp": 1.0}},
+                {"smiles": "CCN", "properties": {"qed": 0.70, "logp": 1.0}},
+            ],
+            "admet": [
+                {
+                    "smiles": "CCN",
+                    "admet": {
+                        "prediction_method": "validated-model",
+                        "risk_count": 0,
+                        "total_endpoints": 4,
+                    },
+                }
+            ],
+            "activity": [
+                {
+                    "smiles": "CCN",
+                    "success": True,
+                    "normalized_activity": 0.95,
+                    "model_provenance": {
+                        "model_id": "rg-mpnn-test",
+                        "demo_mode": False,
+                        "fallback_used": False,
+                    },
+                }
+            ],
+        },
+    }
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is True
+    assert [row["candidate_id"] for row in result["data"]["ranked_candidates"]] == [
+        "candidate-complete",
+        "candidate-incomplete",
+    ]
+    incomplete = result["data"]["ranked_candidates"][1]
+    assert incomplete["assessment_status"] == "needs_assessment"
+    assert incomplete["ranking_evidence"]["weights_used"] == {
+        "properties": 0.5,
+        "admet": None,
+        "activity": None,
+    }
+    assert incomplete["docking_ready_for_preparation"] is True
+
+
+def test_candidate_ranker_marks_missing_required_evidence_as_not_satisfied():
+    payload = _payload(top_n=1)
+    payload["metadata"]["required_evidence"] = ["properties", "activity"]
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is True
+    candidate = result["data"]["top_candidates"][0]
+    assert candidate["assessment_status"] == "requirements_not_met"
+    assert candidate["missing_required_evidence"] == ["activity"]
+    assert candidate["docking_ready_for_preparation"] is False
+    assert any("required" in warning.casefold() for warning in result["warnings"])
+
+
 def test_candidate_ranker_uses_trusted_family_activity_probability():
     payload = _payload(top_n=1)
     payload["outputs"]["activity"] = [

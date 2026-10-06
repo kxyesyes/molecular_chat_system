@@ -49,6 +49,38 @@ DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 6001
 
 
+def resolve_web_chat_profile(
+    profile: str | None = None,
+    *,
+    wire_mode: str | None = None,
+) -> tuple[str, str, str]:
+    """Resolve the explicitly selected web chat chain.
+
+    The stable legacy chain remains the default. The decision runtime is
+    opt-in so a deployment cannot switch the production entry point merely by
+    importing this module; operators can enable it with
+    ``MEDCHAT_CHAT_PROFILE=decision_a2`` or ``semantic_v1`` after acceptance.
+    """
+    selected = (profile if profile is not None else os.environ.get(
+        "MEDCHAT_CHAT_PROFILE", "legacy"
+    )).strip().lower()
+    selected_wire = (wire_mode if wire_mode is not None else os.environ.get(
+        "MEDCHAT_DECISION_WIRE_MODE", "native"
+    )).strip().lower()
+    profiles = {
+        "legacy": ("legacy", selected_wire, "a1_closed"),
+        "decision_a2": ("decision_a2", selected_wire, "a1_closed"),
+        "semantic_v1": ("decision_a2", selected_wire, "semantic_v1"),
+    }
+    if selected not in profiles:
+        raise ValueError(
+            "MEDCHAT_CHAT_PROFILE must be legacy, decision_a2, or semantic_v1"
+        )
+    if selected_wire not in {"native", "json"}:
+        raise ValueError("MEDCHAT_DECISION_WIRE_MODE must be native or json")
+    return profiles[selected]
+
+
 def load_env_file(env_path: str | Path = ".env") -> None:
     """Load simple KEY=VALUE pairs without adding a runtime dependency."""
     path = Path(env_path)
@@ -699,7 +731,7 @@ class MolecularChatApp:
             saved = await self._persist_user_llm_config(payload)
             return {
                 "success": True,
-                "message": "模型配置已保存到本机用户目录并生效；连接状态请使用测试连接确认。",
+                "message": "模型配置已保存并生效。",
                 "config": public_llm_config(saved),
                 "warnings": [],
             }
@@ -968,8 +1000,30 @@ def create_app_sync():
         # 从环境变量读取配置文件路径
         config_path = os.environ.get("MOLECULAR_CHAT_CONFIG", "config/ollama_config.yaml")
         logger.info(f"🔧 加载配置文件: {config_path}")
-        
-        app_instance = MolecularChatApp(config_path=config_path)
+        normal_chat_mode, decision_wire_mode, ordinary_chat_policy = resolve_web_chat_profile()
+        logger.info(
+            "Chat profile: %s / %s / %s",
+            normal_chat_mode,
+            decision_wire_mode,
+            ordinary_chat_policy,
+        )
+        if ordinary_chat_policy == "semantic_v1":
+            # Semantic assembly owns async lifecycle resources. Uvicorn
+            # imports this module before its serving loop starts, so assemble
+            # it once here and keep the same startup/shutdown hooks below.
+            app_instance = asyncio.run(MolecularChatApp.create_async(
+                config_path=config_path,
+                normal_chat_mode=normal_chat_mode,
+                decision_wire_mode=decision_wire_mode,
+                ordinary_chat_policy=ordinary_chat_policy,
+            ))
+        else:
+            app_instance = MolecularChatApp(
+                config_path=config_path,
+                normal_chat_mode=normal_chat_mode,
+                decision_wire_mode=decision_wire_mode,
+                ordinary_chat_policy=ordinary_chat_policy,
+            )
         app = app_instance.app
 
         # Add startup event to initialize async components

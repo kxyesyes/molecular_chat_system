@@ -63,6 +63,28 @@ def test_common_chinese_protein_and_ligand_wording_is_bound_to_structured_input(
     }
 
 
+def test_line_oriented_chinese_docking_fields_bind_box_center_and_size():
+    tool = _RecordingDockingTool()
+    prompt = """请进行真实分子对接。
+受体：D:/work/data/receptor.pdb
+配体：D:/work/data/ligand.sdf
+盒子中心：[5.99, 3.01, 17.345]
+盒子大小：[20, 20, 20]
+"""
+
+    SupervisorAgent(tools={"molecular_docking": tool}).execute(
+        prompt,
+        active_skill="docking_simulation",
+    )
+
+    assert tool.received == {
+        "receptor_path": "D:/work/data/receptor.pdb",
+        "ligand_path": "D:/work/data/ligand.sdf",
+        "center": [5.99, 3.01, 17.345],
+        "size": [20.0, 20.0, 20.0],
+    }
+
+
 def test_incomplete_docking_prompt_remains_unstructured_for_safe_rejection():
     tool = _RecordingDockingTool()
     SupervisorAgent(tools={"molecular_docking": tool}).execute(

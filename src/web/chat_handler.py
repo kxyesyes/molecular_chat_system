@@ -4,6 +4,7 @@
 import json
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Mapping
 from typing import List, Dict, Any
@@ -65,6 +66,13 @@ class ChatHandler:
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
         self.decision_runtime = None
+
+    @staticmethod
+    def _validate_request_temperature(value: Any) -> float:
+        """Validate the temperature once and reuse it for the whole turn."""
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 2:
+            raise ValueError("temperature must be a finite number between 0 and 2")
+        return float(value)
 
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
@@ -187,6 +195,15 @@ class ChatHandler:
         """处理用户消息 - 性能优化版"""
         # Hold one client for generation, retries and completion metadata.
         request_model = self.model
+        try:
+            temperature = self._validate_request_temperature(temperature)
+        except ValueError as exc:
+            await websocket.send_text(json.dumps({
+                "type": "complete",
+                "content": "生成参数无效，temperature 必须是 0 到 2 之间的有限数值。",
+                "error": {"code": "invalid_temperature", "message": str(exc)},
+            }, ensure_ascii=False))
+            return
         history = (
             conversation_history
             if conversation_history is not None
@@ -574,7 +591,7 @@ class ChatHandler:
                 chunk_count = 0
                 stream = request_model.stream_generate(
                     prompt,
-                    temperature=self.config.get("inference", {}).get("temperature", 0.7),
+                    temperature=temperature,
                     max_tokens=model_max_tokens,
                 )
                 try:
@@ -624,30 +641,30 @@ class ChatHandler:
                 full_response = await generate_for_chat(
                     request_model,
                     prompt,
-                    temperature=self.config.get("inference", {}).get("temperature", 0.7),
+                    temperature=temperature,
                     max_tokens=model_max_tokens,
                 )
                 full_response, _, completion_meta = self._finalize_model_response(
                     full_response, request_model
                 )
                 await websocket.send_text(json.dumps({
-                    "type": "message",
-                    "message": full_response,
+                    "type": "complete",
+                    "content": full_response,
                     **completion_meta,
                 }, ensure_ascii=False))
         else:
             full_response = await generate_for_chat(
                 request_model,
                 prompt,
-                temperature=self.config.get("inference", {}).get("temperature", 0.7),
+                temperature=temperature,
                 max_tokens=model_max_tokens,
             )
             full_response, _, completion_meta = self._finalize_model_response(
                 full_response, request_model
             )
             await websocket.send_text(json.dumps({
-                "type": "message",
-                "message": full_response,
+                "type": "complete",
+                "content": full_response,
                 **completion_meta,
             }, ensure_ascii=False))
         

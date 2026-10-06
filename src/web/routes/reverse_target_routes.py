@@ -92,9 +92,7 @@ def setup_reverse_target_routes(app, *, _support):
                 )
 
             results = await _support._invoke_in_threadpool(run_batch_prediction)
-            if not isinstance(results, list) or (
-                results and len(results) != len(rows)
-            ):
+            if not isinstance(results, list) or len(results) != len(rows):
                 raise HTTPException(
                     status_code=502,
                     detail="批量预测结果与输入行数不一致，已拒绝返回不完整结果",

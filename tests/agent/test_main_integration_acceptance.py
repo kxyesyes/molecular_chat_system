@@ -169,8 +169,8 @@ def test_invalid_smiles_is_rejected_without_scientific_execution(tmp_path):
 @isolated_scenario
 def test_plain_chat_uses_offline_model_without_scientific_events(tmp_path, query):
     app = capture(create_lab(tmp_path))
-    answer, events = exchange(app, query, terminal='message')
-    assert answer['message'] == NOTICE
+    answer, events = exchange(app, query, terminal='complete')
+    assert answer['content'] == NOTICE
     assert events == []
     assert not any(app.state.calls.values())
 

@@ -190,7 +190,7 @@ def test_ranker_order_exact_and_projection_detached(tmp_path):
         ("candidate_id", "canonical_smiles", "score", "missing_evidence", "ranking_evidence")}
         for r in original["top_candidates"]]
     value["ranking"]["top_candidates"][0]["ranking_evidence"]["weights_used"]["properties"] = 0
-    assert original["top_candidates"][0]["ranking_evidence"]["weights_used"]["properties"] == 1
+    assert original["top_candidates"][0]["ranking_evidence"]["weights_used"]["properties"] == 0.5
     cp = snap["latest"]["ranking"]
     raw = json.loads(cp["output_json"])
     raw["data"]["ranked_candidates"].reverse()

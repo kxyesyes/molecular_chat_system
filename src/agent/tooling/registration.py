@@ -7,6 +7,7 @@ from .factory import TOOL_AGENT_OWNERS
 REQUIRED_TOOLS = frozenset({
     "property_calculator", "drug_likeness_assessment", "admet_predictor",
     "llm_molecular_generator", "candidate_ranker",
+    "lead_optimization_verifier",
 })
 # Absence is a reported runtime limitation, not a malformed installation.
 OPTIONAL_TOOLS = frozenset({

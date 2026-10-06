@@ -175,7 +175,10 @@ class PlanCompiler:
                         "workflow_output_keys"
                     )
                     if workflow_output_keys is not None:
-                        if requested.name != "candidate.rank":
+                        if requested.name not in {
+                            "candidate.rank",
+                            "molecule.optimization.verify",
+                        }:
                             raise PlanCompilationError(
                                 "Workflow output allowlists are reserved for "
                                 "candidate ranking steps"

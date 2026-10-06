@@ -16,6 +16,7 @@ from .generation_ranking_contract import (
     GenerationInput, GenerationOutput, GenerationToolAdapter,
     RankingInput, RankingOutput, RankingToolAdapter,
 )
+from .optimization_contract import LeadOptimizationInput, LeadOptimizationOutput
 from .target_contract import (
     TargetSearchInput, TargetSearchOutput, ReverseTargetInput, ReverseTargetOutput, TargetToolAdapter,
 )
@@ -28,6 +29,7 @@ TOOL_AGENT_OWNERS = {
     "reverse_target_predictor": "reverse_target",
     "llm_molecular_generator": "molecular_design",
     "candidate_ranker": "molecular_design",
+    "lead_optimization_verifier": "molecular_design",
     "property_calculator": "property_admet",
     "drug_likeness_assessment": "property_admet",
     "admet_predictor": "property_admet",
@@ -82,6 +84,7 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             input_schema=(RAGSearchInput if name == "rag_search" else
                           GenerationInput if name == "llm_molecular_generator" else
                           RankingInput if name == "candidate_ranker" else
+                          LeadOptimizationInput if name == "lead_optimization_verifier" else
                           TargetSearchInput if name == "target_database_search" else
                           ReverseTargetInput if name == "reverse_target_predictor" else
                           DockingInput if name == "molecular_docking" else
@@ -91,6 +94,7 @@ def build_tool_registry(tools: Iterable[Any]) -> ToolRegistry:
             output_schema=(RAGSearchOutput if name == "rag_search" else
                            GenerationOutput if name == "llm_molecular_generator" else
                            RankingOutput if name == "candidate_ranker" else
+                           LeadOptimizationOutput if name == "lead_optimization_verifier" else
                            TargetSearchOutput if name == "target_database_search" else
                            ReverseTargetOutput if name == "reverse_target_predictor" else
                            DockingOutput if name == "molecular_docking" else

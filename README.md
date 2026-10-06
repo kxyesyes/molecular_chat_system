@@ -55,6 +55,16 @@ python main.py
 
 启动后访问 `http://127.0.0.1:6001` 即可开始使用。端口、主机、worker 数等运行参数可通过 `.env` 或命令行覆盖；命令行参数优先级最高。
 
+聊天运行链路默认保持稳定的 `legacy` 入口。完成决策链验收后，可在启动前显式启用：
+
+```powershell
+$env:MEDCHAT_CHAT_PROFILE = "decision_a2"   # 或 semantic_v1
+$env:MEDCHAT_DECISION_WIRE_MODE = "native" # 或 json
+python main.py
+```
+
+未设置 `MEDCHAT_CHAT_PROFILE` 时不会切换入口；发现问题可改回 `legacy`，保留回退路径。
+
 ### 主模型接入与一次保存
 
 首页默认使用 DeepSeek 官方 OpenAI 兼容接口 `https://api.deepseek.com/chat/completions`、

@@ -30,6 +30,12 @@ CAPABILITY_CATALOG = (
     ),
     CapabilitySpec("candidate.rank", ("candidate_ranker",), "low", False),
     CapabilitySpec(
+        "molecule.optimization.verify",
+        ("lead_optimization_verifier",),
+        "low",
+        False,
+    ),
+    CapabilitySpec(
         "target.reverse_predict",
         ("reverse_target_predictor",),
         "medium",
