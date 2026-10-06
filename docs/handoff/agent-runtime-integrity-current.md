@@ -63,6 +63,30 @@ temporary directory, ran the classification-to-regression chain, checked the
 bound model identity and cleaned the directory. It is isolated acceptance
 evidence, not a production activation or an experimental accuracy claim.
 
+Additional end-to-end boundary checks passed after the full Agent suite:
+
+```text
+python scripts/run_agent_acceptance.py --mode contract
+contract: passed
+
+python -m pytest tests/agent/test_activity_contract_integration.py \
+tests/agent/test_activity_checkpoint_identity.py \
+tests/agent/test_candidate_ranker.py \
+tests/agent/test_lead_optimization_verifier.py \
+tests/agent/test_decision_protocol_recovery.py \
+tests/agent/test_chat_handler_partial_results.py -q
+192 passed
+
+python -m pytest tests/task_runtime/test_docking_consent.py \
+tests/task_runtime/test_docking_execution.py -q
+280 passed, 2 skipped
+```
+
+These checks cover required-tool/evidence identity, matched baseline/candidate
+comparisons, failed-stream projection, persistent task state, disconnect and
+physical cancellation cleanup. They do not activate a production model or
+claim docking/ADMET scientific accuracy.
+
 ## Batch activity upload: missed route fixed
 
 The earlier training-column fix did not fix the batch prediction endpoint.
@@ -123,15 +147,11 @@ The training run ended **partial**:
 The default model registry remains empty. Its old sidecars fail current metadata
 validation; they must not be force-registered merely to make health checks green.
 
-## Still required before full goal acceptance
+## Remaining before full goal acceptance
 
-1. Audit evidence identity and required-goal enforcement through the full
-   candidate-ranking and lead-optimization flows, not only individual tools.
-2. Verify request parameters and protocol semantics on both legacy and model
-   decision paths, including failed stream fallback and persistent message state.
-3. Verify status lookup after disconnect and physical cancellation semantics
-   across actual long-running scientific tasks; passing wrapper tests alone is
-   not proof that a computation stopped.
-4. Finish the bounded, isolated real-chain acceptance and deliver a requirement-
-   by-requirement report. Previous broad pytest counts do not prove these missing
-   end-to-end requirements and must not be used as a completion claim.
+1. Produce the final requirement-by-requirement report, including explicit
+   non-claims for unactivated production models, unavailable ADMET assets and
+   unverified docking/experimental accuracy.
+2. Decide whether to promote the isolated v2 activity bundles through the
+   normal reviewed activation path; no promotion is implied by the acceptance
+   results above.
