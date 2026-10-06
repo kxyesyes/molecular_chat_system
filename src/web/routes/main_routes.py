@@ -31,7 +31,11 @@ def register_main_routes(
     @app.get("/")
     async def home(request: Request):
         if templates is not None:
-            return render_template(request, "index.html")
+            response = render_template(request, "index.html")
+            # The homepage contains inline UI and configuration markup. Do not
+            # let a local browser keep an older template after a code update.
+            response.headers["Cache-Control"] = "no-store"
+            return response
         return {"message": "Molecular Chat System API", "status": "running"}
 
     @app.get("/molecular-docking")

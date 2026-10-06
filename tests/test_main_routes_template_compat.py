@@ -52,6 +52,17 @@ def test_real_templates_preserve_request_url_for_and_escaping(
     assert "<script>" not in response.text
 
 
+def test_homepage_html_is_not_cached_so_ui_cleanup_reaches_local_browsers(templates):
+    app = FastAPI()
+    main_routes.register_main_routes(app, templates)
+
+    with TestClient(app) as client:
+        response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+
+
 @pytest.mark.parametrize("path,name,message", PAGES)
 def test_without_templates_preserves_fallback_json(path, name, message):
     app = FastAPI()
