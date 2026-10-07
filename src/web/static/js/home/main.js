@@ -2004,36 +2004,10 @@
   }
 
   function resolveAgentEventPresentation(event) {
-    const eventType = event.event || event.type || "agent_event";
-    const percent =
-      typeof event.progress === "number"
-        ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
-        : null;
-    const terminalLabels = {
-      task_completed: "已完成",
-      task_partial: "部分完成",
-      task_failed: "失败",
-      task_rejected: "已拒绝",
-      task_cancelled: "已取消",
-    };
-    const progressText =
-      Object.prototype.hasOwnProperty.call(terminalLabels, eventType)
-        ? terminalLabels[eventType]
-        : percent !== null
-        ? `${percent}%`
-        : "执行中";
-    const terminalAgentEvents = new Set([
-      "task_completed",
-      "task_failed",
-      "task_partial",
-      "task_rejected",
-      "task_cancelled",
-    ]);
+    const presentation = window.HomeTaskStatus.resolve(event);
     return {
-      eventType,
-      itemClass: getAgentEventClass(eventType),
-      progressText,
-      terminal: terminalAgentEvents.has(eventType),
+      ...presentation,
+      itemClass: getAgentEventClass(presentation.eventType),
     };
   }
 
@@ -2075,44 +2049,15 @@
   }
 
   function getAgentEventLabel(type, toolName) {
-    const toolText = toolName ? formatToolName(toolName) : "";
-    const labels = {
-      planning_started: "任务规划",
-      planning_completed: "规划完成",
-      task_started: "任务开始",
-      task_completed: "任务完成",
-      task_failed: "任务失败",
-      task_partial: "部分完成",
-      task_rejected: "已拒绝",
-      task_cancelled: "已取消",
-      tool_started: toolText ? `调用 ${toolText}` : "工具调用",
-      tool_completed: toolText ? `${toolText} 完成` : "工具完成",
-      tool_failed: toolText ? `${toolText} 失败` : "工具失败",
-      validation_warning: "结果校验提醒",
-    };
-    return labels[type] || "Agent 事件";
+    return window.HomeTaskStatus.label(type, toolName);
   }
 
   function getAgentEventClass(type) {
-    if (type && type.includes("failed")) return "is-error";
-    if (type === "validation_warning" || type === "task_partial") {
-      return "is-warning";
-    }
-    if (type && type.includes("completed")) return "is-complete";
-    return "is-running";
+    return window.HomeTaskStatus.className(type);
   }
 
   function formatToolName(toolName) {
-    const names = {
-      property_calculator: "属性计算",
-      admet_predictor: "ADMET预测",
-      activity_predictor: "活性预测",
-      reverse_target_predictor: "反向寻靶",
-      target_database_search: "靶点库检索",
-      llm_molecular_generator: "分子生成",
-      molecular_docking: "分子对接",
-    };
-    return names[toolName] || toolName;
+    return window.HomeTaskStatus.formatToolName(toolName);
   }
 
   function escapeHtml(value) {

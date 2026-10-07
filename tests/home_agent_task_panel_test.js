@@ -14,6 +14,10 @@ const jsPath = path.join(
   "main.js"
 );
 const source = fs.readFileSync(jsPath, "utf8");
+const taskStatusSource = fs.readFileSync(
+  path.join(__dirname, "..", "src", "web", "static", "js", "home", "task_status.js"),
+  "utf8",
+);
 const template = fs.readFileSync(
   path.join(__dirname, "..", "src", "web", "templates", "index.html"),
   "utf8"
@@ -22,6 +26,14 @@ assert(template.includes("/static/js/shared/status.js"),
   "homepage must load the shared status contract before the Agent entrypoint");
 assert(!source.includes("const decisionStatuses = {"),
   "homepage workflow labels belong to the shared status contract");
+assert(template.includes("/static/js/home/task_status.js"),
+  "homepage must load the Agent task status module before the entrypoint");
+
+const taskStatusSandbox = {window: {}, Object, Math};
+taskStatusSandbox.globalThis = taskStatusSandbox;
+vm.createContext(taskStatusSandbox);
+vm.runInContext(taskStatusSource, taskStatusSandbox, {filename: "task_status.js"});
+const HomeTaskStatus = taskStatusSandbox.window.HomeTaskStatus;
 
 function extractFunction(functionName) {
   const start = source.indexOf(`function ${functionName}(`);
@@ -106,11 +118,12 @@ if (sendBody.includes("resetAgentTaskPanel();")) {
 }
 
 const eventClassSource = extractFunction("getAgentEventClass");
-const getAgentEventClass = vm.runInNewContext(`(${eventClassSource})`);
+const helperContext = {window: {HomeTaskStatus}};
+const getAgentEventClass = vm.runInNewContext(`(${eventClassSource})`, helperContext);
 const eventPresentationSource = extractFunction("resolveAgentEventPresentation");
 const resolveAgentEventPresentation = vm.runInNewContext(
   `(${eventPresentationSource})`,
-  { getAgentEventClass }
+  { getAgentEventClass, window: {HomeTaskStatus} }
 );
 const agentEventBody = extractFunction("handleAgentEvent");
 
@@ -213,10 +226,13 @@ for (const event of ["future_event", "task_completed_extra", "constructor", "toS
   }
 }
 
-const formatToolName = vm.runInNewContext(`(${extractFunction("formatToolName")})`);
+const formatToolName = vm.runInNewContext(
+  `(${extractFunction("formatToolName")})`,
+  {window: {HomeTaskStatus}},
+);
 const getAgentEventLabel = vm.runInNewContext(
   `(${extractFunction("getAgentEventLabel")})`,
-  { formatToolName }
+  { formatToolName, window: {HomeTaskStatus} }
 );
 for (const event of ["task_partial", "task_rejected", "task_cancelled"]) {
   assert.strictEqual(getAgentEventLabel(event), terminalLabels[event]);
