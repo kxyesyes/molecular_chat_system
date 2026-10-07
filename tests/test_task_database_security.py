@@ -3,6 +3,7 @@ import pytest
 
 def test_task_database_permission_failure_aborts_connect(tmp_path, monkeypatch):
     from src.task_runtime import database
+    from src.task_runtime import private_permissions
 
     real_os = database.os
 
@@ -13,6 +14,7 @@ def test_task_database_permission_failure_aborts_connect(tmp_path, monkeypatch):
             return getattr(real_os, name)
 
     monkeypatch.setattr(database, "os", PosixOsProxy())
+    monkeypatch.setattr(private_permissions, "os", PosixOsProxy())
 
     def deny_chmod(self, mode):
         raise PermissionError("synthetic permission failure")

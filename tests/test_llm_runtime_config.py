@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 import unittest
 import json
+import os
 from unittest import mock
 from pathlib import Path
 import sys
@@ -12,6 +13,20 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 
 class LLMRuntimeConfigTest(unittest.TestCase):
+    def setUp(self):
+        self._previous_allowed_hosts = os.environ.get("MEDCHAT_LLM_ALLOWED_HOSTS")
+        os.environ["MEDCHAT_LLM_ALLOWED_HOSTS"] = ",".join((
+            "api.example.com", "modelscope.example.com", "runtime.example.com",
+            "env.example.com", "custom.example.com", "stale.example.com",
+            "stored.example.com", "canonical.example.com",
+        ))
+
+    def tearDown(self):
+        if self._previous_allowed_hosts is None:
+            os.environ.pop("MEDCHAT_LLM_ALLOWED_HOSTS", None)
+        else:
+            os.environ["MEDCHAT_LLM_ALLOWED_HOSTS"] = self._previous_allowed_hosts
+
     def test_env_snapshot_signature_matches_the_exact_written_content(self):
         from src.web.llm_runtime_config import save_llm_env_config_snapshot
 

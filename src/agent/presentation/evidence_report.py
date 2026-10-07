@@ -31,7 +31,11 @@ def _accepted(cp, run, sequence, ledger):
     reference_json(raw)
     _check(cp["trace_id"] == run["trace_id"] and cp["workflow_version"] == run["workflow_version"])
     _check(cp["status"] in {"succeeded", "partial"} and cp["error_json"] is None
-           and raw["success"] is True and raw["status"] == cp["status"] and raw.get("error") is None)
+           and raw["status"] == cp["status"] and raw.get("error") is None)
+    # Partial observations are still usable evidence.  Preserve their
+    # measured rows and let the report mark missing/uncertain fields as
+    # partial instead of silently treating the whole source as unavailable.
+    _check(raw["success"] is True or (cp["status"] == "partial" and raw["success"] is False))
     expected = {**raw, "tool_name": cp["tool_name"]}
     matches = [o for o in sequence if o.get("quality", {}).get("step_id") == cp["step_id"]]
     _check(len(matches) == 1)

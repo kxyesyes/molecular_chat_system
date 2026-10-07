@@ -52,11 +52,7 @@ jobs:
           - name: root-activity
             pytest_target: "tests/test_activity*.py"
             pytest_args: ""
-            # Activity acceptance includes real CPU model loading across
-            # nested worker boundaries; Windows/local parity can exceed the
-            # generic six-minute shell limit while remaining within the job
-            # timeout and completing successfully.
-            command_timeout: 900
+            command_timeout: 600
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"

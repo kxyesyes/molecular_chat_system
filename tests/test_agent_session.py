@@ -119,13 +119,13 @@ def test_store_creates_private_parent_directory(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX directory permission semantics")
-def test_store_preserves_existing_parent_permissions(tmp_path):
+def test_store_hardens_existing_parent_permissions(tmp_path):
     parent = tmp_path / "existing-config"
     parent.mkdir()
     parent.chmod(0o750)
     AgentSessionStore(parent / "sessions.sqlite")
 
-    assert stat.S_IMODE(parent.stat().st_mode) == 0o750
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o700
 
 
 def test_expired_and_unknown_cookies_get_new_identity(tmp_path):

@@ -989,10 +989,16 @@ class ChatHandler:
         *,
         trace_id: Any,
     ) -> Dict[str, Any] | None:
-        if observation.get("success") is not True:
-            return None
         status = observation.get("status")
         if status not in {"succeeded", "partial"}:
+            return None
+        # A partial candidate set intentionally has success=False at the
+        # workflow level.  It still contains validated molecules that must be
+        # shown, with the partial status preserved, rather than disappearing
+        # from the live UI and reference flow.
+        if observation.get("success") is not True and not (
+            status == "partial" and observation.get("success") is False
+        ):
             return None
         quality = observation.get("quality")
         if (
