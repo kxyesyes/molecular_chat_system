@@ -22,8 +22,11 @@ class Element {
 }
 
 const source = read('src/web/static/js/admet.js');
+const statusSource = read('src/web/static/js/shared/status.js');
 const template = read('src/web/templates/admet.html');
 const styles = read('src/web/static/css/admet.css');
+assert(template.includes('/static/js/shared/status.js'), 'load the shared status contract before page rendering');
+assert(!source.includes('const stateText ='), 'status labels belong to the shared status module');
 assert(!source.includes('innerHTML'));
 assert(!/on(?:click|submit)=/.test(template));
 assert(!template.includes('/kermt-admet'));
@@ -63,6 +66,7 @@ function createUI(fetchImpl) {
   const elements = Object.fromEntries([...template.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const sandbox = { document, window: {}, fetch: fetchImpl, console, AbortController, setTimeout, clearTimeout };
+  vm.runInNewContext(statusSource, sandbox, { filename: 'shared/status.js' });
   vm.runInNewContext(source, sandbox, { filename: 'admet.js' });
   return { elements, ui: sandbox.window.MedChatADMET };
 }
