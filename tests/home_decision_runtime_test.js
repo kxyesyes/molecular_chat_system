@@ -93,7 +93,7 @@ function loadHome({request, storedPointer = null} = {}) {
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js"]) {
+  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
   context.HomeConfig = window.HomeConfig;

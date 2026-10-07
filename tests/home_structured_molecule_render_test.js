@@ -975,7 +975,7 @@ behaviorSandbox.window.WebSocket = FakeWebSocket;
 behaviorSandbox.globalThis = behaviorSandbox;
 vm.createContext(behaviorSandbox);
 vm.runInContext(helperSource, behaviorSandbox, { filename: helperPath });
-for (const file of ["config.js", "../shared/status.js", "connection.js", "protocol.js"]) {
+for (const file of ["config.js", "../shared/status.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js"]) {
   vm.runInContext(
     fs.readFileSync(path.join(root, "src/web/static/js/home", file), "utf8"),
     behaviorSandbox,

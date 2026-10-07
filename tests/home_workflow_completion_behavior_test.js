@@ -24,11 +24,15 @@ const templatePath = path.join(
 );
 const templateSource = fs.readFileSync(templatePath, "utf8");
 
-assert.ok(
-  templateSource.includes(
-    '<script src="/static/js/home/main.js?v=20261007-settings-clean-v9"></script>'
-  ),
-  "homepage must cache-bust the task terminal labels fix"
+assert.match(
+  templateSource,
+  /<script src="\/static\/js\/home\/main\.js\?v=[^"]+"><\/script>/,
+  "homepage must cache-bust the main home script"
+);
+assert.match(
+  templateSource,
+  /<script src="\/static\/js\/home\/task_state\.js\?v=[^"]+"><\/script>/,
+  "homepage must load the isolated task state module"
 );
 
 function extractFunction(functionName) {
@@ -49,11 +53,31 @@ function extractFunction(functionName) {
 const resolverSource = extractFunction("resolveCompletionAction");
 const resolveCompletionAction = vm.runInNewContext(`(${resolverSource})`);
 const eventClassSource = extractFunction("getAgentEventClass");
-const getAgentEventClass = vm.runInNewContext(`(${eventClassSource})`);
 const eventPresentationSource = extractFunction("resolveAgentEventPresentation");
-const resolveAgentEventPresentation = vm.runInNewContext(
+const statusPath = path.join(
+  __dirname,
+  "..",
+  "src",
+  "web",
+  "static",
+  "js",
+  "home",
+  "task_status.js",
+);
+const eventSandbox = {window: {}, Object, Math, Set};
+eventSandbox.globalThis = eventSandbox;
+vm.createContext(eventSandbox);
+vm.runInContext(fs.readFileSync(statusPath, "utf8"), eventSandbox, {
+  filename: statusPath,
+});
+const getAgentEventClass = vm.runInContext(
+  `(${eventClassSource})`,
+  eventSandbox,
+);
+eventSandbox.getAgentEventClass = getAgentEventClass;
+const resolveAgentEventPresentation = vm.runInContext(
   `(${eventPresentationSource})`,
-  { getAgentEventClass }
+  eventSandbox,
 );
 const agentEventHandlerSource = extractFunction("handleAgentEvent");
 

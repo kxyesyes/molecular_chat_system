@@ -17,7 +17,7 @@
   let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
-  let agentTaskRunActive = false;
+  let agentTaskState = window.HomeTaskState.create();
   let protocolDesyncedSocket = null;
   let decisionMode = false;
   let decisionAwaitingReady = false;
@@ -1977,7 +1977,7 @@
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
-    agentTaskRunActive = true;
+    agentTaskState = window.HomeTaskState.reset(agentTaskState);
     window.HomeTaskPanel.reset(panel);
   }
 
@@ -1992,7 +1992,7 @@
   function handleAgentEvent(event) {
     const presentation = resolveAgentEventPresentation(event);
     const eventType = presentation.eventType;
-    if (!agentTaskRunActive) {
+    if (!agentTaskState.active) {
       resetAgentTaskPanel();
     }
 
@@ -2009,9 +2009,7 @@
     }, document);
     if (!rendered) return;
 
-    if (presentation.terminal) {
-      agentTaskRunActive = false;
-    }
+    agentTaskState = window.HomeTaskState.record(agentTaskState, presentation);
 
     HomeChatRenderer.scrollToBottom();
   }
