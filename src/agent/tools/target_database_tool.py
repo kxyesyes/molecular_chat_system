@@ -145,7 +145,11 @@ class TargetDatabaseTool(BaseMolecularTool):
                                     "Could not load structures for target "
                                     f"{target_id}."
                                 )
-                        target["recommended_structures"] = recommended_structures
+                        target["recommended_structures"] = self._guard_structure_freshness(
+                            target,
+                            recommended_structures,
+                            result.setdefault("warnings", []),
+                        )
                         for provenance in self._target_evidence(target):
                             if provenance not in evidence:
                                 evidence.append(provenance)
@@ -321,6 +325,24 @@ class TargetDatabaseTool(BaseMolecularTool):
             }
 
         return result
+
+    @staticmethod
+    def _guard_structure_freshness(
+        target: dict[str, Any],
+        structures: list[dict[str, Any]],
+        warnings: list[str],
+    ) -> list[dict[str, Any]]:
+        """Keep stale structures visible as evidence, never as docking inputs."""
+        target_structures_stale = target.get("structures_stale") is True
+        for structure in structures:
+            if not (target_structures_stale or structure.get("stale") is True):
+                continue
+            structure["docking_recommended"] = False
+            structure["suitable_for_direct_docking"] = False
+            warning = "stale_structure_excluded_from_docking"
+            if warning not in warnings:
+                warnings.append(warning)
+        return structures
 
     @staticmethod
     def _service_evidence(value: Any) -> dict[str, Any] | None:

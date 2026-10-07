@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import gzip
+import ipaddress
 import logging
 import os
 import re
+import socket
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 import requests
@@ -28,6 +31,10 @@ logger = logging.getLogger(__name__)
 MAX_STRUCTURE_DOWNLOAD_BYTES = 50 * 1024 * 1024
 VALIDATION_READ_BYTES = 2 * 1024 * 1024
 DEFAULT_CACHE_PREFIX = Path("data") / "target_db" / "cache"
+TRUSTED_STRUCTURE_HOSTS = frozenset({
+    "files.rcsb.org",
+    "alphafold.ebi.ac.uk",
+})
 
 RCSB_FORMAT_EXTENSIONS = {
     "cif": "cif",
@@ -65,15 +72,20 @@ class StructureDownloader:
         local_path = self._local_path_for_format(structure, file_format)
         absolute_path = self._absolute_cache_path(local_path)
 
-        if absolute_path.exists():
-            self._mark_downloaded(structure["id"], local_path)
+        verified = self._verified_cached_structure(structure, file_format)
+        if verified is not None:
+            verified_path, verified_relative = verified
+            self._mark_downloaded(structure["id"], verified_relative, file_format=file_format)
             return {
                 "success": True,
-                "file_path": str(absolute_path),
-                "local_file_path": local_path,
+                "file_path": str(verified_path),
+                "local_file_path": verified_relative,
                 "file_format": file_format,
-                "message": "Using cached structure file.",
+                "message": "Using verified cached structure file.",
             }
+
+        if absolute_path.exists():
+            logger.warning("Ignoring unverified cached structure file: %s", absolute_path)
 
         source = str(structure.get("source") or "")
         if source == "RCSB_PDB":
@@ -109,10 +121,14 @@ class StructureDownloader:
         url = structure.get("download_url")
         if not url or file_format != str(structure.get("file_format") or "").lower():
             url = f"https://files.rcsb.org/download/{pdb_id}.{RCSB_FORMAT_EXTENSIONS[file_format]}"
-
         absolute_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            response = requests.get(url, timeout=30, stream=True)
+            response = _request_structure(
+                url,
+                {"files.rcsb.org"},
+                timeout=30,
+            )
+            _reject_redirect_response(response)
             response.raise_for_status()
             absolute_path, local_path = self._publish_managed_response(
                 response, structure, file_format
@@ -135,15 +151,6 @@ class StructureDownloader:
             raise StructureDownloadError(f"Failed to download {pdb_id}.{file_format}: {exc}") from exc
 
     def _prepare_alphafold(self, structure: dict, file_format: str, local_path: str, absolute_path: Path) -> dict:
-        if absolute_path.exists():
-            self._mark_downloaded(structure["id"], local_path, file_format=file_format)
-            return {
-                "success": True,
-                "file_path": str(absolute_path),
-                "local_file_path": local_path,
-                "file_format": file_format,
-                "message": "Using cached AlphaFold structure file.",
-            }
         if file_format not in ALPHAFOLD_FORMAT_EXTENSIONS:
             raise StructureDownloadError(f"Unsupported AlphaFold format: {file_format}")
 
@@ -152,7 +159,12 @@ class StructureDownloader:
         last_error: Optional[Exception] = None
         for url in candidate_urls:
             try:
-                response = requests.get(url, timeout=45, stream=True)
+                response = _request_structure(
+                    url,
+                    {"alphafold.ebi.ac.uk"},
+                    timeout=45,
+                )
+                _reject_redirect_response(response)
                 response.raise_for_status()
                 absolute_path, local_path = self._publish_managed_response(
                     response, structure, file_format
@@ -174,6 +186,30 @@ class StructureDownloader:
                 last_error = exc
                 logger.warning("AlphaFold download failed for %s from %s: %s", structure.get("structure_id"), url, exc)
         raise StructureDownloadError(f"Failed to download AlphaFold model as {file_format}: {last_error}")
+
+    def _verified_cached_structure(
+        self, structure: dict, file_format: str
+    ) -> Optional[tuple[Path, str]]:
+        source = str(structure.get("source") or "")
+        structure_id = str(structure.get("structure_id") or "")
+        if not source or not structure_id:
+            return None
+        evidence = self.cache.get(
+            self._coordinate_cache_key(source, structure_id, file_format)
+        )
+        if evidence is None or evidence.record_type != "coordinate_file":
+            return None
+        payload = evidence.payload
+        expected_species = structure.get("organism")
+        if payload.get("species") != expected_species:
+            return None
+        expected_version = self._source_version(structure, file_format)
+        if payload.get("source_version") != expected_version:
+            return None
+        cache_root = get_cache_dir(self.project_root)
+        relative = Path(payload["path"])
+        absolute = cache_root.joinpath(*relative.parts)
+        return absolute, relative_to_project(absolute, self.project_root)
 
     def _alphafold_urls(self, structure: dict, file_format: str) -> list[str]:
         preferred_url = structure.get("download_url")
@@ -201,7 +237,12 @@ class StructureDownloader:
     def _legacy_alphafold_download(self, structure: dict, file_format: str, local_path: str, absolute_path: Path) -> dict:
         try:
             url = self._alphafold_url(structure, file_format)
-            response = requests.get(url, timeout=45, stream=True)
+            response = _request_structure(
+                url,
+                {"alphafold.ebi.ac.uk"},
+                timeout=45,
+            )
+            _reject_redirect_response(response)
             response.raise_for_status()
             self._publish_response(response, absolute_path, file_format)
             self._mark_downloaded(structure["id"], local_path, download_url=url, file_format=file_format)
@@ -290,6 +331,8 @@ class StructureDownloader:
                 staged_path=staged_relative.as_posix(),
                 coordinate_suffix=coordinate_suffix,
                 ttl=timedelta(days=90),
+                source_version=self._source_version(structure, normalized_format),
+                species=structure.get("organism"),
             )
         finally:
             staged_path.unlink(missing_ok=True)
@@ -300,6 +343,18 @@ class StructureDownloader:
     @staticmethod
     def _coordinate_cache_key(source: str, structure_id: str, file_format: str) -> str:
         return f"coordinate:{source}:{structure_id}:{file_format}"
+
+    @staticmethod
+    def _source_version(structure: dict, file_format: str) -> Optional[str]:
+        for key in ("source_version", "model_version", "structure_version", "version"):
+            value = structure.get(key)
+            if value not in (None, ""):
+                return str(value)
+        if str(structure.get("source") or "") == "AlphaFold":
+            match = re.search(r"-model_(v\d+)\.", str(structure.get("download_url") or ""))
+            if match:
+                return match.group(1)
+        return None
 
     @staticmethod
     def _content_length(response) -> Optional[int]:
@@ -367,3 +422,92 @@ class StructureDownloader:
             conn.commit()
         finally:
             conn.close()
+
+
+def _resolve_structure_host(host: str, port: int = 443) -> tuple[str, ...]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise StructureDownloadError("Structure download host could not be resolved") from exc
+
+    addresses: set[str] = set()
+    for info in infos:
+        try:
+            address = str(info[4][0]).split("%", 1)[0]
+            parsed = ipaddress.ip_address(address)
+        except (IndexError, ValueError) as exc:
+            raise StructureDownloadError("Structure download host returned an invalid address") from exc
+        if (
+            not parsed.is_global
+            or parsed.is_private
+            or parsed.is_loopback
+            or parsed.is_link_local
+            or parsed.is_multicast
+            or parsed.is_reserved
+            or parsed.is_unspecified
+        ):
+            raise StructureDownloadError("Structure download host resolves to a restricted network")
+        addresses.add(address)
+
+    if not addresses:
+        raise StructureDownloadError("Structure download host returned no addresses")
+    return tuple(sorted(addresses))
+
+
+def _validate_structure_download_url(
+    url: object,
+    allowed_hosts: set[str],
+    *,
+    resolve_host: bool = True,
+) -> str:
+    if not isinstance(url, str):
+        raise StructureDownloadError("Structure download URL is not a trusted host")
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise StructureDownloadError("Structure download URL has an invalid port") from exc
+    normalized_hosts = {str(item).lower().rstrip(".") for item in allowed_hosts}
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.username is not None
+        or parsed.password is not None
+        or host not in normalized_hosts
+        or not parsed.netloc
+        or parsed.query
+        or parsed.fragment
+        or (port is not None and port != 443)
+    ):
+        raise StructureDownloadError("Structure download URL is not a trusted host")
+    if resolve_host:
+        _resolve_structure_host(host, port or 443)
+    return url
+
+
+def _request_structure(url: str, allowed_hosts: set[str], **kwargs):
+    """Fetch a trusted structure URL while checking DNS before and after I/O."""
+
+    _validate_structure_download_url(url, allowed_hosts, resolve_host=False)
+    parsed = urlsplit(url)
+    before = _resolve_structure_host((parsed.hostname or "").lower().rstrip("."), parsed.port or 443)
+    request_kwargs = {
+        "timeout": 30,
+        "stream": True,
+        "allow_redirects": False,
+    }
+    request_kwargs.update(kwargs)
+    response = requests.get(url, **request_kwargs)
+    after = _resolve_structure_host((parsed.hostname or "").lower().rstrip("."), parsed.port or 443)
+    if before != after:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+        raise StructureDownloadError("Structure download DNS resolution changed during request")
+    return response
+
+
+def _reject_redirect_response(response: object) -> None:
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int) and 300 <= status_code < 400:
+        raise StructureDownloadError("Structure download redirects are not allowed")
