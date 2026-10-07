@@ -12,6 +12,18 @@ CORE_MODULES = (
 )
 
 
+def test_tool_result_normalizer_is_system_owned_for_task_runtime():
+    from src.agent.tools.base_tool import execute_tool_compat as legacy
+    from src.system.tool_adapter import execute_tool_compat as shared
+
+    assert legacy is shared
+    source = (
+        Path(__file__).parents[1] / "src" / "task_runtime" / "docking_execution.py"
+    ).read_text(encoding="utf-8")
+    assert "src.agent.tools.base_tool" not in source
+    assert "src.system.tool_adapter" in source
+
+
 def test_redaction_implementation_is_owned_by_system_and_legacy_imports_are_identical():
     from src.agent.persistence import redaction as legacy
     from src.system import redaction as shared

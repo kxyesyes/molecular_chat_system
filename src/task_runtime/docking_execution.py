@@ -21,7 +21,7 @@ from src.system.scientific_contracts import (
     WorkflowArtifact,
 )
 from src.system.redaction import sanitize_sensitive_text
-from src.agent.tools.base_tool import execute_tool_compat
+from src.system.tool_adapter import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.validators.result_validator import AgentResultValidator
 from src.docking.adapters.base import CommandOwnershipScope, CommandOwnershipUncertainError
