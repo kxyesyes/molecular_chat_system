@@ -43,6 +43,16 @@ class _DynamicLogger:
 _ROUTE_LOGGER = _DynamicLogger()
 
 
+class _DynamicInvoker:
+    """Keep post-registration threadpool patching without passing this module."""
+
+    async def __call__(self, func, *args, **kwargs):
+        return await sys.modules[__name__]._invoke_in_threadpool(func, *args, **kwargs)
+
+
+_ROUTE_INVOKER = _DynamicInvoker()
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -402,7 +412,11 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     """设置 API 路由。"""
     support = sys.modules[__name__]
     setup_docking_routes(app, docking_service=docking_service, task_runtime=task_runtime, _support=support)
-    setup_molecule_utility_routes(app, _support=support)
+    setup_molecule_utility_routes(
+        app,
+        invoke_in_threadpool=_ROUTE_INVOKER,
+        logger=_ROUTE_LOGGER,
+    )
     setup_docking_report_routes(app, docking_service=docking_service, _support=support)
     setup_reverse_target_routes(app, _support=support)
     setup_activity_prediction_routes(app, _support=support)

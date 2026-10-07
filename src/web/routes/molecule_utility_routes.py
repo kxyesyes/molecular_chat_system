@@ -1,8 +1,12 @@
 """Molecule utility route registration."""
 import io
+import logging
 from typing import Dict, Any
 
 from fastapi import Body, Query, HTTPException, Response
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _smiles_to_3d_sync(smiles: str) -> dict[str, Any]:
@@ -150,8 +154,30 @@ def _mcs_sync(
     }
 
 
-def setup_molecule_utility_routes(app, *, _support):
-    """Register the original endpoints with dynamically resolved compatibility support."""
+def setup_molecule_utility_routes(
+    app,
+    *,
+    invoke_in_threadpool=None,
+    logger=None,
+    _support=None,
+):
+    """Register utility endpoints with explicit runtime dependencies.
+
+    ``_support`` remains a compatibility-only fallback for older direct callers;
+    application registration passes the two narrow dependencies explicitly.
+    """
+    def get_invoker():
+        if invoke_in_threadpool is not None:
+            return invoke_in_threadpool
+        if _support is not None:
+            return _support._invoke_in_threadpool
+        raise RuntimeError("molecule utility threadpool dependency is not configured")
+
+    def get_logger():
+        if logger is not None:
+            return logger
+        return _support.logger if _support is not None else _LOGGER
+
     @app.post("/api/docking/smiles_to_3d")
     async def smiles_to_3d(payload: Dict[str, Any] = Body(...)):
         """将SMILES转换为3D结构用于预览"""
@@ -162,11 +188,11 @@ def setup_molecule_utility_routes(app, *, _support):
         if not smiles:
             raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
         try:
-            return await _support._invoke_in_threadpool(_smiles_to_3d_sync, smiles)
+            return await get_invoker()(_smiles_to_3d_sync, smiles)
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("SMILES转3D失败")
+            get_logger().exception("SMILES转3D失败")
             raise HTTPException(status_code=500, detail="3D结构生成失败，请稍后重试") from None
 
     @app.get("/api/utils/smiles_to_image")
@@ -177,7 +203,7 @@ def setup_molecule_utility_routes(app, *, _support):
     ):
         """生成分子2D图片"""
         try:
-            content = await _support._invoke_in_threadpool(
+            content = await get_invoker()(
                 _smiles_to_image_sync,
                 smiles,
                 width,
@@ -188,10 +214,10 @@ def setup_molecule_utility_routes(app, *, _support):
             # Preserve the legacy route contract: RDKit/input failures from
             # this image endpoint were exposed as HTTP 500 responses.
             legacy_detail = f"{error.status_code}: {error.detail}"
-            _support.logger.error(f"生成分子图片失败: {legacy_detail}")
+            get_logger().error(f"生成分子图片失败: {legacy_detail}")
             raise HTTPException(status_code=500, detail=legacy_detail)
         except Exception:
-            _support.logger.exception("生成分子图片失败")
+            get_logger().exception("生成分子图片失败")
             raise HTTPException(status_code=500, detail="分子图片生成失败，请稍后重试") from None
 
     @app.get("/api/utils/mcs")
@@ -206,7 +232,7 @@ def setup_molecule_utility_routes(app, *, _support):
         if not smiles1 or not smiles2:
             raise HTTPException(status_code=400, detail="SMILES cannot be empty")
         try:
-            return await _support._invoke_in_threadpool(
+            return await get_invoker()(
                 _mcs_sync,
                 smiles1,
                 smiles2,
@@ -217,5 +243,5 @@ def setup_molecule_utility_routes(app, *, _support):
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("MCS计算失败")
+            get_logger().exception("MCS计算失败")
             raise HTTPException(status_code=500, detail="MCS计算失败，请稍后重试") from None

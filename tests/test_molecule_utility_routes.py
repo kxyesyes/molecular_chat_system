@@ -89,3 +89,32 @@ def test_molecule_utility_routes_do_not_return_internal_exception_text(
     assert response.status_code == 500
     assert "secret" not in response.text
     assert "C:/private/model.bin" not in response.text
+
+
+def test_molecule_utility_routes_accept_explicit_runtime_dependencies():
+    from unittest.mock import Mock
+
+    from src.web.routes import molecule_utility_routes
+
+    calls = []
+
+    async def invoke_in_threadpool(function, *args, **kwargs):
+        calls.append((function, args, kwargs))
+        return b"png" if function is molecule_utility_routes._smiles_to_image_sync else {
+            "success": True,
+            "mcs_smarts": "[#6]",
+        }
+
+    app = FastAPI()
+    molecule_utility_routes.setup_molecule_utility_routes(
+        app,
+        invoke_in_threadpool=invoke_in_threadpool,
+        logger=Mock(),
+    )
+
+    with TestClient(app) as client:
+        response = client.get("/api/utils/smiles_to_image", params={"smiles": "CC"})
+
+    assert response.status_code == 200
+    assert response.content == b"png"
+    assert len(calls) == 1

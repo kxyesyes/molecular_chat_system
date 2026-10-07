@@ -257,6 +257,11 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
             expected["docking_service"] = service
             if domain == "docking":
                 expected["task_runtime"] = runtime
+        if domain == "molecule_utility":
+            expected = {
+                "invoke_in_threadpool": support._ROUTE_INVOKER,
+                "logger": support._ROUTE_LOGGER,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
