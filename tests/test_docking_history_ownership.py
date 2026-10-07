@@ -74,6 +74,7 @@ def test_owned_history_rejects_missing_server_session(tmp_path):
     )
     with pytest.raises(HTTPException) as error:
         _owned_history(type("Request", (), {"scope": {}})(), str(work_dir), "job")
+    assert error.value.status_code == 401
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX permissions only")
@@ -91,4 +92,3 @@ def test_history_index_and_lock_are_private(tmp_path):
     assert stat.S_IMODE(work_dir.stat().st_mode) == 0o700
     assert stat.S_IMODE(index.stat().st_mode) == 0o600
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
-    assert error.value.status_code == 401

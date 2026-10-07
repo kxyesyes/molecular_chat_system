@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 def test_docking_limits_reject_non_finite_manual_center():
     from src.web.routes import api_routes
 
-    with pytest.raises(Exception, match="center"):
+    with pytest.raises(Exception) as error:
         api_routes._validate_docking_limits(
             center_x=math.nan,
             center_y=0.0,
@@ -26,6 +26,7 @@ def test_docking_limits_reject_non_finite_manual_center():
             num_modes=10,
             energy_range=3.0,
         )
+    assert "center" in error.value.detail
 
 
 def test_completed_admet_future_does_not_leave_cancel_marker():

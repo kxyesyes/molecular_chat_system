@@ -12,8 +12,9 @@ def test_smiles_to_3d_rejects_missing_force_field_parameters(monkeypatch):
     monkeypatch.setattr(AllChem, "MMFFHasAllMoleculeParams", lambda _mol: False)
     monkeypatch.setattr(AllChem, "UFFHasAllMoleculeParams", lambda _mol: False)
 
-    with pytest.raises(HTTPException, match="力场参数"):
+    with pytest.raises(HTTPException) as error:
         molecule_utility_routes._smiles_to_3d_sync("CCO")
+    assert "力场参数" in error.value.detail
 
 
 def test_smiles_to_3d_rejects_non_converged_force_field(monkeypatch):
@@ -23,8 +24,9 @@ def test_smiles_to_3d_rejects_non_converged_force_field(monkeypatch):
     monkeypatch.setattr(AllChem, "MMFFHasAllMoleculeParams", lambda _mol: True)
     monkeypatch.setattr(AllChem, "MMFFOptimizeMolecule", lambda _mol: 1)
 
-    with pytest.raises(HTTPException, match="未收敛"):
+    with pytest.raises(HTTPException) as error:
         molecule_utility_routes._smiles_to_3d_sync("CCO")
+    assert "未收敛" in error.value.detail
 
 
 def test_smiles_to_3d_uses_uff_when_mmff_is_unavailable(monkeypatch):
