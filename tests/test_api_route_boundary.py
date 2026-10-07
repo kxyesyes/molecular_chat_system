@@ -512,17 +512,18 @@ def test_legacy_single_docking_rejects_file_and_smiles_together(controlled_app):
 
 def test_batch_docking_rejects_file_and_smiles_together(controlled_app):
     app, _ = controlled_app
-    with TestClient(app) as client:
-        response = client.post(
-            "/api/docking/batch_submit",
-            files=[
-                ("protein_file", ("protein.pdb", b"P")),
-                ("ligand_files", ("ligand.sdf", b"L")),
-            ],
-            data={"batch_smiles": "CC"},
+    route = next(route for route in app.routes if route.path == "/api/docking/batch_submit")
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(
+            route.endpoint(
+                request=SimpleNamespace(scope={"agent_session_id": "test-session"}),
+                protein_file=UploadFile(filename="protein.pdb", file=BytesIO(b"P")),
+                ligand_files=[UploadFile(filename="ligand.sdf", file=BytesIO(b"L"))],
+                batch_smiles="CC",
+            )
         )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Provide either ligand files or batch SMILES, not both"
+    assert error.value.status_code == 400
+    assert error.value.detail == "Provide either ligand files or batch SMILES, not both"
 
 
 @pytest.mark.parametrize("timing", ["before", "after"])
