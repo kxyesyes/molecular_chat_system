@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.system.scientific_status import summarize_completion
+from src.system.scientific_status import ObservationStatus, RunOutcome, summarize_completion
 
 
 def test_scientific_transport_types_are_owned_by_system_and_reexported_by_agent():
@@ -41,6 +41,32 @@ def test_completion_summary_never_promotes_partial_or_empty_work(
     completed, total, status, success
 ):
     assert summarize_completion(completed, total) == (status, success)
+
+
+def test_shared_status_contract_has_explicit_timeout_and_not_calculated_states():
+    assert ObservationStatus.TIMEOUT.value == "timeout"
+    assert ObservationStatus.NOT_CALCULATED.value == "not_calculated"
+    assert RunOutcome.TIMEOUT.value == "timeout"
+    assert RunOutcome.NOT_CALCULATED.value == "not_calculated"
+
+
+def test_legacy_timeout_alias_normalizes_to_canonical_timeout_status():
+    from src.agent.tools.base_tool import execute_tool_compat
+    from src.agent.contracts import AgentErrorCode
+
+    class TimedTool:
+        name = "timed_tool"
+
+        def execute(self, _query):
+            return {
+                "success": False,
+                "status": "timed_out",
+                "error": {"code": "tool_timeout", "message": "timed out"},
+            }
+
+    result = execute_tool_compat(TimedTool(), "CCO")
+    assert result.status is ObservationStatus.TIMEOUT
+    assert result.error.code is AgentErrorCode.TOOL_TIMEOUT
 
 
 def test_docking_runtime_imports_shared_transport_types_without_agent_contract_facade():

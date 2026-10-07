@@ -105,6 +105,10 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                 # receive the canonical ObservationStatus enum.
                 raw_status = {
                     "passed": ObservationStatus.SUCCEEDED.value,
+                    "timed_out": ObservationStatus.TIMEOUT.value,
+                    "timed-out": ObservationStatus.TIMEOUT.value,
+                    "canceled": ObservationStatus.CANCELLED.value,
+                    "not-calculated": ObservationStatus.NOT_CALCULATED.value,
                 }.get(raw_result["status"], raw_result["status"])
                 try:
                     status = ObservationStatus(raw_status)
@@ -124,7 +128,9 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
             raw_error_present = bool(raw_result.get("error"))
             if raw_success and status in {
                 ObservationStatus.FAILED,
+                ObservationStatus.TIMEOUT,
                 ObservationStatus.UNAVAILABLE,
+                ObservationStatus.NOT_CALCULATED,
                 ObservationStatus.INVALID_INPUT,
                 ObservationStatus.REJECTED,
                 ObservationStatus.CANCELLED,

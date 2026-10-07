@@ -12,7 +12,9 @@ class ObservationStatus(str, Enum):
     SUCCEEDED = "succeeded"
     PARTIAL = "partial"
     FAILED = "failed"
+    TIMEOUT = "timeout"
     UNAVAILABLE = "unavailable"
+    NOT_CALCULATED = "not_calculated"
     INVALID_INPUT = "invalid_input"
     REJECTED = "rejected"
     CANCELLED = "cancelled"
@@ -22,6 +24,9 @@ class RunOutcome(str, Enum):
     COMPLETED = "completed"
     PARTIAL = "partial"
     FAILED = "failed"
+    TIMEOUT = "timeout"
+    UNAVAILABLE = "unavailable"
+    NOT_CALCULATED = "not_calculated"
     REJECTED = "rejected"
     CANCELLED = "cancelled"
 
@@ -33,7 +38,6 @@ NON_SUCCESS_STATUS = frozenset(
         *(status.value for status in ObservationStatus if status is not ObservationStatus.SUCCEEDED),
         "error",
         "unknown",
-        "not_calculated",
     }
 )
 
