@@ -36,6 +36,8 @@ class DeploymentAssetsTest(unittest.TestCase):
     def test_legacy_target_reverse_is_archived_only(self):
         legacy_dir = PROJECT_ROOT / "archive" / "legacy_target_reverse"
         self.assertTrue(legacy_dir.exists())
+        self.assertTrue((legacy_dir / "README.md").exists())
+        self.assertFalse((legacy_dir / "target_reverse.py").exists())
 
         forbidden_markers = ("src.target_reverse", "legacy_target_reverse")
         for path in (PROJECT_ROOT / "src").rglob("*.py"):
