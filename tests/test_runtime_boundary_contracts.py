@@ -43,6 +43,22 @@ def test_scientific_and_agent_core_do_not_import_web_modules():
     assert violations == {}
 
 
+def test_task_runtime_routes_do_not_import_web_adapters():
+    path = ROOT / "src/task_runtime/routes.py"
+    assert _web_imports(path) == []
+
+
+def test_api_response_legacy_exports_are_canonical_objects():
+    from src.system.api_response import api_error, api_success
+    from src.web.api_response import (
+        api_error as legacy_api_error,
+        api_success as legacy_api_success,
+    )
+
+    assert legacy_api_error is api_error
+    assert legacy_api_success is api_success
+
+
 def test_url_policy_legacy_exports_are_the_canonical_objects():
     from src.system.network_policy import resolve_llm_host, validate_llm_url
     from src.web.security.url_policy import (
