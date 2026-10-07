@@ -139,7 +139,7 @@ def test_web_runtime_uses_the_canonical_ollama_model_class():
     model_module = importlib.import_module("src.web.models.ollama_model")
 
     assert app_module.OllamaModel is model_module.OllamaModel
-    assert app_module.OllamaModel.__module__ == "src.web.models.ollama_model"
+    assert app_module.OllamaModel.__module__ == "src.system.ollama_model"
     assert app_module.RAGSystem is importlib.import_module("src.rag.service").RAGSystem
     assert app_module.RAGSystem.__module__ == "src.rag.service"
 
@@ -149,7 +149,7 @@ def test_web_runtime_uses_the_canonical_ollama_model_class():
     scientific_runner = (
         PROJECT_ROOT / "src" / "agent" / "evaluation" / "scientific.py"
     ).read_text(encoding="utf-8")
-    canonical_import = "from src.web.models.ollama_model import OllamaModel"
+    canonical_import = "from src.system.model_clients import OllamaModel"
     assert canonical_import in tool_registry
     assert canonical_import in scientific_runner
 

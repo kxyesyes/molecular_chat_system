@@ -27,6 +27,7 @@ from .models import OllamaModel, generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.service import RAGSystem
 from src.system.env import load_env_file as _load_env_file
+from src.system.model_clients import ModelScopeModel, OpenAICompatibleModel
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent
@@ -201,7 +202,7 @@ class MolecularChatApp:
         if config.get('provider') not in {'openai_compatible', 'custom'}:
             raise ValueError('Semantic assembly requires an approved provider')
         if model is not None:
-            from src.agent.openai_compatible_model import OpenAICompatibleModel
+            from src.system.model_clients import OpenAICompatibleModel
             if (type(model) is not OpenAICompatibleModel or any(
                     not callable(getattr(model, name, None)) for name in
                     ('propose_ordinary_intent', 'decide', 'generate', 'stream_generate', 'close'))):
@@ -526,8 +527,6 @@ class MolecularChatApp:
             )
 
         if config.get("provider") == "modelscope":
-            from src.agent.modelscope_model import ModelScopeModel
-
             return ModelScopeModel(
                 api_key=config.get("api_key", ""),
                 model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
@@ -535,8 +534,6 @@ class MolecularChatApp:
                 enforce_url_policy=True,
                 provider="modelscope",
             )
-
-        from src.agent.openai_compatible_model import OpenAICompatibleModel
 
         return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),

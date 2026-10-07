@@ -64,3 +64,30 @@ def test_model_lifecycle_legacy_exports_are_canonical_objects():
     assert legacy_close_owned_model is close_owned_model
     assert legacy_finish_on_cancel is finish_on_cancel
     assert legacy_model_request is model_request
+
+
+def test_model_client_legacy_exports_are_canonical_objects():
+    from src.system.model_clients import (
+        ModelScopeModel,
+        ModelScopeModelManager,
+        OllamaGenerationError,
+        OllamaModel,
+        OpenAICompatibleModel,
+    )
+    from src.agent.modelscope_model import (
+        ModelScopeModel as LegacyModelScopeModel,
+        ModelScopeModelManager as LegacyModelScopeModelManager,
+    )
+    from src.agent.openai_compatible_model import (
+        OpenAICompatibleModel as LegacyOpenAICompatibleModel,
+    )
+    from src.web.models.ollama_model import (
+        OllamaGenerationError as LegacyOllamaGenerationError,
+        OllamaModel as LegacyOllamaModel,
+    )
+
+    assert LegacyModelScopeModel is ModelScopeModel
+    assert LegacyModelScopeModelManager is ModelScopeModelManager
+    assert LegacyOpenAICompatibleModel is OpenAICompatibleModel
+    assert LegacyOllamaGenerationError is OllamaGenerationError
+    assert LegacyOllamaModel is OllamaModel

@@ -34,7 +34,7 @@ def get_core_tools(molecular_generator_llm=None):
     generator_llm = molecular_generator_llm
     if generator_llm is None:
         try:
-            from src.web.models.ollama_model import OllamaModel
+            from src.system.model_clients import OllamaModel
             generator_llm = OllamaModel(
                 base_url="http://localhost:11434",
                 model_name="gmm-llama:latest"
