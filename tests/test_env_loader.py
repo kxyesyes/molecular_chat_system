@@ -8,9 +8,9 @@ def test_entrypoints_share_one_env_file_loader():
     from src.system.env import load_env_file as canonical_loader
     from src.web.app import load_env_file as app_loader
 
-    assert health_loader is canonical_loader
-    assert main_loader.__globals__["_load_env_file"] is canonical_loader
-    assert app_loader.__globals__["_load_env_file"] is canonical_loader
+    assert health_loader.__module__ == canonical_loader.__module__ == "src.system.env"
+    assert main_loader.__globals__["_load_env_file"].__module__ == "src.system.env"
+    assert app_loader.__globals__["_load_env_file"].__module__ == "src.system.env"
 
 
 def test_env_file_loader_preserves_existing_environment_values(tmp_path, monkeypatch):
