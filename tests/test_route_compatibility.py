@@ -30,6 +30,16 @@ def test_legacy_dependency_lookup_prefers_explicit_value_and_stays_dynamic():
     assert getter() == "after"
 
 
+def test_activity_budget_helper_has_no_support_container_parameter():
+    """The private budget runner is a concrete adapter, not a support facade."""
+
+    import inspect
+
+    from src.web.routes.activity_prediction_routes import _invoke_activity_with_budget
+
+    assert "_support" not in inspect.signature(_invoke_activity_with_budget).parameters
+
+
 @pytest.mark.parametrize("module_name", ROUTE_MODULES)
 def test_selected_routes_keep_support_access_in_compatibility_adapter(module_name):
     source = (

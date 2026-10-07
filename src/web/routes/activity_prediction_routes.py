@@ -163,7 +163,6 @@ async def _invoke_isolated_activity(
 
 
 async def _invoke_activity_with_budget(
-    _support,
     *,
     operation: str,
     isolated_payload,
@@ -299,10 +298,7 @@ def setup_activity_prediction_routes(
     )
 
     async def invoke_with_budget(*, operation, isolated_payload):
-        # The historical callable keeps an unused first argument. Passing None
-        # preserves the explicit and compatibility adapters' old signature.
         return await get_activity_invoker()(
-            None,
             operation=operation,
             isolated_payload=isolated_payload,
         )

@@ -97,7 +97,7 @@ def test_legacy_reverse_and_activity_responses_expose_owned_receipts(
         sys.modules, "src.reverse_target.predictor", fake_predictor_module
     )
 
-    async def fake_activity_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+    async def fake_activity_invoke(*, operation, isolated_payload, isolated_target=None):
         return {"status": "failed", "success": False, "error": "controlled"}
 
     monkeypatch.setattr(

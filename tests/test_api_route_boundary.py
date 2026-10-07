@@ -564,7 +564,7 @@ def controlled_app(monkeypatch, tmp_path):
                 get_molecule_pharmacophore=lambda smiles: {"success": False, "error": "controlled unavailable"})
     from src.web.routes import activity_prediction_routes
 
-    async def controlled_activity_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+    async def controlled_activity_invoke(*, operation, isolated_payload, isolated_target=None):
         return {"success": False, "error": "controlled unavailable"}
 
     monkeypatch.setattr(
@@ -916,7 +916,7 @@ def test_activity_routes_use_isolated_budget_entry_and_keep_batch_order(monkeypa
     from src.web.routes import activity_prediction_routes
     calls = []
 
-    async def controlled_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+    async def controlled_invoke(*, operation, isolated_payload, isolated_target=None):
         calls.append((operation, isolated_payload))
         return {"success": False, "error": "controlled unavailable"}
 
