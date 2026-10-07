@@ -13,8 +13,6 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-import httpcore
-
 from src.agent.contracts.decision import (
     AgentDecision, DecisionProtocolError, decode_protocol_json,
     decision_json_schema, parse_decision_json,
@@ -28,9 +26,13 @@ from src.agent.contracts.docking_preparation import (
 )
 from src.agent.decision_privacy import private_decision_request
 from src.agent.persistence.redaction import redact_sensitive, contains_sensitive_text
-from src.web.security.url_policy import resolve_llm_host
-
-
+from src.system.llm_transport import (
+    PinnedAsyncHTTPTransport,
+    PinnedClientTransport,
+    PinnedNetworkBackend,
+    create_pinned_async_client,
+    pin_supplied_async_client,
+)
 _FUNCTION = "agent_decision"
 _NATIVE_INSTRUCTION = (
     'The only callable function is agent_decision. For every tool, clarify, or finish action, '
@@ -61,125 +63,6 @@ _DOCKING_INSTRUCTION = (
     'leave missing inputs unresolved. This is not admission, consent or execution authority. '
     'Do not invent inputs, approve consent, execute tools or answer with scientific results.'
 )
-
-
-_PINNED_ADDRESSES: ContextVar[dict[str, tuple[str, ...]] | None] = ContextVar(
-    "llm_pinned_addresses", default=None,
-)
-
-
-class PinnedNetworkBackend(httpcore.AsyncNetworkBackend):
-    """Resolve an approved hostname once and use that address for the socket.
-
-    TLS is still initiated by httpcore with the original hostname, so SNI and
-    certificate verification remain intact. The address is held in a task-local
-    context to avoid cross-request mutable state.
-    """
-
-    def __init__(self, backend: httpcore.AsyncNetworkBackend | None = None):
-        backend_type = getattr(httpcore, "AutoBackend", None)
-        if backend_type is None:
-            backend_type = httpcore.AnyIOBackend
-        self._backend = backend or backend_type()
-
-    @asynccontextmanager
-    async def pin(self, host: str, addresses):
-        current = dict(_PINNED_ADDRESSES.get() or {})
-        current[host] = tuple(addresses)
-        token = _PINNED_ADDRESSES.set(current)
-        try:
-            yield
-        finally:
-            _PINNED_ADDRESSES.reset(token)
-
-    async def connect_tcp(self, host, port, timeout=None, local_address=None, socket_options=None):
-        pinned = (_PINNED_ADDRESSES.get() or {}).get(host)
-        if not pinned:
-            raise httpcore.ConnectError("unbound outbound hostname")
-        # A deterministic first address avoids allowing a later DNS lookup or
-        # an unvalidated fallback address during this connection attempt.
-        return await self._backend.connect_tcp(
-            pinned[0], port, timeout=timeout, local_address=local_address,
-            socket_options=socket_options,
-        )
-
-    async def connect_unix_socket(self, *args, **kwargs):
-        raise httpcore.ConnectError("unix sockets are not allowed for outbound LLM transport")
-
-    async def sleep(self, seconds):
-        return await self._backend.sleep(seconds)
-
-
-class PinnedAsyncHTTPTransport(httpx.AsyncHTTPTransport):
-    """HTTPX transport with connect-time DNS pinning and normal TLS checks."""
-
-    def __init__(self, **kwargs):
-        # Do not let HTTPX create proxy mounts from the process environment.
-        # Proxy transports do not use this class' pinned direct-socket backend.
-        kwargs["trust_env"] = False
-        super().__init__(**kwargs)
-        self._pinned_backend = PinnedNetworkBackend()
-        # HTTPX owns this pool and its backend is intentionally replaced only
-        # on this transport instance; no process-wide socket hooks are used.
-        self._pool._network_backend = self._pinned_backend
-
-    async def handle_async_request(self, request):
-        host = request.url.host
-        port = request.url.port
-        addresses = resolve_llm_host(host, port)
-        async with self._pinned_backend.pin(host, addresses):
-            return await super().handle_async_request(request)
-
-
-class PinnedClientTransport(httpx.AsyncBaseTransport):
-    """Pin direct HTTPX client connections while preserving its pool settings."""
-
-    def __init__(self, transport):
-        pool = getattr(transport, "_pool", None)
-        if pool is None or not hasattr(pool, "_network_backend"):
-            raise TypeError("unsupported client transport for DNS pinning")
-        self._transport = transport
-        self._backend = PinnedNetworkBackend()
-        pool._network_backend = self._backend
-
-    async def handle_async_request(self, request):
-        addresses = resolve_llm_host(request.url.host, request.url.port)
-        async with self._backend.pin(request.url.host, addresses):
-            return await self._transport.handle_async_request(request)
-
-    async def aclose(self):
-        await self._transport.aclose()
-
-
-def pin_supplied_async_client(client):
-    """Apply connect-time pinning to a direct HTTPX client, if supported."""
-    transport = getattr(client, "_transport", None)
-    if isinstance(transport, httpx.MockTransport):
-        return client
-    if isinstance(transport, httpx.AsyncHTTPTransport):
-        # A client constructed with the HTTPX default can already contain
-        # HTTP(S)_PROXY mounts. Clear those routes before replacing the direct
-        # transport, otherwise a request may bypass DNS pinning entirely.
-        client._trust_env = False
-        if isinstance(getattr(client, "_mounts", None), dict):
-            client._mounts = {}
-        client._transport = PinnedClientTransport(transport)
-    return client
-
-
-def create_pinned_async_client(timeout, *, event_hooks=None, httpx_module=httpx):
-    # Construct through HTTPX first so existing constructor instrumentation and
-    # response hooks remain compatible. Replace only the per-client transport;
-    # MockTransport stays untouched as an explicit offline test seam.
-    client = httpx_module.AsyncClient(
-        timeout=timeout,
-        follow_redirects=False,
-        trust_env=False,
-        event_hooks=event_hooks,
-    )
-    if not isinstance(getattr(client, "_transport", None), httpx_module.MockTransport):
-        client._transport = PinnedAsyncHTTPTransport()
-    return client
 
 
 class ProtocolProfile(Enum):

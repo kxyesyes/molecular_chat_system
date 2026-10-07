@@ -13,8 +13,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from src.agent.decision_transport import create_pinned_async_client, pin_supplied_async_client
-from src.web.security.url_policy import validate_llm_url
+from src.system.llm_transport import create_pinned_async_client, pin_supplied_async_client
+from src.system.network_policy import validate_llm_url
 
 
 logger = logging.getLogger(__name__)
