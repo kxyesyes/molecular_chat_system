@@ -8,11 +8,25 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
+from .private_permissions import restrict_private_path
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DB_PATH = PROJECT_ROOT / "scratch" / "tasks.sqlite"
 _MIGRATION_LOCK = threading.Lock()
 _MIGRATION_ATTEMPTS = 8
+
+
+def _restrict_permissions(path: Path, mode: int, *, required: bool = False) -> None:
+    """Apply private permissions, failing closed for required paths."""
+    restrict_private_path(path, mode, required=required)
+
+
+def _restrict_database_permissions(path: Path) -> None:
+    _restrict_permissions(path.parent, 0o700, required=True)
+    _restrict_permissions(path, 0o600, required=True)
+    for candidate in (Path(f"{path}-wal"), Path(f"{path}-shm"), Path(f"{path}-journal")):
+        _restrict_permissions(candidate, 0o600)
 
 
 def get_task_db_path(db_path: str | Path | None = None) -> Path:
@@ -31,14 +45,20 @@ def connect(db_path: str | Path | None = None) -> sqlite3.Connection:
     path = get_task_db_path(db_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
-    conn.row_factory = dict_factory
-    conn.execute("PRAGMA busy_timeout=30000")
-    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        conn.row_factory = dict_factory
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _restrict_database_permissions(path)
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
 @contextmanager
 def connection(db_path: str | Path | None = None):
+    path = get_task_db_path(db_path)
     conn = connect(db_path)
     try:
         yield conn
@@ -48,6 +68,7 @@ def connection(db_path: str | Path | None = None):
         raise
     finally:
         conn.close()
+        _restrict_database_permissions(path)
 
 
 def _initialize_once(path: Path) -> None:

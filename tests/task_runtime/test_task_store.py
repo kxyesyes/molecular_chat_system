@@ -1150,6 +1150,37 @@ def test_list_has_stable_order_and_clamps_limit(tmp_path):
     assert len(store.list(limit=0)) == 1
 
 
+def test_browser_task_projections_are_owner_scoped(tmp_path):
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    store.create("owned-a", "docking", {}, owner_session_id="session-a")
+    store.create("owned-b", "docking", {}, owner_session_id="session-b")
+    store.create("legacy", "docking", {})
+
+    assert store.get_owned("owned-a", "session-a").task_id == "owned-a"
+    with pytest.raises(KeyError):
+        store.get_owned("owned-a", "session-b")
+    with pytest.raises(KeyError):
+        store.get_owned("legacy", "session-a")
+
+    assert [item.task_id for item in store.list(
+        owner_session_id="session-a", require_owner=True
+    )] == ["owned-a"]
+
+    assert [item.task_id for item in store.events(
+        "owned-a", owner_session_id="session-a", require_owner=True
+    )]
+    with pytest.raises(KeyError):
+        store.events("owned-a", owner_session_id="session-b", require_owner=True)
+
+    with pytest.raises(KeyError):
+        store.request_cancel(
+            "owned-a", owner_session_id="session-b", reason="foreign"
+        )
+    assert store.request_cancel(
+        "owned-a", owner_session_id="session-a", reason="owner"
+    ).status is TaskStatus.CANCEL_REQUESTED
+
+
 def test_finish_rejects_nonterminal_target_status(tmp_path):
     store = TaskStore(tmp_path / "tasks.sqlite")
     store.create("task-1", "demo", {})

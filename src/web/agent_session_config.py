@@ -29,7 +29,18 @@ class AgentEntrySessionMiddleware(AgentSessionMiddleware):
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
         protected = path in {"/", "/ws", "/api/tasks"} or any(
-            path.startswith(prefix) for prefix in ("/api/tasks/", "/api/agent/workflows/")
+            path.startswith(prefix)
+            for prefix in (
+                "/api/tasks/",
+                "/api/agent/workflows/",
+                "/api/llm/",
+                "/api/switch_model",
+                "/api/docking/",
+                "/api/reverse-target/",
+                "/api/reverse_target/",
+                "/api/activity/",
+                "/api/admet/",
+            )
         )
         if not protected:
             await self.app(scope, receive, send)

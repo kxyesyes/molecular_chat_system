@@ -11,6 +11,8 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from src.task_runtime.private_permissions import restrict_private_path
+
 
 COOKIE_NAME = "medchat_agent_session"
 SESSION_MAX_AGE = 90 * 86400
@@ -26,10 +28,18 @@ class AgentSessionStore:
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._restrict_permissions()
         self._initialize_lock = threading.Lock()
         self._initialized = False
 
+    def _restrict_permissions(self) -> None:
+        restrict_private_path(self.db_path.parent, 0o700)
+        for path in (self.db_path, Path(f"{self.db_path}-wal"),
+                     Path(f"{self.db_path}-shm"), Path(f"{self.db_path}-journal")):
+            restrict_private_path(path, 0o600)
+
     def _open(self) -> sqlite3.Connection:
+        self._restrict_permissions()
         connection = sqlite3.connect(self.db_path, timeout=5)
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
@@ -56,6 +66,7 @@ class AgentSessionStore:
                     ON agent_sessions(expires_at)"""
                 )
                 connection.commit()
+                self._restrict_permissions()
                 self._initialized = True
             finally:
                 connection.close()

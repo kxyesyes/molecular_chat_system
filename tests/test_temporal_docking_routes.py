@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from src.task_runtime.backends.base import BackendSubmitResult, StartOutcome
@@ -15,6 +16,7 @@ from src.task_runtime.selector import BackendDecision
 from src.task_runtime.staging import DockingInputStager
 from src.task_runtime.store import TaskStore
 from src.web.routes.api_routes import setup_api_routes
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 
 
 TASK_ID = "00000000-0000-4000-8000-000000000901"
@@ -100,13 +102,34 @@ class FakeDockingService:
 def _build_client(monkeypatch):
     runtime = FakeTaskRuntime()
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(Path(tempfile.mkdtemp(prefix="medchat-test-sessions-")) / "sessions.sqlite"),
+    )
+
+    @app.get("/test/identity")
+    async def test_identity(request: Request):
+        return request.scope["agent_session_id"]
+
     setup_api_routes(
         app,
         docking_service=FakeDockingService(),
         task_runtime=runtime,
     )
     setup_task_routes(app, task_runtime=runtime)
-    return TestClient(app), runtime
+    client = TestClient(app, base_url="https://localhost")
+    owner_session_id = client.get("/test/identity").json()
+    runtime.store = TaskStore(
+        Path(tempfile.mkdtemp(prefix="medchat-test-tasks-")) / "tasks.sqlite"
+    )
+    runtime.store.create(
+        TASK_ID,
+        "docking",
+        {},
+        backend="temporal",
+        owner_session_id=owner_session_id,
+    )
+    return client, runtime
 
 
 def _headers(**extra):
@@ -368,9 +391,13 @@ def test_async_submit_is_accepted_by_real_docking_stager(tmp_path: Path, monkeyp
         temporal_backend=None,
     )
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "sessions.sqlite"),
+    )
     setup_api_routes(app, task_runtime=runtime)
 
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://localhost") as client:
         response = client.post(
             "/api/docking/tasks",
             headers=_headers(),

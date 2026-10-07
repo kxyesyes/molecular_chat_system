@@ -15,6 +15,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
 from src.agent.persistence.redaction import sanitize_sensitive_text
+from src.task_runtime.private_permissions import restrict_private_path
 
 
 
@@ -1774,10 +1775,7 @@ def _ensure_private_directory(path: Path, task_root: Path) -> None:
             or resolved.parent != task_root
         ):
             raise CompletionError("completion_artifact_invalid")
-        try:
-            path.chmod(0o700)
-        except OSError:
-            pass
+        restrict_private_path(path, 0o700, required=True)
     except CompletionError:
         raise
     except (OSError, RuntimeError):

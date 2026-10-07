@@ -404,6 +404,7 @@ class TemporalTaskBackend:
                     else None
                 ),
                 submission_digest=submission.request_digest,
+                owner_session_id=submission.owner_session_id,
             ), True
         except sqlite3.IntegrityError:
             existing = self._existing_authority(submission)

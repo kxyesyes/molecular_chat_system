@@ -382,6 +382,7 @@ class TaskRuntime:
                 operation.row["task_id"], operation.row["manifest_locator"],
             )),
             request_digest=json.loads(operation.row["binding_json"])["request_digest"],
+            owner_session_id=operation.row["owner_session_id"],
         )
         operation.submission = asyncio.create_task(self.local_backend.submit(submission))
         try:
@@ -903,6 +904,7 @@ class TaskRuntime:
         smiles: str | None,
         config: Mapping[str, Any],
         idempotency_key: str | None = None,
+        owner_session_id: str | None = None,
     ) -> BackendSubmitResult:
         if self._closed:
             raise RuntimeError("task runtime is closed")
@@ -964,6 +966,7 @@ class TaskRuntime:
                 input_manifest_path=str(manifest_path),
                 idempotency_key=idempotency_key,
                 request_digest=request_digest,
+                owner_session_id=owner_session_id,
             )
         except asyncio.CancelledError:
             await self._discard_staging_after_cancellation(task_id, manifest_path)
@@ -1730,6 +1733,7 @@ class TaskRuntime:
                     provenance=submission.payload["decision"],
                     idempotency_digest=self._submission_idempotency_digest(submission),
                     submission_digest=submission.request_digest,
+                    owner_session_id=submission.owner_session_id,
                 )
             except sqlite3.IntegrityError:
                 if submission.idempotency_key is None:
@@ -1808,6 +1812,7 @@ class TaskRuntime:
                     provenance=provenance,
                     idempotency_digest=self._submission_idempotency_digest(submission),
                     submission_digest=submission.request_digest,
+                    owner_session_id=submission.owner_session_id,
                 )
             except sqlite3.IntegrityError:
                 record = await asyncio.to_thread(self.store.get, submission.task_id)
@@ -1881,6 +1886,7 @@ class TaskRuntimeBinding:
         self._lock = threading.Lock()
         self._close_future: Future[None] | None = None
         self._close_runner: asyncio.Task[None] | None = None
+        self._startup_cleanup_done = False
 
     def start(self):
         with self._lock:
@@ -1899,9 +1905,20 @@ class TaskRuntimeBinding:
     def install(self, app, logger) -> None:
         async def startup() -> None:
             try:
-                self.start()
+                runtime = self.start()
             except Exception:
                 logger.warning("Durable task runtime initialization failed")
+                return
+            if self._startup_cleanup_done:
+                return
+            try:
+                cleanup = getattr(runtime, "cleanup_staging_once", None)
+                if callable(cleanup):
+                    await cleanup()
+            except Exception:
+                logger.warning("Durable task runtime startup cleanup failed")
+                return
+            self._startup_cleanup_done = True
 
         async def shutdown() -> None:
             try:

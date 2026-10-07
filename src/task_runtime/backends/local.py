@@ -288,6 +288,7 @@ class LocalTaskBackend:
                     provenance=provenance,
                     idempotency_digest=digest,
                     submission_digest=request_digest,
+                    owner_session_id=submission.owner_session_id,
                 ),
                 name=f"medchat-create-{submission.task_id}",
             )
