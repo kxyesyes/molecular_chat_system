@@ -8,7 +8,7 @@ from functools import wraps
 from uuid import uuid4
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("src.web.model_lifecycle")
 
 
 class ModelRequestGate:

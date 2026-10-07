@@ -14,7 +14,7 @@ import logging
 from src.system.openai_compatible_model import OpenAICompatibleModel
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("src.agent.modelscope_model")
 
 
 class ModelScopeModel(OpenAICompatibleModel):

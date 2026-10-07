@@ -83,7 +83,7 @@ class OpenAICompatibleModelTest(unittest.TestCase):
             client=ErrorClient(),
         )
 
-        with self.assertLogs("src.system.openai_compatible_model", level="ERROR") as logs:
+        with self.assertLogs("src.agent.openai_compatible_model", level="ERROR") as logs:
             result = asyncio.run(model.generate("hello"))
 
         rendered_logs = "\n".join(logs.output)

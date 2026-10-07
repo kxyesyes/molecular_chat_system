@@ -608,7 +608,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
     def _capture_strict_generate(self):
         """Verify the concrete implementation and signature without invoking it."""
         # Keep client imports lazy: importing the generator must not initialize
-        # the Web client's legacy logging setup or construct any HTTP clients.
+        # a model client's logging setup or construct any HTTP clients.
         from src.system.model_clients import OllamaModel
 
         try:

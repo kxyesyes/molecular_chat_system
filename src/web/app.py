@@ -23,11 +23,11 @@ from .user_llm_config import (
     load_user_llm_config, save_user_llm_config, user_llm_config_path,
     user_llm_signature, resolve_user_llm_request, default_user_llm_config,
 )
-from .models import OllamaModel, generate_for_chat
+from .models import generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.service import RAGSystem
 from src.system.env import load_env_file as _load_env_file
-from src.system.model_clients import ModelScopeModel, OpenAICompatibleModel
+from src.system.model_clients import OllamaModel
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent
@@ -527,6 +527,8 @@ class MolecularChatApp:
             )
 
         if config.get("provider") == "modelscope":
+            from src.system.model_clients import ModelScopeModel
+
             return ModelScopeModel(
                 api_key=config.get("api_key", ""),
                 model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
@@ -534,6 +536,8 @@ class MolecularChatApp:
                 enforce_url_policy=True,
                 provider="modelscope",
             )
+
+        from src.system.model_clients import OpenAICompatibleModel
 
         return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),

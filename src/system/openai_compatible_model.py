@@ -17,7 +17,8 @@ from src.system.llm_transport import create_pinned_async_client, pin_supplied_as
 from src.system.network_policy import validate_llm_url
 
 
-logger = logging.getLogger(__name__)
+# Preserve the public logging category used by deployment filters and audits.
+logger = logging.getLogger("src.agent.openai_compatible_model")
 _HTTPX_ASYNC_CLIENT_TYPE = httpx.AsyncClient
 
 

@@ -20,7 +20,8 @@ try:
 except ImportError:
     ENHANCED_LOGGING = False
 
-logger = logging.getLogger(__name__)
+# Preserve the public logging category used by deployment filters and audits.
+logger = logging.getLogger("src.web.models.ollama_model")
 
 
 class OllamaGenerationError(Exception):
