@@ -6,6 +6,7 @@
 """
 
 from copy import deepcopy
+import hashlib
 from src.activity.family_contract import resolve_activity_family
 from src.agent.contracts import (
     AgentErrorCode,
@@ -262,6 +263,19 @@ class ActivityPredictorTool(BaseMolecularTool):
             and row["provenance"]["request"].get("identity")
         }
         request_identity = next(iter(request_identities)) if len(request_identities) == 1 else None
+        data_versions = sorted({
+            model.get("prepared_dataset_sha256")
+            for row in rows
+            for model in (row.get("provenance", {}).get("models", {}) or {}).values()
+            if isinstance(model, dict) and model.get("prepared_dataset_sha256")
+        })
+        input_structures = [
+            {"smiles": row.get("smiles"),
+             "sha256": "sha256:" + hashlib.sha256(
+                 str(row.get("smiles", "")).encode("utf-8")
+             ).hexdigest()}
+            for row in rows
+        ]
         labels = {"passed": "完成", "partial": "部分完成", "failed": "失败"}
         needs_review = any(row.get("classification_regression_consistent") is False for row in rows)
         review_message = "计算已完成，分类与回归不一致，需复核"
@@ -296,6 +310,10 @@ class ActivityPredictorTool(BaseMolecularTool):
             quality={
                 "prediction_status": status,
                 "model_provenance": [deepcopy(r.get("provenance", {})) for r in rows],
+                "source": "registered_family_rg_mpnn",
+                "model_version": request_identity,
+                "data_version": data_versions,
+                "input_structures": input_structures,
                 "candidate_ids_bound": candidate_ids is not None,
                 "requested_endpoint": endpoint or "pIC50",
                 "request_model_identity": request_identity,

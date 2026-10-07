@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.activity.model_registry import ActivityModelRegistry
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 
 
 REQUIRED_FIELDS = {
@@ -652,8 +653,12 @@ def test_activity_model_api_uses_model_ids_and_rejects_path_payloads(
     dummy_predictor = SimpleNamespace(_loaded=True)
     monkeypatch.setattr(predictor_module, "_predictor", dummy_predictor)
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "sessions.sqlite"),
+    )
     setup_api_routes(app)
-    client = TestClient(app)
+    client = TestClient(app, base_url="https://localhost")
 
     listed = client.get("/api/activity/models")
     assert listed.status_code == 200
@@ -704,8 +709,12 @@ def test_activity_model_delete_api_invalidates_shared_predictor(
     dummy_predictor.invalidate = Mock(side_effect=invalidate)
     monkeypatch.setattr(predictor_module, "_predictor", dummy_predictor)
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "delete-sessions.sqlite"),
+    )
     setup_api_routes(app)
-    client = TestClient(app)
+    client = TestClient(app, base_url="https://localhost")
 
     response = client.delete("/api/activity/models/delete-model")
 

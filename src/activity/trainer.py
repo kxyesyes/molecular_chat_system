@@ -19,8 +19,26 @@ logger = logging.getLogger(__name__)
 
 # Global dictionary to track training jobs
 training_jobs: Dict[str, Dict[str, Any]] = {}
+training_jobs_lock = threading.RLock()
 MODELS_DIR = Path("data/activity/models")
 MODEL_IMPLEMENTATION_VERSION = 2
+
+
+class TrainingCancelled(RuntimeError):
+    """Internal control flow used when an owned training job is cancelled."""
+
+
+_TERMINAL_TRAINING_STATES = {"completed", "failed", "canceled"}
+_PRIVATE_TRAINING_FIELDS = {"owner_session_id", "_cancel_event", "_cancel_log_written"}
+
+
+def _remove_training_input(file_path: str | None) -> None:
+    if not file_path or not os.path.exists(file_path):
+        return
+    try:
+        os.remove(file_path)
+    except OSError:
+        logger.warning("Unable to remove temporary training input", exc_info=True)
 
 
 def get_activity_models_dir() -> Path:
@@ -474,6 +492,11 @@ class ActivityTrainer:
     def _log(self, message: str):
         self.status["logs"].append(message)
         logger.info(f"[Job {self.job_id}] {message}")
+
+    def _raise_if_cancelled(self):
+        event = self.status.get("_cancel_event")
+        if isinstance(event, threading.Event) and event.is_set():
+            raise TrainingCancelled("Training canceled by user")
         
     def _update_progress(
         self,
@@ -537,10 +560,20 @@ class ActivityTrainer:
                     classification_threshold=None, classification_direction=None,
                     prepared_manifest_path=None):
         start_time = time.time()
+        try:
+            self._raise_if_cancelled()
+        except TrainingCancelled:
+            self.status["state"] = "canceled"
+            self.status["error"] = "Training canceled by user"
+            self._log("Training canceled before startup.")
+            self.status["elapsed"] = time.time() - start_time
+            _remove_training_input(file_path)
+            return
         self.status["state"] = "running"
         task_type = str(task_type).strip().lower()
         if prepared_manifest_path is not None:
             try:
+                self._raise_if_cancelled()
                 from src.activity.prepared_training import run_prepared_training
                 run_prepared_training(
                     self, prepared_manifest_path, epochs=total_epochs, lr=lr,
@@ -548,6 +581,10 @@ class ActivityTrainer:
                     hidden_size=hidden_size, weight_decay=weight_decay, patience=patience,
                     loss_metric=loss_metric, lr_scheduler=lr_scheduler, random_seed=random_seed,
                 )
+            except TrainingCancelled:
+                self.status["state"] = "canceled"
+                self.status["error"] = "Training canceled by user"
+                self._log("Training canceled by user.")
             except Exception as exc:
                 self.status["state"] = "failed"
                 self.status["error"] = str(exc)
@@ -737,6 +774,7 @@ class ActivityTrainer:
                     yield a_batch, r_batch
             
             for epoch in range(1, total_epochs + 1):
+                self._raise_if_cancelled()
                 model.train()
                 train_loss = 0
                 batches = 0
@@ -747,6 +785,7 @@ class ActivityTrainer:
                 t_rg = [train_rg[i] for i in perm]
                 
                 for a_batch, r_batch in get_batches(t_atom, t_rg, batch_size):
+                    self._raise_if_cancelled()
                     optimizer.zero_grad()
                     out, _ = model(a_batch, r_batch)
                     target = a_batch.y.view(-1)
@@ -773,6 +812,7 @@ class ActivityTrainer:
                 
                 with torch.no_grad():
                     for a_batch, r_batch in get_batches(val_atom, val_rg, batch_size):
+                        self._raise_if_cancelled()
                         out, _ = model(a_batch, r_batch)
                         target = a_batch.y.view(-1)
                         if task_type == "classification":
@@ -903,6 +943,10 @@ class ActivityTrainer:
                 self.status["state"] = "failed"
                 self.status["error"] = "Training failed to produce weights."
                 
+        except TrainingCancelled:
+            self.status["state"] = "canceled"
+            self.status["error"] = "Training canceled by user"
+            self._log("Training canceled by user.")
         except Exception as e:
             self.status["state"] = "failed"
             self.status["error"] = str(e)
@@ -913,14 +957,20 @@ class ActivityTrainer:
         finally:
             elapsed = time.time() - start_time
             self.status["elapsed"] = elapsed
-            if os.path.exists(file_path):
-                try:
-                    os.remove(file_path) # Clean up temp dataset
-                except: pass
+            _remove_training_input(file_path)
 
 def submit_training_job(**kwargs):
+    owner_session_id = kwargs.pop("owner_session_id", None)
+    if owner_session_id is not None:
+        if type(owner_session_id) is not str or not owner_session_id.strip():
+            raise ValueError("owner_session_id must be a non-empty string")
+        owner_session_id = owner_session_id.strip()
     job_id = str(uuid.uuid4())[:8]
     training_jobs[job_id] = {
+        "job_id": job_id,
+        "owner_session_id": owner_session_id,
+        "_cancel_event": threading.Event(),
+        "cancel_requested": False,
         "state": "pending",
         "progress": 0,
         "epoch": 0,
@@ -944,5 +994,66 @@ def submit_training_job(**kwargs):
     trainer.start_training(**kwargs)
     return job_id
 
-def get_job_status(job_id: str):
-    return training_jobs.get(job_id, None)
+
+def _public_training_status(job_id: str, status: dict) -> dict:
+    public_status = dict(status)
+    for field in _PRIVATE_TRAINING_FIELDS:
+        public_status.pop(field, None)
+    public_status.setdefault("job_id", job_id)
+    return public_status
+
+
+def get_job_status(job_id: str, *, owner_session_id: str | None = None):
+    status = training_jobs.get(job_id, None)
+    if status is None:
+        return None
+    if owner_session_id is not None and status.get("owner_session_id") != owner_session_id:
+        return None
+    return _public_training_status(job_id, status)
+
+
+def list_training_jobs(owner_session_id: str):
+    """List only the caller's training jobs with private fields removed."""
+    if type(owner_session_id) is not str or not owner_session_id.strip():
+        raise ValueError("owner_session_id must be a non-empty string")
+    with training_jobs_lock:
+        return [
+            _public_training_status(job_id, status)
+            for job_id, status in training_jobs.items()
+            if status.get("owner_session_id") == owner_session_id
+        ]
+
+
+def get_training_events(job_id: str, *, owner_session_id: str | None = None):
+    """Return an ordered, sanitized log projection for an owned job."""
+    status = training_jobs.get(job_id)
+    if status is None:
+        return None
+    if owner_session_id is not None and status.get("owner_session_id") != owner_session_id:
+        return None
+    return [
+        {"sequence": index, "event_type": "log", "message": str(message)}
+        for index, message in enumerate(list(status.get("logs", [])), start=1)
+    ]
+
+
+def cancel_training_job(job_id: str, *, owner_session_id: str | None = None):
+    """Request cooperative cancellation for an owned non-terminal job."""
+    status = training_jobs.get(job_id)
+    if status is None:
+        return None
+    if owner_session_id is not None and status.get("owner_session_id") != owner_session_id:
+        return None
+    if status.get("state") in _TERMINAL_TRAINING_STATES:
+        return _public_training_status(job_id, status)
+    event = status.get("_cancel_event")
+    if not isinstance(event, threading.Event):
+        return None
+    event.set()
+    status["cancel_requested"] = True
+    if status.get("state") == "pending":
+        status["state"] = "cancel_requested"
+    if not status.get("_cancel_log_written"):
+        status["logs"].append("Cancellation requested by user.")
+        status["_cancel_log_written"] = True
+    return _public_training_status(job_id, status)

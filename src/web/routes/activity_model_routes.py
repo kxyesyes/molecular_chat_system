@@ -1,12 +1,14 @@
 """Activity model route registration."""
 from typing import Dict, Any
-from fastapi import UploadFile, File, Form, Body, HTTPException
+from fastapi import UploadFile, File, Form, Body, HTTPException, Request
+from src.web.request_auth import require_browser_session
 
 
 def setup_activity_model_routes(app, *, _support):
     """Register the original endpoints with dynamically resolved compatibility support."""
     @app.post("/api/activity/train")
     async def start_activity_training(
+        request: Request,
         file: UploadFile           = File(...),
         target_column: str         = Form(...),
         smiles_column: str          = Form("smiles"),
@@ -27,6 +29,7 @@ def setup_activity_model_routes(app, *, _support):
         classification_direction: str | None = Form(None),
     ):
         """提交活性预测模型训练任务"""
+        owner_session_id = require_browser_session(request)
         temp_file = None
         temp_path = None
         retain_temp_file = False
@@ -81,6 +84,7 @@ def setup_activity_model_routes(app, *, _support):
                 random_seed=random_seed,
                 classification_threshold=classification_threshold,
                 classification_direction=classification_direction,
+                owner_session_id=owner_session_id,
             )
             retain_temp_file = True
 
@@ -89,7 +93,7 @@ def setup_activity_model_routes(app, *, _support):
             raise
         except Exception as e:
             _support.logger.error(f"启动训练失败: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
+            raise HTTPException(status_code=500, detail="活性模型训练任务启动失败，请稍后重试")
         finally:
             if temp_file is not None:
                 try:
@@ -104,17 +108,52 @@ def setup_activity_model_routes(app, *, _support):
                     pass
 
     @app.get("/api/activity/train/status/{job_id}")
-    async def get_training_status(job_id: str):
+    async def get_training_status(job_id: str, request: Request):
         """查询训练状态和指标"""
+        owner_session_id = require_browser_session(request)
         from src.activity.trainer import get_job_status
-        status = get_job_status(job_id)
+        status = get_job_status(job_id, owner_session_id=owner_session_id)
         if not status:
             raise HTTPException(status_code=404, detail="任务不存在")
         return {"success": True, "status": status}
+
+    @app.get("/api/activity/train/jobs")
+    async def list_training_jobs(request: Request):
+        """List only training jobs submitted by this browser session."""
+        owner_session_id = require_browser_session(request)
+        from src.activity.trainer import list_training_jobs as list_owned_training_jobs
+
+        return {
+            "success": True,
+            "jobs": list_owned_training_jobs(owner_session_id),
+        }
+
+    @app.get("/api/activity/train/events/{job_id}")
+    async def get_training_events(job_id: str, request: Request):
+        """Return sanitized progress events for an owned training job."""
+        owner_session_id = require_browser_session(request)
+        from src.activity.trainer import get_training_events as get_owned_training_events
+
+        events = get_owned_training_events(job_id, owner_session_id=owner_session_id)
+        if events is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {"success": True, "job_id": job_id, "events": events}
+
+    @app.post("/api/activity/train/cancel/{job_id}")
+    async def cancel_training(job_id: str, request: Request):
+        """Request cooperative cancellation for an owned training job."""
+        owner_session_id = require_browser_session(request)
+        from src.activity.trainer import cancel_training_job
+
+        status = cancel_training_job(job_id, owner_session_id=owner_session_id)
+        if status is None:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return {"success": True, "job_id": job_id, "status": status}
         
     @app.get("/api/activity/models")
-    async def list_activity_models():
+    async def list_activity_models(request: Request):
         """列出所有已训练的活性模型"""
+        require_browser_session(request)
         from src.activity.trainer import list_available_models, get_current_model_id
 
         models = list_available_models()
@@ -125,8 +164,9 @@ def setup_activity_model_routes(app, *, _support):
         }
 
     @app.post("/api/activity/models/switch")
-    async def switch_activity_model(data: Dict[str, Any] = Body(...)):
+    async def switch_activity_model(request: Request, data: Dict[str, Any] = Body(...)):
         """切换当前使用的活性预测模型权重"""
+        require_browser_session(request)
         if set(data) != {"model_id"} or not isinstance(data.get("model_id"), str):
             raise HTTPException(status_code=400, detail="仅接受 model_id 参数")
 
@@ -155,8 +195,9 @@ def setup_activity_model_routes(app, *, _support):
             raise HTTPException(status_code=500, detail="切换活性模型失败")
 
     @app.delete("/api/activity/models/{model_id}")
-    async def remove_activity_model(model_id: str):
+    async def remove_activity_model(model_id: str, request: Request):
         """物理删除一个活性预测模型"""
+        require_browser_session(request)
         try:
             from src.activity.trainer import delete_model
             delete_model(model_id)

@@ -12,6 +12,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.activity.predictor import ActivityPredictor
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 
 
 def _model_metadata(
@@ -404,43 +405,40 @@ def test_agent_tool_requires_target_before_selecting_a_model() -> None:
     assert "靶点" in result.message
 
 
-def test_activity_api_uses_task8_threadpool_for_cold_start_and_prediction(
+def test_activity_api_uses_budgeted_isolated_execution_path(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.activity import predictor as predictor_module
     from src.web.routes import api_routes
+    from src.web.routes import activity_prediction_routes
 
-    state = {"inside_threadpool": False, "invocations": 0}
+    calls: list[tuple[str, object]] = []
 
-    class FakePredictor:
-        def predict(self, smiles):
-            values = [smiles] if isinstance(smiles, str) else list(smiles)
-            return [
-                {
-                    "smiles": value,
-                    "success": False,
-                    "error": "test model unavailable",
-                }
-                for value in values
-            ]
+    async def fake_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+        calls.append((operation, isolated_payload))
+        values = isolated_payload[0]
+        values = [values] if isinstance(values, str) else list(values)
+        return [
+            {
+                "smiles": value,
+                "success": False,
+                "error": "test model unavailable",
+            }
+            for value in values
+        ]
 
-    def get_fake_predictor():
-        assert state["inside_threadpool"] is True
-        return FakePredictor()
-
-    async def fake_invoke(func, *args, **kwargs):
-        state["invocations"] += 1
-        state["inside_threadpool"] = True
-        try:
-            return func(*args, **kwargs)
-        finally:
-            state["inside_threadpool"] = False
-
-    monkeypatch.setattr(predictor_module, "get_predictor", get_fake_predictor)
-    monkeypatch.setattr(api_routes, "_invoke_in_threadpool", fake_invoke)
+    monkeypatch.setattr(
+        activity_prediction_routes,
+        "_invoke_activity_with_budget",
+        fake_invoke,
+    )
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "sessions.sqlite"),
+    )
     api_routes.setup_api_routes(app)
-    client = TestClient(app)
+    client = TestClient(app, base_url="https://localhost")
 
     direct = client.post("/api/activity/predict", data={"smiles": "CCO"})
     batch = client.post(
@@ -450,8 +448,8 @@ def test_activity_api_uses_task8_threadpool_for_cold_start_and_prediction(
 
     assert direct.status_code == 200
     assert batch.status_code == 200
-    assert state["invocations"] == 2
-    assert [item["smiles"] for item in batch.json()["results"]] == [
+    assert [operation for operation, _ in calls] == ["predict", "batch_predict"]
+    assert [item["smiles"] for item in batch.json()] == [
         "CCO",
         "CCO",
         "CCN",
@@ -474,8 +472,12 @@ def test_training_api_and_frontend_forward_split_strategy(
 
     monkeypatch.setattr(trainer, "submit_training_job", fake_submit_training_job)
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "sessions.sqlite"),
+    )
     api_routes.setup_api_routes(app)
-    client = TestClient(app)
+    client = TestClient(app, base_url="https://localhost")
 
     response = client.post(
         "/api/activity/train",
