@@ -98,8 +98,6 @@
     llmBaseUrl: null,
     llmModelName: null,
     llmApiKey: null,
-    llmApiKeyHint: null,
-    llmClearApiKey: null,
     llmSettingsStatus: null,
     testLlmConfig: null,
     saveLlmConfig: null,
@@ -323,8 +321,6 @@
     elements.llmBaseUrl = document.getElementById("llmBaseUrl");
     elements.llmModelName = document.getElementById("llmModelName");
     elements.llmApiKey = document.getElementById("llmApiKey");
-    elements.llmApiKeyHint = document.getElementById("llmApiKeyHint");
-    elements.llmClearApiKey = document.getElementById("clearLlmApiKey");
     elements.llmSettingsStatus = document.getElementById("llmSettingsStatus");
     elements.testLlmConfig = document.getElementById("testLlmConfig");
     elements.saveLlmConfig = document.getElementById("saveLlmConfig");
@@ -869,7 +865,7 @@
           throw new Error(result.message || "读取配置失败");
         }
         fillLlmSettingsForm(result.config || {});
-        setLlmSettingsStatus("配置已读取");
+        setLlmSettingsStatus("");
       } catch (error) {
         console.error("读取 LLM 配置失败:", error);
         setLlmSettingsStatus(`读取配置失败：${error.message}`, true);
@@ -890,7 +886,6 @@
       if (elements.llmBaseUrl) elements.llmBaseUrl.value = config.base_url ?? (useDeepSeekDefaults ? "https://api.deepseek.com/chat/completions" : "");
       if (elements.llmModelName) elements.llmModelName.value = config.model_name ?? (useDeepSeekDefaults ? "deepseek-v4-pro" : "");
       if (elements.llmApiKey) elements.llmApiKey.value = "";
-      if (elements.llmClearApiKey) elements.llmClearApiKey.checked = false;
     }
 
     function collectLlmSettingsForm() {
@@ -899,7 +894,6 @@
         base_url: elements.llmBaseUrl ? elements.llmBaseUrl.value : "",
         model_name: elements.llmModelName ? elements.llmModelName.value : "",
         api_key: elements.llmApiKey ? elements.llmApiKey.value : "",
-        clear_api_key: Boolean(elements.llmClearApiKey?.checked),
         stream: elements.llmStream ? elements.llmStream.value === "true" : true,
       };
     }
@@ -1326,8 +1320,7 @@
   // 获取模型显示名称
   function getModelDisplayName(modelKey) {
     const modelNames = {
-      glm4: "GLM-4.6 (魔搭社区)",
-      qwen3: "Qwen3-235B (魔搭社区)",
+      deepseek: "DeepSeek",
     };
     return modelNames[modelKey] || modelKey;
   }
@@ -2246,12 +2239,17 @@
             box-shadow: 0 5px 15px rgba(239, 68, 68, 0.3);
         `;
 
-    errorDiv.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 12px;">
-                <span style="font-size: 20px;">⚠️</span>
-                <span style="font-size: 15px;">${message}</span>
-            </div>
-        `;
+    const errorContent = document.createElement("div");
+    errorContent.style.cssText = "display: flex; align-items: center; gap: 12px;";
+    const errorIcon = document.createElement("span");
+    errorIcon.style.fontSize = "20px";
+    errorIcon.textContent = "⚠️";
+    const messageSpan = document.createElement("span");
+    messageSpan.style.fontSize = "15px";
+    messageSpan.textContent = String(message ?? "");
+    errorContent.appendChild(errorIcon);
+    errorContent.appendChild(messageSpan);
+    errorDiv.appendChild(errorContent);
 
     elements.chatContainer.appendChild(errorDiv);
     HomeChatRenderer.scrollToBottom();
@@ -2440,7 +2438,7 @@
         检索到的相关分子数据
       </div>
       <div style="font-size: 14px; color: #075985;">
-        ${infoMessage || `共找到 ${molecules.length} 个相关分子`}
+        ${escapeHtml(infoMessage || `共找到 ${molecules.length} 个相关分子`)}
       </div>
     `;
 
@@ -2645,7 +2643,7 @@
             `;
 
             propItem.innerHTML = `
-              <span style="color: #64748b; font-size: 11px; font-weight: 500;">${propertyLabels[prop] || prop}</span>
+              <span style="color: #64748b; font-size: 11px; font-weight: 500;">${escapeHtml(propertyLabels[prop] || prop)}</span>
               <span style="color: ${valueColor}; font-weight: 700; font-size: 12px; font-family: 'Inter', ui-sans-serif, system-ui;">${
                 prop === "molwt" ? propValue.toFixed(1) : propValue.toFixed(2)
               }</span>
@@ -2661,12 +2659,14 @@
         // SMILES 折叠区域
         const smilesDetails = document.createElement("details");
         smilesDetails.style.cssText = `margin-top: 4px;`;
-        smilesDetails.innerHTML = `
-        <summary style="cursor: pointer; color: #64748b; font-size: 12px; user-select: none;">显示 SMILES</summary>
-        <div style="margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;">
-          ${smiles}
-        </div>
-      `;
+        const smilesSummary = document.createElement("summary");
+        smilesSummary.style.cssText = "cursor: pointer; color: #64748b; font-size: 12px; user-select: none;";
+        smilesSummary.textContent = "显示 SMILES";
+        const smilesValue = document.createElement("div");
+        smilesValue.style.cssText = "margin-top: 6px; padding: 8px; background: #f8fafc; border-radius: 4px; font-family: monospace; font-size: 11px; color: #475569; word-break: break-all; border: 1px solid #e2e8f0;";
+        smilesValue.textContent = smiles;
+        smilesDetails.appendChild(smilesSummary);
+        smilesDetails.appendChild(smilesValue);
         infoSection.appendChild(smilesDetails);
 
         // 操作按钮
@@ -3091,7 +3091,7 @@
     };
 
     const config = statusConfig[status] || statusConfig.connecting;
-    elements.connectionStatus.innerHTML = `${config.icon} ${config.text}`;
+    elements.connectionStatus.textContent = `${config.icon} ${config.text}`;
     elements.connectionStatus.style.backgroundColor = config.bg;
     elements.connectionStatus.style.color = "#fff";
     elements.connectionStatus.style.padding = "6px 12px";
@@ -3416,11 +3416,11 @@
               visualContent += `
                 <div style="display: flex; align-items: center; margin: 12px 0; padding: 12px; background: #f8fafc; border-radius: 8px;">
                   <div style="background: #e2e8f0; padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #4a5568; margin-right: 12px; flex: 1;">
-                    ${reactants}
+                    ${escapeHtml(reactants)}
                   </div>
                   <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 6px 12px; border-radius: 20px; font-size: 20px; margin: 0 12px;">→</div>
                   <div style="background: #e6fffa; padding: 8px 12px; border-radius: 6px; font-family: monospace; font-size: 12px; color: #234e52; flex: 1;">
-                    ${products}
+                    ${escapeHtml(products)}
                   </div>
                 </div>
               `;
@@ -3451,7 +3451,7 @@
     }
 
     // 如果没有匹配到路线格式，返回基础格式化
-    return content.replace(/\n/g, "<br>");
+    return escapeHtml(content).replace(/\n/g, "<br>");
   }
 
   // 格式化反应预测结果

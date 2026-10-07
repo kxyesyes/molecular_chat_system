@@ -2120,8 +2120,7 @@
         <img src="/static/images/top1.png" alt="" />
         <span>模型</span>
         <select id="modelSelect">
-          <option value="glm4" selected>GLM-5.1 (魔搭)</option>
-          <option value="qwen3">Qwen3-235B (魔搭)</option>
+          <option value="deepseek" selected>DeepSeek</option>
         </select>
       </div>
 
@@ -2178,7 +2177,7 @@
         </div>
         <div class="llm-settings-field">
           <label for="llmApiKey">API Key</label>
-          <input id="llmApiKey" type="password" autocomplete="off" placeholder="本地 Ollama 可留空；外部 API 请填写 Key" />
+          <input id="llmApiKey" type="password" autocomplete="off" placeholder="请输入 API Key" />
         </div>
         <div class="llm-settings-status" id="llmSettingsStatus"></div>
         <div class="llm-settings-actions">
@@ -2515,18 +2514,18 @@
   <script src="/static/js/home/config.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/state.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/theme.js"></script>
-  <script src="/static/js/shared/safe_render.js"></script>
+  <script src="/static/js/shared/safe_render.js?v=20261007-url-policy-v2"></script>
   <script src="/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5"></script>
   <script src="/static/js/home/scientific_references.js?v=20260924-reference-v1"></script>
   <script src="/static/js/home/evidence_report.js?v=20260925-evidence-report-v1"></script>
-  <script src="/static/js/home/formatters.js"></script>
+  <script src="/static/js/home/formatters.js?v=20261007-chat-url-policy-v1"></script>
   <script src="/static/js/home/molecule_renderer.js"></script>
   <script src="/static/js/home/chat_renderer.js"></script>
   <script src="/static/js/home/advanced_options.js?v=20261001-explicit-count-v1"></script>
   <script src="/static/js/home/ws_client.js"></script>
   <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20260925-terminal-labels-v1 -->
-  <script src="/static/js/home/main.js?v=20260925-decision-runtime-v1"></script>
+  <script src="/static/js/home/main.js?v=20261007-settings-clean-v9"></script>
 </body>
 
 </html>
