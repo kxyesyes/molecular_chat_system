@@ -234,7 +234,9 @@ class ToolAdapter(ABC):
             raw_error_present = bool(raw.get("error"))
             terminal_failure = {
                 ObservationStatus.FAILED,
+                ObservationStatus.TIMEOUT,
                 ObservationStatus.UNAVAILABLE,
+                ObservationStatus.NOT_CALCULATED,
                 ObservationStatus.INVALID_INPUT,
                 ObservationStatus.REJECTED,
                 ObservationStatus.CANCELLED,
@@ -406,12 +408,13 @@ class LegacyPythonToolAdapter(ToolAdapter):
             raw_validator(raw)
         if isinstance(raw, dict) and (
             ("success" in raw and type(raw["success"]) is not bool)
-            or (raw.get("success") is True and (
-                raw.get("error") is not None
-                or raw.get("status") in {
-                    "failed", "rejected", "cancelled", "unavailable", "invalid_input"
-                }
-            ))
+                or (raw.get("success") is True and (
+                    raw.get("error") is not None
+                    or raw.get("status") in {
+                        "failed", "timeout", "not_calculated", "rejected",
+                        "cancelled", "unavailable", "invalid_input",
+                    }
+                ))
             or (raw.get("success") is False and raw.get("status") == "succeeded")
         ):
             return ToolResult.error_result(
