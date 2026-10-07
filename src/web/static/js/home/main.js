@@ -1442,7 +1442,6 @@
         temperature: advancedConfig.temperature, // 生成温度
         mol_count: advancedConfig.molCount, // 分子生成数量
         timestamp: Date.now(),
-        client_id: "web_client",
         ...(scientificReferences?.outgoing() || {}),
       };
 
