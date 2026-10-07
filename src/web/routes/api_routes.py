@@ -83,6 +83,18 @@ class _DynamicTempfile:
 _ROUTE_TEMPFILE = _DynamicTempfile()
 
 
+class _DynamicActivityInvoker:
+    """Keep post-registration activity budget patching compatible."""
+
+    async def __call__(self, *args, **kwargs):
+        from . import activity_prediction_routes
+
+        return await activity_prediction_routes._invoke_activity_with_budget(*args, **kwargs)
+
+
+_ROUTE_ACTIVITY_INVOKER = _DynamicActivityInvoker()
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -454,7 +466,12 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
         logger=_ROUTE_LOGGER,
     )
     setup_reverse_target_routes(app, _support=support)
-    setup_activity_prediction_routes(app, _support=support)
+    setup_activity_prediction_routes(
+        app,
+        invoke_activity_with_budget=_ROUTE_ACTIVITY_INVOKER,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        logger=_ROUTE_LOGGER,
+    )
     setup_activity_model_routes(
         app,
         read_upload_limited=_ROUTE_UPLOAD_READER,

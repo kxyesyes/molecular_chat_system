@@ -274,6 +274,12 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
                 "tempfile_module": support._ROUTE_TEMPFILE,
                 "logger": support._ROUTE_LOGGER,
             }
+        if domain == "activity_prediction":
+            expected = {
+                "invoke_activity_with_budget": support._ROUTE_ACTIVITY_INVOKER,
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "logger": support._ROUTE_LOGGER,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
