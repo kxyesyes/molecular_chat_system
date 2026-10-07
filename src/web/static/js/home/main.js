@@ -35,7 +35,6 @@
       maxEventsPerRun: 8,
       maxCandidates: 32,
     });
-  let referenceStatusElement = null;
   const evidenceReportLifecycle = window.HomeEvidenceReport?.createLifecycle();
   const evidenceReportViews = new WeakMap(); // live DOM lifetime only; never storage/restore
   let tabStorage;
@@ -50,15 +49,7 @@
       if (!response.ok || envelope.success !== true) throw new Error("Reference unavailable");
       return envelope.data;
     },
-    onStatus: message => {
-      if (referenceStatusElement) referenceStatusElement.textContent = message;
-      HomeChatRenderer.showNotification(message, "warning");
-    },
-    onChange: hint => {
-      if (referenceStatusElement) referenceStatusElement.textContent = hint.selection
-        ? `已选候选：${hint.selection.candidate_id}`
-        : hint.reference ? "候选集合已确认，可按显示序号继续计算。" : "未选择科研引用";
-    },
+    onStatus: message => HomeChatRenderer.showNotification(message, "warning"),
   });
 
   function displayCandidateCollections(element, payloads) {
@@ -332,20 +323,6 @@
 
     // 创建聊天容器（初始隐藏）
     createChatContainer();
-    if (scientificReferences && elements.input?.parentNode) {
-      const controls = document.createElement("div");
-      controls.className = "scientific-reference-controls";
-      referenceStatusElement = document.createElement("span");
-      referenceStatusElement.setAttribute("role", "status");
-      referenceStatusElement.textContent = "未选择科研引用";
-      const clearReference = document.createElement("button");
-      clearReference.type = "button";
-      clearReference.textContent = "清除科研选择";
-      clearReference.addEventListener("click", () => scientificReferences.clear());
-      controls.appendChild(referenceStatusElement);
-      controls.appendChild(clearReference);
-      elements.input.parentNode.appendChild(controls);
-    }
     HomeTheme.init();
 
     // 设置初始连接状态
