@@ -280,7 +280,10 @@ class ADMETPredictor(BaseMolecularTool):
             result["quality"].update(lineage["quality"])
             result["evidence"] = lineage["evidence"]
             if successful:
-                result['success'] = True
+                # A mixed batch has usable rows, but it is not a complete
+                # scientific success.  Keep the rows and provenance while
+                # exposing the partial terminal state to every caller.
+                result['success'] = not failed
                 result['status'] = 'partial' if failed else 'succeeded'
                 result['formatted'] = "\n\n".join(
                     self.format_admet_result(row['smiles'], row['admet'])
