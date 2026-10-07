@@ -379,7 +379,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261007-settings-clean-v9"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261007-reference-controls-removed-v1"]);
   });
   await test("strict candidate trace is socket-bound and receive is not mounted ACK", async () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
