@@ -20,6 +20,8 @@ from typing import Any
 from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Request
+
+from .route_compat import lazy_dependency
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -475,13 +477,25 @@ def setup_admet_routes(
         return
 
     if env_getter is None:
-        env_getter = _env_getter(_support)
-    if executor_factory is None:
-        executor_factory = (
-            getattr(_support, "ThreadPoolExecutor", None) or futures.ThreadPoolExecutor
-            if _support is not None
-            else futures.ThreadPoolExecutor
+        env_getter = _env_getter(
+            lazy_dependency(
+                None,
+                _support,
+                "os",
+                label="ADMET environment",
+                default=os,
+            )()
         )
+    if executor_factory is None:
+        executor_factory = lazy_dependency(
+            None,
+            _support,
+            "ThreadPoolExecutor",
+            label="ADMET executor",
+            default=futures.ThreadPoolExecutor,
+        )()
+        if executor_factory is None:
+            executor_factory = futures.ThreadPoolExecutor
     worker = getattr(app.state, "_admet_worker", None)
     if worker is None:
         isolate = True if _isolate is None else _isolate

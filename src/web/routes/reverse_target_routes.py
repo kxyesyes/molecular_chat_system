@@ -3,6 +3,8 @@ import asyncio
 import math
 
 from fastapi import UploadFile, File, Form, HTTPException, Request
+
+from .route_compat import lazy_dependency
 from src.web.request_auth import require_browser_session
 from src.system.scientific_status import summarize_completion
 
@@ -73,11 +75,12 @@ def setup_reverse_target_routes(
     application registration passes the individual callables explicitly.
     """
     def resolve(explicit, attribute):
-        if explicit is not None:
-            return explicit
-        if _support is not None:
-            return getattr(_support, attribute)
-        raise RuntimeError(f"reverse target dependency is not configured: {attribute}")
+        return lazy_dependency(
+            explicit,
+            _support,
+            attribute,
+            label=f"reverse target dependency: {attribute}",
+        )()
 
     @app.post("/api/reverse_target/predict")
     async def reverse_target_predict(

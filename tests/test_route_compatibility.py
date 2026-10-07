@@ -11,6 +11,8 @@ ROUTE_MODULES = (
     "agent_metrics_routes",
     "molecule_properties_routes",
     "docking_routes",
+    "admet_routes",
+    "reverse_target_routes",
 )
 
 
@@ -36,3 +38,4 @@ def test_selected_routes_keep_support_access_in_compatibility_adapter(module_nam
 
     assert "from .route_compat import lazy_dependency" in source
     assert "_support." not in source
+    assert "getattr(_support" not in source
