@@ -390,10 +390,14 @@ GitHub 分支保护和必需审批人数为“待确认”。
 - 用户上传文件不得永久保留，除非有明确数据保留策略；
 - 日志、评测报告和 handoff 不得包含真实凭据原文；
 - 外部模型、HTTP API、MCP 和命令行工具视为不可信边界；
+- 子进程只接收完成任务所需的最小环境白名单，不得继承 API Key、会话路径或完整运行时环境；
 - 大型数据与模型需要来源、许可证和完整性校验；
 - 发现凭据泄露时立即停止 push/PR，并轮换凭据。
 
-用户数据保存期限、访问控制、审计和备份策略为“待确认”。
+用户数据留存与清理边界见
+[`docs/security_data_retention_policy.md`](security_data_retention_policy.md)。其中 TaskStore
+终态记录、对接报告和已发布 artifact 的统一自动过期作业仍明确标为工程待办，生产部署不得将本地
+开发服务器行为当作完整留存治理。
 
 ## 15. 新功能开发流程
 
@@ -524,5 +528,5 @@ contract/replay 只证明生命周期契约；它们、fake runner、Windows 静
 6. CI 覆盖率阈值、必需检查名称和是否增加 GPU/真实工具的受控工作流。
 7. GitHub 分支保护、审批人数和 CODEOWNERS。
 8. README 声明 MIT，但根目录未见独立 LICENSE 文件，许可证状态需确认。
-9. 用户数据、上传文件、日志和任务记录的保留策略。
+9. TaskStore 终态记录、对接报告和已发布 artifact 的统一自动留存/删除作业及其审计实现。
 10. 生产数据库是否从 SQLite 迁移到 PostgreSQL，以及对象存储/Redis 的采用时点。

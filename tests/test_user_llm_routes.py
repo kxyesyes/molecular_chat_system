@@ -81,6 +81,7 @@ def test_save_restart_blank_clear_and_new_checkout(factory, monkeypatch, tmp_pat
 
 
 def test_changed_endpoint_never_borrows_key_for_save_or_test(factory, monkeypatch):
+    monkeypatch.setenv("MEDCHAT_LLM_ALLOWED_HOSTS", "other.example")
     app, client = factory()
     client.post("/api/llm/config", json=dict(default_user_llm_config(), api_key="synthetic-ui-secret"))
     captured = []

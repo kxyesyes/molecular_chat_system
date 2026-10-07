@@ -14,6 +14,16 @@ from src.web.routes.system_routes import setup_system_routes
 from src.web.user_llm_config import (
     load_user_llm_config, save_user_llm_config, user_llm_config_path,
 )
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+
+
+@pytest.fixture(autouse=True)
+def isolate_user_llm_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDCHAT_USER_CONFIG_DIR", str(tmp_path / "user-config"))
+    monkeypatch.setenv(
+        "MEDCHAT_LLM_ALLOWED_HOSTS",
+        "api.example.com,modelscope.example.com,different.example.com",
+    )
 
 
 class MockDockingService:
@@ -46,10 +56,14 @@ def build_management_app(tmp_path, monkeypatch) -> TestClient:
     task_manager_module._MANAGER = None
 
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "management-sessions.sqlite"),
+    )
     setup_task_routes(app)
     setup_agent_workflow_routes(app)
     setup_system_routes(app)
-    return TestClient(app)
+    return TestClient(app, base_url="https://localhost")
 
 
 def request(client: TestClient, method: str, path: str, **kwargs):
@@ -130,8 +144,12 @@ def test_docking_history_and_activity_model_routes_need_no_admin_token(
     tmp_path, monkeypatch
 ):
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "route-sessions.sqlite"),
+    )
     setup_api_routes(app, docking_service=MockDockingService(tmp_path))
-    client = TestClient(app)
+    client = TestClient(app, base_url="https://localhost")
 
     assert_available_without_admin_token(client, "GET", "/api/docking/history")
     assert_available_without_admin_token(client, "DELETE", "/api/docking/history")
@@ -146,8 +164,12 @@ def test_heavy_compute_routes_reject_oversized_requests_before_execution(tmp_pat
     monkeypatch.setenv("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", "2")
 
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "limits-sessions.sqlite"),
+    )
     setup_api_routes(app, docking_service=MockDockingService(tmp_path))
-    client = TestClient(app)
+    client = TestClient(app, base_url="https://localhost")
 
     oversized_receptor = client.post(
         "/api/docking/submit",
@@ -185,7 +207,7 @@ def test_llm_runtime_config_routes_need_no_admin_token(tmp_path, monkeypatch):
 
     monkeypatch.setattr("src.web.app.generate_for_chat", fake_generate)
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
 
     assert_available_without_admin_token(client, "GET", "/api/llm/config")
     assert client.post("/api/llm/config", json={}).status_code == 200
@@ -210,7 +232,7 @@ def test_llm_runtime_save_route_persists_only_to_user_store(tmp_path, monkeypatc
     from src.web.app import MolecularChatApp
 
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
     response = client.post(
         "/api/llm/config",
         json={
@@ -272,7 +294,7 @@ def test_llm_runtime_save_route_switches_provider_without_borrowing_keys(
     from src.web.app import MolecularChatApp
 
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
     response = client.post(
         "/api/llm/config",
         json={
@@ -333,7 +355,7 @@ def test_llm_runtime_save_route_clear_removes_previous_external_key(
     from src.web.app import MolecularChatApp
 
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
     response = client.post(
         "/api/llm/config",
         json={
@@ -376,7 +398,7 @@ def test_llm_runtime_save_route_preserves_state_when_user_store_write_fails(
         "api_key": "previous-fake-key",
     })
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
     before_file = user_llm_config_path().read_bytes()
     before_config = app_instance.active_llm_config.copy()
     before_model = app_instance.model
@@ -458,7 +480,7 @@ def test_llm_runtime_test_route_reuses_only_same_provider_endpoint_key(
 
     monkeypatch.setattr(app_instance, "_create_model_from_llm_config", capture_model)
     monkeypatch.setattr("src.web.app.generate_for_chat", fake_generate)
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
     response = client.post(
         "/api/llm/test",
         json={
@@ -500,7 +522,7 @@ def test_switch_model_updates_user_store_without_losing_key(tmp_path, monkeypatc
     from src.web.app import MolecularChatApp
 
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    client = TestClient(app_instance.app)
+    client = TestClient(app_instance.app, base_url="https://localhost")
     response = client.post(
         "/api/switch_model",
         json={"model": "new-model"},
@@ -532,7 +554,7 @@ def test_string_false_does_not_clear_saved_api_key(tmp_path, monkeypatch):
     from src.web.app import MolecularChatApp
 
     app_instance = MolecularChatApp(config_path=str(tmp_path / "missing.yaml"))
-    response = TestClient(app_instance.app).post(
+    response = TestClient(app_instance.app, base_url="https://localhost").post(
         "/api/llm/config",
         json={
             "provider": "openai_compatible",
@@ -566,7 +588,7 @@ def test_llm_test_route_does_not_return_untrusted_upstream_error_body(
         return "模型调用失败：上游回显 Authorization: Bearer fake-secret-value"
 
     monkeypatch.setattr("src.web.app.generate_for_chat", fake_generate)
-    response = TestClient(app_instance.app).post(
+    response = TestClient(app_instance.app, base_url="https://localhost").post(
         "/api/llm/test",
         json={
             "provider": "ollama",

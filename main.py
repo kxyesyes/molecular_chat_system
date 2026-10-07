@@ -407,6 +407,8 @@ def main():
             port=port,
             reload=reload_enabled,
             workers=workers,
+            proxy_headers=True,
+            forwarded_allow_ips=os.environ.get("MEDCHAT_FORWARDED_ALLOW_IPS", "127.0.0.1"),
             log_level="debug" if debug else os.environ.get("MEDCHAT_LOG_LEVEL", "info"),
             access_log=debug
         )

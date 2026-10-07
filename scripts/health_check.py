@@ -22,6 +22,20 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+_COMMAND_ENV_KEYS = (
+    "SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "TMPDIR",
+    "USERPROFILE", "HOME", "LANG", "LC_ALL", "COMSPEC",
+)
+
+
+def _minimal_command_environment() -> dict[str, str]:
+    """Keep health-check subprocesses free of runtime credentials and config."""
+    return {
+        key: os.environ[key]
+        for key in _COMMAND_ENV_KEYS
+        if key in os.environ
+    }
+
 
 def load_env_file(env_path: str | Path = ".env") -> None:
     path = Path(env_path)
@@ -73,6 +87,7 @@ def check_vina() -> tuple[bool, str]:
             capture_output=True,
             text=True,
             timeout=10,
+            env=_minimal_command_environment(),
         )
         if result.returncode not in (0, 1):
             return False, f"Vina exists but '--help' returned {result.returncode}"

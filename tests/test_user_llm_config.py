@@ -19,6 +19,10 @@ def store():
 def path(tmp_path, monkeypatch):
     monkeypatch.setenv("MEDCHAT_LLM_LOCK_DIR", str(tmp_path / "locks"))
     monkeypatch.setenv("MEDCHAT_USER_CONFIG_DIR", str(tmp_path / "private"))
+    # The endpoint-binding cases use a synthetic hostname.  Declare it
+    # explicitly for this test process instead of weakening the production
+    # trusted-host policy.
+    monkeypatch.setenv("MEDCHAT_LLM_ALLOWED_HOSTS", "other.example")
     return tmp_path / "private" / "llm.env"
 
 

@@ -23,7 +23,19 @@ def _smiles_to_3d_sync(smiles: str) -> dict[str, Any]:
     if embed_result != 0:
         raise HTTPException(status_code=400, detail="无法生成3D构象")
 
-    AllChem.MMFFOptimizeMolecule(mol)
+    if AllChem.MMFFHasAllMoleculeParams(mol):
+        force_field = "MMFF"
+        optimization_status = AllChem.MMFFOptimizeMolecule(mol)
+    elif AllChem.UFFHasAllMoleculeParams(mol):
+        force_field = "UFF"
+        optimization_status = AllChem.UFFOptimizeMolecule(mol)
+    else:
+        raise HTTPException(status_code=400, detail="缺少可用的力场参数，无法确认3D结构质量")
+    if optimization_status != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{force_field} 3D结构优化未收敛，未返回合格构象",
+        )
     mol_no_h = Chem.RemoveHs(mol)
     pdb_block = Chem.MolToPDBBlock(mol_no_h)
     if not pdb_block:
@@ -153,9 +165,9 @@ def setup_molecule_utility_routes(app, *, _support):
             return await _support._invoke_in_threadpool(_smiles_to_3d_sync, smiles)
         except HTTPException:
             raise
-        except Exception as error:
-            _support.logger.error(f"SMILES转3D失败: {error}")
-            raise HTTPException(status_code=500, detail=f"转换失败: {str(error)}")
+        except Exception:
+            _support.logger.exception("SMILES转3D失败")
+            raise HTTPException(status_code=500, detail="3D结构生成失败，请稍后重试") from None
 
     @app.get("/api/utils/smiles_to_image")
     async def smiles_to_image(
@@ -178,9 +190,9 @@ def setup_molecule_utility_routes(app, *, _support):
             legacy_detail = f"{error.status_code}: {error.detail}"
             _support.logger.error(f"生成分子图片失败: {legacy_detail}")
             raise HTTPException(status_code=500, detail=legacy_detail)
-        except Exception as error:
-            _support.logger.error(f"生成分子图片失败: {error}")
-            raise HTTPException(status_code=500, detail=str(error))
+        except Exception:
+            _support.logger.exception("生成分子图片失败")
+            raise HTTPException(status_code=500, detail="分子图片生成失败，请稍后重试") from None
 
     @app.get("/api/utils/mcs")
     async def get_mcs(
@@ -204,6 +216,6 @@ def setup_molecule_utility_routes(app, *, _support):
             )
         except HTTPException:
             raise
-        except Exception as error:
-            _support.logger.error(f"MCS计算失败: {error}")
-            raise HTTPException(status_code=500, detail=str(error))
+        except Exception:
+            _support.logger.exception("MCS计算失败")
+            raise HTTPException(status_code=500, detail="MCS计算失败，请稍后重试") from None

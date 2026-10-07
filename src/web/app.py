@@ -307,7 +307,23 @@ class MolecularChatApp:
             self.chat_handler._process_message = self._reject_unassembled_ordinary_dispatch
 
         # Create FastAPI app
-        self.app = FastAPI(title="Molecular Chat System")
+        # The public service exposes only the application API and UI.  OpenAPI
+        # documentation must not become an unauthenticated production
+        # discovery surface.
+        self.app = FastAPI(
+            title="Molecular Chat System",
+            docs_url=None,
+            redoc_url=None,
+            openapi_url=None,
+        )
+        from .security.headers import apply_security_headers
+
+        @self.app.middleware("http")
+        async def _security_headers(request: Request, call_next):
+            response = await call_next(request)
+            apply_security_headers(response, secure=request.url.scheme == "https")
+            return response
+
         from .agent_session_config import setup_agent_sessions
         setup_agent_sessions(self.app)
         self._setup_routes()
@@ -526,6 +542,8 @@ class MolecularChatApp:
                 api_key=config.get("api_key", ""),
                 model_name=config.get("model_name") or "ZhipuAI/GLM-5.1",
                 base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
+                enforce_url_policy=True,
+                provider="modelscope",
             )
 
         from src.agent.openai_compatible_model import OpenAICompatibleModel
@@ -535,6 +553,8 @@ class MolecularChatApp:
             model_name=config.get("model_name") or default_user_llm_config()["model_name"],
             base_url=config.get("base_url") or default_user_llm_config()["base_url"],
             provider_name="OpenAI-compatible",
+            provider=config.get("provider") or "openai_compatible",
+            enforce_url_policy=True,
         )
 
     async def _replace_llm_config(self, config):
@@ -713,9 +733,16 @@ class MolecularChatApp:
                 "timestamp": __import__('time').time()
             }
 
+        def require_browser_session(request: Request) -> str:
+            session_id = request.scope.get("agent_session_id")
+            if type(session_id) is not str or not session_id:
+                raise HTTPException(status_code=401, detail="Browser session required")
+            return session_id
+
         @self.app.get("/api/llm/config")
-        async def get_llm_config():
+        async def get_llm_config(request: Request):
             """Return public LLM connection configuration without leaking API keys."""
+            require_browser_session(request)
             await self._refresh_llm_config_from_env()
             return {
                 "success": True,
@@ -725,6 +752,7 @@ class MolecularChatApp:
         @self.app.post("/api/llm/config")
         async def save_llm_config(request: Request):
             """Persist before activation; a successful save is not a connection test."""
+            require_browser_session(request)
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise HTTPException(status_code=422, detail="模型配置必须为对象。")
@@ -739,6 +767,7 @@ class MolecularChatApp:
         @self.app.post("/api/llm/test")
         async def test_llm_config(request: Request):
             """Test without saving or borrowing credentials from another endpoint."""
+            require_browser_session(request)
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise HTTPException(status_code=422, detail="模型配置必须为对象。")
@@ -769,17 +798,23 @@ class MolecularChatApp:
 
         @self.app.post("/api/switch_model")
         async def switch_model(request: Request):
+            require_browser_session(request)
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise HTTPException(status_code=422, detail="模型配置必须为对象。")
             await self._refresh_llm_config_from_env()
             model_key = str(payload.get("model") or "").strip()
             model_map = {
-                "glm4": "ZhipuAI/GLM-5.1", "glm5.1": "ZhipuAI/GLM-5.1",
-                "qwen3": "Qwen/Qwen3-235B-A22B-Instruct-2507", "gmm-llama": "gmm-llama:latest",
+                "deepseek": "deepseek-v4-pro",
+                "gmm-llama": "gmm-llama:latest",
             }
             next_config = dict(self.active_llm_config)
-            next_config["model_name"] = model_map.get(model_key, model_key or next_config["model_name"])
+            if model_key == "deepseek":
+                current_key = next_config.get("api_key", "")
+                next_config.update(default_user_llm_config())
+                next_config["api_key"] = current_key
+            else:
+                next_config["model_name"] = model_map.get(model_key, model_key or next_config["model_name"])
             # Resolve against the saved state under the file lock, not a stale key.
             next_config["api_key"] = ""
             saved = await self._persist_user_llm_config(next_config)

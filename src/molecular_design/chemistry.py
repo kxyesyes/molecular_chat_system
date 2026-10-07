@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional
 
 from .optimizer import evaluate_goals, parse_optimization_goals
@@ -204,6 +205,8 @@ def calculate_properties(
         "qed": round(float(qed(mol)), 4),
         "fsp3": round(float(rdMolDescriptors.CalcFractionCSP3(mol)), 3),
     }
+    if not (math.isfinite(props["qed"]) and 0.0 <= props["qed"] <= 1.0):
+        raise ValueError(f"QED={props['qed']} out of [0,1] for {smiles}")
 
     try:
         from rdkit.Chem import RDConfig

@@ -38,6 +38,7 @@ from src.web.agent_result_presentation import (
 from src.web.models import generate_for_chat
 from src.web.model_lifecycle import model_request, finish_on_cancel
 from src.web.rag_presentation import format_rag_context, rag_info_molecule
+from src.web.legacy_websocket_protocol import LegacyFrameError, decode_legacy_frame
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +119,15 @@ class ChatHandler:
         try:
             while True:
                 data = await websocket.receive_text()
-                message_data = json.loads(data)
+                try:
+                    message_data = decode_legacy_frame(data)
+                except LegacyFrameError as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "请求格式无效。",
+                        "error": {"code": exc.code},
+                    }, ensure_ascii=False))
+                    continue
 
                 # 处理 ping 消息
                 if message_data.get("type") == "ping":

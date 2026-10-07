@@ -34,6 +34,7 @@ def main() -> int:
             "ready": True,
             "version": backend.version,
             "weights_id": backend.weights_id,
+            "data_version": backend.data_version,
             "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
         }), flush=True)
     except Exception as exc:
