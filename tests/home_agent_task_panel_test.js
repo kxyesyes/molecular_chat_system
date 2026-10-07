@@ -252,25 +252,71 @@ for (const [event, label, toolLabel] of [
   assert.strictEqual(getAgentEventLabel(event, "property_calculator"), toolLabel);
 }
 
-const requiredLazyPanelSnippets = [
-  "const presentation = resolveAgentEventPresentation(event);",
-  "presentation.eventType",
-  "if (!agentTaskRunActive)",
-  "resetAgentTaskPanel();",
-  "presentation.itemClass",
-  "presentation.progressText",
-  "presentation.terminal",
-  "agentTaskRunActive = false;",
-];
-const missingLazyPanelSnippets = requiredLazyPanelSnippets.filter(
-  (snippet) => !agentEventBody.includes(snippet)
+// Exercise the actual handler and state module rather than requiring state
+// ownership to remain inside main.js under a particular variable name.
+assert(template.indexOf("/static/js/home/task_state.js") >= 0);
+assert(template.indexOf("/static/js/home/task_state.js") <
+  template.indexOf("/static/js/home/main.js"));
+const taskStateSource = fs.readFileSync(
+  path.join(__dirname, "..", "src", "web", "static", "js", "home", "task_state.js"),
+  "utf8",
 );
+vm.runInContext(taskStateSource, taskStatusSandbox, {filename: "task_state.js"});
+const HomeTaskState = taskStatusSandbox.window.HomeTaskState;
 
-if (missingLazyPanelSnippets.length) {
-  console.error(
-    `Agent panel is not driven by real workflow lifecycle: ${missingLazyPanelSnippets.join(", ")}`
-  );
-  process.exit(1);
+for (const [terminal, label] of Object.entries(terminalLabels)) {
+  const panel = {rows: [], progress: "", resets: 0};
+  let mounted = true;
+  let renderSucceeds = true;
+  let scrolls = 0;
+  const context = {
+    window: {HomeTaskState, HomeTaskStatus, HomeTaskPanel: {
+      reset(target) { target.rows = []; target.resets += 1; },
+      appendEvent(target, row) {
+        if (!renderSucceeds) return false;
+        target.rows.push(row);
+        target.progress = row.progressText;
+        return true;
+      },
+    }},
+    document: {},
+    agentTaskState: HomeTaskState.create(),
+    createAgentTaskPanel: () => mounted ? panel : null,
+    resolveAgentEventPresentation,
+    getAgentEventLabel,
+    HomeChatRenderer: {scrollToBottom() { scrolls += 1; }},
+  };
+  vm.createContext(context);
+  vm.runInContext(extractFunction("resetAgentTaskPanel"), context);
+  vm.runInContext(agentEventBody, context);
+
+  context.handleAgentEvent({event: "task_started"});
+  context.handleAgentEvent({event: "planning_completed", progress: 1});
+  assert.strictEqual(context.agentTaskState.active, true);
+  assert.strictEqual(panel.resets, 1);
+  assert.strictEqual(panel.rows.length, 2);
+  assert.strictEqual(panel.progress, "100%");
+
+  context.handleAgentEvent({event: terminal, progress: 1});
+  assert.strictEqual(context.agentTaskState.active, false, terminal);
+  assert.strictEqual(context.agentTaskState.lastEventType, terminal);
+  assert.strictEqual(panel.progress, label);
+  assert.strictEqual(panel.rows.length, 3, "terminal must retain prior steps");
+
+  context.handleAgentEvent({event: "task_started"});
+  assert.strictEqual(context.agentTaskState.active, true);
+  assert.strictEqual(panel.resets, 2);
+  assert.strictEqual(panel.rows.length, 1, "new run must clear old steps");
+
+  const before = context.agentTaskState;
+  renderSucceeds = false;
+  context.handleAgentEvent({event: terminal});
+  assert.strictEqual(context.agentTaskState, before,
+    "failed mount must not consume the event or mark completion");
+  mounted = false;
+  context.handleAgentEvent({event: terminal});
+  assert.strictEqual(context.agentTaskState, before);
+  assert.strictEqual(scrolls, 4);
 }
 
-console.log("Homepage agent task panel static checks passed");
+console.log("Homepage agent task panel static and lifecycle checks passed");
