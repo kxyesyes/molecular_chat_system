@@ -8,7 +8,8 @@ import threading
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
-from src.agent.persistence.redaction import redact_sensitive
+from src.system.redaction import redact_sensitive
+from src.system.scientific_status import summarize_completion
 
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -169,7 +170,7 @@ async def _run_batch_docking_jobs(
 
     completed = sum(row["status"] == "completed" for row in results)
     failed = len(results) - completed
-    status = "completed" if completed == len(results) else "failed" if completed == 0 else "partial"
+    status, _success = summarize_completion(completed, len(results))
     return {
         "status": status,
         "timed_out": timed_out,

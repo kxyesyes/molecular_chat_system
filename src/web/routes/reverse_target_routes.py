@@ -4,6 +4,7 @@ import math
 
 from fastapi import UploadFile, File, Form, HTTPException, Request
 from src.web.request_auth import require_browser_session
+from src.system.scientific_status import summarize_completion
 
 
 def _safe_internal_failure(operation: str) -> str:
@@ -27,18 +28,9 @@ def _reverse_result_status(results):
 def _reverse_batch_status(rows):
     """Summarize per-input outcomes without treating partial work as success."""
 
-    if not rows:
-        status = "failed"
-    else:
-        completed = sum(1 for row in rows if row.get("success") is True)
-        status = (
-            "completed"
-            if completed == len(rows)
-            else "failed"
-            if completed == 0
-            else "partial"
-        )
-    summary = {"status": status, "success": status == "completed"}
+    completed = sum(1 for row in rows if row.get("success") is True)
+    status, success = summarize_completion(completed, len(rows))
+    summary = {"status": status, "success": success}
     if status == "failed":
         summary["error_code"] = "NO_MATCHING_TARGETS"
     return summary

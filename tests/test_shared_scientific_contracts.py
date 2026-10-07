@@ -1,5 +1,9 @@
 from pathlib import Path
 
+import pytest
+
+from src.system.scientific_status import summarize_completion
+
 
 def test_scientific_transport_types_are_owned_by_system_and_reexported_by_agent():
     from src.agent.contracts import (
@@ -22,6 +26,21 @@ def test_scientific_transport_types_are_owned_by_system_and_reexported_by_agent(
     assert ToolProvenance is SystemToolProvenance
     assert ToolResult is SystemToolResult
     assert WorkflowArtifact is SystemWorkflowArtifact
+
+
+@pytest.mark.parametrize(
+    ("completed", "total", "status", "success"),
+    [
+        (3, 3, "completed", True),
+        (1, 3, "partial", False),
+        (0, 3, "failed", False),
+        (0, 0, "failed", False),
+    ],
+)
+def test_completion_summary_never_promotes_partial_or_empty_work(
+    completed, total, status, success
+):
+    assert summarize_completion(completed, total) == (status, success)
 
 
 def test_docking_runtime_imports_shared_transport_types_without_agent_contract_facade():

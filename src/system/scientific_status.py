@@ -58,6 +58,18 @@ def is_non_success_status(status: str) -> bool:
     return status in NON_SUCCESS_STATUS
 
 
+def summarize_completion(completed: int, total: int) -> tuple[str, bool]:
+    """Map aggregate item counts to a truthful run status and success flag."""
+
+    if type(completed) is not int or type(total) is not int or total <= 0:
+        return RunOutcome.FAILED.value, False
+    if completed >= total:
+        return RunOutcome.COMPLETED.value, True
+    if completed > 0:
+        return RunOutcome.PARTIAL.value, False
+    return RunOutcome.FAILED.value, False
+
+
 __all__ = [
     "CANCELLED_STATUS_ALIASES",
     "NON_SUCCESS_STATUS",
@@ -68,4 +80,5 @@ __all__ = [
     "is_non_success_status",
     "is_timeout_status",
     "reported_status",
+    "summarize_completion",
 ]

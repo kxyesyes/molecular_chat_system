@@ -12,6 +12,7 @@ from fastapi import UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, start_isolated_process
 from src.web.request_auth import require_browser_session
+from src.system.scientific_status import summarize_completion
 
 from .route_compat import lazy_dependency
 
@@ -234,15 +235,10 @@ def _attach_activity_task_receipt(
             isinstance(item, dict) and item.get("success") is True
             for item in result
         )
+        status, success = summarize_completion(completed, len(result))
         summary = {
-            "status": (
-                "completed"
-                if completed == len(result) and result
-                else "failed"
-                if completed == 0
-                else "partial"
-            ),
-            "success": completed == len(result) and bool(result),
+            "status": status,
+            "success": success,
             "count": len(result),
             "results": result,
         }
