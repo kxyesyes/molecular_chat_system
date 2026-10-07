@@ -26,6 +26,7 @@ from .user_llm_config import (
 from .models import OllamaModel, generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.service import RAGSystem
+from src.system.env import load_env_file
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent
@@ -79,25 +80,6 @@ def resolve_web_chat_profile(
     if selected_wire not in {"native", "json"}:
         raise ValueError("MEDCHAT_DECISION_WIRE_MODE must be native or json")
     return profiles[selected]
-
-
-def load_env_file(env_path: str | Path = ".env") -> None:
-    """Load simple KEY=VALUE pairs without adding a runtime dependency."""
-    path = Path(env_path)
-    if not path.exists():
-        return
-    try:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-    except Exception as exc:
-        logger.warning(f"Unable to load env file {path}: {exc}")
 
 
 def expand_env_placeholders(value: Any) -> Any:
