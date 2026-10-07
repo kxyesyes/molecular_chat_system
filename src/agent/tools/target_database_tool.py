@@ -305,7 +305,9 @@ class TargetDatabaseTool(BaseMolecularTool):
                     lines.append("- Recommended structures: none recorded")
                 lines.append("")
 
-            result["success"] = True
+            # Preserve the matched rows as evidence, but never advertise a
+            # partial or stale authoritative lookup as a complete success.
+            result["success"] = not partial
             result["data"] = targets
             result["formatted"] = "\n".join(lines)
             result["message"] = (

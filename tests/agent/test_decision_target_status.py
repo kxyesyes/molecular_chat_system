@@ -118,13 +118,23 @@ def test_non_success_lookup_states_remain_non_success(boundary, status):
     result = call(lambda: SingleAttemptTool(adapter).execute({'query': 'EGFR'}))
     assert not result.success and result.status is not ObservationStatus.SUCCEEDED
     if status == 'partial':
-        # The actual legacy wrapper says success=True/status=partial. The
-        # approved exception is only resolved/not_found; preserve rejection.
+        # Partial lookup is retained as evidence and is not a complete success.
         assert direct.status is ObservationStatus.PARTIAL
-        assert result.message == 'conflicting_tool_result'
+        assert result.status is ObservationStatus.PARTIAL
+        assert result.data
         return
     assert result.quality.get('lookup_status') == direct.quality.get('lookup_status') == status
     assert result.status == direct.status
+
+
+def test_partial_target_lookup_is_not_reported_as_success():
+    tool = TargetDatabaseTool()
+    tool._service = Service("partial")
+
+    raw = tool.execute("EGFR")
+
+    assert raw["status"] == "partial"
+    assert raw["success"] is False
 
 
 @pytest.mark.parametrize('kind', ['legacy_target_name', 'reverse', 'other_tool'])
