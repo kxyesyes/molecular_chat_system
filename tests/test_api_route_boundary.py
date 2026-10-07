@@ -257,11 +257,73 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
             expected["docking_service"] = service
             if domain == "docking":
                 expected["task_runtime"] = runtime
-        if domain == "molecule_properties":
-            expected = {"logger": support._MOLECULE_PROPERTIES_LOGGER}
+        if domain in {"molecule_properties", "agent_metrics"}:
+            expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
         assert kwargs == expected
     assert api_routes(app) == []
+
+
+def test_agent_metrics_route_accepts_explicit_logger(monkeypatch):
+    from src.web.routes.agent_metrics_routes import setup_agent_metrics_routes
+
+    fake_metrics = SimpleNamespace(get_report=lambda: {"controlled": True})
+    fake_module(monkeypatch, "src.agent.metrics", metrics_system=fake_metrics)
+    app = FastAPI()
+    setup_agent_metrics_routes(app, logger=Mock())
+
+    with TestClient(app) as client:
+        response = client.get("/api/agent/metrics")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "report": {"controlled": True}}
+
+
+@pytest.mark.parametrize("wiring", ["explicit", "legacy", "default", "facade"])
+def test_metrics_failure_preserves_envelope_and_logger(monkeypatch, wiring):
+    from src.web.routes import api_routes as support
+    from src.web.routes import agent_metrics_routes as metrics
+
+    report = Mock(side_effect=RuntimeError("controlled metrics failure"))
+    fake_module(monkeypatch, "src.agent.metrics", metrics_system=SimpleNamespace(get_report=report))
+    log = Mock()
+    app = FastAPI()
+    if wiring == "explicit":
+        metrics.setup_agent_metrics_routes(app, logger=log)
+    elif wiring == "legacy":
+        metrics.setup_agent_metrics_routes(app, _support=SimpleNamespace(logger=log))
+    elif wiring == "default":
+        monkeypatch.setattr(metrics, "_LOGGER", log)
+        metrics.setup_agent_metrics_routes(app)
+    else:
+        support.setup_api_routes(app)
+        monkeypatch.setattr(support, "logger", log)
+    with TestClient(app) as client:
+        response = client.get("/api/agent/metrics")
+    assert response.status_code == 200
+    assert response.json() == {"success": False, "error": "controlled metrics failure"}
+    report.assert_called_once_with()
+    log.error.assert_called_once_with("获取指标报表失败: controlled metrics failure")
+
+
+@pytest.mark.parametrize("domain", ["molecule_properties", "agent_metrics"])
+def test_direct_legacy_logger_replacement_after_registration(monkeypatch, domain):
+    import importlib
+
+    module = importlib.import_module(f"src.web.routes.{domain}_routes")
+    report = Mock(side_effect=RuntimeError("controlled metrics failure"))
+    fake_module(monkeypatch, "src.agent.metrics", metrics_system=SimpleNamespace(get_report=report))
+    original, replacement = Mock(), Mock()
+    support = SimpleNamespace(logger=original)
+    app = FastAPI()
+    getattr(module, f"setup_{domain}_routes")(app, _support=support)
+    support.logger = replacement
+    with TestClient(app) as client:
+        response = (client.post("/api/molecule/properties", json={})
+                    if domain == "molecule_properties" else client.get("/api/agent/metrics"))
+    assert response.status_code == 200 and response.json()["success"] is False
+    replacement.error.assert_called_once()
+    original.error.assert_not_called()
 
 
 def fake_module(monkeypatch, name, **attributes):

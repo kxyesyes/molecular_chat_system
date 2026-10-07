@@ -37,10 +37,10 @@ class _DynamicLogger:
     """Keep post-registration logger patching without passing the support module."""
 
     def __getattr__(self, name):
-        return getattr(sys.modules[__name__].logger, name)
+        return getattr(logger, name)
 
 
-_MOLECULE_PROPERTIES_LOGGER = _DynamicLogger()
+_ROUTE_LOGGER = _DynamicLogger()
 
 
 def _normalize_warning_strings(values: Any) -> List[str]:
@@ -407,6 +407,6 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     setup_reverse_target_routes(app, _support=support)
     setup_activity_prediction_routes(app, _support=support)
     setup_activity_model_routes(app, _support=support)
-    setup_molecule_properties_routes(app, logger=_MOLECULE_PROPERTIES_LOGGER)
+    setup_molecule_properties_routes(app, logger=_ROUTE_LOGGER)
     setup_admet_routes(app, _support=support)
-    setup_agent_metrics_routes(app, _support=support)
+    setup_agent_metrics_routes(app, logger=_ROUTE_LOGGER)

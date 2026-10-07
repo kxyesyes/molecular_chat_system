@@ -13,7 +13,10 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
     ``_support`` remains a compatibility-only fallback for older direct callers;
     the application route registration passes ``logger`` explicitly.
     """
-    route_logger = logger or getattr(_support, "logger", None) or _LOGGER
+    def get_logger():
+        if logger is not None:
+            return logger
+        return _support.logger if _support is not None else _LOGGER
 
     @app.post("/api/molecule/properties")
     async def calculate_molecule_properties(data: Dict[str, Any] = Body(...)):
@@ -23,7 +26,7 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
             if not smiles:
                 raise HTTPException(status_code=400, detail="缺少SMILES参数")
             
-            route_logger.info(f"计算分子属性: {smiles}")
+            get_logger().info(f"计算分子属性: {smiles}")
             
             # 直接使用RDKit计算属性，避免工具的SMILES提取逻辑
             try:
@@ -43,7 +46,7 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
                             mol = None
 
                 if mol is None:
-                    route_logger.warning(f"RDKit无法解析SMILES: {smiles}")
+                    get_logger().warning(f"RDKit无法解析SMILES: {smiles}")
                     return {
                         "success": False,
                         "error": f"无法识别的分子结构: {smiles}",
@@ -78,7 +81,7 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
                     'warning': 'ADMET未计算；本接口仅计算基础理化性质，不能据此判断毒性、CNS安全性或体内表现。',
                 }
                 
-                route_logger.info(f"属性计算完成: {len(properties['basic'])} 个基础属性, {len(properties['admet'])} 个ADMET属性")
+                get_logger().info(f"属性计算完成: {len(properties['basic'])} 个基础属性, {len(properties['admet'])} 个ADMET属性")
                 
                 return {
                     "success": True,
@@ -87,11 +90,11 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
                 }
                 
             except Exception as rdkit_error:
-                route_logger.error(f"RDKit计算失败: {rdkit_error}")
+                get_logger().error(f"RDKit计算失败: {rdkit_error}")
                 raise
             
         except Exception as e:
-            route_logger.error(f"分子属性计算失败: {e}", exc_info=True)
+            get_logger().error(f"分子属性计算失败: {e}", exc_info=True)
             return {
                 "success": False,
                 "error": str(e),
