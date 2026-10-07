@@ -26,7 +26,7 @@ const templateSource = fs.readFileSync(templatePath, "utf8");
 
 assert.ok(
   templateSource.includes(
-    '<script src="/static/js/home/main.js?v=20260925-decision-runtime-v1"></script>'
+    '<script src="/static/js/home/main.js?v=20261007-settings-clean-v9"></script>'
   ),
   "homepage must cache-bust the task terminal labels fix"
 );
