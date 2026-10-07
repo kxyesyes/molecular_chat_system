@@ -5,6 +5,7 @@ Legacy Agent imports remain available from ``src.agent.contracts.scientific``.
 """
 
 from enum import Enum
+from typing import Any
 
 
 class ObservationStatus(str, Enum):
@@ -25,4 +26,46 @@ class RunOutcome(str, Enum):
     CANCELLED = "cancelled"
 
 
-__all__ = ["ObservationStatus", "RunOutcome"]
+TIMEOUT_STATUS_ALIASES = frozenset({"timeout", "timed_out", "timed-out"})
+CANCELLED_STATUS_ALIASES = frozenset({"cancelled", "canceled"})
+NON_SUCCESS_STATUS = frozenset(
+    {
+        *(status.value for status in ObservationStatus if status is not ObservationStatus.SUCCEEDED),
+        "error",
+        "unknown",
+        "not_calculated",
+    }
+)
+
+
+def reported_status(result: Any) -> str:
+    """Normalize a provider result's status without changing its payload."""
+
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("status", "")).strip().lower()
+
+
+def is_timeout_status(status: str) -> bool:
+    return status in TIMEOUT_STATUS_ALIASES
+
+
+def is_cancelled_status(status: str) -> bool:
+    return status in CANCELLED_STATUS_ALIASES
+
+
+def is_non_success_status(status: str) -> bool:
+    return status in NON_SUCCESS_STATUS
+
+
+__all__ = [
+    "CANCELLED_STATUS_ALIASES",
+    "NON_SUCCESS_STATUS",
+    "ObservationStatus",
+    "RunOutcome",
+    "TIMEOUT_STATUS_ALIASES",
+    "is_cancelled_status",
+    "is_non_success_status",
+    "is_timeout_status",
+    "reported_status",
+]

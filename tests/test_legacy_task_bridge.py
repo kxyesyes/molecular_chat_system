@@ -3,6 +3,8 @@
 import sys
 import types
 
+import pytest
+
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
@@ -11,6 +13,19 @@ from src.task_runtime.manager import TaskManager
 from src.web.routes import activity_prediction_routes
 from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 from src.task_runtime.legacy_bridge import persist_legacy_terminal_task
+from src.task_runtime.legacy_bridge import _terminal_status
+from src.task_runtime.models import TaskStatus
+
+
+@pytest.mark.parametrize(
+    "reported_status",
+    ["partial", "unavailable", "not_calculated", "invalid_input", "rejected", "error"],
+)
+def test_legacy_receipt_never_promotes_non_success_status(reported_status):
+    status, error = _terminal_status({"status": reported_status, "success": True})
+
+    assert status is TaskStatus.FAILED
+    assert error
 
 
 def test_legacy_terminal_receipt_is_owned_across_task_detail_and_events(

@@ -92,6 +92,8 @@ def test_task_manager_normalizes_returned_failed_status(tmp_path):
     [
         ("partial", True, TaskStatus.FAILED),
         ("unavailable", True, TaskStatus.FAILED),
+        ("not_calculated", True, TaskStatus.FAILED),
+        ("invalid_input", True, TaskStatus.FAILED),
         ("rejected", True, TaskStatus.FAILED),
         ("cancelled", True, TaskStatus.FAILED),
         ("timeout", True, TaskStatus.TIMED_OUT),
