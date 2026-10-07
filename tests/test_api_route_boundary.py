@@ -255,8 +255,10 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
         expected = {"_support": support}
         if domain in {"docking", "docking_report"}:
             expected["docking_service"] = service
-        if domain == "docking":
-            expected["task_runtime"] = runtime
+            if domain == "docking":
+                expected["task_runtime"] = runtime
+        if domain == "molecule_properties":
+            expected = {"logger": support._MOLECULE_PROPERTIES_LOGGER}
         assert owner is app
         assert kwargs == expected
     assert api_routes(app) == []
