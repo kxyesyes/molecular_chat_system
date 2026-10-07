@@ -1966,7 +1966,11 @@
     }
 
     .llm-settings-panel {
-      width: min(520px, 100%);
+      width: min(470px, 100%);
+      min-height: 560px;
+      max-height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
       background: #ffffff;
       border-radius: 18px;
       box-shadow: 0 30px 80px rgba(15, 23, 42, 0.24);
@@ -2009,9 +2013,12 @@
     }
 
     .llm-settings-body {
+      flex: 1 1 auto;
+      min-height: 0;
       padding: 22px 24px 24px;
       display: grid;
       gap: 14px;
+      overflow-y: auto;
     }
 
     .llm-settings-field {
@@ -2055,6 +2062,7 @@
       display: flex;
       gap: 10px;
       justify-content: flex-end;
+      margin-top: auto;
       padding-top: 6px;
     }
 
@@ -2087,6 +2095,11 @@
     }
 
     @media (max-width: 640px) {
+      .llm-settings-panel {
+        min-height: min(560px, calc(100vh - 32px));
+        max-height: calc(100vh - 32px);
+      }
+
       .llm-settings-grid {
         grid-template-columns: 1fr;
       }
