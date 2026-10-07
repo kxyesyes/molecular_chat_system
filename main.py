@@ -10,7 +10,7 @@ import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from src.system.env import load_env_file
+from src.system.env import load_env_file as _load_env_file
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 6001
@@ -48,6 +48,14 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def load_env_file(env_path: str = ".env"):
+    """Load the shared env parser while preserving startup logging behavior."""
+    try:
+        _load_env_file(env_path)
+    except Exception as exc:
+        logger.warning(f"Unable to load env file {env_path}: {exc}")
 
 
 def _parse_bool(value: str | bool | None, default: bool = False) -> bool:

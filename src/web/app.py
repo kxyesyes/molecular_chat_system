@@ -26,7 +26,7 @@ from .user_llm_config import (
 from .models import OllamaModel, generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.service import RAGSystem
-from src.system.env import load_env_file
+from src.system.env import load_env_file as _load_env_file
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent
@@ -48,6 +48,14 @@ logger = logging.getLogger(__name__)
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 6001
+
+
+def load_env_file(env_path: str | Path = ".env") -> None:
+    """Load the shared env parser while preserving app logging behavior."""
+    try:
+        _load_env_file(env_path)
+    except Exception as exc:
+        logger.warning(f"Unable to load env file {env_path}: {exc}")
 
 
 def resolve_web_chat_profile(
