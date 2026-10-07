@@ -33,6 +33,13 @@ class RunOutcome(str, Enum):
 
 TIMEOUT_STATUS_ALIASES = frozenset({"timeout", "timed_out", "timed-out"})
 CANCELLED_STATUS_ALIASES = frozenset({"cancelled", "canceled"})
+OBSERVATION_STATUS_ALIASES = {
+    "passed": ObservationStatus.SUCCEEDED.value,
+    "timed_out": ObservationStatus.TIMEOUT.value,
+    "timed-out": ObservationStatus.TIMEOUT.value,
+    "canceled": ObservationStatus.CANCELLED.value,
+    "not-calculated": ObservationStatus.NOT_CALCULATED.value,
+}
 NON_SUCCESS_STATUS = frozenset(
     {
         *(status.value for status in ObservationStatus if status is not ObservationStatus.SUCCEEDED),
@@ -48,6 +55,13 @@ def reported_status(result: Any) -> str:
     if not isinstance(result, dict):
         return ""
     return str(result.get("status", "")).strip().lower()
+
+
+def normalize_observation_status(value: Any) -> str:
+    """Normalize legacy observation-status spellings to canonical values."""
+
+    normalized = str(value).strip().lower() if isinstance(value, str) else ""
+    return OBSERVATION_STATUS_ALIASES.get(normalized, normalized)
 
 
 def is_timeout_status(status: str) -> bool:
@@ -77,12 +91,14 @@ def summarize_completion(completed: int, total: int) -> tuple[str, bool]:
 __all__ = [
     "CANCELLED_STATUS_ALIASES",
     "NON_SUCCESS_STATUS",
+    "OBSERVATION_STATUS_ALIASES",
     "ObservationStatus",
     "RunOutcome",
     "TIMEOUT_STATUS_ALIASES",
     "is_cancelled_status",
     "is_non_success_status",
     "is_timeout_status",
+    "normalize_observation_status",
     "reported_status",
     "summarize_completion",
 ]

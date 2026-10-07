@@ -9,7 +9,7 @@ from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
 from src.system.redaction import redact_sensitive
-from src.system.scientific_status import summarize_completion
+from src.system.scientific_status import normalize_observation_status, summarize_completion
 
 from .route_compat import lazy_dependency
 
@@ -44,21 +44,26 @@ def _positive_float_env(name: str, default: float) -> float:
 def _batch_result(index: int, job: dict, result: object, *, error: str | None = None,
                  status: str | None = None) -> dict:
     payload = result if isinstance(result, dict) else {}
-    payload_status = payload.get("status")
-    non_success_statuses = {"partial", "failed", "cancelled", "timed_out"}
+    raw_payload_status = payload.get("status")
+    payload_status = (
+        normalize_observation_status(raw_payload_status)
+        if raw_payload_status is not None
+        else None
+    )
+    non_success_statuses = {"partial", "failed", "cancelled", "timeout"}
     success_statuses = {"completed", "succeeded"}
     if error is not None:
         success = False
-        resolved_status = status or "failed"
+        resolved_status = normalize_observation_status(status) or "failed"
     elif payload_status in non_success_statuses:
         success = False
-        resolved_status = status or payload_status
+        resolved_status = normalize_observation_status(status) or payload_status
     elif payload_status in success_statuses or payload_status is None:
         success = bool(payload.get("success"))
-        resolved_status = status or ("completed" if success else "failed")
+        resolved_status = normalize_observation_status(status) or ("completed" if success else "failed")
     else:
         success = False
-        resolved_status = status or "failed"
+        resolved_status = normalize_observation_status(status) or "failed"
         error = "Docking result contained an unsupported status."
     best_pose = payload.get("best_pose") if success else None
     return {

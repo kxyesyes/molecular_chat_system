@@ -15,7 +15,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
         ToolResult,
         WorkflowArtifact,
     )
-    from src.system.scientific_status import ObservationStatus
+    from src.system.scientific_status import ObservationStatus, normalize_observation_status
 
     def normalize_artifacts(values: Any) -> list[WorkflowArtifact]:
         artifacts: list[WorkflowArtifact] = []
@@ -103,13 +103,7 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                 # ``passed`` for a successful batch.  Normalize that transport
                 # alias at the compat boundary; all ToolResult consumers still
                 # receive the canonical ObservationStatus enum.
-                raw_status = {
-                    "passed": ObservationStatus.SUCCEEDED.value,
-                    "timed_out": ObservationStatus.TIMEOUT.value,
-                    "timed-out": ObservationStatus.TIMEOUT.value,
-                    "canceled": ObservationStatus.CANCELLED.value,
-                    "not-calculated": ObservationStatus.NOT_CALCULATED.value,
-                }.get(raw_result["status"], raw_result["status"])
+                raw_status = normalize_observation_status(raw_result["status"])
                 try:
                     status = ObservationStatus(raw_status)
                 except (ValueError, TypeError):
