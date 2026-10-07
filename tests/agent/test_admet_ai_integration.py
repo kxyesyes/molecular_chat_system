@@ -31,8 +31,18 @@ def _prediction(smiles: str, *, molecule_id: str) -> dict:
             "model_name": "ADMET-AI",
             "model_version": "1.4.0",
             "weights_id": "sha256:" + "a" * 64,
+            "data_version": "sha256:" + "b" * 64,
             "demo_mode": False,
             "fallback_used": False,
+            "source": "local_admet_ai",
+            "evidence": {
+                "type": "model_output",
+                "source": "admet_ai_model",
+                "model_version": "1.4.0",
+                "weights_id": "sha256:" + "a" * 64,
+                "data_version": "sha256:" + "b" * 64,
+                "row_count": 1,
+            },
             "physicochemical_source": "rdkit",
             "endpoints": {
                 "HIA_Hou": {
@@ -56,6 +66,7 @@ def _prediction(smiles: str, *, molecule_id: str) -> dict:
 class FakeBackend:
     version = "1.4.0"
     weights_id = "sha256:" + "a" * 64
+    data_version = "sha256:" + "b" * 64
 
     def __init__(self, *, fail_ids: set[str] | None = None, delay: float = 0.0):
         self.fail_ids = fail_ids or set()
@@ -115,6 +126,34 @@ def test_batch_preserves_ids_and_exposes_item_failure_without_row_mixing():
     assert result["data"][1]["status"] == "failed"
     assert "HIA_Hou" not in result["data"][1]["admet"]
     assert backend.calls == [(["CCO", "CCN"], ["molecule-001", "molecule-002"])]
+
+
+def test_admet_result_records_structure_model_data_source_and_evidence():
+    result = ADMETPredictor(backend=FakeBackend()).execute("SMILES: CCO")
+
+    assert result["success"] is True
+    provenance = result["provenance"]
+    assert provenance["model_version"] == "1.4.0"
+    quality = result["quality"]
+    assert quality["data_version"] == "sha256:" + "b" * 64
+    assert quality["source"] == "local_admet_ai"
+    assert quality["input_structures"] == [{
+        "molecule_id": "molecule-001",
+        "smiles": "CCO",
+        "canonical_smiles": "CCO",
+    }]
+    assert result["evidence"] == [{
+        "type": "model_output",
+        "source": "admet_ai_model",
+        "model_version": "1.4.0",
+        "weights_id": "sha256:" + "a" * 64,
+        "data_version": "sha256:" + "b" * 64,
+        "row_count": 1,
+    }]
+    admet = result["data"][0]["admet"]
+    assert admet["data_version"] == quality["data_version"]
+    assert admet["source"] == quality["source"]
+    assert admet["evidence"] == result["evidence"][0]
 
 
 def test_timeout_returns_no_scientific_values():

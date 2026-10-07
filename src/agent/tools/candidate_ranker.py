@@ -39,6 +39,7 @@ class CandidateRanker:
             properties = self._evidence_by_candidate(
                 outputs.get("properties"), candidates, "properties"
             )
+            self._validate_property_evidence(properties.values())
             admet = self._evidence_by_candidate(
                 outputs.get("admet"), candidates, "admet"
             )
@@ -327,10 +328,33 @@ class CandidateRanker:
         logp = properties.get("logp")
         if not CandidateRanker._finite_number(qed) or not CandidateRanker._finite_number(logp):
             return None
-        qed_value = min(max(float(qed), 0.0), 1.0)
+        qed_value = float(qed)
+        if not 0.0 <= qed_value <= 1.0:
+            return None
         return 0.70 * qed_value + 0.30 * CandidateRanker._logp_window_score(
             float(logp)
         )
+
+    @classmethod
+    def _validate_property_evidence(
+        cls, records: Sequence[Mapping[str, Any]],
+    ) -> None:
+        """Reject present-but-invalid property values instead of repairing them."""
+        for record in records:
+            properties = record.get("properties")
+            if not isinstance(properties, Mapping):
+                continue
+            if "qed" not in properties:
+                continue
+            qed = properties.get("qed")
+            if (
+                not cls._finite_number(qed)
+                or not 0.0 <= float(qed) <= 1.0
+            ):
+                raise _RankingInputError(
+                    "invalid_property_evidence",
+                    "Property evidence contains an invalid qED value",
+                )
 
     @staticmethod
     def _admet_score(record: Mapping[str, Any] | None) -> float | None:
@@ -372,7 +396,10 @@ class CandidateRanker:
             value = record.get("activity_probability")
         if not CandidateRanker._finite_number(value):
             return None
-        return min(max(float(value), 0.0), 1.0)
+        value = float(value)
+        if not 0.0 <= value <= 1.0:
+            return None
+        return value
 
     @classmethod
     def _validate_activity_scope(

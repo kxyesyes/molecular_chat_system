@@ -1,5 +1,7 @@
 """Actual docking/registry/delegation; synthetic service, never real Vina."""
 from copy import deepcopy
+import hashlib
+from pathlib import Path
 from threading import Event
 
 import pytest
@@ -11,6 +13,18 @@ from src.agent.specialists.agents import DockingAgent
 from src.agent.tooling import build_tool_registry
 from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
+
+
+def test_docking_model_identity_uses_executable_digest(tmp_path):
+    from src.agent.tools.molecular_docking import _runtime_model_version
+
+    executable = tmp_path / "vina"
+    executable.write_bytes(b"synthetic vina executable")
+
+    assert _runtime_model_version(type("Service", (), {"vina_exe": str(executable)})()) == (
+        "vina-executable:sha256:"
+        + hashlib.sha256(executable.read_bytes()).hexdigest()
+    )
 
 
 @pytest.fixture
@@ -103,6 +117,20 @@ def test_real_docking_receives_complete_structured_request(docking_boundary, del
     assert result.data["best_pose"] == {"binding_energy": -7.2, "pose_file": str(env["pose"])}
     assert result.data["extension"] == {"preserve": [1, "synthetic"]}
     assert result.quality["docking_inputs"]["ligand_mode"] == ligand_mode
+    assert result.quality["source"] == "local_autodock_vina"
+    assert "model_version" in result.quality
+    assert result.quality["data_version"].startswith("sha256:")
+    assert result.quality["input_structure"]["receptor"]["sha256"] == (
+        "sha256:" + hashlib.sha256(Path(env["request"]["receptor_path"]).read_bytes()).hexdigest()
+    )
+    ligand_digest = (
+        hashlib.sha256(request["smiles"].encode()).hexdigest()
+        if ligand_mode == "smiles"
+        else hashlib.sha256(Path(env["request"]["ligand_path"]).read_bytes()).hexdigest()
+    )
+    assert result.quality["input_structure"]["ligand"]["sha256"] == "sha256:" + ligand_digest
+    assert result.evidence[0]["type"] == "vina_output"
+    assert result.evidence[0]["source"] == "autodock_vina"
     assert result.provenance.tool_name == "molecular_docking"
     assert result.provenance.demo_mode is False
     assert result.provenance.fallback_used is False

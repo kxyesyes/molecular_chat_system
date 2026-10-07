@@ -75,6 +75,17 @@ def test_candidate_ranker_fails_closed_on_evidence_for_unknown_candidate():
     assert result["error_code"] == "invalid_candidate_evidence"
 
 
+@pytest.mark.parametrize("qed", [-0.01, 1.01, float("nan"), float("inf")])
+def test_candidate_ranker_rejects_invalid_qed_instead_of_clamping(qed):
+    payload = _payload(top_n=1)
+    payload["outputs"]["properties"][0]["properties"]["qed"] = qed
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is False
+    assert result["error_code"] == "invalid_property_evidence"
+
+
 def test_candidate_without_real_property_evidence_is_not_rankable():
     payload = _payload(top_n=3)
     payload["outputs"]["properties"] = payload["outputs"]["properties"][:2]
@@ -161,6 +172,30 @@ def test_candidate_ranker_uses_trusted_normalized_activity_and_explicit_admet_ri
     assert evidence["admet_score"] == pytest.approx(0.75)
     assert evidence["activity_score"] == pytest.approx(0.8)
     assert evidence["missing_evidence"] == []
+
+
+@pytest.mark.parametrize("invalid_activity", [-0.01, 1.01, float("nan"), float("inf")])
+def test_candidate_ranker_does_not_clamp_invalid_activity_probability(invalid_activity):
+    payload = _payload(top_n=1)
+    payload["outputs"]["activity"] = [
+        {
+            "smiles": "CCO",
+            "success": True,
+            "normalized_activity": invalid_activity,
+            "model_provenance": {
+                "model_id": "rg-mpnn-test",
+                "demo_mode": False,
+                "fallback_used": False,
+            },
+        }
+    ]
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is True
+    evidence = result["data"]["ranked_candidates"][0]["ranking_evidence"]
+    assert evidence["activity_score"] is None
+    assert "activity" in evidence["missing_evidence"]
 
 
 def test_candidate_ranker_does_not_promote_missing_optional_evidence():

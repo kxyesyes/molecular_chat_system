@@ -216,26 +216,92 @@ class ToolAdapter(ABC):
             raw.data = redact_sensitive(raw.data, self.spec.sensitive_fields)
             return raw
         if isinstance(raw, dict):
-            if raw.get("success", False):
+            raw_status = {"passed": ObservationStatus.SUCCEEDED.value}.get(
+                raw.get("status"), raw.get("status")
+            )
+            try:
+                status = ObservationStatus(raw_status) if raw_status is not None else None
+            except (TypeError, ValueError):
+                return ToolResult.error_result(
+                    self.spec.name,
+                    AgentErrorCode.INVALID_OUTPUT,
+                    "Tool output contained an invalid observation status",
+                    {"raw_result": redact_sensitive(raw, self.spec.sensitive_fields)},
+                    elapsed_ms,
+                )
+
+            raw_success = raw.get("success") is True
+            raw_error_present = bool(raw.get("error"))
+            terminal_failure = {
+                ObservationStatus.FAILED,
+                ObservationStatus.UNAVAILABLE,
+                ObservationStatus.INVALID_INPUT,
+                ObservationStatus.REJECTED,
+                ObservationStatus.CANCELLED,
+            }
+            if (
+                (raw_success and status in terminal_failure)
+                or (status is ObservationStatus.SUCCEEDED
+                    and (not raw_success or raw_error_present))
+            ):
+                return ToolResult.error_result(
+                    self.spec.name,
+                    AgentErrorCode.INVALID_OUTPUT,
+                    "Tool output success and status fields conflict",
+                    {"raw_result": redact_sensitive(raw, self.spec.sensitive_fields)},
+                    elapsed_ms,
+                    warnings=list(raw.get("warnings") or []),
+                    evidence=list(raw.get("evidence") or []),
+                    quality=dict(raw.get("quality") or {}),
+                    status=status,
+                )
+
+            if raw_success and not raw_error_present:
                 return ToolResult.success_result(
                     tool_name=self.spec.name,
-                    data=redact_sensitive(
-                        raw.get("data"), self.spec.sensitive_fields
-                    ),
+                    data=redact_sensitive(raw.get("data"), self.spec.sensitive_fields),
                     message=raw.get("message", ""),
                     formatted=raw.get("formatted", ""),
                     elapsed_ms=elapsed_ms,
-                    warnings=raw.get("warnings", []),
-                    evidence=raw.get("evidence", []),
-                    quality=raw.get("quality", {}),
+                    warnings=list(raw.get("warnings") or []),
+                    evidence=list(raw.get("evidence") or []),
+                    quality=dict(raw.get("quality") or {}),
+                    status=status,
                 )
-            return ToolResult.error_result(
+
+            error_payload = raw.get("error") or {}
+            if isinstance(error_payload, dict):
+                error_message = error_payload.get("message") or raw.get(
+                    "message", "Tool execution failed"
+                )
+                error_code = error_payload.get("code")
+            else:
+                error_message = str(error_payload) or raw.get(
+                    "message", "Tool execution failed"
+                )
+                error_code = raw.get("error_code")
+            if isinstance(error_code, AgentErrorCode):
+                normalized_code = error_code
+            else:
+                try:
+                    normalized_code = AgentErrorCode(str(error_code))
+                except ValueError:
+                    normalized_code = AgentErrorCode.INTERNAL_ERROR
+            result = ToolResult.error_result(
                 self.spec.name,
-                AgentErrorCode.INTERNAL_ERROR,
-                raw.get("message", "Tool execution failed"),
+                normalized_code,
+                error_message,
                 {"raw_result": redact_sensitive(raw, self.spec.sensitive_fields)},
                 elapsed_ms,
+                warnings=list(raw.get("warnings") or []),
+                evidence=list(raw.get("evidence") or []),
+                quality=dict(raw.get("quality") or {}),
+                status=status,
             )
+            if status is ObservationStatus.PARTIAL:
+                result.data = redact_sensitive(raw.get("data"), self.spec.sensitive_fields)
+                result.formatted = raw.get("formatted", "")
+            return result
         return ToolResult.success_result(
             self.spec.name,
             data=redact_sensitive(raw, self.spec.sensitive_fields),

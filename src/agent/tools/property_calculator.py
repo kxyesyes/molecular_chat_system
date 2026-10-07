@@ -147,9 +147,8 @@ class PropertyCalculator(BaseMolecularTool):
             }
 
             # ── 完整性校验（防止 RDKit 异常导致幻觉）──────────
-            if not (0.0 <= properties['qed'] <= 1.0):
-                logger.error(f"QED={properties['qed']} out of [0,1] for {smiles}, clamping")
-                properties['qed'] = round(min(max(properties['qed'], 0.0), 1.0), 3)
+            if not (math.isfinite(qed_val) and 0.0 <= qed_val <= 1.0):
+                raise ValueError(f"QED={qed_val} out of [0,1] for {smiles}")
 
             return properties
 

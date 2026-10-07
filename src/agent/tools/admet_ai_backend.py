@@ -31,6 +31,24 @@ _BACKEND_LOCK = RLock()
 _DEFAULT_BACKEND: "ADMETAIBackend | None" = None
 _DEFAULT_BACKEND_ERROR: str | None = None
 
+# The ADMET worker is a scientific subprocess, not a credential-bearing
+# application process.  Keep only runtime/toolchain variables needed to start
+# Python and select compute resources; never inherit provider keys, sessions,
+# database paths, or unrelated deployment state.
+_WORKER_ENV_ALLOWLIST = frozenset({
+    "PATH", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE",
+    "HOME", "LANG", "LC_ALL", "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+})
+
+
+def _worker_environment() -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in os.environ.items()
+        if str(key) in _WORKER_ENV_ALLOWLIST
+    }
+
 
 def _canonical_smiles(value: str) -> str | None:
     if Chem is None:
@@ -73,6 +91,13 @@ def _weight_digest(package_root: Any) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _endpoint_schema_digest(endpoint_info: dict[str, dict[str, str]]) -> str:
+    """Identify the endpoint metadata used to interpret model columns."""
+
+    payload = json.dumps(endpoint_info, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return f"sha256:{sha256(payload).hexdigest()}"
+
+
 def _finite(value: Any) -> bool:
     return type(value) in (int, float) and math.isfinite(float(value))
 
@@ -87,12 +112,14 @@ class ADMETAIBackend:
         package_version: str = ADMET_AI_VERSION,
         weights_id: str,
         endpoint_info: dict[str, dict[str, str]] | None = None,
+        data_version: str | None = None,
         predict_lock: RLock | None = None,
     ) -> None:
         self.model = model
         self.version = package_version
         self.weights_id = weights_id
         self.endpoint_info = endpoint_info or {}
+        self.data_version = data_version or _endpoint_schema_digest(self.endpoint_info)
         self._predict_lock = predict_lock or RLock()
 
     @classmethod
@@ -222,8 +249,18 @@ class ADMETAIBackend:
             "model_version": self.version,
             "model_name": "ADMET-AI",
             "weights_id": self.weights_id,
+            "data_version": self.data_version,
             "demo_mode": False,
             "fallback_used": False,
+            "source": "local_admet_ai",
+            "evidence": {
+                "type": "model_output",
+                "source": "admet_ai_model",
+                "model_version": self.version,
+                "weights_id": self.weights_id,
+                "data_version": self.data_version,
+                "row_count": 1,
+            },
             "device": str(getattr(self.model, "device", "unknown")),
             "physicochemical_source": "rdkit_calculation",
             "endpoints": endpoints,
@@ -284,6 +321,7 @@ class ADMETAISubprocessBackend:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env=_worker_environment(),
             text=True,
             encoding="utf-8",
             bufsize=1,
@@ -300,10 +338,12 @@ class ADMETAISubprocessBackend:
             raise RuntimeError(str(ready.get("error") or "ADMET-AI worker failed to start"))
         self.version = str(ready.get("version") or ADMET_AI_VERSION)
         self.weights_id = str(ready.get("weights_id") or "")
+        self.data_version = str(ready.get("data_version") or "")
         worker_python = str(ready.get("python_version") or "")
         if (
             self.version != ADMET_AI_VERSION
             or not self.weights_id.startswith("sha256:")
+            or not self.data_version.startswith("sha256:")
             or worker_python != "3.10"
         ):
             self.close()
@@ -318,6 +358,7 @@ class ADMETAISubprocessBackend:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                env=_worker_environment(),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise RuntimeError("Unable to verify ADMET_AI_PYTHON Python version") from exc

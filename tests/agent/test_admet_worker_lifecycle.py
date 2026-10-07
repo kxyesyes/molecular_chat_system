@@ -59,7 +59,8 @@ def hanging_worker(monkeypatch, tmp_path):
     script.write_text(
         "import json, sys, time\n"
         "print(json.dumps({'ready': True, 'version': '1.4.0', "
-        "'python_version': '3.10', 'weights_id': 'sha256:' + 'a' * 64}), flush=True)\n"
+        "'python_version': '3.10', 'weights_id': 'sha256:' + 'a' * 64, "
+        "'data_version': 'sha256:' + 'b' * 64}), flush=True)\n"
         "for line in sys.stdin:\n    time.sleep(60)\n",
         encoding="utf-8",
     )
@@ -73,6 +74,34 @@ def test_prediction_timeout_reaps_real_process_and_reader(monkeypatch, tmp_path)
         assert not result["success"] and result["data"] is None
         assert backend._process.poll() is not None, "timeout left a live worker"
         assert not backend._reader.is_alive(), "timeout left a blocked pipe reader"
+    finally:
+        backend.close()
+
+
+def test_worker_receives_only_non_secret_runtime_environment(monkeypatch, tmp_path):
+    monkeypatch.setattr(backend_module.subprocess, "run",
+                        lambda *a, **kw: SimpleNamespace(stdout="3.10\n"))
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "synthetic-secret")
+    monkeypatch.setenv("MEDCHAT_AGENT_SESSION_DB", "synthetic-session-path")
+    observed = tmp_path / "worker-environment.json"
+    script = tmp_path / "environment_fixture.py"
+    script.write_text(
+        "import json, os, time\n"
+        f"open({str(observed)!r}, 'w', encoding='utf-8').write(json.dumps(sorted(os.environ)))\n"
+        "print(json.dumps({'ready': True, 'version': '1.4.0', "
+        "'python_version': '3.10', 'weights_id': 'sha256:' + 'a' * 64, "
+        "'data_version': 'sha256:' + 'b' * 64}), flush=True)\n"
+        "for line in __import__('sys').stdin:\n"
+        "    time.sleep(60)\n",
+        encoding="utf-8",
+    )
+    backend = backend_module.ADMETAISubprocessBackend(sys.executable, script)
+    try:
+        keys = json.loads(observed.read_text(encoding="utf-8"))
+        assert "PATH" in keys
+        assert "OPENAI_COMPATIBLE_API_KEY" not in keys
+        assert "MEDCHAT_AGENT_SESSION_DB" not in keys
+        assert "ADMET_AI_PYTHON" not in keys
     finally:
         backend.close()
 

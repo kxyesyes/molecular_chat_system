@@ -239,6 +239,15 @@ def test_rdkit_calculation_failure_is_not_fabricated(tool, monkeypatch, query):
     assert result["reasoning"] == "提供的SMILES结构似乎无效或无法被RDKit处理。"
 
 
+@pytest.mark.parametrize("invalid_qed", [-0.01, 1.01, float("nan"), float("inf")])
+def test_out_of_range_qed_is_not_repaired(tool, monkeypatch, invalid_qed):
+    monkeypatch.setattr(QED, "qed", lambda _mol: invalid_qed)
+
+    result = tool.execute("CCO")
+
+    assert_failed_without_values(result)
+
+
 def adapter_for(tool):
     return LegacyPythonToolAdapter(ToolSpec(
         name=tool.name, version="1", description="Drug-likeness evidence regression",
