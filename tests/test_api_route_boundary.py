@@ -212,6 +212,13 @@ def test_admet_endpoint_openapi_request_schema_is_strict_and_explicit():
     assert set(admet_schema["properties"]) == {"smiles", "molecule_id"}
 
 
+def test_admet_route_default_support_does_not_import_api_facade():
+    source = (Path(__file__).parents[1] / "src/web/routes/admet_routes.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.web.routes.api_routes" not in source
+
+
 @pytest.mark.parametrize("domain,count", DOMAINS)
 def test_domain_module_owns_operations(domain, count):
     # Deliberately inside the test: a missing module is RED, not collection error.

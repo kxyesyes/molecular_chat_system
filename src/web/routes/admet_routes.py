@@ -8,7 +8,6 @@ result semantics remain in :class:`ADMETPredictor`.
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import math
 import os
@@ -18,6 +17,7 @@ from concurrent import futures
 from uuid import uuid4
 from collections.abc import Mapping
 from typing import Any
+from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -455,7 +455,9 @@ class _AdmetWorker:
 
 
 def _default_support() -> Any:
-    return importlib.import_module("src.web.routes.api_routes")
+    """Return the legacy support shape without importing the route facade."""
+
+    return SimpleNamespace(os=os, ThreadPoolExecutor=futures.ThreadPoolExecutor)
 
 
 def setup_admet_routes(
