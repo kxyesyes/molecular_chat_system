@@ -76,7 +76,6 @@ class MolecularAgent:
             tool.name: getattr(tool, "description", "No description available")
             for tool in self.core_tools
         }
-        descriptions["RXNChemistryAgent"] = "Chemical reaction prediction and synthesis planning"
         descriptions["MolecularDocking"] = "Molecular docking and binding analysis"
         return descriptions
 

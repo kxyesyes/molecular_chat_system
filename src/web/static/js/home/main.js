@@ -3251,7 +3251,7 @@
             <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🔬</div>
             <div>
               <h3 style="margin: 0; color: #2d3748; font-size: 20px;">逆合成分析结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">IBM RXN for Chemistry</p>
+              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">反应路线分析</p>
             </div>
           </div>
       `;
@@ -3338,7 +3338,7 @@
             <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #ec4899 0%, #be185d 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🧪</div>
             <div>
               <h3 style="margin: 0; color: #2d3748; font-size: 20px;">反应预测结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">IBM RXN for Chemistry</p>
+              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">反应预测</p>
             </div>
           </div>
       `;
@@ -3425,7 +3425,7 @@
             <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">📚</div>
             <div>
               <h3 style="margin: 0; color: #2d3748; font-size: 20px;">文献数据搜索结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">IBM RXN for Chemistry数据库</p>
+              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">文献检索结果</p>
             </div>
           </div>
       `;

@@ -22,10 +22,7 @@ DRUG_DESIGN_SYSTEM_PROMPT = """# 🧬 药物设计智能系统 - AI大脑
 ### 2. 分子设计与生成
 - **llm_molecular_generator**: 使用AI生成新分子结构
 
-### 3. 反应与合成
-- **rxn_chemistry_agent**: 反应预测和逆合成分析（IBM RXN）
-
-### 4. 靶点与对接
+### 3. 靶点与对接
 - **molecular_docking**: 分子对接分析（AutoDock Vina）
 
 ## 工作流程
@@ -35,7 +32,6 @@ DRUG_DESIGN_SYSTEM_PROMPT = """# 🧬 药物设计智能系统 - AI大脑
 1. **理解意图**
    - 是分析现有分子？→ 使用分析工具
    - 是生成新分子？→ 使用生成工具
-   - 是规划合成？→ 使用反应工具
    - 是预测结合？→ 使用对接工具
 
 2. **智能工具选择**
@@ -71,10 +67,7 @@ DRUG_DESIGN_SYSTEM_PROMPT = """# 🧬 药物设计智能系统 - AI大脑
 ### 场景2：用户提供SMILES要求"分析"
 → 这是分析任务，调用 property_calculator 或 admet_predictor
 
-### 场景3：用户询问"合成路线"
-→ 这是逆合成任务，调用 rxn_chemistry_agent
-
-### 场景4：用户询问"与靶点结合"
+### 场景3：用户询问"与靶点结合"
 → 这是对接任务，调用 molecular_docking
 
 ## 记住

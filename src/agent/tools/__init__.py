@@ -22,7 +22,6 @@ OPTIONAL_TOOLS = [
     'TargetDatabaseTool',
     'ActivityPredictorTool',
     'RAGSearchTool',
-    'RXNChemistryAgent',
 ]
 
 __all__ = CORE_TOOLS + OPTIONAL_TOOLS
@@ -70,9 +69,6 @@ def get_optional_tool(tool_name, llm=None, *, rag_system=None):
     elif tool_name == 'RAGSearchTool':
         from .rag_search_tool import RAGSearchTool
         return RAGSearchTool(rag_system=rag_system)
-    elif tool_name == 'RXNChemistryAgent':
-        from .rxn_chemistry_agent import RXNChemistryAgent
-        return RXNChemistryAgent()
     else:
         raise ValueError(f"Unknown optional tool: {tool_name}")
 
