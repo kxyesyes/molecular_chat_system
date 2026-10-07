@@ -1967,26 +1967,8 @@
 
   function createAgentTaskPanel() {
     if (!elements.chatContainer) return null;
-
-    let panel = elements.chatContainer.querySelector(".agent-task-panel");
-    if (panel) {
-      elements.agentTaskPanel = panel;
-      return panel;
-    }
-
-    panel = document.createElement("div");
-    panel.className = "agent-task-panel";
-    panel.innerHTML = `
-      <div class="agent-task-header">
-        <div>
-          <div class="agent-task-kicker">AGENT WORKFLOW</div>
-          <div class="agent-task-title">智能任务执行</div>
-        </div>
-        <div class="agent-task-progress">准备中</div>
-      </div>
-      <div class="agent-task-list"></div>
-    `;
-    elements.chatContainer.appendChild(panel);
+    const panel = window.HomeTaskPanel.create(elements.chatContainer, document);
+    if (!panel) return null;
     elements.agentTaskPanel = panel;
     return panel;
   }
@@ -1996,11 +1978,7 @@
     if (!panel) return;
 
     agentTaskRunActive = true;
-    panel.classList.add("is-active");
-    const progress = panel.querySelector(".agent-task-progress");
-    const list = panel.querySelector(".agent-task-list");
-    if (progress) progress.textContent = "执行中";
-    if (list) list.innerHTML = "";
+    window.HomeTaskPanel.reset(panel);
   }
 
   function resolveAgentEventPresentation(event) {
@@ -2021,25 +1999,15 @@
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
-    panel.classList.add("is-active");
-    const progress = panel.querySelector(".agent-task-progress");
-    const list = panel.querySelector(".agent-task-list");
-    if (!list) return;
-
     const toolName = event.tool_name || event.tool || "";
     const message = event.message || getAgentEventLabel(eventType, toolName);
-    const item = document.createElement("div");
-    item.className = `agent-task-item ${presentation.itemClass}`;
-    item.innerHTML = `
-      <span class="agent-task-dot"></span>
-      <div class="agent-task-copy">
-        <strong>${escapeHtml(getAgentEventLabel(eventType, toolName))}</strong>
-        <span>${escapeHtml(message)}</span>
-      </div>
-    `;
-    list.appendChild(item);
-
-    if (progress) progress.textContent = presentation.progressText;
+    const rendered = window.HomeTaskPanel.appendEvent(panel, {
+      label: getAgentEventLabel(eventType, toolName),
+      message,
+      itemClass: presentation.itemClass,
+      progressText: presentation.progressText,
+    }, document);
+    if (!rendered) return;
 
     if (presentation.terminal) {
       agentTaskRunActive = false;

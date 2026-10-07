@@ -28,6 +28,8 @@ assert(!source.includes("const decisionStatuses = {"),
   "homepage workflow labels belong to the shared status contract");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
+assert(template.includes("/static/js/home/task_panel.js"),
+  "homepage must load the Agent task panel renderer before the entrypoint");
 
 const taskStatusSandbox = {window: {}, Object, Math};
 taskStatusSandbox.globalThis = taskStatusSandbox;
