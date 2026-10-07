@@ -20,7 +20,6 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 from src.agent.contracts import (
     AgentErrorCode,
-    ObservationStatus,
     ToolProvenance,
     ToolResult,
     WorkflowArtifact,
@@ -34,6 +33,7 @@ from src.sandbox_broker.models import (
 from src.task_runtime.config import _stat_identity, _stat_version
 from src.task_runtime.private_permissions import restrict_private_path
 from src.task_runtime.secure_io import read_file_snapshot
+from src.system.scientific_status import ObservationStatus
 
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")

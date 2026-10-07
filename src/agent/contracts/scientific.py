@@ -2,26 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any
 
-
-class ObservationStatus(str, Enum):
-    SUCCEEDED = "succeeded"
-    PARTIAL = "partial"
-    FAILED = "failed"
-    UNAVAILABLE = "unavailable"
-    INVALID_INPUT = "invalid_input"
-    REJECTED = "rejected"
-    CANCELLED = "cancelled"
-
-
-class RunOutcome(str, Enum):
-    COMPLETED = "completed"
-    PARTIAL = "partial"
-    FAILED = "failed"
-    REJECTED = "rejected"
-    CANCELLED = "cancelled"
+from src.system.scientific_status import ObservationStatus, RunOutcome
 
 
 @dataclass(frozen=True)

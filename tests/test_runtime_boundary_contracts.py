@@ -59,6 +59,17 @@ def test_api_response_legacy_exports_are_canonical_objects():
     assert legacy_api_success is api_success
 
 
+def test_scientific_status_legacy_exports_are_canonical_objects():
+    from src.system.scientific_status import ObservationStatus, RunOutcome
+    from src.agent.contracts.scientific import (
+        ObservationStatus as LegacyObservationStatus,
+        RunOutcome as LegacyRunOutcome,
+    )
+
+    assert LegacyObservationStatus is ObservationStatus
+    assert LegacyRunOutcome is RunOutcome
+
+
 def test_url_policy_legacy_exports_are_the_canonical_objects():
     from src.system.network_policy import resolve_llm_host, validate_llm_url
     from src.web.security.url_policy import (

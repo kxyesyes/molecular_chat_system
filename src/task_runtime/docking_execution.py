@@ -16,7 +16,6 @@ from typing import Any, Callable, Mapping
 
 from src.agent.contracts import (
     AgentErrorCode,
-    ObservationStatus,
     ToolProvenance,
     ToolResult,
     WorkflowArtifact,
@@ -26,6 +25,7 @@ from src.agent.tools.base_tool import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.validators.result_validator import AgentResultValidator
 from src.docking.adapters.base import CommandOwnershipScope, CommandOwnershipUncertainError
+from src.system.scientific_status import ObservationStatus
 
 from .completion import (
     AUTHORITY_BLOCKED,
