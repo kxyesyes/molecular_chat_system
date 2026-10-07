@@ -129,6 +129,10 @@ _ROUTE_PHARM3D_LIMIT = _DynamicSupportCallable("_get_pharm3d_candidate_pool_limi
 _ROUTE_PHARM3D_TIMEOUT = _DynamicSupportCallable("_get_pharm3d_timeout")
 _ROUTE_PHARM3D_RUNNER = _DynamicSupportCallable("_run_pharm3d_job")
 _ROUTE_PHARM3D_FALLBACK = _DynamicSupportCallable("_build_pharm3d_fallback")
+_ROUTE_DOCKING_LIMITS = _DynamicSupportCallable("_validate_docking_limits")
+_ROUTE_DOCKING_WARNINGS = _DynamicSupportCallable("_normalize_warning_strings")
+_ROUTE_DOCKING_INT_ENV = _DynamicSupportCallable("_get_int_env")
+_ROUTE_API_SUCCESS = _DynamicSupportCallable("api_success")
 
 
 def _normalize_warning_strings(values: Any) -> List[str]:
@@ -488,8 +492,19 @@ def _build_pharm3d_fallback(candidates: List[Dict[str, Any]], error: str = "") -
 
 def setup_api_routes(app, docking_service=None, task_runtime=None):
     """设置 API 路由。"""
-    support = sys.modules[__name__]
-    setup_docking_routes(app, docking_service=docking_service, task_runtime=task_runtime, _support=support)
+    setup_docking_routes(
+        app,
+        docking_service=docking_service,
+        task_runtime=task_runtime,
+        invoke_in_threadpool=_ROUTE_INVOKER,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        validate_docking_limits=_ROUTE_DOCKING_LIMITS,
+        normalize_warning_strings=_ROUTE_DOCKING_WARNINGS,
+        get_int_env=_ROUTE_DOCKING_INT_ENV,
+        api_success=_ROUTE_API_SUCCESS,
+        logger=_ROUTE_LOGGER,
+        tempfile_module=_ROUTE_TEMPFILE,
+    )
     setup_molecule_utility_routes(
         app,
         invoke_in_threadpool=_ROUTE_INVOKER,

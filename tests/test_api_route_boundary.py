@@ -298,6 +298,19 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
                 "pharm3d_refine_job": support._pharm3d_refine_job,
                 "pharm3d_query_job": support._pharm3d_query_job,
             }
+        if domain == "docking":
+            expected = {
+                "docking_service": service,
+                "task_runtime": runtime,
+                "invoke_in_threadpool": support._ROUTE_INVOKER,
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "validate_docking_limits": support._ROUTE_DOCKING_LIMITS,
+                "normalize_warning_strings": support._ROUTE_DOCKING_WARNINGS,
+                "get_int_env": support._ROUTE_DOCKING_INT_ENV,
+                "api_success": support._ROUTE_API_SUCCESS,
+                "logger": support._ROUTE_LOGGER,
+                "tempfile_module": support._ROUTE_TEMPFILE,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
@@ -365,6 +378,66 @@ def test_direct_legacy_logger_replacement_after_registration(monkeypatch, domain
     assert response.status_code == 200 and response.json()["success"] is False
     replacement.error.assert_called_once()
     original.error.assert_not_called()
+
+
+@pytest.mark.parametrize("domain", ["docking", "reverse_target"])
+def test_scientific_routes_legacy_logger_is_resolved_after_registration(monkeypatch, domain):
+    from src.web.routes import api_routes as support
+
+    module = importlib.import_module(f"src.web.routes.{domain}_routes")
+    original, replacement = Mock(), Mock()
+    monkeypatch.setattr(support, "logger", original)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def session(request, call_next):
+        request.scope["agent_session_id"] = "test-session"
+        return await call_next(request)
+
+    fail = Mock(side_effect=RuntimeError("controlled failure"))
+    if domain == "docking":
+        module.setup_docking_routes(
+            app, docking_service=SimpleNamespace(verify_environment=fail), _support=support,
+        )
+        path = "/api/docking/status"
+    else:
+        fake_module(monkeypatch, "src.reverse_target.predictor", get_predictor=fail)
+        module.setup_reverse_target_routes(app, _support=support)
+        path = "/api/reverse_target/stats"
+    monkeypatch.setattr(support, "logger", replacement)
+    with TestClient(app) as client:
+        response = client.get(path)
+    assert response.status_code == (200 if domain == "docking" else 500)
+    fail.assert_called_once()
+    original.assert_not_called()
+    assert original.method_calls == []
+    assert len(replacement.method_calls) == 1
+
+
+def test_reverse_legacy_job_identity_and_runner_are_resolved_after_registration(monkeypatch):
+    from src.web.routes import api_routes as support, reverse_target_routes
+
+    app = FastAPI()
+    reverse_target_routes.setup_reverse_target_routes(app, _support=support)
+    replacement_target = Mock()
+    seen = []
+
+    async def run(target, *args, timeout_seconds=None):
+        seen.append((target, args, timeout_seconds))
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(support, "_pharm3d_query_job", replacement_target)
+    monkeypatch.setattr(support, "_run_pharm3d_job", run)
+    monkeypatch.setattr(support, "_get_pharm3d_timeout", lambda _: 7.0)
+    from starlette.requests import Request
+    route = next(r for r in app.routes if r.path == "/api/reverse_target/pharmacophore")
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(route.endpoint(
+            request=Request({"type": "http", "agent_session_id": "test-session"}), smiles="CC",
+        ))
+    assert error.value.status_code == 504
+    assert seen == [(replacement_target, ("CC",), 7.0)]
+    replacement_target.assert_not_called()
 
 
 def fake_module(monkeypatch, name, **attributes):

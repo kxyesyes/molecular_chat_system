@@ -87,19 +87,6 @@ def setup_reverse_target_routes(
             return getattr(_support, attribute)
         raise RuntimeError(f"reverse target dependency is not configured: {attribute}")
 
-    invoke_in_threadpool = resolve(invoke_in_threadpool, "_invoke_in_threadpool")
-    read_upload_limited = resolve(read_upload_limited, "_read_upload_limited")
-    route_logger = resolve(logger, "logger")
-    get_pharm3d_candidate_pool_limit = resolve(
-        get_pharm3d_candidate_pool_limit, "_get_pharm3d_candidate_pool_limit"
-    )
-    get_pharm3d_timeout = resolve(get_pharm3d_timeout, "_get_pharm3d_timeout")
-    run_pharm3d_job = resolve(run_pharm3d_job, "_run_pharm3d_job")
-    build_pharm3d_fallback = resolve(build_pharm3d_fallback, "_build_pharm3d_fallback")
-    pharm3d_candidates_job = resolve(pharm3d_candidates_job, "_pharm3d_candidates_job")
-    pharm3d_refine_job = resolve(pharm3d_refine_job, "_pharm3d_refine_job")
-    pharm3d_query_job = resolve(pharm3d_query_job, "_pharm3d_query_job")
-
     @app.post("/api/reverse_target/predict")
     async def reverse_target_predict(
         request: Request,
@@ -132,9 +119,9 @@ def setup_reverse_target_routes(
                     organism_filter=organism_filter,
                 )
 
-            results = await invoke_in_threadpool(run_prediction)
+            results = await resolve(invoke_in_threadpool, "_invoke_in_threadpool")(run_prediction)
             
-            route_logger.info(f"反向寻靶预测成功: 找到 {len(results)} 个靶点")
+            resolve(logger, "logger").info(f"反向寻靶预测成功: 找到 {len(results)} 个靶点")
             
             status = _reverse_result_status(results)
             response = {
@@ -151,10 +138,10 @@ def setup_reverse_target_routes(
         except HTTPException:
             raise
         except ValueError as e:
-            route_logger.warning(f"反向寻靶输入无效: {e}")
+            resolve(logger, "logger").warning(f"反向寻靶输入无效: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            route_logger.error(f"反向寻靶预测失败: {e}")
+            resolve(logger, "logger").error(f"反向寻靶预测失败: {e}")
             raise HTTPException(status_code=500, detail=_safe_internal_failure("反向寻靶预测"))
     
     @app.post("/api/reverse_target/batch_predict")
@@ -173,7 +160,7 @@ def setup_reverse_target_routes(
             if top_k < 1 or top_k > 100:
                 raise HTTPException(status_code=400, detail="返回数量必须在1-100之间")
 
-            content = await read_upload_limited(file, "reverse target batch file")
+            content = await resolve(read_upload_limited, "_read_upload_limited")(file, "reverse target batch file")
             text = content.decode("utf-8")
             
             from src.reverse_target.batch_input import parse_batch_rows
@@ -195,7 +182,7 @@ def setup_reverse_target_routes(
                     organism_filter=organism_filter,
                 )
 
-            results = await invoke_in_threadpool(run_batch_prediction)
+            results = await resolve(invoke_in_threadpool, "_invoke_in_threadpool")(run_batch_prediction)
             if not isinstance(results, list) or len(results) != len(rows):
                 raise HTTPException(
                     status_code=502,
@@ -207,7 +194,7 @@ def setup_reverse_target_routes(
                 result["original_row_index"] = input_row["row_index"]
                 result["row_index"] = input_row["row_index"]
             
-            route_logger.info(f"批量反向寻靶预测完成: {len(results)} 个分子")
+            resolve(logger, "logger").info(f"批量反向寻靶预测完成: {len(results)} 个分子")
             
             status = _reverse_batch_status(results)
             response = {
@@ -225,10 +212,10 @@ def setup_reverse_target_routes(
         except HTTPException:
             raise
         except ValueError as e:
-            route_logger.warning(f"批量反向寻靶输入无效: {e}")
+            resolve(logger, "logger").warning(f"批量反向寻靶输入无效: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            route_logger.error(f"批量预测失败: {e}")
+            resolve(logger, "logger").error(f"批量预测失败: {e}")
             raise HTTPException(status_code=500, detail=_safe_internal_failure("批量预测"))
 
     @app.get("/api/reverse_target/stats")
@@ -241,10 +228,10 @@ def setup_reverse_target_routes(
             def load_stats():
                 return get_predictor().get_stats()
 
-            stats = await invoke_in_threadpool(load_stats)
+            stats = await resolve(invoke_in_threadpool, "_invoke_in_threadpool")(load_stats)
             return {"success": True, "stats": stats}
         except Exception as e:
-            route_logger.error(f"获取统计信息失败: {e}")
+            resolve(logger, "logger").error(f"获取统计信息失败: {e}")
             raise HTTPException(status_code=500, detail=_safe_internal_failure("获取反向寻靶统计信息"))
 
     @app.get("/api/reverse_target/health")
@@ -258,7 +245,7 @@ def setup_reverse_target_routes(
             data_dir = get_reverse_target_data_dir()
             return inspect_reverse_target_database(data_dir)
         except Exception as e:
-            route_logger.error(f"反向寻靶健康检查失败: {e}", exc_info=True)
+            resolve(logger, "logger").error(f"反向寻靶健康检查失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=_safe_internal_failure("反向寻靶健康检查"))
     
     @app.get("/api/reverse_target/similar_molecules")
@@ -295,7 +282,7 @@ def setup_reverse_target_routes(
                     organism_filter=organism_filter,
                 )
 
-            results = await invoke_in_threadpool(
+            results = await resolve(invoke_in_threadpool, "_invoke_in_threadpool")(
                 load_similar
             )
             
@@ -316,10 +303,10 @@ def setup_reverse_target_routes(
         except HTTPException:
             raise
         except ValueError as e:
-            route_logger.warning(f"获取相似分子输入无效: {e}")
+            resolve(logger, "logger").warning(f"获取相似分子输入无效: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            route_logger.error(f"获取相似分子失败: {e}")
+            resolve(logger, "logger").error(f"获取相似分子失败: {e}")
             raise HTTPException(status_code=500, detail=_safe_internal_failure("获取相似分子"))
 
     # ==================== 3D 药效团 API ====================
@@ -361,16 +348,16 @@ def setup_reverse_target_routes(
                 raise HTTPException(status_code=400, detail="3D精修候选数必须在1-100之间")
 
             smiles = smiles.strip()
-            candidate_limit = get_pharm3d_candidate_pool_limit(top_k, max_refine)
-            timeout_seconds = get_pharm3d_timeout(25.0)
+            candidate_limit = resolve(get_pharm3d_candidate_pool_limit, "_get_pharm3d_candidate_pool_limit")(top_k, max_refine)
+            timeout_seconds = resolve(get_pharm3d_timeout, "_get_pharm3d_timeout")(25.0)
             deadline = asyncio.get_running_loop().time() + timeout_seconds
 
             # Step 1: 2D 预筛选。返回数量(top_k)和 3D 精修数量(max_refine)解耦。
             # 降低阈值保证候选数量，提升召回
             prefilter_threshold = max(0.0, threshold - 0.2)
             raw_candidates = await asyncio.wait_for(
-                run_pharm3d_job(
-                    pharm3d_candidates_job,
+                resolve(run_pharm3d_job, "_run_pharm3d_job")(
+                    resolve(pharm3d_candidates_job, "_pharm3d_candidates_job"),
                     smiles,
                     prefilter_threshold,
                     candidate_limit,
@@ -408,7 +395,7 @@ def setup_reverse_target_routes(
                     result=response,
                 )
 
-            route_logger.info(
+            resolve(logger, "logger").info(
                 f"3D精修: 2D粗筛得到 {len(raw_candidates)} 个候选分子，"
                 f"候选池上限 {candidate_limit}，计划精修前 {min(max_refine, len(raw_candidates))} 个，"
                 f"最终返回前 {top_k} 个"
@@ -421,8 +408,8 @@ def setup_reverse_target_routes(
             try:
                 remaining = max(0.1, deadline - asyncio.get_running_loop().time())
                 refined = await asyncio.wait_for(
-                    run_pharm3d_job(
-                        pharm3d_refine_job,
+                    resolve(run_pharm3d_job, "_run_pharm3d_job")(
+                        resolve(pharm3d_refine_job, "_pharm3d_refine_job"),
                         smiles,
                         raw_candidates,
                         max_refine,
@@ -434,16 +421,16 @@ def setup_reverse_target_routes(
                     timeout=remaining,
                 )
             except asyncio.TimeoutError:
-                route_logger.warning("3D药效团精修超时，返回2D基础结果")
+                resolve(logger, "logger").warning("3D药效团精修超时，返回2D基础结果")
                 refinement_status = "timeout"
                 refinement_message = "3D 药效团精修超时，已返回基础反向寻靶结果"
-                refined = build_pharm3d_fallback(raw_candidates, refinement_message)
+                refined = resolve(build_pharm3d_fallback, "_build_pharm3d_fallback")(raw_candidates, refinement_message)
                 query_pharm = None
             except Exception as e:
-                route_logger.warning(f"3D药效团精修失败，返回2D基础结果: {e}")
+                resolve(logger, "logger").warning(f"3D药效团精修失败，返回2D基础结果: {e}")
                 refinement_status = "fallback"
                 refinement_message = "3D 药效团精修失败，已返回基础反向寻靶结果"
-                refined = build_pharm3d_fallback(raw_candidates, refinement_message)
+                refined = resolve(build_pharm3d_fallback, "_build_pharm3d_fallback")(raw_candidates, refinement_message)
                 query_pharm = None
             else:
                 timeout_fallback_count = sum(
@@ -471,18 +458,18 @@ def setup_reverse_target_routes(
                     if remaining <= 0:
                         raise asyncio.TimeoutError
                     query_pharm = await asyncio.wait_for(
-                        run_pharm3d_job(
-                            pharm3d_query_job,
+                        resolve(run_pharm3d_job, "_run_pharm3d_job")(
+                            resolve(pharm3d_query_job, "_pharm3d_query_job"),
                             smiles,
                             timeout_seconds=min(5.0, remaining),
                         ),
                         timeout=min(5.0, remaining),
                     )
                 except asyncio.TimeoutError:
-                    route_logger.warning("查询分子药效团提取超时，继续返回精修结果")
+                    resolve(logger, "logger").warning("查询分子药效团提取超时，继续返回精修结果")
                     query_pharm = None
                 except Exception as e:
-                    route_logger.warning(f"查询分子药效团提取失败，继续返回精修结果: {e}")
+                    resolve(logger, "logger").warning(f"查询分子药效团提取失败，继续返回精修结果: {e}")
                     query_pharm = None
 
             # Step 3: 按结果状态分别聚合，禁止把 2D fallback 当作 3D 结果排序。
@@ -530,7 +517,7 @@ def setup_reverse_target_routes(
                 fallback_results = []
                 ranking_mode = "2d_fallback"
 
-            route_logger.info(f"3D精修完成, 返回 {len(final_results)} 个靶点")
+            resolve(logger, "logger").info(f"3D精修完成, 返回 {len(final_results)} 个靶点")
 
             result_status = _reverse_result_status(final_results)
             if final_results and refinement_status not in {"success"}:
@@ -561,13 +548,13 @@ def setup_reverse_target_routes(
         except HTTPException:
             raise
         except asyncio.TimeoutError:
-            route_logger.warning("3D 药效团请求超过统一时间预算")
+            resolve(logger, "logger").warning("3D 药效团请求超过统一时间预算")
             raise HTTPException(status_code=504, detail="反向寻靶 3D 计算超时，未返回不完整结果") from None
         except ValueError as e:
-            route_logger.warning(f"3D药效团预测输入无效: {e}")
+            resolve(logger, "logger").warning(f"3D药效团预测输入无效: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
-            route_logger.error(f"3D药效团预测失败: {e}", exc_info=True)
+            resolve(logger, "logger").error(f"3D药效团预测失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=_safe_internal_failure("3D 药效团预测"))
 
     @app.post("/api/reverse_target/pharmacophore")
@@ -590,10 +577,10 @@ def setup_reverse_target_routes(
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
 
             try:
-                result = await run_pharm3d_job(
-                    pharm3d_query_job,
+                result = await resolve(run_pharm3d_job, "_run_pharm3d_job")(
+                    resolve(pharm3d_query_job, "_pharm3d_query_job"),
                     smiles.strip(),
-                    timeout_seconds=get_pharm3d_timeout(25.0),
+                    timeout_seconds=resolve(get_pharm3d_timeout, "_get_pharm3d_timeout")(25.0),
                 )
             except asyncio.TimeoutError:
                 raise HTTPException(status_code=504, detail="药效团提取超时，请稍后重试或使用更简单的分子")
@@ -610,5 +597,5 @@ def setup_reverse_target_routes(
         except HTTPException:
             raise
         except Exception as e:
-            route_logger.error(f"药效团提取失败: {e}", exc_info=True)
+            resolve(logger, "logger").error(f"药效团提取失败: {e}", exc_info=True)
             raise HTTPException(status_code=500, detail=_safe_internal_failure("药效团提取"))
