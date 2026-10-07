@@ -268,6 +268,12 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
                 "validate_report_base64_payload": support._ROUTE_REPORT_VALIDATOR,
                 "logger": support._ROUTE_LOGGER,
             }
+        if domain == "activity_model":
+            expected = {
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "tempfile_module": support._ROUTE_TEMPFILE,
+                "logger": support._ROUTE_LOGGER,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app

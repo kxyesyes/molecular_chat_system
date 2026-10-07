@@ -63,6 +63,26 @@ class _DynamicReportValidator:
 _ROUTE_REPORT_VALIDATOR = _DynamicReportValidator()
 
 
+class _DynamicUploadReader:
+    """Keep post-registration upload-limit patching without api_routes injection."""
+
+    async def __call__(self, *args, **kwargs):
+        return await sys.modules[__name__]._read_upload_limited(*args, **kwargs)
+
+
+_ROUTE_UPLOAD_READER = _DynamicUploadReader()
+
+
+class _DynamicTempfile:
+    """Keep post-registration temporary-file factory patching compatible."""
+
+    def __getattr__(self, name):
+        return getattr(sys.modules[__name__].tempfile, name)
+
+
+_ROUTE_TEMPFILE = _DynamicTempfile()
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -435,7 +455,12 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
     )
     setup_reverse_target_routes(app, _support=support)
     setup_activity_prediction_routes(app, _support=support)
-    setup_activity_model_routes(app, _support=support)
+    setup_activity_model_routes(
+        app,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        tempfile_module=_ROUTE_TEMPFILE,
+        logger=_ROUTE_LOGGER,
+    )
     setup_molecule_properties_routes(app, logger=_ROUTE_LOGGER)
     setup_admet_routes(app, _support=support)
     setup_agent_metrics_routes(app, logger=_ROUTE_LOGGER)
