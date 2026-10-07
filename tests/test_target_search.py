@@ -892,7 +892,8 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         result = tool.execute("EGFR")
 
-        self.assertTrue(result["success"])
+        self.assertFalse(result["success"])
+        self.assertEqual(result["status"], "partial")
         self.assertEqual(
             result["data"][0]["recommended_structures"][0]["structure_id"],
             "1ABC",
@@ -1061,7 +1062,7 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         result = tool.execute(["EGFR", "OUTAGE"])
 
-        self.assertTrue(result["success"])
+        self.assertFalse(result["success"])
         self.assertEqual(result["status"], "partial")
         self.assertEqual(result["quality"]["status"], "partial")
         self.assertEqual(
@@ -1098,7 +1099,7 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         result = tool.execute("EGFR")
 
-        self.assertTrue(result["success"])
+        self.assertFalse(result["success"])
         self.assertEqual(result["status"], "partial")
         self.assertIn("Structure evidence: unavailable", result["formatted"])
         self.assertIn("Experimental structure: unknown", result["formatted"])
