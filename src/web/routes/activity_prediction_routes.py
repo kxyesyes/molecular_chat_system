@@ -13,6 +13,8 @@ from fastapi.responses import JSONResponse
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, start_isolated_process
 from src.web.request_auth import require_browser_session
 
+from .route_compat import lazy_dependency
+
 
 _SMILES_COLUMN_ALIASES = {"smiles", "smile", "canonical_smiles", "structure"}
 _DEFAULT_ACTIVITY_TIMEOUT_SECONDS = 60.0
@@ -280,34 +282,37 @@ def setup_activity_prediction_routes(
     ``_support`` remains a compatibility-only fallback for older direct callers;
     application registration passes narrow budget, upload and logging dependencies.
     """
+    get_activity_invoker = lazy_dependency(
+        invoke_activity_with_budget,
+        _support,
+        "_ROUTE_ACTIVITY_INVOKER",
+        label="activity budget",
+    )
+    get_upload_reader = lazy_dependency(
+        read_upload_limited,
+        _support,
+        "_read_upload_limited",
+        label="activity upload",
+    )
+    get_logger = lazy_dependency(
+        logger,
+        _support,
+        "logger",
+        label="activity logger",
+        default=logging.getLogger(__name__),
+    )
+
     async def invoke_with_budget(*, operation, isolated_payload):
-        if invoke_activity_with_budget is not None:
-            # The historical callable keeps an unused first argument. Pass None
-            # through the explicit adapter without exposing the support module.
-            return await invoke_activity_with_budget(
-                None,
-                operation=operation,
-                isolated_payload=isolated_payload,
-            )
-        if _support is not None:
-            return await _invoke_activity_with_budget(
-                _support,
-                operation=operation,
-                isolated_payload=isolated_payload,
-            )
-        raise RuntimeError("activity budget dependency is not configured")
+        # The historical callable keeps an unused first argument. Passing None
+        # preserves the explicit and compatibility adapters' old signature.
+        return await get_activity_invoker()(
+            None,
+            operation=operation,
+            isolated_payload=isolated_payload,
+        )
 
     async def read_upload(upload, label):
-        if read_upload_limited is not None:
-            return await read_upload_limited(upload, label)
-        if _support is not None:
-            return await _support._read_upload_limited(upload, label)
-        raise RuntimeError("activity upload dependency is not configured")
-
-    def get_logger():
-        if logger is not None:
-            return logger
-        return _support.logger if _support is not None else logging.getLogger(__name__)
+        return await get_upload_reader()(upload, label)
 
     @app.post("/api/activity/predict")
     async def activity_predict(
