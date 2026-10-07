@@ -13,8 +13,18 @@
     running: "执行中",
   });
 
+  const workflowLabels = Object.freeze({
+    completed: "已完成",
+    waiting_for_input: "等待补充输入",
+    partial: "部分完成",
+    failed: "失败",
+    rejected: "已拒绝",
+    cancelled: "已取消",
+  });
+
   global.MedChatStatus = Object.freeze({
     labels,
+    workflowLabels,
     isKnown(value) {
       return typeof value === "string" && Object.prototype.hasOwnProperty.call(labels, value);
     },

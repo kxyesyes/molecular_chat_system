@@ -14,6 +14,14 @@ const jsPath = path.join(
   "main.js"
 );
 const source = fs.readFileSync(jsPath, "utf8");
+const template = fs.readFileSync(
+  path.join(__dirname, "..", "src", "web", "templates", "index.html"),
+  "utf8"
+);
+assert(template.includes("/static/js/shared/status.js"),
+  "homepage must load the shared status contract before the Agent entrypoint");
+assert(!source.includes("const decisionStatuses = {"),
+  "homepage workflow labels belong to the shared status contract");
 
 function extractFunction(functionName) {
   const start = source.indexOf(`function ${functionName}(`);

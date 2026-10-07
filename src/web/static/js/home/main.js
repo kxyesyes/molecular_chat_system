@@ -26,8 +26,7 @@
   let decisionAbandonAwait = null;
   let decisionControls = null;
   const decisionSeenTurns = new Set();
-  const decisionStatuses = {completed: "已完成", waiting_for_input: "等待补充输入",
-    partial: "部分完成", failed: "失败", rejected: "已拒绝", cancelled: "已取消"};
+  const decisionStatuses = window.MedChatStatus.workflowLabels;
   const maxWebSocketMessageLength = 256 * 1024;
   const moleculeCandidateLifecycle =
     window.HomeMoleculeCandidates.createLifecycle({
