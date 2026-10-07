@@ -344,4 +344,3 @@ def sanitize_bounded(
         return SANITIZED, True
 
     return visit(value, 0)
-
