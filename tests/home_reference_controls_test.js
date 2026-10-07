@@ -10,7 +10,7 @@ assert(!main.includes("未选择科研引用"), "reference status copy must not 
 assert(!main.includes("清除科研选择"), "reference clear button must not render on the home page");
 assert(main.includes("scientificReferences?.outgoing()"), "reference workflow wiring must remain active");
 assert(references.includes("function clear()"), "reference controller must retain programmatic cleanup");
-assert(template.includes("main.js?v=20261007-reference-controls-removed-v1"),
+assert(template.includes("main.js?v=20261007-smart-tool-removed-v1"),
   "homepage main script cache must be invalidated after removing controls");
 
 console.log("Homepage reference-control removal checks passed");

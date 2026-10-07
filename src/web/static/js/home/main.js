@@ -70,7 +70,6 @@
     input: null,
     sendBtn: null,
     ragToggle: null,
-    toolsToggle: null,
     themeButtons: null,
     connectionStatus: null,
     chatContainer: null,
@@ -292,9 +291,6 @@
     elements.sendBtn = document.querySelector(".fill .btn");
     elements.ragToggle = document.querySelector(
       ".tool .chose .item:nth-child(1) .icon"
-    );
-    elements.toolsToggle = document.querySelector(
-      ".tool .chose .item:nth-child(2) .icon"
     );
     elements.themeButtons = document.querySelectorAll(".theme-option");
     elements.connectionStatus = document.getElementById("connectionStatus");
@@ -764,12 +760,6 @@
     if (elements.ragToggle) {
       elements.ragToggle.parentElement.addEventListener("click", toggleRAG);
       console.log("✅ 绑定RAG开关事件");
-    }
-
-    // 工具开关
-    if (elements.toolsToggle) {
-      elements.toolsToggle.parentElement.addEventListener("click", toggleTools);
-      console.log("✅ 绑定工具开关事件");
     }
 
     // 快速操作按钮
@@ -2288,17 +2278,6 @@
     console.log("🔄 RAG状态切换:", ragEnabled);
   }
 
-  // 切换工具状态
-  function toggleTools() {
-    toolsEnabled = !toolsEnabled;
-    updateToggleStates();
-    HomeChatRenderer.showNotification(
-      `智能工具已${toolsEnabled ? "启用" : "禁用"}`,
-      "info"
-    );
-    console.log("🔄 工具状态切换:", toolsEnabled);
-  }
-
   // 更新开关状态显示
   function updateToggleStates() {
     if (elements.ragToggle) {
@@ -2307,11 +2286,6 @@
         : "#cbd5e0";
     }
 
-    if (elements.toolsToggle) {
-      elements.toolsToggle.style.backgroundColor = toolsEnabled
-        ? "#667eea"
-        : "#cbd5e0";
-    }
   }
 
   // 快速操作处理
