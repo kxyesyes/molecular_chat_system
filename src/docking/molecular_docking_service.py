@@ -1069,6 +1069,7 @@ class MolecularDockingService:
             "HOH", "WAT", "H2O", "NA", "CL", "K", "CA", "MG", "ZN",
             "MN", "FE", "CU", "CO", "NI", "BR", "I",
         }
+        ligand_residues = set()
         found = 0
         try:
             with open(pdb_path, "r", encoding="utf-8", errors="ignore") as stream:
@@ -1080,6 +1081,18 @@ class MolecularDockingService:
                     residue = (line[17:20].strip() or "").upper()
                     if not residue or residue in excluded_residues:
                         continue
+                    # Auto-boxing is only safe for one explicitly identifiable
+                    # co-crystal ligand residue. Multiple hetero residues may
+                    # be cofactors, metals, additives, or alternate ligands;
+                    # fail closed and require an explicit user box instead.
+                    ligand_residues.add((
+                        line[21:22].strip(),
+                        residue,
+                        line[22:26].strip(),
+                        line[26:27].strip(),
+                    ))
+                    if len(ligand_residues) > 1:
+                        return None
                     try:
                         coordinates = [
                             float(line[30:38]),
@@ -1172,7 +1185,7 @@ class MolecularDockingService:
                 "exhaustiveness": config.exhaustiveness,
                 "num_modes": config.num_modes,
                 "energy_range": config.energy_range,
-                "warning": "The box was estimated from non-solvent HETATM coordinates in the receptor file.",
+                "warning": "The box was estimated from one identifiable non-solvent co-crystal ligand residue; ambiguous hetero residues require explicit confirmation.",
             }
 
         raise ValueError("docking_box_confirmation_required")
@@ -1409,6 +1422,7 @@ class MolecularDockingService:
         job_id: str | None = None,
         progress_callback=None,
         cancel_event=None,
+        owner_session_id: str | None = None,
     ) -> Dict[str, Any]:
         """Run a traceable docking workflow with cooperative cancellation."""
         import uuid
@@ -1755,6 +1769,7 @@ class MolecularDockingService:
                         job_dir,
                         job_id=resolved_job_id,
                         status="completed",
+                        owner_session_id=owner_session_id,
                     ),
                 )
                 history_written = True

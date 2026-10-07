@@ -12,6 +12,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
+from src.task_runtime.private_permissions import restrict_private_path
+
 
 HISTORY_INDEX_FILE = "docking_history_index.json"
 HISTORY_LOCK_FILE = "docking_history_index.lock"
@@ -19,6 +21,10 @@ DEFAULT_LOCK_TIMEOUT_SECONDS = 10.0
 DEFAULT_LOCK_POLL_SECONDS = 0.05
 _VINA_RESULT_RE = re.compile(r"REMARK\s+VINA\s+RESULT:\s*([\-+]?\d*\.?\d+)")
 _HISTORY_INDEX_LOCK = threading.RLock()
+
+
+def _restrict_private_path(path: Path, mode: int) -> None:
+    restrict_private_path(path, mode)
 
 
 def history_index_path(work_dir: str | Path) -> Path:
@@ -69,6 +75,7 @@ def _unlock_file(lock_file) -> None:
 def _interprocess_history_lock(work_dir: str | Path) -> Iterator[None]:
     lock_path = _history_lock_path(work_dir)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
+    _restrict_private_path(lock_path.parent, 0o700)
     timeout_seconds = _configured_positive_float(
         "MEDCHAT_DOCKING_HISTORY_LOCK_TIMEOUT_SECONDS",
         DEFAULT_LOCK_TIMEOUT_SECONDS,
@@ -79,6 +86,7 @@ def _interprocess_history_lock(work_dir: str | Path) -> Iterator[None]:
     )
     deadline = time.monotonic() + timeout_seconds
     lock_file = lock_path.open("a+b", buffering=0)
+    _restrict_private_path(lock_path, 0o600)
     acquired = False
     try:
         lock_file.seek(0, os.SEEK_END)
@@ -125,6 +133,7 @@ def _load_records_unlocked(work_dir: str | Path) -> list[dict[str, Any]]:
     path = history_index_path(work_dir)
     if not path.exists():
         return []
+    _restrict_private_path(path, 0o600)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
@@ -140,6 +149,7 @@ def _write_records_unlocked(
 ) -> None:
     path = history_index_path(work_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
+    _restrict_private_path(path.parent, 0o700)
     temp_path = path.with_name(
         f".{path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
     )
@@ -153,7 +163,9 @@ def _write_records_unlocked(
             )
             temp_file.flush()
             os.fsync(temp_file.fileno())
+        _restrict_private_path(temp_path, 0o600)
         os.replace(temp_path, path)
+        _restrict_private_path(path, 0o600)
     finally:
         try:
             temp_path.unlink(missing_ok=True)
@@ -309,6 +321,7 @@ def build_history_record(
     job_dir: str | Path,
     job_id: str | None = None,
     status: str | None = None,
+    owner_session_id: str | None = None,
 ) -> dict[str, Any]:
     job_path = Path(job_dir).resolve()
     resolved_job_id = job_id or job_path.name.replace("docking_", "", 1)
@@ -337,7 +350,7 @@ def build_history_record(
     record_status = status or (
         "completed" if has_result else ("processing" if has_receptor else "failed")
     )
-    return {
+    record = {
         "job_id": resolved_job_id,
         "time": datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S"),
         "timestamp": timestamp,
@@ -359,6 +372,26 @@ def build_history_record(
         "preprocessing_state": manifest.get("preprocessing_state"),
         "execution": manifest.get("execution"),
     }
+    if type(owner_session_id) is str and owner_session_id.strip():
+        record["owner_session_id"] = owner_session_id.strip()
+    return record
+
+
+def get_history_record(
+    work_dir: str | Path,
+    job_id: str,
+    *,
+    owner_session_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Return one history record only when its optional owner matches exactly."""
+    with _history_transaction(work_dir):
+        for record in _load_records_unlocked(work_dir):
+            if str(record.get("job_id") or "") != str(job_id):
+                continue
+            if owner_session_id is None or record.get("owner_session_id") == owner_session_id:
+                return dict(record)
+            return None
+    return None
 
 
 def upsert_history_record(work_dir: str | Path, record: dict[str, Any]) -> None:
@@ -379,12 +412,17 @@ def read_history_page(
     work_dir: str | Path,
     page: int = 1,
     limit: int = 50,
+    owner_session_id: str | None = None,
 ) -> tuple[list[dict[str, Any]], int, int, int]:
     with _history_transaction(work_dir):
         resolved_page = max(1, int(page or 1))
         resolved_limit = max(1, min(200, int(limit or 50)))
         records = sorted(
-            _load_records_unlocked(work_dir),
+            [
+                record for record in _load_records_unlocked(work_dir)
+                if owner_session_id is None
+                or record.get("owner_session_id") == owner_session_id
+            ],
             key=lambda item: float(item.get("timestamp") or 0),
             reverse=True,
         )

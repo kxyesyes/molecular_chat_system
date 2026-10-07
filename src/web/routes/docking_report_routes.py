@@ -1,16 +1,20 @@
 """Docking report route registration."""
 from typing import Dict, Any
-from fastapi import Body, HTTPException
+from fastapi import Body, HTTPException, Request
 from src.web.api_response import api_error
 
 
 def setup_docking_report_routes(app, docking_service=None, *, _support):
     """Register the original endpoints with dynamically resolved compatibility support."""
     @app.post("/api/docking/report/{job_id}")
-    async def get_docking_report(job_id: str, payload: Dict[str, Any] = Body(None)):
+    async def get_docking_report(job_id: str, request: Request, payload: Dict[str, Any] = Body(None)):
         """生成并返回对接报告"""
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
+
+        from .docking_routes import _owned_history, _validate_job_id
+        _validate_job_id(job_id)
+        _owned_history(request, docking_service.work_dir, job_id)
 
         try:
             job_dir = _support.os.path.join(docking_service.work_dir, f"docking_{job_id}")

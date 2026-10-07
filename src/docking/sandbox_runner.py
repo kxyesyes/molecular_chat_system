@@ -32,6 +32,7 @@ from src.sandbox_broker.models import (
     TERMINAL_STATUSES,
 )
 from src.task_runtime.config import _stat_identity, _stat_version
+from src.task_runtime.private_permissions import restrict_private_path
 from src.task_runtime.secure_io import read_file_snapshot
 
 
@@ -1266,7 +1267,9 @@ class SandboxDockingRunner:
             if hasattr(os, "fchmod"):
                 os.fchmod(descriptor, 0o600)
             else:
-                os.chmod(temporary, 0o600)
+                restrict_private_path(temporary, 0o600, required=True)
+            if os.name == "nt":
+                restrict_private_path(temporary, 0o600, required=True)
             os.fsync(descriptor)
             after = os.fstat(descriptor)
             named = (
@@ -1564,6 +1567,7 @@ class SandboxDockingRunner:
     ) -> tuple[Path, Path, int | None, int | None, tuple[int, ...], tuple[int, ...]]:
         root = self._allowed_output_root
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        restrict_private_path(root, 0o700, required=True)
         root_metadata = root.lstat()
         if (
             not stat.S_ISDIR(root_metadata.st_mode)
@@ -1652,7 +1656,7 @@ class SandboxDockingRunner:
             or _stat_identity(root.lstat()) != root_identity
         ):
             raise ValueError("unsafe artifact output")
-        os.chmod(job_root, 0o700)
+        restrict_private_path(job_root, 0o700, required=True)
         after = job_root.lstat()
         if _stat_identity(after) != _stat_identity(metadata):
             raise ValueError("unsafe artifact output")

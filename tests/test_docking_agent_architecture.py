@@ -13,6 +13,33 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
+def _secure_client(app):
+    from fastapi.testclient import TestClient
+    from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+
+    session_root = Path(tempfile.mkdtemp(prefix="medchat-test-sessions-"))
+    store = AgentSessionStore(session_root / "sessions.sqlite")
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=store,
+    )
+    app.state.test_session_store = store
+    return TestClient(app, base_url="https://localhost")
+
+
+def _bind_history_job(client, app, work_dir, job_id):
+    from src.docking.history_index import build_history_record, upsert_history_record
+
+    client.get("/__session_bootstrap")
+    token = client.cookies.get("medchat_agent_session")
+    owner = app.state.test_session_store.resolve(token)
+    job_dir = Path(work_dir) / f"docking_{job_id}"
+    upsert_history_record(
+        work_dir,
+        build_history_record(job_dir, job_id=job_id, status="completed", owner_session_id=owner),
+    )
+
+
 class DockingAgentArchitectureTests(unittest.TestCase):
     def test_docking_domain_schemas_are_available(self):
         from src.docking.schemas import DockingRequest, DockingJobResult
@@ -90,7 +117,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
             new=recording_run_in_threadpool,
             create=True,
         ):
-            with TestClient(app) as client:
+            with _secure_client(app) as client:
                 direct = client.post(
                     "/api/docking/submit",
                     files={"protein_file": ("protein.pdbqt", b"ATOM\n", "text/plain")},
@@ -144,7 +171,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
              patch.object(molecule_utility_routes, "_smiles_to_3d_sync", new=recording_3d), \
              patch.object(molecule_utility_routes, "_smiles_to_image_sync", new=recording_image), \
              patch.object(molecule_utility_routes, "_mcs_sync", new=recording_mcs):
-            with TestClient(app) as client:
+            with _secure_client(app) as client:
                 three_d = client.post("/api/docking/smiles_to_3d", json={"smiles": "CCO"})
                 image = client.get("/api/utils/smiles_to_image?smiles=CCO")
                 mcs = client.get("/api/utils/mcs?smiles1=CCO&smiles2=CCC")
@@ -177,7 +204,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
 
         app = FastAPI()
         setup_api_routes(app)
-        client = TestClient(app)
+        client = _secure_client(app)
 
         invalid_urls = [
             "/api/utils/smiles_to_image?smiles=CCO&width=63&height=200",
@@ -220,7 +247,9 @@ class DockingAgentArchitectureTests(unittest.TestCase):
                 api_routes.logger,
                 "warning",
             ) as warning_log:
-                response = TestClient(app).post(
+                client = _secure_client(app)
+                _bind_history_job(client, app, work_dir, "job-1")
+                response = client.post(
                     "/api/docking/report/job-1",
                     json={
                         "format": "md",
@@ -267,7 +296,8 @@ class DockingAgentArchitectureTests(unittest.TestCase):
                 api_routes.logger,
                 "warning",
             ) as warning_log:
-                with TestClient(app) as client:
+                with _secure_client(app) as client:
+                    _bind_history_job(client, app, work_dir, "job-1")
                     for payload in invalid_payloads:
                         with self.subTest(payload_type=type(payload.get("smiles_images"))):
                             response = client.post(
@@ -294,7 +324,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
             predictor_module,
             "get_predictor",
         ) as get_predictor:
-            response = TestClient(app).post(
+            response = _secure_client(app).post(
                 "/api/activity/batch_predict",
                 files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
             )
@@ -320,7 +350,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
             trainer_module,
             "submit_training_job",
         ) as submit_training_job:
-            response = TestClient(app).post(
+            response = _secure_client(app).post(
                 "/api/activity/train",
                 files={"file": ("train.csv", b"smiles,y\nCCO,1\n", "text/csv")},
                 data={"target_column": "y"},
@@ -371,7 +401,7 @@ class DockingAgentArchitectureTests(unittest.TestCase):
                 "submit_training_job",
                 side_effect=RuntimeError("submission failed"),
             ):
-                response = TestClient(app).post(
+                response = _secure_client(app).post(
                     "/api/activity/train",
                     files={"file": ("train.csv", b"smiles,y\nCCO,1\n", "text/csv")},
                     data={"target_column": "y"},

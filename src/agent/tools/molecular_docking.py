@@ -5,8 +5,11 @@
 """
 
 from typing import Dict, Any, Callable
+import hashlib
+import json
 import logging
 import threading
+from pathlib import Path
 
 from src.agent.persistence.redaction import redact_sensitive
 from src.agent.contracts import ToolProvenance
@@ -77,6 +80,94 @@ def _normalize_warning_strings(values: Any) -> list[str]:
         if isinstance(warning, str) and warning not in warnings:
             warnings.append(warning)
     return warnings
+
+
+def _sha256_file(path: Path) -> str | None:
+    """Return a content digest without exposing the local path."""
+    try:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return f"sha256:{digest.hexdigest()}"
+    except (OSError, ValueError):
+        return None
+
+
+def _sha256_text(value: str) -> str:
+    return f"sha256:{hashlib.sha256(value.encode('utf-8')).hexdigest()}"
+
+
+def _runtime_model_version(service: Any) -> str | None:
+    """Identify the configured Vina executable without exposing its path."""
+    executable = getattr(service, "vina_exe", None)
+    if not executable:
+        return None
+    digest = _sha256_file(Path(str(executable)))
+    return f"vina-executable:{digest}" if digest else None
+
+
+def _docking_lineage(
+    *,
+    receptor_path: Path,
+    ligand_input: str,
+    input_type: str,
+    center: tuple[float, float, float],
+    size: tuple[float, float, float],
+    config: Any,
+    docking_data: Dict[str, Any],
+    runtime_model_version: str | None = None,
+) -> tuple[Dict[str, Any], list[Dict[str, Any]]]:
+    """Build path-free provenance for a real Vina result.
+
+    The input fingerprint is intentionally separate from ToolProvenance's
+    strict compatibility shape. It records exactly what was docked without
+    leaking machine-specific paths into Agent output.
+    """
+    receptor_digest = _sha256_file(receptor_path)
+    if input_type == "file":
+        ligand_digest = _sha256_file(Path(ligand_input))
+        ligand_record = {"kind": "ligand_file", "sha256": ligand_digest}
+    else:
+        ligand_digest = _sha256_text(ligand_input)
+        ligand_record = {"kind": "smiles", "sha256": ligand_digest}
+
+    input_structure = {
+        "receptor": {"kind": "receptor_file", "sha256": receptor_digest},
+        "ligand": ligand_record,
+    }
+    params = {
+        "center": list(center),
+        "size": list(size),
+        "exhaustiveness": getattr(config, "exhaustiveness", None),
+        "num_modes": getattr(config, "num_modes", None),
+        "energy_range": getattr(config, "energy_range", None),
+        "manual_center": getattr(config, "manual_center", None),
+    }
+    manifest = {"input_structure": input_structure, "parameters": params}
+    data_version = _sha256_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")))
+    provider_provenance = docking_data.get("provenance")
+    provider_provenance = provider_provenance if isinstance(provider_provenance, dict) else {}
+    model_version = (
+        provider_provenance.get("vina_version")
+        or docking_data.get("vina_version")
+        or runtime_model_version
+    )
+    evidence = {
+        "type": "vina_output",
+        "source": "autodock_vina",
+        "model_version": model_version,
+        "data_version": data_version,
+        "input_structure": input_structure,
+        "parameters": params,
+    }
+    quality = {
+        "source": "local_autodock_vina",
+        "model_version": model_version,
+        "data_version": data_version,
+        "input_structure": input_structure,
+    }
+    return quality, [evidence]
 
 
 class MolecularDocking(BaseMolecularTool):
@@ -260,11 +351,23 @@ class MolecularDocking(BaseMolecularTool):
                 "execution_status": execution_status,
             }
             if result["success"]:
+                lineage_quality, evidence = _docking_lineage(
+                    receptor_path=receptor_path,
+                    ligand_input=str(ligand_input),
+                    input_type=input_type,
+                    center=center,
+                    size=size,
+                    config=config,
+                    docking_data=docking_data,
+                    runtime_model_version=_runtime_model_version(service),
+                )
+                result["quality"].update(lineage_quality)
+                result["evidence"] = evidence
                 result["provenance"] = ToolProvenance(
                     tool_name="molecular_docking",
                     tool_version=MOLECULAR_DOCKING_ADAPTER_VERSION,
                     model_name="AutoDock Vina",
-                    model_version=None,
+                    model_version=lineage_quality["model_version"],
                     demo_mode=False,
                     fallback_used=False,
                 ).to_dict()

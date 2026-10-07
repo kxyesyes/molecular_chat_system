@@ -6,6 +6,18 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_docking_command_environment_excludes_application_secrets(monkeypatch):
+    from src.docking.adapters.base import _command_environment
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "synthetic-secret")
+    monkeypatch.setenv("MEDCHAT_AGENT_SESSION_DB", "synthetic-session-path")
+    environment = _command_environment()
+
+    assert "PATH" in environment
+    assert "OPENAI_COMPATIBLE_API_KEY" not in environment
+    assert "MEDCHAT_AGENT_SESSION_DB" not in environment
+
+
 def test_docking_box_requires_confirmation_without_evidence(tmp_path: Path, monkeypatch):
     from src.docking.molecular_docking_service import DockingConfig, MolecularDockingService
 
@@ -16,6 +28,23 @@ def test_docking_box_requires_confirmation_without_evidence(tmp_path: Path, monk
 
     with pytest.raises(ValueError, match="docking_box_confirmation_required"):
         service._resolve_docking_box(str(receptor), DockingConfig())
+
+
+def test_auto_box_rejects_multiple_hetero_residues_as_ambiguous(tmp_path: Path):
+    from src.docking.molecular_docking_service import MolecularDockingService
+
+    receptor = tmp_path / "complex.pdb"
+    receptor.write_text(
+        "\n".join(
+            [
+                "HETATM    1  C1  LIG A   1       1.000   2.000   3.000  1.00  0.00           C",
+                "HETATM    2  C1  FAD A   2       5.000   8.000   9.000  1.00  0.00           C",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert MolecularDockingService._auto_box_from_co_crystal(str(receptor)) is None
 
 
 @pytest.mark.parametrize(

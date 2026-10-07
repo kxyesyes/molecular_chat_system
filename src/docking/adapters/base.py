@@ -15,6 +15,20 @@ logger = logging.getLogger(__name__)
 _COMMAND_POLL_INTERVAL_SECONDS = 0.2
 _COMMAND_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024
 _POSIX_GROUP_SETTLEMENT_TIMEOUT_SECONDS = 2.0
+_COMMAND_ENV_ALLOWLIST = frozenset({
+    "PATH", "PATHEXT", "COMSPEC", "SYSTEMROOT", "WINDIR", "TEMP", "TMP",
+    "TMPDIR", "USERPROFILE", "HOME", "LANG", "LC_ALL",
+    "CUDA_VISIBLE_DEVICES", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+})
+
+
+def _command_environment() -> dict[str, str]:
+    """Build a tool environment without carrying application credentials."""
+    return {
+        str(key): str(value)
+        for key, value in os.environ.items()
+        if str(key) in _COMMAND_ENV_ALLOWLIST
+    }
 
 
 class CommandCancelledError(RuntimeError):
@@ -794,6 +808,7 @@ class CommandAdapter:
                 stderr=subprocess.PIPE,
                 cwd=cwd,
                 start_new_session=True,
+                env=_command_environment(),
             )
         except BaseException:
             if receipt is not None:
@@ -913,6 +928,7 @@ class CommandAdapter:
                     stderr=subprocess.PIPE,
                     cwd=cwd,
                     creationflags=cls._windows_creationflags(),
+                    env=_command_environment(),
                 )
             except BaseException:
                 if receipt is not None:
