@@ -4,6 +4,8 @@ import math
 from typing import Dict, Any
 from fastapi import Body, HTTPException
 
+from .route_compat import lazy_dependency
+
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -13,10 +15,13 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
     ``_support`` remains a compatibility-only fallback for older direct callers;
     the application route registration passes ``logger`` explicitly.
     """
-    def get_logger():
-        if logger is not None:
-            return logger
-        return _support.logger if _support is not None else _LOGGER
+    get_logger = lazy_dependency(
+        logger,
+        _support,
+        "logger",
+        label="molecule properties logger",
+        default=_LOGGER,
+    )
 
     @app.post("/api/molecule/properties")
     async def calculate_molecule_properties(data: Dict[str, Any] = Body(...)):

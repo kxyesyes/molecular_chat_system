@@ -11,6 +11,8 @@ from src.web.api_response import api_error
 from src.system.redaction import redact_sensitive
 from src.system.scientific_status import summarize_completion
 
+from .route_compat import lazy_dependency
+
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
 
@@ -86,9 +88,12 @@ async def _run_batch_docking_jobs(
     queue = asyncio.Semaphore(concurrency)
     cancel_events = [threading.Event() for _ in jobs]
     if invoke_in_threadpool is None:
-        if _support is None:
-            raise RuntimeError("docking threadpool dependency is not configured")
-        invoke_in_threadpool = _support._invoke_in_threadpool
+        invoke_in_threadpool = lazy_dependency(
+            None,
+            _support,
+            "_invoke_in_threadpool",
+            label="docking threadpool",
+        )()
 
     async def run_one(index: int, job: dict) -> dict:
         async with queue:
@@ -246,11 +251,12 @@ def setup_docking_routes(
     application registration passes narrow runtime and response dependencies.
     """
     def resolve(explicit, attribute):
-        if explicit is not None:
-            return explicit
-        if _support is not None:
-            return getattr(_support, attribute)
-        raise RuntimeError(f"docking dependency is not configured: {attribute}")
+        return lazy_dependency(
+            explicit,
+            _support,
+            attribute,
+            label=f"docking dependency: {attribute}",
+        )()
 
     def current_task_runtime():
         if task_runtime is None:

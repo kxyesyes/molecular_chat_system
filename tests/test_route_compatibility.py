@@ -8,6 +8,9 @@ ROUTE_MODULES = (
     "activity_prediction_routes",
     "molecule_utility_routes",
     "docking_report_routes",
+    "agent_metrics_routes",
+    "molecule_properties_routes",
+    "docking_routes",
 )
 
 

@@ -1,15 +1,20 @@
 """Agent metrics route registration."""
 import logging
 
+from .route_compat import lazy_dependency
+
 _LOGGER = logging.getLogger(__name__)
 
 
 def setup_agent_metrics_routes(app, *, logger=None, _support=None):
     """Register with a logger; retain dynamic support for legacy callers only."""
-    def get_logger():
-        if logger is not None:
-            return logger
-        return _support.logger if _support is not None else _LOGGER
+    get_logger = lazy_dependency(
+        logger,
+        _support,
+        "logger",
+        label="agent metrics logger",
+        default=_LOGGER,
+    )
 
     @app.get("/api/agent/metrics")
     async def get_agent_metrics():
