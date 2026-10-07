@@ -197,6 +197,29 @@ def _owned_history(request: Request, work_dir: str, job_id: str) -> dict:
     return record
 
 
+def _clear_owned_history_records(work_dir: str, owner_session_id: str) -> int:
+    """Remove every history page owned by one browser session."""
+    import shutil
+
+    from src.docking.history_index import read_history_page, remove_history_record
+
+    deleted = 0
+    while True:
+        history, _, _, _ = read_history_page(
+            work_dir, page=1, limit=200, owner_session_id=owner_session_id,
+        )
+        if not history:
+            return deleted
+        for record in history:
+            job_id = str(record.get("job_id") or "")
+            _validate_job_id(job_id)
+            job_dir = os.path.join(work_dir, f"docking_{job_id}")
+            if os.path.isdir(job_dir):
+                shutil.rmtree(job_dir)
+            remove_history_record(work_dir, job_id)
+            deleted += 1
+
+
 def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _support):
     """Register the original endpoints with dynamically resolved compatibility support."""
     def current_task_runtime():
@@ -814,22 +837,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             if not _support.os.path.isdir(work_dir):
                 return {"success": True, "message": "无历史记录", "deleted": 0}
 
-            import shutil as _shutil
-            from src.docking.history_index import read_history_page, remove_history_record
-
-            history, total, _, _ = read_history_page(
-                work_dir, page=1, limit=200, owner_session_id=owner,
-            )
-
-            deleted = 0
-            for record in history:
-                job_id = str(record.get("job_id") or "")
-                _validate_job_id(job_id)
-                job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
-                if _support.os.path.isdir(job_dir):
-                    _shutil.rmtree(job_dir)
-                remove_history_record(work_dir, job_id)
-                deleted += 1
+            deleted = _clear_owned_history_records(work_dir, owner)
 
             return {"success": True, "message": f"已清除 {deleted} 条历史记录", "deleted": deleted}
         except Exception:

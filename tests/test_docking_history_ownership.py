@@ -10,7 +10,7 @@ from src.docking.history_index import (
     read_history_page,
     upsert_history_record,
 )
-from src.web.routes.docking_routes import _owned_history
+from src.web.routes.docking_routes import _clear_owned_history_records, _owned_history
 
 
 def _request(session_id):
@@ -44,6 +44,24 @@ def test_ownerless_history_is_not_owned_by_any_session(tmp_path):
     with pytest.raises(HTTPException) as error:
         _owned_history(_request("session-a"), str(work_dir), "legacy")
     assert error.value.status_code == 404
+
+
+def test_clear_owned_history_removes_all_pages(tmp_path):
+    work_dir = tmp_path / "docking"
+    for index in range(201):
+        job_id = f"job-{index}"
+        job_dir = work_dir / f"docking_{job_id}"
+        job_dir.mkdir(parents=True)
+        upsert_history_record(
+            work_dir,
+            build_history_record(job_dir, job_id=job_id, owner_session_id="session-a"),
+        )
+
+    assert _clear_owned_history_records(work_dir, "session-a") == 201
+    rows, total, _, _ = read_history_page(work_dir, page=1, limit=200, owner_session_id="session-a")
+    assert rows == []
+    assert total == 0
+    assert not any(work_dir.glob("docking_job-*"))
 
 
 def test_owned_history_rejects_missing_server_session(tmp_path):
