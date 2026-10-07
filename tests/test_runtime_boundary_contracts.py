@@ -34,11 +34,36 @@ def _web_imports(path: Path) -> list[str]:
     return [name for name in imports if name == "src.web" or name.startswith("src.web.")]
 
 
+def _agent_imports(path: Path) -> list[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    imports = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imports.extend(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imports.append(node.module)
+    return [name for name in imports if name == "src.agent" or name.startswith("src.agent.")]
+
+
 def test_scientific_and_agent_core_do_not_import_web_modules():
     violations = {
         str(path.relative_to(ROOT)): _web_imports(path)
         for path in CORE_FILES
         if _web_imports(path)
+    }
+    assert violations == {}
+
+
+def test_shared_model_clients_do_not_import_agent_modules():
+    paths = (
+        ROOT / "src/system/openai_compatible_model.py",
+        ROOT / "src/system/modelscope_model.py",
+        ROOT / "src/system/model_clients.py",
+    )
+    violations = {
+        str(path.relative_to(ROOT)): _agent_imports(path)
+        for path in paths
+        if _agent_imports(path)
     }
     assert violations == {}
 

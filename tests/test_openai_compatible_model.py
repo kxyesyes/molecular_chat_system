@@ -64,6 +64,30 @@ class _FakeClient:
 
 
 class OpenAICompatibleModelTest(unittest.TestCase):
+    def test_decision_transport_is_explicitly_injected(self):
+        from src.system.openai_compatible_model import OpenAICompatibleModel
+
+        calls = []
+
+        class Transport:
+            async def request_decision(self, model, messages, **options):
+                calls.append((model, messages, options))
+                return "decision-fixture"
+
+        model = OpenAICompatibleModel(
+            api_key="fake-client-key",
+            model_name="demo-model",
+            base_url="https://api.example.com",
+            client=_FakeClient(),
+            decision_transport=Transport(),
+        )
+
+        result = asyncio.run(model.decide([{"role": "user", "content": "hello"}]))
+
+        self.assertEqual(result, "decision-fixture")
+        self.assertEqual(calls[0][0], model)
+        self.assertEqual(calls[0][1], [{"role": "user", "content": "hello"}])
+
     def test_http_error_does_not_log_untrusted_response_body(self):
         from src.agent.openai_compatible_model import OpenAICompatibleModel
 

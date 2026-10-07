@@ -20,6 +20,14 @@ from src.system.network_policy import validate_llm_url
 # Preserve the public logging category used by deployment filters and audits.
 logger = logging.getLogger("src.agent.openai_compatible_model")
 _HTTPX_ASYNC_CLIENT_TYPE = httpx.AsyncClient
+_DEFAULT_DECISION_TRANSPORT = None
+
+
+def configure_default_decision_transport(transport) -> None:
+    """Install an optional Agent protocol adapter from the composition root."""
+
+    global _DEFAULT_DECISION_TRANSPORT
+    _DEFAULT_DECISION_TRANSPORT = transport
 
 
 class OpenAICompatibleModel:
@@ -36,12 +44,20 @@ class OpenAICompatibleModel:
         client: Optional[httpx.AsyncClient] = None,
         provider: str = "openai_compatible",
         enforce_url_policy: bool | None = None,
+        decision_transport=None,
     ):
         self.api_key = (api_key or "").strip()
         self.model_name = (model_name or "").strip()
         self.base_url = self._normalize_chat_url(base_url)
         self.provider_name = provider_name
         self.provider = provider
+        # Agent-specific protocol handling is injected by the composition
+        # root.  The shared client must remain usable without importing Agent.
+        self._decision_transport = (
+            decision_transport
+            if decision_transport is not None
+            else _DEFAULT_DECISION_TRANSPORT
+        )
         self._implicit_url_policy = enforce_url_policy is None
         if enforce_url_policy is None:
             # MockTransport and small fake clients are test seams, not network
@@ -324,9 +340,8 @@ class OpenAICompatibleModel:
         self, messages, *, mode="native", max_tokens=1500, timeout_seconds=60.0,
     ):
         """Return a validated proposal, never execute a tool or a workflow."""
-        from src.agent.decision_transport import request_decision
-
-        return await request_decision(
+        transport = self._require_decision_transport("request_decision")
+        return await transport.request_decision(
             self, messages, mode=mode, max_tokens=max_tokens,
             timeout_seconds=timeout_seconds,
         )
@@ -335,9 +350,8 @@ class OpenAICompatibleModel:
         self, messages, *, mode="native", max_tokens=256, timeout_seconds=30.0, _journal=None,
     ):
         """Return one strict intent proposal using the same bounded transport."""
-        from src.agent.decision_transport import request_ordinary_intent
-
-        return await request_ordinary_intent(
+        transport = self._require_decision_transport("request_ordinary_intent")
+        return await transport.request_ordinary_intent(
             self, messages, mode=mode, max_tokens=max_tokens,
             timeout_seconds=timeout_seconds, _journal=_journal,
         )
@@ -346,12 +360,19 @@ class OpenAICompatibleModel:
         self, messages, *, mode="native", max_tokens=256, timeout_seconds=30.0, _journal=None,
     ):
         """Return a preparation proposal, never admission, consent or execution."""
-        from src.agent.decision_transport import request_docking_preparation
-
-        return await request_docking_preparation(
+        transport = self._require_decision_transport("request_docking_preparation")
+        return await transport.request_docking_preparation(
             self, messages, mode=mode, max_tokens=max_tokens,
             timeout_seconds=timeout_seconds, _journal=_journal,
         )
+
+    def _require_decision_transport(self, method):
+        transport = self._decision_transport
+        if transport is None:
+            raise RuntimeError("Agent decision transport is not configured")
+        if not callable(getattr(transport, method, None)):
+            raise RuntimeError("Agent decision transport is incomplete")
+        return transport
 
     async def close(self) -> None:
         close = getattr(self.client, "aclose", None) if self.client is not None else None

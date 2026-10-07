@@ -528,6 +528,7 @@ class MolecularChatApp:
 
         if config.get("provider") == "modelscope":
             from src.system.model_clients import ModelScopeModel
+            from src.agent import decision_transport
 
             return ModelScopeModel(
                 api_key=config.get("api_key", ""),
@@ -535,9 +536,11 @@ class MolecularChatApp:
                 base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
                 enforce_url_policy=True,
                 provider="modelscope",
+                decision_transport=decision_transport,
             )
 
         from src.system.model_clients import OpenAICompatibleModel
+        from src.agent import decision_transport
 
         return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),
@@ -546,6 +549,7 @@ class MolecularChatApp:
             provider_name="OpenAI-compatible",
             provider=config.get("provider") or "openai_compatible",
             enforce_url_policy=True,
+            decision_transport=decision_transport,
         )
 
     async def _replace_llm_config(self, config):
