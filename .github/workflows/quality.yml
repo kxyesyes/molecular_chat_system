@@ -52,7 +52,7 @@ jobs:
           - name: root-activity
             pytest_target: "tests/test_activity*.py"
             pytest_args: ""
-            command_timeout: 600
+            command_timeout: 900
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"

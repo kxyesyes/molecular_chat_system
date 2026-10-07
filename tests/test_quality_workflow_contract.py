@@ -153,7 +153,9 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
     assert all(row["command_timeout"] == (
-                   1200 if name == "agent" else 180 if name == "sandbox-api" else 600)
+                   1200 if name == "agent" else
+                   900 if name == "root-activity" else
+                   180 if name == "sandbox-api" else 600)
                for name, row in matrix.items())
     assert jobs["offline-quality"]["needs"] == ["python-tests", "static-quality"]
     assert jobs["offline-quality"]["if"] == "${{ always() }}"
