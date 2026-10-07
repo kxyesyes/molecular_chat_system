@@ -38,7 +38,15 @@ class _PinnedPredictor(ActivityPredictor):
         if hashlib.sha256(self._content).hexdigest() != self._metadata["weights_sha256"]:
             raise ValueError("Pinned weight digest mismatch")
         # Fail closed on PyTorch versions without restricted loading support.
-        state = torch.load(io.BytesIO(self._content), map_location=self.device, weights_only=True)
+        load_device = self.device
+        # A spawned worker may import torch before its sanitized environment is
+        # applied.  Do not let a stale CUDA selection prevent a verified model
+        # from loading when the worker has no usable accelerator.
+        if (load_device is not None and load_device.type == "cuda"
+                and (not torch.cuda.is_available() or torch.cuda.device_count() == 0)):
+            load_device = torch.device("cpu")
+            self.device = load_device
+        state = torch.load(io.BytesIO(self._content), map_location=load_device, weights_only=True)
         config = self._metadata["model_config"]
         model_kwargs = {key: config[key] for key in (
             "in_channels", "channels", "out_channels", "edge_dim", "num_passing_atom",

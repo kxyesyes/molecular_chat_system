@@ -425,7 +425,7 @@ def check_decision(session, result, expected, snapshot, target, frames=None):
 
 
 @contextmanager
-def isolated_runtime(snapshot):
+def isolated_runtime(snapshot, work_dir):
     """Local guards and CPU configuration are restored even after a failed chain."""
     import httpx
     import pandas as pd
@@ -434,6 +434,7 @@ def isolated_runtime(snapshot):
     import urllib.request
     from src.activity import prediction_service, predictor
     from src.agent.planning.task_planner import TaskPlanner
+    from src.task_runtime import manager as task_manager
     calls = []
 
     def forbidden(*args, **kwargs):
@@ -444,6 +445,9 @@ def isolated_runtime(snapshot):
     prediction_service._family_predictor.cache_clear()
     try:
         with ExitStack() as stack:
+            manager = task_manager.TaskManager(work_dir / "activity-tasks.sqlite")
+            stack.callback(manager.executor.shutdown, wait=True)
+            stack.enter_context(patch.object(task_manager, "get_task_manager", lambda: manager))
             # Patch only this named variable; do not enumerate/copy ambient secrets.
             previous = os.environ.get("ACTIVITY_MODEL_DIR")
             os.environ["ACTIVITY_MODEL_DIR"] = str(snapshot.models_dir)
@@ -477,7 +481,11 @@ def api_summary(client, smiles, target, *, batch=False):
     else:
         response = client.post("/api/activity/predict", data={"smiles": smiles[0], "target": target})
     require(response.status_code == 200)
-    return response.json()
+    summary = response.json()
+    # Task receipts are transport metadata; the scientific summary must remain
+    # byte-for-byte comparable with the direct predictor result.
+    summary.pop("task_id", None)
+    return summary
 
 
 def summary_record(summary):
@@ -622,13 +630,14 @@ def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
         work_dir.mkdir(parents=True, exist_ok=True)
         report["expected_identity"] = identity(snapshot)
         report["actual_identity"] = None
-        with isolated_runtime(snapshot):
+        with isolated_runtime(snapshot, work_dir):
             from src.activity import prediction_service
             from src.activity.family_predictor import FamilyActivityPredictor
             from src.activity.model_registry import ActivityModelRegistry
             from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
             from fastapi import FastAPI
             from fastapi.testclient import TestClient
+            from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
             from src.web.routes.api_routes import setup_api_routes
             target, alias = ALIASES[snapshot.family_id]
             timings.start(report['stages'], 'predictor')
@@ -649,8 +658,12 @@ def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
             timings.close()
             remaining()
             app = FastAPI()
+            app.add_middleware(
+                AgentSessionMiddleware,
+                store=AgentSessionStore(work_dir / "activity-api-sessions.sqlite"),
+            )
             setup_api_routes(app)
-            with TestClient(app) as client:
+            with TestClient(app, base_url="https://localhost") as client:
                 for name, requested in (("api_single", target), ("api_batch", alias)):
                     timings.start(report['stages'], name)
                     if name == "api_single":
@@ -710,7 +723,7 @@ def run_family_chain(snapshot, *, work_dir, mode, deadline=None):
             run_dom(summary, work_dir=work_dir, remaining=remaining, record=report["stages"]["dom"])
             timings.close()
             report["rejections"] = {}
-            with TestClient(app) as client:
+            with TestClient(app, base_url="https://localhost") as client:
                 for case, smi, requested in (("invalid_smiles", INVALID_SMILES, alias),
                                              ("unknown_target", "CCO", "AChE")):
                     report["rejections"][case] = {}

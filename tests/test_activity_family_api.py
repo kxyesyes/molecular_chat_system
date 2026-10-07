@@ -3,20 +3,52 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 from src.web.routes import api_routes
+from src.web.routes import activity_prediction_routes
 
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(tmp_path / "models"))
+    from src.task_runtime import manager as task_manager
+    manager = task_manager.TaskManager(tmp_path / "activity-tasks.sqlite")
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: manager)
     from src.activity import predictor
     class ForbiddenLegacy:
         def predict(self, smiles):
             pytest.fail("Explicit family target must not use the global model")
     monkeypatch.setattr(predictor, "get_predictor", lambda: ForbiddenLegacy())
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "activity-api-sessions.sqlite"),
+    )
     api_routes.setup_api_routes(app)
-    return TestClient(app)
+
+    async def invoke_activity_in_process(_support, *, operation, isolated_payload, **kwargs):
+        """Keep API unit contracts in-process while isolation has its own tests."""
+        from src.activity import prediction_service
+
+        return await api_routes._invoke_in_threadpool(
+            prediction_service.predict_activity,
+            isolated_payload[0],
+            target=isolated_payload[1],
+        )
+
+    # These tests intentionally monkeypatch the predictor and service.  The
+    # production route runs the scientific call in a terminable subprocess;
+    # this seam exercises the legacy HTTP contract without pretending a child
+    # process inherits test monkeypatches.
+    monkeypatch.setattr(
+        activity_prediction_routes,
+        "_invoke_activity_with_budget",
+        invoke_activity_in_process,
+    )
+    try:
+        yield TestClient(app, base_url="https://localhost")
+    finally:
+        manager.executor.shutdown(wait=True)
 
 
 def _complete_summary_row(**changes):
@@ -175,7 +207,10 @@ def test_api_retains_conflict_values_and_conservative_summary(client, monkeypatc
                         lambda: SimpleNamespace(predict=lambda *a, **k: [row]))
     response = _post_prediction(client, endpoint, target="PDE5A")
     assert response.status_code == 200
-    assert response.json() == dict(success=False, status="partial", results=[row], warnings=["需复核"])
+    body = response.json()
+    task_id = body.pop("task_id", None)
+    assert task_id
+    assert body == dict(success=False, status="partial", results=[row], warnings=["需复核"])
 
 
 def test_batch_order_and_invalid_input_retained(client):
@@ -274,11 +309,11 @@ def test_family_service_runs_in_worker_and_preserves_partial(client, monkeypatch
     def get_predictor():
         assert state["inside"]
         return Predictor()
-    async def invoke(function):
+    async def invoke(function, *args, **kwargs):
         state["calls"] += 1
         state["inside"] = True
         try:
-            return function()
+            return function(*args, **kwargs)
         finally:
             state["inside"] = False
     monkeypatch.setattr(prediction_service, "get_family_predictor", get_predictor)

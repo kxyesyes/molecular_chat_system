@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -44,13 +45,35 @@ def load_processed_graph_dataset(path: str | Path) -> tuple[Data, dict[str, Any]
     if "weights_only" not in load_parameters:
         raise RuntimeError("PyTorch weights_only loading is required for graph datasets")
 
-    try:
-        safe_globals = torch.serialization.safe_globals
-    except AttributeError as exc:
-        raise RuntimeError("PyTorch safe globals are unavailable for graph datasets") from exc
+    safe_globals = getattr(torch.serialization, "safe_globals", None)
+    if callable(safe_globals):
+        allowlist_context = safe_globals(list(_PYG_SAFE_GLOBALS))
+        restore_allowlist = None
+    else:
+        # ``safe_globals`` is a newer convenience context manager.  The CI
+        # profile still supports PyTorch versions that expose the equivalent
+        # process-wide ``add_safe_globals`` API, so keep restricted loading
+        # available without ever falling back to unrestricted pickle.
+        add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+        get_safe_globals = getattr(torch.serialization, "get_safe_globals", None)
+        clear_safe_globals = getattr(torch.serialization, "clear_safe_globals", None)
+        if not all(callable(item) for item in
+                   (add_safe_globals, get_safe_globals, clear_safe_globals)):
+            raise RuntimeError("PyTorch safe globals are unavailable for graph datasets")
+        previous_safe_globals = list(get_safe_globals())
+        add_safe_globals(list(_PYG_SAFE_GLOBALS))
+        allowlist_context = nullcontext()
 
-    with safe_globals(list(_PYG_SAFE_GLOBALS)):
-        payload = torch.load(path, map_location="cpu", weights_only=True)
+        def restore_allowlist():
+            clear_safe_globals()
+            add_safe_globals(previous_safe_globals)
+
+    try:
+        with allowlist_context:
+            payload = torch.load(path, map_location="cpu", weights_only=True)
+    finally:
+        if restore_allowlist is not None:
+            restore_allowlist()
 
     if not isinstance(payload, tuple) or len(payload) not in (2, 3):
         raise ValueError("Invalid processed graph dataset envelope")
