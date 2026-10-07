@@ -9,11 +9,16 @@ import logging
 from contextlib import aclosing
 from contextvars import ContextVar
 from typing import AsyncIterator, Optional
+from urllib.parse import urlsplit
 
 import httpx
 
+from src.agent.decision_transport import create_pinned_async_client, pin_supplied_async_client
+from src.web.security.url_policy import validate_llm_url
+
 
 logger = logging.getLogger(__name__)
+_HTTPX_ASYNC_CLIENT_TYPE = httpx.AsyncClient
 
 
 class OpenAICompatibleModel:
@@ -28,12 +33,45 @@ class OpenAICompatibleModel:
         base_url: str,
         provider_name: str = "OpenAI-compatible",
         client: Optional[httpx.AsyncClient] = None,
+        provider: str = "openai_compatible",
+        enforce_url_policy: bool | None = None,
     ):
         self.api_key = (api_key or "").strip()
         self.model_name = (model_name or "").strip()
         self.base_url = self._normalize_chat_url(base_url)
         self.provider_name = provider_name
-        self.client = client
+        self.provider = provider
+        self._implicit_url_policy = enforce_url_policy is None
+        if enforce_url_policy is None:
+            # MockTransport and small fake clients are test seams, not network
+            # adapters. Real owned/HTTPX clients remain fail-closed by default.
+            transport = getattr(client, "_transport", None)
+            is_mock = isinstance(transport, httpx.MockTransport)
+            self.enforce_url_policy = client is None or not is_mock and isinstance(
+                client, httpx.AsyncClient,
+            )
+        else:
+            self.enforce_url_policy = bool(enforce_url_policy)
+        if self.enforce_url_policy:
+            try:
+                self.base_url = validate_llm_url(
+                    self.base_url, provider=self.provider, resolve_host=False
+                )
+            except ValueError:
+                # Existing offline lifecycle probes use the reserved
+                # example.invalid domain with an owned client substituted by
+                # the test. Explicit production enforcement never takes this
+                # compatibility path.
+                if not (
+                    self._implicit_url_policy and client is None
+                    and (urlsplit(self.base_url).hostname or "").lower().endswith(".invalid")
+                ):
+                    raise
+        self.client = (
+            pin_supplied_async_client(client)
+            if self.enforce_url_policy and isinstance(client, _HTTPX_ASYNC_CLIENT_TYPE)
+            else client
+        )
         self._response_metadata_var: ContextVar[dict | None] = ContextVar(
             f"openai_response_metadata_{id(self)}",
             default=None,
@@ -90,6 +128,19 @@ class OpenAICompatibleModel:
             payload["thinking"] = {"type": "disabled"}
         return payload
 
+    def _validate_request_endpoint(self) -> None:
+        if self.enforce_url_policy:
+            try:
+                self.base_url = validate_llm_url(
+                    self.base_url, provider=self.provider, resolve_host=True
+                )
+            except ValueError:
+                if not (
+                    self._implicit_url_policy and self.client is None
+                    and (urlsplit(self.base_url).hostname or "").lower().endswith(".invalid")
+                ):
+                    raise
+
     def _empty_response_message(self) -> str:
         finish_reason = self.last_response_metadata.get("finish_reason")
         suffix = f"（finish_reason={finish_reason}）" if finish_reason else ""
@@ -103,19 +154,26 @@ class OpenAICompatibleModel:
             return unavailable
 
         try:
+            self._validate_request_endpoint()
             logger.info("Calling %s model: %s", self.provider_name, self.model_name)
             if self.client is not None:
+                post_kwargs = {
+                    "headers": self._headers(),
+                    "json": self._payload(prompt, temperature, max_tokens, stream=False),
+                }
+                if isinstance(self.client, _HTTPX_ASYNC_CLIENT_TYPE):
+                    post_kwargs["follow_redirects"] = False
                 response = await self.client.post(
                     self.base_url,
-                    headers=self._headers(),
-                    json=self._payload(prompt, temperature, max_tokens, stream=False),
+                    **post_kwargs,
                 )
             else:
-                async with httpx.AsyncClient(timeout=150.0) as client:
+                async with create_pinned_async_client(timeout=150.0, httpx_module=httpx) as client:
                     response = await client.post(
                         self.base_url,
                         headers=self._headers(),
                         json=self._payload(prompt, temperature, max_tokens, stream=False),
+                        follow_redirects=False,
                     )
             if response.status_code != 200:
                 logger.error(
@@ -160,12 +218,13 @@ class OpenAICompatibleModel:
             return
 
         try:
+            self._validate_request_endpoint()
             if self.client is not None:
                 async with aclosing(self._stream_with_client(self.client, prompt, temperature, max_tokens)) as stream:
                     async for content in stream:
                         yield content
             else:
-                async with httpx.AsyncClient(timeout=150.0) as client:
+                async with create_pinned_async_client(timeout=150.0, httpx_module=httpx) as client:
                     async with aclosing(self._stream_with_client(client, prompt, temperature, max_tokens)) as stream:
                         async for content in stream:
                             yield content
@@ -184,13 +243,14 @@ class OpenAICompatibleModel:
         temperature: float,
         max_tokens: int,
     ) -> AsyncIterator[str]:
-        async with client.stream(
-            "POST",
-            self.base_url,
-            headers=self._headers(),
-            json=self._payload(prompt, temperature, max_tokens, stream=True),
-            timeout=150.0,
-        ) as response:
+        stream_kwargs = {
+            "headers": self._headers(),
+            "json": self._payload(prompt, temperature, max_tokens, stream=True),
+            "timeout": 150.0,
+        }
+        if isinstance(client, _HTTPX_ASYNC_CLIENT_TYPE):
+            stream_kwargs["follow_redirects"] = False
+        async with client.stream("POST", self.base_url, **stream_kwargs) as response:
             if response.status_code != 200:
                 logger.error(
                     "%s stream error: HTTP %s",

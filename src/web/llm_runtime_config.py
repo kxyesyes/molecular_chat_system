@@ -8,6 +8,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator
@@ -147,23 +148,40 @@ def _exclusive_file_lock(path: str | Path) -> Iterator[None]:
             if lock_stream.tell() == 0:
                 lock_stream.write(b"\0")
                 lock_stream.flush()
-            lock_stream.seek(0)
+            acquired = False
             if os.name == "nt":
                 import msvcrt
 
-                msvcrt.locking(lock_stream.fileno(), msvcrt.LK_LOCK, 1)
+                # ``LK_LOCK`` has a fixed, short retry window on Windows.
+                # Concurrent worker start-up can exceed it even though the
+                # critical section is healthy. Retry explicitly with a
+                # bounded deadline so contention is distinguishable from a
+                # broken lock without making the write path unbounded.
+                deadline = time.monotonic() + 30.0
+                while True:
+                    try:
+                        lock_stream.seek(0)
+                        msvcrt.locking(lock_stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        acquired = True
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise
+                        time.sleep(0.05)
             else:  # pragma: no cover - exercised on Linux deployments
                 import fcntl
 
                 fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX)
+                acquired = True
             try:
                 yield
             finally:
-                lock_stream.seek(0)
-                if os.name == "nt":
-                    msvcrt.locking(lock_stream.fileno(), msvcrt.LK_UNLCK, 1)
-                else:  # pragma: no cover - exercised on Linux deployments
-                    fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+                if acquired:
+                    lock_stream.seek(0)
+                    if os.name == "nt":
+                        msvcrt.locking(lock_stream.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:  # pragma: no cover - exercised on Linux deployments
+                        fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
 
 
 def _atomic_replace_text(path: Path, content: str, *, private: bool = False) -> None:
