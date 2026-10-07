@@ -115,6 +115,22 @@ class _DynamicExecutorFactory:
 _ROUTE_EXECUTOR_FACTORY = _DynamicExecutorFactory()
 
 
+class _DynamicSupportCallable:
+    """Resolve a legacy api_routes callable only when the route invokes it."""
+
+    def __init__(self, attribute):
+        self._attribute = attribute
+
+    def __call__(self, *args, **kwargs):
+        return getattr(sys.modules[__name__], self._attribute)(*args, **kwargs)
+
+
+_ROUTE_PHARM3D_LIMIT = _DynamicSupportCallable("_get_pharm3d_candidate_pool_limit")
+_ROUTE_PHARM3D_TIMEOUT = _DynamicSupportCallable("_get_pharm3d_timeout")
+_ROUTE_PHARM3D_RUNNER = _DynamicSupportCallable("_run_pharm3d_job")
+_ROUTE_PHARM3D_FALLBACK = _DynamicSupportCallable("_build_pharm3d_fallback")
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -485,7 +501,19 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
         validate_report_base64_payload=_ROUTE_REPORT_VALIDATOR,
         logger=_ROUTE_LOGGER,
     )
-    setup_reverse_target_routes(app, _support=support)
+    setup_reverse_target_routes(
+        app,
+        invoke_in_threadpool=_ROUTE_INVOKER,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        logger=_ROUTE_LOGGER,
+        get_pharm3d_candidate_pool_limit=_ROUTE_PHARM3D_LIMIT,
+        get_pharm3d_timeout=_ROUTE_PHARM3D_TIMEOUT,
+        run_pharm3d_job=_ROUTE_PHARM3D_RUNNER,
+        build_pharm3d_fallback=_ROUTE_PHARM3D_FALLBACK,
+        pharm3d_candidates_job=_pharm3d_candidates_job,
+        pharm3d_refine_job=_pharm3d_refine_job,
+        pharm3d_query_job=_pharm3d_query_job,
+    )
     setup_activity_prediction_routes(
         app,
         invoke_activity_with_budget=_ROUTE_ACTIVITY_INVOKER,

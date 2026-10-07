@@ -285,6 +285,19 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
                 "env_getter": support._ROUTE_ENV_GETTER,
                 "executor_factory": support._ROUTE_EXECUTOR_FACTORY,
             }
+        if domain == "reverse_target":
+            expected = {
+                "invoke_in_threadpool": support._ROUTE_INVOKER,
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "logger": support._ROUTE_LOGGER,
+                "get_pharm3d_candidate_pool_limit": support._ROUTE_PHARM3D_LIMIT,
+                "get_pharm3d_timeout": support._ROUTE_PHARM3D_TIMEOUT,
+                "run_pharm3d_job": support._ROUTE_PHARM3D_RUNNER,
+                "build_pharm3d_fallback": support._ROUTE_PHARM3D_FALLBACK,
+                "pharm3d_candidates_job": support._pharm3d_candidates_job,
+                "pharm3d_refine_job": support._pharm3d_refine_job,
+                "pharm3d_query_job": support._pharm3d_query_job,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
