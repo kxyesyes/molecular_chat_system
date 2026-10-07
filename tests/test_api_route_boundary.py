@@ -239,6 +239,13 @@ def test_admet_agent_import_path_is_a_compatibility_alias():
     assert legacy_module.ADMETPredictor is domain_module.ADMETPredictor
 
 
+def test_admet_runtime_wiring_does_not_depend_on_agent_compatibility_paths():
+    root = Path(__file__).parents[1]
+    for relative in ("src/web/app.py", "scripts/admet_ai_worker.py"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "src.agent.tools.admet_ai_backend" not in source
+
+
 @pytest.mark.parametrize("domain,count", DOMAINS)
 def test_domain_module_owns_operations(domain, count):
     # Deliberately inside the test: a missing module is RED, not collection error.

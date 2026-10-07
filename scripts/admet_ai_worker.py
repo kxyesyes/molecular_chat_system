@@ -24,7 +24,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 def main() -> int:
     try:
-        from src.agent.tools.admet_ai_backend import ADMETAIBackend
+        from src.admet.backend import ADMETAIBackend
 
         # Chemprop/RDKit progress output is not part of the JSON-lines
         # protocol.  Keep stdout reserved for handshake/result envelopes.

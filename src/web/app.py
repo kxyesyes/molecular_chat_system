@@ -940,7 +940,7 @@ class MolecularChatApp:
         try:
             await finish_on_cancel(self._shutdown())
         finally:
-            from src.agent.tools.admet_ai_backend import reset_admet_ai_backend_cache
+            from src.admet.backend import reset_admet_ai_backend_cache
             reset_admet_ai_backend_cache()
 
     async def _shutdown(self):
