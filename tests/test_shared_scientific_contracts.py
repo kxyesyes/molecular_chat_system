@@ -69,3 +69,12 @@ def test_docking_runtime_uses_docking_owned_tool_adapter():
     )
     assert "src.agent.tools.molecular_docking" not in source
     assert "src.docking.molecular_docking_adapter" in source
+
+
+def test_molecular_input_validation_has_one_shared_implementation():
+    from src.agent.tools.base_tool import BaseMolecularTool as AgentBaseMolecularTool
+    from src.docking.molecular_docking_adapter import MolecularDocking
+    from src.system.molecular_input import BaseMolecularTool
+
+    assert AgentBaseMolecularTool is BaseMolecularTool
+    assert issubclass(MolecularDocking, BaseMolecularTool)

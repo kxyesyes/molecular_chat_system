@@ -15,102 +15,12 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
+from src.system.molecular_input import BaseMolecularTool
 from src.system.redaction import redact_sensitive
 from src.system.scientific_contracts import ToolProvenance
 
 logger = logging.getLogger(__name__)
 MOLECULAR_DOCKING_ADAPTER_VERSION = "molecular-docking-adapter-1"
-
-
-class _MolecularToolBase:
-    """Small domain-local base retaining the adapter's input contract."""
-
-    def __init__(self, name: str, description: str):
-        self.name = name
-        self.description = description
-
-    def extract_smiles(self, text: str) -> List[str]:
-        candidates: list[str] = []
-        complex_pattern = r"[A-Za-z][A-Za-z0-9@+\-\[\]\(\)=#\.\\/:]{5,}"
-        for match in re.findall(complex_pattern, text):
-            candidate = match.strip().strip("`'\".,;")
-            if (
-                not re.match(r"^[a-zA-Z]+$", candidate)
-                and len(candidate) >= 6
-                and self._is_plausible_smiles_lexeme(candidate)
-                and self.validate_smiles(candidate)
-            ):
-                candidates.append(candidate)
-
-        if not candidates and re.search(r"\bCCO\b", text, re.IGNORECASE):
-            candidates.append("CCO")
-
-        for pattern in (
-            r"O=C\([^)]+\)[^.]{10,}",
-            r"[CNO][CNO0-9\(\)\[\]=@#\-+\.]{10,}",
-        ):
-            for match in re.findall(pattern, text):
-                candidate = match.strip().strip("`'\".,;")
-                if len(candidate) >= 10 and self.validate_smiles(candidate):
-                    candidates.append(candidate)
-
-        valid: list[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            if candidate in seen or len(candidate) < 3:
-                continue
-            if candidate.lower() in {"and", "the", "for", "with", "from", "this", "that"}:
-                continue
-            if len(candidate) <= 2 and candidate != "CCO":
-                continue
-            if self._is_plausible_smiles_lexeme(candidate) and self.validate_smiles(candidate):
-                valid.append(candidate)
-                seen.add(candidate)
-        return valid
-
-    def validate_smiles(self, smiles: str) -> bool:
-        try:
-            from rdkit import Chem, rdBase
-
-            try:
-                with rdBase.BlockLogs():
-                    return Chem.MolFromSmiles(smiles) is not None
-            except (AttributeError, ImportError):
-                return Chem.MolFromSmiles(smiles) is not None
-        except ImportError:
-            return self._basic_smiles_validation(smiles)
-        except Exception:
-            return False
-
-    @staticmethod
-    def _is_plausible_smiles_lexeme(candidate: str) -> bool:
-        value = str(candidate or "").strip()
-        if not value or value.startswith(":") or value.endswith(":"):
-            return False
-        unbracketed = re.sub(r"\[[^\]]*\]", "", value)
-        letters = "".join(character for character in unbracketed if character.isalpha())
-        letters = letters.replace("Cl", "").replace("Br", "")
-        return all(character in "BCNOPSFIbcnops" for character in letters)
-
-    @staticmethod
-    def _basic_smiles_validation(smiles: str) -> bool:
-        if not smiles or len(smiles) < 1:
-            return False
-        if smiles.count("(") != smiles.count(")"):
-            return False
-        if smiles.count("[") != smiles.count("]"):
-            return False
-        return any(atom in smiles for atom in ("C", "N", "O", "S", "P", "F", "Cl", "Br", "I"))
-
-    def _create_base_result(self, query: Any) -> Dict[str, Any]:
-        return {
-            "query": query,
-            "success": False,
-            "message": "",
-            "data": None,
-            "formatted": "",
-            "reasoning": "",
-        }
 
 
 def _run_coroutine_sync(factory: Callable[[], Any]) -> Any:
@@ -225,7 +135,7 @@ def _docking_lineage(*, receptor_path: Path, ligand_input: str, input_type: str,
     return quality, [evidence]
 
 
-class MolecularDocking(_MolecularToolBase):
+class MolecularDocking(BaseMolecularTool):
     """Synchronous domain adapter around the real docking service."""
 
     def __init__(self, *, command_scope=None, allowed_output_root=None):
@@ -343,7 +253,9 @@ class MolecularDocking(_MolecularToolBase):
             )
             if result["success"]:
                 best_pose = docking_data.get("best_pose") if isinstance(docking_data.get("best_pose"), dict) else {}
-                binding_energy = best_pose.get("binding_energy", docking_data.get("binding_energy"))
+                binding_energy = best_pose.get("binding_energy")
+                if binding_energy is None:
+                    binding_energy = docking_data.get("binding_energy")
                 pose_file = docking_data.get("pose_file") or best_pose.get("pose_file")
                 formatted_lines = [f"Docking job: {docking_result.get('job_id')}", f"Poses: {docking_result.get('total_poses', 0)}"]
                 if isinstance(binding_energy, (int, float)) and not isinstance(binding_energy, bool):
