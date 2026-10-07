@@ -1,8 +1,12 @@
 # MedChat 项目规范
 
-版本日期：2026-08-25
+版本日期：2026-10-07
 适用仓库：`molecular_chat_system`
 规范状态：基于当前仓库结构整理；标记为“待确认”的内容尚未形成团队最终决策。
+
+本规范与 AGENTS.md、Agent 维护指南、工具契约清单分工：本文件规定长期工程边界，
+维护指南说明当前 Agent 调用链，工具清单说明工具 schema、状态和证据。
+历史 handoff、plans 和 specs 记录当时事实，不覆盖当前源码或本轮用户授权。
 
 ## 1. 项目定位
 
@@ -66,12 +70,41 @@ MedChat 是面向药物设计与计算药物化学的 Web 平台，不是单一�
 - 反向寻靶：TSV、NumPy 指纹、可选 ChEMBL SQLite；
 - 模型：磁盘权重文件和 JSON 元数据。
 
-### 2.5 依赖版本
+### 2.5 Agent 运行时边界
 
-- `requirements.txt`：Python 3.10 的 CI / CPU 开发环境，不包含 CUDA 版 PyTorch/PyG；
-- `deployment/requirements.txt`：Linux、CUDA 12.1、RTX3090 生产部署环境，包含 GPU 深度学习栈。
+- 默认网页聊天链路是 main.py → src/web/app.py → ChatHandler → SupervisorAgent；
+  默认 MEDCHAT_CHAT_PROFILE=legacy 不表示旧 ReAct 工具循环。
+- decision_a2/semantic_v1 是显式 Web profile；AGENT_HARNESS_MODE 控制执行适配，
+  Temporal/OpenSandbox 控制后台对接边界。三者不是同一个开关，也不能互相推断已启用。
+- src/agent/capabilities/catalog.py 是能力目录，src/agent/tooling/factory.py
+  是工具契约注册入口，WorkflowCatalog 是工作流声明入口；SkillRouter 和
+  active_skill 等名称是兼容字段，不代表已恢复旧 Skill 对象层。
+- 主聊天模型只负责意图理解、受控规划和证据解释；本地 gmm-llama:latest 独立负责
+  SMILES 生成。RDKit、ADMET/RG-MPNN、靶点库/RAG、Vina 的输出必须保留真实工具状态、
+  warnings、evidence、artifacts、quality 和 provenance。
+- 缺模型、demo/fallback、无效输入、工具不可用、缺 docking 输入或未执行工具时，
+  只能返回明确的 failed/partial/unavailable/skipped 语义，不能补造 pIC50、结合能、
+  文献或实验结论。
+- .agent/skills/ 若存在，是 Git 忽略的本机开发辅助资源，不是可部署运行时模块；
+  运行时能力以 src/agent/capabilities/ 和工具注册表为准。
 
-两套 profile 不可互换，版本也不要求机械同步。CI 使用根依赖验证不需要真实模型/密钥的离线质量门；GPU 服务器使用 deployment profile，并在部署后额外运行健康检查和真实工具验收。修改依赖时必须说明目标 profile，并验证另一 profile 是否需要兼容调整。
+### 2.6 依赖版本
+
+- requirements.txt：Python 3.10 的 CI / CPU 开发环境，不包含 CUDA 版 PyTorch/PyG；
+- deployment/requirements.txt：Linux、CUDA 12.1、RTX3090 生产部署环境，包含 GPU 深度学习栈。
+
+两套 profile 不可互换，版本也不要求机械同步。CI 使用根依赖验证不需要真实模型/密钥的离线质量门；
+GPU 服务器使用 deployment profile，并在部署后额外运行健康检查和真实工具验收。
+修改依赖时必须说明目标 profile，并验证另一 profile 是否需要兼容调整。
+
+### 2.7 Agent 状态与证据
+
+- trace_id、task_id/job_id、事件序列、工具结果、checkpoint、artifact 和来源应能
+  互相定位；最终文本不是唯一证据。
+- 下游步骤必须消费经过校验和所有权/版本绑定的上游输出；output_key 或计划存在本身
+  不证明数据流已经发生。
+- 合同/回放/静态测试不能冒充真实模型、真实 RDKit、RG-MPNN、Vina、Temporal、
+  OpenSandbox 或生产部署证据。真实验收缺依赖时如实记录 partial/failed/skipped。
 
 ## 3. 目录结构说明
 
@@ -322,6 +355,10 @@ node tests/reverse_target_broad_recall_test.js
 node tests/reverse_target_pagination_test.js
 ```
 
+以上是维护 Agent 展示/反向寻靶的聚焦示例，不是完整 Node 清单。
+CI 会运行 tests 根目录下所有 *_test.js 以及 tests/activity_family_acceptance_dom.js；
+修改前端时应按 .github/workflows/quality.yml 的当前命令核对完整范围。
+
 ### 11.3 要求
 
 - Bug 修复先增加失败测试；
@@ -442,6 +479,10 @@ GitHub 分支保护和必需审批人数为“待确认”。
 - 路径、配置项、端口、模型和依赖变更时同步更新相关文档；
 - `AGENTS.md` 保持短而可执行，详细规则放本文件；
 - 每轮重要任务更新 `docs/handoff/latest.md`；
+- `docs/README.md` 只维护当前文档导航和来源映射，不重复历史测试结论；
+- 长期文档中的提交号、PR 号和测试数量必须标明核对日期及“历史/当前/部署”状态；
+- 更新入口、工具 schema、Agent profile、验收 CLI 或部署后端时，同时核对
+  AGENTS.md、Agent 维护指南、工具契约清单和相应 handoff；
 - 数据资产变化更新 `data/REGISTRY.md`；
 - 部署变化更新 `deployment/README.md`；
 - 不在文档中写真实密钥原文、个人隐私或本机绝对凭据路径；如需记录测试凭据状态，只能使用脱敏形式；

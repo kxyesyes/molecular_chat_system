@@ -1,5 +1,32 @@
 # Latest handoff
 
+> **当前权威摘要（2026-10-07）**
+>
+> 本文件下方保留历史交接条目；这些条目的授权、分支、提交、测试数量和部署结论
+> 只属于当时任务。当前源码基线为 da485f5，本次文档更新在独立分支
+> docs/agent-docs-refresh-20261007，未修改业务代码、未启用模型、未部署或合并 main。
+>
+> 本轮目标是同步 Agent 使用的长期文档。已更新：
+> AGENTS.md、docs/README.md、docs/PROJECT_STANDARDS.md、
+> docs/AGENT_MAINTENANCE.md、docs/AGENT_TOOL_CONTRACTS.md。
+> 新增实施计划：docs/superpowers/plans/2026-10-07-agent-docs-refresh.md。
+>
+> 当前维护共识：
+>
+> - 默认 Web 聊天是 ChatHandler → SupervisorAgent；decision_a2/semantic_v1 是显式
+>   profile，不等同于 Harness、Temporal 或 OpenSandbox 开关。
+> - src/agent/capabilities/catalog.py、src/agent/tooling/factory.py、WorkflowCatalog
+>   是当前能力/工具/工作流声明入口；旧 src/agent/skills/ 对象层已删除，
+>   SkillRouter 等只是兼容命名。
+> - 外部主模型、Ollama gmm-llama:latest、RDKit、ADMET/RG-MPNN、靶点/RAG、
+>   Vina 和沙盒执行边界必须分开记录；缺依赖、fallback、demo、partial 或 skipped
+>   不能被叙述成科研成功。
+> - 工具真实性依赖 ToolResult、状态、warnings、evidence、artifacts、quality、
+>   provenance、事件与 trace/checkpoint；合同/回放/静态测试不等于真实科研验收。
+>
+> 本轮只做 Markdown 修改。已执行/待执行的命令、链接核对、未运行业务测试和未确认事项，
+> 以本轮提交后的交接内容为准；不要从下方历史数量推断当前测试结果。
+
 ## 第2项发布完成／第3项开始（2026-09-25）
 
 [PR #63](https://github.com/kxyesyes/molecular_chat_system/pull/63) 已按用户默认授权 squash 合并为

@@ -33,6 +33,22 @@
 - 模块化设计，便于扩展新的化学工具与智能体能力
 - 面向药物设计任务进行了场景化整合，而非单一功能演示
 
+## Agent 架构边界
+
+默认网页聊天链路为 ChatHandler → SupervisorAgent → Router/WorkflowCatalog →
+TaskPlanner → WorkflowExecutor/WorkflowRunSession → ToolRegistry/科学工具。
+decision_a2 和 semantic_v1 是显式可选的 Web 决策 profile；LangGraph harness、
+Temporal docking 和 OpenSandbox 是受控执行边界，不是同一个配置开关，也不因代码存在
+就表示生产已启用。维护入口见 docs/AGENT_MAINTENANCE.md。
+
+主聊天模型负责理解、受控规划和证据解释；本地 Ollama gmm-llama:latest 独立负责
+SMILES 生成。RDKit、ADMET/RG-MPNN、靶点库/RAG 和 Vina 的结果必须保留工具状态、
+warnings、evidence、artifacts、quality 与 provenance。缺依赖、demo/fallback、无效输入
+或未执行工具时，不得输出伪造的 pIC50、结合能、文献或实验结论。
+
+项目文档按职责索引见 docs/README.md；协作规则见 AGENTS.md，通用规范见
+docs/PROJECT_STANDARDS.md。
+
 ## 快速开始
 
 ### 环境要求

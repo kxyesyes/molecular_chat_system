@@ -1,137 +1,174 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-25。当前分支已同步 main `aa86377`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）、类药性评分/证据边界修复（#61）、终态标签（#62）与聊天展示/提示提取（#63）。本分支继续领域 API 等价拆分，发布状态见[本批交接](handoff/domain-api-separation.md)。代码合并不代表生产已更新。此前隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
-本文记录源码维护入口；是否合并以每节明确标注和 Git 历史为准，不表示已生产部署或通过真实科研验收。后续调用关系变化也应同步更新本页。
+核对日期：2026-10-07。本页描述当前源码和维护边界，不代表某台服务器已启用相应模式。
+基线与本轮验证见 [latest handoff](handoff/latest.md)。
+协作规则见 [AGENTS.md](../AGENTS.md)，工程规范见 [PROJECT_STANDARDS.md](PROJECT_STANDARDS.md)。
+历史计划、PR 阶段结论和测试数量留在交接记录，不作为当前架构声明。
 
-协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
+## 1. 用户入口和模式必须分开核对
 
-## 1. 先分清三类入口
-
-| 类别 | 实际位置与调用 | 维护边界 |
+| 入口 | 源码路径与调用 | 边界 |
 |---|---|---|
-| 正式网页聊天 | [main.py](../main.py) → [MolecularChatApp](../src/web/app.py) 注册 `/ws` → [ChatHandler.handle_websocket](../src/web/chat_handler.py) | `_create_chat_agent()` 构造 `SupervisorAgent`；没有 ChatHandler 时以 1011 失败关闭，不回退到旧聊天实现。普通聊天不等于科研工具调用。 |
-| 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 `/api/agent/workflows/plan`、`/run` | 使用应用注入的 `_create_supervisor_agent()`，注册表审计、specialist 委派；正式应用的 `run` 经 `ModelRequestGate.submit_background()` 转交 TaskManager，再调用 `SupervisorAgent.run()`，模型使用权覆盖实际 worker 生命周期。没有注入 gate 的独立构造仍兼容直接 submit。 |
-| 领域 HTTP API | [api_routes.py](../src/web/routes/api_routes.py) 兼容注册入口 → 同目录八个领域注册模块 | 原30个操作按原顺序注册；docking/runtime 按应用注入，getter仅在请求时解析。兼容 helper、logger 和 pharm3d 资源仍由 facade 持有，子模块动态使用显式 `_support`，不能每次 setup 新建线程池或运行时。 |
-| 隔离模型决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[decision_chat.py](../src/web/decision_chat.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | 独立 loopback 验收应用；`ChatHandler.process_decision_message()` 是显式服务端桥接，正式 `/ws` 不根据浏览器参数自动启用它。不能把隔离验收通过描述为已切换生产 Agent。 |
+| 默认网页聊天 | [main.py](../main.py) → [app.py](../src/web/app.py) 的 `/ws` → [ChatHandler](../src/web/chat_handler.py) → `_create_chat_agent()` 构造的 [SupervisorAgent](../src/agent/supervisor.py) | 默认 legacy profile；科学结果经过注册表与工作流，普通聊天不等于科学工具执行。不是旧 ReAct 自由循环。 |
+| 显式 Web 决策模式 | `resolve_web_chat_profile()` → [WebDecisionRuntime](../src/web/decision_runtime.py) → ChatHandler 的决策桥接 → [decision_chat.py](../src/web/decision_chat.py) / [ModelDecisionLoop](../src/agent/harness/decision_loop.py) | 由服务端选 profile，不能凭浏览器字段任意扩权；已接入应用不等于默认或生产已启用。 |
+| 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 plan/run → 应用注入 `_create_supervisor_agent()` | 复用 Registry；正式 run 经 ModelRequestGate/TaskManager 执行 Supervisor。独立路由构造的兼容路径不等于生产完整组装。 |
+| 领域 HTTP API | [api_routes.py](../src/web/routes/api_routes.py) facade → 同目录领域路由 | 不是全部都先经过聊天 Agent；必须保留各领域输入、会话归属、权限和服务生命周期。 |
+| 独立决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | loopback 隔离应用/CLI；不自动切换网页或生产配置，不能用实验入口通过替代真实网页验收。 |
 
-当前正式科学入口仍包含路由、计划和工作流执行。仓库同时有模型决策循环，但“代码已存在”不代表正式聊天已使用该循环，也不意味着可以删掉验证、任务运行时或恢复保护。
+### 配置是不同的控制面
 
-## 2. 意图到证据的定位顺序
+以下是源码默认值，不是本机运行环境探测结果：
+
+| 控制项 | 默认 / 支持项 | 来源与含义 |
+|---|---|---|
+| `MEDCHAT_CHAT_PROFILE` | `legacy`；可选 `decision_a2`、`semantic_v1` | app.py 的 profile 解析；semantic_v1 将 decision_a2 与语义准入组合，要求受支持的主模型适配器和异步组装 |
+| `MEDCHAT_DECISION_WIRE_MODE` | `native`；可选 `json` | 决策协议传输形式，不是换科学模型 |
+| `AGENT_HARNESS_MODE` | `legacy`；`shadow`、`langgraph_canary` | [HarnessFactory](../src/agent/harness/factory.py) 对工作流执行适配；legacy 指现有执行器 |
+| `AGENT_LANGGRAPH_CANARY_PERCENT` | `0` | 有界 LangGraph 灰度，不自动扩展委派执行范围 |
+| 任务后端与沙盒 | 开发/未放量保持 local 和 canary 0 | [TaskRuntimeConfig](../src/task_runtime/config.py)、[Temporal runbook](runbooks/temporal_docking_canary.md)、[OpenSandbox 部署说明](../deployment/opensandbox/README.md)；与 Web profile 无等价关系 |
+
+Web profile/协议非法值拒绝；Harness 未知模式或可选依赖不可用则记录 warning 并回到既有执行器。
+`AGENT_HARNESS_MODE=langgraph` 不是已开放的全量执行模式。执行器兼容回退不允许科学结果模拟。
+修改文档或导入模块都不授权放量、切换主模型、启用沙盒或重启用户服务。
+
+## 2. 意图到证据的真实维护路径
 
 ```text
-ChatHandler / 工作流 API
-  → SupervisorAgent：组织上下文、选择策略与执行路径
-  → Router + TaskPlanner + Compiler/Bindings：决定任务与数据依赖
-  → Harness / WorkflowExecutor：准备一次执行
-  → WorkflowRunSession：步骤执行、校验、事件、检查点、结果汇总
-  → 工具适配 / specialist → 实际领域工具
-  → ToolResult / AgentResult → 脱敏展示与证据记录
+默认 Web / 工作流 API
+  → Supervisor → Router + WorkflowCatalog
+  → TaskPlanner → Compiler / Bindings → Harness / WorkflowExecutor
+显式 Web 决策模式
+  → WebDecisionRuntime → ModelDecisionLoop（准入、预算、授权、续接）
+两条科学执行路径
+  → WorkflowRunSession → Registry adapter / specialist → 领域工具
+  → 领域 Validator → ToolResult / AgentResult → 状态/事件/来源 → 安全展示
 ```
 
-| 问题 | 优先查找的源码 | 必须保留的契约 |
+这是维护导航，不表示所有 HTTP 领域接口都经同一聊天路径。
+遇到问题先确认实际入口/profile，再按下表定位：
+
+| 问题 | 优先源码 | 不得破坏的契约 |
 |---|---|---|
-| 路由错、靶点别名或否定意图丢失 | [router.py](../src/agent/router.py)、[routing/hybrid.py](../src/agent/routing/hybrid.py)、[target_request.py](../src/agent/contracts/target_request.py) | 不靠关键词强行运行工具；输入不完整应澄清，显式否定约束不能被删去。 |
-| 步骤或上下游输入错 | [task_planner.py](../src/agent/planning/task_planner.py)、[step_templates.py](../src/agent/planning/step_templates.py)、[compiler.py](../src/agent/planning/compiler.py)、[bindings.py](../src/agent/planning/bindings.py) | Planner 保留选择、参数解析和计划元数据；五类纯模板只构造步骤。`output_key` 本身不是数据流证明；检查实际 selector、转换和工具收到的输入，保留生成候选的可信来源。 |
-| 工具归属、别名或重复实例 | [tooling/factory.py](../src/agent/tooling/factory.py)、[registration.py](../src/agent/tooling/registration.py)、[specialists](../src/agent/specialists) | 未知归属失败关闭；别名归一化；工作流工厂复用注册表已有工具，不建立第二个池。 |
-| 状态、重试、恢复或候选对齐不一致 | [run_session.py](../src/agent/runtime/run_session.py)、[workflow_executor.py](../src/agent/runtime/workflow_executor.py)、[delegated_executor.py](../src/agent/runtime/delegated_executor.py) | 普通/委派执行共用 Session 生命周期；委派层保留授权、调用和结果信封差异，不能另写完整终态循环。 |
-| 工具异常、超时或旧返回格式 | [tooling/adapters.py](../src/agent/tooling/adapters.py)、[tools/base_tool.py](../src/agent/tools/base_tool.py) | `ToolResult` 中的状态、错误、warnings、artifacts、evidence、quality 不能退化为一段成功文本。 |
-| 数值、候选结构或来源不可信 | [validators](../src/agent/validators)、[contracts/result.py](../src/agent/contracts/result.py) | 保留领域校验、候选对齐和 partial/failed；模型缺失或 demo 不等于真实预测，未执行 Vina 不得给出已计算结合能。 |
-| 长历史或证据挤掉当前问题 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_prompt_builder.py](../src/web/chat_prompt_builder.py)、[chat_handler.py](../src/web/chat_handler.py) | 分区字符预算不是精确 token 计数；保留完整问题和科学约束，历史/证据整块取舍，不截断 SMILES 或 JSON。输入自身超限应明确拒绝；关键状态放不下时直接保留工具结果，不强行交模型解读。 |
-| partial/失败展示与安全摘要 | [agent_result_presentation.py](../src/web/agent_result_presentation.py)、[chat_handler.py](../src/web/chat_handler.py) | 纯投影保留科学正文和失败步骤；兼容入口传入当前 sanitizer 覆写。诊断、WebSocket、历史及资源清理仍由 handler 拥有；不能因提取改变状态或让主模型改写 partial 结果。 |
+| 路由、否定意图、靶点别名 | [router.py](../src/agent/router.py)、[routing/hybrid.py](../src/agent/routing/hybrid.py)、[target_request.py](../src/agent/contracts/target_request.py) | 输入不足澄清，不能把搜索自动升级为设计或 docking |
+| 工作流选择、参数和顺序 | [task_planner.py](../src/agent/planning/task_planner.py)、[workflow_selection.py](../src/agent/planning/workflow_selection.py)、[request_parsing.py](../src/agent/planning/request_parsing.py)、[step_templates.py](../src/agent/planning/step_templates.py) | 选择/解析已拆成模块；模板只描述步骤，不复制执行器 |
+| 上下游数据流 | [compiler.py](../src/agent/planning/compiler.py)、[bindings.py](../src/agent/planning/bindings.py)、[run_session.py](../src/agent/runtime/run_session.py) | output_key 不等于已消费；检查真正送入下游的候选、靶点记录、类型和来源 |
+| 工具归属、schema、别名 | [factory.py](../src/agent/tooling/factory.py)、[registration.py](../src/agent/tooling/registration.py)、[specialists](../src/agent/specialists) | 未知归属拒绝、别名归一化、复用已有工具池 |
+| 状态、重试、恢复 | [workflow_executor.py](../src/agent/runtime/workflow_executor.py)、[delegated_executor.py](../src/agent/runtime/delegated_executor.py)、run_session.py | required/optional 失败语义、checkpoint 身份、取消/资源排空不被另写循环绕过 |
+| 模型动态动作 | [decision_loop.py](../src/agent/harness/decision_loop.py)、[decision_policy.py](../src/agent/harness/decision_policy.py)、[ordinary_chat_policy.py](../src/agent/harness/ordinary_chat_policy.py) | 动作受能力、开关、请求、证据、预算和批准约束；模型提议不等于执行授权 |
+| 错误、超时与兼容返回 | [adapters.py](../src/agent/tooling/adapters.py)、[result.py](../src/agent/contracts/result.py) | 保留状态、错误、warnings、artifacts、quality、evidence、provenance |
+| 候选/数值真实性 | [validators](../src/agent/validators)、[candidate_ranker.py](../src/agent/tools/candidate_ranker.py)、[lead_optimization_verifier.py](../src/agent/tools/lead_optimization_verifier.py) | 缺证据不是优势，优化必须有匹配前后比较；主模型不能补造分数 |
+| 提示预算 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_prompt_builder.py](../src/web/chat_prompt_builder.py) | 字符预算非精确 token；不截断 SMILES/JSON，放不下的关键工具事实不强行交模型润色 |
+| 结果不显示、partial 丢失 | [agent_result_presentation.py](../src/web/agent_result_presentation.py)、[scientific_report.py](../src/web/scientific_report.py)、[home/main.js](../src/web/static/js/home/main.js) | task 终态、科学正文、失败步骤和来源投影一致；工具完成不等于回答完成 |
 
-[HarnessFactory](../src/agent/harness/factory.py) 默认 `legacy`；这指现有执行器适配，不是启用 `ReActMolecularAgent`。`shadow` 是旁路计划比较；`langgraph_canary` 是有界灰度，委派执行器明确不扩展该灰度范围。未知模式或可选依赖不可用会记录 warning 并回到既有执行器，不代表科学工具结果被允许模拟。
+### 工具契约覆盖
 
-[ModelDecisionLoop](../src/agent/harness/decision_loop.py) 通过决策协议、任务约束和预算控制动态追加动作，复用 `WorkflowRunSession`。其隔离入口、允许工具集合和续接存储必须由服务端组装，不接受浏览器任意覆盖。
+当前 capability catalog 中各能力均在 factory 中配置输入/输出 schema，
+详见唯一清单 [AGENT_TOOL_CONTRACTS.md](AGENT_TOOL_CONTRACTS.md)。
+不再使用“只有 RAG/活性/对接三个工具类型化”的历史描述。
+四个 staged docking helper 仍是受限兼容例外；不能因为存在 run 方法就开放给主模型。
+类型 schema 不替代执行证据或领域校验，也不能把失败字典规范化成成功文本。
 
-### 已接入 Registry 的类型契约
+## 3. 模型和科学事实的边界
 
-[build_tool_registry](../src/agent/tooling/factory.py) 按规范工具名选择以下专用 `LegacyPythonToolAdapter` 子类；没有为它们建立第二个执行器或结果规范化循环。
+| 组件 | 能做什么 | 不能据此声称什么 |
+|---|---|---|
+| 外部主模型 | 理解意图、提出受控动作、解释已验证证据 | 没调用工具也算出了 pIC50、ADMET、结合能或实验结论 |
+| 本地 Ollama `gmm-llama:latest` | 生成候选 SMILES；由候选校验再决定可用结构/数量/唯一性 | 文本条数等于有效唯一候选数；主模型可替代专用生成器 |
+| RDKit | 真实描述符和结构/规则判断 | 规则判断等于实验结果 |
+| ADMET / RG-MPNN | 有可用后端/真实权重时输出带方法与模型来源的预测 | demo、缺模型、回退或 unknown 是真实成功；训练完成等于生产已启用 |
+| 靶点库 / 反向寻靶 / RAG | 数据库、结构、相似度和检索来源证据 | 相似度命中等于实验证明；无检索结果仍可编造引用 |
+| Vina | 经完整 receptor/ligand/box 和受控执行产生 pose、能量与 artifact | 工具注册/合成 pose/缺输入时已有真实 binding energy |
 
-| 规范工具名与实现 | 输入和结果边界 |
+主模型配置由 [user_llm_config.py](../src/web/user_llm_config.py) 管理，网页从仓库外用户私有配置读取；
+不从仓库 .env 或 OPENAI_COMPATIBLE_* 自动恢复旧 Key。独立验收 CLI 另用显式环境变量。
+这是应用功能和测试注入的两种边界，不能为测试去读取用户配置。
+保存配置与连接成功、模型可用是不同状态，参见 [README](../README.md#主模型接入与一次保存)。
+
+应用独立构造 molecular_generator_model；主模型切换不得重绑它。
+[model_lifecycle.py](../src/web/model_lifecycle.py) 管理请求租约/排空；取消等待者或任务表终态不等于 worker 已退出。
+设计页主模型推荐在 [design_routes.py](../src/web/routes/design_routes.py) 和
+[molecular_design/service.py](../src/molecular_design/service.py)，不要与专用 SMILES 生成器混淆。
+
+## 4. RAG、状态、任务与安全边界
+
+- RAG 服务在 [rag/service.py](../src/rag/service.py)，索引/manifest 在 [rag/index.py](../src/rag/index.py)，检索行映射/来源校验在 [rag/retrieval.py](../src/rag/retrieval.py)。
+  工具接受应用注入的同一服务，不另建全局 Web 单例。FAISS 标签不能直接当原始行号。
+  未初始化/索引错误与合法无命中要区分；异步兼容接口可 warning+空列表，不能只凭空列表认定无记录。
+- [event_bus.py](../src/agent/runtime/event_bus.py)、[SQLiteAgentStateStore](../src/agent/persistence/sqlite_store.py) 保存运行、事件、checkpoint 和续接；
+  [redaction.py](../src/agent/persistence/redaction.py) 负责脱敏。用 trace_id 对齐真实调用、输入绑定和 artifact，不只看最终文字。
+- [TaskManager](../src/task_runtime/manager.py) 的后台提交与 [TaskRuntime](../src/task_runtime/runtime.py) 的 staging、幂等、后端选择、收尾不是一个类。
+  Temporal 对已接受任务拥有执行权，SQLite 是查询投影，不能因结果不明就 local 重跑。
+- OpenSandbox 是受控 docking 执行边界，不是让整个聊天 Agent 任意执行 shell 的通用沙盒。
+  真实验收需要服务、权限、隔离、pose/hash/provenance 和 cleanup 证据，Windows 静态测试不替代 Linux/QEMU 验收。
+- [agent_session_config.py](../src/web/agent_session_config.py)、[request_auth.py](../src/web/request_auth.py) 等负责服务端会话和请求边界。
+  匿名会话归属不等于实名登录/RBAC；不能为测试移除 Origin、CSRF、所有权或本机配置权限校验。
+- 前端动态数据用 [safe_render.js](../src/web/static/js/shared/safe_render.js) 及现有安全 DOM 投影；
+  不把模型、工具或历史文本直接拼进 innerHTML/onclick。
+- TTL、私有文件权限、保留与显式清理见 [数据留存策略](security_data_retention_policy.md)。文档更新不执行清理作业。
+
+### 跨轮科研对象引用
+
+[scientific_references.py](../src/agent/contracts/scientific_references.py) 和
+[专用存储](../src/agent/persistence/scientific_references.py) 绑定展示顺序、来源观察、修订和归属。
+确认引用固定 24 小时，不随恢复/回放续期。
+[Web 投影](../src/web/scientific_references.py)、[确认/恢复路由](../src/web/routes/scientific_reference_routes.py)、
+[前端 ACK](../src/web/static/js/home/scientific_references.js) 共同验证实际显示对象；
+“第3个分子”不能从历史文本猜 SMILES，跨会话/失效/版本变化失败关闭。
+
+[resolved_molecule.py](../src/agent/contracts/resolved_molecule.py) 将引用送入 Supervisor/Planner/Session；
+新 SMILES 优先，改靶点只继承结构，不继承旧分数；分发/checkpoint 复用前再验证。
+聊天历史的有界连接内缓存不等于完整断线持久化，也不保证任意时刻崩溃后恰好执行一次。
+
+## 5. 兼容层与历史资料
+
+| 项目 | 当前边界 |
 |---|---|
-| `rag_search`：[rag_contract.py](../src/agent/tooling/rag_contract.py) | 接受字符串或字符串 query；检查检索记录的 source_index、有限相似度与来源结构，保留额外 CSV 字段。来源字段形状正确不等于来源真实，索引/manifest/行映射验证仍由 RAG 服务负责。`rag_database_search` 经工厂别名归一化进入同一适配。 |
-| `activity_predictor`：[activity_contract.py](../src/agent/tooling/activity_contract.py) | 兼容字符串与结构化分子/靶点输入；检查原始和规范化成功、partial、失败观察及已知失败快照，复用活性科学校验。不训练、加载或启用模型，不改活性阈值。缺模型/demo 不能因通过类型校验就成为真实预测。 |
-| `molecular_docking`：[docking_contract.py](../src/agent/tooling/docking_contract.py) | 兼容文本、单层 query 包装和直接结构；可执行结构须显式给出 receptor、ligand/SMILES、center 与 size，不能借作业模型默认值补 box。复用 pose/能量/输入证明和 OpenSandbox hash、gvisor、image、cleanup 检查；不可信结果按现有规则清除。通过已验证快照传递的沙盒要求不能被外层 local 标记降低。 |
+| 旧 Skill 对象 | `src/agent/skills/`、BaseSkill、SkillRegistry 已删除；[WorkflowCatalog](../src/agent/workflows/catalog.py) 承接声明；[删除守卫](../tests/agent/test_no_legacy_skill_layer.py) 防回流 |
+| SkillRouter / active_skill / selected_skill / skill_name | 保留接口名，不代表旧 Skill 对象还存在 |
+| [agent_executor.py](../src/agent/agent_executor.py)、[react_agent.py](../src/agent/react_agent.py) | 公共兼容薄适配，委托 Supervisor/Session；不是另一个生产工具执行器 |
+| [page_routes.py](../src/web/routes/page_routes.py)、[websocket_routes.py](../src/web/routes/websocket_routes.py) | 兼容注册入口，不得在应用重复注册 /ws |
+| `.agent/skills/` | .gitignore 排除的本机编码辅助资源，不是可部署运行时模块 |
+| plans/specs/旧 handoff | 当时基线和授权的历史材料；已实现/待办必须在当前源码重新核实 |
 
-三个输出视图的 `schema_version` 均为类元数据 `1`，不是新增 HTTP 字段。它们校验观察而不把 `model_dump()` 投影写回科学结果；既有 `execute_tool_compat` 继续负责结果规范化，合法状态、warnings、artifacts、evidence、quality 与来源不应在类型迁移中丢失。工具归属、一次调用内的超时/并发槽与关闭仍沿用既有适配层。
+## 6. 验证入口
 
-其余工具尚使用 `LegacyQueryInput(query: Any)` / `output_schema=None`，但并非没有领域或 Session 校验。`prepare_receptor`、`prepare_ligand`、`run_docking`、`get_docking_result` 四个辅助工具也未因本次契约迁移开启其 `run()` 执行路径。类型契约和合成 pose 测试不替代真实 Vina 或模型验收。
-
-## 3. 模型、RAG、持久化各自负责什么
-
-- **主聊天模型**：应用配置加载与切换在 [app.py](../src/web/app.py)、[user_llm_config.py](../src/web/user_llm_config.py)，OpenAI-compatible 适配在 [openai_compatible_model.py](../src/agent/openai_compatible_model.py)。[model_lifecycle.py](../src/web/model_lifecycle.py) 让聊天、设计推荐、后台工作流共享排空边界：在途请求固定模型，切换等待实际消费者结束后关闭旧客户端。取消或任务表终态不等于底层 worker 已退出；挂起的 worker 仍可能让排空持续等待，本机制不强杀它。配置值、Key、运行时用户文件不得进入文档或 Git。
-- **分子生成模型**：应用独立构造 `molecular_generator_model`，默认本地 Ollama `gmm-llama:latest`；主模型切换不能重绑它。设计页主模型推荐入口另在 [design_routes.py](../src/web/routes/design_routes.py)、[molecular_design/service.py](../src/molecular_design/service.py)，不要与 SMILES 生成模型混为一谈。
-- **RAG**：唯一 `RAGSystem` 在 [rag/service.py](../src/rag/service.py)，索引/manifest、不可变快照与原子写入在 [rag/index.py](../src/rag/index.py)，同步/异步检索共用 [rag/retrieval.py](../src/rag/retrieval.py) 的行映射与来源校验。工具 [rag_search_tool.py](../src/agent/tools/rag_search_tool.py) 接受应用显式注入的同一服务，不读取全局 Web 单例或另起 embedding 配置。`app.py.RAGSystem` 和 [web/rag_index.py](../src/web/rag_index.py) 保留同一对象兼容导出；测试注入点使用规范领域模块。未初始化或来源/索引不兼容时，同步服务抛出异常，工具适配器返回失败；异步兼容接口记录 warning 并返回空列表，不能仅凭空列表区分检索不可用与无命中。任何路径都不能把 FAISS 标签直接当原始行号。Web 展示投影另在 [rag_presentation.py](../src/web/rag_presentation.py)，保留 source_index/provenance。
-- **执行证据**：[event_bus.py](../src/agent/runtime/event_bus.py) 与 [SQLiteAgentStateStore](../src/agent/persistence/sqlite_store.py) 记录运行、事件、检查点及续接；[redaction.py](../src/agent/persistence/redaction.py) 负责敏感内容处理。排障用 trace_id 对齐实际步骤、工具结果和 artifact，不能只看最终文本。
-- **后台工作**：[TaskManager](../src/task_runtime/manager.py) 是工作流 API 使用的提交入口；[TaskRuntime](../src/task_runtime/runtime.py) 是带 staging、幂等、后端选择和收尾的异步科学任务门面，两者不是同一个类。Temporal/OpenSandbox 等边界见 [task_runtime](../src/task_runtime)；不要因都是“任务”就机械合并或删除资源清理。
-- **聊天与续接**：[agent_session_config.py](../src/web/agent_session_config.py) 组装服务端匿名会话，正式 WebSocket/工作流从 scope 取身份，任务访问按服务端归属过滤；它不是实名登录授权。聊天历史仍按连接创建，六处终态共用 `_append_history` 原位保留末20条，不是完整断线历史持久化。隔离决策续接与本分支首页科研引用各自保留保护；首页“第3个分子”通过实际展示ACK、版本、归属和失效校验解析，不从历史文本猜SMILES。详见下方科研续接定位。
-
-## 4. 兼容代码与迁移状态
-
-| 保留项 | 原因与删除门槛 |
-|---|---|
-| 已删除的旧 Skill 对象层与保留名称 | `src/agent/skills/`、`BaseSkill`、`SkillRegistry` 已移除，声明信息由 [WorkflowCatalog/WorkflowPolicy](../src/agent/workflows/catalog.py) 承接；[删除守卫测试](../tests/agent/test_no_legacy_skill_layer.py) 防止旧 import 回流。`SkillRouter`、`selected_skill`、`active_skill`、`skill_name` 是保留的兼容名称，不代表旧 Skill 对象仍存在，也不代表工作流已删除。 |
-| [agent_executor.py](../src/agent/agent_executor.py) | MolecularAgent 保留公开接口，仅适配参数和返回形状；委托 Supervisor/Session，不再逐工具 should_use 或直接执行。partial 为 success=false，拒绝/取消状态和失败观察保留。不是正式聊天工厂。 |
-| [react_agent.py](../src/agent/react_agent.py) | ReAct 保留公共构造、execute/set_llm/should_use_tools/format_result 及 ReActStep 导出；执行委托 Supervisor/Session，删除私有 action 文本循环和关键词回退，不承诺旧自由推理轨迹。规范结果保留失败/partial及有序观察，tools_used 来自真实开始事件；主模型不替换专用分子生成器，不关闭借入工具。不是生产入口切换。 |
-| [routes/page_routes.py](../src/web/routes/page_routes.py)、[routes/websocket_routes.py](../src/web/routes/websocket_routes.py) | `routes/__init__.py` 仍公开导出。页面兼容层已委托 `register_main_routes()`；WebSocket 兼容注册直接委托 ChatHandler。不得在正式应用重复注册 `/ws`。 |
-| 已删除的 app.py 旧私有聊天/提示函数、静态备份 | `_handle_websocket` 及仅服务它的三个提示 helper、旧应用级历史已删除，正式 `/ws` 仍唯一委托 ChatHandler。无引用的 `activity_prediction_v2.legacy.backup.js` 已删除；公共占位 `script.js`、`activity_prediction_v2.js` 保留，真实页面与静态路由测试检查加载次序、200/404 和清理。 |
-| 工具输入/输出 schema | RAG、活性、对接已接入上表专用类型边界；其他工具仍为通用兼容边界。逐工具迁移，不将“已迁移三个工具”说成所有工具都已类型化，也不另造工作流 DSL。 |
-
-本基线已包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位、T10-A 三个优先工具类型契约，以及独立批准的测试分层与新旧模板签名适配。
-
-本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
-
-T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。两个无状态聊天模块已通过 PR #63 合并，原 helper 保留薄委托。当前领域路由拆分按八个模块维护：`docking_routes`、`molecule_utility_routes`、`docking_report_routes`、`reverse_target_routes`、`activity_prediction_routes`、`activity_model_routes`、`molecule_properties_routes`、`agent_metrics_routes`；发布/验证以本批交接为准。固定 API 基线保留各已验证 FastAPI/Pydantic profile 的完整描述，不抹去框架差异；未知版本要求补旧实现基线。性质端点的既有启发式 ADMET 标签问题单独登记，搬迁测试不构成科学有效性证明。
-
-仍未完成：其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。
-
-本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
-
-### 科研对象续接（已合并，非生产部署声明）
-
-- 权威对象：[scientific_references.py](../src/agent/contracts/scientific_references.py)；专用原子存储：[persistence/scientific_references.py](../src/agent/persistence/scientific_references.py)。确认的展示顺序、来源观察、修订和归属共同定位候选，固定24小时，不随恢复/重放续期。
-- Web投影及解析：[web/scientific_references.py](../src/web/scientific_references.py)；确认/恢复路由：[scientific_reference_routes.py](../src/web/routes/scientific_reference_routes.py)。来源版本变化、失效、跨会话、协议损坏失败关闭，不从客户端SMILES或聊天历史重建事实。
-- 首页：[scientific_references.js](../src/web/static/js/home/scientific_references.js) 只在标签页保存不透明指针；实际挂载与严格顺序ACK之后才可引用。刷新恢复有效数据时需先进入可见聊天模式，多集合需明确选择，清除选择不删除科研历史。
-- 实际输入：[resolved_molecule.py](../src/agent/contracts/resolved_molecule.py) → Supervisor/AgentContext/Planner → Session。新SMILES优先，改靶点只继承结构、不继承旧分数；工具分发和checkpoint复用前再次复核来源，不跨长工具持有SQLite锁。
-- 验收入口：`tests/agent/test_scientific_reference_*.py`、`tests/home_scientific_references_test.js`；显式离线浏览器夹具 `python -B -m tests.scientific_reference_browser_lab --state-dir <本任务临时目录> --port 6017`。夹具不是生产启动方式，不读取用户模型配置；生成是合成候选，性质调用真实RDKit。
-
-取消等待方会先排空已开始的科学worker，再释放请求租约；这不是强制停止外部计算进程的保证。浏览器服务进程重启验证针对空闲时中断与持久化恢复，不等于运行中任意点硬崩溃后恰好执行一次。完整证据和保留限制见[第三增量交接](handoff/scientific-reference-acceptance.md)。
-
-## 5. 验证入口与常见误判
-
-在安装项目依赖的 Python/Conda 环境执行，先查看 [tests/conftest.py](../tests/conftest.py) 的用户配置隔离。涉及数据库的独立探针必须用临时路径，禁止读写用户运行库或真实 Key。
+以下是维护命令，**不是本页声称已运行的结果**。先读 [tests/conftest.py](../tests/conftest.py)，
+隔离用户配置与数据库；不要将临时探针指向真实资产/用户库。
+离线测试与真实工具验收分开；CPU CI 与 GPU 部署 profile 不混用。
 
 ```powershell
-python -B -m pytest tests/agent/test_app_supervisor_entrypoint.py tests/test_web_app_lifecycle.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_supervisor_delegation.py tests/agent/test_workflow_run_session.py tests/agent/test_workflow_resume.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_candidate_alignment.py tests/agent/test_registration_consistency.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
-python -B -m pytest tests/test_rag_service_boundary.py tests/test_rag_index_manifest.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_rag_tool_contract.py tests/agent/test_activity_tool_contract.py tests/agent/test_activity_contract_integration.py tests/agent/test_docking_tool_contract.py tests/agent/test_docking_contract_integration.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_planner_step_templates.py tests/agent/test_planner_template_execution.py tests/agent/test_task_planner.py tests/agent/test_plan_compiler.py tests/agent/test_binding_resolver.py tests/agent/test_workflow_executor.py tests/agent/test_decision_loop.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_chat_input_budget.py tests/test_model_request_lifecycle.py tests/test_design_model_switch.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_legacy_chat_entry_cleanup.py tests/agent/test_chat_local_cleanup.py tests/test_static_placeholder_cleanup.py tests/test_main_routes_template_compat.py -q -p no:cacheprovider
-python -B -m pytest tests/agent/test_no_legacy_skill_layer.py -q -p no:cacheprovider
-python -B -m pytest tests/agent -q -p no:cacheprovider
-python -B -m pytest tests -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_app_supervisor_entrypoint.py tests/agent/test_web_decision_runtime.py tests/agent/test_ordinary_web_runtime.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_tool_contract_inventory.py tests/agent/test_tool_registry.py tests/agent/test_registration_consistency.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_task_planner.py tests/agent/test_binding_resolver.py tests/agent/test_workflow_run_session.py tests/agent/test_workflow_resume.py -q -p no:cacheprovider
+python -B -m pytest tests/agent/test_no_legacy_skill_layer.py tests/agent/test_lead_optimization_verifier.py tests/agent/test_real_acceptance_checks.py -q -p no:cacheprovider
 node tests/home_agent_task_panel_test.js
+node tests/frontend_safe_render_test.js
+node tests/home_scientific_references_test.js
 git diff --check
 ```
 
-这些是维护命令，不是本页宣称已执行的全仓验收；结果以当前提交的实际输出为准。真实服务测试必须保持显式 opt-in。CI 的 CPU 根依赖与 GPU 部署依赖是不同 profile，本机通过不能覆盖旧版 FastAPI/Starlette 兼容问题。
+全量/分区命令见 [AGENTS.md](../AGENTS.md) 和 [.github/workflows/quality.yml](../.github/workflows/quality.yml)。
 
-[run_agent_acceptance.py](../scripts/run_agent_acceptance.py) 的模式边界：
+[Agent 验收 CLI](../scripts/run_agent_acceptance.py)：
 
-- `contract`：路由、计划、工具契约等离线检查；不证明真实模型与科研工具闭环可用。
-- `replay --replay-input <report.json>`：读取结构化报告，离线重新检查；缺报告应失败，不能重跑真实工具伪装回放。
-- `real`：真实工具案例与依赖检查；`all` 包含真实模式。本轮维护不启用这两者；缺模型、样例或依赖必须如实记录 partial/failed/skipped。
-- 脚本退出码 0 允许报告状态为 `partial`；必须读结构化 status/truth checks，而不是把 exit 0 等同于全部科研通过。
+| 模式 | 证明什么 | 不证明什么 |
+|---|---|---|
+| contract | 路由、计划、受控 stub/契约 | 真实模型或科学工具闭环 |
+| replay | 从已有结构化报告离线复核 forbidden/truth/provenance | 新一轮真实执行；必须保留原报告，输出另一个路径 |
+| real | 默认 golden；也支持 diverse、all-real 或 dataset，repeat 用于稳定性 | 主模型连接成功不等于 Web 实际入口完成任务 |
+| all | contract + 选定 real | 依赖缺失可忽略 |
 
-独立性能用例 `MEDCHAT_RUN_TASK_STORE_OFFLOAD_PERF=1` 保留原 50ms 调度断言，仅在适当的受控 runner 使用；默认功能测试验证线程 offload、同步进展和真实 SQLite。此拆分不是原 CI 慢点已经定位或性能已修复的证据。
+当前脚本 exit 0 也可能是 partial；real 顶层将部分失败汇总为 partial，
+且 external_main_model 不在 required 检查列表中。
+必须查看 checks、逐 case status、truth_checks、warnings、tool_provenance、artifacts 和 stability，
+不能用顶层标签或退出码宣称“全通过”。
+科学验收还要检查生成候选进入下游、反向靶点进入检索、真实 pose/能量/模型状态；
+缺模型、demo/fallback、不完整输入、错误来源必须如实失败或部分完成。
 
-## 6. 修改时的最小检查顺序
+## 7. 修改时的最小检查顺序
 
-1. 先确认当前分支和工作树，不覆盖原始混杂改动；为本任务建立独立分支。
-2. 从实际入口复现，再定位路由、绑定、适配或呈现边界；不要只复制表达式做“通过”探针。
-3. 修改契约时同时测正式组装路径、兼容路径、partial/failed、取消/清理和来源字段；削弱测试不是修复。
-4. 保留首个失败及原因，记录当前 SHA、解释器、真实命令、退出码和 skipped 原因；不粘贴密钥或聊天隐私数据。
-5. 独立审查、精确暂存、CI 门禁和授权齐备后再合并。文档、schema 或目录重命名都不能代替科学验收。
+1. 确认仓库、分支、HEAD、已有改动和实际入口/profile；历史目录不等于当前部署。
+2. 从用户入口复现，定位路由/输入绑定/执行/呈现边界，保留首个失败。
+3. 代码变更补正式组装、兼容、partial/failed、取消/恢复、来源与权限测试；不得削弱门禁。
+4. 更新相应指导页和 latest，记录真实命令、环境、结果、未运行项及待确认事项；不写秘密。
+5. 精确暂存，独立审查/CI；仅在明确授权后合并/部署。本页不授予生产操作权限。
