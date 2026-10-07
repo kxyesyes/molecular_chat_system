@@ -44,3 +44,23 @@ def test_url_policy_legacy_exports_are_the_canonical_objects():
 
     assert legacy_resolve_llm_host is resolve_llm_host
     assert legacy_validate_llm_url is validate_llm_url
+
+
+def test_model_lifecycle_legacy_exports_are_canonical_objects():
+    from src.system.model_lifecycle import (
+        ModelRequestGate,
+        close_owned_model,
+        finish_on_cancel,
+        model_request,
+    )
+    from src.web.model_lifecycle import (
+        ModelRequestGate as LegacyGate,
+        close_owned_model as legacy_close_owned_model,
+        finish_on_cancel as legacy_finish_on_cancel,
+        model_request as legacy_model_request,
+    )
+
+    assert LegacyGate is ModelRequestGate
+    assert legacy_close_owned_model is close_owned_model
+    assert legacy_finish_on_cancel is finish_on_cancel
+    assert legacy_model_request is model_request
