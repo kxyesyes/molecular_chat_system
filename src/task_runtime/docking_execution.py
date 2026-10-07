@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from src.agent.contracts import (
+from src.system.scientific_contracts import (
     AgentErrorCode,
     ToolProvenance,
     ToolResult,

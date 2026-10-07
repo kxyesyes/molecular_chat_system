@@ -18,7 +18,7 @@ import httpx
 import httpcore
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
-from src.agent.contracts import (
+from src.system.scientific_contracts import (
     AgentErrorCode,
     ToolProvenance,
     ToolResult,
