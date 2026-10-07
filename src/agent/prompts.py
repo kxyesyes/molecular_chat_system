@@ -2,7 +2,6 @@
 药物设计智能系统 - 提示词模板（中文优化版）
 针对API-key模型（ModelScope GLM-4/Qwen3）优化
 """
-
 # 药物设计系统提示词 - 用于主聊天模型
 DRUG_DESIGN_SYSTEM_PROMPT = """# 🧬 药物设计智能系统 - AI大脑
 

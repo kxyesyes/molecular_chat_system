@@ -1407,31 +1407,6 @@
     }, 3000);
   }
 
-  // 添加系统消息（仅在聊天模式下）
-  function addSystemMessage(message, isError = false) {
-    // 只在聊天模式下显示系统消息
-    if (!chatMode || !elements.chatContainer) {
-      return;
-    }
-
-    const msgDiv = document.createElement("div");
-    msgDiv.className = "chat-message system-message";
-    msgDiv.style.cssText = `
-      margin: 15px 0;
-      padding: 12px 18px;
-      background: ${isError ? "#fee2e2" : "#f0f9ff"};
-      border-left: 4px solid ${isError ? "#dc2626" : "#0284c7"};
-      border-radius: 8px;
-      font-size: 14px;
-      color: ${isError ? "#991b1b" : "#1e40af"};
-      text-align: center;
-    `;
-    msgDiv.textContent = `ℹ️ ${message}`;
-
-    elements.chatContainer.appendChild(msgDiv);
-    elements.chatContainer.scrollTop = elements.chatContainer.scrollHeight;
-  }
-
   // 修复后的消息发送函数
   function sendMessage() {
     if (decisionAwaitingReady) return; // no legacy fallback before the new server announcement
@@ -3026,57 +3001,6 @@
       elements.input.value = analysisQuery;
       sendMessage();
     }
-  }
-
-  // 显示通知 - 美化版
-  function showNotification(message, type = "info") {
-    const notification = document.createElement("div");
-    notification.className = `notification notification-${type}`;
-
-    const colors = {
-      info: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-      success: "linear-gradient(135deg, #0fb981 0%, #07c983 100%)",
-      warning: "linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%)",
-      error: "linear-gradient(135deg, #ef4444 0%, #f87171 100%)",
-    };
-
-    notification.style.cssText = `
-            position: fixed;
-            top: 80px;
-            right: 20px;
-            padding: 16px 24px;
-            border-radius: 12px;
-            color: white;
-            font-size: 14px;
-            font-weight: 500;
-            z-index: 10000;
-            animation: slideInRight 0.3s ease-out;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-            background: ${colors[type] || colors.info};
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        `;
-
-    const icons = {
-      info: "ℹ️",
-      success: "✅",
-      warning: "⚠️",
-      error: "❌",
-    };
-
-    const iconSpan = document.createElement("span");
-    iconSpan.textContent = icons[type] || icons.info;
-    const messageSpan = document.createElement("span");
-    messageSpan.textContent = message;
-    notification.append(iconSpan, messageSpan);
-    document.body.appendChild(notification);
-
-    // 3秒后自动移除
-    setTimeout(() => {
-      notification.style.animation = "slideOutRight 0.3s ease-out";
-      setTimeout(() => notification.remove(), 300);
-    }, 3000);
   }
 
   // 更新连接状态
