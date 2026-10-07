@@ -60,3 +60,12 @@ def test_docking_runtime_uses_docking_owned_result_validator():
     )
     assert "src.agent.validators.result_validator" not in source
     assert "src.docking.result_validator" in source
+
+
+def test_docking_runtime_uses_docking_owned_tool_adapter():
+    root = Path(__file__).parents[1]
+    source = (root / "src" / "task_runtime" / "docking_execution.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.agent.tools.molecular_docking" not in source
+    assert "src.docking.molecular_docking_adapter" in source
