@@ -542,41 +542,20 @@
   // 增强的消息处理函数
   function handleWebSocketMessage(data, socket = ws) {
     if (socket !== ws) return;
-    // 数据有效性检查
-    if (!data || typeof data !== "string") {
-      closeProtocolSocket(socket, 1002, "invalid message data");
-      console.warn("⚠️ 收到无效消息数据");
-      return;
-    }
-
-    if (data.length > maxWebSocketMessageLength) {
-      closeProtocolSocket(socket, 1009, "message too large");
-      console.warn("Ignored oversized WebSocket message");
-      showErrorMessage("收到的消息过大，已安全忽略");
-      return;
-    }
-
-    if (data.trim() === "") {
-      closeProtocolSocket(socket, 1002, "empty message");
-      console.warn("⚠️ 收到空消息");
+    const parsed = window.HomeProtocol.parseMessage(data, maxWebSocketMessageLength);
+    if (!parsed.ok) {
+      closeProtocolSocket(socket, parsed.code, parsed.reason);
+      if (parsed.code === 1009) {
+        console.warn("Ignored oversized WebSocket message");
+      } else {
+        console.warn(parsed.reason);
+      }
+      showErrorMessage(parsed.userMessage);
       return;
     }
 
     try {
-      const message = JSON.parse(data);
-
-      // 消息格式验证
-      if (!message || typeof message !== "object") {
-        closeProtocolSocket(socket, 1002, "invalid message shape");
-        console.warn("Invalid WebSocket message shape");
-        return;
-      }
-
-      if (!message.type) {
-        closeProtocolSocket(socket, 1002, "missing message type");
-        console.warn("Missing WebSocket message type");
-        return;
-      }
+      const message = parsed.message;
 
       if (decisionAwaitingReady && !["connection_ready", "pong"].includes(message.type)) return;
       if (message.type === "connection_ready") configureDecisionMode(message);
