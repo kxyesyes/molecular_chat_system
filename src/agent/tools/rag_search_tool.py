@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 from src.rag.receipt import validate_retrieval_envelope
 from src.rag.index import RAGIndexCompatibilityError
-from src.web.rag_presentation import format_rag_context
+from src.rag.presentation import format_rag_context
 from .base_tool import BaseMolecularTool
 
 

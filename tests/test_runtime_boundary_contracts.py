@@ -11,6 +11,7 @@ CORE_FILES = (
     ROOT / "src/agent/tools/__init__.py",
     ROOT / "src/agent/tools/llm_molecular_generator.py",
     ROOT / "src/agent/evaluation/scientific.py",
+    ROOT / "src/agent/tools/rag_search_tool.py",
     ROOT / "src/molecular_design/service.py",
     ROOT / "src/system/model_clients.py",
     ROOT / "src/system/ollama_model.py",
@@ -210,3 +211,14 @@ def test_pinned_transport_exports_remain_identical():
         "pin_supplied_async_client", "create_pinned_async_client",
     ):
         assert getattr(decision_transport, name) is getattr(llm_transport, name)
+
+
+def test_rag_presentation_legacy_exports_are_canonical_objects():
+    from src.rag.presentation import format_rag_context, rag_info_molecule
+    from src.web.rag_presentation import (
+        format_rag_context as legacy_format_rag_context,
+        rag_info_molecule as legacy_rag_info_molecule,
+    )
+
+    assert legacy_format_rag_context is format_rag_context
+    assert legacy_rag_info_molecule is rag_info_molecule
