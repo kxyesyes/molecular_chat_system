@@ -657,6 +657,7 @@ assert(
 );
 
 const mainSource = read("src/web/static/js/home/main.js");
+const protocolSource = read("src/web/static/js/home/protocol.js");
 const indexHtml = read("src/web/templates/index.html");
 const rendererStart = mainSource.indexOf(
   "function renderMoleculeCandidates(messageElement, payload)",
@@ -678,11 +679,11 @@ assert(
 assert(
   mainSource.includes("let protocolDesyncedSocket") &&
     mainSource.includes("closeProtocolSocket(socket, 1002") &&
-    mainSource.includes("closeProtocolSocket(socket, 1009"),
+    protocolSource.includes("code: 1009"),
   "Malformed and oversized frames must block the exact socket as protocol desync",
 );
 assert(
-  mainSource.includes("const socket = new WebSocket(wsUrl)") &&
+  mainSource.includes("HomeConnection.create") &&
     mainSource.match(/if \(socket !== ws\) return;/g)?.length >= 3,
   "WebSocket callbacks must be correlated to their captured socket instance",
 );
@@ -696,8 +697,8 @@ assert(
   sendCall >= 0 && requestStart > sendCall,
   "Request state must become active only after WebSocket send succeeds",
 );
-const parseCall = mainSource.indexOf("JSON.parse(data)");
-const rawLengthGuard = mainSource.lastIndexOf("data.length", parseCall);
+const parseCall = protocolSource.indexOf("JSON.parse(data)");
+const rawLengthGuard = protocolSource.lastIndexOf("data.length", parseCall);
 assert(
   rawLengthGuard >= 0 && rawLengthGuard < parseCall,
   "Raw WebSocket messages must be length-capped before JSON parsing",
@@ -970,9 +971,18 @@ const behaviorSandbox = {
   setTimeout: () => 1,
 };
 behaviorSandbox.window.window = behaviorSandbox.window;
+behaviorSandbox.window.WebSocket = FakeWebSocket;
 behaviorSandbox.globalThis = behaviorSandbox;
 vm.createContext(behaviorSandbox);
 vm.runInContext(helperSource, behaviorSandbox, { filename: helperPath });
+for (const file of ["config.js", "../shared/status.js", "connection.js", "protocol.js"]) {
+  vm.runInContext(
+    fs.readFileSync(path.join(root, "src/web/static/js/home", file), "utf8"),
+    behaviorSandbox,
+    { filename: file },
+  );
+}
+behaviorSandbox.HomeConfig = behaviorSandbox.window.HomeConfig;
 vm.runInContext(behaviorMainSource, behaviorSandbox, {
   filename: path.join(root, "src/web/static/js/home/main.js"),
 });

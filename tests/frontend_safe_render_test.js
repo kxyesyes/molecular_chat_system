@@ -231,6 +231,7 @@ assert(
 
 const homeFormatters = read("src/web/static/js/home/formatters.js");
 const homeMain = read("src/web/static/js/home/main.js");
+const homeProtocol = read("src/web/static/js/home/protocol.js");
 const homeChatRenderer = read("src/web/static/js/home/chat_renderer.js");
 const homeMoleculeCandidates = read(
   "src/web/static/js/home/molecule_candidates.js",
@@ -292,13 +293,14 @@ assert(
 assert(
   homeMain.includes("HomeMoleculeCandidates.createLifecycle") &&
     homeMain.includes("maxWebSocketMessageLength") &&
-    homeMain.indexOf("data.length > maxWebSocketMessageLength") <
-      homeMain.indexOf("JSON.parse(data)"),
+    homeProtocol.indexOf("data.length > maxLength") <
+      homeProtocol.indexOf("JSON.parse(data)"),
   "Homepage candidate handling must be request-scoped and bound raw messages before parsing",
 );
 assert(
   homeMoleculeCandidates.includes("canonicalSmiles: new Set()") &&
-    homeMain.includes("const socket = new WebSocket(wsUrl)") &&
+    homeProtocol.includes("parseMessage(data, maxLength)") &&
+    homeMain.includes("HomeConnection.create") &&
     homeMain.includes("protocolDesyncedSocket"),
   "Candidate rendering must dedupe canonical identities and correlate protocol state to one socket",
 );

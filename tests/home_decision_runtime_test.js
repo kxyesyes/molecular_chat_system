@@ -83,7 +83,7 @@ function loadHome({request, storedPointer = null} = {}) {
   const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
     sessionStorage: {getItem: () => stored, setItem: (_, s) => {stored = s;}, removeItem: () => {stored = null;}},
-    HomeChatRenderer: renderer};
+    HomeChatRenderer: renderer, WebSocket: Socket};
   const context = vm.createContext({window, document, WebSocket: Socket, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
     HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: s => String(s)},
@@ -93,9 +93,10 @@ function loadHome({request, storedPointer = null} = {}) {
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["molecule_candidates.js", "scientific_references.js", "evidence_report.js"]) {
+  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
+  context.HomeConfig = window.HomeConfig;
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,

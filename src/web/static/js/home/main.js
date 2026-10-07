@@ -395,22 +395,15 @@
       previousSocket.close();
     }
 
-    try {
-      const socket = new WebSocket(wsUrl);
-      ws = socket;
-
-      // 连接超时处理
-      const connectionTimeout = setTimeout(() => {
+    const socket = window.HomeConnection.create({
+      url: wsUrl,
+      timeoutMs: HomeConfig.websocket.connectTimeoutMs,
+      onTimeout: currentSocket => {
+        if (currentSocket === ws) console.log("WebSocket连接超时");
+      },
+      onOpen: currentSocket => {
+        const socket = currentSocket;
         if (socket !== ws) return;
-        if (socket.readyState === WebSocket.CONNECTING) {
-          console.log("WebSocket连接超时");
-          socket.close();
-        }
-      }, 10000); // 10秒超时
-
-      socket.onopen = () => {
-        if (socket !== ws) return;
-        clearTimeout(connectionTimeout);
         console.log("✅ WebSocket连接成功");
         console.log(`WebSocket readyState: ${socket.readyState}`);
 
@@ -421,9 +414,10 @@
 
         // 发送连接确认消息
         sendTestMessage(socket);
-      };
+      },
 
-      socket.onmessage = (event) => {
+      onMessage: (event, currentSocket) => {
+        const socket = currentSocket;
         if (socket !== ws) return;
         console.log("📨 收到WebSocket消息:", {
           timestamp: new Date().toISOString(),
@@ -437,12 +431,12 @@
           console.error("WebSocket message handling failed");
           showErrorMessage("消息处理失败，连接已关闭。");
         }
-      };
+      },
 
-      socket.onerror = (error) => {
+      onError: (error, currentSocket) => {
+        const socket = currentSocket;
         if (socket !== ws) return;
         clearDecisionConnection();
-        clearTimeout(connectionTimeout);
         if (protocolDesyncedSocket !== socket) {
           moleculeCandidateLifecycle.clear();
           if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
@@ -450,12 +444,12 @@
         console.error("WebSocket connection error");
         HomeChatRenderer.updateConnectionStatus("error");
         HomeChatRenderer.showNotification("WebSocket连接出错", "error");
-      };
+      },
 
-      socket.onclose = (event) => {
+      onClose: (event, currentSocket) => {
+        const socket = currentSocket;
         if (socket !== ws) return;
         clearDecisionConnection();
-        clearTimeout(connectionTimeout);
         moleculeCandidateLifecycle.clear();
         protocolDesyncedSocket = null;
         if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
@@ -493,8 +487,8 @@
           console.log("❌ 达到最大重连次数，停止重连");
           HomeChatRenderer.showNotification("连接失败，请刷新页面重试", "error");
         }
-      };
-    } catch (error) {
+      },
+      onCreateError: error => {
       moleculeCandidateLifecycle.clear();
       if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
       console.error("❌ 创建WebSocket连接失败:", {
@@ -507,7 +501,9 @@
         `连接创建失败: ${error.message}`,
         "error"
       );
-    }
+      },
+    });
+    ws = socket;
   }
 
   function closeProtocolSocket(socket, code, reason) {
