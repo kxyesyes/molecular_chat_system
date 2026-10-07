@@ -1,4 +1,3 @@
-import pickle
 import os
 import json
 import subprocess
@@ -13,6 +12,8 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 import pytest
+
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -33,6 +34,13 @@ class ReverseTargetHealthTest(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    def _add_browser_session(self, app):
+        app.add_middleware(
+            AgentSessionMiddleware,
+            store=AgentSessionStore(self.data_dir / "sessions.sqlite"),
+        )
+        return app
+
     def _write_minimal_database_files(self):
         (self.data_dir / "chembl_data_with_fps.tsv").write_text(
             "molecule_chembl_id\tcanonical_smiles\ttarget_name\tstandard_type\tstandard_value\torganism\n"
@@ -45,8 +53,10 @@ class ReverseTargetHealthTest(unittest.TestCase):
         )
         (self.data_dir / "morgan_fingerprints.npy").write_bytes(b"morgan-demo")
         (self.data_dir / "maccs_fingerprints.npy").write_bytes(b"maccs-demo")
-        with (self.data_dir / "fingerprint_metadata.pkl").open("wb") as handle:
-            pickle.dump({"morgan_bits": 2048, "maccs_bits": 166}, handle)
+        (self.data_dir / "fingerprint_metadata.json").write_text(
+            json.dumps({"morgan_bits": 2048, "maccs_bits": 166}),
+            encoding="utf-8",
+        )
 
     def test_health_reports_missing_files(self):
         from src.reverse_target.health import inspect_reverse_target_database
@@ -72,6 +82,18 @@ class ReverseTargetHealthTest(unittest.TestCase):
         self.assertEqual(health["metadata"]["maccs_bits"], 166)
         self.assertEqual(health["cache_dir"], str((self.data_dir / "pharm3d_cache").as_posix()))
 
+    def test_legacy_pickle_metadata_is_not_a_usable_database_manifest(self):
+        from src.reverse_target.health import inspect_reverse_target_database
+
+        self._write_minimal_database_files()
+        (self.data_dir / "fingerprint_metadata.json").unlink()
+        (self.data_dir / "fingerprint_metadata.pkl").write_bytes(b"legacy data")
+
+        health = inspect_reverse_target_database(self.data_dir)
+
+        assert health["ready"] is False
+        assert any(item["key"] == "metadata" for item in health["missing_files"])
+
     def test_health_route_uses_configured_data_dir(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
@@ -82,8 +104,9 @@ class ReverseTargetHealthTest(unittest.TestCase):
         os.environ["REVERSE_TARGET_DATA_DIR"] = str(self.data_dir)
         try:
             app = FastAPI()
+            self._add_browser_session(app)
             setup_api_routes(app)
-            response = TestClient(app).get("/api/reverse_target/health")
+            response = TestClient(app, base_url="https://localhost").get("/api/reverse_target/health")
         finally:
             if previous is None:
                 os.environ.pop("REVERSE_TARGET_DATA_DIR", None)
@@ -127,6 +150,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
             return fake_predictor
 
         app = FastAPI()
+        self._add_browser_session(app)
         api_routes.setup_api_routes(app)
 
         with patch.object(
@@ -135,7 +159,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
             new=recording_run_in_threadpool,
             create=True,
         ), patch.object(predictor_module, "get_predictor", new=fake_get_predictor):
-            with TestClient(app) as client:
+            with TestClient(app, base_url="https://localhost") as client:
                 direct = client.post(
                     "/api/reverse_target/predict",
                     data={"smiles": "CCO", "threshold": "0.6", "top_k": "10"},
@@ -159,7 +183,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
             self.assertEqual(getter_thread_id, predict_thread_id)
             self.assertNotEqual(route_thread_ids[index], getter_thread_id)
 
-    def test_stats_similar_and_3d_load_predictor_in_worker_threads(self):
+    def test_stats_and_similar_load_predictor_in_worker_threads_and_3d_isolated(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
         from starlette.concurrency import run_in_threadpool as starlette_run_in_threadpool
@@ -182,17 +206,35 @@ class ReverseTargetHealthTest(unittest.TestCase):
                 predictor_thread_events.append(("similar", threading.get_ident()))
                 return []
 
-            def get_raw_similar_molecules(self, **kwargs):
-                predictor_thread_events.append(("raw", threading.get_ident()))
-                return []
-
         fake_predictor = FakePredictor()
+        isolated_job_targets = []
+
+        async def fake_run_pharm3d_job(target, *args, timeout_seconds=None):
+            isolated_job_targets.append(target.__name__)
+            if target.__name__ == "_pharm3d_candidates_job":
+                return [{
+                    "target_name": "synthetic-target",
+                    "target_id": "T1",
+                    "final_similarity": 0.8,
+                }]
+            if target.__name__ == "_pharm3d_refine_job":
+                return [{
+                    "target_name": "synthetic-target",
+                    "target_id": "T1",
+                    "final_similarity": 0.8,
+                    "final_3d_score": 0.9,
+                    "pharm_refinement_status": "refined",
+                }]
+            if target.__name__ == "_pharm3d_query_job":
+                return None
+            raise AssertionError(f"unexpected pharm3d target: {target.__name__}")
 
         def fake_get_predictor():
             predictor_thread_events.append(("get_predictor", threading.get_ident()))
             return fake_predictor
 
         app = FastAPI()
+        self._add_browser_session(app)
         api_routes.setup_api_routes(app)
 
         with patch.object(
@@ -200,8 +242,12 @@ class ReverseTargetHealthTest(unittest.TestCase):
             "run_in_threadpool",
             new=recording_run_in_threadpool,
             create=True,
-        ), patch.object(predictor_module, "get_predictor", new=fake_get_predictor):
-            with TestClient(app) as client:
+        ), patch.object(predictor_module, "get_predictor", new=fake_get_predictor), patch.object(
+            api_routes,
+            "_run_pharm3d_job",
+            new=fake_run_pharm3d_job,
+        ):
+            with TestClient(app, base_url="https://localhost") as client:
                 stats = client.get("/api/reverse_target/stats")
                 similar = client.get(
                     "/api/reverse_target/similar_molecules",
@@ -217,10 +263,15 @@ class ReverseTargetHealthTest(unittest.TestCase):
         self.assertEqual(refined.status_code, 200, refined.text)
         self.assertEqual(
             [event for event, _ in predictor_thread_events],
-            ["get_predictor", "stats", "get_predictor", "similar", "get_predictor", "raw"],
+            ["get_predictor", "stats", "get_predictor", "similar"],
         )
-        self.assertEqual(len(route_thread_ids), 3)
-        for index in range(3):
+        self.assertEqual(isolated_job_targets, [
+            "_pharm3d_candidates_job",
+            "_pharm3d_refine_job",
+            "_pharm3d_query_job",
+        ])
+        self.assertEqual(len(route_thread_ids), 2)
+        for index in range(2):
             getter_thread_id = predictor_thread_events[index * 2][1]
             operation_thread_id = predictor_thread_events[index * 2 + 1][1]
             self.assertEqual(getter_thread_id, operation_thread_id)
@@ -237,6 +288,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
                 raise AssertionError("predict_batch must not run for an oversized upload")
 
         app = FastAPI()
+        self._add_browser_session(app)
         setup_api_routes(app)
 
         with patch.dict(os.environ, {"MEDCHAT_MAX_UPLOAD_BYTES": "4"}), patch.object(
@@ -244,7 +296,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
             "get_predictor",
             return_value=FailIfCalledPredictor(),
         ):
-            response = TestClient(app).post(
+            response = TestClient(app, base_url="https://localhost").post(
                 "/api/reverse_target/batch_predict",
                 files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
                 data={"threshold": "0.6", "top_k": "10"},
@@ -264,9 +316,10 @@ class ReverseTargetHealthTest(unittest.TestCase):
                 return [{"row_index": 0, "success": True, "status": "completed"}]
 
         app = FastAPI()
+        self._add_browser_session(app)
         setup_api_routes(app)
         with patch.object(predictor_module, "get_predictor", return_value=ShortPredictor()):
-            response = TestClient(app).post(
+            response = TestClient(app, base_url="https://localhost").post(
                 "/api/reverse_target/batch_predict",
                 files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
                 data={"threshold": "0.6", "top_k": "10"},
@@ -286,9 +339,10 @@ class ReverseTargetHealthTest(unittest.TestCase):
                 return []
 
         app = FastAPI()
+        self._add_browser_session(app)
         setup_api_routes(app)
         with patch.object(predictor_module, "get_predictor", return_value=EmptyPredictor()):
-            response = TestClient(app).post(
+            response = TestClient(app, base_url="https://localhost").post(
                 "/api/reverse_target/batch_predict",
                 files={"file": ("smiles.txt", b"CCO\nCCC\n", "text/plain")},
                 data={"threshold": "0.6", "top_k": "10"},
@@ -428,7 +482,7 @@ class ReverseTargetHealthTest(unittest.TestCase):
             "chembl_data_with_fps.tsv",
             "morgan_fingerprints.npy",
             "maccs_fingerprints.npy",
-            "fingerprint_metadata.pkl",
+            "fingerprint_metadata.json",
         ):
             self.assertTrue((self.data_dir / filename).exists(), filename)
 

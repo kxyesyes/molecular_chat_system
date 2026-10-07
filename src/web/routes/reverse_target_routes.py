@@ -1,19 +1,76 @@
 """Reverse target route registration."""
 import math
 
-from fastapi import UploadFile, File, Form, HTTPException
+from fastapi import UploadFile, File, Form, HTTPException, Request
+from src.web.request_auth import require_browser_session
+
+
+def _safe_internal_failure(operation: str) -> str:
+    """Keep implementation details, paths and credentials out of HTTP errors."""
+
+    return f"{operation}失败，请稍后重试"
+
+
+def _reverse_result_status(results):
+    """Return a truthful status for a single reverse-target prediction."""
+
+    if results:
+        return {"status": "completed", "success": True}
+    return {
+        "status": "failed",
+        "success": False,
+        "error_code": "NO_MATCHING_TARGETS",
+    }
+
+
+def _reverse_batch_status(rows):
+    """Summarize per-input outcomes without treating partial work as success."""
+
+    if not rows:
+        status = "failed"
+    else:
+        completed = sum(1 for row in rows if row.get("success") is True)
+        status = (
+            "completed"
+            if completed == len(rows)
+            else "failed"
+            if completed == 0
+            else "partial"
+        )
+    summary = {"status": status, "success": status == "completed"}
+    if status == "failed":
+        summary["error_code"] = "NO_MATCHING_TARGETS"
+    return summary
+
+
+def _attach_reverse_task_receipt(
+    *, owner_session_id: str, task_type: str, result: dict
+) -> dict:
+    """Expose a session-bound receipt for legacy synchronous predictions."""
+
+    from src.task_runtime.legacy_bridge import attach_legacy_task_id
+    from src.task_runtime.manager import get_task_manager
+
+    return attach_legacy_task_id(
+        get_task_manager(),
+        task_type=task_type,
+        owner_session_id=owner_session_id,
+        result=result,
+    )
 
 
 def setup_reverse_target_routes(app, *, _support):
     """Register the original endpoints with dynamically resolved compatibility support."""
     @app.post("/api/reverse_target/predict")
     async def reverse_target_predict(
+        request: Request,
         smiles: str = Form(...),
         threshold: float = Form(0.6),
         top_k: int = Form(10),
         organism_filter: str = Form("")
     ):
         """反向寻靶预测API"""
+        owner_session_id = require_browser_session(request)
         try:
             if not smiles or not smiles.strip():
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
@@ -40,11 +97,17 @@ def setup_reverse_target_routes(app, *, _support):
             
             _support.logger.info(f"反向寻靶预测成功: 找到 {len(results)} 个靶点")
             
-            return {
-                "success": True,
+            status = _reverse_result_status(results)
+            response = {
+                **status,
                 "count": len(results),
                 "results": results
             }
+            return _attach_reverse_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="reverse_target",
+                result=response,
+            )
             
         except HTTPException:
             raise
@@ -53,16 +116,18 @@ def setup_reverse_target_routes(app, *, _support):
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             _support.logger.error(f"反向寻靶预测失败: {e}")
-            raise HTTPException(status_code=500, detail=f"预测失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("反向寻靶预测"))
     
     @app.post("/api/reverse_target/batch_predict")
     async def reverse_target_batch_predict(
+        request: Request,
         file: UploadFile = File(...),
         threshold: float = Form(0.6),
         top_k: int = Form(10),
         organism_filter: str = Form("")
     ):
         """反向寻靶批量预测API"""
+        owner_session_id = require_browser_session(request)
         try:
             if not math.isfinite(threshold) or threshold < 0 or threshold > 1:
                 raise HTTPException(status_code=400, detail="阈值必须在0-1之间且为有限数值")
@@ -105,12 +170,18 @@ def setup_reverse_target_routes(app, *, _support):
             
             _support.logger.info(f"批量反向寻靶预测完成: {len(results)} 个分子")
             
-            return {
-                "success": True,
+            status = _reverse_batch_status(results)
+            response = {
+                **status,
                 "count": len(results),
                 "row_count": len(rows),
                 "results": results
             }
+            return _attach_reverse_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="reverse_target_batch",
+                result=response,
+            )
             
         except HTTPException:
             raise
@@ -119,11 +190,12 @@ def setup_reverse_target_routes(app, *, _support):
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             _support.logger.error(f"批量预测失败: {e}")
-            raise HTTPException(status_code=500, detail=f"批量预测失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("批量预测"))
 
     @app.get("/api/reverse_target/stats")
-    async def get_reverse_target_stats():
+    async def get_reverse_target_stats(request: Request):
         """获取反向寻靶数据库统计信息"""
+        require_browser_session(request)
         try:
             from src.reverse_target.predictor import get_predictor
 
@@ -134,11 +206,12 @@ def setup_reverse_target_routes(app, *, _support):
             return {"success": True, "stats": stats}
         except Exception as e:
             _support.logger.error(f"获取统计信息失败: {e}")
-            raise HTTPException(status_code=500, detail=f"获取统计信息失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("获取反向寻靶统计信息"))
 
     @app.get("/api/reverse_target/health")
-    async def get_reverse_target_health():
+    async def get_reverse_target_health(request: Request):
         """轻量检查反向寻靶本地数据库状态，不加载大型指纹矩阵。"""
+        require_browser_session(request)
         try:
             from src.reverse_target.config import get_reverse_target_data_dir
             from src.reverse_target.health import inspect_reverse_target_database
@@ -147,10 +220,11 @@ def setup_reverse_target_routes(app, *, _support):
             return inspect_reverse_target_database(data_dir)
         except Exception as e:
             _support.logger.error(f"反向寻靶健康检查失败: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"反向寻靶健康检查失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("反向寻靶健康检查"))
     
     @app.get("/api/reverse_target/similar_molecules")
     async def get_similar_molecules(
+        request: Request,
         smiles: str,
         target_name: str,
         threshold: float = 0.6,
@@ -158,6 +232,7 @@ def setup_reverse_target_routes(app, *, _support):
         organism_filter: str = ""
     ):
         """获取特定靶点的相似分子列表"""
+        owner_session_id = require_browser_session(request)
         try:
             if not smiles or not smiles.strip():
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
@@ -185,13 +260,19 @@ def setup_reverse_target_routes(app, *, _support):
                 load_similar
             )
             
-            return {
-                "success": True,
+            status = _reverse_result_status(results)
+            response = {
+                **status,
                 "count": len(results),
                 "target_name": target_name,
                 "query_smiles": smiles,
                 "results": results
             }
+            return _attach_reverse_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="reverse_target_similar",
+                result=response,
+            )
             
         except HTTPException:
             raise
@@ -200,12 +281,13 @@ def setup_reverse_target_routes(app, *, _support):
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             _support.logger.error(f"获取相似分子失败: {e}")
-            raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("获取相似分子"))
 
     # ==================== 3D 药效团 API ====================
 
     @app.post("/api/reverse_target/predict_3d")
     async def reverse_target_predict_3d(
+        request: Request,
         smiles: str = Form(...),
         threshold: float = Form(0.5),
         top_k: int = Form(10),
@@ -222,6 +304,7 @@ def setup_reverse_target_routes(app, *, _support):
         2. 对候选分子进行 3D 构象生成 + 药效团打分
         3. 融合 2D+3D 分数进行重新排序，返回最终 top_k 靶点
         """
+        owner_session_id = require_browser_session(request)
         try:
             if not smiles or not smiles.strip():
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
@@ -240,22 +323,23 @@ def setup_reverse_target_routes(app, *, _support):
 
             smiles = smiles.strip()
             candidate_limit = _support._get_pharm3d_candidate_pool_limit(top_k, max_refine)
+            timeout_seconds = _support._get_pharm3d_timeout(25.0)
+            deadline = _support.asyncio.get_running_loop().time() + timeout_seconds
 
             # Step 1: 2D 预筛选。返回数量(top_k)和 3D 精修数量(max_refine)解耦。
-            from src.reverse_target.predictor import get_predictor
-
-            def load_candidates():
-                predictor = get_predictor()
-                return predictor.get_raw_similar_molecules(
-                    smiles=smiles,
-                    threshold=prefilter_threshold,
-                    limit=candidate_limit,
-                    organism_filter=organism_filter,
-                )
-
             # 降低阈值保证候选数量，提升召回
             prefilter_threshold = max(0.0, threshold - 0.2)
-            raw_candidates = await _support._invoke_in_threadpool(load_candidates)
+            raw_candidates = await _support.asyncio.wait_for(
+                _support._run_pharm3d_job(
+                    _support._pharm3d_candidates_job,
+                    smiles,
+                    prefilter_threshold,
+                    candidate_limit,
+                    organism_filter,
+                    timeout_seconds=timeout_seconds,
+                ),
+                timeout=max(0.1, deadline - _support.asyncio.get_running_loop().time()),
+            )
             raw_candidate_count = len(raw_candidates)
             unique_target_count_before_top_k = len(
                 {
@@ -266,8 +350,8 @@ def setup_reverse_target_routes(app, *, _support):
             )
 
             if not raw_candidates:
-                return {
-                    "success": True,
+                response = {
+                    **_reverse_result_status([]),
                     "mode": "2d+3d",
                     "count": 0,
                     "results": [],
@@ -279,6 +363,11 @@ def setup_reverse_target_routes(app, *, _support):
                     "unique_target_count_before_top_k": 0,
                     "prefilter_threshold": prefilter_threshold,
                 }
+                return _attach_reverse_task_receipt(
+                    owner_session_id=owner_session_id,
+                    task_type="reverse_target_3d",
+                    result=response,
+                )
 
             _support.logger.info(
                 f"3D精修: 2D粗筛得到 {len(raw_candidates)} 个候选分子，"
@@ -287,27 +376,23 @@ def setup_reverse_target_routes(app, *, _support):
             )
 
             # Step 2: 3D 药效团精修（在线程池中执行以避免阻塞事件循环）
-            from src.reverse_target.pharmacophore_refiner import (
-                refine_with_pharmacophore,
-                get_molecule_pharmacophore,
-            )
-
             refinement_status = "success"
             refinement_message = "3D 药效团精修完成"
-            timeout_seconds = _support._get_pharm3d_timeout(25.0)
 
             try:
-                outer_timeout = timeout_seconds + min(1.0, max(0.1, timeout_seconds * 0.2))
-                refined = await _support._run_pharm3d_job(
-                    lambda: refine_with_pharmacophore(
-                        query_smiles=smiles,
-                        candidates=raw_candidates,
-                        max_to_refine=max_refine,
-                        alpha_2d=alpha_2d,
-                        alpha_3d=alpha_3d,
-                        timeout_seconds=timeout_seconds,
+                remaining = max(0.1, deadline - _support.asyncio.get_running_loop().time())
+                refined = await _support.asyncio.wait_for(
+                    _support._run_pharm3d_job(
+                        _support._pharm3d_refine_job,
+                        smiles,
+                        raw_candidates,
+                        max_refine,
+                        alpha_2d,
+                        alpha_3d,
+                        remaining,
+                        timeout_seconds=remaining,
                     ),
-                    timeout_seconds=outer_timeout,
+                    timeout=remaining,
                 )
             except _support.asyncio.TimeoutError:
                 _support.logger.warning("3D药效团精修超时，返回2D基础结果")
@@ -318,7 +403,7 @@ def setup_reverse_target_routes(app, *, _support):
             except Exception as e:
                 _support.logger.warning(f"3D药效团精修失败，返回2D基础结果: {e}")
                 refinement_status = "fallback"
-                refinement_message = f"3D 药效团精修失败，已返回基础反向寻靶结果: {str(e)}"
+                refinement_message = "3D 药效团精修失败，已返回基础反向寻靶结果"
                 refined = _support._build_pharm3d_fallback(raw_candidates, refinement_message)
                 query_pharm = None
             else:
@@ -343,9 +428,16 @@ def setup_reverse_target_routes(app, *, _support):
                     )
 
                 try:
-                    query_pharm = await _support._run_pharm3d_job(
-                        lambda: get_molecule_pharmacophore(smiles),
-                        timeout_seconds=min(5.0, timeout_seconds),
+                    remaining = deadline - _support.asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise _support.asyncio.TimeoutError
+                    query_pharm = await _support.asyncio.wait_for(
+                        _support._run_pharm3d_job(
+                            _support._pharm3d_query_job,
+                            smiles,
+                            timeout_seconds=min(5.0, remaining),
+                        ),
+                        timeout=min(5.0, remaining),
                     )
                 except _support.asyncio.TimeoutError:
                     _support.logger.warning("查询分子药效团提取超时，继续返回精修结果")
@@ -401,8 +493,11 @@ def setup_reverse_target_routes(app, *, _support):
 
             _support.logger.info(f"3D精修完成, 返回 {len(final_results)} 个靶点")
 
-            return {
-                "success": True,
+            result_status = _reverse_result_status(final_results)
+            if final_results and refinement_status not in {"success"}:
+                result_status = {"status": "partial", "success": False}
+            response = {
+                **result_status,
                 "mode": "2d+3d",
                 "count": len(final_results),
                 "results": final_results,
@@ -418,18 +513,27 @@ def setup_reverse_target_routes(app, *, _support):
                 "unique_target_count_before_top_k": unique_target_count_before_top_k,
                 "prefilter_threshold": prefilter_threshold,
             }
+            return _attach_reverse_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="reverse_target_3d",
+                result=response,
+            )
 
         except HTTPException:
             raise
+        except _support.asyncio.TimeoutError:
+            _support.logger.warning("3D 药效团请求超过统一时间预算")
+            raise HTTPException(status_code=504, detail="反向寻靶 3D 计算超时，未返回不完整结果") from None
         except ValueError as e:
             _support.logger.warning(f"3D药效团预测输入无效: {e}")
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
             _support.logger.error(f"3D药效团预测失败: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"3D预测失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("3D 药效团预测"))
 
     @app.post("/api/reverse_target/pharmacophore")
     async def get_pharmacophore(
+        request: Request,
         smiles: str = Form(...),
     ):
         """
@@ -441,15 +545,15 @@ def setup_reverse_target_routes(app, *, _support):
             mol_block     : MolBlock (供 3Dmol.js 可视化)
             properties    : 理化性质 (MW, LogP, TPSA, HBD, HBA, RotBonds)
         """
+        owner_session_id = require_browser_session(request)
         try:
             if not smiles or not smiles.strip():
                 raise HTTPException(status_code=400, detail="SMILES字符串不能为空")
 
-            from src.reverse_target.pharmacophore_refiner import get_molecule_pharmacophore
-
             try:
                 result = await _support._run_pharm3d_job(
-                    lambda: get_molecule_pharmacophore(smiles.strip()),
+                    _support._pharm3d_query_job,
+                    smiles.strip(),
                     timeout_seconds=_support._get_pharm3d_timeout(25.0),
                 )
             except _support.asyncio.TimeoutError:
@@ -458,10 +562,14 @@ def setup_reverse_target_routes(app, *, _support):
             if not result.get("success"):
                 raise HTTPException(status_code=422, detail=result.get("error", "药效团提取失败"))
 
-            return result
+            return _attach_reverse_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="reverse_target_pharmacophore",
+                result=result,
+            )
 
         except HTTPException:
             raise
         except Exception as e:
             _support.logger.error(f"药效团提取失败: {e}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"药效团提取失败: {str(e)}")
+            raise HTTPException(status_code=500, detail=_safe_internal_failure("药效团提取"))

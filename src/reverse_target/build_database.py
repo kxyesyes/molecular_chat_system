@@ -4,6 +4,7 @@
 """
 
 import sys
+import json
 from pathlib import Path
 
 # 添加项目根目录到 Python 路径
@@ -120,13 +121,10 @@ class DatabaseBuilder:
         print("步骤 4/4: 生成最终摘要")
         print("=" * 80)
         
-        import pickle
-        
         # 读取元数据
-        metadata_file = self.output_dir / "fingerprint_metadata.pkl"
+        metadata_file = self.output_dir / "fingerprint_metadata.json"
         if metadata_file.exists():
-            with open(metadata_file, 'rb') as f:
-                metadata = pickle.load(f)
+            metadata = json.loads(metadata_file.read_text(encoding="utf-8"))
             
             print("\n数据库构建完成！")
             print("-" * 80)
@@ -136,7 +134,7 @@ class DatabaseBuilder:
             print(f"  2. chembl_data_with_fps.tsv       - 带指纹的数据表")
             print(f"  3. morgan_fingerprints.npy        - Morgan 指纹 ({metadata['morgan_bits']} bits)")
             print(f"  4. maccs_fingerprints.npy         - MACCS 指纹 ({metadata['maccs_bits']} bits)")
-            print(f"  5. fingerprint_metadata.pkl       - 元数据")
+            print(f"  5. fingerprint_metadata.json      - 元数据")
             
             print(f"\n数据统计:")
             print(f"  - 分子数量: {metadata['num_molecules']:,}")

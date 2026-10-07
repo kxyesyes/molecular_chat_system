@@ -6,12 +6,12 @@
 import numpy as np
 import pandas as pd
 import os
+import json
 from pathlib import Path
 from typing import List, Dict, Tuple
 from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import AllChem, MACCSkeys
-import pickle
 import threading
 import uuid
 
@@ -59,7 +59,7 @@ class ReverseTargetPredictor:
         self.maccs_fp_path = self.data_dir / "maccs_fingerprints.npy"
         self.morgan_popcount_path = self.data_dir / "morgan_popcounts.npy"
         self.maccs_popcount_path = self.data_dir / "maccs_popcounts.npy"
-        self.metadata_path = self.data_dir / "fingerprint_metadata.pkl"
+        self.metadata_path = self.data_dir / "fingerprint_metadata.json"
         
         # 数据缓存
         self.df = None
@@ -298,8 +298,10 @@ class ReverseTargetPredictor:
             
             # 加载元数据
             if self.metadata_path.exists():
-                with open(self.metadata_path, 'rb') as f:
-                    self.metadata = pickle.load(f)
+                metadata = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+                if not isinstance(metadata, dict):
+                    raise ValueError("Invalid reverse-target metadata")
+                self.metadata = metadata
             
             print(f"加载完成: {len(self.df)} 条数据, {self.df['target_name'].nunique()} 个靶点")
             self._loaded = True
@@ -528,7 +530,7 @@ class ReverseTargetPredictor:
             for r in results:
                 if check:
                     check()
-                target = r['target_name']
+                target = _target_aggregation_key(r)
                 if target not in target_counts:
                     target_counts[target] = 0
                 target_counts[target] += 1
@@ -584,6 +586,16 @@ class ReverseTargetPredictor:
                 continue
             try:
                 res = self.predict(smiles, threshold, top_k, combine_by_target, organism_filter=organism_filter)
+                if not res:
+                    results.append({
+                        "row_index": row_index,
+                        "query_smiles": smiles,
+                        "success": False,
+                        "status": "no_match",
+                        "error_code": "NO_MATCHING_TARGETS",
+                        "targets": [],
+                    })
+                    continue
                 results.append({
                     "row_index": row_index,
                     "query_smiles": smiles,
@@ -863,11 +875,11 @@ def _aggregate_by_target(
     按靶点聚合候选分子，取每个靶点的最高分代表，返回 top_k 靶点。
     供 3D 级联 API 调用。
     """
-    target_map: Dict[str, Dict] = {}
-    target_counts: Dict[str, int] = {}
+    target_map: Dict[tuple[str, str], Dict] = {}
+    target_counts: Dict[tuple[str, str], int] = {}
 
     for r in candidates:
-        target = r.get('target_name', '')
+        target = _target_aggregation_key(r)
         score  = r.get(score_field, r.get('final_similarity', 0.0))
 
         target_counts[target] = target_counts.get(target, 0) + 1
@@ -878,15 +890,31 @@ def _aggregate_by_target(
     for target, result in target_map.items():
         result['similar_count'] = target_counts[target]
         # 生成搜索链接
+        target_name = str(result.get('target_name', ''))
         result.setdefault(
             'chembl_search_url',
-            f"https://www.ebi.ac.uk/chembl/target_report_card/{target.replace(' ', '%20')}/"
+            f"https://www.ebi.ac.uk/chembl/target_report_card/{target_name.replace(' ', '%20')}/"
         )
         result.setdefault(
             'uniprot_search_url',
-            f"https://www.uniprot.org/uniprotkb?query={target.replace(' ', '+')}+AND+organism_id:9606"
+            f"https://www.uniprot.org/uniprotkb?query={target_name.replace(' ', '+')}+AND+organism_id:9606"
         )
 
     results = list(target_map.values())
     results.sort(key=lambda x: x.get(score_field, 0), reverse=True)
     return results[:top_k]
+
+
+def _target_aggregation_key(record: Dict) -> tuple[str, str]:
+    """Use stable target identity plus organism/taxon for result grouping."""
+
+    target_id = next(
+        (record.get(field) for field in ("target_chembl_id", "target_id", "target_uniprot_id")
+         if record.get(field) not in (None, "")),
+        None,
+    )
+    identity = str(target_id or record.get("target_name") or "").strip().casefold()
+    organism = record.get("organism")
+    taxon = record.get("taxon_id")
+    species = str(taxon if taxon not in (None, "") else organism or "").strip().casefold()
+    return identity, species

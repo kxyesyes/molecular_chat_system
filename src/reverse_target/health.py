@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import json
-import pickle
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +13,7 @@ TRAINING_DATA_CANDIDATES = ("chembl_data_with_fps.tsv", "chembl_training_data.ts
 REQUIRED_FILES = {
     "morgan_fingerprints": "morgan_fingerprints.npy",
     "maccs_fingerprints": "maccs_fingerprints.npy",
-    "metadata": "fingerprint_metadata.pkl",
+    "metadata": "fingerprint_metadata.json",
 }
 
 
@@ -79,10 +78,11 @@ def _resolve_training_data_path(root: Path) -> Path:
 
 def _read_metadata(path: Path) -> dict[str, Any]:
     try:
-        with path.open("rb") as handle:
-            metadata = pickle.load(handle)
-    except Exception as exc:
-        return {"error": str(exc)}
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return {"error": "invalid_metadata"}
+    if not isinstance(metadata, dict):
+        return {"error": "invalid_metadata"}
     return {
         "morgan_bits": metadata.get("morgan_bits"),
         "maccs_bits": metadata.get("maccs_bits"),

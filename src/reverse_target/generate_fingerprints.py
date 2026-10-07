@@ -10,7 +10,6 @@ from rdkit import Chem
 from rdkit import DataStructs
 from rdkit.Chem import MACCSkeys, rdFingerprintGenerator
 from tqdm import tqdm
-import pickle
 import hashlib
 import json
 
@@ -223,9 +222,11 @@ class FingerprintGenerator:
             'data_version': f"sha256:{source_sha256}",
         }
         
-        metadata_file = self.output_dir / "fingerprint_metadata.pkl"
-        with open(metadata_file, 'wb') as f:
-            pickle.dump(metadata, f)
+        metadata_file = self.output_dir / "fingerprint_metadata.json"
+        metadata_file.write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
 
         manifest = {
             'schema_version': 1,
@@ -253,9 +254,11 @@ class FingerprintGenerator:
             'maccs_fps': maccs_fps[:100].tolist()
         }
         
-        sample_file = self.output_dir / "fingerprint_samples.pkl"
-        with open(sample_file, 'wb') as f:
-            pickle.dump(sample_data, f)
+        sample_file = self.output_dir / "fingerprint_samples.json"
+        sample_file.write_text(
+            json.dumps(sample_data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
         
         print(f"✓ 示例数据已保存: {sample_file}")
         

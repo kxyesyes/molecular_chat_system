@@ -29,6 +29,24 @@ SOURCE_ERROR = "Invalid reverse-target owned source."
 PROOF_ERROR = "Invalid reverse-target prediction proof."
 
 
+def _target_identity_key(record):
+    """Return the stable target/species key used by owned result proofs."""
+    target_id = next(
+        (
+            record.get(field)
+            for field in ("target_chembl_id", "target_identifier", "target_uniprot_id", "target_id")
+            if record.get(field) not in (None, "")
+        ),
+        None,
+    )
+    identity = str(target_id or record.get("target_name") or "").strip().casefold()
+    taxon = record.get("taxon_id")
+    species = str(
+        taxon if taxon not in (None, "") else record.get("organism") or ""
+    ).strip().casefold()
+    return identity, species
+
+
 class _StrictInputError(ValueError):
     def __init__(self):
         super().__init__(INPUT_ERROR)
@@ -530,10 +548,11 @@ def validate_envelope(envelope, *, smiles, controls, expected):
             idx, count, score = record["row_index"], record["similar_count"], record["final_similarity"]
             if type(idx) is not int or not 0 <= idx < rows or idx in indices or type(count) is not int or not 1 <= count <= rows:
                 raise ValueError(PROOF_ERROR)
-            if score > previous or (controls["combine_by_target"] and record["target_name"] in targets) or (not controls["combine_by_target"] and count != 1):
+            target_key = _target_identity_key(record)
+            if score > previous or (controls["combine_by_target"] and target_key in targets) or (not controls["combine_by_target"] and count != 1):
                 raise ValueError(PROOF_ERROR)
             indices.add(idx)
-            targets.add(record["target_name"])
+            targets.add(target_key)
             total += count
             previous = score
         if total > rows or not np.all(np.asarray([v["final_similarity"] for v in records], dtype=r["score_dtype"]) >= controls["threshold"]):

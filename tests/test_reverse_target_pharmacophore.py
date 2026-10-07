@@ -1,5 +1,7 @@
 import os
 import sys
+import asyncio
+import tempfile
 import time
 import types
 import unittest
@@ -298,17 +300,35 @@ class ReverseTargetPharm3DApiTest(unittest.TestCase):
         sys.modules["src.reverse_target.pharmacophore_refiner"] = refiner_module
 
         from src.web.routes.api_routes import setup_api_routes
+        from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+        from src.web.routes import api_routes as support
+
+        async def run_job(target, *args, **kwargs):
+            if target is support._pharm3d_candidates_job:
+                return [{
+                    "target_name": "Demo target",
+                    "final_similarity": 0.72,
+                    "canonical_smiles": "CCO",
+                }]
+            raise asyncio.TimeoutError
 
         app = FastAPI()
-        setup_api_routes(app)
-        response = TestClient(app).post(
-            "/api/reverse_target/predict_3d",
-            data={"smiles": "CCO", "threshold": "0.5", "top_k": "10", "max_refine": "1"},
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            app.add_middleware(
+                AgentSessionMiddleware,
+                store=AgentSessionStore(Path(directory) / "sessions.sqlite"),
+            )
+            setup_api_routes(app)
+            with patch.object(support, "_run_pharm3d_job", new=run_job):
+                response = TestClient(app, base_url="http://localhost").post(
+                    "/api/reverse_target/predict_3d",
+                    data={"smiles": "CCO", "threshold": "0.5", "top_k": "10", "max_refine": "1"},
+                )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertTrue(payload["success"])
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["status"], "partial")
         self.assertEqual(payload["pharmacophore_refinement_status"], "timeout")
         self.assertIsNone(payload["results"][0]["final_3d_score"])
         self.assertEqual(payload["results"][0]["score_semantics"], "2d_similarity_fallback")
@@ -359,17 +379,40 @@ class ReverseTargetPharm3DApiTest(unittest.TestCase):
         sys.modules["src.reverse_target.pharmacophore_refiner"] = refiner_module
 
         from src.web.routes.api_routes import setup_api_routes
+        from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+        from src.web.routes import api_routes as support
+
+        async def run_job(target, *args, **kwargs):
+            if target is support._pharm3d_candidates_job:
+                return FakePredictor().get_raw_similar_molecules(
+                    args[0], args[1], args[2], args[3],
+                )
+            if target is support._pharm3d_refine_job:
+                query_smiles, rows, max_to_refine = args[:3]
+                return fake_refine(
+                    query_smiles=query_smiles,
+                    candidates=rows,
+                    max_to_refine=max_to_refine,
+                )
+            return {"success": True, "features": [], "feature_counts": {}, "properties": {}}
 
         app = FastAPI()
-        setup_api_routes(app)
-        response = TestClient(app).post(
-            "/api/reverse_target/predict_3d",
-            data={"smiles": "CCO", "threshold": "0.5", "top_k": "20", "max_refine": "5"},
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            app.add_middleware(
+                AgentSessionMiddleware,
+                store=AgentSessionStore(Path(directory) / "sessions.sqlite"),
+            )
+            setup_api_routes(app)
+            with patch.object(support, "_run_pharm3d_job", new=run_job):
+                response = TestClient(app, base_url="http://localhost").post(
+                    "/api/reverse_target/predict_3d",
+                    data={"smiles": "CCO", "threshold": "0.5", "top_k": "20", "max_refine": "5"},
+                )
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertTrue(payload["success"])
+        self.assertFalse(payload["success"])
+        self.assertEqual(payload["status"], "partial")
         self.assertEqual(payload["count"], 5)
         self.assertEqual(len(payload["fallback_results"]), 20)
         self.assertEqual(observed["limit"], 400)
@@ -417,14 +460,28 @@ class ReverseTargetPharm3DApiTest(unittest.TestCase):
         sys.modules["src.reverse_target.pharmacophore_refiner"] = refiner_module
 
         from src.web.routes.api_routes import setup_api_routes
+        from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+
+        async def run_job(target, *args, **kwargs):
+            if target is support._pharm3d_candidates_job:
+                return candidates
+            if target is support._pharm3d_refine_job:
+                return refine(query_smiles=args[0], candidates=args[1], max_to_refine=args[2])
+            return {"success": True, "features": [], "feature_counts": {}, "properties": {}}
 
         app = FastAPI()
-        setup_api_routes(app)
-        with TestClient(app) as client:
-            response = client.post(
-                "/api/reverse_target/predict_3d",
-                data={"smiles": "CCO", "threshold": "0.5", "top_k": "2", "max_refine": "1"},
+        with tempfile.TemporaryDirectory() as directory:
+            app.add_middleware(
+                AgentSessionMiddleware,
+                store=AgentSessionStore(Path(directory) / "sessions.sqlite"),
             )
+            setup_api_routes(app)
+            with patch.object(support, "_run_pharm3d_job", new=run_job):
+                with TestClient(app, base_url="http://localhost") as client:
+                    response = client.post(
+                        "/api/reverse_target/predict_3d",
+                        data={"smiles": "CCO", "threshold": "0.5", "top_k": "2", "max_refine": "1"},
+                    )
 
         self.assertEqual(response.status_code, 200, response.text)
         payload = response.json()
