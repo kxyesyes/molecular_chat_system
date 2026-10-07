@@ -23,7 +23,7 @@ from src.system.scientific_contracts import (
 from src.system.redaction import sanitize_sensitive_text
 from src.system.tool_adapter import execute_tool_compat
 from src.agent.tools.molecular_docking import MolecularDocking
-from src.agent.validators.result_validator import AgentResultValidator
+from src.docking.result_validator import DockingExecutionResultValidator as AgentResultValidator
 from src.docking.adapters.base import CommandOwnershipScope, CommandOwnershipUncertainError
 from src.system.scientific_status import ObservationStatus
 

@@ -51,3 +51,12 @@ def test_docking_runtime_imports_shared_transport_types_without_agent_contract_f
     ):
         source = (root / relative_path).read_text(encoding="utf-8")
         assert "from src.agent.contracts import" not in source
+
+
+def test_docking_runtime_uses_docking_owned_result_validator():
+    root = Path(__file__).parents[1]
+    source = (root / "src" / "task_runtime" / "docking_execution.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.agent.validators.result_validator" not in source
+    assert "src.docking.result_validator" in source
