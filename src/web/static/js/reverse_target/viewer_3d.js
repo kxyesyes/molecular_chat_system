@@ -9,13 +9,11 @@ const RtViewer = (() => {
   let glViewer = null;
   let isSpinning = false;
 
-  function escapeHtml(value) {
-    return String(value ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+  function safeColor(value) {
+    const color = String(value || "").trim();
+    return /^(?:#[0-9a-f]{3,8}|rgba?\([0-9.,%\s]+\))$/i.test(color)
+      ? color
+      : "#64748b";
   }
 
   // ──────────────────────────────────────
@@ -29,7 +27,16 @@ const RtViewer = (() => {
     const countTag = $("featCountTag");
 
     modal.classList.add("show");
-    title.innerHTML = `<span style="font-size:24px;">🔬</span> 3D 药效团分析: <span style="color:#6366f1;margin-left:8px;">${escapeHtml(chemblId)}</span>`;
+    title.replaceChildren();
+    const titleIcon = document.createElement("span");
+    titleIcon.textContent = "🔬";
+    titleIcon.style.fontSize = "24px";
+    const titleText = document.createTextNode(" 3D 药效团分析: ");
+    const titleId = document.createElement("span");
+    titleId.textContent = String(chemblId ?? "");
+    titleId.style.color = "#6366f1";
+    titleId.style.marginLeft = "8px";
+    title.append(titleIcon, titleText, titleId);
     info.innerHTML =
       '<div style="text-align:center;padding:20px;"><div class="spinner" style="margin:0 auto 10px;"></div>' +
       '<p style="color:#64748b;font-size:13px;">正在生成 3D 构象并提取特征...</p></div>';
@@ -57,7 +64,7 @@ const RtViewer = (() => {
 
       // 2. 渲染药效团特征球
       data.features.forEach((f, idx) => {
-        const color = f.color || "#ffffff";
+        const color = safeColor(f.color);
         glViewer.addSphere({
           center: { x: f.pos[0], y: f.pos[1], z: f.pos[2] },
           radius: 0.85,
@@ -83,22 +90,46 @@ const RtViewer = (() => {
 
       // 4. 特征点列表
       countTag.textContent = `${data.features.length} 个特征`;
-      list.innerHTML = data.features
-        .map(
-          (f, i) => `
-        <div class="feat-item" id="feat-item-${i}"
-             onclick="RtViewer.focusOnFeature(${i}, ${f.pos[0]}, ${f.pos[1]}, ${f.pos[2]})">
-          <div class="feat-icon" style="background:${f.color}20;color:${f.color};">${f.icon}</div>
-          <div style="flex:1">
-            <div style="font-size:13px;font-weight:700;color:#334155;">${escapeHtml(f.label)}</div>
-            <div style="font-size:11px;color:#94a3b8;font-family:monospace;">XYZ: ${f.pos.map((v) => v.toFixed(1)).join(", ")}</div>
-          </div>
-          <div style="width:6px;height:6px;border-radius:50%;background:${f.color}"></div>
-        </div>`,
-        )
-        .join("");
+      list.replaceChildren();
+      data.features.forEach((f, i) => {
+        const position = Array.isArray(f.pos) ? f.pos.slice(0, 3).map(Number) : [];
+        if (position.length !== 3 || position.some((value) => !Number.isFinite(value))) return;
+        const color = safeColor(f.color);
+        const item = document.createElement("div");
+        item.className = "feat-item";
+        item.id = `feat-item-${i}`;
+        item.addEventListener("click", () => focusOnFeature(i, ...position));
+
+        const icon = document.createElement("div");
+        icon.className = "feat-icon";
+        icon.textContent = String(f.icon ?? "");
+        icon.style.background = `${color}20`;
+        icon.style.color = color;
+
+        const details = document.createElement("div");
+        details.style.flex = "1";
+        const label = document.createElement("div");
+        label.textContent = String(f.label ?? "");
+        label.style.fontSize = "13px";
+        label.style.fontWeight = "700";
+        label.style.color = "#334155";
+        const coordinates = document.createElement("div");
+        coordinates.textContent = `XYZ: ${position.map((value) => value.toFixed(1)).join(", ")}`;
+        coordinates.style.fontSize = "11px";
+        coordinates.style.color = "#94a3b8";
+        coordinates.style.fontFamily = "monospace";
+        details.append(label, coordinates);
+
+        const marker = document.createElement("div");
+        marker.style.width = "6px";
+        marker.style.height = "6px";
+        marker.style.borderRadius = "50%";
+        marker.style.background = color;
+        item.append(icon, details, marker);
+        list.appendChild(item);
+      });
     } catch (err) {
-      info.innerHTML = `<div style="color:#ef4444;padding:20px;text-align:center;">❌ ${escapeHtml(err.message)}</div>`;
+      info.textContent = `❌ ${String(err?.message || "药效团分析失败")}`;
       countTag.textContent = "错误";
     }
   }
@@ -120,29 +151,52 @@ const RtViewer = (() => {
 
   // ── 渲染信息卡 ──
   function _renderInfoCard(container, p, timeMs) {
-    container.innerHTML = `
-      <div style="font-size:11px;color:#94a3b8;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px;font-weight:700;">物理化学性质</div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;">
-        <div class="prop-item">
-          <span style="color:#64748b;font-size:12px;">MW</span>
-          <div style="color:#1e293b;font-weight:700;font-size:14px;">${p.MW || "-"}</div>
-        </div>
-        <div class="prop-item">
-          <span style="color:#64748b;font-size:12px;">LogP</span>
-          <div style="color:#1e293b;font-weight:700;font-size:14px;">${p.LogP || "-"}</div>
-        </div>
-        <div class="prop-item">
-          <span style="color:#64748b;font-size:12px;">HBD/HBA</span>
-          <div style="color:#1e293b;font-weight:700;font-size:14px;">${p.HBD || 0} / ${p.HBA || 0}</div>
-        </div>
-        <div class="prop-item">
-          <span style="color:#64748b;font-size:12px;">RotBonds</span>
-          <div style="color:#1e293b;font-weight:700;font-size:14px;">${p.RotBonds || 0}</div>
-        </div>
-      </div>
-      <div style="margin-top:15px;padding-top:12px;border-top:1px solid #f1f5f9;font-size:11px;color:#94a3b8;">
-        ⚡ 构象计算耗时: ${timeMs}ms
-      </div>`;
+    const create = (tag, text, className) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = String(text);
+      return node;
+    };
+    const value = (name, fallback = "-") =>
+      p && p[name] !== null && p[name] !== undefined ? p[name] : fallback;
+    const title = create("div", "物理化学性质");
+    title.style.fontSize = "11px";
+    title.style.color = "#94a3b8";
+    title.style.textTransform = "uppercase";
+    title.style.letterSpacing = "1px";
+    title.style.marginBottom = "12px";
+    title.style.fontWeight = "700";
+
+    const grid = create("div");
+    grid.style.display = "grid";
+    grid.style.gridTemplateColumns = "1fr 1fr";
+    grid.style.gap = "12px";
+    const property = (label, content) => {
+      const item = create("div", undefined, "prop-item");
+      const name = create("span", label);
+      name.style.color = "#64748b";
+      name.style.fontSize = "12px";
+      const output = create("div", content);
+      output.style.color = "#1e293b";
+      output.style.fontWeight = "700";
+      output.style.fontSize = "14px";
+      item.append(name, output);
+      return item;
+    };
+    grid.append(
+      property("MW", value("MW")),
+      property("LogP", value("LogP")),
+      property("HBD/HBA", `${value("HBD", 0)} / ${value("HBA", 0)}`),
+      property("RotBonds", value("RotBonds", 0)),
+    );
+
+    const timing = create("div", `⚡ 构象计算耗时: ${timeMs ?? "-"}ms`);
+    timing.style.marginTop = "15px";
+    timing.style.paddingTop = "12px";
+    timing.style.borderTop = "1px solid #f1f5f9";
+    timing.style.fontSize = "11px";
+    timing.style.color = "#94a3b8";
+    container.replaceChildren(title, grid, timing);
   }
 
   // ── 聚焦到某个特征点 ──

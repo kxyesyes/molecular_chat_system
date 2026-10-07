@@ -729,7 +729,12 @@ function renderDockingStepLog(stepId, status) {
     : /完成|success|succeeded/i.test(statusText)
       ? "success"
       : "running";
-  log.innerHTML = `${stepInfo.icon || "⚙️"} ${stepInfo.title} - ${stepInfo.description} <span class="step-status ${statusClass}">${Safe.escapeHtml(statusText)}</span>`;
+  const prefix = document.createElement("span");
+  prefix.textContent = `${stepInfo.icon || "⚙️"} ${stepInfo.title} - ${stepInfo.description} `;
+  const statusNode = document.createElement("span");
+  statusNode.className = `step-status ${statusClass}`;
+  statusNode.textContent = statusText;
+  log.replaceChildren(prefix, statusNode);
 }
 
 function syncDockingStepState(record) {

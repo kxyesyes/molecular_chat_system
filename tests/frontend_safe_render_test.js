@@ -28,7 +28,7 @@ const helperPath = path.join(
 );
 assert(fs.existsSync(helperPath), "Missing shared safe_render.js helper");
 
-const sandbox = { window: {}, console };
+const sandbox = { window: {}, console, URL };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(helperPath, "utf8"), sandbox, {
@@ -49,8 +49,36 @@ assert(
   "safeUrl must block javascript: URLs",
 );
 assert(
+  Safe.safeUrl("//evil.example/redirect") === "#",
+  "safeUrl must block protocol-relative external URLs",
+);
+assert(
   Safe.safeUrl("https://example.com/a?q=1") === "https://example.com/a?q=1",
   "safeUrl must keep http/https URLs",
+);
+assert(
+  Safe.safeExternalUrl("https://www.rcsb.org/structure/1ABC") ===
+    "https://www.rcsb.org/structure/1ABC",
+  "safeExternalUrl must allow trusted HTTPS scientific sources",
+);
+assert(
+  Safe.safeChatUrl("https://example.com/redirect") === "#",
+  "safeChatUrl must reject untrusted external domains",
+);
+assert(
+  Safe.safeChatUrl("https://www.rcsb.org/structure/1ABC") ===
+    "https://www.rcsb.org/structure/1ABC",
+  "safeChatUrl must allow trusted scientific domains",
+);
+assert(
+  Safe.safeChatUrl("/target-search") === "/target-search",
+  "safeChatUrl must allow same-origin relative paths",
+);
+assert(
+  Safe.safeExternalUrl("https://evil.example/redirect") === "#" &&
+    Safe.safeExternalUrl("http://www.rcsb.org/structure/1ABC") === "#" &&
+    Safe.safeExternalUrl("mailto:research@example.org") === "#",
+  "safeExternalUrl must reject untrusted, insecure and mailto destinations",
 );
 assert(
   Safe.escapeInlineJsString("job');alert(1)//") === "job\\&#039;);alert(1)//",
@@ -60,15 +88,28 @@ assert(
   Safe.escapeCssIdent('job"\\]') === 'job\\"\\\\]',
   "escapeCssIdent must protect quoted CSS attribute selectors",
 );
+assert(
+  typeof Safe.appendSafeSvg === "function",
+  "safe_render.js must expose the DOM-based SVG sanitizer",
+);
 
 const indexHtml = read("src/web/templates/index.html");
 const designHtml = read("src/web/templates/molecular_design.html");
 const dockingHtml = read("src/web/templates/molecular_docking.html");
+const targetSearchHtml = read("src/web/templates/target_search.html");
+const targetSearchMain = read("src/web/static/js/target_search/main.js");
+const reverseTargetHtml = read("src/web/templates/reverse_target.html");
+const reverseResults = read("src/web/static/js/reverse_target/results_renderer.js");
 
 assert(
   indexHtml.indexOf("/static/js/shared/safe_render.js") <
     indexHtml.indexOf("/static/js/home/formatters.js"),
   "Homepage must load safe_render.js before home formatters",
+);
+assert(
+  indexHtml.includes("/static/js/shared/safe_render.js?v=20261007-url-policy-v2") &&
+    indexHtml.includes("/static/js/home/formatters.js?v=20261007-chat-url-policy-v1"),
+  "Homepage must invalidate cached chat URL policy scripts",
 );
 assert(
   indexHtml.indexOf("/static/js/shared/safe_render.js") <
@@ -86,6 +127,106 @@ assert(
   dockingHtml.indexOf("/static/js/shared/safe_render.js") <
     dockingHtml.indexOf("/static/js/docking/ui_manager.js"),
   "Docking page must load safe_render.js before docking ui_manager",
+);
+assert(
+  targetSearchHtml.indexOf("/static/js/shared/safe_render.js") <
+    targetSearchHtml.indexOf("/static/js/target_search/main.js"),
+  "Target search must load safe_render.js before target_search main",
+);
+assert(
+  targetSearchMain.includes("hydrateExternalLinks") &&
+    targetSearchMain.includes("trustedExternalUrlValue(link && link.url)") &&
+    targetSearchMain.includes('anchor.textContent = String'),
+  "Target search external links must use DOM APIs and the trusted URL policy",
+);
+assert(
+  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261007-safe-dom-v4'),
+  "Target search must invalidate the cached script after safety changes",
+);
+assert(
+  targetSearchMain.includes("escapeInlineJsString") &&
+    targetSearchMain.includes("inlineJsArg(item.target_id)") &&
+    targetSearchMain.includes("inlineJsArg(item.id)") &&
+    !targetSearchMain.includes("loadDetail(${item.target_id})") &&
+    !targetSearchMain.includes("downloadStructure(${item.id},") &&
+    !targetSearchMain.includes("escapeAttr(item.family)") &&
+    !targetSearchMain.includes("escapeAttr(item.gene_symbol)") &&
+    !targetSearchMain.includes("escapeAttr(item.file_format"),
+  "Target search inline handlers must use the shared JavaScript string policy",
+);
+assert(
+  reverseTargetHtml.indexOf("/static/js/shared/safe_render.js") <
+    reverseTargetHtml.indexOf("/static/js/reverse_target/results_renderer.js"),
+  "Reverse target results must load the shared rendering policy first",
+);
+assert(
+  reverseResults.includes("appendSafeSvg") &&
+    !reverseResults.includes("${mcsData.query_svg || \"\"}") &&
+    !reverseResults.includes("${mcsData.hit_svg || \"\"}"),
+  "MCS SVG must be parsed through the SVG allowlist before DOM insertion",
+);
+assert(
+  reverseResults.includes("setSameOriginImage") &&
+    reverseResults.includes("parsed.origin !== window.location.origin") &&
+    !reverseResults.includes("src=\"${escapeHtml(RtApi.smilesImageUrl(molSmiles, 360, 300))}\""),
+  "Reverse-target structure image URLs must be same-origin DOM properties",
+);
+assert(
+  reverseResults.includes('data-field="query-mw"') &&
+    reverseResults.includes("queryLegend.querySelector('[data-field=\"query-mw\"]').textContent") &&
+    !reverseResults.includes('${qp.properties?.MW || "-"}'),
+  "Reverse-target query pharmacophore properties must use textContent",
+);
+assert(
+  reverseResults.includes("modalBody.textContent = `加载失败:") &&
+    !reverseResults.includes("modalBody.innerHTML = `<div style=\"text-align:center;padding:40px;color:#ef4444;\">加载失败"),
+  "Reverse-target request errors must use textContent instead of HTML parsing",
+);
+const reverseViewer = read("src/web/static/js/reverse_target/viewer_3d.js");
+assert(
+  reverseViewer.includes("info.textContent = `❌") &&
+    !reverseViewer.includes("info.innerHTML = `<div style=\"color:#ef4444;padding:20px;text-align:center;\">"),
+  "3D viewer errors must use textContent instead of HTML parsing",
+);
+assert(
+  reverseViewer.includes("function safeColor") &&
+    reverseViewer.includes("safeColor(f.color)") &&
+    !reverseViewer.includes("${f.color}") &&
+    !reverseViewer.includes("<div class=\"feat-icon\" style=\"background:${f.color}"),
+  "3D feature colors must pass the style allowlist",
+);
+assert(
+  reverseResults.includes("modalBody.replaceChildren(_buildSimilarModalContent(data.results))") &&
+    reverseResults.includes("smilesNode.textContent = molSmiles") &&
+    !reverseResults.includes("${escapeHtml(molSmiles)}") &&
+    !reverseResults.includes("${escapeHtml(RtApi.smilesImageUrl(molSmiles, 360, 300))}"),
+  "Similar-molecule SMILES and image URLs must be assigned through DOM APIs",
+);
+assert(
+  reverseResults.includes("rowBindings") &&
+    reverseResults.includes("smilesCell.textContent = binding.querySmiles") &&
+    reverseResults.includes("errorCell.textContent = binding.errorText") &&
+    !reverseResults.includes("${escapeHtml(querySmiles)}") &&
+    !reverseResults.includes("${escapeHtml(errorText)}"),
+  "Batch reverse-target SMILES and errors must be assigned through DOM APIs",
+);
+assert(
+  reverseResults.includes("mcsSmart.textContent = String(mcsData.mcs_smarts || \"\")") &&
+    !reverseResults.includes("${escapeHtml(mcsData.mcs_smarts || \"\")}"),
+  "MCS SMARTS must be rendered as text rather than HTML",
+);
+const reverseUi = read("src/web/static/js/reverse_target/ui_manager.js");
+assert(
+  reverseUi.includes('statItems.forEach((item) => {') &&
+    reverseUi.includes('item.textContent = "加载失败"') &&
+    !reverseUi.includes("statItems[0].innerHTML = errorHtml"),
+  "Reverse-target statistics errors must use textContent",
+);
+assert(
+  targetSearchMain.includes("function renderInlineError") &&
+    targetSearchMain.includes("errorBox.textContent = String(message") &&
+    !targetSearchMain.includes("detail.innerHTML = `<div class=\"detail-empty\"><strong>详情加载失败</strong><span>${escapeHtml(error.message)}</span></div>`"),
+  "Target search errors must use DOM text nodes instead of HTML parsing",
 );
 
 const homeFormatters = read("src/web/static/js/home/formatters.js");
@@ -132,6 +273,10 @@ assert(
 assert(
   homeFormatters.includes("MedChatSafeRender"),
   "Homepage formatters must use the shared safe rendering helper",
+);
+assert(
+  homeFormatters.includes("Safe.safeChatUrl(url)"),
+  "Homepage markdown links must use the restricted chat URL policy",
 );
 assert(
   homeMoleculeCandidates.includes("HomeMoleculeCandidates") &&
@@ -194,7 +339,56 @@ assert(
     `${functionName} must render runtime status text with textContent`,
   );
 });
+
+const errorMessageBody = extractFunction(homeMain, "showErrorMessage");
+assert(
+  !errorMessageBody.includes(".innerHTML"),
+  "showErrorMessage must not concatenate runtime error text into innerHTML",
+);
+assert(
+  errorMessageBody.includes("messageSpan.textContent = String(message ?? \"\")"),
+  "showErrorMessage must render runtime error text through textContent",
+);
+assert(
+  !homeMain.includes("${smiles}\n        </div>"),
+  "Homepage molecule cards must not inject raw SMILES into HTML",
+);
+assert(
+  homeMain.includes("smilesValue.textContent = smiles"),
+  "Homepage molecule cards must render SMILES through textContent",
+);
+assert(
+  !homeMain.includes("${reactants}") && !homeMain.includes("${products}"),
+  "Synthesis route cards must not inject raw reaction structures into HTML",
+);
+assert(
+  !homeMain.includes("${infoMessage || `共找到"),
+  "RAG result headers must not inject raw backend status text into HTML",
+);
+assert(
+  homeMain.includes("escapeHtml(infoMessage || `共找到"),
+  "RAG result headers must escape backend status text",
+);
+assert(
+  homeMain.includes("${escapeHtml(propertyLabels[prop] || prop)}"),
+  "Molecule property labels must be escaped before HTML insertion",
+);
+assert(
+  !homeMain.includes("connectionStatus.innerHTML"),
+  "Homepage connection status must not use innerHTML",
+);
+
+const homeChatRendererSource = read("src/web/static/js/home/chat_renderer.js");
+assert(
+  !homeChatRendererSource.includes("connectionStatus.innerHTML"),
+  "Connection status must not use innerHTML",
+);
+assert(
+  homeChatRendererSource.includes("connectionStatus.textContent"),
+  "Connection status must render through textContent",
+);
 [
+  "formatSynthesisRoute",
   "formatReactionPrediction",
   "formatADMETResults",
   "formatReActResults",
@@ -474,6 +668,23 @@ assert(
 );
 
 const dockingUi = read("src/web/static/js/docking/ui_manager.js");
+const dockingMain = read("src/web/static/js/docking/main.js");
+const dockingViewer = read("src/web/static/js/docking/viewer_manager.js");
+assert(
+  dockingUi.includes("statusNode.textContent = statusText") &&
+    !dockingUi.includes("log.innerHTML = `${stepInfo.icon"),
+  "Docking progress status must use DOM text nodes",
+);
+assert(
+  dockingViewer.includes('title.textContent = "3D 查看器加载失败"') &&
+    !dockingViewer.includes("text.innerHTML = `"),
+  "Docking viewer errors must use DOM text nodes",
+);
+assert(
+  dockingMain.includes("Safe.escapeHtml(String(s))") &&
+    !dockingMain.includes("<li>${s}</li>"),
+  "Docking environment suggestions must be escaped before HTML insertion",
+);
 [
   "Safe.escapeHtml(file.name",
   "Safe.escapeInlineJsString(inputId",

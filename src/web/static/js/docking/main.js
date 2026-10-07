@@ -88,7 +88,9 @@ document.addEventListener("DOMContentLoaded", function () {
       if (!py.has_rdkit) missing.push("当前 Python 环境缺少 RDKit");
       if (!res.success) {
         const resultsContent = document.getElementById("results-content");
-        const tips = (d.suggestions || []).map((s) => `<li>${s}</li>`).join("");
+        const tips = (Array.isArray(d.suggestions) ? d.suggestions : [])
+          .map((s) => `<li>${Safe.escapeHtml(String(s))}</li>`)
+          .join("");
         resultsContent.innerHTML = `
           <div style="background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;border-radius:8px;padding:16px;">
             <div style="font-weight:700;margin-bottom:8px;">环境自检未通过</div>

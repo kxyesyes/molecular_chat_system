@@ -71,7 +71,7 @@ function collectCheck(failures, description, check) {
     assert.doesNotMatch(homeTemplate, /id=["']llmApiKeyHint["']/);
     assert.doesNotMatch(homeTemplate, /id=["']clearLlmApiKey["']/);
     assert.doesNotMatch(homeTemplate, /用户配置目录|保存一次|同一台电脑|勾选.*保存/);
-    assert.match(homeSource, /clear_api_key\s*:/);
+    assert.doesNotMatch(homeSource, /llmApiKeyHint|clearLlmApiKey|clear_api_key\s*:/);
   });
 
   collectCheck(failures, "activity model list uses ordinary fetch", () => {

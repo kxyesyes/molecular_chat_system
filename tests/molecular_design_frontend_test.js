@@ -33,6 +33,8 @@ assert.ok(uiManager.includes("function escText"), "HTML text must use text escap
 assert.ok(uiManager.includes("function escInlineJs"), "onclick arguments must use inline-JS escaping");
 assert.ok(properties.includes("—"), "unavailable properties must render as an em dash");
 assert.ok(properties.includes('propertyStatus[key] === "unavailable"'), "backend unavailable status must override numeric placeholders");
+assert.ok(properties.includes("UI.escText(item.label || \"\")"), "optimization goal labels must be escaped before HTML insertion");
+assert.ok(!properties.includes("<span>\" + item.label + \"</span>"), "optimization goal labels must not be inserted raw");
 assert.ok(!properties.includes("p.logp ?? 0"), "missing LogP must not be rendered as zero");
 assert.ok(!properties.includes("p.qed ?? 0"), "missing QED must not be rendered as zero");
 assert.ok(!editor.includes("candidateScore"), "candidate board must not use a fixed weighted score");

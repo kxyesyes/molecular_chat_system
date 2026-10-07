@@ -13,6 +13,9 @@ window.HomeFormatters = (function () {
     safeUrl: function () {
       return "#";
     },
+    safeChatUrl: function () {
+      return "#";
+    },
   };
 
   function escapeHtml(content) {
@@ -62,7 +65,7 @@ window.HomeFormatters = (function () {
         function (_, label, url) {
           return (
             '<a href="' +
-            Safe.safeUrl(url) +
+            Safe.safeChatUrl(url) +
             '" target="_blank" rel="noopener noreferrer" style="color: #4299e1; text-decoration: underline;">' +
             escapeHtml(label) +
             "</a>"
