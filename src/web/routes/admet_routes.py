@@ -25,10 +25,10 @@ from .route_compat import lazy_dependency
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from src.agent.persistence.redaction import sanitize_bounded, sanitize_sensitive_text
-from src.agent.tools.admet_predictor import ADMETPredictor
-from src.agent.tools.base_tool import BaseMolecularTool
-from src.agent.tools.molecular_input import MolecularInputUnavailable, parse_molecular_smiles
+from src.system.redaction import sanitize_bounded, sanitize_sensitive_text
+from src.admet.predictor import ADMETPredictor
+from src.system.molecular_input import BaseMolecularTool
+from src.system.molecular_input_parser import MolecularInputUnavailable, parse_molecular_smiles
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError
 from src.web.request_auth import require_browser_session
 

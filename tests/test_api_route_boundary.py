@@ -219,6 +219,26 @@ def test_admet_route_default_support_does_not_import_api_facade():
     assert "src.web.routes.api_routes" not in source
 
 
+def test_admet_route_uses_domain_predictor_not_agent_tool():
+    source = (Path(__file__).parents[1] / "src/web/routes/admet_routes.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.agent.tools.admet_predictor" not in source
+    domain_module = importlib.import_module("src.admet.predictor")
+    assert inspect.isclass(domain_module.ADMETPredictor)
+    domain_source = (Path(__file__).parents[1] / "src/admet/predictor.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.agent" not in domain_source
+
+
+def test_admet_agent_import_path_is_a_compatibility_alias():
+    pytest.importorskip("rdkit")
+    domain_module = importlib.import_module("src.admet.predictor")
+    legacy_module = importlib.import_module("src.agent.tools.admet_predictor")
+    assert legacy_module.ADMETPredictor is domain_module.ADMETPredictor
+
+
 @pytest.mark.parametrize("domain,count", DOMAINS)
 def test_domain_module_owns_operations(domain, count):
     # Deliberately inside the test: a missing module is RED, not collection error.
