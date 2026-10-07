@@ -62,3 +62,18 @@ def test_generic_adapter_rejects_success_flag_with_non_success_status(status):
     assert result.success is False
     assert result.status.value == status
     assert result.error.code is AgentErrorCode.INVALID_OUTPUT
+
+
+@pytest.mark.parametrize(
+    ("legacy_status", "canonical_status"),
+    [("timed_out", "timeout"), ("canceled", "cancelled"), ("not-calculated", "not_calculated")],
+)
+def test_generic_adapter_normalizes_legacy_status_aliases(legacy_status, canonical_status):
+    result = _adapter({
+        "success": False,
+        "status": legacy_status,
+        "error": {"code": "internal_error", "message": "fixture"},
+    }).execute("input")
+
+    assert result.success is False
+    assert result.status.value == canonical_status

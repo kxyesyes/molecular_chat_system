@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.persistence import redact_sensitive
 from src.agent.runtime.worker_ownership import reserve_worker
+from src.system.scientific_status import normalize_observation_status
 
 from .spec import ToolSpec
 
@@ -216,8 +217,10 @@ class ToolAdapter(ABC):
             raw.data = redact_sensitive(raw.data, self.spec.sensitive_fields)
             return raw
         if isinstance(raw, dict):
-            raw_status = {"passed": ObservationStatus.SUCCEEDED.value}.get(
-                raw.get("status"), raw.get("status")
+            raw_status = (
+                normalize_observation_status(raw.get("status"))
+                if raw.get("status") is not None
+                else None
             )
             try:
                 status = ObservationStatus(raw_status) if raw_status is not None else None
