@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from src.agent.persistence.redaction import redact_sensitive
+from src.system.redaction import redact_sensitive
 from src.task_runtime.private_permissions import restrict_private_path
 
 from .config import (

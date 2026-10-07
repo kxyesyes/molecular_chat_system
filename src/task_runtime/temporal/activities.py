@@ -16,7 +16,7 @@ from temporalio.exceptions import ApplicationError
 
 from src.task_runtime.docking_execution import DockingExecution
 from src.task_runtime.errors import TaskErrorCode
-from src.agent.persistence.redaction import contains_sensitive_text
+from src.system.redaction import contains_sensitive_text
 from src.task_runtime.models import (
     TaskPhase,
     TaskStatus,

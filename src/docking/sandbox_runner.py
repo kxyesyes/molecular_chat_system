@@ -24,7 +24,7 @@ from src.system.scientific_contracts import (
     ToolResult,
     WorkflowArtifact,
 )
-from src.agent.persistence.redaction import sanitize_sensitive_text
+from src.system.redaction import sanitize_sensitive_text
 from src.sandbox_broker.models import (
     BrokerErrorCode,
     BrokerJobStatus,
