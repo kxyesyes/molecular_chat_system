@@ -95,6 +95,26 @@ class _DynamicActivityInvoker:
 _ROUTE_ACTIVITY_INVOKER = _DynamicActivityInvoker()
 
 
+class _DynamicEnvGetter:
+    """Keep post-registration environment patching compatible."""
+
+    def __call__(self, name, default=None):
+        return sys.modules[__name__].os.getenv(name, default)
+
+
+_ROUTE_ENV_GETTER = _DynamicEnvGetter()
+
+
+class _DynamicExecutorFactory:
+    """Keep post-registration executor-factory patching compatible."""
+
+    def __call__(self, *args, **kwargs):
+        return sys.modules[__name__].ThreadPoolExecutor(*args, **kwargs)
+
+
+_ROUTE_EXECUTOR_FACTORY = _DynamicExecutorFactory()
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -479,5 +499,9 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
         logger=_ROUTE_LOGGER,
     )
     setup_molecule_properties_routes(app, logger=_ROUTE_LOGGER)
-    setup_admet_routes(app, _support=support)
+    setup_admet_routes(
+        app,
+        env_getter=_ROUTE_ENV_GETTER,
+        executor_factory=_ROUTE_EXECUTOR_FACTORY,
+    )
     setup_agent_metrics_routes(app, logger=_ROUTE_LOGGER)

@@ -280,6 +280,11 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
                 "read_upload_limited": support._ROUTE_UPLOAD_READER,
                 "logger": support._ROUTE_LOGGER,
             }
+        if domain == "admet":
+            expected = {
+                "env_getter": support._ROUTE_ENV_GETTER,
+                "executor_factory": support._ROUTE_EXECUTOR_FACTORY,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app

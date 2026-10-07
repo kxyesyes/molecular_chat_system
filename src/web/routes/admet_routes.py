@@ -11,8 +11,10 @@ import asyncio
 import importlib
 import logging
 import math
+import os
 import re
 import threading
+from concurrent import futures
 from uuid import uuid4
 from collections.abc import Mapping
 from typing import Any
@@ -110,17 +112,25 @@ class _StructureValidationTool:
 _STRUCTURE_VALIDATOR = _StructureValidationTool()
 
 
-def _positive_int_env(support: Any, name: str, default: int) -> int:
+def _env_getter(source: Any):
+    if callable(source):
+        return source
+    if source is not None and hasattr(source, "os"):
+        return source.os.getenv
+    return os.getenv
+
+
+def _positive_int_env(source: Any, name: str, default: int) -> int:
     try:
-        value = int(support.os.getenv(name, str(default)))
+        value = int(_env_getter(source)(name, str(default)))
     except (TypeError, ValueError):
         return default
     return value if value >= 1 else default
 
 
-def _positive_float_env(support: Any, name: str, default: float) -> float:
+def _positive_float_env(source: Any, name: str, default: float) -> float:
     try:
-        value = float(support.os.getenv(name, str(default)))
+        value = float(_env_getter(source)(name, str(default)))
     except (TypeError, ValueError):
         return default
     return value if math.isfinite(value) and value > 0 else default
@@ -312,19 +322,26 @@ class _AdmetWorker:
 
     def __init__(
         self,
-        support: Any,
+        support: Any = None,
         *,
+        env_getter=None,
+        executor_factory=None,
         isolate: bool = True,
         process_target=None,
     ):
-        self._support = support
+        self._env_getter = env_getter or _env_getter(support)
+        self._executor_factory = executor_factory or (
+            getattr(support, "ThreadPoolExecutor", None) or futures.ThreadPoolExecutor
+            if support is not None
+            else futures.ThreadPoolExecutor
+        )
         self._isolate = bool(isolate)
         self._process_target = process_target or _admet_child_job
         self._capacity = _positive_int_env(
-            support, "MEDCHAT_ADMET_MAX_CONCURRENCY", _DEFAULT_MAX_CONCURRENCY
+            self._env_getter, "MEDCHAT_ADMET_MAX_CONCURRENCY", _DEFAULT_MAX_CONCURRENCY
         )
         self._admission = threading.BoundedSemaphore(self._capacity)
-        self._executor = support.ThreadPoolExecutor(
+        self._executor = self._executor_factory(
             max_workers=self._capacity,
             thread_name_prefix="medchat-admet",
         )
@@ -444,6 +461,8 @@ def _default_support() -> Any:
 def setup_admet_routes(
     app: FastAPI,
     *,
+    env_getter=None,
+    executor_factory=None,
     _support=None,
     _isolate: bool | None = None,
     _process_target=None,
@@ -453,12 +472,20 @@ def setup_admet_routes(
     if getattr(app.state, "_admet_routes_registered", False):
         return
 
-    support = _support if _support is not None else _default_support()
+    if env_getter is None:
+        env_getter = _env_getter(_support)
+    if executor_factory is None:
+        executor_factory = (
+            getattr(_support, "ThreadPoolExecutor", None) or futures.ThreadPoolExecutor
+            if _support is not None
+            else futures.ThreadPoolExecutor
+        )
     worker = getattr(app.state, "_admet_worker", None)
     if worker is None:
         isolate = True if _isolate is None else _isolate
         worker = _AdmetWorker(
-            support,
+            env_getter=env_getter,
+            executor_factory=executor_factory,
             isolate=isolate,
             process_target=_process_target,
         )
@@ -484,7 +511,7 @@ def setup_admet_routes(
             result = await asyncio.wait_for(
                 asyncio.shield(asyncio.wrap_future(future)),
                 timeout=_positive_float_env(
-                    support,
+                    env_getter,
                     "MEDCHAT_ADMET_REQUEST_TIMEOUT_SECONDS",
                     _DEFAULT_REQUEST_TIMEOUT_SECONDS,
                 ),
