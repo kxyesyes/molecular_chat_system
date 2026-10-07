@@ -3,6 +3,9 @@ import unittest
 import importlib.util
 from pathlib import Path
 import sys
+import hashlib
+import os
+import stat
 from unittest import mock
 
 from fastapi import FastAPI
@@ -55,6 +58,64 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
         app = FastAPI()
         design_routes.setup_design_routes(app, model=DummyDesignModel())
         return TestClient(app)
+
+    def _session_client(self, session_id="design-session-a"):
+        import src.web.routes.design_routes as design_routes
+
+        design_routes._FRAG_DB_PATH = str(self.fragment_csv)
+        design_routes._SAVE_DIR = str(self.data_dir / "saved")
+        design_routes._frag_df = None
+
+        app = FastAPI()
+        @app.middleware("http")
+        async def add_session(request, call_next):
+            request.scope["agent_session_id"] = session_id
+            return await call_next(request)
+
+        design_routes.setup_design_routes(app, model=DummyDesignModel())
+        return TestClient(app)
+
+    def test_saved_design_endpoints_require_a_browser_session(self):
+        client = self._client()
+
+        save = client.post(
+            "/api/design/save_molecule",
+            json={"smiles": "CCO", "properties": {}},
+        )
+        export = client.post(
+            "/api/design/export_history",
+            json={"history": [{"step": 1, "smiles": "CCO", "props": {}}]},
+        )
+
+        self.assertEqual(save.status_code, 401)
+        self.assertEqual(export.status_code, 401)
+
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real molecule persistence validation")
+    def test_saved_design_is_written_under_the_current_session_directory(self):
+        import src.web.routes.design_routes as design_routes
+
+        session_id = "design-session-a"
+        response = self._session_client(session_id).post(
+            "/api/design/save_molecule",
+            json={"smiles": "CCO", "properties": {}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        session_dir = self.data_dir / "saved" / hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+        self.assertTrue((session_dir / "saved_molecules.csv").is_file())
+        self.assertFalse((self.data_dir / "saved" / "saved_molecules.csv").exists())
+        self.assertEqual(design_routes._session_save_dir(session_id), session_dir)
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions only")
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real molecule persistence validation")
+    def test_saved_design_root_directory_is_private(self):
+        save_root = self.data_dir / "saved"
+        self._session_client("design-session-permissions").post(
+            "/api/design/save_molecule",
+            json={"smiles": "CCO", "properties": {}},
+        )
+
+        self.assertEqual(stat.S_IMODE(save_root.stat().st_mode), 0o700)
 
     def test_fragment_repository_clamps_pagination(self):
         from src.molecular_design.fragments import FragmentRepository
@@ -148,7 +209,7 @@ class MolecularDesignArchitectureTest(unittest.TestCase):
 
     @unittest.skipUnless(HAS_RDKIT, "RDKit is required for real molecule persistence validation")
     def test_save_molecule_rejects_invalid_smiles(self):
-        response = self._client().post(
+        response = self._session_client().post(
             "/api/design/save_molecule",
             json={"smiles": "not-a-smiles", "properties": {}},
         )

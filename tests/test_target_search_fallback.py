@@ -1089,12 +1089,16 @@ def test_corrupt_intent_transient_prior_probe_retains_linked_active_generation(
     assert result == {"records_deleted": 0, "files_deleted": 0}
     assert active == {"generation_id": first.generation_id, "cleanup_pending": 0}
     assert intents == 0
-    assert repository.get(first.cache_key) == first
+    # A transient prevalidation result cannot be presented as verified cache
+    # evidence; the file is still retained and becomes readable again after
+    # the probe recovers.
+    assert repository.get(first.cache_key) is None
     assert first_file.read_text(encoding="utf-8") == "first generation"
 
     monkeypatch.setattr(
         cache_module, "_prevalidate_regular_file", original_prevalidate
     )
+    assert repository.get(first.cache_key) == first
     second = _publish_coordinate(
         repository,
         project_root,
@@ -2559,7 +2563,10 @@ def test_repository_recovers_publication_after_process_crashes_before_activation
         conn.close()
     assert recovered is not None
     assert recovered.generation_id == intent["generation_id"]
-    assert recovered.payload == {"path": intent["final_path"]}
+    assert recovered.payload["path"] == intent["final_path"]
+    assert recovered.payload["file_format"] == "cif"
+    assert recovered.payload["size_bytes"] == len("crash generation")
+    assert len(recovered.payload["sha256"]) == 64
     assert final_file.read_text(encoding="utf-8") == "crash generation"
     assert remaining_intents == 0
 

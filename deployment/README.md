@@ -42,7 +42,7 @@ sudo apt install -y \
   python3-dev
 ```
 
-如果后续需要 HTTPS，可再安装：
+公网部署必须启用 HTTPS/WSS；先安装证书工具：
 
 ```bash
 sudo apt install -y certbot python3-certbot-nginx
@@ -607,7 +607,8 @@ systemd 的 EnvironmentFile 不对
 服务用户没有写 logs/temp_docking/scratch 的权限
 nginx 没有配置 /ws WebSocket
 nginx client_max_body_size 太小
-公网环境没有 HTTPS
+公网部署必须使用 HTTPS/WSS；`nginx-medchat.conf` 已将 80 重定向到 443，
+并代理 WebSocket 升级。部署前需将配置中的证书路径替换为实际证书，不能直接以明文 80 对公网提供服务。
 API key 写进了 YAML 或代码
 ```
 
@@ -621,8 +622,8 @@ API key 写进了 YAML 或代码
 4. 跑 `python scripts/health_check.py --strict`
 5. 用 `python main.py --no-reload` 手动启动验证
 6. 配置 systemd
-7. 配置 nginx
-8. 配置 HTTPS
+7. 配置 nginx，并替换 `nginx-medchat.conf` 中的实际证书路径
+8. 用 HTTPS 页面和 `wss://` 连接完成一次验收；未完成前不得对公网开放明文 HTTP
 9. 做全模块功能验收
 10. 设置日志轮转和数据备份
 

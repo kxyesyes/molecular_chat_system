@@ -22,6 +22,7 @@ from src.docking.molecular_docking_service import (
 from src.docking.adapters.base import CommandAdapter
 from src.docking.adapters.vina_adapter import VinaAdapter
 from src.web.routes.api_routes import setup_api_routes
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 
 
 class RecordingVinaAdapter:
@@ -457,8 +458,12 @@ class DockingConfigurationTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory(prefix="docking_warning_api_") as tmp:
             app = FastAPI()
+            app.add_middleware(
+                AgentSessionMiddleware,
+                store=AgentSessionStore(Path(tmp) / "sessions.sqlite"),
+            )
             setup_api_routes(app, docking_service=WarningDockingService(tmp))
-            client = TestClient(app)
+            client = TestClient(app, base_url="https://localhost")
 
             batch_response = client.post(
                 "/api/docking/batch_submit",

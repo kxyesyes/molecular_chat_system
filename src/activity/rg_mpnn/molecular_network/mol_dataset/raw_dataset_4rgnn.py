@@ -20,6 +20,7 @@ from rdkit import Chem
 from rdkit.Chem.SaltRemover import SaltRemover
 from molecular_network.transform.complete import Complete_Virtual, Complete_Fake
 from molecular_network.util.wash import NeutraliseCharges
+from molecular_network.mol_dataset._safe_load import load_processed_graph_dataset
 
 
 
@@ -42,7 +43,7 @@ class Raw_Dataset(InMemoryDataset):
         self.Hs = Hs
         self.bond_type_num = bond_type_num
         super(Raw_Dataset, self).__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_name) 
+        self.data, self.slices = load_processed_graph_dataset(self.processed_name)
     
 
     @property
@@ -176,4 +177,3 @@ class Raw_Dataset(InMemoryDataset):
         df.columns = ['rg','smi'] + target_names#['label']*label_num
         df.to_csv(self.rg_smi_name,index=False)        
         
-

@@ -6,12 +6,21 @@ import asyncio
 
 import pandas as pd
 import pytest
+from rdkit.Chem import QED
 
 from src.molecular_design.ai import recommend, validate_fragment_smiles
 from src.molecular_design.chemistry import calculate_properties, substitute_fragment
 from src.molecular_design.fragments import FragmentRepository, infer_label_filters
 from src.molecular_design.optimizer import evaluate_goals, parse_optimization_goals
 from src.molecular_design.storage import DesignStorage
+
+
+@pytest.mark.parametrize("invalid_qed", [-0.01, 1.01, float("nan"), float("inf")])
+def test_molecular_design_rejects_out_of_range_qed(monkeypatch, invalid_qed):
+    monkeypatch.setattr(QED, "qed", lambda _mol: invalid_qed)
+
+    with pytest.raises(ValueError, match="QED"):
+        calculate_properties("CCO")
 
 
 def test_substitution_requires_one_explicit_single_connection_point():

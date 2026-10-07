@@ -1,16 +1,223 @@
 """Docking route registration."""
+import asyncio
+import copy
+import math
+import os
 import re
+import threading
 from typing import List, Optional
-from fastapi import UploadFile, File, Form, Header, HTTPException, Response
+from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
+from src.agent.persistence.redaction import redact_sensitive
 
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
+def _normalize_warning_strings(values) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    warnings = []
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        warning = value.strip()
+        if not warning:
+            continue
+        warning = redact_sensitive(warning)
+        if isinstance(warning, str) and warning not in warnings:
+            warnings.append(warning)
+    return warnings
+
+
+def _positive_float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value > 0 else default
+
+
+def _batch_result(index: int, job: dict, result: object, *, error: str | None = None,
+                 status: str | None = None) -> dict:
+    payload = result if isinstance(result, dict) else {}
+    payload_status = payload.get("status")
+    non_success_statuses = {"partial", "failed", "cancelled", "timed_out"}
+    success_statuses = {"completed", "succeeded"}
+    if error is not None:
+        success = False
+        resolved_status = status or "failed"
+    elif payload_status in non_success_statuses:
+        success = False
+        resolved_status = status or payload_status
+    elif payload_status in success_statuses or payload_status is None:
+        success = bool(payload.get("success"))
+        resolved_status = status or ("completed" if success else "failed")
+    else:
+        success = False
+        resolved_status = status or "failed"
+        error = "Docking result contained an unsupported status."
+    best_pose = payload.get("best_pose") if success else None
+    return {
+        "index": index,
+        "ligand_name": job["ligand_name"],
+        "input_type": job["input_type"],
+        "status": resolved_status,
+        "success": success,
+        "job_id": payload.get("job_id"),
+        "best_pose": best_pose,
+        "best_energy": best_pose.get("binding_energy") if isinstance(best_pose, dict) else None,
+        "total_poses": payload.get("total_poses", 0),
+        "error": error or payload.get("error"),
+        "warnings": _normalize_warning_strings(payload.get("warnings", [])),
+    }
+
+
+async def _run_batch_docking_jobs(
+    *, _support, docking_service, jobs: list[dict], receptor_file: str,
+    base_config, owner_session_id: str,
+) -> dict:
+    """Run batch docking through a bounded, physically cancellable queue."""
+
+    concurrency = max(1, int(os.environ.get("MEDCHAT_DOCKING_BATCH_CONCURRENCY", "1")))
+    overall_timeout = _positive_float_env("MEDCHAT_DOCKING_BATCH_TIMEOUT_SECONDS", 1800.0)
+    item_timeout = _positive_float_env("MEDCHAT_DOCKING_ITEM_TIMEOUT_SECONDS", 300.0)
+    queue = asyncio.Semaphore(concurrency)
+    cancel_events = [threading.Event() for _ in jobs]
+
+    async def run_one(index: int, job: dict) -> dict:
+        async with queue:
+            cancel_event = cancel_events[index - 1]
+            config = copy.deepcopy(base_config)
+            call = asyncio.create_task(_support._invoke_in_threadpool(
+                docking_service.perform_docking,
+                receptor_file=receptor_file,
+                ligand_input=job["ligand_input"],
+                config=config,
+                input_type=job["input_type"],
+                owner_session_id=owner_session_id,
+                cancel_event=cancel_event,
+            ))
+            try:
+                result = await asyncio.wait_for(asyncio.shield(call), timeout=item_timeout)
+                return _batch_result(index, job, result)
+            except asyncio.TimeoutError:
+                cancel_event.set()
+                # The route does not release the batch task until the worker
+                # has observed cancellation and completed its cleanup.
+                try:
+                    result = await call
+                except Exception as exc:
+                    result = {"success": False, "error": str(exc)}
+                return _batch_result(
+                    index, job, result,
+                    status="timed_out",
+                    error="Docking item exceeded its time limit.",
+                )
+            except asyncio.CancelledError:
+                cancel_event.set()
+                try:
+                    await call
+                except BaseException:
+                    pass
+                raise
+            except Exception as exc:
+                return _batch_result(index, job, {}, error=str(exc))
+
+    tasks = [asyncio.create_task(run_one(index, job)) for index, job in enumerate(jobs, 1)]
+    gathered = asyncio.gather(*tasks, return_exceptions=True)
+    timed_out = False
+    try:
+        rows = await asyncio.wait_for(asyncio.shield(gathered), timeout=overall_timeout)
+    except asyncio.TimeoutError:
+        timed_out = True
+        for event in cancel_events:
+            event.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        rows = await gathered
+    except asyncio.CancelledError:
+        # A disconnected request cancels this coroutine, but the shielded
+        # gather would otherwise leave worker tasks and threadpool docking
+        # calls running without their cancellation events being set.
+        for event in cancel_events:
+            event.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await gathered
+        raise
+
+    results = []
+    for index, (job, row) in enumerate(zip(jobs, rows), 1):
+        if isinstance(row, dict):
+            if timed_out and row.get("status") not in {"completed", "timed_out"}:
+                row = _batch_result(index, job, row, status="timed_out",
+                                    error="Batch docking exceeded its overall time limit.")
+            results.append(row)
+        else:
+            results.append(_batch_result(
+                index, job, {}, status="timed_out" if timed_out else "failed",
+                error="Batch docking was cancelled before this item completed."
+                if timed_out else "Batch docking item failed.",
+            ))
+
+    completed = sum(row["status"] == "completed" for row in results)
+    failed = len(results) - completed
+    status = "completed" if completed == len(results) else "failed" if completed == 0 else "partial"
+    return {
+        "status": status,
+        "timed_out": timed_out,
+        "total": len(results),
+        "completed": completed,
+        "failed": failed,
+        "results": results,
+    }
+
+
 def _validate_job_id(job_id: str) -> None:
     if not _SAFE_JOB_ID.fullmatch(job_id or ""):
         raise HTTPException(status_code=400, detail="Invalid job_id")
+
+
+def _session_id(request: Request) -> str:
+    session_id = request.scope.get("agent_session_id")
+    if type(session_id) is not str or not session_id.strip():
+        raise HTTPException(status_code=401, detail="Browser session required")
+    return session_id
+
+
+def _owned_history(request: Request, work_dir: str, job_id: str) -> dict:
+    from src.docking.history_index import get_history_record
+
+    record = get_history_record(work_dir, job_id, owner_session_id=_session_id(request))
+    if record is None:
+        raise HTTPException(status_code=404, detail="对接任务不存在")
+    return record
+
+
+def _clear_owned_history_records(work_dir: str, owner_session_id: str) -> int:
+    """Remove every history page owned by one browser session."""
+    import shutil
+
+    from src.docking.history_index import read_history_page, remove_history_record
+
+    deleted = 0
+    while True:
+        history, _, _, _ = read_history_page(
+            work_dir, page=1, limit=200, owner_session_id=owner_session_id,
+        )
+        if not history:
+            return deleted
+        for record in history:
+            job_id = str(record.get("job_id") or "")
+            _validate_job_id(job_id)
+            job_dir = os.path.join(work_dir, f"docking_{job_id}")
+            if os.path.isdir(job_dir):
+                shutil.rmtree(job_dir)
+            remove_history_record(work_dir, job_id)
+            deleted += 1
 
 
 def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _support):
@@ -27,6 +234,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         status_code=202,
     )
     async def submit_durable_docking_task(
+        request: Request,
         protein_file: UploadFile = File(...),
         ligand_file: UploadFile = File(None),
         smiles: str = Form(None),
@@ -42,6 +250,11 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         manual_center: bool = Form(False),
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ):
+        # Authenticate before resolving the runtime or touching any backend.
+        # This keeps unavailable-runtime responses from becoming an
+        # unauthenticated probe and gives durable docking the same ownership
+        # boundary as the legacy endpoints.
+        owner_session_id = _session_id(request)
         try:
             runtime = current_task_runtime()
         except Exception as exc:
@@ -60,6 +273,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         if clean_idempotency_key is not None and len(clean_idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key is too long")
         _support._validate_docking_limits(
+            center_x=center_x,
+            center_y=center_y,
+            center_z=center_z,
             size_x=size_x,
             size_y=size_y,
             size_z=size_z,
@@ -98,6 +314,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 smiles=clean_smiles,
                 config=config,
                 idempotency_key=clean_idempotency_key,
+                owner_session_id=owner_session_id,
             )
             record = await runtime.get(receipt.task_id)
         except ValueError as exc:
@@ -113,6 +330,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
     @app.post("/api/docking/submit")
     async def submit_docking_job(
+        request: Request,
         protein_file: UploadFile = File(...),
         ligand_file: UploadFile = File(None),
         smiles: str = Form(None),
@@ -128,6 +346,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         manual_center: bool = Form(False)
     ):
         """提交分子对接任务"""
+        owner_session_id = _session_id(request)
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
 
@@ -142,6 +361,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     detail="Provide either a ligand file or SMILES, not both",
                 )
             _support._validate_docking_limits(
+                center_x=center_x,
+                center_y=center_y,
+                center_z=center_z,
                 size_x=size_x,
                 size_y=size_y,
                 size_z=size_z,
@@ -180,7 +402,8 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     receptor_file=protein_temp.name,
                     ligand_input=clean_smiles,
                     config=config,
-                    input_type="smiles"
+                    input_type="smiles",
+                    owner_session_id=owner_session_id,
                 )
             else:
                 original_name = ligand_file.filename or "ligand"
@@ -199,7 +422,8 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     receptor_file=protein_temp.name,
                     ligand_input=ligand_temp_path,
                     config=config,
-                    input_type="file"
+                    input_type="file",
+                    owner_session_id=owner_session_id,
                 )
 
             result = dict(result)
@@ -220,8 +444,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     pass
 
     @app.get("/api/docking/env_check")
-    async def docking_env_check():
+    async def docking_env_check(request: Request):
         """返回分子对接环境详细诊断"""
+        _session_id(request)
         try:
             if not docking_service:
                 raise HTTPException(status_code=503, detail="分子对接服务不可用")
@@ -233,6 +458,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
     @app.post("/api/docking/batch_submit")
     async def submit_batch_docking_job(
+        request: Request,
         protein_file: UploadFile = File(...),
         ligand_files: Optional[List[UploadFile]] = File(None),
         batch_smiles: str = Form(""),
@@ -248,11 +474,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         manual_center: bool = Form(False)
     ):
         """Submit one receptor against multiple ligand files and/or SMILES rows."""
+        owner_session_id = _session_id(request)
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
-
-        import copy
-        import uuid
 
         ligand_files = ligand_files or []
         smiles_rows = [
@@ -275,6 +499,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 detail=f"Batch docking accepts at most {max_batch_ligands} ligands",
             )
         _support._validate_docking_limits(
+            center_x=center_x,
+            center_y=center_y,
+            center_z=center_z,
             size_x=size_x,
             size_y=size_y,
             size_z=size_z,
@@ -283,7 +510,6 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             energy_range=energy_range,
         )
 
-        batch_id = str(uuid.uuid4())[:8]
         temp_paths: List[str] = []
 
         try:
@@ -338,54 +564,39 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             if not jobs:
                 raise HTTPException(status_code=400, detail="没有解析到有效的批量配体输入")
 
-            batch_results = []
-            for index, job in enumerate(jobs, 1):
-                config = copy.deepcopy(base_config)
-                try:
-                    result = await _support._invoke_in_threadpool(
-                        docking_service.perform_docking,
-                        receptor_file=protein_temp.name,
-                        ligand_input=job["ligand_input"],
-                        config=config,
-                        input_type=job["input_type"],
-                    )
-                    best_pose = result.get("best_pose") if result.get("success") else None
-                    batch_results.append({
-                        "index": index,
-                        "ligand_name": job["ligand_name"],
-                        "input_type": job["input_type"],
-                        "success": bool(result.get("success")),
-                        "job_id": result.get("job_id"),
-                        "best_pose": best_pose,
-                        "best_energy": best_pose.get("binding_energy") if best_pose else None,
-                        "total_poses": result.get("total_poses", 0),
-                        "error": result.get("error"),
-                        "warnings": _support._normalize_warning_strings(result.get("warnings")),
-                    })
-                except Exception as item_error:
-                    _support.logger.error(f"批量对接子任务失败 ({job['ligand_name']}): {item_error}")
-                    batch_results.append({
-                        "index": index,
-                        "ligand_name": job["ligand_name"],
-                        "input_type": job["input_type"],
-                        "success": False,
-                        "job_id": None,
-                        "best_pose": None,
-                        "best_energy": None,
-                        "total_poses": 0,
-                        "error": str(item_error),
-                        "warnings": [],
-                    })
-
-            completed = sum(1 for item in batch_results if item["success"])
-            return {
-                "success": completed > 0,
-                "batch_job_id": batch_id,
+            batch = await _run_batch_docking_jobs(
+                _support=_support,
+                docking_service=docking_service,
+                jobs=jobs,
+                receptor_file=protein_temp.name,
+                base_config=base_config,
+                owner_session_id=owner_session_id,
+            )
+            batch_results = batch["results"]
+            completed = batch["completed"]
+            task_result = {
+                # A partial batch is not a successful task even when some
+                # ligands completed. Keep the per-item results for diagnosis.
+                "success": batch["status"] == "completed",
+                "status": batch["status"],
+                "timed_out": batch["timed_out"],
                 "total": len(batch_results),
                 "completed": completed,
                 "failed": len(batch_results) - completed,
                 "results": batch_results,
             }
+            from src.task_runtime.legacy_bridge import persist_legacy_terminal_task
+            from src.task_runtime.manager import get_task_manager
+
+            receipt = persist_legacy_terminal_task(
+                get_task_manager(),
+                task_type="docking_batch",
+                owner_session_id=owner_session_id,
+                result=task_result,
+            )
+            task_result["task_id"] = receipt.task_id
+            task_result["batch_job_id"] = receipt.task_id
+            return task_result
 
         except HTTPException:
             raise
@@ -401,8 +612,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     pass
 
     @app.get("/api/docking/status")
-    async def get_docking_status():
+    async def get_docking_status(request: Request):
         """获取分子对接服务状态"""
+        _session_id(request)
         if not docking_service:
             return {"status": "unavailable", "message": "分子对接服务未初始化"}
 
@@ -422,11 +634,12 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             }
 
     @app.get("/api/docking/result/{job_id}")
-    async def get_docking_result(job_id: str):
+    async def get_docking_result(job_id: str, request: Request):
         """获取分子对接结果文件"""
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
         _validate_job_id(job_id)
+        _owned_history(request, docking_service.work_dir, job_id)
 
         try:
             job_dir = _support.os.path.join(docking_service.work_dir, f"docking_{job_id}")
@@ -451,7 +664,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             return api_error("DOCKING_RESULT_READ_FAILED", "获取结果失败", status_code=500)
 
     @app.get("/api/docking/interactions/{job_id}")
-    async def get_docking_interactions(job_id: str, pose: int = 1):
+    async def get_docking_interactions(job_id: str, request: Request, pose: int = 1):
         """Return backend-derived interactions for an explicitly prepared pose.
 
         The endpoint intentionally does not analyze ``result.pdbqt`` directly:
@@ -459,12 +672,13 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         required for defensible interaction assignment.
         """
         _validate_job_id(job_id)
-        if type(pose) is not int or pose <= 0:
-            raise HTTPException(status_code=422, detail="pose 必须是正整数")
-
         work_dir = docking_service.work_dir if docking_service else _support.os.path.join(
             _support.os.getcwd(), "temp_docking"
         )
+        _owned_history(request, work_dir, job_id)
+        if type(pose) is not int or pose <= 0:
+            raise HTTPException(status_code=422, detail="pose 必须是正整数")
+
         job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
         if not _support.os.path.isdir(job_dir):
             raise HTTPException(status_code=404, detail="对接任务不存在")
@@ -542,11 +756,12 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         return result
 
     @app.get("/api/docking/pose_sdf/{job_id}")
-    async def get_docking_pose_sdf(job_id: str, pose: int = 1):
+    async def get_docking_pose_sdf(job_id: str, request: Request, pose: int = 1):
         """将指定 pose 重建为标准 SDF，保留原始化学拓扑并应用对接坐标"""
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
         _validate_job_id(job_id)
+        _owned_history(request, docking_service.work_dir, job_id)
         if type(pose) is not int or pose <= 0:
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
 
@@ -579,8 +794,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             return api_error("DOCKING_POSE_EXPORT_FAILED", "重建 pose SDF 失败", status_code=500)
 
     @app.get("/api/docking/history")
-    async def get_docking_history(page: int = 1, limit: int = 50):
+    async def get_docking_history(request: Request, page: int = 1, limit: int = 50):
         """获取对接历史记录列表"""
+        owner = _session_id(request)
         try:
             work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
             if not _support.os.path.isdir(work_dir):
@@ -598,6 +814,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 work_dir,
                 page=page,
                 limit=limit,
+                owner_session_id=owner,
             )
             return {
                 "success": True,
@@ -612,25 +829,15 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             return api_error("DOCKING_HISTORY_READ_FAILED", "获取历史失败", status_code=500)
 
     @app.delete("/api/docking/history")
-    async def clear_docking_history():
+    async def clear_docking_history(request: Request):
         """清除所有对接历史记录"""
+        owner = _session_id(request)
         try:
             work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
             if not _support.os.path.isdir(work_dir):
                 return {"success": True, "message": "无历史记录", "deleted": 0}
 
-            import shutil as _shutil
-            from src.docking.history_index import clear_history_records
-
-            deleted = 0
-            for entry in _support.os.scandir(work_dir):
-                if entry.is_dir() and entry.name.startswith("docking_"):
-                    try:
-                        _shutil.rmtree(entry.path)
-                        deleted += 1
-                    except Exception as ex:
-                        _support.logger.warning(f"删除 {entry.path} 失败: {ex}")
-            clear_history_records(work_dir)
+            deleted = _clear_owned_history_records(work_dir, owner)
 
             return {"success": True, "message": f"已清除 {deleted} 条历史记录", "deleted": deleted}
         except Exception:
@@ -638,7 +845,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             return api_error("DOCKING_HISTORY_CLEAR_FAILED", "清除历史失败", status_code=500)
 
     @app.delete("/api/docking/history/{job_id}")
-    async def delete_docking_job(job_id: str):
+    async def delete_docking_job(job_id: str, request: Request):
         """删除指定的对接历史记录"""
         try:
             import shutil as _shutil
@@ -646,6 +853,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
             _validate_job_id(job_id)
             work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
+            _owned_history(request, work_dir, job_id)
             job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
             if not _support.os.path.isdir(job_dir):
                 raise HTTPException(status_code=404, detail="记录不存在")

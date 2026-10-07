@@ -158,6 +158,13 @@ class WorkflowOrchestrator:
             result = self._call_step_dispatch(
                 self.step_dispatch, tool, input_data, step, cancel_event,
             )
+            if not isinstance(result, ToolResult):
+                result = ToolResult.error_result(
+                    tool_name=step.tool_name,
+                    code=AgentErrorCode.INVALID_OUTPUT,
+                    message="Step dispatch must return a normalized ToolResult",
+                    quality={"adapter_boundary": "step_dispatch"},
+                )
             return (self._cancelled_result(step, running=False)
                     if self._is_cancelled(cancel_event) else result)
         if not step.timeout_seconds:
@@ -367,13 +374,22 @@ class WorkflowOrchestrator:
         tool_name: str, checkpoint: Mapping[str, Any]
     ) -> ToolResult:
         output = checkpoint.get("output")
-        if (not isinstance(output, Mapping) or output.get("success") is not True
-                or output.get("error")
-                or output.get("status", "succeeded") not in {None, "succeeded", "partial"}):
+        if not isinstance(output, Mapping):
             raise ValueError("Checkpoint observation cannot be reused as successful")
         status_value = output.get("status") or checkpoint.get("status")
         if checkpoint.get("status") == "partial":
             status_value = "partial"
+        if status_value not in {None, "succeeded", "partial"}:
+            raise ValueError("Checkpoint observation cannot be reused as successful")
+        # ``ToolResult.to_legacy_dict`` intentionally serializes partial
+        # observations with success=false.  Preserve that honest terminal
+        # state when reusing a checkpoint; requiring success=true here would
+        # silently turn every partial checkpoint into a fresh execution.
+        if status_value == "partial":
+            if type(output.get("success")) is not bool or output.get("error"):
+                raise ValueError("Invalid partial checkpoint observation")
+        elif output.get("success") is not True or output.get("error"):
+            raise ValueError("Checkpoint observation cannot be reused as successful")
         status = (
             ObservationStatus(status_value)
             if status_value is not None

@@ -70,6 +70,15 @@ def test_real_descriptor_values_and_legacy_schema_are_unchanged(calculator, smil
     assert_bounded(result["reasoning"])
 
 
+@pytest.mark.parametrize("invalid_qed", [-0.01, 1.01, float("nan"), float("inf")])
+def test_calculate_properties_rejects_invalid_qed_instead_of_clamping(
+    calculator, monkeypatch, invalid_qed
+):
+    monkeypatch.setattr(QED, "qed", lambda _mol: invalid_qed)
+
+    assert calculator.calculate_properties("CCO") is None
+
+
 def test_batch_reasoning_and_each_report_are_bounded(calculator):
     result = calculator.execute("\n".join(f"SMILES: {s}" for s in SMILES))
     assert result["success"]

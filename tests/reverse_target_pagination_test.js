@@ -15,9 +15,10 @@ const rendererPath = path.join(
 );
 
 const source = fs.readFileSync(rendererPath, "utf8");
+const elements = new Map();
 const context = {
   document: {
-    getElementById: () => null,
+    getElementById: (id) => elements.get(id) || null,
     querySelector: () => ({ innerHTML: "" }),
   },
   window: {},
@@ -28,6 +29,14 @@ const context = {
 };
 vm.createContext(context);
 const RtResults = vm.runInContext(`${source}\nRtResults;`, context);
+
+const legend = { innerHTML: "" };
+elements.set("legend", legend);
+RtResults.renderPharmLegend({
+  "<img src=x onerror=alert(1)>": 1,
+}, "legend");
+assert.doesNotMatch(legend.innerHTML, /<img src=x onerror=alert\(1\)>/);
+assert.match(legend.innerHTML, /&lt;img src=x onerror=alert\(1\)&gt;/);
 
 const rows = Array.from({ length: 100 }, (_, index) => ({ id: index + 1 }));
 const pageOne = RtResults._test.paginateResults(rows, 1, 10);

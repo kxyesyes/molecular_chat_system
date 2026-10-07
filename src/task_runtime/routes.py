@@ -1,18 +1,12 @@
-"""Shared task projections; only manager-owned Agent records are browser-visible.
+"""Owned task projections; no browser access without durable ownership authority.
 
-Storeless adapters can add a keyword ``offset`` to ``list`` without changing the
-production runtime API. Paged results must be globally ordered by descending
-(updated_at, task_id); advance by actual row count until enough visible rows or
-an empty page. Legacy single-page results are sorted in full before truncation.
-Requests use at most 200 rows and scan at most 10,000 candidates. Filtered legacy
-underfill, repeated/invalid pages, or scan exhaustion return 503, not an uncertain
-partial result. Durable event reads check projection authority without refresh.
+Filter owners before paging, exclude cross-database ID collisions and refill
+bounded pages. Durable event reads authorize without triggering a refresh.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
@@ -34,6 +28,13 @@ _ADAPTER_PAGE_SIZE = 200
 _ADAPTER_SCAN_LIMIT = 10_000
 
 
+def _session_id(request: Request) -> str:
+    session_id = request.scope.get("agent_session_id")
+    if type(session_id) is not str or not session_id.strip():
+        raise HTTPException(401, "Browser session required")
+    return session_id
+
+
 def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
     def current_task_runtime():
         if task_runtime is None:
@@ -46,73 +47,37 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
                 detail="Task runtime unavailable",
             ) from exc
 
-    def manager_agent_record(manager, task_id: str):
+    def manager_task_record(manager, task_id: str):
         try:
             record = manager.get(task_id)
         except KeyError:
             return None
-        return record if record.task_type == "agent_workflow" else None
+        return record
 
-    def non_agent_records(manager, records):
-        # Manager Agent IDs reserve their namespace, even for another session.
-        # Never substitute a colliding runtime row for a hidden manager task.
-        return [
-            record for record in records
-            if record.task_type != "agent_workflow"
-            and manager_agent_record(manager, record.task_id) is None
-        ]
+    def same_database(first, second):
+        return first is second or first.db_path.samefile(second.db_path)
 
-    def runtime_store_list(manager, store, limit, status, task_type):
-        # The durable runtime lists SQLite projections directly. Filter in SQL
-        # before paging, then refill pages when cross-store ID collisions occur.
+    def owned_store_list(store, other_store, limit, status, task_type, session_id,
+                         *, exclude_task_type=None):
         records = []
-        offset = 0
-        while len(records) < limit:
-            page = store.list(
-                limit=200, offset=offset, status=status, task_type=task_type,
-                exclude_task_type="agent_workflow",
-            )
-            records.extend(non_agent_records(manager, page))
-            if len(page) < 200:
-                break
-            offset += len(page)
-        return records[:limit]
-
-    async def runtime_adapter_list(manager, runtime, limit, status, task_type):
-        """Read bounded adapter projections under the module's paging contract."""
-        try:
-            offset_parameter = inspect.signature(runtime.list).parameters.get("offset")
-        except (TypeError, ValueError):
-            offset_parameter = None
-        can_page = offset_parameter is not None and offset_parameter.kind in (
-            inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
-        )
-        records = []
-        seen = set()
         offset = 0
         while offset < _ADAPTER_SCAN_LIMIT:
-            kwargs = {"offset": offset} if can_page else {}
-            page = await runtime.list(
-                limit=_ADAPTER_PAGE_SIZE, status=status, task_type=task_type, **kwargs
+            page = store.list(
+                limit=_ADAPTER_PAGE_SIZE, offset=offset, status=status, task_type=task_type,
+                exclude_task_type=exclude_task_type,
+                require_owner=True, owner_session_id=session_id,
             )
-            if not page:
+            for record in page:
+                if other_store is not None:
+                    try:
+                        other_store.get(record.task_id)
+                    except KeyError:
+                        pass
+                    else:
+                        continue
+                records.append(record)
+            if len(records) >= limit or len(page) < _ADAPTER_PAGE_SIZE:
                 return records[:limit]
-            ids = {record.task_id for record in page}
-            if ids & seen or len(ids) != len(page) or len(page) > _ADAPTER_PAGE_SIZE:
-                raise HTTPException(503, "Task runtime pagination unavailable")
-            seen.update(ids)
-            visible = await asyncio.to_thread(non_agent_records, manager, page)
-            records.extend(visible)
-            records.sort(
-                key=lambda record: (record.updated_at or "", record.task_id),
-                reverse=True,
-            )
-            if len(records) >= limit:
-                return records[:limit]
-            if not can_page:
-                if len(visible) != len(page):
-                    raise HTTPException(503, "Task runtime pagination unavailable")
-                return records
             offset += len(page)
         raise HTTPException(503, "Task runtime pagination unavailable")
 
@@ -122,30 +87,24 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
         status: str | None,
         task_type: str | None,
     ):
+        session_id = _session_id(request)
         limit = max(1, min(200, limit))
         task_type = task_type or None
         manager = get_task_manager()
         runtime = current_task_runtime()
-        records = []
-        if runtime is None or task_type in (None, "agent_workflow"):
-            records = await asyncio.to_thread(
-                manager.store.list,
-                limit=limit, status=status,
-                task_type="agent_workflow" if runtime is not None else task_type,
-                enforce_agent_ownership=True,
-                agent_session_id=request.scope.get("agent_session_id"),
-            )
-        if runtime is not None and task_type != "agent_workflow":
-            store = getattr(runtime, "store", None)
-            if isinstance(store, TaskStore):
-                other_records = await asyncio.to_thread(
-                    runtime_store_list, manager, store, limit, status, task_type
-                )
-            else:
-                other_records = await runtime_adapter_list(
-                    manager, runtime, limit, status, task_type
-                )
-            records.extend(other_records)
+        store = getattr(runtime, "store", None)
+        if runtime is not None and not isinstance(store, TaskStore):
+            raise HTTPException(503, "Task ownership storage unavailable")
+        separate = store is not None and not await asyncio.to_thread(same_database, store, manager.store)
+        records = await asyncio.to_thread(
+            owned_store_list, manager.store, store if separate else None,
+            limit, status, task_type, session_id,
+        )
+        if separate and task_type != "agent_workflow":
+            records.extend(await asyncio.to_thread(
+                owned_store_list, store, manager.store, limit, status, task_type, session_id,
+                exclude_task_type="agent_workflow",
+            ))
         unique = {record.task_id: record for record in records}
         return sorted(
             unique.values(),
@@ -154,30 +113,44 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
         )[:limit]
 
     async def runtime_get(request: Request, task_id: str, *, refresh: bool = True):
+        session_id = _session_id(request)
         manager = get_task_manager()
-        agent_record = await asyncio.to_thread(manager_agent_record, manager, task_id)
-        if agent_record is not None:
-            session_id = request.scope.get("agent_session_id")
-            owner = await asyncio.to_thread(manager.store.get_agent_owner, task_id)
-            if not session_id or not owner or session_id != owner:
-                raise KeyError(task_id)
+        runtime = current_task_runtime()
+        manager_record = await asyncio.to_thread(manager_task_record, manager, task_id)
+        if manager_record is not None:
+            runtime_store = getattr(runtime, "store", None)
+            if isinstance(runtime_store, TaskStore) and not await asyncio.to_thread(
+                same_database, runtime_store, manager.store
+            ):
+                try:
+                    await asyncio.to_thread(runtime_store.get, task_id)
+                except KeyError:
+                    pass
+                else:
+                    # The ID exists in both stores. Never let a caller borrow
+                    # the source selected by a collision.
+                    raise KeyError(task_id)
+            agent_record = await asyncio.to_thread(
+                manager.store.get_owned, task_id, session_id
+            )
             # Return the source together with the authorized record. Events and
             # cancel must use that same source, not re-resolve by a colliding ID.
             return agent_record, None, manager
-        runtime = current_task_runtime()
         if runtime is not None:
             store = getattr(runtime, "store", None)
             if isinstance(store, TaskStore):
-                projection = await asyncio.to_thread(store.get, task_id)
+                projection = await asyncio.to_thread(store.get_owned, task_id, session_id)
                 if projection.task_type == "agent_workflow":
                     # A Temporal get can refresh/mutate the projection. Reject
                     # unknown Agent records before invoking any backend action.
                     raise KeyError(task_id)
                 if not refresh:
                     return projection, runtime, manager
+            else:
+                raise HTTPException(503, "Task ownership storage unavailable")
             record = await runtime.get(task_id)
         else:
-            record = await asyncio.to_thread(manager.get, task_id)
+            record = await asyncio.to_thread(manager.store.get_owned, task_id, session_id)
         if record.task_type == "agent_workflow":
             raise KeyError(task_id)
         return record, runtime, manager
@@ -207,7 +180,10 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
             if runtime is not None:
                 events = await runtime.events(task_id)
             else:
-                events = await asyncio.to_thread(manager.store.events, task_id)
+                events = await asyncio.to_thread(
+                    manager.store.events, task_id,
+                    owner_session_id=_session_id(request), require_owner=True,
+                )
         except KeyError:
             return api_error("TASK_NOT_FOUND", "Task not found", status_code=404)
         return api_success(
@@ -250,6 +226,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
                     manager.store.request_cancel,
                     task_id,
                     reason=reason,
+                    owner_session_id=_session_id(request),
                 )
         except KeyError:
             return api_error("TASK_NOT_FOUND", "Task not found", status_code=404)
@@ -260,6 +237,7 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
 
     @app.post("/api/tasks/demo")
     async def submit_demo_task(request: Request):
+        session_id = _session_id(request)
         payload: dict[str, Any] = await request.json()
 
         def handler(task_payload: dict[str, Any]) -> dict[str, Any]:
@@ -269,5 +247,5 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
                 "artifacts": [],
             }
 
-        record = get_task_manager().submit("demo", payload, handler)
+        record = get_task_manager().submit("demo", payload, handler, owner_session_id=session_id)
         return api_success(record.to_public_dict(), message="Task submitted")

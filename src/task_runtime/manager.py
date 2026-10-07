@@ -28,8 +28,28 @@ def _terminal_state(result: Any) -> tuple[TaskStatus, str | None]:
     if not isinstance(result, dict):
         return TaskStatus.SUCCEEDED, None
 
-    returned_failed = result.get("success") is False
-    returned_failed = returned_failed or str(result.get("status", "")).strip().lower() == "failed"
+    reported_status = str(result.get("status", "")).strip().lower()
+    if reported_status in {"cancelled", "canceled"}:
+        # CANCELED is a store transition from CANCEL_REQUESTED, not a status a
+        # worker may publish unilaterally. The caller below will reconcile a
+        # requested cancellation; otherwise this is a failed computation.
+        return TaskStatus.FAILED, str(
+            result.get("error") or result.get("message") or "Task was canceled"
+        )
+    if reported_status in {"timeout", "timed_out", "timed-out"}:
+        return TaskStatus.TIMED_OUT, str(
+            result.get("error") or result.get("message") or "Task timed out"
+        )
+
+    # A provider may accidentally set ``success=true`` on a partial,
+    # unavailable, rejected, or failed observation. The durable task state is
+    # authoritative and must fail closed instead of promoting that observation
+    # to ``succeeded``.
+    non_success_statuses = {
+        "failed", "partial", "unavailable", "invalid_input", "rejected",
+        "error", "unknown",
+    }
+    returned_failed = result.get("success") is False or reported_status in non_success_statuses
     if not returned_failed:
         return TaskStatus.SUCCEEDED, None
 

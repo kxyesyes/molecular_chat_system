@@ -112,7 +112,7 @@ def seeded_history(count=23):
 
 
 def terminals(socket):
-    return [item for item in socket.messages if item["type"] in {"complete", "message"}]
+    return [item for item in socket.messages if item["type"] == "complete"]
 
 
 @pytest.mark.parametrize("mode", [
@@ -147,7 +147,7 @@ def test_each_terminal_path_appends_one_complete_history_entry(mode):
     } | ({"error"} if mode == "invalid_count" else set())
     terminal = terminals(socket)
     assert len(terminal) == 1
-    assert terminal[0]["type"] == ("message" if mode in {"success", "stream_retry"} else "complete")
+    assert terminal[0]["type"] == "complete"
     assert record["assistant"] == terminal[0].get("content", terminal[0].get("message"))
     assert handler.conversation_history == []
     expected_calls = {
@@ -204,7 +204,7 @@ def test_rag_branches_preserve_payload_provenance_and_existing_limit(agent_rag):
     assert model.calls == ([] if agent_rag else ["generate"])
     assert rag.calls == ([] if agent_rag else [(query, 1)])
     assert len(terminals(socket)) == 1
-    assert terminals(socket)[0]["type"] == ("complete" if agent_rag else "message")
+    assert terminals(socket)[0]["type"] == "complete"
 
 
 @pytest.mark.parametrize("size", [0, 19, 20, 23])

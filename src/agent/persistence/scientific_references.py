@@ -98,8 +98,14 @@ def _candidates(checkpoint, trace_id):
         raise ValueError("candidate checkpoint exceeds budget")
     value = json.loads(raw)
     reference_json(value)
+    partial_success_projection = (
+        type(value) is dict
+        and checkpoint["status"] == "partial"
+        and value.get("success") is False
+    )
     if (type(value) is not dict
-            or value.get("success") is not True or value.get("status") != checkpoint["status"]
+            or (value.get("success") is not True and not partial_success_projection)
+            or value.get("status") != checkpoint["status"]
             or value.get("error") is not None
             or type(value.get("quality")) is not dict
             or value["quality"].get("output_contract") != "CandidateSet@1"
@@ -117,6 +123,9 @@ def _candidates(checkpoint, trace_id):
         raise ValueError("candidate provenance mismatch")
     # Reuse the scientific validator, including actual RDKit revalidation. No
     # model invocation. An unavailable validator cannot publish a usable view.
+    # Validate the scientific payload through the normal successful-generator
+    # path first. Partial is a usable observation with a false public success
+    # projection, not a failed or unvalidated payload.
     result = ToolResult(
         tool_name=checkpoint["tool_name"], success=True, message=value.get("message", ""),
         data=value["data"], status=ObservationStatus(value["status"]),
@@ -133,7 +142,8 @@ def _candidates(checkpoint, trace_id):
         raise ValueError("candidate evidence identity mismatch")
     before_data = reference_json(result.data)
     result = AgentResultValidator().validate_tool_result(result, trusted_checkpoint=True)
-    if (not result.success or result.status.value != checkpoint["status"]
+    if (not result.success or result.error is not None
+            or result.status.value != checkpoint["status"]
             or reference_json(result.data) != before_data):
         raise ValueError("candidate scientific validation failed")
     candidates = CandidateSet.from_dict(result.data)

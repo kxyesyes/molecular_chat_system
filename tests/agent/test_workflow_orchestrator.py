@@ -573,6 +573,33 @@ def test_cancellation_aware_step_dispatch_receives_signal_and_discards_late_succ
     assert result.tool_results[0].error.code is AgentErrorCode.CANCELLED
 
 
+def test_step_dispatch_cannot_bypass_normalized_tool_result_boundary():
+    class RawDispatch:
+        @staticmethod
+        def authorize(_tool, _step):
+            return None
+
+        @staticmethod
+        def decorate_result(_result, _context, _reused_steps):
+            return None
+
+        def __call__(self, _tool, _input_data, _step):
+            return {"success": True, "data": {"unvalidated": True}}
+
+    orchestrator = WorkflowOrchestrator()
+    orchestrator.step_dispatch = RawDispatch()
+    result = orchestrator.run(
+        context=AgentContext(query="CCO", trace_id="raw-dispatch-boundary"),
+        steps=[WorkflowStep("raw", "raw", "CCO")],
+        tools={"raw": object()},
+    )
+
+    assert result.success is False
+    assert result.outcome is RunOutcome.FAILED
+    assert result.tool_results[0].error.code is AgentErrorCode.INVALID_OUTPUT
+    assert result.tool_results[0].data is None
+
+
 def test_cancelled_checkpoint_cannot_be_reused():
     cancel = threading.Event()
 

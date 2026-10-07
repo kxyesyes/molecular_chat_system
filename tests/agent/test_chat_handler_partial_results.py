@@ -486,9 +486,11 @@ def test_real_supervisor_session_retains_partial_evidence_and_tool_failed():
     assert any(e.get("event") == "tool_failed" and e.get("tool") == "candidate_ranker" for _, e in events)
     complete = assert_partial(websocket, model, rag, history)
     assert original["final_answer"] in complete["content"]
-    # Candidate alignment formats the validated property observation itself.
+    # Candidate alignment keeps the validated evidence visible, but the
+    # incomplete observation must not be projected as succeeded.
     properties = original["tool_results"]["property_calculator"]
-    assert properties["success"] is True
+    assert properties["success"] is False
+    assert properties["status"] == "partial"
     assert properties["formatted"] in complete["content"]
     assert "46.07" in complete["content"]
     assert "synthetic" in complete["content"]

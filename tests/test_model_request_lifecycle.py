@@ -303,13 +303,14 @@ async def test_application_switch_drains_design_request_and_closes_clients(tmp_p
 
     monkeypatch.setattr(MolecularChatApp, '_create_model_from_llm_config', build)
     monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Mock(tools={}))
+    monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
     monkeypatch.setattr(design_routes, '_FRAG_DB_PATH', str(tmp_path / 'absent.csv'))
     monkeypatch.setattr(design_routes, '_SAVE_DIR', str(tmp_path / 'saved'))
     app = MolecularChatApp(str(tmp_path / 'absent.yaml'))
     generator = app.molecular_generator_model
     old = switch = None
     try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='http://test') as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='https://test') as client:
             payload = {'command': 'lower LogP', 'current_smiles': 'CCO'}
             old = asyncio.create_task(client.post('/api/design/ai_recommend', json=payload))
             await asyncio.wait_for(started.wait(), 5)
@@ -577,7 +578,7 @@ async def test_connection_probe_closes_only_its_temporary_model(tmp_path, monkey
     monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Mock(tools={}))
     app = MolecularChatApp(str(tmp_path / 'absent.yaml'))
     try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='http://test') as client:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='https://test') as client:
             response = await client.post('/api/llm/test', json={'model_name': 'test'})
         assert response.json()['success'] is not fails
         assert len(models) == 2
@@ -664,6 +665,7 @@ async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path
     monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Agent(self.model))
     monkeypatch.setattr(design_routes, '_FRAG_DB_PATH', str(tmp_path / 'absent.csv'))
     monkeypatch.setattr(design_routes, '_SAVE_DIR', str(tmp_path / 'saved'))
+    monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
     app = MolecularChatApp(str(tmp_path / 'absent.yaml'))
     original = app.model
     original_stream = app.config['inference']['stream']

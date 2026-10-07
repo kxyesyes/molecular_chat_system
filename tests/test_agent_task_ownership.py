@@ -14,6 +14,7 @@ from src.task_runtime.manager import TaskManager
 from src.task_runtime.models import TaskRecord, TaskStatus
 from src.task_runtime.runtime import TaskRuntime
 from src.task_runtime.store import TaskStore
+from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 
 
 class StoreRuntime:
@@ -130,7 +131,7 @@ def test_forged_body_query_headers_and_unknown_cookie_cannot_change_owner(task_a
     assert api.manager.get("owned").status == TaskStatus.QUEUED
 
 
-def test_missing_scope_fails_closed_but_non_agent_tasks_remain_public(task_api):
+def test_missing_scope_fails_closed_for_all_task_routes(task_api):
     api = task_api
     seed(api, "owned", api.first_id)
     store = api.runtime.store if api.runtime else api.manager.store
@@ -138,9 +139,9 @@ def test_missing_scope_fails_closed_but_non_agent_tasks_remain_public(task_api):
     app = FastAPI()  # Deliberately no session authority middleware.
     routes.setup_task_routes(app, task_runtime=api.runtime)
     with TestClient(app, base_url="http://localhost") as client:
-        assert [r.status_code for r in responses(client, "owned")] == [404] * 3
-        assert [r.status_code for r in responses(client, "public")] == [200] * 3
-        assert [r["task_id"] for r in client.get("/api/tasks").json()["data"]] == ["public"]
+        assert [r.status_code for r in responses(client, "owned")] == [401] * 3
+        assert [r.status_code for r in responses(client, "public")] == [401] * 3
+        assert client.get("/api/tasks").status_code == 401
 
 
 def test_empty_task_type_retains_unfiltered_list_semantics(task_api):
@@ -163,7 +164,7 @@ def test_list_filters_before_limit_and_merges_stably(task_api):
             api.runtime.store.create(f"unknown-{number}", "agent_workflow", {})
     for _ in range(2):
         assert [r["task_id"] for r in api.first.get("/api/tasks?limit=2").json()["data"]] == [
-            "visible-z", "visible-m"
+            "visible-z", "visible-a"
         ]
     assert [r["task_id"] for r in api.first.get(
         "/api/tasks?limit=1&task_type=agent_workflow&status=queued"
@@ -179,9 +180,7 @@ def test_runtime_collisions_never_borrow_owner_or_evidence(task_api):
     api.runtime.store.create("same-id", "agent_workflow", {})
     api.runtime.store.claim_running("same-id")
     assert [r.status_code for r in responses(api.second, "same-id")] == [404] * 3
-    observed = api.first.get("/api/tasks/same-id/events").json()["data"]
-    assert [event["event_type"] for event in observed] == ["task_created"]
-    assert api.first.post("/api/tasks/same-id/cancel").status_code == 200
+    assert [r.status_code for r in responses(api.first, "same-id")] == [404] * 3
     assert api.runtime.store.get("same-id").status == TaskStatus.RUNNING
     # A manager non-Agent row with the same ID cannot authorize a runtime Agent.
     api.manager.store.create("wrong-type", "demo", {}, owner_session_id=api.first_id)
@@ -192,7 +191,7 @@ def test_runtime_collisions_never_borrow_owner_or_evidence(task_api):
     api.runtime.store.create("private-id", "demo", {})
     assert [r.status_code for r in responses(api.first, "private-id")] == [404] * 3
     listed = api.first.get("/api/tasks").json()["data"]
-    assert [row["task_id"] for row in listed] == ["same-id"]
+    assert [row["task_id"] for row in listed] == []
 
 
 def test_unknown_runtime_agent_is_rejected_before_backend_refresh(task_api):
@@ -220,7 +219,7 @@ def test_colliding_runtime_rows_cannot_starve_visible_page(task_api):
         seed(api, f"collision-{number}", api.second_id)
         api.runtime.store.create(f"collision-{number}", "demo", {})
     api.runtime.store.create("visible", "demo", {}, now="2020-01-01T00:00:00+00:00")
-    assert [r["task_id"] for r in api.first.get("/api/tasks?limit=1").json()["data"]] == ["visible"]
+    assert api.first.get("/api/tasks?limit=1").json()["data"] == []
 
 
 def test_manager_binds_owner_before_handler_and_ignores_payload(tmp_path):
@@ -310,23 +309,22 @@ def test_real_runtime_routes_manager_agent_and_non_agent_rows(tmp_path, monkeypa
             store.create("public", "demo", {})
             assert [r.status_code for r in responses(second, "owned")] == [404] * 3
             assert [r.status_code for r in responses(first, "owned")] == [200] * 3
-            assert [r.status_code for r in responses(first, "public")] == [200] * 3
-            assert {r["task_id"] for r in first.get("/api/tasks").json()["data"]} == {"owned", "public"}
-            assert [r["task_id"] for r in second.get("/api/tasks").json()["data"]] == ["public"]
-            assert len(first.get("/api/tasks").json()["data"]) == 2
+            assert [r.status_code for r in responses(first, "public")] == [404] * 3
+            assert [r["task_id"] for r in first.get("/api/tasks").json()["data"]] == ["owned"]
+            assert second.get("/api/tasks").json()["data"] == []
             second.close()
     finally:
         manager.executor.shutdown(wait=True)
 
 
 def test_non_agent_events_remain_readable_when_temporal_factory_is_offline(tmp_path, monkeypatch):
+    from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+
     manager_store = TaskStore(tmp_path / "manager.sqlite")
     monkeypatch.setattr(routes, "get_task_manager", lambda: SimpleNamespace(
         store=manager_store, get=manager_store.get
     ))
     store = TaskStore(tmp_path / "runtime.sqlite")
-    store.create("offline", "docking", {}, backend="temporal")
-    store.create("unknown", "agent_workflow", {}, backend="temporal")
     calls = []
 
     def unavailable_backend():
@@ -340,9 +338,21 @@ def test_non_agent_events_remain_readable_when_temporal_factory_is_offline(tmp_p
         temporal_backend_factory=unavailable_backend,
     )
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "sessions.sqlite"),
+    )
+
+    @app.get("/who")
+    def who(request: Request):
+        return request.scope["agent_session_id"]
+
     app.router.add_event_handler("shutdown", runtime.close)
     routes.setup_task_routes(app, task_runtime=runtime)
-    with TestClient(app, base_url="http://localhost", raise_server_exceptions=False) as client:
+    with TestClient(app, base_url="https://localhost", raise_server_exceptions=False) as client:
+        owner = client.get("/who").json()
+        store.create("offline", "docking", {}, backend="temporal", owner_session_id=owner)
+        store.create("unknown", "agent_workflow", {}, backend="temporal", owner_session_id=owner)
         response = client.get("/api/tasks/offline/events")
         assert response.status_code == 200
         assert [row["event_type"] for row in response.json()["data"]] == ["task_created"]
@@ -368,7 +378,9 @@ def capped_storeless_runtime(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("internal_cap", [50, 200])
-def test_storeless_runtime_pages_past_hidden_agent_rows(capped_storeless_runtime, internal_cap):
+def test_storeless_runtime_is_rejected_without_ownership_authority(
+    capped_storeless_runtime, internal_cap, tmp_path
+):
     calls = []
 
     class PagedRuntime:
@@ -379,22 +391,17 @@ def test_storeless_runtime_pages_past_hidden_agent_rows(capped_storeless_runtime
             )
 
     app = FastAPI()
+    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
     routes.setup_task_routes(app, task_runtime=PagedRuntime())
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="https://localhost") as client:
         response = client.get("/api/tasks?limit=1")
-        assert response.status_code == 200
-        assert [row["task_id"] for row in response.json()["data"]] == ["visible"]
-        assert len(calls) > 1
-        assert all(limit <= 200 for limit, _ in calls)
-        assert calls[1][1] == internal_cap
-        underfilled = client.get("/api/tasks?limit=20")
-        assert underfilled.status_code == 200
-        assert [row["task_id"] for row in underfilled.json()["data"]] == ["visible"]
-        assert calls[-1][1] == 206  # Exhaustion, not a short capped page.
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Task ownership storage unavailable"
+        assert calls == []
 
 
 @pytest.mark.parametrize("internal_cap", [50, 200])
-def test_storeless_runtime_without_paging_rejects_incomplete_list(capped_storeless_runtime, internal_cap):
+def test_storeless_runtime_without_paging_rejects_incomplete_list(capped_storeless_runtime, internal_cap, tmp_path):
     class UnpagedRuntime:
         async def list(self, limit=20, status=None, task_type=None):
             return capped_storeless_runtime.list(
@@ -402,18 +409,15 @@ def test_storeless_runtime_without_paging_rejects_incomplete_list(capped_storele
             )
 
     app = FastAPI()
+    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
     routes.setup_task_routes(app, task_runtime=UnpagedRuntime())
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="https://localhost") as client:
         response = client.get("/api/tasks?limit=1")
         assert response.status_code == 503
-        assert response.json()["detail"] == "Task runtime pagination unavailable"
-        # Legacy bounded adapters still serve complete, explicitly typed pages.
-        typed = client.get("/api/tasks?limit=1&task_type=demo")
-        assert typed.status_code == 200
-        assert [row["task_id"] for row in typed.json()["data"]] == ["visible"]
+        assert response.json()["detail"] == "Task ownership storage unavailable"
 
 
-def test_storeless_runtime_ignoring_offset_fails_bounded(capped_storeless_runtime):
+def test_storeless_runtime_ignoring_offset_fails_bounded(capped_storeless_runtime, tmp_path):
     calls = []
 
     class BrokenPagedRuntime:
@@ -423,10 +427,11 @@ def test_storeless_runtime_ignoring_offset_fails_bounded(capped_storeless_runtim
             return capped_storeless_runtime.list(limit=limit, status=status, task_type=task_type)
 
     app = FastAPI()
+    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
     routes.setup_task_routes(app, task_runtime=BrokenPagedRuntime())
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="https://localhost") as client:
         assert client.get("/api/tasks?limit=1").status_code == 503
-        assert calls == [0, 200]
+        assert calls == []
 
 
 def test_storeless_runtime_scan_budget_never_returns_partial_success(tmp_path, monkeypatch):
@@ -446,16 +451,17 @@ def test_storeless_runtime_scan_budget_never_returns_partial_success(tmp_path, m
             ) for index in range(limit)]
 
     app = FastAPI()
+    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
     routes.setup_task_routes(app, task_runtime=NonExhaustingRuntime())
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="https://localhost") as client:
         response = client.get("/api/tasks?limit=1")
         assert response.status_code == 503
-        assert response.json()["detail"] == "Task runtime pagination unavailable"
-        assert len(calls) == 50
+        assert response.json()["detail"] == "Task ownership storage unavailable"
+        assert calls == []
 
 
 @pytest.mark.parametrize("newer_timestamp", [False, True], ids=["task-id-tie-break", "updated-at"])
-def test_legacy_storeless_list_sorts_entire_page_before_limit(tmp_path, monkeypatch, newer_timestamp):
+def test_legacy_storeless_list_is_rejected_before_reading_rows(tmp_path, monkeypatch, newer_timestamp):
     manager_store = TaskStore(tmp_path / "manager.sqlite")
     monkeypatch.setattr(routes, "get_task_manager", lambda: SimpleNamespace(
         store=manager_store, get=manager_store.get
@@ -471,9 +477,10 @@ def test_legacy_storeless_list_sorts_entire_page_before_limit(tmp_path, monkeypa
             return records[:min(limit, 200)]
 
     app = FastAPI()
+    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
     routes.setup_task_routes(app, task_runtime=LegacyRuntime())
-    with TestClient(app, base_url="http://localhost") as client:
+    with TestClient(app, base_url="https://localhost") as client:
         for limit in (1, 2, 1, 2):
             response = client.get(f"/api/tasks?limit={limit}")
-            assert response.status_code == 200
-            assert [row["task_id"] for row in response.json()["data"]] == ["z", "a"][:limit]
+            assert response.status_code == 503
+            assert response.json()["detail"] == "Task ownership storage unavailable"

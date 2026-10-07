@@ -164,7 +164,7 @@ window.HomeChatRenderer = (function () {
     };
 
     const config = statusConfig[status] || statusConfig.connecting;
-    elements.connectionStatus.innerHTML = `${config.icon} ${config.text}`;
+    elements.connectionStatus.textContent = `${config.icon} ${config.text}`;
     elements.connectionStatus.style.backgroundColor = config.bg;
     elements.connectionStatus.style.color = "#fff";
     elements.connectionStatus.style.padding = "6px 12px";

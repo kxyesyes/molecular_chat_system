@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
+import math
 import re
 import threading
+from uuid import uuid4
 from collections.abc import Mapping
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -23,11 +25,14 @@ from src.agent.persistence.redaction import sanitize_bounded, sanitize_sensitive
 from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.base_tool import BaseMolecularTool
 from src.agent.tools.molecular_input import MolecularInputUnavailable, parse_molecular_smiles
+from src.web.process_isolation import IsolatedProcess, ProcessExecutionError
+from src.web.request_auth import require_browser_session
 
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CONCURRENCY = 1
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 180.0
 _DIAGNOSTIC_FIELDS = frozenset(
     {"message", "reasoning", "warnings", "error", "reason", "failure_reason", "backend_error"}
 )
@@ -53,6 +58,48 @@ class _InvalidSmiles(ValueError):
     """The complete requested structure failed the existing parser."""
 
 
+def _execute_admet_request(smiles: str, molecule_id: str) -> Any:
+    """Run one ADMET calculation in the current execution boundary."""
+
+    predictor = None
+    try:
+        try:
+            parse_molecular_smiles(smiles, _STRUCTURE_VALIDATOR)
+        except MolecularInputUnavailable:
+            return _validation_unavailable()
+        except ValueError as exc:
+            raise _InvalidSmiles from exc
+
+        predictor = build_admet_predictor()
+        return predictor.execute(
+            {
+                "smiles": [smiles],
+                "molecule_ids": [molecule_id],
+            }
+        )
+    finally:
+        if predictor is not None:
+            close = getattr(predictor, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    logger.warning("ADMET predictor cleanup failed; exception details omitted")
+
+
+def _admet_child_job(smiles: str, molecule_id: str) -> dict[str, Any]:
+    """Translate expected child outcomes without serializing exception details."""
+
+    try:
+        return {"kind": "result", "value": _execute_admet_request(smiles, molecule_id)}
+    except _InvalidSmiles:
+        return {"kind": "invalid_smiles"}
+    except TimeoutError:
+        return {"kind": "timeout"}
+    except BaseException:
+        return {"kind": "error"}
+
+
 class _StructureValidationTool:
     """Minimal parser context; it performs no prediction or fallback logic."""
 
@@ -69,6 +116,14 @@ def _positive_int_env(support: Any, name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value >= 1 else default
+
+
+def _positive_float_env(support: Any, name: str, default: float) -> float:
+    try:
+        value = float(support.os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value > 0 else default
 
 
 def build_admet_predictor() -> ADMETPredictor:
@@ -247,10 +302,24 @@ def _sanitize_row_diagnostics(output: dict[str, Any]) -> None:
 
 
 class _AdmetWorker:
-    """App-scoped worker with non-queueing admission and physical cleanup."""
+    """App-scoped worker with non-queueing admission and physical cleanup.
 
-    def __init__(self, support: Any):
+    Production calculations run in a child process so request cancellation and
+    hard deadlines can terminate the scientific work itself.  ``isolate=False``
+    is intentionally available for deterministic unit fixtures that inject a
+    predictor into the parent interpreter.
+    """
+
+    def __init__(
+        self,
+        support: Any,
+        *,
+        isolate: bool = True,
+        process_target=None,
+    ):
         self._support = support
+        self._isolate = bool(isolate)
+        self._process_target = process_target or _admet_child_job
         self._capacity = _positive_int_env(
             support, "MEDCHAT_ADMET_MAX_CONCURRENCY", _DEFAULT_MAX_CONCURRENCY
         )
@@ -260,6 +329,8 @@ class _AdmetWorker:
             thread_name_prefix="medchat-admet",
         )
         self._lock = threading.Lock()
+        self._active_processes: dict[str, IsolatedProcess] = {}
+        self._cancelled_jobs: set[str] = set()
         self._closed = False
 
     @property
@@ -280,45 +351,89 @@ class _AdmetWorker:
         return True
 
     def submit(self, request: AdmetPredictRequest):
+        job_id = uuid4().hex
         try:
-            future = self._executor.submit(self._run, request)
+            future = self._executor.submit(self._run, request, job_id)
+            future._admet_job_id = job_id
             future.add_done_callback(lambda _: self._admission.release())
             return future
         except Exception:
             self._admission.release()
             raise
 
-    def _run(self, request: AdmetPredictRequest) -> Any:
-        predictor = None
-        try:
-            try:
-                parse_molecular_smiles(request.smiles, _STRUCTURE_VALIDATOR)
-            except MolecularInputUnavailable:
-                return _validation_unavailable()
-            except ValueError as exc:
-                raise _InvalidSmiles from exc
+    def _run(self, request: AdmetPredictRequest, job_id: str) -> Any:
+        if not self._isolate:
+            return _execute_admet_request(request.smiles, request.molecule_id)
 
-            predictor = build_admet_predictor()
-            return predictor.execute(
-                {
-                    "smiles": [request.smiles],
-                    "molecule_ids": [request.molecule_id],
-                }
-            )
+        process = IsolatedProcess(
+            self._process_target,
+            args=(request.smiles, request.molecule_id),
+        )
+        with self._lock:
+            if self._closed or job_id in self._cancelled_jobs:
+                self._cancelled_jobs.discard(job_id)
+                raise ProcessExecutionError("ADMET job cancelled before start")
+            self._active_processes[job_id] = process
+        try:
+            # Do not hold the worker registry lock across native process
+            # startup.  Cancellation must be able to find and terminate a
+            # process even when its start call is slow or stuck.
+            process.start()
+        except Exception:
+            with self._lock:
+                self._active_processes.pop(job_id, None)
+                self._cancelled_jobs.discard(job_id)
+            process.close()
+            raise
+        try:
+            envelope = process.wait()
+            if not isinstance(envelope, dict):
+                raise ProcessExecutionError("ADMET child returned an invalid envelope")
+            kind = envelope.get("kind")
+            if kind == "result":
+                return envelope.get("value")
+            if kind == "invalid_smiles":
+                raise _InvalidSmiles
+            if kind == "timeout":
+                raise TimeoutError("ADMET child timed out")
+            raise ProcessExecutionError("ADMET child failed")
         finally:
-            if predictor is not None:
-                close = getattr(predictor, "close", None)
-                if callable(close):
-                    try:
-                        close()
-                    except Exception:
-                        logger.warning("ADMET predictor cleanup failed; exception details omitted")
+            with self._lock:
+                self._active_processes.pop(job_id, None)
+                self._cancelled_jobs.discard(job_id)
+            process.close()
+
+    def cancel(self, future) -> bool:
+        """Cancel queued work or physically terminate its scientific child."""
+
+        job_id = getattr(future, "_admet_job_id", None)
+        if callable(getattr(future, "done", None)) and future.done():
+            if isinstance(job_id, str):
+                with self._lock:
+                    self._cancelled_jobs.discard(job_id)
+            return False
+        process = None
+        if isinstance(job_id, str):
+            with self._lock:
+                self._cancelled_jobs.add(job_id)
+                process = self._active_processes.get(job_id)
+        cancelled = future.cancel()
+        if process is not None:
+            process.terminate()
+            return True
+        if cancelled and isinstance(job_id, str):
+            with self._lock:
+                self._cancelled_jobs.discard(job_id)
+        return cancelled
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
             self._closed = True
+            active = list(self._active_processes.values())
+        for process in active:
+            process.terminate()
         self._executor.shutdown(wait=True, cancel_futures=True)
 
 
@@ -326,7 +441,13 @@ def _default_support() -> Any:
     return importlib.import_module("src.web.routes.api_routes")
 
 
-def setup_admet_routes(app: FastAPI, *, _support=None) -> None:
+def setup_admet_routes(
+    app: FastAPI,
+    *,
+    _support=None,
+    _isolate: bool | None = None,
+    _process_target=None,
+) -> None:
     """Register the single structured ADMET operation."""
 
     if getattr(app.state, "_admet_routes_registered", False):
@@ -335,7 +456,12 @@ def setup_admet_routes(app: FastAPI, *, _support=None) -> None:
     support = _support if _support is not None else _default_support()
     worker = getattr(app.state, "_admet_worker", None)
     if worker is None:
-        worker = _AdmetWorker(support)
+        isolate = True if _isolate is None else _isolate
+        worker = _AdmetWorker(
+            support,
+            isolate=isolate,
+            process_target=_process_target,
+        )
         app.state._admet_worker = worker
 
         async def shutdown_admet_worker() -> None:
@@ -344,7 +470,8 @@ def setup_admet_routes(app: FastAPI, *, _support=None) -> None:
         app.router.add_event_handler("shutdown", shutdown_admet_worker)
 
     @app.post("/api/admet/predict")
-    async def predict_admet(payload: AdmetPredictRequest):
+    async def predict_admet(request: Request, payload: AdmetPredictRequest):
+        require_browser_session(request)
         if not worker.acquire():
             return _safe_request_error(
                 429,
@@ -354,11 +481,28 @@ def setup_admet_routes(app: FastAPI, *, _support=None) -> None:
 
         try:
             future = worker.submit(payload)
-            result = await asyncio.shield(asyncio.wrap_future(future))
+            result = await asyncio.wait_for(
+                asyncio.shield(asyncio.wrap_future(future)),
+                timeout=_positive_float_env(
+                    support,
+                    "MEDCHAT_ADMET_REQUEST_TIMEOUT_SECONDS",
+                    _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+                ),
+            )
         except _InvalidSmiles:
             return _safe_request_error(422, "INVALID_SMILES", "SMILES 无效或缺失；请提供完整结构。")
         except HTTPException:
             raise
+        except asyncio.TimeoutError:
+            await asyncio.to_thread(worker.cancel, future)
+            logger.warning("ADMET prediction timed out; exception details omitted")
+            return JSONResponse(status_code=504, content=_safe_timeout_failure())
+        except asyncio.CancelledError:
+            await asyncio.to_thread(worker.cancel, future)
+            raise
+        except ProcessExecutionError:
+            logger.warning("ADMET child process failed; exception details omitted")
+            return JSONResponse(status_code=500, content=_safe_execution_failure())
         except TimeoutError:
             logger.warning("ADMET prediction timed out; exception details omitted")
             return JSONResponse(status_code=504, content=_safe_timeout_failure())

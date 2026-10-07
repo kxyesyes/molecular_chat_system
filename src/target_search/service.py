@@ -1196,22 +1196,55 @@ class TargetSearchService:
         file_format = (requested_format or structure.get("file_format") or "cif").lower()
         local_file_path = self.downloader._local_path_for_format(row, file_format)
         absolute_path = absolute_from_project(local_file_path, self.project_root)
-        file_exists = absolute_path.exists()
+        file_exists = absolute_path.is_file()
         file_size = absolute_path.stat().st_size if file_exists else None
         source = str(structure.get("source") or "")
         docking_grade = structure["docking_grade"]
         warnings = list(structure.get("warnings") or [])
 
+        cache_key = self.downloader._coordinate_cache_key(
+            source,
+            str(structure.get("structure_id") or ""),
+            file_format,
+        )
+        cached_evidence = self.downloader.cache.get(cache_key, allow_stale=True)
+        verified_cache = (
+            self.downloader._verified_cached_structure(row, file_format)
+            if cached_evidence is not None and not cached_evidence.stale
+            else None
+        )
+        cache_verified = verified_cache is not None
+
         if not file_exists:
             warnings.append("本地缓存文件不存在，下载时将尝试远程获取并写入缓存。")
+        elif not cache_verified:
+            warnings.append("local_structure_integrity_unverified")
+            warnings.append(
+                "本地结构缺少可验证的哈希、格式或来源元数据，不能直接用于 docking。"
+            )
+        if cached_evidence is not None and cached_evidence.stale:
+            warnings.append("stale_structure_excluded_from_docking")
+            warnings.append("结构缓存已过期，不能直接用于 docking。")
         if source == "AlphaFold":
             warnings.append("AlphaFold 预测结构仅建议作为参考，不建议作为 docking 首选。")
         if docking_grade == "C":
             warnings.append("C 级结构不建议直接作为首选 docking 输入。")
 
-        can_download = file_exists or source in {"RCSB_PDB", "AlphaFold"} or bool(structure.get("download_url"))
-        suitable_for_direct_docking = docking_grade in {"A", "B"} and source != "AlphaFold"
+        can_download = cache_verified or source in {"RCSB_PDB", "AlphaFold"} or bool(structure.get("download_url"))
+        suitable_for_direct_docking = (
+            cache_verified and docking_grade in {"A", "B"} and source != "AlphaFold"
+        )
+        docking_recommended = bool(structure["docking_recommended"]) and cache_verified
         needs_pdbqt_conversion = file_format not in {"pdbqt"}
+
+        if cache_verified:
+            cache_status = "available"
+        elif cached_evidence is not None and cached_evidence.stale:
+            cache_status = "stale"
+        elif file_exists:
+            cache_status = "unverified"
+        else:
+            cache_status = "missing"
 
         return {
             "structure_db_id": structure["id"],
@@ -1221,11 +1254,11 @@ class TargetSearchService:
             "file_format": file_format,
             "local_file_path": relative_to_project(absolute_path, self.project_root),
             "local_file_exists": file_exists,
-            "cache_status": "available" if file_exists else "missing",
+            "cache_status": cache_status,
             "file_size_bytes": file_size,
             "download_url": structure.get("download_url"),
             "can_download": can_download,
-            "docking_recommended": structure["docking_recommended"],
+            "docking_recommended": docking_recommended,
             "docking_grade": docking_grade,
             "docking_grade_label": structure["docking_grade_label"],
             "recommendation_level": structure["recommendation_level"],

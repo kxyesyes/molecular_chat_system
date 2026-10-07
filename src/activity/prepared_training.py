@@ -9,6 +9,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -19,6 +20,22 @@ import uuid
 import numpy as np
 
 _TRAINING_RNG_LOCK = threading.Lock()
+
+_PROVENANCE_ENV_KEYS = (
+    "SYSTEMROOT", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "TMPDIR",
+    "USERPROFILE", "HOME", "LANG", "LC_ALL", "COMSPEC",
+)
+
+
+def _provenance_environment():
+    """Return only the environment needed for a local, read-only Git probe."""
+    environment = {
+        key: os.environ[key]
+        for key in _PROVENANCE_ENV_KEYS
+        if key in os.environ
+    }
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_TERMINAL_PROMPT="0")
+    return environment
 
 
 def training_code_provenance():
@@ -34,7 +51,8 @@ def training_code_provenance():
         json.dumps(files, sort_keys=True).encode("utf-8")).hexdigest(), "git_commit": "unknown"}
     try:
         revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True,
-                                  text=True, timeout=3, check=True).stdout.strip()
+                                  text=True, timeout=3, check=True,
+                                  env=_provenance_environment()).stdout.strip()
         if re.fullmatch(r"[0-9a-f]{40,64}", revision):
             result["git_commit"] = revision
     except (OSError, subprocess.SubprocessError):
@@ -119,12 +137,15 @@ def evaluate(model, loader, criterion, task_type, device, *, prediction_summary=
 
 
 def fit_prepared(model, optimizer, loaders, criterion, *, task_type, device,
-                 epochs, patience, scheduler=None, plateau=False, progress=None):
+                 epochs, patience, scheduler=None, plateau=False, progress=None,
+                 cancel_check=None):
     if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in (epochs, patience)):
         raise ValueError("epochs and patience must be positive integers")
     best_score, best_weights, best_epoch = math.inf, None, 0
     best_metrics = None
     for epoch in range(1, epochs + 1):
+        if cancel_check is not None:
+            cancel_check()
         train_loss = train_epoch(model, loaders["train"], criterion, optimizer, device)
         val_loss, metrics = evaluate(model, loaders["validation"], criterion, task_type, device)
         score = metrics["rmse"] if task_type == "regression" else -metrics["pr_auc"]
@@ -268,7 +289,8 @@ def _run_prepared_training(owner, manifest_path, *, epochs, lr, batch_size, drop
                                train_loss=metrics["train_loss"], val_loss=metrics["val_loss"])
     result = fit_prepared(model, optimizer, loaders, criterion, task_type=task_type,
                           device=owner.device, epochs=epochs, patience=patience,
-                          scheduler=scheduler, plateau=lr_scheduler == "Plateau", progress=progress)
+                          scheduler=scheduler, plateau=lr_scheduler == "Plateau", progress=progress,
+                          cancel_check=getattr(owner, "_raise_if_cancelled", None))
     if training_code_provenance()["source_sha256"] != code_provenance["source_sha256"]:
         raise ValueError("Training source files changed during the job; refusing registration")
     metadata = publish_model(owner.job_id, model, prepared, config, result, random_seed,

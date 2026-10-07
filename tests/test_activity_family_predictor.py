@@ -407,6 +407,32 @@ def test_pinned_loader_never_retries_without_weights_only(monkeypatch, error):
     assert stage.model is None
 
 
+def test_pinned_loader_falls_back_to_cpu_when_cuda_selection_is_stale(monkeypatch):
+    import io
+    import torch
+    from src.activity.predictor import ActivityPredictor
+
+    payload = b"SYNTHETIC CPU FALLBACK CONTRACT"
+    monkeypatch.setattr(ActivityPredictor, "_find_checkpoint", lambda _: pytest.fail("legacy lookup"))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+
+    def restricted(stream, *, map_location, weights_only):
+        assert isinstance(stream, io.BytesIO)
+        assert map_location == torch.device("cpu")
+        assert weights_only is True
+        raise RuntimeError("synthetic restricted-load failure")
+
+    monkeypatch.setattr(torch, "load", restricted)
+    stage = module()._PinnedPredictor(
+        {"weights_sha256": hashlib.sha256(payload).hexdigest()}, payload)
+    stage.device = torch.device("cuda")
+    with pytest.raises(RuntimeError, match="restricted-load failure"):
+        stage.load()
+    assert stage.device.type == "cpu"
+    assert not stage._loaded
+
+
 def test_pinned_loader_checks_digest_before_deserialization(monkeypatch):
     import torch
 

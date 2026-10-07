@@ -1021,6 +1021,11 @@ def build_default_tools() -> dict[str, Any]:
         ("target_database_search", "src.agent.tools.target_database_tool", "TargetDatabaseTool"),
         ("llm_molecular_generator", "src.agent.tools.llm_molecular_generator", "LLMMolecularGenerator"),
         ("candidate_ranker", "src.agent.tools.candidate_ranker", "CandidateRanker"),
+        (
+            "lead_optimization_verifier",
+            "src.agent.tools.lead_optimization_verifier",
+            "LeadOptimizationVerifier",
+        ),
         ("molecular_docking", "src.agent.tools.molecular_docking", "MolecularDocking"),
         ("rag_search", "src.agent.tools.rag_search_tool", "RAGSearchTool"),
     ]

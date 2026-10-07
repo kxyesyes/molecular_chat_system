@@ -6,6 +6,7 @@
 
 from typing import Dict, List, Optional, Any
 import logging
+import math
 
 try:
     from rdkit import Chem
@@ -137,6 +138,8 @@ class DrugLikenessAssessment(BaseMolecularTool):
 
             # QED计算
             qed_score = QED.qed(mol)
+            if not (math.isfinite(qed_score) and 0.0 <= qed_score <= 1.0):
+                raise ValueError(f"QED={qed_score} out of [0,1] for {smiles}")
 
             # Lipinski's Rule of Five评估
             lipinski_violations = self._assess_lipinski_violations(mw, logp, hba, hbd)

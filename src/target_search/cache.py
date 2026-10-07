@@ -112,13 +112,6 @@ class TargetCacheRepository:
         ttl: Optional[timedelta] = None,
     ) -> CachedEvidence:
         if record_type == "coordinate_file":
-            _validate_identifier("cache_key", cache_key)
-            _validate_record_type(record_type)
-            _validate_identifier("source", source)
-            _validate_identifier("source_record_id", source_record_id)
-            _validate_payload_schema(record_type, payload)
-            if ttl is not None:
-                _validate_ttl(ttl)
             raise ValueError(
                 "coordinate_file records must be created with publish_coordinate"
             )
@@ -140,6 +133,8 @@ class TargetCacheRepository:
         staged_path: str,
         coordinate_suffix: str,
         ttl: Optional[timedelta] = None,
+        source_version: Optional[str] = None,
+        species: Optional[str] = None,
     ) -> CachedEvidence:
         cache_key = _validate_identifier("cache_key", cache_key)
         source = _validate_identifier("source", source)
@@ -149,6 +144,8 @@ class TargetCacheRepository:
         )
         staged_relative = _validate_incoming_path(staged_path)
         coordinate_suffix = _validate_coordinate_suffix(coordinate_suffix)
+        source_version = _validate_optional_metadata("source_version", source_version)
+        species = _validate_optional_metadata("species", species)
         generation_id = str(uuid.uuid4())
         final_relative = _derive_coordinate_final_path(
             source, source_record_id, generation_id, coordinate_suffix
@@ -165,6 +162,9 @@ class TargetCacheRepository:
             )
             if staged_state != "regular":
                 raise ValueError("staged coordinate file is not a safe regular file")
+            file_sha256, file_size_bytes = _coordinate_file_fingerprint(
+                staged, cache_root, staged_relative.parts
+            )
             self._reject_active_coordinate_path(staged_relative.as_posix())
             destination_state = _ensure_relative_directory(
                 cache_root, final_relative.parts[:-1]
@@ -187,6 +187,11 @@ class TargetCacheRepository:
                 generation_id=generation_id,
                 retrieved_at=retrieved_at,
                 expires_at=expires_at,
+                file_sha256=file_sha256,
+                file_size_bytes=file_size_bytes,
+                file_format=coordinate_suffix.removeprefix("."),
+                source_version=source_version,
+                species=species,
             )
             evidence = self._continue_publication_intent_locked(intent_id)
             if evidence is None:
@@ -194,25 +199,25 @@ class TargetCacheRepository:
             return evidence
 
     def _reject_active_coordinate_path(self, final_path: str) -> None:
-        payload_json = json.dumps(
-            {"path": final_path}, separators=(",", ":"), sort_keys=True
-        )
         conn = get_connection(self.project_root)
         try:
-            row = conn.execute(
+            rows = conn.execute(
                 """
-                SELECT cache_key
+                SELECT payload_json
                 FROM target_remote_cache
                 WHERE record_type = 'coordinate_file'
-                    AND payload_json = ? AND cleanup_pending = 0
-                LIMIT 1
-                """,
-                (payload_json,),
-            ).fetchone()
+                    AND cleanup_pending = 0
+                """
+            ).fetchall()
         finally:
             conn.close()
-        if row is not None:
-            raise ValueError("active coordinate paths are immutable")
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"])
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if isinstance(payload, Mapping) and payload.get("path") == final_path:
+                raise ValueError("active coordinate paths are immutable")
 
     def _reserve_publication_intent(
         self,
@@ -225,6 +230,11 @@ class TargetCacheRepository:
         generation_id: str,
         retrieved_at: datetime,
         expires_at: datetime,
+        file_sha256: str,
+        file_size_bytes: int,
+        file_format: str,
+        source_version: Optional[str],
+        species: Optional[str],
     ) -> str:
         intent_id = str(uuid.uuid4())
         previous_generation_id = None
@@ -279,8 +289,9 @@ class TargetCacheRepository:
                     intent_id, generation_id, cache_key, staged_path, final_path,
                     source, source_record_id, status, retrieved_at, expires_at,
                     expires_epoch, previous_generation_id, previous_path,
-                    previous_quarantine_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?)
+                    previous_quarantine_path, file_sha256, file_size_bytes,
+                    file_format, source_version, species, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'reserved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     intent_id,
@@ -296,6 +307,11 @@ class TargetCacheRepository:
                     previous_generation_id,
                     previous_path,
                     previous_quarantine_path,
+                    file_sha256,
+                    file_size_bytes,
+                    file_format,
+                    source_version,
+                    species,
                     now_text,
                     now_text,
                 ),
@@ -631,10 +647,25 @@ class TargetCacheRepository:
                 )
                 if deleted.rowcount != 1:
                     raise RuntimeError("previous coordinate generation was not retired")
+            final_path = get_cache_dir(self.project_root).joinpath(
+                *intent["final_relative"].parts
+            )
+            suffix = _coordinate_suffix_from_path(intent["final_relative"])
+            file_sha256, file_size_bytes = _coordinate_file_fingerprint(
+                final_path,
+                get_cache_dir(self.project_root),
+                intent["final_relative"].parts,
+            )
+            payload = {
+                "path": intent["final_relative"].as_posix(),
+                "sha256": file_sha256,
+                "size_bytes": file_size_bytes,
+                "file_format": suffix.removeprefix("."),
+                "source_version": intent.get("source_version"),
+                "species": intent.get("species"),
+            }
             payload_json = json.dumps(
-                {"path": intent["final_relative"].as_posix()},
-                separators=(",", ":"),
-                sort_keys=True,
+                payload, separators=(",", ":"), sort_keys=True
             )
             payload_digest = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
             conn.execute(
@@ -1079,7 +1110,7 @@ class TargetCacheRepository:
         if row is None or row.get("cleanup_pending") == 1:
             return None
 
-        evidence = self._validated_evidence(row)
+        evidence = self._validated_evidence(row, verify_file=True)
         if evidence is None:
             return None
         stale = evidence.expires_at <= self._now()
@@ -1403,7 +1434,9 @@ class TargetCacheRepository:
             raise ValueError("clock must return a timezone-aware datetime")
         return value.astimezone(timezone.utc)
 
-    def _validated_evidence(self, row: dict[str, Any]) -> Optional[CachedEvidence]:
+    def _validated_evidence(
+        self, row: dict[str, Any], *, verify_file: bool = False
+    ) -> Optional[CachedEvidence]:
         try:
             if (
                 row is None
@@ -1438,6 +1471,25 @@ class TargetCacheRepository:
             )
             generation_id = _validate_generation_id(row["generation_id"])
             _validate_payload_schema(record_type, payload)
+            if (
+                verify_file
+                and record_type == "coordinate_file"
+                and row.get("cleanup_pending") == 0
+            ):
+                coordinate_path = _validate_cache_relative_path(payload["path"])
+                cache_root = get_cache_dir(self.project_root)
+                actual_sha256, actual_size = _coordinate_file_fingerprint(
+                    cache_root.joinpath(*coordinate_path.parts),
+                    cache_root,
+                    coordinate_path.parts,
+                )
+                if (
+                    not hmac.compare_digest(actual_sha256, payload["sha256"])
+                    or actual_size != payload["size_bytes"]
+                    or _coordinate_suffix_from_path(coordinate_path).removeprefix(".")
+                    != payload["file_format"]
+                ):
+                    return None
             return CachedEvidence(
                 cache_key=cache_key,
                 record_type=record_type,
@@ -1450,7 +1502,7 @@ class TargetCacheRepository:
                 expires_at=expires_at,
                 stale=False,
             )
-        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        except (KeyError, TypeError, ValueError, OSError, json.JSONDecodeError):
             return None
 
 def _parse_utc_timestamp(value: Any) -> datetime:
@@ -1501,6 +1553,21 @@ def _validate_ttl(value: Any) -> timedelta:
     return value
 
 
+def _validate_optional_metadata(name: str, value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string or null")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > MAX_IDENTIFIER_LENGTH:
+        raise ValueError(f"{name} is too long")
+    if any(unicodedata.category(character).startswith("C") for character in normalized):
+        raise ValueError(f"{name} contains unsafe Unicode characters")
+    return normalized
+
+
 def _validate_generation_id(value: Any) -> str:
     if not isinstance(value, str):
         raise TypeError("generation_id must be a string")
@@ -1528,9 +1595,50 @@ def _validate_payload_schema(record_type: str, payload: Any) -> None:
 
 
 def _validate_coordinate_payload(payload: Mapping[str, Any]) -> None:
-    if set(payload) != {"path"}:
-        raise ValueError("coordinate_file payload must contain only path")
+    required = {
+        "path",
+        "sha256",
+        "size_bytes",
+        "file_format",
+        "source_version",
+        "species",
+    }
+    if set(payload) != required:
+        raise ValueError("coordinate_file payload has incomplete integrity metadata")
     _validate_cache_relative_path(payload["path"])
+    sha256 = payload["sha256"]
+    if (
+        not isinstance(sha256, str)
+        or len(sha256) != 64
+        or sha256 != sha256.lower()
+        or any(character not in "0123456789abcdef" for character in sha256)
+    ):
+        raise ValueError("coordinate sha256 is invalid")
+    if type(payload["size_bytes"]) is not int or payload["size_bytes"] < 0:
+        raise ValueError("coordinate size_bytes is invalid")
+    file_format = payload["file_format"]
+    if not isinstance(file_format, str) or f".{file_format.lower()}" not in COORDINATE_FILE_SUFFIXES:
+        raise ValueError("coordinate file_format is invalid")
+    _validate_optional_metadata("source_version", payload["source_version"])
+    _validate_optional_metadata("species", payload["species"])
+
+
+def _coordinate_file_fingerprint(
+    path: Path, cache_root: Path, relative_parts: tuple[str, ...]
+) -> tuple[str, int]:
+    state = _prevalidate_regular_file(cache_root, path, relative_parts)
+    if state != "regular":
+        raise ValueError("coordinate file is not a safe regular file")
+    digest = hashlib.sha256()
+    size_bytes = 0
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size_bytes += len(chunk)
+    return digest.hexdigest(), size_bytes
 
 
 def _validate_cache_relative_path(value: Any) -> Path:

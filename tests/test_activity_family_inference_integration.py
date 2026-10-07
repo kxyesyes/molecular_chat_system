@@ -71,16 +71,21 @@ def test_registered_pair_runs_real_forward_without_global_selection(offline_chai
     if entrypoint != "predictor":
         from fastapi import FastAPI
         from fastapi.testclient import TestClient
+        from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
         from src.web.routes.api_routes import setup_api_routes
 
         app = FastAPI()
+        app.add_middleware(
+            AgentSessionMiddleware,
+            store=AgentSessionStore(registry.models_dir / "synthetic-sessions.sqlite"),
+        )
         setup_api_routes(app)
 
     def predict(smiles, *, target):
         if entrypoint == "predictor":
             return predictor.predict(smiles, target=target)
         inputs = [smiles] if isinstance(smiles, str) else list(smiles)
-        with TestClient(app) as client:
+        with TestClient(app, base_url="http://localhost") as client:
             if entrypoint == "predict":
                 responses = [client.post("/api/activity/predict", data={
                     "smiles": value, "target": target}) for value in inputs]

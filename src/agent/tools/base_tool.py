@@ -290,7 +290,37 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                     message="Tool provenance failed strict validation",
                     elapsed_ms=elapsed_ms,
                 )
-            if raw_result.get("success", False) and not raw_result.get("error"):
+            raw_success = raw_result.get("success") is True
+            raw_error_present = bool(raw_result.get("error"))
+            if raw_success and status in {
+                ObservationStatus.FAILED,
+                ObservationStatus.UNAVAILABLE,
+                ObservationStatus.INVALID_INPUT,
+                ObservationStatus.REJECTED,
+                ObservationStatus.CANCELLED,
+            }:
+                return ToolResult.error_result(
+                    tool_name=tool_name,
+                    code=AgentErrorCode.INVALID_OUTPUT,
+                    message="Tool success flag conflicts with terminal failure status",
+                    elapsed_ms=elapsed_ms,
+                    warnings=list(raw_result.get("warnings") or []),
+                    evidence=list(raw_result.get("evidence") or []),
+                    quality=dict(raw_result.get("quality") or {}),
+                    provenance=provenance,
+                )
+            if status is ObservationStatus.SUCCEEDED and (not raw_success or raw_error_present):
+                return ToolResult.error_result(
+                    tool_name=tool_name,
+                    code=AgentErrorCode.INVALID_OUTPUT,
+                    message="Tool status conflicts with success or error fields",
+                    elapsed_ms=elapsed_ms,
+                    warnings=list(raw_result.get("warnings") or []),
+                    evidence=list(raw_result.get("evidence") or []),
+                    quality=dict(raw_result.get("quality") or {}),
+                    provenance=provenance,
+                )
+            if raw_success and not raw_error_present:
                 return ToolResult.success_result(
                     tool_name=tool_name,
                     data=raw_result.get("data"),

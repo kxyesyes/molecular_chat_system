@@ -263,7 +263,7 @@ class ADMETPredictor(BaseMolecularTool):
 
         try:
             rows = self._predict_batch_with_timeout(smiles_list, molecule_ids)
-            self._validate_batch_rows(rows, smiles_list, molecule_ids)
+            self._validate_batch_rows(rows, smiles_list, molecule_ids, backend=self.backend)
             successful = [row for row in rows if row.get("status") == "succeeded"]
             failed = [row for row in rows if row.get("status") != "succeeded"]
             result['data'] = rows
@@ -276,6 +276,9 @@ class ADMETPredictor(BaseMolecularTool):
                 "success_count": len(successful),
                 "failure_count": len(failed),
             }
+            lineage = self._lineage_metadata(rows, successful, backend=self.backend)
+            result["quality"].update(lineage["quality"])
+            result["evidence"] = lineage["evidence"]
             if successful:
                 result['success'] = True
                 result['status'] = 'partial' if failed else 'succeeded'
@@ -299,7 +302,7 @@ class ADMETPredictor(BaseMolecularTool):
                 result['message'] = "ADMET-AI 未返回任何可用模型结果；未形成评估。"
                 result['reasoning'] = "所有分子均失败，未用 RDKit 规则或模拟值替代模型结果。"
 
-            result['provenance'] = self._provenance(smiles_list, rows)
+            result['provenance'] = self._provenance(smiles_list, rows, backend=self.backend)
 
         except TimeoutError as e:
             logger.warning("ADMET-AI prediction timed out; exception details omitted")
@@ -396,7 +399,7 @@ class ADMETPredictor(BaseMolecularTool):
             executor.shutdown(wait=True, cancel_futures=True)
 
     @staticmethod
-    def _validate_batch_rows(rows, smiles_list, molecule_ids):
+    def _validate_batch_rows(rows, smiles_list, molecule_ids, *, backend=None):
         if not isinstance(rows, list) or len(rows) != len(smiles_list):
             raise ValueError("ADMET-AI returned an invalid batch shape")
         for row, smiles, molecule_id in zip(rows, smiles_list, molecule_ids):
@@ -410,11 +413,48 @@ class ADMETPredictor(BaseMolecularTool):
                     raise ValueError("ADMET-AI success row lacks model provenance")
                 if admet.get("demo_mode") is not False or admet.get("fallback_used") is not False:
                     raise ValueError("ADMET-AI success row is marked demo/fallback")
+                if not all(admet.get(field) for field in (
+                    "model_version", "weights_id", "data_version", "source", "evidence"
+                )):
+                    raise ValueError("ADMET-AI success row lacks complete provenance")
+                expected_data_version = getattr(backend, "data_version", None)
+                if expected_data_version and admet.get("data_version") != expected_data_version:
+                    raise ValueError("ADMET-AI success row data version does not match backend")
             elif not row.get("error"):
                 raise ValueError("ADMET-AI failure row lacks an error")
 
     @staticmethod
-    def _provenance(smiles_list, rows):
+    def _lineage_metadata(rows, successful, *, backend=None):
+        first = successful[0].get("admet", {}) if successful else {}
+        model_version = first.get("model_version") or getattr(backend, "version", "1.4.0")
+        weights_id = first.get("weights_id") or getattr(backend, "weights_id", None)
+        data_version = first.get("data_version") or getattr(backend, "data_version", None)
+        evidence = {
+            "type": "model_output" if successful else "model_execution",
+            "source": "admet_ai_model",
+            "model_version": model_version,
+            "weights_id": weights_id,
+            "data_version": data_version,
+            "row_count": len(successful),
+        }
+        return {
+            "quality": {
+                "data_version": data_version,
+                "source": "local_admet_ai",
+                "input_structures": [
+                    {
+                        "molecule_id": row.get("molecule_id"),
+                        "smiles": row.get("smiles"),
+                        "canonical_smiles": row.get("canonical_smiles"),
+                    }
+                    for row in rows
+                ],
+            },
+            "evidence": [evidence],
+        }
+
+    @staticmethod
+    def _provenance(smiles_list, rows, backend=None):
         def digest(value):
             return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode('utf-8')).hexdigest()
 
@@ -424,7 +464,7 @@ class ADMETPredictor(BaseMolecularTool):
             "tool_name": "admet_predictor",
             "tool_version": "2",
             "model_name": "ADMET-AI",
-            "model_version": first.get("model_version", "1.4.0"),
+            "model_version": first.get("model_version") or getattr(backend, "version", "1.4.0"),
             "demo_mode": False,
             "fallback_used": False,
             "input_digest": digest(smiles_list),

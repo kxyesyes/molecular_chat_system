@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 from src.agent.persistence.redaction import redact_sensitive
+from src.task_runtime.private_permissions import restrict_private_path
 
 from .config import (
     _absolute_path_components,
@@ -573,7 +574,7 @@ class ReadOnlyTemporalObservationStore:
                         prefix="medchat-observation-"
                     ) as directory:
                         private_directory = Path(directory)
-                        os.chmod(private_directory, 0o700)
+                        restrict_private_path(private_directory, 0o700, required=True)
                         snapshot_path = private_directory / "tasks.sqlite"
                         _copy_database_snapshot(
                             self.db_path, snapshot_path, before
@@ -1308,6 +1309,26 @@ class TaskStore:
             raise KeyError(task_id)
         return TaskRecord.from_row(row)
 
+    def get_owned(self, task_id: str, owner_session_id: str) -> TaskRecord:
+        """Return a task only when it is explicitly owned by the session.
+
+        Ownerless legacy rows intentionally do not match. Browser-facing
+        routes must use this method instead of resolving a public task ID and
+        checking ownership after reading the row.
+        """
+        task_id = _validate_required_string(task_id, "task_id")
+        owner_session_id = _validate_required_string(
+            owner_session_id, "owner_session_id"
+        )
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM tasks WHERE task_id = ? AND owner_session_id = ?",
+                (task_id, owner_session_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return TaskRecord.from_row(row)
+
     def get_agent_owner(self, task_id: str) -> str | None:
         """Read private authority, never inferred from a public task projection."""
         with connection(self.db_path) as conn:
@@ -1328,6 +1349,8 @@ class TaskStore:
         enforce_agent_ownership: bool = False,
         agent_session_id: str | None = None,
         exclude_task_type: str | None = None,
+        owner_session_id: str | None = None,
+        require_owner: bool = False,
     ) -> list[TaskRecord]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -1347,6 +1370,12 @@ class TaskStore:
                 "AND owner_session_id = ?))"
             )
             params.append(agent_session_id or None)
+        if require_owner:
+            owner_session_id = _validate_required_string(
+                owner_session_id, "owner_session_id"
+            )
+            clauses.append("owner_session_id = ?")
+            params.append(owner_session_id)
         where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend((max(1, min(200, int(limit))), max(0, int(offset))))
         with connection(self.db_path) as conn:
@@ -1626,6 +1655,7 @@ class TaskStore:
         task_id: str,
         *,
         reason: str | None = None,
+        owner_session_id: str | None = None,
         now: datetime | str | None = None,
     ) -> TaskRecord:
         task_id = _validate_required_string(task_id, "task_id")
@@ -1636,16 +1666,27 @@ class TaskStore:
         placeholders = ", ".join("?" for _ in terminal_values)
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
-            exists = conn.execute(
-                "SELECT task_id FROM tasks WHERE task_id = ?", (task_id,)
-            ).fetchone()
+            if owner_session_id is None:
+                exists = conn.execute(
+                    "SELECT task_id FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+            else:
+                owner_session_id = _validate_required_string(
+                    owner_session_id, "owner_session_id"
+                )
+                exists = conn.execute(
+                    "SELECT task_id FROM tasks "
+                    "WHERE task_id = ? AND owner_session_id = ?",
+                    (task_id, owner_session_id),
+                ).fetchone()
             if exists is None:
                 raise KeyError(task_id)
+            owner_clause = "" if owner_session_id is None else " AND owner_session_id = ?"
             cursor = conn.execute(
                 f"""
                 UPDATE tasks SET status = ?, updated_at = ?
                 WHERE task_id = ? AND status != ?
-                AND status NOT IN ({placeholders})
+                AND status NOT IN ({placeholders}){owner_clause}
                 """,
                 (
                     TaskStatus.CANCEL_REQUESTED.value,
@@ -1653,6 +1694,7 @@ class TaskStore:
                     task_id,
                     TaskStatus.CANCEL_REQUESTED.value,
                     *terminal_values,
+                    *((owner_session_id,) if owner_session_id is not None else ()),
                 ),
             )
             if cursor.rowcount == 1:
@@ -1664,10 +1706,31 @@ class TaskStore:
                     is_terminal=False,
                     created_at=timestamp,
                 )
-        return self.get(task_id)
+        return (
+            self.get_owned(task_id, owner_session_id)
+            if owner_session_id is not None
+            else self.get(task_id)
+        )
 
-    def events(self, task_id: str) -> list[TaskEvent]:
+    def events(
+        self,
+        task_id: str,
+        *,
+        owner_session_id: str | None = None,
+        require_owner: bool = False,
+    ) -> list[TaskEvent]:
+        task_id = _validate_required_string(task_id, "task_id")
         with connection(self.db_path) as conn:
+            if require_owner:
+                owner_session_id = _validate_required_string(
+                    owner_session_id, "owner_session_id"
+                )
+                owned = conn.execute(
+                    "SELECT 1 FROM tasks WHERE task_id = ? AND owner_session_id = ?",
+                    (task_id, owner_session_id),
+                ).fetchone()
+                if owned is None:
+                    raise KeyError(task_id)
             rows = conn.execute(
                 "SELECT * FROM task_events WHERE task_id = ? ORDER BY sequence ASC",
                 (task_id,),

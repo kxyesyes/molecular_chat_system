@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from .base import RunOwnershipConflict
 from .redaction import contains_credential, contains_secret_material, redact_sensitive
+from src.task_runtime.private_permissions import restrict_private_path
 
 
 class _UnownedRun(dict):
@@ -108,14 +109,23 @@ class SQLiteAgentStateStore:
     def __init__(self, db_path: str | Path):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._restrict_permissions()
         self._lock = threading.RLock()
         self._initialize()
 
+    def _restrict_permissions(self) -> None:
+        restrict_private_path(self.db_path.parent, 0o700)
+        for path in (self.db_path, Path(f"{self.db_path}-wal"),
+                     Path(f"{self.db_path}-shm"), Path(f"{self.db_path}-journal")):
+            restrict_private_path(path, 0o600)
+
     def _connect(self) -> sqlite3.Connection:
+        self._restrict_permissions()
         connection = sqlite3.connect(self.db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA journal_mode = WAL")
+        self._restrict_permissions()
         return connection
 
     def _initialize(self) -> None:

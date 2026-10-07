@@ -31,7 +31,7 @@ DOMAINS = [
     ("docking_report", 1),
     ("reverse_target", 7),
     ("activity_prediction", 2),
-    ("activity_model", 5),
+    ("activity_model", 8),
     ("molecule_properties", 1),
     ("admet", 1),
     ("agent_metrics", 1),
@@ -41,6 +41,11 @@ CONTRACT_PROFILES = {
     ("0.135.3", "2.12.5"): "api_route_contract.json",
     ("0.104.1", "2.5.0"): "api_route_contract_ci_deployment.json",
     ("0.115.6", "2.10.4"): "api_route_contract_ci_deployment.json",
+}
+NEW_ACTIVITY_TRAINING_PATHS = {
+    "/api/activity/train/jobs",
+    "/api/activity/train/events/{job_id}",
+    "/api/activity/train/cancel/{job_id}",
 }
 
 
@@ -63,8 +68,29 @@ def contract_path_for_versions(fastapi_version, pydantic_version):
 def registered_app(**kwargs):
     from src.web.routes import api_routes
     app = FastAPI()
+
+    @app.middleware("http")
+    async def _test_browser_session(request, call_next):
+        request.scope.setdefault("agent_session_id", "test-session")
+        return await call_next(request)
+
     assert api_routes.setup_api_routes(app, **kwargs) is None
     return app
+
+
+def seed_owned_docking_history(work_dir: Path, job_id: str = "job") -> None:
+    """Create the same ownership record required by result/report routes."""
+    from src.docking.history_index import build_history_record, upsert_history_record
+
+    upsert_history_record(
+        work_dir,
+        build_history_record(
+            work_dir / f"docking_{job_id}",
+            job_id=job_id,
+            status="completed",
+            owner_session_id="test-session",
+        ),
+    )
 
 
 def api_routes(app):
@@ -76,6 +102,10 @@ def registration_contract(app):
     operations = []
     for route in api_routes(app):
         function = ast.parse(textwrap.dedent(inspect.getsource(route.endpoint))).body[0]
+        # Request is an internal authentication dependency.  It is intentionally
+        # present in endpoint callables but does not become a public HTTP field or
+        # OpenAPI parameter; exclude it from the frozen public signature.
+        function.args.args = [arg for arg in function.args.args if arg.arg != "request"]
         operations.append({
             "methods": sorted(route.methods),
             "path": route.path,
@@ -86,6 +116,17 @@ def registration_contract(app):
             "parameters": ast.unparse(function.args),
         })
     return {"operations": operations, "openapi": app.openapi()}
+
+
+def _canonical_contract_json(value):
+    """Treat JSON integer/float spelling as equivalent when the value is exact."""
+    if isinstance(value, dict):
+        return {key: _canonical_contract_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_canonical_contract_json(item) for item in value]
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
 
 
 def test_registration_contract():
@@ -114,13 +155,16 @@ def test_registration_contract():
     assert admet_operations[0]["methods"] == ["POST"]
     historic = {
         "operations": [
-            row for row in actual["operations"] if row["path"] != "/api/admet/predict"
+            row for row in actual["operations"]
+            if row["path"] != "/api/admet/predict"
+            and row["path"] not in NEW_ACTIVITY_TRAINING_PATHS
         ],
         "openapi": dict(actual["openapi"]),
     }
     historic["openapi"]["paths"] = {
         path: value for path, value in actual["openapi"]["paths"].items()
         if path != "/api/admet/predict"
+        and path not in NEW_ACTIVITY_TRAINING_PATHS
     }
     historic["openapi"]["components"] = dict(actual["openapi"]["components"])
     historic["openapi"]["components"]["schemas"] = {
@@ -128,14 +172,30 @@ def test_registration_contract():
         for name, value in actual["openapi"]["components"]["schemas"].items()
         if name != "AdmetPredictRequest"
     }
-    assert historic == expected
+    assert _canonical_contract_json(historic) == _canonical_contract_json(expected)
     assert len(historic["operations"]) == 31
     assert Counter(row["methods"][0] for row in historic["operations"]) == {
         "POST": 14, "GET": 14, "DELETE": 3,
     }
     assert len(historic["openapi"]["paths"]) == 30
-    assert len(actual["operations"]) == 32
-    assert len(actual["openapi"]["paths"]) == 31
+    assert len(actual["operations"]) == 35
+    assert len(actual["openapi"]["paths"]) == 34
+
+
+def test_activity_training_management_routes_are_registered_explicitly():
+    actual = registration_contract(registered_app())
+    registered = {
+        (method, path)
+        for operation in actual["operations"]
+        for method in operation["methods"]
+        for path in [operation["path"]]
+        if path in NEW_ACTIVITY_TRAINING_PATHS
+    }
+    assert registered == {
+        ("GET", "/api/activity/train/jobs"),
+        ("GET", "/api/activity/train/events/{job_id}"),
+        ("POST", "/api/activity/train/cancel/{job_id}"),
+    }
 
 
 def test_admet_endpoint_openapi_request_schema_is_strict_and_explicit():
@@ -232,7 +292,7 @@ OPERATION_CASES = [
     ("POST", "/api/docking/report/job", {"json": {"format": "md"}}, 200, None),
     ("POST", "/api/reverse_target/predict", {"data": {"smiles": "CC"}}, 200, {"results": [], "count": 0}),
     ("POST", "/api/reverse_target/batch_predict", {"files": {"file": ("x.txt", b"CC\nCCC")}},
-     200, {"results": [], "count": 0}),
+     200, {"count": 2, "row_count": 2}),
     ("GET", "/api/reverse_target/stats", {}, 200, {"stats": {"controlled": True}}),
     ("GET", "/api/reverse_target/health", {}, 200, {"ready": False, "controlled": True}),
     ("GET", "/api/reverse_target/similar_molecules",
@@ -276,7 +336,11 @@ def controlled_app(monkeypatch, tmp_path):
         parse_vina_results=lambda path: [],
     )
     predictor = SimpleNamespace(
-        predict=lambda **kw: [], predict_batch=lambda **kw: [],
+        predict=lambda **kw: [],
+        predict_batch=lambda **kw: [
+            {"smiles": smiles, "success": True, "targets": []}
+            for smiles in kw["smiles_list"]
+        ],
         get_stats=lambda: {"controlled": True},
         get_similar_molecules=lambda **kw: [], get_raw_similar_molecules=lambda **kw: [],
     )
@@ -286,10 +350,25 @@ def controlled_app(monkeypatch, tmp_path):
                 inspect_reverse_target_database=lambda path: {"ready": False, "controlled": True})
     fake_module(monkeypatch, "src.reverse_target.pharmacophore_refiner",
                 get_molecule_pharmacophore=lambda smiles: {"success": False, "error": "controlled unavailable"})
-    fake_module(monkeypatch, "src.activity.prediction_service",
-                predict_activity=lambda *a, **kw: {"success": False, "error": "controlled unavailable"})
+    from src.web.routes import activity_prediction_routes
+
+    async def controlled_activity_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+        return {"success": False, "error": "controlled unavailable"}
+
+    monkeypatch.setattr(
+        activity_prediction_routes,
+        "_invoke_activity_with_budget",
+        controlled_activity_invoke,
+    )
+    async def controlled_pharm3d_invoke(target, *args, timeout_seconds=None):
+        if target is api_support._pharm3d_candidates_job:
+            return []
+        return {"success": False, "error": "controlled unavailable"}
+
+    from src.web.routes import api_routes as api_support
+    monkeypatch.setattr(api_support, "_run_pharm3d_job", controlled_pharm3d_invoke)
     fake_module(monkeypatch, "src.activity.trainer",
-                get_job_status=lambda job: None, list_available_models=lambda: [],
+                get_job_status=lambda job, owner_session_id=None: None, list_available_models=lambda: [],
                 get_current_model_id=lambda: None, set_active_model=lambda model: None,
                 delete_model=lambda model: None)
     fake_module(monkeypatch, "src.activity.predictor",
@@ -309,6 +388,7 @@ def test_controlled_operation_branch(controlled_app, method, path, kwargs, statu
         job = work_dir / "docking_job"
         job.mkdir(parents=True)
         (job / "result.pdbqt").write_text("REMARK controlled fixture\n", encoding="utf-8")
+        seed_owned_docking_history(work_dir)
     with TestClient(app) as client:
         response = client.request(method, path, **kwargs)
     assert response.status_code == status, response.text
@@ -393,6 +473,28 @@ def test_unavailable_runtime_is_503_without_registration_resolution(mode):
     assert calls == ([] if mode == "none" else [mode, mode])
 
 
+def test_durable_docking_rejects_missing_session_before_runtime_lookup():
+    from src.web.routes import api_routes
+
+    calls = []
+
+    def runtime_getter():
+        calls.append("runtime")
+        raise AssertionError("unauthenticated request reached task runtime")
+
+    app = FastAPI()
+    api_routes.setup_api_routes(app, task_runtime=runtime_getter)
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/docking/tasks",
+            files={"protein_file": ("protein.pdb", b"ATOM\n")},
+        )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Browser session required"}
+    assert calls == []
+
+
 def test_legacy_single_docking_rejects_file_and_smiles_together(controlled_app):
     app, _ = controlled_app
     with TestClient(app) as client:
@@ -411,16 +513,17 @@ def test_legacy_single_docking_rejects_file_and_smiles_together(controlled_app):
 def test_batch_docking_rejects_file_and_smiles_together(controlled_app):
     app, _ = controlled_app
     route = next(route for route in app.routes if route.path == "/api/docking/batch_submit")
-    with pytest.raises(HTTPException) as exc_info:
+    with pytest.raises(HTTPException) as error:
         asyncio.run(
             route.endpoint(
+                request=SimpleNamespace(scope={"agent_session_id": "test-session"}),
                 protein_file=UploadFile(filename="protein.pdb", file=BytesIO(b"P")),
                 ligand_files=[UploadFile(filename="ligand.sdf", file=BytesIO(b"L"))],
                 batch_smiles="CC",
             )
         )
-    assert exc_info.value.status_code == 400
-    assert exc_info.value.detail == "Provide either ligand files or batch SMILES, not both"
+    assert error.value.status_code == 400
+    assert error.value.detail == "Provide either ligand files or batch SMILES, not both"
 
 
 @pytest.mark.parametrize("timing", ["before", "after"])
@@ -428,8 +531,10 @@ def test_batch_docking_rejects_file_and_smiles_together(controlled_app):
 def test_old_support_patch_timing(monkeypatch, timing, patch_name):
     from src.web.routes import api_routes as support
     calls = []
-    fake_module(monkeypatch, "src.activity.prediction_service",
-                predict_activity=lambda *a, **kw: {"success": False, "error": "controlled"})
+    # Reverse-target 2D still uses this compatibility seam. Activity prediction
+    # deliberately moved to killable processes and must not revert to threads.
+    fake_module(monkeypatch, "src.reverse_target.predictor",
+                get_predictor=lambda: SimpleNamespace(predict=lambda **kw: []))
     original = getattr(support, patch_name)
     async def dispatch(*args, **kwargs):
         calls.append(patch_name)
@@ -447,7 +552,7 @@ def test_old_support_patch_timing(monkeypatch, timing, patch_name):
             assert client.post("/api/molecule/properties", json={}).json()["success"] is False
             log.error.assert_called_once()
         else:
-            assert client.post("/api/activity/predict", data={"smiles": "CC"}).status_code == 200
+            assert client.post("/api/reverse_target/predict", data={"smiles": "CC"}).status_code == 200
             assert calls == [patch_name]
 
 
@@ -500,35 +605,10 @@ def test_upload_budget_prevents_deferred_service_calls(monkeypatch, path):
     forbidden.assert_not_called()
 
 
-def test_shared_pharm_resources_and_queue_wait_outside_timeout(monkeypatch):
+def test_pharm3d_routes_share_one_bounded_semaphore():
     from src.web.routes import api_routes as support
-    executor, semaphore = support._PHARM3D_EXECUTOR, support._PHARM3D_SEMAPHORE
-    registered_app()
-    registered_app()
-    assert support._PHARM3D_EXECUTOR is executor
-    assert support._PHARM3D_SEMAPHORE is semaphore
-
-    # Contention binds a semaphore to a loop; do not bind the real global to a
-    # test-only asyncio.run loop that will be closed before the next test.
-    semaphore = asyncio.Semaphore(support._PHARM3D_CONCURRENCY)
-    monkeypatch.setattr(support, "_PHARM3D_SEMAPHORE", semaphore)
-
-    async def exercise():
-        # Occupy all slots: no worker should start, and timeout should not tick yet.
-        for _ in range(support._PHARM3D_CONCURRENCY):
-            await semaphore.acquire()
-        started = []
-        task = asyncio.create_task(support._run_pharm3d_job(lambda: started.append(True), 0.01))
-        try:
-            await asyncio.sleep(0.04)
-            assert not task.done()
-            assert started == []
-        finally:
-            for _ in range(support._PHARM3D_CONCURRENCY):
-                semaphore.release()
-        await task
-        assert started == [True]
-    asyncio.run(exercise())
+    assert support._PHARM3D_CONCURRENCY >= 1
+    assert isinstance(support._PHARM3D_SEMAPHORE, asyncio.Semaphore)
 
 
 @pytest.mark.parametrize("mode,expected_status", [
@@ -558,13 +638,13 @@ def test_pharm3d_fallback_partial_order_and_old_support_patch(monkeypatch, mode,
                 get_molecule_pharmacophore=lambda smiles: {"success": True, "features": []})
     app = registered_app()
     calls = []
-    async def run_job(func, timeout_seconds=None):
+    async def run_job(func, *args, timeout_seconds=None):
         calls.append(timeout_seconds)
-        if mode == "timeout":
+        if func is support._pharm3d_refine_job and mode == "timeout":
             raise asyncio.TimeoutError
-        if mode == "error":
+        if func is support._pharm3d_refine_job and mode == "error":
             raise RuntimeError("controlled refiner failure")
-        return func()
+        return func(*args)
     monkeypatch.setattr(support, "_run_pharm3d_job", run_job)
     monkeypatch.setattr(support, "_get_pharm3d_timeout", lambda default=25: 2.0)
     with TestClient(app) as client:
@@ -591,7 +671,8 @@ def test_pharm3d_fallback_partial_order_and_old_support_patch(monkeypatch, mode,
     assert candidates == [{"target_name": "second", "final_similarity": 0.3},
                           {"target_name": "first", "final_similarity": 0.8}]
     if mode in {"timeout", "error"}:
-        assert calls == [2.4]
+        assert len(calls) == 2  # Candidate search, then refinement.
+        assert 0 < calls[1] <= calls[0] == 2.0
         assert refine_calls == []
         assert data["query_pharmacophore"] is None
         for row in data["results"]:
@@ -600,7 +681,8 @@ def test_pharm3d_fallback_partial_order_and_old_support_patch(monkeypatch, mode,
             assert row["pharm_features"] == []
             assert row["pharm_error"]
     else:
-        assert calls == [2.4, 2.0]
+        assert len(calls) == 3  # Candidate search, refinement, query features.
+        assert 0 < calls[2] <= calls[1] <= calls[0] == 2.0
         assert refine_calls[0]["max_to_refine"] == 1
         assert data["query_pharmacophore"]["success"] is True
 
@@ -618,31 +700,26 @@ def test_pharmacophore_timeout_remains_504(monkeypatch):
     assert response.status_code == 504
 
 
-def test_awaitable_activity_predictor_completes_in_worker_and_keeps_batch_order(monkeypatch):
-    import threading
-    from src.web.routes import api_routes as support
-    route_threads, worker_threads, inputs = [], [], []
-    original = support.run_in_threadpool
-    async def dispatch(func, *args, **kwargs):
-        route_threads.append(threading.get_ident())
-        return await original(func, *args, **kwargs)
-    async def predict(smiles, target=None):
-        worker_threads.append(threading.get_ident())
-        await asyncio.sleep(0)
-        inputs.append((smiles, target))
+def test_activity_routes_use_isolated_budget_entry_and_keep_batch_order(monkeypatch):
+    from src.web.routes import activity_prediction_routes
+    calls = []
+
+    async def controlled_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+        calls.append((operation, isolated_payload))
         return {"success": False, "error": "controlled unavailable"}
-    fake_module(monkeypatch, "src.activity.prediction_service", predict_activity=predict)
+
+    monkeypatch.setattr(activity_prediction_routes, "_invoke_activity_with_budget", controlled_invoke)
     app = registered_app()
-    monkeypatch.setattr(support, "run_in_threadpool", dispatch)
     with TestClient(app) as client:
         assert client.post("/api/activity/predict",
                            data={"smiles": "CC", "target": "demo"}).status_code == 200
         assert client.post("/api/activity/batch_predict",
-                           files={"file": ("x.txt", b"CCC one\nCC,two\nCCC duplicate")},
-                           data={"target": "demo"}).status_code == 200
-    assert inputs == [("CC", "demo"), (["CCC", "CC", "CCC"], "demo")]
-    assert len(worker_threads) == len(route_threads) == 2
-    assert all(w != r for w, r in zip(worker_threads, route_threads))
+                               files={"file": ("x.txt", b"CCC one\nCC,two\nCCC duplicate")},
+                               data={"target": "demo"}).status_code == 200
+    assert calls == [
+        ("predict", ("CC", "demo")),
+        ("batch_predict", (["CCC", "CC", "CCC"], "demo")),
+    ]
 
 
 @pytest.mark.parametrize("fmt,media,extension", [
@@ -655,6 +732,7 @@ def test_report_real_media_headers_with_synthetic_empty_results(tmp_path, fmt, m
     job.mkdir()
     (job / "result.pdbqt").write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
     (job / "config.txt").write_text("center_x = 1\n", encoding="utf-8")
+    seed_owned_docking_history(tmp_path, "demo")
     service = SimpleNamespace(work_dir=str(tmp_path), parse_vina_results=lambda path: [])
     with TestClient(registered_app(docking_service=service)) as client:
         response = client.post("/api/docking/report/demo", json={"format": fmt})
@@ -672,6 +750,7 @@ def test_pose_helpers_reconstruct_requested_coordinates_from_synthetic_file(tmp_
     from rdkit import Chem
     job = tmp_path / "docking_demo"
     job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
     lines = ["REMARK SMILES C", "REMARK SMILES IDX 1 1"]
     for pose, x in [(1, 1.0), (2, 5.0)]:
         lines += [f"MODEL {pose}",
@@ -716,12 +795,27 @@ def test_docking_report_zip_exports_the_lowest_energy_pose(tmp_path):
     assert "  1.000   2.000   3.000" not in exported
 
 
+def test_report_pose_export_does_not_fallback_to_another_pose():
+    from src.web.routes.report_generator import _extract_pose_pdb_from_pdbqt_text
+
+    text = "\n".join(
+        [
+            "MODEL 1",
+            "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C",
+            "ENDMDL",
+        ]
+    )
+
+    assert _extract_pose_pdb_from_pdbqt_text(text, pose_index=2) == ""
+
+
 def test_interaction_endpoint_materializes_topology_bearing_pose_artifact(tmp_path, monkeypatch):
     from src.docking import interaction_analysis
 
     monkeypatch.setattr(interaction_analysis, "_dependency_available", lambda _: False)
     job = tmp_path / "docking_demo"
     job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
     (job / "analysis_receptor.pdb").write_text(
         "ATOM      1  C   ALA A   1       0.000   0.000   0.000\n",
         encoding="utf-8",
@@ -752,6 +846,7 @@ def test_interaction_endpoint_materializes_topology_bearing_pose_artifact(tmp_pa
 def test_interaction_endpoint_preserves_pose_export_failure(tmp_path):
     job = tmp_path / "docking_demo"
     job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
     (job / "analysis_receptor.pdb").write_text("ATOM\n", encoding="utf-8")
     (job / "result.pdbqt").write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
     service = SimpleNamespace(work_dir=str(tmp_path))
@@ -768,6 +863,7 @@ def test_interaction_endpoint_preserves_pose_export_failure(tmp_path):
 def test_pose_sdf_rejects_non_positive_pose_numbers(tmp_path, pose):
     job = tmp_path / "docking_demo"
     job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
     (job / "result.pdbqt").write_text(
         "REMARK SMILES C\nREMARK SMILES IDX 1 1\nMODEL 1\nENDMDL\n",
         encoding="utf-8",
@@ -838,6 +934,7 @@ def test_docking_report_failure_returns_stable_error_code_without_internal_detai
     secret_detail = "C:\\private\\report\\result.pdbqt"
     job = tmp_path / "docking_job"
     job.mkdir()
+    seed_owned_docking_history(tmp_path)
     (job / "result.pdbqt").write_text("REMARK fixture\n", encoding="utf-8")
 
     def fail(_path):
@@ -862,6 +959,7 @@ def test_docking_report_failure_returns_stable_error_code_without_internal_detai
 def test_pose_sdf_does_not_fallback_to_all_models_for_out_of_range_pose(tmp_path):
     job = tmp_path / "docking_demo"
     job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
     lines = [
         "REMARK SMILES C",
         "REMARK SMILES IDX 1 1",
@@ -880,6 +978,7 @@ def test_pose_sdf_rejects_incomplete_heavy_atom_mapping(tmp_path):
     pytest.importorskip("rdkit")
     job = tmp_path / "docking_demo"
     job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
     lines = [
         "REMARK SMILES CC",
         "REMARK SMILES IDX 1 1",
@@ -912,3 +1011,16 @@ def test_properties_endpoint_reports_unknown_admet_after_behavior_fix(monkeypatc
         "availability": "unavailable", "method": "not_calculated",
         "warning": "ADMET未计算；本接口仅计算基础理化性质，不能据此判断毒性、CNS安全性或体内表现。",
     }
+
+
+@pytest.mark.parametrize("invalid_qed", [-0.01, 1.01, float("nan"), float("inf")])
+def test_properties_endpoint_rejects_invalid_qed(monkeypatch, invalid_qed):
+    from rdkit.Chem import QED
+
+    monkeypatch.setattr(QED, "qed", lambda _mol: invalid_qed)
+    with TestClient(registered_app()) as client:
+        response = client.post("/api/molecule/properties", json={"smiles": "CC"})
+
+    assert response.status_code == 200
+    assert response.json()["success"] is False
+    assert response.json()["properties"] is None

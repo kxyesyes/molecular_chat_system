@@ -2004,7 +2004,7 @@ def test_scaffold_split_is_nonempty_leakage_free_exact_and_stably_ordered() -> N
         assert frame["canonical_smiles"].tolist() == sorted(
             frame["canonical_smiles"].tolist()
         )
-    assert result.provenance["algorithm"] == "deterministic_scaffold_greedy_v2"
+    assert result.provenance["algorithm"] == "deterministic_feature_identity_greedy_v1"
     assert result.provenance["seed"] == 42
     assert sum(result.provenance["counts"].values()) == len(prepared)
 

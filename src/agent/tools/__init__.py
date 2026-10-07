@@ -3,6 +3,7 @@ from .admet_predictor import ADMETPredictor
 from .drug_likeness_assessment import DrugLikenessAssessment
 from .llm_molecular_generator import LLMMolecularGenerator
 from .candidate_ranker import CandidateRanker
+from .lead_optimization_verifier import LeadOptimizationVerifier
 
 # 核心工具列表 - 按重要性和使用频率排序
 CORE_TOOLS = [
@@ -11,6 +12,7 @@ CORE_TOOLS = [
     'DrugLikenessAssessment',
     'LLMMolecularGenerator',
     'CandidateRanker',
+    'LeadOptimizationVerifier',
 ]
 
 # 可选工具列表 - 延迟加载以提升性能
@@ -48,6 +50,7 @@ def get_core_tools(molecular_generator_llm=None):
         DrugLikenessAssessment(),
         LLMMolecularGenerator(llm_model=generator_llm),
         CandidateRanker(),
+        LeadOptimizationVerifier(),
     ]
 
 def get_optional_tool(tool_name, llm=None, *, rag_system=None):

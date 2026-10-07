@@ -1849,8 +1849,8 @@ def test_non_workflow_agent_result_can_still_use_model_interpretation():
 
     assert model.generate_calls == 1
     assert websocket.messages[-1] == {
-        "type": "message",
-        "message": "assistant response",
+        "type": "complete",
+        "content": "assistant response",
     }
 
 
@@ -2067,8 +2067,8 @@ def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
     assert tool.calls == []
     assert model.generate_calls == 1
     assert websocket.messages[-1] == {
-        "type": "message",
-        "message": "assistant response",
+        "type": "complete",
+        "content": "assistant response",
     }
 
 
@@ -2324,8 +2324,8 @@ def test_conceptual_question_skips_molecular_rag_and_uses_main_model():
     assert rag.calls == []
     assert model.generate_calls == 1
     assert websocket.messages[-1] == {
-        "type": "message",
-        "message": "assistant response",
+        "type": "complete",
+        "content": "assistant response",
     }
 
 
@@ -2348,8 +2348,8 @@ def test_greeting_uses_main_model_without_agent_or_rag():
     assert rag.calls == []
     assert not any(item["type"] == "agent_event" for item in websocket.messages)
     assert websocket.messages[-1] == {
-        "type": "message",
-        "message": "assistant response",
+        "type": "complete",
+        "content": "assistant response",
     }
 
 

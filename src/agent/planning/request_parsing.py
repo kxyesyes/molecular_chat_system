@@ -18,11 +18,15 @@ _DOCKING_FIELD = re.compile(
     r"(?=\s*(?:[；;。]|(?:和|and)\s*"
     r"(?:receptor(?:_path)?|ligand(?:_path)?|"
     r"protein(?:_path)?|蛋白(?:文件|结构)?|受体|配体)\b|"
+    r"(?:receptor(?:_path)?|ligand(?:_path)?|protein(?:_path)?|"
+    r"蛋白(?:文件|结构)?|受体|配体|center|size|box\s*center|"
+    r"box\s*size|中心|尺寸|盒子中心|盒子大小)\s*[:：=]|"
     r"(?:进行|使用|执行)|(?:perform|run)\b)|$)",
     re.I,
 )
 _DOCKING_VECTOR = re.compile(
-    r"(?P<label>center|size|中心|尺寸)\s*[:：=]\s*\[(?P<value>[^\]]+)\]",
+    r"(?P<label>center|size|box\s*center|box\s*size|中心|尺寸|盒子中心|盒子大小)"
+    r"\s*[:：=]\s*\[(?P<value>[^\]]+)\]",
     re.I,
 )
 
@@ -46,9 +50,12 @@ def parse_structured_docking_input(query: str) -> dict[str, Any] | None:
             or label.startswith('protein')
             or label in {'蛋白', '蛋白文件', '蛋白结构', '受体'}
         ):
-            fields['receptor_path'] = value
+            key = 'receptor_path'
         else:
-            fields['ligand_path'] = value
+            key = 'ligand_path'
+        if key in fields and fields[key] != value:
+            return None
+        fields[key] = value
 
     vectors: dict[str, list[float]] = {}
     for match in _DOCKING_VECTOR.finditer(query):
@@ -59,7 +66,13 @@ def parse_structured_docking_input(query: str) -> dict[str, Any] | None:
             return None
         if len(values) != 3 or not all(math.isfinite(value) for value in values):
             return None
-        vectors['center' if label == 'center' or label == '中心' else 'size'] = values
+        if label in {'center', 'box center', '中心', '盒子中心'}:
+            key = 'center'
+        else:
+            key = 'size'
+        if key in vectors and vectors[key] != values:
+            return None
+        vectors[key] = values
 
     if not fields.get('receptor_path') or not fields.get('ligand_path'):
         return None
@@ -114,4 +127,18 @@ def wants_admet(query: str) -> bool:
     lowered = query.lower()
     return any(token in lowered for token in (
         "admet", "adme", "吸收", "分布", "代谢", "排泄", "毒性", "风险",
+    ))
+
+
+def wants_activity(query: str) -> bool:
+    """Return true only for a positive activity request, not a negation."""
+    if not isinstance(query, str):
+        return False
+    lowered = query.casefold()
+    if not any(token in lowered for token in ("活性", "potency", "activity", "inhibition")):
+        return False
+    return not bool(re.search(
+        r"(?:不要|无需|不需要|不做|禁止|without|without\s+.*(?:activity|potency)|"
+        r"do\s+not|don't)\s*(?:预测|评估|计算|输出|做|activity|potency|活性)?",
+        lowered,
     ))

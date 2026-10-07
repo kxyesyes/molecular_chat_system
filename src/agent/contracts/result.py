@@ -93,8 +93,16 @@ class ToolResult:
         )
 
     def to_legacy_dict(self) -> dict:
+        # ``success`` is the terminal success bit in the public contract.
+        # Partial observations may retain usable data internally, but must not
+        # be serialized as succeeded.
+        public_success = (
+            self.success
+            and self.error is None
+            and self.status is ObservationStatus.SUCCEEDED
+        )
         return {
-            "success": self.success,
+            "success": public_success,
             "message": self.message,
             "data": self.data,
             "formatted": self.formatted,
@@ -219,11 +227,19 @@ class AgentResult:
             tool_result_sequence.append(step_payload)
             tool_results_by_step[step_id] = step_payload
 
+        status = self.outcome.value if self.outcome else (
+            "completed" if self.success else "partial" if self.partial else "failed"
+        )
+        public_success = (
+            self.success
+            and not self.partial
+            and self.error is None
+            and status == RunOutcome.COMPLETED.value
+        )
+
         return {
-            "success": self.success,
-            "status": self.outcome.value if self.outcome else (
-                "completed" if self.success else "partial" if self.partial else "failed"
-            ),
+            "success": public_success,
+            "status": status,
             "message": self.message,
             "final_answer": self.final_answer,
             "active_skill": self.skill_name,

@@ -78,9 +78,16 @@ def test_websocket_session_is_propagated_through_chat_handler(tmp_path):
         owner = client.get("/").json()["owner"]
         with client.websocket_connect("/ws", headers={"host": "localhost", "origin": "http://localhost", "cookie": f"medchat_agent_session={client.cookies.get('medchat_agent_session')}"}) as ws:
             ws.receive_json()
+            # Unknown client ownership fields are rejected by the wire
+            # protocol; they must never reach the handler or override server
+            # session identity. A valid follow-up frame still proves the
+            # server-owned session is propagated.
             ws.send_json({"message": "CCO", "session_id": "forged"})
-            while ws.receive_json()["type"] != "complete":
-                pass
+            assert ws.receive_json()["error"]["code"] == "invalid_frame"
+            assert received == []
+            ws.send_json({"message": "CCO"})
+            assert ws.receive_json()["type"] == "status"
+            assert ws.receive_json()["type"] == "complete"
     assert received[0].get("session_id") == owner
 
 

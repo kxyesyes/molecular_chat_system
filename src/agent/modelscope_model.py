@@ -25,12 +25,20 @@ class ModelScopeModel(OpenAICompatibleModel):
         api_key: str,
         model_name: str = "ZhipuAI/GLM-4.6",
         base_url: str = "https://api-inference.modelscope.cn/v1/chat/completions",
+        client=None,
+        provider: str = "modelscope",
+        enforce_url_policy: bool = True,
+        **kwargs,
     ):
         super().__init__(
             api_key=api_key,
             model_name=model_name,
             base_url=base_url,
             provider_name="ModelScope",
+            client=client,
+            provider=provider,
+            enforce_url_policy=enforce_url_policy,
+            **kwargs,
         )
         logger.info("Initialized ModelScope model: %s", self.model_name)
 

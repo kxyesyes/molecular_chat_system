@@ -22,6 +22,7 @@ from molecular_network.util.wash import NeutraliseCharges
 
 from molecular_network.mol_feature.reduceGraph_feature import rg_feature, reduce_graph_to_mol, rg_x_feature
 from molecular_network.transform.reduce_graph import reduceGraph
+from molecular_network.mol_dataset._safe_load import load_processed_graph_dataset
 print('~~~~~~~~~~~~')
 
 class ReduceGraph_Dataset(InMemoryDataset):
@@ -42,7 +43,7 @@ class ReduceGraph_Dataset(InMemoryDataset):
         self.Hs = Hs
         self.bond_type_num = bond_type_num
         super(ReduceGraph_Dataset, self).__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_name) 
+        self.data, self.slices = load_processed_graph_dataset(self.processed_name)
     
 
     @property
@@ -143,7 +144,6 @@ class ReduceGraph_Dataset(InMemoryDataset):
             rg_data_list.append(rg_data)
 
         torch.save(self.collate(rg_data_list), self.processed_name)
-
 
 
 

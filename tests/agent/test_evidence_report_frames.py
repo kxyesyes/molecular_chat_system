@@ -66,7 +66,7 @@ def test_same_rdkit_sqlite_frames_actual_js_mount_then_reference_api(tmp_path, p
     ranked = next(o for o in execution["tool_result_sequence"] if o["tool_name"] == "candidate_ranker")["data"]["top_candidates"]
     assert [r["ranking_evidence"]["weights_used"] for r in report["ranking"]["top_candidates"]] == [
         r["ranking_evidence"]["weights_used"] for r in ranked]
-    assert ranked[0]["ranking_evidence"]["weights_used"] == {"properties": 1, "admet": None, "activity": None}
+    assert ranked[0]["ranking_evidence"]["weights_used"] == {"properties": 0.5, "admet": None, "activity": None}
     script = Path(__file__).resolve().parents[1] / "home_evidence_report_test.js"
     node = subprocess.run(["node", str(script), "--frames-stdin"], input=json.dumps(frames, ensure_ascii=False),
         text=True, encoding="utf-8", capture_output=True, timeout=30, check=False)

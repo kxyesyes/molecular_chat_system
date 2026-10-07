@@ -2,8 +2,11 @@ from src.agent.contracts import (
     AgentContext,
     AgentErrorCode,
     AgentResult,
+    ObservationStatus,
+    RunOutcome,
     ToolResult,
 )
+from src.agent.tools.base_tool import execute_tool_compat
 
 
 def test_tool_result_success_payload():
@@ -29,6 +32,42 @@ def test_tool_result_error_payload():
     assert result.success is False
     assert result.error.code == AgentErrorCode.EXTERNAL_TOOL_UNAVAILABLE
     assert result.data is None
+
+
+def test_partial_tool_result_is_not_serialized_as_success():
+    result = ToolResult.success_result(
+        "activity_predictor", data={"usable_rows": 1},
+        status=ObservationStatus.PARTIAL,
+    )
+
+    assert result.success is True  # internal partial data remains available
+    assert result.to_legacy_dict()["status"] == "partial"
+    assert result.to_legacy_dict()["success"] is False
+
+
+class _InconsistentTool:
+    name = "fixture_tool"
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    def execute(self, _query):
+        return self.payload
+
+
+def test_adapter_rejects_success_flag_with_terminal_failure_status():
+    result = execute_tool_compat(
+        _InconsistentTool({
+            "success": True,
+            "status": "failed",
+            "data": {"value": 1},
+        }),
+        "fixture",
+    )
+
+    assert result.success is False
+    assert result.status is ObservationStatus.FAILED
+    assert result.error.code is AgentErrorCode.INVALID_OUTPUT
 
 
 def test_agent_context_defaults_are_isolated():
@@ -60,6 +99,21 @@ def test_agent_result_preserves_partial_tool_results():
     assert result.success is False
     assert result.partial is True
     assert result.tool_results == [success, failure]
+
+
+def test_agent_result_legacy_payload_never_promotes_non_completed_outcome():
+    result = AgentResult(
+        trace_id="inconsistent-run",
+        success=True,
+        message="usable partial output",
+        partial=True,
+        outcome=RunOutcome.PARTIAL,
+    )
+
+    payload = result.to_legacy_dict()
+
+    assert payload["status"] == "partial"
+    assert payload["success"] is False
 
 
 def test_agent_result_preserves_repeated_tools_in_execution_order_and_by_step():

@@ -7,7 +7,10 @@ import os
 from pathlib import Path
 import threading
 from typing import Optional
-from fastapi import UploadFile, File, Form, HTTPException
+from fastapi import UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import JSONResponse
+from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, start_isolated_process
+from src.web.request_auth import require_browser_session
 
 
 _SMILES_COLUMN_ALIASES = {"smiles", "smile", "canonical_smiles", "structure"}
@@ -32,60 +35,50 @@ def _positive_int_env(name: str, default: int, *, minimum: int = 1) -> int:
     return value if value >= minimum else default
 
 
-# A timed-out request must not release capacity while its worker is still
-# running.  A thread semaphore keeps admission non-blocking for the event loop
-# and bounds the number of in-flight calculations even when a worker cannot be
-# force-cancelled safely.
+# A timed-out request must terminate its child before releasing capacity.
 _ACTIVITY_ADMISSION = threading.BoundedSemaphore(
     _positive_int_env("MEDCHAT_ACTIVITY_MAX_CONCURRENCY", _DEFAULT_ACTIVITY_MAX_CONCURRENCY)
 )
 
+def _activity_child_job(payload, target):
+    """Execute one activity request in a separately terminable process."""
 
-_ACTIVITY_WORKERS: set[asyncio.Task] = set()
+    try:
+        from src.activity.prediction_service import predict_activity
+
+        return {
+            "kind": "result",
+            "value": predict_activity(payload, target=target),
+        }
+    except TimeoutError:
+        return {"kind": "timeout"}
+    except BaseException:
+        return {"kind": "error"}
 
 
-class _ActivityLease:
-    """Release on physical exit, not on cancellation of an asyncio wrapper."""
-
-    def __init__(self, slots):
-        self.slots = slots
-        self.lock = threading.Lock()
-        self.state = "pending"
-
-    def abandon_pending(self):
-        with self.lock:
-            if self.state == "pending":
-                self.state = "finished"
-                self.slots.release()
-
-    def run(self, function):
-        with self.lock:
-            if self.state != "pending":
-                return None  # timed out/cancelled while queued: do not compute
-            self.state = "running"
+async def _stop_activity_process(process, waiter):
+    await asyncio.to_thread(process.terminate)
+    if waiter is not None and not waiter.done():
         try:
-            return function()
-        finally:
-            with self.lock:
-                self.state = "finished"
-                self.slots.release()
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0)
+        except asyncio.TimeoutError:
+            waiter.cancel()
+            try:
+                await waiter
+            except BaseException:
+                pass
+        except BaseException:
+            pass
+    await asyncio.to_thread(process.close)
 
-    def observe(self, worker):
-        _ACTIVITY_WORKERS.discard(worker)
-        self.abandon_pending()  # dispatch failure before the worker started
-        if not worker.cancelled():
-            worker.exception()  # consume late exceptions; never log raw input
 
-
-async def _invoke_activity_with_budget(_support, function, *, operation: str):
-    """Run one activity computation with bounded admission and request timeout.
-
-    ``asyncio`` cannot safely stop arbitrary RDKit/PyTorch work running in a
-    thread.  On timeout we therefore stop waiting for the request, keep the
-    worker drained in the background, and retain its admission slot until it
-    finishes.  This distinguishes request timeout from computation
-    cancellation without allowing timed-out requests to multiply indefinitely.
-    """
+async def _invoke_isolated_activity(
+    payload,
+    target,
+    *,
+    operation: str,
+    timeout: float,
+):
     slots = _ACTIVITY_ADMISSION
     if not slots.acquire(blocking=False):
         raise HTTPException(
@@ -97,32 +90,90 @@ async def _invoke_activity_with_budget(_support, function, *, operation: str):
             },
         )
 
-    lease = _ActivityLease(slots)
-    timeout = _positive_float_env(
-        "MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", _DEFAULT_ACTIVITY_TIMEOUT_SECONDS
-    )
+    process = IsolatedProcess(target, args=payload)
+    waiter = None
+    deadline = asyncio.get_running_loop().time() + timeout
     try:
-        worker = asyncio.create_task(_support._invoke_in_threadpool(lambda: lease.run(function)))
-        _ACTIVITY_WORKERS.add(worker)
-        worker.add_done_callback(lease.observe)
-        # Unlike wait_for, wait distinguishes worker TimeoutError from deadline
-        # expiry and does not cancel a physical calculation on request timeout.
-        done, _ = await asyncio.wait((worker,), timeout=timeout)
-        if done:
-            return await worker
+        startup_budget = max(0.001, deadline - asyncio.get_running_loop().time())
+        try:
+            await start_isolated_process(process, timeout=startup_budget)
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "ACTIVITY_REQUEST_TIMEOUT",
+                    "message": "活性预测超过请求时间限制，科学计算子进程已终止。",
+                    "operation": operation,
+                    "compute_disposition": "terminated",
+                },
+            ) from None
+        waiter = asyncio.create_task(asyncio.to_thread(process.wait))
+        try:
+            remaining = max(0.001, deadline - asyncio.get_running_loop().time())
+            envelope = await asyncio.wait_for(asyncio.shield(waiter), timeout=remaining)
+        except asyncio.TimeoutError:
+            await _stop_activity_process(process, waiter)
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "ACTIVITY_REQUEST_TIMEOUT",
+                    "message": "活性预测超过请求时间限制，科学计算子进程已终止。",
+                    "operation": operation,
+                    "compute_disposition": "terminated",
+                },
+            ) from None
+        except asyncio.CancelledError:
+            await _stop_activity_process(process, waiter)
+            raise
+        if not isinstance(envelope, dict):
+            raise ProcessExecutionError("activity child returned an invalid envelope")
+        kind = envelope.get("kind")
+        if kind == "result":
+            return envelope.get("value")
+        if kind == "timeout":
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "code": "ACTIVITY_COMPUTE_TIMEOUT",
+                    "message": "活性预测计算超时，未返回科学结果。",
+                    "operation": operation,
+                    "compute_disposition": "terminated",
+                },
+            )
+        raise ProcessExecutionError("activity child failed")
+    except ProcessExecutionError:
         raise HTTPException(
-            status_code=504,
+            status_code=500,
             detail={
-                "code": "ACTIVITY_REQUEST_TIMEOUT",
-                "message": "活性预测超过请求时间限制，未返回科学结果。请求已停止等待，后台计算仍受并发上限约束。",
+                "code": "ACTIVITY_EXECUTION_FAILED",
+                "message": "活性预测服务不可用，未返回科学结果。",
                 "operation": operation,
-                "compute_disposition": "draining",
             },
         ) from None
     finally:
-        # Cancel queued execution; running work owns its slot until run() exits,
-        # even if the loop is closed or its asyncio wrapper is cancelled.
-        lease.abandon_pending()
+        if process.is_alive():
+            await _stop_activity_process(process, waiter)
+        else:
+            await asyncio.to_thread(process.close)
+        slots.release()
+
+
+async def _invoke_activity_with_budget(
+    _support,
+    *,
+    operation: str,
+    isolated_payload,
+    isolated_target=_activity_child_job,
+):
+    timeout = _positive_float_env(
+        "MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", _DEFAULT_ACTIVITY_TIMEOUT_SECONDS
+    )
+    return await _invoke_isolated_activity(
+        isolated_payload,
+        isolated_target,
+        operation=operation,
+        timeout=timeout,
+    )
 
 
 def _parse_batch_smiles(content: str, *, filename: str, smiles_column: str | None = None) -> list[str]:
@@ -135,14 +186,15 @@ def _parse_batch_smiles(content: str, *, filename: str, smiles_column: str | Non
         except csv.Error:
             dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
         reader = csv.DictReader(io.StringIO(content), dialect=dialect)
-        headers = [str(header).strip() for header in (reader.fieldnames or []) if header is not None]
+        # Normalize only for matching; DictReader rows retain the original keys.
+        headers = [header for header in (reader.fieldnames or []) if header is not None]
         if not headers:
             raise ValueError("CSV 缺少表头，无法定位 SMILES 列")
         requested = str(smiles_column or "").strip()
         if requested:
-            matches = [header for header in headers if header.casefold() == requested.casefold()]
+            matches = [header for header in headers if header.strip().casefold() == requested.casefold()]
         else:
-            matches = [header for header in headers if header.casefold() in _SMILES_COLUMN_ALIASES]
+            matches = [header for header in headers if header.strip().casefold() in _SMILES_COLUMN_ALIASES]
         if len(matches) != 1:
             raise ValueError("CSV 必须明确且唯一地提供 SMILES 列")
         selected = matches[0]
@@ -165,21 +217,75 @@ def _parse_batch_smiles(content: str, *, filename: str, smiles_column: str | Non
     return values
 
 
+def _attach_activity_task_receipt(
+    *, owner_session_id: str, task_type: str, result
+):
+    """Persist a session-bound receipt for a synchronous prediction result."""
+
+    from src.task_runtime.legacy_bridge import attach_legacy_task_id
+    from src.task_runtime.manager import get_task_manager
+
+    list_response = isinstance(result, list)
+    if list_response:
+        completed = sum(
+            isinstance(item, dict) and item.get("success") is True
+            for item in result
+        )
+        summary = {
+            "status": (
+                "completed"
+                if completed == len(result) and result
+                else "failed"
+                if completed == 0
+                else "partial"
+            ),
+            "success": completed == len(result) and bool(result),
+            "count": len(result),
+            "results": result,
+        }
+    elif not isinstance(result, dict):
+        result = {
+            "status": "failed",
+            "success": False,
+            "error": "活性预测返回了无效结果",
+        }
+        summary = result
+    else:
+        summary = result
+    receipt = attach_legacy_task_id(
+        get_task_manager(),
+        task_type=task_type,
+        owner_session_id=owner_session_id,
+        result=summary,
+    )
+    if list_response:
+        return JSONResponse(
+            content=result,
+            headers={"X-MedChat-Task-ID": receipt["task_id"]},
+        )
+    return receipt
+
+
 def setup_activity_prediction_routes(app, *, _support):
     """Register the original endpoints with dynamically resolved compatibility support."""
     @app.post("/api/activity/predict")
     async def activity_predict(
+        request: Request,
         smiles: str = Form(...),
         target: Optional[str] = Form(None),
     ):
         """活性预测 API"""
+        owner_session_id = require_browser_session(request)
         try:
-            def run_activity_prediction():
-                from src.activity.prediction_service import predict_activity
-                return predict_activity(smiles, target=target)
-
-            return await _invoke_activity_with_budget(
-                _support, run_activity_prediction, operation="predict"
+            result = await _invoke_activity_with_budget(
+                _support,
+                operation="predict",
+                isolated_payload=(smiles, target),
+            )
+            return _attach_activity_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="activity_prediction",
+                result=result,
             )
         except HTTPException:
             raise
@@ -189,11 +295,13 @@ def setup_activity_prediction_routes(app, *, _support):
 
     @app.post("/api/activity/batch_predict")
     async def activity_batch_predict(
+        request: Request,
         file: UploadFile = File(...),
         target: Optional[str] = Form(None),
         smiles_column: Optional[str] = Form(None),
     ):
         """活性批量预测 API"""
+        owner_session_id = require_browser_session(request)
         try:
             content = await _support._read_upload_limited(file, "activity batch file")
             text = content.decode("utf-8-sig")
@@ -216,12 +324,15 @@ def setup_activity_prediction_routes(app, *, _support):
                     },
                 )
             
-            def run_activity_batch_prediction():
-                from src.activity.prediction_service import predict_activity
-                return predict_activity(smiles_list, target=target)
-
-            return await _invoke_activity_with_budget(
-                _support, run_activity_batch_prediction, operation="batch_predict"
+            result = await _invoke_activity_with_budget(
+                _support,
+                operation="batch_predict",
+                isolated_payload=(smiles_list, target),
+            )
+            return _attach_activity_task_receipt(
+                owner_session_id=owner_session_id,
+                task_type="activity_batch_prediction",
+                result=result,
             )
         except HTTPException:
             raise

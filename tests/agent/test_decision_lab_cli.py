@@ -36,7 +36,7 @@ def test_launcher_is_loopback_only_and_temp_state_removed(monkeypatch, mode):
     import uvicorn
     from fastapi import FastAPI
     monkeypatch.setenv('OPENAI_COMPATIBLE_API_KEY', 'synthetic-only-key')
-    monkeypatch.setenv('OPENAI_COMPATIBLE_BASE_URL', 'https://example.invalid/chat/completions')
+    monkeypatch.setenv('OPENAI_COMPATIBLE_BASE_URL', 'https://api.deepseek.com/chat/completions')
     monkeypatch.setenv('OPENAI_COMPATIBLE_MODEL', 'test-model')
     m = module()
     paths = []
@@ -84,7 +84,7 @@ def test_server_exception_closes_client_removes_state_and_hides_details(monkeypa
     import uvicorn
     from fastapi import FastAPI
     monkeypatch.setenv('OPENAI_COMPATIBLE_API_KEY', 'synthetic-only-key')
-    monkeypatch.setenv('OPENAI_COMPATIBLE_BASE_URL', 'https://example.invalid')
+    monkeypatch.setenv('OPENAI_COMPATIBLE_BASE_URL', 'https://api.deepseek.com')
     monkeypatch.setenv('OPENAI_COMPATIBLE_MODEL', 'synthetic-model')
     m = module()
     paths, clients = [], []

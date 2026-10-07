@@ -114,6 +114,7 @@ def write_history_index(work_dir: Path, count: int = 120) -> None:
                 "has_ligand": True,
                 "has_result": True,
                 "size_bytes": 1234 + index,
+                "owner_session_id": "history-test-session",
             }
         )
     (work_dir / "docking_history_index.json").write_text(
@@ -153,6 +154,11 @@ def test_docking_history_reads_index_with_pagination(tmp_path, monkeypatch):
     )
 
     app = FastAPI()
+    @app.middleware("http")
+    async def inject_test_session(request, call_next):
+        request.scope["agent_session_id"] = "history-test-session"
+        return await call_next(request)
+
     setup_api_routes(app, docking_service=MockDockingService(tmp_path))
     client = TestClient(app)
 

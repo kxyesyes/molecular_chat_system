@@ -4,13 +4,18 @@
 """
 import os
 import logging
+import hashlib
+import threading
 from typing import Dict, Any
-from fastapi import Body, Response
+from pathlib import Path
+from fastapi import Body, Request, Response
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 
 from src.molecular_design.fragment_repository import get_fragment_database_path
 from src.molecular_design.service import MolecularDesignService
+from src.molecular_design.storage import DesignStorage
+from src.web.request_auth import require_browser_session
 
 logger = logging.getLogger(__name__)
 
@@ -18,9 +23,26 @@ logger = logging.getLogger(__name__)
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 _FRAG_DB_PATH = get_fragment_database_path(_BASE_DIR)
 _SAVE_DIR = os.path.join(_BASE_DIR, "data", "design_results")
+_SESSION_SAVE_LOCK = threading.Lock()
 
-if not os.path.exists(_SAVE_DIR):
-    os.makedirs(_SAVE_DIR, exist_ok=True)
+
+def _ensure_private_save_root() -> Path:
+    """Create the design-results root with private permissions.
+
+    Session directories are private as well, but their parent must not expose
+    directory names or legacy artifacts to another local account.
+    """
+
+    root = Path(_SAVE_DIR)
+    if root.is_symlink():
+        raise RuntimeError("分子设计结果目录不能是符号链接")
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if os.name == "posix":
+        root.chmod(0o700)
+    return root
+
+
+_ensure_private_save_root()
 
 _DESIGN_ROUTE_PATHS = {
     "/api/design/fragments",
@@ -39,8 +61,16 @@ def _error_response(message: str, status_code: int = 400, **extra):
     return JSONResponse(status_code=status_code, content=payload)
 
 
+def _session_save_dir(session_id: str) -> Path:
+    """Return a stable, non-reversible directory name for one browser session."""
+
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return Path(_SAVE_DIR) / digest
+
+
 def setup_design_routes(app, model=None, config=None, *, model_provider=None, model_request_gate=None):
     """注册分子设计相关API路由"""
+    _ensure_private_save_root()
     existing_paths = {getattr(route, "path", None) for route in app.routes}
     if existing_paths & _DESIGN_ROUTE_PATHS:
         logger.info("分子设计 API 路由已存在，跳过重复注册")
@@ -267,15 +297,24 @@ def setup_design_routes(app, model=None, config=None, *, model_provider=None, mo
     # 6. 保存当前分子
     # ──────────────────────────────────────────────────
     @app.post("/api/design/save_molecule")
-    async def save_molecule(payload: Dict[str, Any] = Body(...)):
+    async def save_molecule(request: Request, payload: Dict[str, Any] = Body(...)):
         """将当前设计的分子及其属性保存到 CSV 文件中"""
+        owner_session_id = require_browser_session(request)
         smiles = payload.get("smiles", "").strip()
         props = payload.get("properties", {})
         if not smiles:
             return _error_response("SMILES不能为空", status_code=400)
         
         try:
-            return await run_in_threadpool(design_service.save_molecule, smiles, props)
+            storage = DesignStorage(_session_save_dir(owner_session_id))
+
+            def save_with_shared_lock():
+                # Each request creates a short-lived storage wrapper. Keep the
+                # read/append/replace sequence atomic across those wrappers.
+                with _SESSION_SAVE_LOCK:
+                    return storage.save_molecule(smiles, props)
+
+            return await run_in_threadpool(save_with_shared_lock)
         except ValueError as e:
             return _error_response(str(e), status_code=400)
         except Exception as e:
@@ -286,8 +325,9 @@ def setup_design_routes(app, model=None, config=None, *, model_provider=None, mo
     # 7. 导出迭代历史
     # ──────────────────────────────────────────────────
     @app.post("/api/design/export_history")
-    async def export_history(payload: Dict[str, Any] = Body(...)):
+    async def export_history(request: Request, payload: Dict[str, Any] = Body(...)):
         """导出当前设计的迭代历史为 CSV 并提供下载"""
+        require_browser_session(request)
         history = payload.get("history", [])
         if not history:
             return _error_response("历史记录为空，无法导出", status_code=400)

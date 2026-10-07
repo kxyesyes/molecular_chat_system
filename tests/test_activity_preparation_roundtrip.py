@@ -31,14 +31,16 @@ def test_scaffold_stereo_survives_parent_roundtrip_without_mutating_parent():
 
 @pytest.mark.parametrize("input_format,separator", [("csv", ","), ("tsv", "\t")])
 def test_generic_preparation_preserves_ez_scaffolds_after_publication(tmp_path, input_format, separator):
-    # Three distinct scaffold groups make all three partitions feasible. Values
-    # and IDs deliberately avoid the independent precision/leading-zero bugs.
+    # The feature-aware split intentionally keeps E/Z variants in one leakage
+    # group. Add two genuinely distinct ring groups so all three partitions
+    # remain feasible while the stereo scaffold round-trip is still covered.
     frame = pd.DataFrame({
-        "smiles": [*ALKENE_PAIR, "c1ccccc1"],
-        "value": ["4.8"] * 3,
-        "units": ["pIC50"] * 3,
-        "relation": ["="] * 3,
-        "compound_id": ["synthetic-ez-a", "synthetic-ez-b", "synthetic-ring"],
+        "smiles": [*ALKENE_PAIR, "c1ccccc1", "c1ccncc1"],
+        "value": ["4.8"] * 4,
+        "units": ["pIC50"] * 4,
+        "relation": ["="] * 4,
+        "compound_id": ["synthetic-ez-a", "synthetic-ez-b",
+                         "synthetic-ring", "synthetic-heteroring"],
     })
     source = frame.to_csv(index=False, sep=separator).encode("utf-8")
     frame = pd.read_csv(io.BytesIO(source), sep=separator, dtype=str, keep_default_na=False)
@@ -46,15 +48,15 @@ def test_generic_preparation_preserves_ez_scaffolds_after_publication(tmp_path, 
         dataset_id="synthetic-ez-roundtrip", target_id="synthetic-target",
         target_name="Synthetic target", task_type="regression", endpoint="pIC50",
         units="pIC50", label_transform="identity", source="synthetic-test",
-        license="test-only", minimum_unique_molecules=3, minimum_scaffolds=3,
+        license="test-only", minimum_unique_molecules=4, minimum_scaffolds=4,
     )
     result = dc.validate_activity_dataset(
         frame, declaration, input_bytes=source, input_format=input_format,
     )
     assert result.ready_for_training
     assert result.rejected.empty
-    assert result.statistics["unique_molecules"] == 3
-    assert result.statistics["unique_scaffolds"] == 3
+    assert result.statistics["unique_molecules"] == 4
+    assert result.statistics["unique_scaffolds"] == 4
     expected = result.accepted.set_index("compound_id").sort_index()
     assert expected.loc["synthetic-ez-a", "canonical_smiles"] != expected.loc[
         "synthetic-ez-b", "canonical_smiles"]
@@ -65,7 +67,7 @@ def test_generic_preparation_preserves_ez_scaffolds_after_publication(tmp_path, 
     path = dc.write_prepared_dataset(result, split, declaration, tmp_path / "prepared")
     frames = [dc.read_prepared_split(path.parent / f"{name}.csv")
               for name in ("train", "validation", "test")]
-    assert all(len(part) == 1 for part in frames)
+    assert sorted(len(part) for part in frames) == [1, 1, 2]
     for part in frames:
         assert dc._verify_prepared_chemistry(part) == part["scaffold_smiles"].tolist()
     published = pd.concat(frames).set_index("compound_id").sort_index()

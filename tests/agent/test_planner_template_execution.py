@@ -84,10 +84,11 @@ def target_responses():
         "target_database_search": [observed("target_database_search", TARGET)],
         "llm_molecular_generator": [observed("llm_molecular_generator", GENERATED)],
         "property_calculator": [observed("property_calculator", ROWS)],
-        "admet_predictor": [observed("admet_predictor", ROWS)],
+        "admet_predictor": [observed("admet_predictor", ROWS), observed("admet_predictor", ROWS)],
         # No fabricated activity score or model provenance: transport rows only.
-        "activity_predictor": [observed("activity_predictor", ROWS)],
+        "activity_predictor": [observed("activity_predictor", ROWS), observed("activity_predictor", ROWS)],
         "candidate_ranker": [observed("candidate_ranker", {"fixture_note": SYNTHETIC})],
+        "lead_optimization_verifier": [observed("lead_optimization_verifier", {"status": "unverified"})],
     }
 
 
@@ -229,7 +230,8 @@ def test_hit_to_lead_generation_consumes_typed_baseline_then_properties_consume_
     execution, calls = execute("hit_to_lead_optimization", query, responses, requested_count=2)
 
     assert_sequence(execution, calls, ["property_calculator", "admet_predictor",
-                    "activity_predictor", "llm_molecular_generator", "property_calculator"],
+                    "activity_predictor", "llm_molecular_generator", "property_calculator",
+                    "admet_predictor", "activity_predictor", "lead_optimization_verifier"],
                     "task_completed")
     assert [payload for _, payload in calls[:3]] == [query] * 3
     assert calls[3][1] == {"query": query, "metadata": {"requested_count": 2, "temperature": 0.7},

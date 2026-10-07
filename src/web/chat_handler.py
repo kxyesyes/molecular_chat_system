@@ -4,6 +4,7 @@
 import json
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Mapping
 from typing import List, Dict, Any
@@ -37,6 +38,7 @@ from src.web.agent_result_presentation import (
 from src.web.models import generate_for_chat
 from src.web.model_lifecycle import model_request, finish_on_cancel
 from src.web.rag_presentation import format_rag_context, rag_info_molecule
+from src.web.legacy_websocket_protocol import LegacyFrameError, decode_legacy_frame
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +67,13 @@ class ChatHandler:
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
         self.decision_runtime = None
+
+    @staticmethod
+    def _validate_request_temperature(value: Any) -> float:
+        """Validate the temperature once and reuse it for the whole turn."""
+        if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 2:
+            raise ValueError("temperature must be a finite number between 0 and 2")
+        return float(value)
 
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
@@ -110,7 +119,15 @@ class ChatHandler:
         try:
             while True:
                 data = await websocket.receive_text()
-                message_data = json.loads(data)
+                try:
+                    message_data = decode_legacy_frame(data)
+                except LegacyFrameError as exc:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "请求格式无效。",
+                        "error": {"code": exc.code},
+                    }, ensure_ascii=False))
+                    continue
 
                 # 处理 ping 消息
                 if message_data.get("type") == "ping":
@@ -187,6 +204,15 @@ class ChatHandler:
         """处理用户消息 - 性能优化版"""
         # Hold one client for generation, retries and completion metadata.
         request_model = self.model
+        try:
+            temperature = self._validate_request_temperature(temperature)
+        except ValueError as exc:
+            await websocket.send_text(json.dumps({
+                "type": "complete",
+                "content": "生成参数无效，temperature 必须是 0 到 2 之间的有限数值。",
+                "error": {"code": "invalid_temperature", "message": str(exc)},
+            }, ensure_ascii=False))
+            return
         history = (
             conversation_history
             if conversation_history is not None
@@ -574,7 +600,7 @@ class ChatHandler:
                 chunk_count = 0
                 stream = request_model.stream_generate(
                     prompt,
-                    temperature=self.config.get("inference", {}).get("temperature", 0.7),
+                    temperature=temperature,
                     max_tokens=model_max_tokens,
                 )
                 try:
@@ -624,30 +650,30 @@ class ChatHandler:
                 full_response = await generate_for_chat(
                     request_model,
                     prompt,
-                    temperature=self.config.get("inference", {}).get("temperature", 0.7),
+                    temperature=temperature,
                     max_tokens=model_max_tokens,
                 )
                 full_response, _, completion_meta = self._finalize_model_response(
                     full_response, request_model
                 )
                 await websocket.send_text(json.dumps({
-                    "type": "message",
-                    "message": full_response,
+                    "type": "complete",
+                    "content": full_response,
                     **completion_meta,
                 }, ensure_ascii=False))
         else:
             full_response = await generate_for_chat(
                 request_model,
                 prompt,
-                temperature=self.config.get("inference", {}).get("temperature", 0.7),
+                temperature=temperature,
                 max_tokens=model_max_tokens,
             )
             full_response, _, completion_meta = self._finalize_model_response(
                 full_response, request_model
             )
             await websocket.send_text(json.dumps({
-                "type": "message",
-                "message": full_response,
+                "type": "complete",
+                "content": full_response,
                 **completion_meta,
             }, ensure_ascii=False))
         
@@ -963,10 +989,16 @@ class ChatHandler:
         *,
         trace_id: Any,
     ) -> Dict[str, Any] | None:
-        if observation.get("success") is not True:
-            return None
         status = observation.get("status")
         if status not in {"succeeded", "partial"}:
+            return None
+        # A partial candidate set intentionally has success=False at the
+        # workflow level.  It still contains validated molecules that must be
+        # shown, with the partial status preserved, rather than disappearing
+        # from the live UI and reference flow.
+        if observation.get("success") is not True and not (
+            status == "partial" and observation.get("success") is False
+        ):
             return None
         quality = observation.get("quality")
         if (

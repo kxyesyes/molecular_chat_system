@@ -262,6 +262,22 @@ def test_strict_source_rejects_swapped_rows(tmp_path):
         close_fixture_mmaps(fresh)
 
 
+def test_owned_target_identity_keeps_same_name_across_species():
+    human = {
+        "target_name": "PDE5A",
+        "target_chembl_id": "CHEMBL-T1",
+        "organism": "Homo sapiens",
+        "taxon_id": 9606,
+    }
+    mouse = {
+        **human,
+        "organism": "Mus musculus",
+        "taxon_id": 10090,
+    }
+
+    assert owned._target_identity_key(human) != owned._target_identity_key(mouse)
+
+
 @pytest.mark.parametrize("cached", [True, False])
 @pytest.mark.parametrize("smiles", [("CCO", "CCC", "CCO"), ()])
 def test_owned_parity_and_detached_proof(tmp_path, cached, smiles):

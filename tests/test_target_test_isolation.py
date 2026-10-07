@@ -160,11 +160,14 @@ def test_cache_hit_guard_rejects_missing_cache_before_transport(method_name):
     case = search_tests.TargetSearchDemoTest(methodName=method_name)
     try:
         case.setUp()
-        # Exercise the real cache-hit test with a misplaced file. The lower guard
-        # keeps RED offline; GREEN must fail at the test's requests.get guard.
+        # Miss the authoritative verified cache, not the legacy path hint.
+        # Keep DNS deterministic too: the HTTP guard must be the failure.
         with patch(
-            "src.target_search.downloader.StructureDownloader._absolute_cache_path",
-            return_value=case.root / "missing-cache" / "missing.cif",
+            "src.target_search.downloader.StructureDownloader._verified_cached_structure",
+            return_value=None,
+        ), patch(
+            "src.target_search.downloader._resolve_structure_host",
+            return_value=("8.8.8.8",),
         ), patch(
             "requests.adapters.HTTPAdapter.send",
             side_effect=AssertionError("unguarded HTTP reached transport"),

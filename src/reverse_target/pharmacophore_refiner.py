@@ -20,8 +20,6 @@ from __future__ import annotations
 import os
 import time
 import logging
-import hashlib
-import pickle
 import itertools
 from functools import lru_cache
 from pathlib import Path
@@ -30,9 +28,14 @@ from typing import List, Dict, Tuple, Optional
 import numpy as np
 
 from src.reverse_target.config import get_pharm3d_cache_dir
+from src.reverse_target.pharmacophore_cache import (
+    DEFAULT_CACHE_TTL_SECONDS,
+    load_cache,
+    save_cache,
+)
 
 try:
-    from rdkit import Chem, RDConfig
+    from rdkit import Chem, RDConfig, rdBase
     from rdkit.Chem import AllChem, ChemicalFeatures
     from rdkit.Chem.rdMolDescriptors import CalcTPSA, CalcNumRotatableBonds, CalcNumHBD, CalcNumHBA
     from rdkit.Chem.Descriptors import MolWt
@@ -40,6 +43,7 @@ try:
 except ModuleNotFoundError:
     Chem = None
     RDConfig = None
+    rdBase = None
     AllChem = None
     ChemicalFeatures = None
     CalcTPSA = CalcNumRotatableBonds = CalcNumHBD = CalcNumHBA = None
@@ -83,6 +87,8 @@ def _get_factory():
 #   缓存目录（避免重复计算相同分子的 3D 构象）
 # ─────────────────────────────────────────
 _CACHE_DIR: Optional[Path] = None
+_DEFAULT_NUM_CONFS = 5
+_PHARM3D_CACHE_TTL_SECONDS = DEFAULT_CACHE_TTL_SECONDS
 
 def _get_cache_dir() -> Path:
     """懒加载缓存目录，以当前工作目录为基准"""
@@ -93,42 +99,93 @@ def _get_cache_dir() -> Path:
     return _CACHE_DIR
 
 
-def _smiles_hash(smiles: str) -> str:
-    return hashlib.md5(smiles.encode()).hexdigest()[:12]
+def _rdkit_version() -> str:
+    return str(getattr(rdBase, "rdkitVersion", "unavailable"))
 
 
-def _try_load_cache(smiles: str) -> Optional[Dict]:
-    """尝试从磁盘缓存加载药效团数据"""
+def _generation_params(num_confs: int = _DEFAULT_NUM_CONFS) -> Dict:
+    """Describe every deterministic input that affects 3D generation."""
+    return {
+        "embedding_method": "ETKDGv3",
+        "num_confs": int(num_confs),
+        "random_seed": 42,
+        "num_threads": 1,
+        "enforce_chirality": True,
+        "forcefield": "MMFF94",
+    }
+
+
+def _canonical_smiles(smiles: str) -> Optional[str]:
+    if Chem is None:
+        return None
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    return Chem.MolToSmiles(mol, canonical=True)
+
+
+def _try_load_cache(
+    smiles: str,
+    *,
+    canonical_smiles: Optional[str] = None,
+    num_confs: int = _DEFAULT_NUM_CONFS,
+) -> Optional[Dict]:
+    """Load only a verified molecule-only JSON cache payload."""
+    canonical_smiles = canonical_smiles or _canonical_smiles(smiles)
+    if not canonical_smiles:
+        return None
+    return load_cache(
+        _get_cache_dir(),
+        canonical_smiles=canonical_smiles,
+        rdkit_version=_rdkit_version(),
+        generation_params=_generation_params(num_confs),
+    )
+
+
+def _save_cache(
+    smiles: str,
+    data: Dict,
+    *,
+    canonical_smiles: Optional[str] = None,
+    num_confs: int = _DEFAULT_NUM_CONFS,
+) -> None:
+    """Best-effort atomic save of a verified-environment JSON cache payload."""
+    canonical_smiles = canonical_smiles or _canonical_smiles(smiles)
+    if not canonical_smiles:
+        return
     try:
-        h = _smiles_hash(smiles)
-        cache_file = _get_cache_dir() / f"{h}.pkl"
-        if cache_file.exists():
-            with open(cache_file, "rb") as f:
-                return pickle.load(f)
+        save_cache(
+            _get_cache_dir(),
+            canonical_smiles=canonical_smiles,
+            payload=data,
+            rdkit_version=_rdkit_version(),
+            generation_params=_generation_params(num_confs),
+            ttl_seconds=_PHARM3D_CACHE_TTL_SECONDS,
+        )
     except Exception:
-        pass
-    return None
+        # A cache failure must never turn a real scientific computation into
+        # an HTTP failure or a fabricated cached result.
+        logger.warning("Unable to persist pharm3d cache entry")
 
 
-def _save_cache(smiles: str, data: Dict):
-    tmp_file = None
-    """保存药效团数据到磁盘缓存"""
-    try:
-        h = _smiles_hash(smiles)
-        cache_file = _get_cache_dir() / f"{h}.pkl"
-        tmp_file = cache_file.with_name(f"{cache_file.name}.{os.getpid()}.tmp")
-        with open(tmp_file, "wb") as f:
-            pickle.dump(data, f)
-        os.replace(tmp_file, cache_file)
-    except Exception:
-        pass
-    finally:
-        if tmp_file is not None:
-            try:
-                if tmp_file.exists():
-                    tmp_file.unlink()
-            except Exception:
-                pass
+def _is_valid_cached_result(data: Optional[Dict]) -> bool:
+    """Require the scientific success contract before using cached data."""
+    if not isinstance(data, dict):
+        return False
+    energy = data.get("conformer_energy")
+    return (
+        data.get("success") is True
+        and data.get("conformer_status") == "optimized"
+        and data.get("mmff_converged") is True
+        and data.get("embedding_method") in {"ETKDGv3", "ETKDG_fallback"}
+        and isinstance(data.get("features"), list)
+        and isinstance(data.get("feature_counts"), dict)
+        and isinstance(data.get("mol_block"), str)
+        and isinstance(data.get("properties"), dict)
+        and isinstance(energy, (int, float))
+        and not isinstance(energy, bool)
+        and np.isfinite(energy)
+    )
 
 
 # ─────────────────────────────────────────
@@ -289,21 +346,24 @@ def get_molecule_pharmacophore(smiles: str) -> Dict:
         properties    : 基础理化性质
         error         : 失败时的错误信息
     """
-    # 尝试磁盘缓存
-    cached = _try_load_cache(smiles)
-    if cached and cached.get("conformer_status") == "optimized":
-        logger.debug(f"Loaded pharmacophore from cache: {smiles[:20]}...")
-        return cached
-
     try:
         _require_rdkit()
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return {"success": False, "error": f"无效的 SMILES: {smiles}"}
 
+        # Validate and bind the canonical input before reading any cache.
+        canonical_smiles = Chem.MolToSmiles(mol, canonical=True)
+        cached = _try_load_cache(smiles, canonical_smiles=canonical_smiles)
+        if _is_valid_cached_result(cached):
+            logger.debug(f"Loaded pharmacophore from cache: {smiles[:20]}...")
+            return cached
+
         # 3D 构象生成
         t0 = time.time()
-        mol_3d, conformer_status = generate_3d_conformer_with_status(mol)
+        mol_3d, conformer_status = generate_3d_conformer_with_status(
+            mol, num_confs=_DEFAULT_NUM_CONFS
+        )
         t1 = time.time()
 
         if mol_3d is None:

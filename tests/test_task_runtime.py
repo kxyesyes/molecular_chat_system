@@ -87,6 +87,29 @@ def test_task_manager_normalizes_returned_failed_status(tmp_path):
     assert finished.error == "Task returned a failed result"
 
 
+@pytest.mark.parametrize(
+    ("reported_status", "reported_success", "expected_status"),
+    [
+        ("partial", True, TaskStatus.FAILED),
+        ("unavailable", True, TaskStatus.FAILED),
+        ("rejected", True, TaskStatus.FAILED),
+        ("cancelled", True, TaskStatus.FAILED),
+        ("timeout", True, TaskStatus.TIMED_OUT),
+    ],
+)
+def test_task_manager_never_promotes_non_success_status_to_succeeded(
+    tmp_path, reported_status, reported_success, expected_status
+):
+    manager = TaskManager(db_path=tmp_path / f"tasks-{reported_status}.sqlite", max_workers=1)
+    result = {"status": reported_status, "success": reported_success, "message": reported_status}
+
+    record = manager.submit("unit_test", {}, lambda _payload: result)
+    finished = wait_for_terminal(manager, record.task_id)
+
+    assert finished.status is expected_status
+    assert finished.status is not TaskStatus.SUCCEEDED
+
+
 def test_task_manager_preserves_non_mapping_json_result(tmp_path):
     manager = TaskManager(db_path=tmp_path / "tasks.sqlite", max_workers=1)
 

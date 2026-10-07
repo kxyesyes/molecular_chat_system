@@ -1,6 +1,9 @@
-"""Request lifetime is not physical worker lifetime; no model assets are used."""
+"""Activity prediction resource limits and hard process cancellation."""
+
 import asyncio
+from pathlib import Path
 import threading
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -8,141 +11,151 @@ from fastapi import HTTPException
 from src.web.routes import activity_prediction_routes as routes, api_routes
 
 
+def _success_activity_child(smiles: str, target: str | None):
+    return {"kind": "result", "value": {"status": "succeeded", "smiles": smiles, "target": target}}
+
+
+def _slow_activity_child(marker_path: str, _target: str):
+    time.sleep(5.0)
+    Path(marker_path).write_text("completed", encoding="utf-8")
+    return {"kind": "result", "value": {"status": "succeeded"}}
+
+
 @pytest.fixture
 def admission(monkeypatch):
     slots = threading.BoundedSemaphore(1)
     monkeypatch.setattr(routes, "_ACTIVITY_ADMISSION", slots)
-    monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", "5")
     return slots
 
 
-def test_success_and_worker_exceptions_release_capacity(admission):
+def test_success_releases_capacity(admission):
     async def exercise():
-        for error in (None, RuntimeError, TimeoutError, None):
-            def compute():
-                if error:
-                    raise error("synthetic worker error")
-                return {"status": "failed", "results": []}
-
-            call = routes._invoke_activity_with_budget(api_routes, compute, operation="test")
-            if error:
-                with pytest.raises(error):
-                    await call
-            else:
-                assert await call == {"status": "failed", "results": []}
-            assert admission.acquire(blocking=False), "completed call leaked a slot"
-            admission.release()
-
-    asyncio.run(exercise())
-
-
-@pytest.mark.parametrize("end_request", ["timeout", "cancel"])
-@pytest.mark.parametrize("late_error", [False, True])
-def test_running_thread_retains_slot_until_physical_exit(admission, monkeypatch, end_request, late_error):
-    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
-
-    def compute():
-        entered.set()
-        try:
-            assert release.wait(5)
-            if late_error:
-                raise RuntimeError("private synthetic failure")
-            return {"unexpected_late_result": True}
-        finally:
-            exited.set()
-
-    async def exercise():
-        # Real offload, with a signal confirming the slot-owning wrapper returned.
-        settled = asyncio.Event()
-        original = api_routes._invoke_in_threadpool
-
-        async def dispatch(func):
-            try:
-                return await original(func)
-            finally:
-                settled.set()
-
-        monkeypatch.setattr(api_routes, "_invoke_in_threadpool", dispatch)
-        if end_request == "cancel":
-            monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", "5")
-        task = asyncio.create_task(routes._invoke_activity_with_budget(api_routes, compute, operation="test"))
-        try:
-            assert await asyncio.to_thread(entered.wait, 3)
-            if end_request == "cancel":
-                task.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            else:
-                with pytest.raises(HTTPException) as error:
-                    await task
-                assert error.value.status_code == 504
-                assert error.value.detail["code"] == "ACTIVITY_REQUEST_TIMEOUT"
-                assert error.value.detail["compute_disposition"] == "draining"
-            assert not exited.is_set()
-            with pytest.raises(HTTPException) as busy:
-                await routes._invoke_activity_with_budget(api_routes, lambda: pytest.fail("over capacity"), operation="test")
-            assert busy.value.status_code == 429
-        finally:
-            release.set()
-            await asyncio.wait_for(settled.wait(), 3)
-            await asyncio.gather(task, return_exceptions=True)
-        assert exited.is_set()
+        result = await routes._invoke_activity_with_budget(
+            api_routes,
+            operation="test",
+            isolated_payload=("CC", "PDE5A"),
+            isolated_target=_success_activity_child,
+        )
+        assert result == {"status": "succeeded", "smiles": "CC", "target": "PDE5A"}
         assert admission.acquire(blocking=False)
         admission.release()
 
     asyncio.run(exercise())
 
 
-def test_loop_shutdown_does_not_release_a_still_running_thread(admission):
-    entered, release, exited = threading.Event(), threading.Event(), threading.Event()
-
-    def compute():
-        entered.set()
-        try:
-            assert release.wait(5)
-        finally:
-            exited.set()
+def test_capacity_is_reserved_until_process_is_stopped(admission, monkeypatch, tmp_path):
+    marker = tmp_path / "marker.txt"
+    monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", "0.5")
 
     async def exercise():
+        task = asyncio.create_task(
+            routes._invoke_activity_with_budget(
+                api_routes,
+                operation="isolated-test",
+                isolated_payload=(str(marker), "PDE5A"),
+                isolated_target=_slow_activity_child,
+            )
+        )
         with pytest.raises(HTTPException) as error:
-            await routes._invoke_activity_with_budget(api_routes, compute, operation="test")
+            await task
         assert error.value.status_code == 504
-        assert entered.is_set()
+        assert error.value.detail["compute_disposition"] == "terminated"
+        assert admission.acquire(blocking=False)
+        admission.release()
 
-    try:
-        asyncio.run(exercise())  # cancels all pending async wrappers on shutdown
-        assert not exited.is_set()
-        assert not admission.acquire(blocking=False), "async cancellation released a live thread"
-    finally:
-        release.set()
-        assert exited.wait(3)
-    assert admission.acquire(timeout=3)
-    admission.release()
+    asyncio.run(exercise())
+    assert not marker.exists()
 
 
-def test_timeout_before_dispatch_prevents_late_computation(admission):
+def test_cancel_terminates_child_and_releases_capacity(admission, monkeypatch, tmp_path):
+    marker = tmp_path / "marker.txt"
+    monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", "5")
+
     async def exercise():
-        release, settled = asyncio.Event(), asyncio.Event()
-        calls = []
+        task = asyncio.create_task(
+            routes._invoke_activity_with_budget(
+                api_routes,
+                operation="isolated-test",
+                isolated_payload=(str(marker), "PDE5A"),
+                isolated_target=_slow_activity_child,
+            )
+        )
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert admission.acquire(blocking=False)
+        admission.release()
 
-        class DelayedSupport:
-            async def _invoke_in_threadpool(self, function):
-                try:
-                    await release.wait()
-                    return function()
-                finally:
-                    settled.set()
+    asyncio.run(exercise())
+    assert not marker.exists()
 
-        try:
-            with pytest.raises(HTTPException) as error:
-                await routes._invoke_activity_with_budget(DelayedSupport(), lambda: calls.append(1), operation="test")
-            assert error.value.status_code == 504
-            assert admission.acquire(blocking=False), "queued work retained a slot after cancellation"
-            admission.release()
-        finally:
-            release.set()
-            await asyncio.wait_for(settled.wait(), 3)
-        assert calls == []
+
+def test_hung_process_start_consumes_activity_budget(admission, monkeypatch):
+    class HungStartProcess:
+        def start(self):
+            time.sleep(0.5)
+
+        def terminate(self):
+            pass
+
+        def close(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+    monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", "0.1")
+    monkeypatch.setattr(routes, "IsolatedProcess", lambda *args, **kwargs: HungStartProcess())
+
+    async def exercise():
+        started = time.monotonic()
+        with pytest.raises(HTTPException) as error:
+            await asyncio.wait_for(
+                routes._invoke_activity_with_budget(
+                    api_routes,
+                    operation="isolated-test",
+                    isolated_payload=("CC", "PDE5A"),
+                    isolated_target=_success_activity_child,
+                ),
+                timeout=0.25,
+            )
+        assert error.value.status_code == 504
+        assert error.value.detail["code"] == "ACTIVITY_REQUEST_TIMEOUT"
+        assert time.monotonic() - started < 0.35
+
+    asyncio.run(exercise())
+
+
+def test_activity_cleanup_cancels_waiter_that_outlives_cleanup_window(monkeypatch):
+    class StoppedProcess:
+        def terminate(self):
+            pass
+
+        def close(self):
+            pass
+
+    real_wait_for = asyncio.wait_for
+
+    async def shortened_wait_for(awaitable, timeout):
+        return await real_wait_for(awaitable, timeout=0.01)
+
+    monkeypatch.setattr(routes.asyncio, "wait_for", shortened_wait_for)
+
+    async def exercise():
+        errors = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+
+        async def fail_late():
+            await asyncio.sleep(0.05)
+            raise RuntimeError("late activity pipe failure")
+
+        waiter = asyncio.create_task(fail_late())
+        await routes._stop_activity_process(StoppedProcess(), waiter)
+        await asyncio.sleep(0.08)
+        assert errors == []
 
     asyncio.run(exercise())
 
@@ -150,4 +163,4 @@ def test_timeout_before_dispatch_prevents_late_computation(admission):
 @pytest.mark.parametrize("value", ["inf", "nan", "-1", "0", "not-a-number"])
 def test_invalid_timeout_cannot_disable_budget(monkeypatch, value):
     monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", value)
-    assert routes._positive_float_env("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", 60.) == 60.
+    assert routes._positive_float_env("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", 60.0) == 60.0

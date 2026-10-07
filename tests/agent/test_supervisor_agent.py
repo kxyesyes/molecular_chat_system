@@ -70,6 +70,8 @@ class FakeTool:
             data = [row]
         elif self.name == "candidate_ranker":
             data = {"top_candidates": [{"canonical_smiles": "CCO", "score": 0.5}]}
+        elif self.name == "lead_optimization_verifier":
+            data = {"status": "unverified", "candidates": []}
         else:
             data = {"query": query}
         return {
@@ -92,6 +94,7 @@ def build_fake_tools(*, target_quality=None):
             "admet_predictor",
             "activity_predictor",
             "candidate_ranker",
+            "lead_optimization_verifier",
             "molecular_docking",
         ]
     }

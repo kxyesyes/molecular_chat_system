@@ -12,12 +12,13 @@ const ViewerManager = {
           placeholder.style.display = "flex";
           const text = placeholder.querySelector(".viewer-text");
           if (text) {
-            text.innerHTML = `
-              <div>3D 查看器加载失败</div>
-              <div style="font-size: 14px; margin-top: 5px">
-                请确认 /static/vendor/3dmol/3Dmol-min.js 可正常访问
-              </div>
-            `;
+            const title = document.createElement("div");
+            title.textContent = "3D 查看器加载失败";
+            const hint = document.createElement("div");
+            hint.style.fontSize = "14px";
+            hint.style.marginTop = "5px";
+            hint.textContent = "请确认 /static/vendor/3dmol/3Dmol-min.js 可正常访问";
+            text.replaceChildren(title, hint);
           }
         }
         return;

@@ -35,7 +35,9 @@ const TargetSearchApp = (() => {
       });
     document.getElementById("filterDockingGrade").addEventListener("change", () => {
       if (currentDetail) {
-        document.getElementById("targetDetail").innerHTML = renderDetail(currentDetail);
+        const detail = document.getElementById("targetDetail");
+        detail.innerHTML = renderDetail(currentDetail);
+        hydrateExternalLinks(detail, currentDetail.external_links);
       }
     });
 
@@ -57,13 +59,7 @@ const TargetSearchApp = (() => {
       ]);
       panel.innerHTML = renderDatabaseStatus(stats, health, validation);
     } catch (error) {
-      panel.innerHTML = `
-        <div class="db-status-card db-status-error">
-          <span class="db-status-label">DB CHECK</span>
-          <strong>状态读取失败</strong>
-          <p>${escapeHtml(error.message)}</p>
-        </div>
-      `;
+      renderInlineError(panel, "db-status-card db-status-error", "DB CHECK", "状态读取失败", error.message);
     }
   }
 
@@ -114,12 +110,7 @@ const TargetSearchApp = (() => {
       const data = await TargetSearchApi.pdeOverview(3);
       panel.innerHTML = renderPdeOverview(data);
     } catch (error) {
-      panel.innerHTML = `
-        <div class="pde-overview-error">
-          <strong>PDE 家族概览暂不可用</strong>
-          <span>${escapeHtml(error.message)}</span>
-        </div>
-      `;
+      renderInlineError(panel, "pde-overview-error", "PDE 家族概览暂不可用", "", error.message);
     }
   }
 
@@ -129,7 +120,7 @@ const TargetSearchApp = (() => {
       .sort((a, b) => (b.best_structure.score || 0) - (a.best_structure.score || 0))
       .slice(0, 6);
     const familyCards = (data.families || []).map((item) => `
-      <button type="button" class="pde-family-chip" onclick="TargetSearchApp.searchPreset('${escapeAttr(item.family)}')">
+      <button type="button" class="pde-family-chip" onclick="TargetSearchApp.searchPreset('${escapeInlineJs(item.family)}')">
         <strong>${escapeHtml(item.family)}</strong>
         <span>${item.target_count} 靶点 · ${item.structure_count} 结构</span>
       </button>
@@ -151,7 +142,7 @@ const TargetSearchApp = (() => {
       <div class="pde-family-grid">${familyCards}</div>
       <div class="pde-top-list">
         ${topTargets.map((item) => `
-          <article class="pde-top-item" onclick="TargetSearchApp.searchPreset('${escapeAttr(item.gene_symbol)}')">
+            <article class="pde-top-item" onclick="TargetSearchApp.searchPreset('${escapeInlineJs(item.gene_symbol)}')">
             <div>
               <strong>${escapeHtml(item.gene_symbol)}</strong>
               <span>${escapeHtml(item.pde_target_class)}</span>
@@ -259,7 +250,7 @@ const TargetSearchApp = (() => {
     const isSelected = Number(item.target_id) === Number(selectedTargetId);
     const reasonText = matchReasonText(item.match_reason);
     return `
-      <article class="target-result-item ${isSelected ? "selected" : ""}" data-target-id="${item.target_id}">
+      <article class="target-result-item ${isSelected ? "selected" : ""}" data-target-id="${escapeHtml(item.target_id)}">
         <div class="target-result-main">
           <div class="gene">${escapeHtml(item.gene_symbol)}</div>
           <div class="protein-name">${escapeHtml(item.protein_name || "-")}</div>
@@ -279,8 +270,8 @@ const TargetSearchApp = (() => {
         </div>
 
         <div class="action-row target-actions">
-          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.loadDetail(${item.target_id})">详情</button>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadPreferred(${item.target_id})">下载推荐</button>
+          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.loadDetail(${inlineJsArg(item.target_id)})">详情</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadPreferred(${inlineJsArg(item.target_id)})">下载推荐</button>
         </div>
       </article>
     `;
@@ -304,9 +295,10 @@ const TargetSearchApp = (() => {
       currentDetail = data;
       selectedTargetId = Number(data.target_id);
       detail.innerHTML = renderDetail(data);
+      hydrateExternalLinks(detail, data.external_links);
       refreshSelectedCards();
     } catch (error) {
-      detail.innerHTML = `<div class="detail-empty"><strong>详情加载失败</strong><span>${escapeHtml(error.message)}</span></div>`;
+      renderInlineError(detail, "detail-empty", "详情加载失败", "", error.message);
     }
   }
 
@@ -364,9 +356,7 @@ const TargetSearchApp = (() => {
             </div>
           </div>
 
-          <div class="external-links">
-            ${(data.external_links || []).map((link) => `<a href="${escapeHtml(link.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(link.label)}</a>`).join("")}
-          </div>
+          <div class="external-links" aria-label="External references"></div>
 
           ${recommended ? renderRecommendedStructure(recommended) : ""}
         </section>
@@ -436,7 +426,7 @@ const TargetSearchApp = (() => {
         </div>
         <div class="recommend-actions">
           <span class="score-pill">Score ${item.score || 0}</span>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadStructure(${item.id}, '${escapeAttr(item.file_format || "cif")}')">下载推荐</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, ${inlineJsArg(item.file_format || "cif")})">下载推荐</button>
         </div>
       </section>
     `;
@@ -494,9 +484,9 @@ const TargetSearchApp = (() => {
         <div class="structure-side">
           <span class="score-pill">Score ${item.score || 0}</span>
           <span class="level-pill">${escapeHtml(item.recommendation_level || "Reference")}</span>
-          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${item.id}, 'pdb')">下载 PDB</button>
-          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${item.id}, 'cif')">下载 mmCIF</button>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.sendToDocking(${item.id})">发送到分子对接</button>
+          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'pdb')">下载 PDB</button>
+          <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'cif')">下载 mmCIF</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.sendToDocking(${inlineJsArg(item.id)})">发送到分子对接</button>
         </div>
       </article>
     `;
@@ -637,14 +627,87 @@ const TargetSearchApp = (() => {
     message.textContent = text;
   }
 
+  function renderInlineError(container, className, label, title, message) {
+    if (!container) return;
+    const card = document.createElement("div");
+    card.className = className;
+    if (label) {
+      const labelNode = document.createElement("span");
+      labelNode.className = "db-status-label";
+      labelNode.textContent = label;
+      card.appendChild(labelNode);
+    }
+    if (title) {
+      const titleNode = document.createElement("strong");
+      titleNode.textContent = title;
+      card.appendChild(titleNode);
+    }
+    const errorBox = document.createElement("span");
+    errorBox.textContent = String(message || "未知错误");
+    card.appendChild(errorBox);
+    container.replaceChildren(card);
+  }
+
+  function trustedExternalUrlValue(value) {
+    try {
+      const parsed = new URL(String(value || ""));
+      const trustedHosts = [
+        "ebi.ac.uk",
+        "rcsb.org",
+        "pubmed.ncbi.nlm.nih.gov",
+        "doi.org",
+      ];
+      const trusted = trustedHosts.some(
+        (host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`),
+      );
+      if (parsed.protocol !== "https:" || parsed.username || parsed.password || !trusted) {
+        return null;
+      }
+      return parsed.href;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function hydrateExternalLinks(container, links) {
+    const target = container?.querySelector(".external-links");
+    if (!target) return;
+    target.replaceChildren();
+    (Array.isArray(links) ? links : []).forEach((link) => {
+      const href = trustedExternalUrlValue(link && link.url);
+      if (!href) return;
+      const anchor = document.createElement("a");
+      anchor.href = href;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      anchor.textContent = String((link && link.label) || "外部来源");
+      target.appendChild(anchor);
+    });
+  }
+
   function hideMessage() {
     const message = document.getElementById("targetMessage");
     message.hidden = true;
     message.textContent = "";
   }
 
-  function escapeAttr(value) {
-    return String(value ?? "").replaceAll("'", "\\'");
+  function escapeInlineJs(value) {
+    const helper = window.MedChatSafeRender;
+    if (helper && typeof helper.escapeInlineJsString === "function") {
+      return helper.escapeInlineJsString(value);
+    }
+    return String(value ?? "")
+      .replaceAll("\\", "\\\\")
+      .replaceAll("'", "\\'")
+      .replaceAll("\r", "\\r")
+      .replaceAll("\n", "\\n")
+      .replaceAll("<", "\\x3C")
+      .replaceAll(">", "\\x3E")
+      .replaceAll("&", "\\x26");
+  }
+
+  function inlineJsArg(value) {
+    return escapeHtml(JSON.stringify(String(value ?? "")));
   }
 
   function escapeHtml(value) {

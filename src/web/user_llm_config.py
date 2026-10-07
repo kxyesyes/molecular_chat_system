@@ -15,6 +15,7 @@ from .llm_runtime_config import (
     PROVIDER_ENV_FIELDS, _atomic_replace_text, _exclusive_file_lock,
     _validated_env_value, normalize_llm_config,
 )
+from .security.url_policy import validate_llm_url
 
 _ERROR = "本机模型配置不可用；请检查用户配置目录权限或文件格式。"
 _DEFAULTS = {
@@ -139,20 +140,15 @@ def _request_config(raw: dict) -> dict:
 
 
 def _endpoint(config: dict) -> tuple[str, str]:
-    from src.agent.openai_compatible_model import OpenAICompatibleModel
-    url = config["base_url"]
-    if config["provider"] != "ollama":
-        url = OpenAICompatibleModel._normalize_chat_url(url)
-    parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.hostname or parts.username or parts.password or parts.query or parts.fragment:
-        raise ValueError(_ERROR)
-    port = parts.port
-    host = parts.hostname.lower()
-    if ":" in host:
-        host = f"[{host}]"
-    if port and port != (443 if parts.scheme == "https" else 80):
-        host += f":{port}"
-    return config["provider"], urlunsplit((parts.scheme, host, parts.path.rstrip("/"), "", ""))
+    try:
+        url = validate_llm_url(
+            config["base_url"],
+            provider=config["provider"],
+            resolve_host=False,
+        )
+    except (KeyError, TypeError, ValueError):
+        raise ValueError(_ERROR) from None
+    return config["provider"], url
 
 
 def resolve_user_llm_request(raw: dict, current: dict, *, clear_api_key: bool = False) -> dict:

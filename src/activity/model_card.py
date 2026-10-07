@@ -251,7 +251,13 @@ def _load(path: Path) -> PreparedTrainingData:
             raise ValueError("Regression evaluation requires at least two rows")
         frames[name] = frame
     combined = pd.concat(list(frames.values()), ignore_index=True)
-    dc._verify_split_invariants(combined, frames)
+    dc._verify_split_invariants(
+        combined,
+        frames,
+        check_feature_identity=(
+            manifest["split"]["algorithm"] == dc._SPLIT_ALGORITHM
+        ),
+    )
     validated_sha = dc._validated_content_sha256(combined)
     _digest(validated_sha, manifest["validated_content_sha256"], "validated scientific content")
     _digest(dc._input_binding_sha256(dc._validated_input_sha256(manifest["input_sha256"]),

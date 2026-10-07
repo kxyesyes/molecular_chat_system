@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Optional
 
+from src.task_runtime.private_permissions import restrict_private_path
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TARGET_DB_DIR = Path("data") / "target_db"
@@ -83,25 +85,31 @@ def dict_factory(cursor: sqlite3.Cursor, row: Iterable[object]) -> dict:
 
 def get_connection(project_root: Optional[Path | str] = None) -> sqlite3.Connection:
     db_path = get_db_path(project_root)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _restrict_permissions(db_path.parent, 0o700)
     conn = sqlite3.connect(db_path, timeout=30)
+    _restrict_sqlite_permissions(db_path)
     conn.row_factory = dict_factory
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
+    _restrict_sqlite_permissions(db_path)
     return conn
 
 
 def init_db(project_root: Optional[Path | str] = None) -> None:
     db_path = get_db_path(project_root)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    db_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _restrict_permissions(db_path.parent, 0o700)
     with _migration_thread_lock(db_path), _DatabaseMigrationLock(db_path):
         _init_db_locked(project_root)
 
 
 def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
-    get_cache_dir(project_root).mkdir(parents=True, exist_ok=True)
+    cache_dir = get_cache_dir(project_root)
+    cache_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    _restrict_permissions(cache_dir, 0o700)
     conn = get_connection(project_root)
     try:
         conn.executescript(
@@ -211,6 +219,11 @@ def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
                 previous_generation_id TEXT,
                 previous_path TEXT,
                 previous_quarantine_path TEXT,
+                file_sha256 TEXT,
+                file_size_bytes INTEGER,
+                file_format TEXT,
+                source_version TEXT,
+                species TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -243,6 +256,17 @@ def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
                 "cleanup_quarantine_path": "TEXT",
                 "next_retry_epoch": "REAL NOT NULL DEFAULT 0",
                 "retry_count": "INTEGER NOT NULL DEFAULT 0",
+            },
+        )
+        _ensure_columns(
+            conn,
+            "target_coordinate_publication_intents",
+            {
+                "file_sha256": "TEXT",
+                "file_size_bytes": "INTEGER",
+                "file_format": "TEXT",
+                "source_version": "TEXT",
+                "species": "TEXT",
             },
         )
         if not _migration_completed(conn, CACHE_MIGRATION_STATE_KEY):
@@ -286,11 +310,24 @@ def _init_db_locked(project_root: Optional[Path | str] = None) -> None:
             """
         )
         conn.commit()
+        _restrict_sqlite_permissions(get_db_path(project_root))
     except Exception:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def _restrict_permissions(path: Path, mode: int) -> None:
+    restrict_private_path(path, mode)
+
+
+def _restrict_sqlite_permissions(path: Path) -> None:
+    """Keep the SQLite database and any journaling sidecars private."""
+
+    _restrict_permissions(path, 0o600)
+    for suffix in ("-wal", "-shm", "-journal"):
+        _restrict_permissions(Path(f"{path}{suffix}"), 0o600)
 
 
 def _ensure_columns(conn: sqlite3.Connection, table_name: str, columns: dict[str, str]) -> None:

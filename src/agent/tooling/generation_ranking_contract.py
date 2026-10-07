@@ -214,7 +214,14 @@ def _generation_quality(quality, canonical):
 def _ranking_row(row):
     _dict(row)
     _fields(row, {"candidate_id": _ID, "canonical_smiles": _ID, "score": _UNIT,
-                  "rank": _POSITIVE, "missing_evidence": _STRINGS, "docking_ready_for_preparation": _BOOL})
+                  "rank": _POSITIVE, "missing_evidence": _STRINGS,
+                  "docking_ready_for_preparation": _BOOL})
+    _fields(row, {
+        "missing_required_evidence": _STRINGS,
+        "assessment_status": TypeAdapter(
+            Literal["complete", "needs_assessment", "requirements_not_met"]
+        ),
+    }, required=False)
     evidence = _mapping(row.get("ranking_evidence"))
     _fields(evidence, {"property_score": _UNIT, "admet_score": _OPTIONAL_UNIT,
                        "activity_score": _OPTIONAL_UNIT, "missing_evidence": _STRINGS})
@@ -224,11 +231,31 @@ def _ranking_row(row):
     if (row["missing_evidence"] != evidence["missing_evidence"] or row["missing_evidence"] != missing
             or any((weights[key] is None) != (key in missing) for key in ("admet", "activity"))):
         raise ValueError("Conflicting ranking evidence availability")
+    if "missing_required_evidence" in row:
+        required_missing = row["missing_required_evidence"]
+        if any(value not in row["missing_evidence"] for value in required_missing):
+            raise ValueError("Conflicting required ranking evidence availability")
+        if row.get("assessment_status") == "requirements_not_met" and not required_missing:
+            raise ValueError("Missing required ranking evidence status")
+        if row.get("assessment_status") != "requirements_not_met" and required_missing:
+            raise ValueError("Conflicting required ranking evidence status")
 
 
 def _ranking_data(data):
     _dict(data)
     _fields(data, {"requested_top_n": _POSITIVE, "ranked_candidate_count": _COUNT})
+    if "required_evidence" in data:
+        _fields(data, {"required_evidence": _STRINGS})
+        if (len(set(data["required_evidence"])) != len(data["required_evidence"])
+                or any(value not in {"properties", "admet", "activity"}
+                       for value in data["required_evidence"])):
+            raise ValueError("Invalid required ranking evidence")
+    if "assessment_summary" in data:
+        summary = _mapping(data["assessment_summary"])
+        _fields(summary, {"complete": _COUNT, "needs_assessment": _COUNT,
+                          "requirements_not_met": _COUNT})
+        if sum(summary.values()) != data.get("ranked_candidate_count"):
+            raise ValueError("Conflicting ranking assessment summary")
     for key in ("top_candidates", "ranked_candidates", "unrankable_candidates"):
         if not isinstance(data.get(key), list):
             raise ValueError("Missing ranking output list")
@@ -320,7 +347,7 @@ class _RawOutput(_View):
             }, required=False)
             for item in self.evidence or []:
                 if item.get("type") == "deterministic_candidate_ranking":
-                    _fields(item, {"method": TypeAdapter(Literal["property_admet_activity_weighted_normalization"]),
+                    _fields(item, {"method": TypeAdapter(Literal["property_admet_activity_fixed_weight_prioritization"]),
                                    "ranked_candidate_count": _COUNT})
                     if self.data is not None and item["ranked_candidate_count"] != self.data["ranked_candidate_count"]:
                         raise ValueError("Conflicting ranking evidence count")

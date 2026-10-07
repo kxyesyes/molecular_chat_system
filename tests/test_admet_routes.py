@@ -5,7 +5,9 @@ from fastapi.testclient import TestClient
 import asyncio
 import logging
 import os
+from pathlib import Path
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 import pytest
@@ -38,14 +40,40 @@ class FakePredictor:
         return None
 
 
+def _slow_isolated_job(marker_path: str, _molecule_id: str):
+    import time
+
+    time.sleep(0.5)
+    Path(marker_path).write_text("completed", encoding="utf-8")
+    return {
+        "kind": "result",
+        "value": {"success": True, "status": "succeeded", "data": [], "warnings": []},
+    }
+
+
+def _test_app():
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def attach_session(request, call_next):
+        request.scope["agent_session_id"] = "test-session"
+        return await call_next(request)
+
+    return app
+
+
+def _setup_test_routes(app):
+    setup_admet_routes(app, _isolate=False)
+
+
 def make_client(monkeypatch, result, request):
     predictor = FakePredictor(result)
     monkeypatch.setattr(
         "src.web.routes.admet_routes.build_admet_predictor",
         lambda: predictor,
     )
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
     client = TestClient(app)
     client.__enter__()
     request.addfinalizer(client.__exit__)
@@ -187,8 +215,8 @@ def test_predict_preserves_partial_scientific_data_and_digests(monkeypatch):
     }
     predictor = FakePredictor(expected)
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", lambda: predictor)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CCO"})
@@ -207,8 +235,8 @@ def test_invalid_smiles_is_rejected_before_predictor_or_backend(monkeypatch):
         raise AssertionError("predictor must not be constructed for invalid structure")
 
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", forbidden_build)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CC(C)(("})
@@ -224,8 +252,8 @@ def test_unavailable_real_tool_returns_structured_state_without_live_model(monke
         "src.agent.tools.admet_predictor.admet_ai_backend_error",
         lambda: "synthetic weights are unavailable",
     )
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CCO"})
@@ -249,8 +277,8 @@ def test_unexpected_predictor_error_is_safe_and_closes_owned_predictor(monkeypat
 
     predictor = ExplodingPredictor({})
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", lambda: predictor)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CCO"})
@@ -305,8 +333,8 @@ def test_predictor_timeout_keeps_timeout_state_and_returns_504(monkeypatch):
 
     predictor = ADMETPredictor(backend=TimeoutBackend())
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", lambda: predictor)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CCO"})
@@ -383,8 +411,8 @@ def test_structured_input_is_unavailable_when_rdkit_validation_is_unavailable(mo
 
     monkeypatch.setattr("src.web.routes.admet_routes.parse_molecular_smiles", unavailable)
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", forbidden_build)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CCO"})
@@ -401,11 +429,11 @@ def test_structured_input_is_unavailable_when_rdkit_validation_is_unavailable(mo
 def test_setup_is_idempotent_for_route_and_worker(monkeypatch):
     predictor = FakePredictor({"success": True, "status": "succeeded", "data": [], "warnings": []})
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", lambda: predictor)
-    app = FastAPI()
+    app = _test_app()
 
-    setup_admet_routes(app)
+    _setup_test_routes(app)
     worker = app.state._admet_worker
-    setup_admet_routes(app)
+    _setup_test_routes(app)
 
     with TestClient(app):
         assert app.state._admet_worker is worker
@@ -447,8 +475,8 @@ def test_predictor_execute_and_close_stay_on_same_cached_worker_thread(monkeypat
             calls.append(("init", threading.get_ident()))
 
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", RecordingPredictor)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         assert client.post("/api/admet/predict", json={"smiles": "CCO"}).status_code == 200
@@ -469,8 +497,8 @@ def test_busy_admission_is_explicit_and_does_not_queue(monkeypatch):
         release=release,
     )
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", lambda: predictor)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
     first_result = []
 
     def first_request():
@@ -502,8 +530,8 @@ def test_timeout_returns_504_with_complete_envelope(monkeypatch):
 
     predictor.execute = timeout
     monkeypatch.setattr("src.web.routes.admet_routes.build_admet_predictor", lambda: predictor)
-    app = FastAPI()
-    setup_admet_routes(app)
+    app = _test_app()
+    _setup_test_routes(app)
 
     with TestClient(app) as client:
         response = client.post("/api/admet/predict", json={"smiles": "CCO"})
@@ -515,9 +543,17 @@ def test_timeout_returns_504_with_complete_envelope(monkeypatch):
     assert body["status"] == "timeout"
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "0", "-1", "invalid"])
+def test_invalid_admet_timeout_cannot_disable_request_budget(monkeypatch, value):
+    from src.web.routes import admet_routes
+
+    monkeypatch.setenv("MEDCHAT_ADMET_REQUEST_TIMEOUT_SECONDS", value)
+    assert admet_routes._positive_float_env(admet_routes._default_support(), "MEDCHAT_ADMET_REQUEST_TIMEOUT_SECONDS", 180.0) == 180.0
+
+
 def test_worker_releases_admission_once_when_queued_future_is_cancelled():
     support = SimpleNamespace(os=os, ThreadPoolExecutor=ThreadPoolExecutor)
-    worker = _AdmetWorker(support)
+    worker = _AdmetWorker(support, isolate=False)
     started = threading.Event()
     release = threading.Event()
 
@@ -539,7 +575,7 @@ def test_worker_releases_admission_once_when_queued_future_is_cancelled():
 
 def test_worker_releases_admission_once_when_submit_raises():
     support = SimpleNamespace(os=os, ThreadPoolExecutor=ThreadPoolExecutor)
-    worker = _AdmetWorker(support)
+    worker = _AdmetWorker(support, isolate=False)
     worker._executor.submit = lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("submit failed"))
 
     assert worker.acquire() is True
@@ -547,4 +583,64 @@ def test_worker_releases_admission_once_when_submit_raises():
         worker.submit(AdmetPredictRequest(smiles="CCO"))
     assert worker.acquire() is True
     worker._admission.release()
+    worker.close()
+
+
+def test_isolated_worker_termination_stops_scientific_child(tmp_path):
+    support = SimpleNamespace(os=os, ThreadPoolExecutor=ThreadPoolExecutor)
+    marker = tmp_path / "marker.txt"
+    worker = _AdmetWorker(
+        support,
+        isolate=True,
+        process_target=_slow_isolated_job,
+    )
+    assert worker.acquire() is True
+    future = worker.submit(AdmetPredictRequest(smiles=str(marker)))
+
+    # The worker thread is only waiting on the child process.  Termination must
+    # prevent the delayed scientific side effect from occurring.
+    threading.Event().wait(0.05)
+    worker.cancel(future)
+    with pytest.raises(Exception):
+        future.result(timeout=2)
+    assert not marker.exists()
+    worker.close()
+
+
+def test_worker_cancel_does_not_wait_for_child_start(monkeypatch):
+    support = SimpleNamespace(os=os, ThreadPoolExecutor=ThreadPoolExecutor)
+
+    class HungStartProcess:
+        def start(self):
+            import time
+
+            time.sleep(0.4)
+
+        def terminate(self):
+            pass
+
+        def close(self):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def wait(self):
+            raise RuntimeError("terminated before wait")
+
+    monkeypatch.setattr(
+        "src.web.routes.admet_routes.IsolatedProcess",
+        lambda *args, **kwargs: HungStartProcess(),
+    )
+    worker = _AdmetWorker(support, isolate=True)
+    assert worker.acquire() is True
+    future = worker.submit(AdmetPredictRequest(smiles="CCO"))
+    threading.Event().wait(0.03)
+
+    started = time.monotonic()
+    worker.cancel(future)
+    assert time.monotonic() - started < 0.15
+
+    with pytest.raises(Exception):
+        future.result(timeout=2)
     worker.close()

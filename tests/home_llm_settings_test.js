@@ -13,8 +13,6 @@ const defaults = {
   model_name: "deepseek-v4-pro",
   stream: true,
 };
-const savedHint = "已保存，无需重复填写。同一服务商和接口地址下，留空保存会保留已保存的 Key；更换服务商或接口地址需填写新 Key。";
-const emptyHint = "未配置 API Key。外部 API 请填写 Key，本地 Ollama 可留空。";
 
 // Execute production declarations, not copies of their implementation. Boundaries
 // use sibling declarations so braces inside strings/templates cannot truncate them.
@@ -30,7 +28,7 @@ function extractFunction(name) {
 
 function harness(responses = []) {
   const elements = {};
-  for (const name of ["llmProvider", "llmStream", "llmBaseUrl", "llmModelName", "llmApiKey", "llmClearApiKey", "llmApiKeyHint", "llmSettingsStatus", "connectionStatus"]) {
+  for (const name of ["llmProvider", "llmStream", "llmBaseUrl", "llmModelName", "llmApiKey", "llmSettingsStatus", "connectionStatus"]) {
     elements[name] = { value: "", checked: false, textContent: "", style: {} };
   }
   elements.llmSettingsOverlay = { classList: { add() {}, remove() {} }, setAttribute() {} };
@@ -76,13 +74,13 @@ function formValues(context) {
 test("empty configuration fills DeepSeek defaults and a blank password", () => {
   const { context } = harness();
   context.fillLlmSettingsForm({});
-  assert.deepEqual(formValues(context), { ...defaults, api_key: "", clear_api_key: false });
+  assert.deepEqual(formValues(context), { ...defaults, api_key: "" });
 });
 
 test("missing compatible fields use DeepSeek defaults", () => {
   const { context } = harness();
   context.fillLlmSettingsForm({ provider: "openai_compatible" });
-  assert.deepEqual(formValues(context), { ...defaults, api_key: "", clear_api_key: false });
+  assert.deepEqual(formValues(context), { ...defaults, api_key: "" });
 });
 
 test("explicit other providers preserve configured and empty fields", () => {
@@ -91,7 +89,7 @@ test("explicit other providers preserve configured and empty fields", () => {
     for (const [base_url, model_name] of [["https://example.invalid/chat", "chosen-model"], ["", ""]]) {
       const config = { provider, base_url, model_name, stream: false };
       context.fillLlmSettingsForm(config);
-      assert.deepEqual(formValues(context), { ...config, api_key: "", clear_api_key: false });
+      assert.deepEqual(formValues(context), { ...config, api_key: "" });
     }
   }
 });
@@ -103,22 +101,19 @@ test("other providers without fields do not inherit DeepSeek fields", () => {
   assert.equal(formValues(context).model_name, "");
 });
 
-test("fill always clears password and clear checkbox; saved hint ignores server fragments", () => {
+test("fill always clears the password field", () => {
   const { context, elements } = harness();
   for (const api_key_hint of ["SYNTHETIC_PREFIX***SYNTHETIC_SUFFIX", "<img src=x onerror=alert(1)>", ""]) {
     elements.llmApiKey.value = "synthetic-unsaved-value";
-    elements.llmClearApiKey.checked = true;
     context.fillLlmSettingsForm({ ...defaults, api_key: "synthetic-server-value", api_key_configured: true, api_key_hint });
     assert.equal(elements.llmApiKey.value, "");
-    assert.equal(elements.llmClearApiKey.checked, false);
-    assert.equal(elements.llmApiKeyHint.textContent, savedHint);
   }
 });
 
-test("empty key hint is fixed regardless of server hint", () => {
-  const { context, elements } = harness();
+test("server key hints are not rendered into the settings panel", () => {
+  const { context } = harness();
   context.fillLlmSettingsForm({ api_key_configured: false, api_key_hint: "SYNTHETIC_FRAGMENT" });
-  assert.equal(elements.llmApiKeyHint.textContent, emptyHint);
+  assert.doesNotMatch(source, /api_key_hint|llmApiKeyHint|clearLlmApiKey/);
 });
 
 test("opening without persisted config uses defaults; reopening never refills password", async () => {
@@ -127,13 +122,13 @@ test("opening without persisted config uses defaults; reopening never refills pa
     { success: true, config: { ...defaults, api_key_configured: true, api_key_hint: "SYNTHETIC_FRAGMENT" } },
   ]);
   await context.openLlmSettings();
-  assert.deepEqual(formValues(context), { ...defaults, api_key: "", clear_api_key: false });
+  assert.deepEqual(formValues(context), { ...defaults, api_key: "" });
   elements.llmApiKey.value = "synthetic-unsaved-value";
   context.closeLlmSettings();
   await context.openLlmSettings();
   assert.equal(elements.llmApiKey.value, "");
-  assert.equal(elements.llmApiKeyHint.textContent, savedHint);
   assert.deepEqual(requests.map((request) => request.url), ["/api/llm/config", "/api/llm/config"]);
+  assert.equal(elements.llmSettingsStatus.textContent, "");
   assert.deepEqual(storageAccess, []);
 });
 
@@ -154,30 +149,23 @@ test("saving sends entered key only in POST and reports saved, never connected",
   assert.equal(requests.length, 1);
   assert.equal(requests[0].url, "/api/llm/config");
   assert.equal(requests[0].options.method, "POST");
-  assert.deepEqual(JSON.parse(requests[0].options.body), { ...defaults, api_key: "synthetic-test-only-key", clear_api_key: false });
+  assert.deepEqual(JSON.parse(requests[0].options.body), { ...defaults, api_key: "synthetic-test-only-key" });
   assert.equal(JSON.stringify(elements.connectionStatus), originalConnection);
   assert.equal(elements.llmApiKey.value, "");
-  assert.equal(elements.llmApiKeyHint.textContent, savedHint);
-  assert.match(elements.llmSettingsStatus.textContent, /已保存/);
-  assert.match(elements.llmSettingsStatus.textContent, /未验证.*连接/);
+  assert.equal(elements.llmSettingsStatus.textContent, "配置已保存并启用");
+  assert.doesNotMatch(elements.llmSettingsStatus.textContent, /API Key|远程连接|测试连接|本机用户目录/);
   assert.doesNotMatch(elements.llmSettingsStatus.textContent, /已连接/);
   assert.equal(toasts[0][1], "success");
   assert.deepEqual(storageAccess, []);
 });
 
-test("blank save preserves key intent; clearing is explicit and updates empty hint", async () => {
-  const { context, elements, requests, storageAccess } = harness([
+test("blank save preserves the existing key without exposing key controls", async () => {
+  const { context, requests, storageAccess } = harness([
     { success: true, config: { ...defaults, api_key_configured: true } },
-    { success: true, config: { ...defaults, api_key_configured: false } },
   ]);
   context.fillLlmSettingsForm({ ...defaults, api_key_configured: true });
   await context.saveLlmConfig();
-  assert.deepEqual(JSON.parse(requests[0].options.body), { ...defaults, api_key: "", clear_api_key: false });
-  elements.llmClearApiKey.checked = true;
-  await context.saveLlmConfig();
-  assert.deepEqual(JSON.parse(requests[1].options.body), { ...defaults, api_key: "", clear_api_key: true });
-  assert.equal(elements.llmApiKeyHint.textContent, emptyHint);
-  assert.equal(elements.llmClearApiKey.checked, false);
+  assert.deepEqual(JSON.parse(requests[0].options.body), { ...defaults, api_key: "" });
   assert.deepEqual(storageAccess, []);
 });
 
@@ -212,12 +200,26 @@ test("initial markup selects compatible provider and shows DeepSeek placeholders
   assert.match(html, /id="llmApiKey" type="password" autocomplete="off"/);
 });
 
-test("markup explains user-directory persistence, account boundary and explicit clear", () => {
+test("homepage model selector contains only the current DeepSeek entry", () => {
+  const selector = html.match(/<select id="modelSelect">([\s\S]*?)<\/select>/)[1];
+  assert.match(selector, /value="deepseek"/);
+  assert.doesNotMatch(selector, /GLM|Qwen|魔搭|glm4|qwen3/i);
+  assert.doesNotMatch(source, /GLM-5\.1|Qwen3-235B|魔搭社区|ZhipuAI\/GLM|Qwen\/Qwen3/);
+});
+
+test("settings markup omits verbose persistence and API-key instructions", () => {
   const settings = html.slice(html.indexOf('<div class="llm-settings-overlay"'), html.indexOf('id="saveLlmConfig"'));
-  assert.match(settings, /用户配置目录/);
-  assert.match(settings, /保存一次/);
-  assert.match(settings, /同一台电脑.*同一操作系统账号/);
-  assert.match(settings, /重启.*更新代码.*切换工作树/);
-  assert.match(settings, /勾选.*保存.*清除/);
-  assert.doesNotMatch(settings, /本机 \.env/);
+  assert.doesNotMatch(
+    settings,
+    /用户配置目录|仓库之外|保存一次|已保存|无需重复填写|同一台电脑|同一服务商|接口地址下|重启.*更新代码|勾选.*保存|清除.*API Key|本机 \.env|配置已读取/
+  );
+  assert.doesNotMatch(
+    settings,
+    /id="llmApiKeyHint"|id="clearLlmApiKey"|llm-key-clear|本地 Ollama 可留空|外部 API 请填写 Key/,
+  );
+  assert.doesNotMatch(source, /已保存，无需重复填写|清除本机用户配置目录|配置保存在仓库之外|配置已读取。API Key 不会回传明文/);
+});
+
+test("homepage loads the updated settings script instead of the stale cached version", () => {
+  assert.ok(html.includes('<script src="/static/js/home/main.js?v=20261007-settings-clean-v9"></script>'));
 });

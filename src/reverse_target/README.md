@@ -72,7 +72,7 @@ python src/reverse_target/build_database.py --step 4
 | `chembl_data_with_fps.tsv` | 带指纹的完整数据 | TSV |
 | `morgan_fingerprints.npy` | Morgan 指纹矩阵 | NumPy |
 | `maccs_fingerprints.npy` | MACCS 指纹矩阵 | NumPy |
-| `fingerprint_metadata.pkl` | 元数据信息 | Pickle |
+| `fingerprint_metadata.json` | 元数据信息 | JSON（只读数据，不执行对象反序列化） |
 
 ### 数据格式示例
 

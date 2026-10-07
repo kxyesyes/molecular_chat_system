@@ -1,4 +1,5 @@
 """Molecule properties route registration."""
+import math
 from typing import Dict, Any
 from fastapi import Body, HTTPException
 
@@ -41,6 +42,10 @@ def setup_molecule_properties_routes(app, *, _support):
                     }
                 
                 # 计算基础属性
+                qed_value = QED.qed(mol)
+                if not (math.isfinite(qed_value) and 0.0 <= qed_value <= 1.0):
+                    raise ValueError(f"QED={qed_value} out of [0,1]")
+
                 properties = {
                     'basic': {
                         'molecular_weight': round(Descriptors.MolWt(mol), 2),
@@ -49,7 +54,7 @@ def setup_molecule_properties_routes(app, *, _support):
                         'hba': Lipinski.NumHAcceptors(mol),
                         'tpsa': round(Descriptors.TPSA(mol), 2),
                         'rotatable_bonds': Lipinski.NumRotatableBonds(mol),
-                        'qed': round(QED.qed(mol), 3)
+                        'qed': round(qed_value, 3)
                     },
                     'admet': {}
                 }

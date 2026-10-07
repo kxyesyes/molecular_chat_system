@@ -187,6 +187,7 @@ async def test_application_constructs_once_and_switches_both_consumers(tmp_path,
     monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Mock(tools={}))
     monkeypatch.setattr(design_routes, '_FRAG_DB_PATH', str(tmp_path / 'absent.csv'))
     monkeypatch.setattr(design_routes, '_SAVE_DIR', str(tmp_path / 'saved'))
+    monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
     application = MolecularChatApp(str(tmp_path / 'missing.yaml'))
     generator = application.molecular_generator_model
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=application.app), base_url='http://localhost')

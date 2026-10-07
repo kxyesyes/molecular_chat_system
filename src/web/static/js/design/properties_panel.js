@@ -127,7 +127,7 @@ var PropertiesPanel = (function () {
     el.innerHTML = items.map(function (item) {
       var status = item.passed === true ? "pass" : item.passed === false ? "fail" : "pend";
       var text = item.passed === true ? "达成" : item.passed === false ? "未达成" : "待比较";
-      return '<div class="goal-item"><span>' + item.label + '</span><span class="goal-status ' + status + '">' + text + '</span></div>';
+      return '<div class="goal-item"><span>' + UI.escText(item.label || "") + '</span><span class="goal-status ' + status + '">' + text + '</span></div>';
     }).join("");
   }
 

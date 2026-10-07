@@ -35,6 +35,7 @@ WORKFLOW_POLICIES = (
             "admet_predictor",
             "activity_predictor",
             "llm_molecular_generator",
+            "lead_optimization_verifier",
         ),
         True,
     ),

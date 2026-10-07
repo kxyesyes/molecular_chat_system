@@ -89,7 +89,10 @@ def _control_reason(deadline, stop, cancel_event):
 def _spawn(argv, cwd, env):
     if os.name == "nt":
         def factory(*args, **kwargs):
-            return subprocess.Popen(*args, env=env, **kwargs)
+            # The base primitive supplies its own sanitized environment
+            # keyword; replace it instead of passing a duplicate keyword.
+            kwargs["env"] = env
+            return subprocess.Popen(*args, **kwargs)
 
         try:
             return CommandAdapter._create_windows_suspended(

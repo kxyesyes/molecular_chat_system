@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Mapping
 
 import pandas as pd
 
+from src.task_runtime.private_permissions import restrict_private_path
+
 from .chemistry import calculate_properties, canonicalize_smiles
 
 
@@ -27,6 +29,10 @@ PROPERTY_KEYS = (
 )
 HISTORY_COLUMNS = ["step", "smiles", *[f"prop_{key}" for key in PROPERTY_KEYS]]
 MOLECULE_COLUMNS = ["timestamp", "smiles", *[f"prop_{key}" for key in PROPERTY_KEYS]]
+
+
+def _restrict_private_path(path: Path, mode: int) -> None:
+    restrict_private_path(path, mode)
 
 
 def _fixed_property_values(properties: Mapping[str, Any] | None) -> Dict[str, Any]:
@@ -67,7 +73,8 @@ class DesignStorage:
             if abs(supplied_value - calculated_value) > 1e-4:
                 raise ValueError(f"属性 {key} 与当前 SMILES 不一致，未保存")
 
-        self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.save_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _restrict_private_path(self.save_dir, 0o700)
         file_path = self.save_dir / "saved_molecules.csv"
         row = {
             "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -81,7 +88,9 @@ class DesignStorage:
             combined = pd.concat([existing, pd.DataFrame([row], columns=MOLECULE_COLUMNS)], ignore_index=True)
             temp_path = file_path.with_suffix(".csv.tmp")
             combined.to_csv(temp_path, index=False)
+            _restrict_private_path(temp_path, 0o600)
             os.replace(temp_path, file_path)
+            _restrict_private_path(file_path, 0o600)
 
         return {"success": True, "message": f"分子已保存到 {file_path.name}", "smiles": canonical_smiles}
 

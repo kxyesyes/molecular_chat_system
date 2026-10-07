@@ -70,6 +70,7 @@ def test_hit_to_lead_policy_declares_permissions_not_plan_steps():
         "admet_predictor",
         "activity_predictor",
         "llm_molecular_generator",
+        "lead_optimization_verifier",
     )
     assert not hasattr(policy, "workflow_steps")
 

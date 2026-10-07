@@ -123,6 +123,10 @@ def rig(monkeypatch):
             quality={"model": "gmm-llama:latest", "requested_count": 1},
         )),
         FixtureTool("candidate_ranker", success({"top_candidates": []})),
+        FixtureTool(
+            "lead_optimization_verifier",
+            success({"status": "unverified", "candidates": []}),
+        ),
     ]
     optional = {
         "ActivityPredictorTool": FixtureTool("activity_predictor", activity_result()),

@@ -27,7 +27,9 @@ def test_frontend_passes_query_smiles_and_uses_abortable_detail_requests():
     ui_manager = (PROJECT_ROOT / "src/web/static/js/reverse_target/ui_manager.js").read_text(
         encoding="utf-8"
     )
-    assert "onShowSimilar(${inlineJsArg(targetName)}, ${inlineJsArg(querySmiles)})" in renderer
+    assert 'similarButton.addEventListener("click"' in renderer
+    assert "binding.targetName, binding.querySmiles" in renderer
+    assert "querySmiles" in renderer
     assert "new AbortController()" in renderer
     assert "signal }" in api_client
     assert '"status"' in ui_manager

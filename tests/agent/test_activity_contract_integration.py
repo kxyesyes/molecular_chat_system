@@ -1,5 +1,6 @@
 """Real parser/registry/specialist integration, with synthetic inference only."""
 from copy import deepcopy
+import hashlib
 
 import pytest
 
@@ -99,6 +100,15 @@ def test_structured_inputs_reach_real_service_without_losing_order_or_target(
     assert payload == original
     assert result.evidence == [{"prediction": row} for row in rows]
     assert result.quality["model_provenance"] == [row["provenance"] for row in rows]
+    assert result.quality["source"] == "registered_family_rg_mpnn"
+    assert result.quality["model_version"]
+    assert result.quality["data_version"] == [
+        "c" * 64,
+    ]
+    assert result.quality["input_structures"] == [
+        {"smiles": smiles, "sha256": "sha256:" + hashlib.sha256(smiles.encode()).hexdigest()}
+        for smiles in ("CCO", "CCN", "CCO")
+    ]
     assert "synthetic inference, not real weights" in result.warnings
 
 

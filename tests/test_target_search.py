@@ -345,6 +345,8 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual(best_grades["PDE6D"], "C")
 
     def test_local_download_returns_cached_file_without_network(self):
+        from src.target_search.cache import TargetCacheRepository
+        from src.target_search.database import get_cache_dir
         from src.target_search.seed import seed_database
         from src.target_search.service import TargetSearchService
 
@@ -356,6 +358,18 @@ class TargetSearchDemoTest(unittest.TestCase):
         cached_path = self.root / structure["local_file_path"]
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         cached_path.write_text("data_demo\n", encoding="utf-8")
+        staged_relative = Path(".incoming") / "cached.cif.part"
+        staged_path = get_cache_dir(self.root) / staged_relative
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.write_text("data_demo\n", encoding="utf-8")
+        TargetCacheRepository(self.root).publish_coordinate(
+            f"coordinate:{structure['source']}:{structure['structure_id']}:cif",
+            structure["source"],
+            f"{structure['structure_id']}:cif",
+            staged_path=staged_relative.as_posix(),
+            coordinate_suffix=".cif",
+            species=structure["organism"],
+        )
 
         with patch(
             "src.target_search.downloader.requests.get",
@@ -410,9 +424,10 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         self_outer = self
 
-        def fake_get(_url, *, timeout, stream):
+        def fake_get(_url, *, timeout, stream, allow_redirects):
             self.assertEqual(timeout, 30)
             self.assertTrue(stream)
+            self.assertFalse(allow_redirects)
             return FakeResponse()
 
         structure = {
@@ -456,7 +471,7 @@ class TargetSearchDemoTest(unittest.TestCase):
             "source": "RCSB_PDB",
             "file_format": "cif",
             "local_file_path": "data/target_db/cache/rcsb/BAD/BAD1.cif",
-            "download_url": "https://example.invalid/BAD1.cif",
+            "download_url": "https://files.rcsb.org/download/BAD1.cif",
         }
         final_path = self.root / structure["local_file_path"]
 
@@ -521,10 +536,27 @@ class TargetSearchDemoTest(unittest.TestCase):
         cached_path.write_text("data_demo\n", encoding="utf-8")
 
         cached = service.preflight_structure(structure["id"], requested_format="cif")
-        self.assertEqual(cached["cache_status"], "available")
+        self.assertEqual(cached["cache_status"], "unverified")
         self.assertTrue(cached["local_file_exists"])
         self.assertEqual(cached["file_size_bytes"], cached_path.stat().st_size)
         self.assertIn(cached["docking_grade"], {"A", "B", "C"})
+
+    def test_structure_preflight_does_not_treat_unverified_file_as_docking_ready(self):
+        service = self._seeded_service()
+        target = service.search_targets("WDR5")["results"][0]
+        structure = service.get_target_structures(target["target_id"])["structures"][0]
+
+        cached_path = self.root / structure["local_file_path"]
+        cached_path.parent.mkdir(parents=True, exist_ok=True)
+        cached_path.write_text("data_unverified\n", encoding="utf-8")
+
+        preflight = service.preflight_structure(structure["id"], requested_format="cif")
+
+        self.assertTrue(preflight["local_file_exists"])
+        self.assertEqual(preflight["cache_status"], "unverified")
+        self.assertFalse(preflight["docking_recommended"])
+        self.assertFalse(preflight["suitable_for_direct_docking"])
+        self.assertIn("local_structure_integrity_unverified", preflight["warnings"])
 
     def test_alphafold_preflight_warns_when_not_primary_docking_choice(self):
         service = self._seeded_service()
@@ -575,12 +607,26 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertTrue(any(item["source"] == "AlphaFold" for item in structures))
 
     def test_send_to_docking_uses_readable_chinese_message(self):
+        from src.target_search.cache import TargetCacheRepository
+        from src.target_search.database import get_cache_dir
         service = self._seeded_service()
         target = service.search_targets("WDR5")["results"][0]
         structure = service.get_target_structures(target["target_id"])["structures"][0]
         cached_path = self.root / structure["local_file_path"]
         cached_path.parent.mkdir(parents=True, exist_ok=True)
         cached_path.write_text("data_demo\n", encoding="utf-8")
+        staged_relative = Path(".incoming") / "docking.cif.part"
+        staged_path = get_cache_dir(self.root) / staged_relative
+        staged_path.parent.mkdir(parents=True, exist_ok=True)
+        staged_path.write_text("data_demo\n", encoding="utf-8")
+        TargetCacheRepository(self.root).publish_coordinate(
+            f"coordinate:{structure['source']}:{structure['structure_id']}:cif",
+            structure["source"],
+            f"{structure['structure_id']}:cif",
+            staged_path=staged_relative.as_posix(),
+            coordinate_suffix=".cif",
+            species=structure["organism"],
+        )
 
         with patch(
             "src.target_search.downloader.requests.get",
@@ -591,7 +637,7 @@ class TargetSearchDemoTest(unittest.TestCase):
 
         self.assertEqual(payload["status"], "success")
         self.assertEqual(payload["message"], "结构文件已准备好，后续可接入分子对接模块")
-        self.assertEqual(payload["protein_file"], structure["local_file_path"])
+        self.assertIn("coordinates", payload["protein_file"])
 
     def test_route_returns_404_for_missing_structure(self):
         from fastapi import FastAPI

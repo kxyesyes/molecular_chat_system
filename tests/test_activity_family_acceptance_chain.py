@@ -6,6 +6,26 @@ import urllib.request
 import pytest
 
 
+@pytest.fixture
+def in_process_activity_contract(monkeypatch):
+    """Opt-in seam for report/fault tests, not process integration acceptance.
+
+    Real spawn coverage remains in test_same_snapshot_reaches_all_real_entrypoints
+    and test_actual_worker_cli_uses_only_explicit_synthetic_snapshot for both
+    families. Fault injection must execute in the process owning monkeypatches.
+    """
+    from src.activity import prediction_service
+    from src.web.routes import activity_prediction_routes, api_routes
+
+    async def invoke(_support, *, operation, isolated_payload, **kwargs):
+        return await api_routes._invoke_in_threadpool(
+            prediction_service.predict_activity,
+            isolated_payload[0], target=isolated_payload[1],
+        )
+
+    monkeypatch.setattr(activity_prediction_routes, "_invoke_activity_with_budget", invoke)
+
+
 @pytest.mark.parametrize('probability,value', [(.2, 6.1), (.8, 4.1), (.5, 5.), (.49, 4.9)])
 def test_chain_checks_completed_computation_separately_from_review(probability, value):
     from copy import deepcopy
@@ -154,7 +174,7 @@ def test_actual_worker_cli_uses_only_explicit_synthetic_snapshot(synthetic_snaps
     assert _cleanup_owned(owned, original_identity)
 
 
-def test_public_report_never_accepts_forged_rejection_rows(synthetic_snapshot, tmp_path):
+def test_public_report_never_accepts_forged_rejection_rows(synthetic_snapshot, tmp_path, in_process_activity_contract):
     from copy import deepcopy
     from tests.family_acceptance_chain_support import run_family_chain
     from tests.family_real_acceptance_support import public_report
@@ -170,7 +190,7 @@ def test_public_report_never_accepts_forged_rejection_rows(synthetic_snapshot, t
     ('units', 'nM'), ('requested_target', 'AChE'), ('activity_class', 'unsupported')])
 @pytest.mark.parametrize('damage', ['missing', 'changed'])
 def test_public_contract_rejects_consistently_corrupted_baseline(
-        synthetic_snapshot, tmp_path, field, value, damage):
+        synthetic_snapshot, tmp_path, field, value, damage, in_process_activity_contract):
     from tests.family_acceptance_chain_support import run_family_chain
     from tests.family_real_acceptance_support import public_report
     report = run_family_chain(synthetic_snapshot, work_dir=tmp_path / 'chain', mode='synthetic_fixture')
@@ -191,7 +211,7 @@ def test_public_contract_rejects_consistently_corrupted_baseline(
 
 
 @pytest.mark.parametrize('synthetic_snapshot', ['PDE', 'BuChE'], indirect=True)
-def test_public_contract_validates_each_entry_target_and_probability_class(synthetic_snapshot, tmp_path):
+def test_public_contract_validates_each_entry_target_and_probability_class(synthetic_snapshot, tmp_path, in_process_activity_contract):
     from copy import deepcopy
     from tests.family_acceptance_chain_support import ALIASES, run_family_chain
     from tests.family_real_acceptance_support import public_report
@@ -250,7 +270,7 @@ def test_worker_snapshot_change_before_assignment_keeps_changed(synthetic_snapsh
     assert support.public_report(report, mode='synthetic_fixture')['scope']['production_selection'] == 'changed'
 
 
-def test_public_report_rejects_missing_or_mutated_obligations(synthetic_snapshot, tmp_path):
+def test_public_report_rejects_missing_or_mutated_obligations(synthetic_snapshot, tmp_path, in_process_activity_contract):
     from copy import deepcopy
     from tests.family_acceptance_chain_support import run_family_chain
     from tests.family_real_acceptance_support import public_report
@@ -297,7 +317,7 @@ def test_public_report_rejects_missing_or_mutated_obligations(synthetic_snapshot
     assert accepted == [], accepted
 
 
-def test_parent_aggregates_nested_report_and_real_directory_cleanup(synthetic_snapshot, tmp_path, monkeypatch):
+def test_parent_aggregates_nested_report_and_real_directory_cleanup(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from copy import deepcopy
     from tests.family_acceptance_chain_support import run_family_chain
     from tests.family_acceptance_process_support import ChildResult
@@ -479,7 +499,7 @@ def test_same_snapshot_reaches_all_real_entrypoints(synthetic_snapshot, tmp_path
     ('PDE', {'classification': .4, 'regression': 4.}),
     ('BuChE', {'classification': -.4, 'regression': 6.}),
 ], indirect=True)
-def test_synthetic_conflict_forward_preserves_partial_across_full_chain(synthetic_snapshot, tmp_path):
+def test_synthetic_conflict_forward_preserves_partial_across_full_chain(synthetic_snapshot, tmp_path, in_process_activity_contract):
     """Deliberate constant untrained heads; exercise actual RGNN, not model performance."""
     from tests.family_acceptance_chain_support import run_family_chain
     from tests.family_real_acceptance_support import public_report
@@ -508,7 +528,7 @@ def test_synthetic_conflict_forward_preserves_partial_across_full_chain(syntheti
     ('PDE', {'classification': .4, 'regression': 4.}),
 ], indirect=True)
 def test_chain_rejects_api_conflict_summary_even_when_production_summarizer_agrees(
-        synthetic_snapshot, tmp_path, monkeypatch):
+        synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from src.activity import prediction_service
     from tests.family_acceptance_chain_support import run_family_chain
     original = prediction_service.summarize_predictions
@@ -532,6 +552,7 @@ def test_chain_rejects_api_conflict_summary_even_when_production_summarizer_agre
 def test_invalid_inputs_are_not_model_unavailability(synthetic_snapshot, tmp_path, monkeypatch, bad_input):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
     from src.activity import prediction_service
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
     from src.web.routes.api_routes import setup_api_routes
@@ -541,8 +562,12 @@ def test_invalid_inputs_are_not_model_unavailability(synthetic_snapshot, tmp_pat
     target = "AChE" if bad_input == "target" else ALIASES[synthetic_snapshot.family_id][1]
     smiles = "CC(C)((" if bad_input == "smiles" else "CCO"
     app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "activity-api-sessions.sqlite"),
+    )
     setup_api_routes(app)
-    with TestClient(app) as client:
+    with TestClient(app, base_url="https://localhost") as client:
         responses = [client.post("/api/activity/predict", data={"smiles": smiles, "target": target}),
                      client.post("/api/activity/batch_predict", data={"target": target},
                                  files={"file": ("invalid.smi", smiles.encode(), "text/plain")})]
@@ -608,7 +633,7 @@ def test_damaged_copy_fails_without_fallback_and_keeps_stage_errors(synthetic_sn
 
 @pytest.mark.parametrize("damage", ["family", "smiles", "empty", "demo", "fallback", "wrong_hash",
                                      "bool_pic50", "numeric_drift", "threshold", "warnings", "errors", "class"])
-def test_service_corruption_cannot_count_as_forward_success(synthetic_snapshot, tmp_path, monkeypatch, damage):
+def test_service_corruption_cannot_count_as_forward_success(synthetic_snapshot, tmp_path, monkeypatch, damage, in_process_activity_contract):
     from src.activity import prediction_service
     from tests.family_acceptance_chain_support import run_family_chain
     original = prediction_service.predict_activity
@@ -719,7 +744,7 @@ def test_unauthorized_activity_decision_never_executes(synthetic_snapshot, tmp_p
         assert session.inputs == session.outputs == []
 
 
-def test_node_receives_actual_summary_and_bounded_remaining_time(synthetic_snapshot, tmp_path, monkeypatch):
+def test_node_receives_actual_summary_and_bounded_remaining_time(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from types import SimpleNamespace
     from tests import family_acceptance_chain_support as chain
     from tests.family_acceptance_process_support import ChildResult
@@ -755,7 +780,7 @@ def test_node_receives_actual_summary_and_bounded_remaining_time(synthetic_snaps
     assert report["stages"]["dom"]["status"] == "failed"
 
 
-def test_rejected_finish_preserves_actual_tool_and_agent_failure(synthetic_snapshot, tmp_path, monkeypatch):
+def test_rejected_finish_preserves_actual_tool_and_agent_failure(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from src.agent.contracts.decision import FinishDecision
     from tests import family_acceptance_chain_support as chain
 
@@ -777,7 +802,7 @@ def test_rejected_finish_preserves_actual_tool_and_agent_failure(synthetic_snaps
     assert stage["rows"][0]["models"]["regression"]["weights_sha256"] == synthetic_snapshot.expected_models["regression"]["weights_sha256"]
 
 
-def test_websocket_lost_scientific_evidence_cannot_pass(synthetic_snapshot, tmp_path, monkeypatch):
+def test_websocket_lost_scientific_evidence_cannot_pass(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from tests import family_acceptance_chain_support as chain
     original = chain.websocket_decision
 
@@ -796,7 +821,7 @@ def test_websocket_lost_scientific_evidence_cannot_pass(synthetic_snapshot, tmp_
     assert report["stages"]["websocket"]["agent_status"] == "completed"
 
 
-def test_bounded_report_cannot_pass_when_evidence_is_oversized(synthetic_snapshot, tmp_path, monkeypatch):
+def test_bounded_report_cannot_pass_when_evidence_is_oversized(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from tests import family_acceptance_chain_support as chain
     original = chain.decision_record
 
@@ -811,7 +836,7 @@ def test_bounded_report_cannot_pass_when_evidence_is_oversized(synthetic_snapsho
     assert "x" * 513 not in json.dumps(report)
 
 
-def test_settings_and_caches_restore_even_when_node_is_missing(synthetic_snapshot, tmp_path, monkeypatch):
+def test_settings_and_caches_restore_even_when_node_is_missing(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     import os
     import torch
     from src.activity import prediction_service
@@ -828,7 +853,7 @@ def test_settings_and_caches_restore_even_when_node_is_missing(synthetic_snapsho
 
 
 @pytest.mark.parametrize("synthetic_snapshot", ["PDE", "BuChE"], indirect=True)
-def test_runner_reports_real_rejections_and_mixed_api_dom(synthetic_snapshot, tmp_path, monkeypatch):
+def test_runner_reports_real_rejections_and_mixed_api_dom(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from tests import family_acceptance_chain_support as chain
     summaries = []
     original = chain.run_owned_child
@@ -873,7 +898,7 @@ def test_runner_reports_real_rejections_and_mixed_api_dom(synthetic_snapshot, tm
 
 
 @pytest.mark.parametrize("tail", ["complete", "molecular_generation", "agent_event", "overflow"])
-def test_tail_frames_after_bridge_cannot_pass(synthetic_snapshot, tmp_path, monkeypatch, tail):
+def test_tail_frames_after_bridge_cannot_pass(synthetic_snapshot, tmp_path, monkeypatch, tail, in_process_activity_contract):
     from src.web.chat_handler import ChatHandler
     from tests import family_acceptance_chain_support as chain
     original = ChatHandler.process_decision_message
@@ -940,7 +965,7 @@ def test_websocket_wait_for_close_has_a_cooperative_deadline(synthetic_snapshot,
     assert cancelled == [True]
 
 
-def test_websocket_requires_normal_server_close(synthetic_snapshot, tmp_path, monkeypatch):
+def test_websocket_requires_normal_server_close(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from fastapi import WebSocket
     from tests import family_acceptance_chain_support as chain
     original = WebSocket.close
@@ -974,7 +999,7 @@ def test_websocket_rejects_close_received_after_deadline(synthetic_snapshot, tmp
 
 
 @pytest.mark.parametrize("bad_input", ["smiles", "target"])
-def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tmp_path, monkeypatch, bad_input):
+def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tmp_path, monkeypatch, bad_input, in_process_activity_contract):
     from src.agent.runtime.task_state import TaskEvent
     from src.web.chat_handler import ChatHandler
     from tests import family_acceptance_chain_support as chain
@@ -1028,7 +1053,7 @@ def test_runner_rejects_forged_rejection_over_actual_asgi(synthetic_snapshot, tm
 
 
 @pytest.mark.parametrize("corruption", ["wrong_trace", "duplicate_terminal", "drop_rejection_events"])
-def test_runner_rejects_event_stream_corruption(synthetic_snapshot, tmp_path, monkeypatch, corruption):
+def test_runner_rejects_event_stream_corruption(synthetic_snapshot, tmp_path, monkeypatch, corruption, in_process_activity_contract):
     from src.web.chat_handler import ChatHandler
     from tests import family_acceptance_chain_support as chain
     original = ChatHandler.process_decision_message
@@ -1083,7 +1108,7 @@ def test_event_checker_compares_actual_bus_and_public_provenance(synthetic_snaps
             chain.check_rejected_decision(session, result, frames)
 
 
-def test_runner_does_not_accept_model_unavailable_as_invalid_smiles(synthetic_snapshot, tmp_path, monkeypatch):
+def test_runner_does_not_accept_model_unavailable_as_invalid_smiles(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     from src.activity import prediction_service
     from tests import family_acceptance_chain_support as chain
     original = prediction_service.predict_activity

@@ -153,7 +153,7 @@ def _failed_status(report):
     return "partial" if any(j["status"] == "completed" for j in report["jobs"]) else "failed"
 
 
-def _execute(root, models, run_id, report, report_path, events):
+def _execute(root, models, run_id, report, report_path, events, *, package_version):
     import torch
     from src.activity.family_dataset import load_family_dataset
     from src.activity.model_card import load_prepared_training_data
@@ -192,7 +192,7 @@ def _execute(root, models, run_id, report, report_path, events):
 
     packages = {}
     for family in FAMILIES:
-        path = root / "data/activity/prepared" / (family + "-v1") / "family_dataset.json"
+        path = root / "data/activity/prepared" / (family + "-" + package_version) / "family_dataset.json"
         descriptor = load_family_dataset(path)
         # The core loader verifies/recomputes its descriptor, but cannot know
         # which loop family the CLI intended to train.
@@ -270,12 +270,16 @@ def _execute(root, models, run_id, report, report_path, events):
         report["status"] = "partial"
 
 
-def run(run_id, *, root=ROOT):
+def run(run_id, *, root=ROOT, package_version="v1"):
     """Reserve a fresh run; reject same-module concurrency before any overrides."""
     if not _RUN_LOCK.acquire(blocking=False):
         raise RuntimeError("Family training runner already running")
     try:
-        return _run(run_id, root=Path(root).resolve())
+        return _run(
+            run_id,
+            root=Path(root).resolve(),
+            package_version=package_version,
+        )
     except FileExistsError:
         raise FileExistsError("Run ID already exists; refusing automatic repeat") from None
     except OSError:
@@ -286,11 +290,15 @@ def run(run_id, *, root=ROOT):
         _RUN_LOCK.release()
 
 
-def _run(run_id, *, root):
+def _run(run_id, *, root, package_version):
     if (not isinstance(run_id, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", run_id)
             # Run directories must remain portable when copied between hosts.
             or PureWindowsPath(run_id).is_reserved()):
         raise ValueError("Invalid run ID")
+    if (not isinstance(package_version, str)
+            or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,31}", package_version)
+            or PureWindowsPath(package_version).is_reserved()):
+        raise ValueError("Invalid prepared package version")
     output = root / "outputs/activity_training" / run_id
     models = root / "data/activity/models" / run_id
     if os.path.lexists(output) or os.path.lexists(models):
@@ -308,7 +316,15 @@ def _run(run_id, *, root):
     try:
         write_report(report_path, report)
         with _process_overrides(models):
-            _execute(root, models, run_id, report, report_path, events)
+            _execute(
+                root,
+                models,
+                run_id,
+                report,
+                report_path,
+                events,
+                package_version=package_version,
+            )
     except (KeyboardInterrupt, SystemExit) as exc:
         report.update(status=_failed_status(report), error_type=_error_type(exc))
         raise
@@ -342,13 +358,17 @@ def main(argv=None):
     try:
         parser = _Parser(description=__doc__)
         parser.add_argument("--run-id", required=True)
+        parser.add_argument("--package-version", default="v1")
         args = parser.parse_args(argv)
         # Direct script execution needs the repository on sys.path. Importing
         # this module has no path, model, environment or logging side effects.
         if str(ROOT) not in sys.path:
             sys.path.insert(0, str(ROOT))
         try:
-            result = run(args.run_id)
+            if args.package_version == "v1":
+                result = run(args.run_id)
+            else:
+                result = run(args.run_id, package_version=args.package_version)
         except (KeyboardInterrupt, SystemExit) as exc:
             # run() has persisted failure and restored process globals. Never
             # forward training's exit code/message to the interpreter. Keep

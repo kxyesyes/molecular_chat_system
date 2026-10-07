@@ -276,6 +276,7 @@ class TaskSubmission:
     input_manifest_path: str = field(repr=False)
     idempotency_key: str | None = field(default=None, repr=False)
     request_digest: str | None = field(default=None, repr=False)
+    owner_session_id: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _validate_runtime_code(self.task_id, "task_id")
@@ -298,6 +299,17 @@ class TaskSubmission:
             or _SAFE_DIGEST.fullmatch(self.request_digest) is None
         ):
             raise ValueError("invalid request_digest")
+        if self.owner_session_id is not None and (
+            type(self.owner_session_id) is not str
+            or not self.owner_session_id.strip()
+            or self.owner_session_id != self.owner_session_id.strip()
+            or len(self.owner_session_id) > 255
+            or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in self.owner_session_id
+            )
+        ):
+            raise ValueError("invalid owner_session_id")
         object.__setattr__(
             self,
             "payload",

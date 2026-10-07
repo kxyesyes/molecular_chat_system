@@ -49,13 +49,11 @@ const RtUI = (() => {
     const statLabels = document.querySelectorAll(".stat-item .stat-label");
     if (statItems.length < 3) return;
 
-    const loadingHtml =
-      '<span style="color: #94a3b8; font-size: 14px;">检查中...</span>';
-    const errorHtml = '<span style="color: #ef4444;">加载失败</span>';
-    statItems[0].innerHTML = loadingHtml;
-    statItems[1].innerHTML = loadingHtml;
-    statItems[2].innerHTML = loadingHtml;
-    if (statItems[3]) statItems[3].innerHTML = loadingHtml;
+    statItems.forEach((item) => {
+      item.textContent = "检查中...";
+      item.style.color = "#94a3b8";
+      item.style.fontSize = "14px";
+    });
 
     const [statsResult, healthResult] = await Promise.allSettled([
         RtApi.fetchStats(),
@@ -66,10 +64,11 @@ const RtUI = (() => {
     const health = healthResult.status === "fulfilled" ? healthResult.value : null;
 
     if (!stats && !health) {
-      statItems[0].innerHTML = errorHtml;
-      statItems[1].innerHTML = errorHtml;
-      statItems[2].innerHTML = errorHtml;
-      if (statItems[3]) statItems[3].innerHTML = errorHtml;
+      statItems.forEach((item) => {
+        item.textContent = "加载失败";
+        item.style.color = "#ef4444";
+        item.style.fontSize = "";
+      });
       return;
     }
 

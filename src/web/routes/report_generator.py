@@ -3,6 +3,7 @@
 """
 import os
 import datetime
+import html
 import logging
 from fastapi import Response
 
@@ -112,8 +113,14 @@ def _pdbqt_line_to_pdb(line: str) -> str:
     return padded[:76] + element.rjust(2) + "  "
 
 
-def _extract_pose_pdb_from_pdbqt_text(pdbqt_text: str, pose_index: int = 1) -> str:
+def _extract_pose_pdb_from_pdbqt_text(
+    pdbqt_text: str,
+    pose_index: int = 1,
+    *,
+    allow_unmodelled: bool = False,
+) -> str:
     lines = pdbqt_text.splitlines()
+    has_models = any(line.startswith("MODEL") for line in lines)
     current_pose = 0
     collecting = False
     atoms = []
@@ -131,7 +138,7 @@ def _extract_pose_pdb_from_pdbqt_text(pdbqt_text: str, pose_index: int = 1) -> s
         if collecting and line.startswith(("ATOM", "HETATM")):
             atoms.append(_pdbqt_line_to_pdb(line))
 
-    if not atoms:
+    if not atoms and allow_unmodelled and not has_models:
         atoms = [_pdbqt_line_to_pdb(line) for line in lines if line.startswith(("ATOM", "HETATM"))]
 
     if not atoms:
@@ -144,7 +151,9 @@ def _read_pose_pdb_from_pdbqt_file(file_path: str, pose_index: int = 1) -> str:
         return ""
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-            return _extract_pose_pdb_from_pdbqt_text(f.read(), pose_index=pose_index)
+            return _extract_pose_pdb_from_pdbqt_text(
+                f.read(), pose_index=pose_index, allow_unmodelled=True,
+            )
     except Exception as e:
         logger.warning(f"从 PDBQT 生成 PDB 失败 ({file_path}): {e}")
         return ""
@@ -180,6 +189,11 @@ def _read_best_pose_pdb_from_pdbqt_file(file_path: str) -> str:
 def _generate_html_report(job_id: str, now: str, config_lines: list, results: list,
                          viewer_png_b64: str, smiles_images_b64: list):
     """生成 HTML 格式报告"""
+
+    safe_job_id = html.escape(str(job_id), quote=True)
+
+    def _safe_text(value) -> str:
+        return html.escape(str(value), quote=True)
     
     def _result_rows_html():
         if not results:
@@ -202,12 +216,14 @@ def _generate_html_report(job_id: str, now: str, config_lines: list, results: li
                       "th{background:#f9fafb;text-align:left}.tag{display:inline-block;background:#eef2ff;"
                       "color:#3730a3;padding:2px 8px;border-radius:999px;font-size:12px;margin-left:8px}"
                       "</style></head><body>")
-    html_parts.append(f"<h1>分子对接报告 <span class='tag'>ID: {job_id}</span></h1>")
+    html_parts.append(f"<h1>分子对接报告 <span class='tag'>ID: {safe_job_id}</span></h1>")
     html_parts.append(f"<p>生成时间：{now}</p>")
     html_parts.append("<h2>对接参数</h2>")
     
     if config_lines:
-        html_parts.append("<ul>" + "".join([f"<li>{line}</li>" for line in config_lines]) + "</ul>")
+        html_parts.append(
+            "<ul>" + "".join(f"<li>{_safe_text(line)}</li>" for line in config_lines) + "</ul>"
+        )
     else:
         html_parts.append("<p>无可用配置</p>")
     
