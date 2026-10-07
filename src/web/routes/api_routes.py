@@ -53,6 +53,16 @@ class _DynamicInvoker:
 _ROUTE_INVOKER = _DynamicInvoker()
 
 
+class _DynamicReportValidator:
+    """Keep post-registration report validation patching without api_routes injection."""
+
+    def __call__(self, *args, **kwargs):
+        return sys.modules[__name__]._validate_report_base64_payload(*args, **kwargs)
+
+
+_ROUTE_REPORT_VALIDATOR = _DynamicReportValidator()
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -417,7 +427,12 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
         invoke_in_threadpool=_ROUTE_INVOKER,
         logger=_ROUTE_LOGGER,
     )
-    setup_docking_report_routes(app, docking_service=docking_service, _support=support)
+    setup_docking_report_routes(
+        app,
+        docking_service=docking_service,
+        validate_report_base64_payload=_ROUTE_REPORT_VALIDATOR,
+        logger=_ROUTE_LOGGER,
+    )
     setup_reverse_target_routes(app, _support=support)
     setup_activity_prediction_routes(app, _support=support)
     setup_activity_model_routes(app, _support=support)

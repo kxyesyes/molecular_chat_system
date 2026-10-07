@@ -262,6 +262,12 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
                 "invoke_in_threadpool": support._ROUTE_INVOKER,
                 "logger": support._ROUTE_LOGGER,
             }
+        if domain == "docking_report":
+            expected = {
+                "docking_service": service,
+                "validate_report_base64_payload": support._ROUTE_REPORT_VALIDATOR,
+                "logger": support._ROUTE_LOGGER,
+            }
         if domain in {"molecule_properties", "agent_metrics"}:
             expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
@@ -1023,6 +1029,40 @@ def test_docking_report_failure_returns_stable_error_code_without_internal_detai
     assert body["message"] == "生成对接报告失败"
     assert body["details"] is None
     assert secret_detail not in response.text
+
+
+def test_docking_report_route_accepts_explicit_report_dependencies(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.web.routes.docking_report_routes import setup_docking_report_routes
+
+    job = tmp_path / "docking_job"
+    job.mkdir()
+    (job / "result.pdbqt").write_text("REMARK fixture\n", encoding="utf-8")
+    seed_owned_docking_history(tmp_path, "job")
+    service = SimpleNamespace(
+        work_dir=str(tmp_path),
+        parse_vina_results=lambda _path: [],
+    )
+    validator = Mock(return_value=(None, []))
+    app = FastAPI()
+    @app.middleware("http")
+    async def _test_browser_session(request, call_next):
+        request.scope.setdefault("agent_session_id", "test-session")
+        return await call_next(request)
+
+    setup_docking_report_routes(
+        app,
+        docking_service=service,
+        validate_report_base64_payload=validator,
+        logger=Mock(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/docking/report/job", json={"format": "md"})
+
+    assert response.status_code == 200
+    validator.assert_called_once_with(None, [])
 
 
 def test_pose_sdf_does_not_fallback_to_all_models_for_out_of_range_pose(tmp_path):
