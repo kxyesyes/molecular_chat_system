@@ -1,4 +1,5 @@
 import os
+import importlib
 import importlib.util
 import io
 import contextlib
@@ -38,6 +39,8 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertTrue(legacy_dir.exists())
         self.assertTrue((legacy_dir / "README.md").exists())
         self.assertFalse((legacy_dir / "target_reverse.py").exists())
+        archived = importlib.import_module("archive.legacy_target_reverse")
+        self.assertFalse(hasattr(archived, "predict_targets"))
 
         forbidden_markers = ("src.target_reverse", "legacy_target_reverse")
         for path in (PROJECT_ROOT / "src").rglob("*.py"):
