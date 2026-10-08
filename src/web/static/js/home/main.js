@@ -265,7 +265,7 @@
     if (message.type === "complete") {
       if (!turn.result) return true;
       const {status, text, metadata} = turn.result;
-      if (["failed", "rejected", "cancelled"].includes(status)) {
+      if (window.MedChatStatus.isNonSuccess(status)) {
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
       }
       completeLastMessage(text); clearToolStatus();
@@ -643,7 +643,7 @@
           break;
 
         case "complete":
-          if (["failed", "rejected", "cancelled"].includes(message.status)) {
+          if (window.MedChatStatus.isNonSuccess(message.status)) {
             if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
             moleculeCandidateLifecycle.clear();
           }
@@ -2002,7 +2002,7 @@
     const toolName = event.tool_name || event.tool || "";
     const message = event.message || getAgentEventLabel(eventType, toolName);
     const rendered = window.HomeTaskPanel.appendEvent(panel, {
-      label: getAgentEventLabel(eventType, toolName),
+      label: getAgentEventLabel(eventType, toolName, event.payload),
       message,
       itemClass: presentation.itemClass,
       progressText: presentation.progressText,
@@ -2014,8 +2014,8 @@
     HomeChatRenderer.scrollToBottom();
   }
 
-  function getAgentEventLabel(type, toolName) {
-    return window.HomeTaskStatus.label(type, toolName);
+  function getAgentEventLabel(type, toolName, payload) {
+    return window.HomeTaskStatus.label(type, toolName, payload);
   }
 
   function getAgentEventClass(type) {

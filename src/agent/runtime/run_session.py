@@ -1344,7 +1344,7 @@ class WorkflowRunSession:
             RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
             RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
             RunOutcome.FAILED: TaskEventType.TASK_FAILED,
-        }[agent_result.outcome]
+        }.get(agent_result.outcome, TaskEventType.TASK_FAILED)
         if not self._terminal_event_emitted:
             try:
                 self._emit_once(

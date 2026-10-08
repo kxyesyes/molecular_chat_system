@@ -20,7 +20,14 @@
     failed: "失败",
     rejected: "已拒绝",
     cancelled: "已取消",
+    timeout: "计算超时",
+    unavailable: "工具不可用",
+    not_calculated: "尚未计算",
   });
+
+  const nonSuccessStatuses = new Set([
+    "failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated",
+  ]);
 
   global.MedChatStatus = Object.freeze({
     labels,
@@ -33,6 +40,9 @@
     },
     label(value, fallback = "未计算") {
       return this.isKnown(value) ? labels[value] : fallback;
+    },
+    isNonSuccess(value) {
+      return nonSuccessStatuses.has(value);
     },
   });
 })(window);

@@ -30,6 +30,19 @@ assert.deepStrictEqual(JSON.parse(JSON.stringify(status.resolve({event: "task_pa
   progressText: "部分完成",
   terminal: true,
 });
+for (const outcome of ["timeout", "unavailable", "not_calculated"]) {
+  const resolved = status.resolve({
+    event: "task_failed",
+    progress: 1,
+    payload: {status: outcome},
+  });
+  assert.strictEqual(resolved.progressText, {
+    timeout: "计算超时",
+    unavailable: "工具不可用",
+    not_calculated: "尚未计算",
+  }[outcome]);
+  assert.strictEqual(resolved.terminal, true);
+}
 assert.deepStrictEqual(JSON.parse(JSON.stringify(status.resolve({event: "tool_started", progress: 0.42}))), {
   eventType: "tool_started",
   progressText: "42%",

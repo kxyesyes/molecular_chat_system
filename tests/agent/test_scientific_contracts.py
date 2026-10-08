@@ -154,6 +154,45 @@ def test_agent_result_with_success_and_cancelled_result_is_partial():
     assert result.outcome == RunOutcome.PARTIAL
 
 
+def test_agent_result_preserves_timeout_instead_of_collapsing_to_failed():
+    timed_out = ToolResult.error_result(
+        "admet_predictor",
+        AgentErrorCode.TOOL_TIMEOUT,
+        "prediction timed out",
+        status=ObservationStatus.TIMEOUT,
+    )
+
+    result = AgentResult.from_tool_results(
+        trace_id="timed-out-run",
+        skill_name="evaluation",
+        tool_results=[timed_out],
+    )
+
+    assert result.outcome is RunOutcome.TIMEOUT
+    assert result.to_legacy_dict()["status"] == "timeout"
+
+
+def test_agent_result_preserves_unavailable_and_not_calculated_states():
+    for status, outcome in (
+        (ObservationStatus.UNAVAILABLE, RunOutcome.UNAVAILABLE),
+        (ObservationStatus.NOT_CALCULATED, RunOutcome.NOT_CALCULATED),
+    ):
+        result = AgentResult.from_tool_results(
+            trace_id=f"{status.value}-run",
+            skill_name="evaluation",
+            tool_results=[
+                ToolResult.error_result(
+                    "admet_predictor",
+                    AgentErrorCode.MODEL_UNAVAILABLE,
+                    status.value,
+                    status=status,
+                )
+            ],
+        )
+        assert result.outcome is outcome
+        assert result.to_legacy_dict()["status"] == outcome.value
+
+
 def test_terminal_observation_status_cannot_be_completed_by_success_flag():
     cancelled = ToolResult.success_result(
         "admet_predictor",
