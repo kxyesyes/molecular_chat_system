@@ -21,6 +21,20 @@ from src.system.scientific_contracts import ToolProvenance
 
 logger = logging.getLogger(__name__)
 MOLECULAR_DOCKING_ADAPTER_VERSION = "molecular-docking-adapter-1"
+_DOCKING_STATUSES = frozenset({
+    "succeeded", "partial", "failed", "timeout", "unavailable",
+    "not_calculated", "invalid_input", "rejected", "cancelled",
+})
+
+
+def _status_from_docking_result(docking_result: Any, *, success: bool) -> str:
+    """Translate service terminal codes into the shared observation contract."""
+
+    if success:
+        return "succeeded"
+    error_code = docking_result.get("error_code") if isinstance(docking_result, dict) else None
+    normalized = str(error_code or "failed").strip().lower()
+    return normalized if normalized in _DOCKING_STATUSES else "failed"
 
 
 def _run_coroutine_sync(factory: Callable[[], Any]) -> Any:
@@ -171,6 +185,7 @@ class MolecularDocking(BaseMolecularTool):
                 "ligand_mode": "smiles" if query.get("smiles") else "file",
             }
         result = self._create_base_result(safe_query)
+        result["status"] = "not_calculated"
         if not isinstance(query, dict):
             result["message"] = "Docking requires receptor and ligand inputs plus docking box center/size parameters; no binding energy was calculated."
             result["reasoning"] = "A target name and SMILES alone are insufficient for a real AutoDock Vina run."
@@ -180,6 +195,7 @@ class MolecularDocking(BaseMolecularTool):
         if not query.get("ligand_path") and not query.get("smiles"):
             missing.append("ligand_path or smiles")
         if missing:
+            result["status"] = "invalid_input"
             result["message"] = "Missing docking inputs: " + ", ".join(missing) + ". No binding energy was calculated."
             result["reasoning"] = "Docking precondition validation failed."
             return result
@@ -187,11 +203,13 @@ class MolecularDocking(BaseMolecularTool):
             from src.docking.molecular_docking_service import DockingConfig, MolecularDockingService
             receptor_path = Path(str(query["receptor_path"])).expanduser().resolve()
             if not receptor_path.is_file():
+                result["status"] = "invalid_input"
                 result["message"] = "Receptor file does not exist. No binding energy was calculated."
                 return result
             center = tuple(float(value) for value in query["center"])
             size = tuple(float(value) for value in query["size"])
             if len(center) != 3 or len(size) != 3:
+                result["status"] = "invalid_input"
                 result["message"] = "Docking center and size must each contain 3 values."
                 return result
             config = DockingConfig(
@@ -206,6 +224,7 @@ class MolecularDocking(BaseMolecularTool):
                 ownership = {"command_scope": self._command_scope, "allowed_output_root": self._allowed_output_root}
             service = MolecularDockingService(config=query.get("runtime_config"), **ownership)
             if not service.verify_environment():
+                result["status"] = "unavailable"
                 result["message"] = "AutoDock Vina docking environment is unavailable. No binding energy was calculated."
                 result["data"] = {"diagnostics": _safe_environment_diagnostics(service.env_diagnostics())}
                 return result
@@ -214,6 +233,7 @@ class MolecularDocking(BaseMolecularTool):
             if not ligand_input:
                 ligand_path = Path(str(query["ligand_path"])).expanduser().resolve()
                 if not ligand_path.is_file():
+                    result["status"] = "invalid_input"
                     result["message"] = "Ligand file does not exist. No binding energy was calculated."
                     return result
                 ligand_input, input_type = str(ligand_path), "file"
@@ -226,6 +246,7 @@ class MolecularDocking(BaseMolecularTool):
             docking_data = dict(docking_result)
             docking_data["warnings"] = warnings
             result["success"] = bool(docking_result.get("success"))
+            result["status"] = _status_from_docking_result(docking_result, success=result["success"])
             result["data"] = docking_data
             result["warnings"] = warnings
             execution_status = "completed" if result["success"] else str(docking_result.get("error_code") or "failed")
@@ -268,6 +289,7 @@ class MolecularDocking(BaseMolecularTool):
             result["reasoning"] = "Results were parsed from an actual Vina output file." if result["success"] else "No scientific docking result was accepted."
         except Exception:
             logger.error("Molecular docking failed (%s)", "adapter_error")
+            result["status"] = "failed"
             result["message"] = "Docking failed before a scientific result was produced."
             result["reasoning"] = "The real docking pipeline raised an error."
         return result
@@ -276,4 +298,5 @@ class MolecularDocking(BaseMolecularTool):
 __all__ = [
     "MOLECULAR_DOCKING_ADAPTER_VERSION", "MolecularDocking", "_docking_lineage",
     "_normalize_warning_strings", "_runtime_model_version", "_safe_environment_diagnostics",
+    "_status_from_docking_result",
 ]

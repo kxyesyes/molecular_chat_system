@@ -38,7 +38,7 @@ def docking_boundary(tmp_path, monkeypatch):
     ligand.write_text("$$$$\n", encoding="utf-8")
     pose.write_text("MODEL 1\nREMARK VINA RESULT: -7.2 0 0\nENDMDL\n", encoding="utf-8")
     calls, constructed, payloads = [], [], []
-    state = {"available": True, "failed": False, "cancelled": False}
+    state = {"available": True, "failed": False, "cancelled": False, "timeout": False}
 
     class SyntheticService:
         def __init__(self, config=None):
@@ -52,9 +52,10 @@ def docking_boundary(tmp_path, monkeypatch):
 
         async def perform_docking(self, **kwargs):
             calls.append(kwargs)
-            if state["failed"] or state["cancelled"]:
+            if state["failed"] or state["cancelled"] or state["timeout"]:
                 return {"success": False, "job_id": "synthetic-only",
-                        "error_code": "cancelled" if state["cancelled"] else "internal_error",
+                        "error_code": ("cancelled" if state["cancelled"] else
+                                       "timeout" if state["timeout"] else "internal_error"),
                         "error": "synthetic service failure", "warnings": ["synthetic warning"]}
             result = {"success": True, "job_id": "synthetic-only", "total_poses": 1,
                       "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)},
@@ -137,16 +138,30 @@ def test_real_docking_receives_complete_structured_request(docking_boundary, del
     assert result.warnings == ["Synthetic fixture; not a real docking result"]
 
 
-@pytest.mark.parametrize("mode", ["success", "unavailable", "failed", "cancelled"])
+@pytest.mark.parametrize("mode", ["success", "unavailable", "failed", "cancelled", "timeout"])
 def test_actual_tool_keeps_legacy_compat_observation(docking_boundary, mode):
     env = docking_boundary
-    env["state"].update(available=mode != "unavailable", failed=mode == "failed", cancelled=mode == "cancelled")
+    env["state"].update(
+        available=mode != "unavailable",
+        failed=mode == "failed",
+        cancelled=mode == "cancelled",
+        timeout=mode == "timeout",
+    )
     expected = execute_tool_compat(env["tool"], env["request"])
     actual = env["adapter"].execute({"query": env["request"]})
     left, right = expected.to_legacy_dict(), actual.to_legacy_dict()
     left.pop("elapsed_ms")
     right.pop("elapsed_ms")
     assert right == left
+    expected_status = {
+        "success": "succeeded",
+        "unavailable": "unavailable",
+        "failed": "failed",
+        "cancelled": "cancelled",
+        "timeout": "timeout",
+    }[mode]
+    assert actual.status.value == expected_status
+    assert expected.status.value == expected_status
     assert len(env["calls"]) == (0 if mode == "unavailable" else 2)
 
 
