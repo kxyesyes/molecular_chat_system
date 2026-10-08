@@ -4,24 +4,26 @@
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
-- `origin/main` 当前为 `d61b7fe`。本地没有直接修改 `main`。
-- 分子性质入口核心收敛已在独立分支
-  `codex/molecular-properties-core-convergence` 完成，提交 `eeefcf3` 已推送但尚未合并：
-  Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`，旧 HTTP/Agent 字段与失败语义保持。
-- 本批验证：全量 Python `21966 passed, 272 skipped, 10 warnings, 173 subtests passed`；
-  三个 Node 回归、全部 JavaScript 语法检查和 `compileall` 通过。
+- `origin/main` 当前为 `d3b2a58`。PR #167（分子性质核心复用）与 PR #168（对接终态保真）
+  均已通过 GitHub 全部质量检查并 squash 合并；本地没有直接修改 `main`。
+- Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`；对接适配器现在保留
+  `succeeded`、`unavailable`、`timeout`、`cancelled`、`invalid_input`、`not_calculated` 等统一状态，
+  不再把非成功终态降级成普通 `failed`。
+- 合并后聚焦回归：247 passed；三个 Node 回归、全部 JavaScript 语法检查、`compileall` 和跨层扫描通过。
+  合并后的全量 Python 回归正在最终验收工作树中运行。
 - 路由兼容层中正式注册路径已使用窄依赖；目标路由的 `_support` 仅保留给旧直接调用者，
   不应再次把它描述为生产注册依赖。
-- 严格健康检查在 MedChat Conda 环境为 `20/23`：缺少 ChEMBL 反向寻靶表、注册活性模型权重和
-  RAG FAISS 索引。它们是本机运行资产，不得用模拟文件或伪造模型结果填充。
+- 干净合并工作树的严格健康检查为 `17/23`：缺少本机运行资产（靶点 SQLite/缓存、反向寻靶数据、
+  PDE/BuChE 活性模型权重、RAG FAISS 索引）及运行日志目录。它们是本机运行资产，不得用模拟文件
+  或伪造模型结果填充；有真实资产的部署环境仍需单独复验。
 
 ### 当前真正未完成
 
-1. 对 `eeefcf3` 做代码审查、CI 和正式合并。
-2. 对其余科研入口逐项完成核心/适配层和统一结果状态的证据审计；不能把历史分支名或旧交接文字当作完成证据。
-3. 准备真实 ChEMBL、PDE/BuChE 活性模型权重与 RAG 索引，并做真实链路验收。
-4. 完成前端刷新恢复、断线重连、取消和失败原因的真实浏览器验收，以及部署环境验证。
-5. 更新或归档与当前 `main` 不一致的历史台账，最后再执行全项目合并验收。
+1. 等待合并后全量 Python 回归完成，并执行最终资源清理/安全检查。
+2. 在具备真实 ChEMBL、PDE/BuChE 活性模型权重与 RAG 索引的环境完成真实链路验收。
+3. 完成前端刷新恢复、断线重连、取消和失败原因的真实浏览器验收，以及部署环境验证。
+4. 逐项复核其余科研入口的核心/适配层与统一结果状态，不能把历史分支名或旧交接文字当作完成证据。
+5. 归档历史台账中的过时“待合并”描述，并完成最终项目级验收。
 
 ## 第2项发布完成／第3项开始（2026-09-25）
 
