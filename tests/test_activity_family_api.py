@@ -258,6 +258,103 @@ def test_legacy_list_receipt_reuses_activity_summary(monkeypatch, client):
     assert observed == [[{"smiles": "CCO", "success": True}]]
 
 
+def test_legacy_list_receipt_persists_shared_summary(monkeypatch, tmp_path):
+    """The HTTP response and refresh receipt preserve the domain summary."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.task_runtime import manager as task_manager
+    from src.task_runtime import routes as task_routes
+    from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+    from src.web.routes import api_routes
+
+    async def legacy_list(*, operation, isolated_payload, **kwargs):
+        # This row intentionally claims transport success but is scientifically
+        # incomplete; the real domain aggregator must downgrade it to partial.
+        return [{
+            "smiles": isolated_payload[0], "success": True, "status": "partial",
+            "warnings": ["shared summary warning"],
+        }]
+
+    manager = task_manager.TaskManager(tmp_path / "legacy-list-receipt.sqlite")
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: manager)
+    monkeypatch.setattr(task_routes, "get_task_manager", lambda: manager)
+    monkeypatch.setattr(activity_prediction_routes, "_invoke_activity_with_budget", legacy_list)
+    app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "legacy-list-receipt-sessions.sqlite"),
+    )
+    api_routes.setup_api_routes(app)
+    task_routes.setup_task_routes(app)
+    try:
+        with TestClient(app, base_url="https://localhost") as client:
+            response = client.post(
+                "/api/activity/predict",
+                data={"smiles": "CCO", "target": "PDE5A"},
+            )
+            task_id = response.headers.get("X-MedChat-Task-ID")
+            assert response.status_code == 200
+            assert task_id
+            receipt = client.get(f"/api/tasks/{task_id}")
+            assert receipt.status_code == 200
+            persisted = receipt.json()["data"]
+    finally:
+        manager.executor.shutdown(wait=True)
+
+    assert persisted["status"] == "failed"
+    assert persisted["result"]["status"] == "partial"
+    assert persisted["result"]["success"] is False
+    assert persisted["result"]["count"] == 1
+    assert persisted["result"]["warnings"] == [{"code": "TOOL_WARNING"}]
+    assert persisted["warnings"] == [{
+        "code": "TOOL_WARNING", "message": "shared summary warning",
+    }]
+
+
+def test_legacy_list_receipt_fails_closed_when_summary_is_invalid(monkeypatch, tmp_path):
+    """A malformed raw list cannot produce a successful HTTP task receipt."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.task_runtime import manager as task_manager
+    from src.task_runtime import routes as task_routes
+    from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
+    from src.web.routes import api_routes
+
+    async def legacy_list(*, operation, isolated_payload, **kwargs):
+        return ["not-a-prediction-row"]
+
+    manager = task_manager.TaskManager(tmp_path / "legacy-list-invalid.sqlite")
+    monkeypatch.setattr(task_manager, "get_task_manager", lambda: manager)
+    monkeypatch.setattr(task_routes, "get_task_manager", lambda: manager)
+    monkeypatch.setattr(activity_prediction_routes, "_invoke_activity_with_budget", legacy_list)
+    app = FastAPI()
+    app.add_middleware(
+        AgentSessionMiddleware,
+        store=AgentSessionStore(tmp_path / "legacy-list-invalid-sessions.sqlite"),
+    )
+    api_routes.setup_api_routes(app)
+    task_routes.setup_task_routes(app)
+    try:
+        with TestClient(app, base_url="https://localhost") as client:
+            response = client.post(
+                "/api/activity/predict",
+                data={"smiles": "CCO", "target": "PDE5A"},
+            )
+            task_id = response.headers.get("X-MedChat-Task-ID")
+            assert response.status_code == 200
+            assert task_id
+            receipt = client.get(f"/api/tasks/{task_id}")
+            assert receipt.status_code == 200
+            persisted = receipt.json()["data"]
+    finally:
+        manager.executor.shutdown(wait=True)
+
+    assert persisted["status"] == "failed"
+    assert persisted["result"]["status"] == "failed"
+    assert persisted["result"]["success"] is False
+    assert persisted["result"]["count"] == 1
+
+
 def test_empty_batch_not_success(client):
     response = client.post("/api/activity/batch_predict", data={"target": "PDE"},
         files={"file": ("empty.smi", b" \n", "text/plain")})
