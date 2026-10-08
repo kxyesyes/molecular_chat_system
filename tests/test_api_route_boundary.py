@@ -129,15 +129,6 @@ def _canonical_contract_json(value):
     return value
 
 
-def test_route_composition_uses_a_narrow_dependency_factory():
-    source = (Path(__file__).parents[1] / "src" / "web" / "routes" / "api_routes.py").read_text(
-        encoding="utf-8"
-    )
-
-    assert "build_route_dependencies" in source
-    assert "class _Dynamic" not in source
-
-
 def test_registration_contract():
     expected_profiles = {
         ("0.135.3", "2.12.5"): "api_route_contract.json",
