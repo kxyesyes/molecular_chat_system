@@ -135,6 +135,27 @@ def test_activity_model_health_accepts_only_a_valid_registered_model(
     assert "1 registered models" in detail
 
 
+def test_activity_model_health_discovers_family_registries_under_configured_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scripts import health_check
+
+    models_dir = tmp_path / "models"
+    family_dir = models_dir / "pde-buche-run"
+    weights = _write_weights(family_dir, "health.pt")
+    ActivityModelRegistry(family_dir).register(
+        _metadata("family-health-model", weights.name)
+    )
+    monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(models_dir))
+
+    ok, detail = health_check.check_activity_models()
+
+    assert ok is True
+    assert "1 registered models" in detail
+    assert "family" in detail
+
+
 @pytest.mark.parametrize(
     "unsafe_name",
     [
