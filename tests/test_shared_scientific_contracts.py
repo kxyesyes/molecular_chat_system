@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from src.system.scientific_status import ObservationStatus, RunOutcome, summarize_completion
+from src.system.scientific_status import (
+    ObservationStatus,
+    RunOutcome,
+    aggregate_run_outcome,
+    summarize_completion,
+)
 
 
 def test_scientific_transport_types_are_owned_by_system_and_reexported_by_agent():
@@ -48,6 +53,18 @@ def test_shared_status_contract_has_explicit_timeout_and_not_calculated_states()
     assert ObservationStatus.NOT_CALCULATED.value == "not_calculated"
     assert RunOutcome.TIMEOUT.value == "timeout"
     assert RunOutcome.NOT_CALCULATED.value == "not_calculated"
+
+
+@pytest.mark.parametrize(
+    ("status", "outcome"),
+    [
+        (ObservationStatus.TIMEOUT, RunOutcome.TIMEOUT),
+        (ObservationStatus.UNAVAILABLE, RunOutcome.UNAVAILABLE),
+        (ObservationStatus.NOT_CALCULATED, RunOutcome.NOT_CALCULATED),
+    ],
+)
+def test_aggregate_status_preserves_scientific_unavailability_reason(status, outcome):
+    assert aggregate_run_outcome([status], all_succeeded=False, any_usable=False) is outcome
 
 
 def test_legacy_timeout_alias_normalizes_to_canonical_timeout_status():

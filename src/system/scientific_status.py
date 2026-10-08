@@ -88,6 +88,34 @@ def summarize_completion(completed: int, total: int) -> tuple[str, bool]:
     return RunOutcome.FAILED.value, False
 
 
+def aggregate_run_outcome(
+    statuses: Any,
+    *,
+    all_succeeded: bool,
+    any_usable: bool,
+) -> RunOutcome:
+    """Preserve the most specific non-success reason at an Agent boundary."""
+
+    values = {
+        value.value if isinstance(value, ObservationStatus) else str(value).strip().lower()
+        for value in statuses
+    }
+    if all_succeeded and values:
+        return RunOutcome.COMPLETED
+    if any_usable:
+        return RunOutcome.PARTIAL
+    for status, outcome in (
+        (ObservationStatus.CANCELLED.value, RunOutcome.CANCELLED),
+        (ObservationStatus.REJECTED.value, RunOutcome.REJECTED),
+        (ObservationStatus.TIMEOUT.value, RunOutcome.TIMEOUT),
+        (ObservationStatus.UNAVAILABLE.value, RunOutcome.UNAVAILABLE),
+        (ObservationStatus.NOT_CALCULATED.value, RunOutcome.NOT_CALCULATED),
+    ):
+        if status in values:
+            return outcome
+    return RunOutcome.FAILED
+
+
 __all__ = [
     "CANCELLED_STATUS_ALIASES",
     "NON_SUCCESS_STATUS",
@@ -99,6 +127,7 @@ __all__ = [
     "is_non_success_status",
     "is_timeout_status",
     "normalize_observation_status",
+    "aggregate_run_outcome",
     "reported_status",
     "summarize_completion",
 ]

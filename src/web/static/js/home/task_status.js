@@ -11,6 +11,11 @@ window.HomeTaskStatus = (() => {
     task_cancelled: "已取消",
   });
   const terminalEvents = new Set(Object.keys(terminalLabels));
+  const outcomeLabels = Object.freeze({
+    timeout: "计算超时",
+    unavailable: "工具不可用",
+    not_calculated: "尚未计算",
+  });
   const labels = Object.freeze({
     planning_started: "任务规划",
     planning_completed: "规划完成",
@@ -37,9 +42,14 @@ window.HomeTaskStatus = (() => {
     const percent = event && typeof event.progress === "number"
       ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
       : null;
+    const outcome = event && event.payload && typeof event.payload.status === "string"
+      ? outcomeLabels[event.payload.status]
+      : null;
     return {
       eventType,
-      progressText: Object.prototype.hasOwnProperty.call(terminalLabels, eventType)
+      progressText: outcome && eventType === "task_failed"
+        ? outcome
+        : Object.prototype.hasOwnProperty.call(terminalLabels, eventType)
         ? terminalLabels[eventType]
         : percent !== null ? `${percent}%` : "执行中",
       terminal: terminalEvents.has(eventType),
@@ -50,8 +60,11 @@ window.HomeTaskStatus = (() => {
     return toolNames[toolName] || toolName;
   }
 
-  function label(type, toolName) {
+  function label(type, toolName, payload) {
     const toolText = toolName ? formatToolName(toolName) : "";
+    if (type === "task_failed" && payload && outcomeLabels[payload.status]) {
+      return outcomeLabels[payload.status];
+    }
     if (type === "tool_started") return toolText ? `调用 ${toolText}` : "工具调用";
     if (type === "tool_completed") return toolText ? `${toolText} 完成` : "工具完成";
     if (type === "tool_failed") return toolText ? `${toolText} 失败` : "工具失败";
