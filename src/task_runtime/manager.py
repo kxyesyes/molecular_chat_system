@@ -19,6 +19,12 @@ from .models import (
     strict_json_snapshot,
 )
 from .store import TaskStore
+from src.system.scientific_status import (
+    is_cancelled_status,
+    is_non_success_status,
+    is_timeout_status,
+    reported_status,
+)
 
 
 TaskHandler = Callable[[dict[str, Any]], Any]
@@ -28,15 +34,15 @@ def _terminal_state(result: Any) -> tuple[TaskStatus, str | None]:
     if not isinstance(result, dict):
         return TaskStatus.SUCCEEDED, None
 
-    reported_status = str(result.get("status", "")).strip().lower()
-    if reported_status in {"cancelled", "canceled"}:
+    status = reported_status(result)
+    if is_cancelled_status(status):
         # CANCELED is a store transition from CANCEL_REQUESTED, not a status a
         # worker may publish unilaterally. The caller below will reconcile a
         # requested cancellation; otherwise this is a failed computation.
         return TaskStatus.FAILED, str(
             result.get("error") or result.get("message") or "Task was canceled"
         )
-    if reported_status in {"timeout", "timed_out", "timed-out"}:
+    if is_timeout_status(status):
         return TaskStatus.TIMED_OUT, str(
             result.get("error") or result.get("message") or "Task timed out"
         )
@@ -45,11 +51,7 @@ def _terminal_state(result: Any) -> tuple[TaskStatus, str | None]:
     # unavailable, rejected, or failed observation. The durable task state is
     # authoritative and must fail closed instead of promoting that observation
     # to ``succeeded``.
-    non_success_statuses = {
-        "failed", "partial", "unavailable", "invalid_input", "rejected",
-        "error", "unknown",
-    }
-    returned_failed = result.get("success") is False or reported_status in non_success_statuses
+    returned_failed = result.get("success") is False or is_non_success_status(status)
     if not returned_failed:
         return TaskStatus.SUCCEEDED, None
 

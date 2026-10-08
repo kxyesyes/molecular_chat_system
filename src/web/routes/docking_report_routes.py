@@ -1,11 +1,43 @@
 """Docking report route registration."""
+import logging
+import os
 from typing import Dict, Any
 from fastapi import Body, HTTPException, Request
 from src.web.api_response import api_error
 
+from .route_compat import lazy_dependency
 
-def setup_docking_report_routes(app, docking_service=None, *, _support):
-    """Register the original endpoints with dynamically resolved compatibility support."""
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def setup_docking_report_routes(
+    app,
+    docking_service=None,
+    *,
+    validate_report_base64_payload=None,
+    logger=None,
+    _support=None,
+):
+    """Register report endpoints with explicit validation and logging dependencies.
+
+    ``_support`` remains a compatibility-only fallback for older direct callers;
+    application registration passes the narrow dependencies explicitly.
+    """
+    get_validator = lazy_dependency(
+        validate_report_base64_payload,
+        _support,
+        "_validate_report_base64_payload",
+        label="docking report validator",
+    )
+    get_logger = lazy_dependency(
+        logger,
+        _support,
+        "logger",
+        label="docking report logger",
+        default=_LOGGER,
+    )
+
     @app.post("/api/docking/report/{job_id}")
     async def get_docking_report(job_id: str, request: Request, payload: Dict[str, Any] = Body(None)):
         """生成并返回对接报告"""
@@ -17,18 +49,18 @@ def setup_docking_report_routes(app, docking_service=None, *, _support):
         _owned_history(request, docking_service.work_dir, job_id)
 
         try:
-            job_dir = _support.os.path.join(docking_service.work_dir, f"docking_{job_id}")
-            result_file = _support.os.path.join(job_dir, "result.pdbqt")
+            job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")
+            result_file = os.path.join(job_dir, "result.pdbqt")
             
-            if not _support.os.path.exists(result_file):
+            if not os.path.exists(result_file):
                 raise HTTPException(status_code=404, detail="对接结果文件不存在")
 
             results = docking_service.parse_vina_results(result_file)
             
             # 读取配置
-            config_file = _support.os.path.join(job_dir, "config.txt")
+            config_file = os.path.join(job_dir, "config.txt")
             config_lines = []
-            if _support.os.path.exists(config_file):
+            if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8', errors='ignore') as cf:
                     config_lines = [line.strip() for line in cf.readlines() if line.strip()]
 
@@ -40,7 +72,7 @@ def setup_docking_report_routes(app, docking_service=None, *, _support):
                 fmt = str(payload.get("format", "md")).lower()
                 viewer_png_b64 = payload.get("viewer_png_base64")
                 smiles_images_b64 = payload.get("smiles_images", [])
-            viewer_png_b64, smiles_images_b64 = _support._validate_report_base64_payload(
+            viewer_png_b64, smiles_images_b64 = get_validator()(
                 viewer_png_b64,
                 smiles_images_b64,
             )
@@ -52,5 +84,5 @@ def setup_docking_report_routes(app, docking_service=None, *, _support):
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("生成报告失败")
+            get_logger().exception("生成报告失败")
             return api_error("DOCKING_REPORT_FAILED", "生成对接报告失败", status_code=500)

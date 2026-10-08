@@ -698,7 +698,7 @@ class ScientificAcceptanceRunner:
 
 def _build_ollama_model() -> Any:
     try:
-        from src.web.models.ollama_model import OllamaModel
+        from src.system.model_clients import OllamaModel
 
         return OllamaModel(
             base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),

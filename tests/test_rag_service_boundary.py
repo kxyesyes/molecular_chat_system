@@ -113,9 +113,9 @@ def test_legacy_app_exports_the_same_canonical_service(tmp_path):
                 raise AssertionError("Import must not execute a model")
 
         with ExitStack() as patches:
-            patches.enter_context(patch("src.web.models.OllamaModel", OfflineModel))
+            patches.enter_context(patch("src.system.model_clients.OllamaModel", OfflineModel))
             patches.enter_context(patch(
-                "src.agent.openai_compatible_model.OpenAICompatibleModel", OfflineModel))
+                "src.system.model_clients.OpenAICompatibleModel", OfflineModel))
             patches.enter_context(patch("src.agent.tools.get_all_tools", return_value=[]))
             patches.enter_context(patch.object(
                 RAGSystem, "initialize", side_effect=AssertionError("No RAG startup")))

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
 from src.agent.persistence import redact_sensitive
 from src.agent.runtime.worker_ownership import reserve_worker
+from src.system.scientific_status import normalize_observation_status
 
 from .spec import ToolSpec
 
@@ -216,8 +217,10 @@ class ToolAdapter(ABC):
             raw.data = redact_sensitive(raw.data, self.spec.sensitive_fields)
             return raw
         if isinstance(raw, dict):
-            raw_status = {"passed": ObservationStatus.SUCCEEDED.value}.get(
-                raw.get("status"), raw.get("status")
+            raw_status = (
+                normalize_observation_status(raw.get("status"))
+                if raw.get("status") is not None
+                else None
             )
             try:
                 status = ObservationStatus(raw_status) if raw_status is not None else None
@@ -234,7 +237,9 @@ class ToolAdapter(ABC):
             raw_error_present = bool(raw.get("error"))
             terminal_failure = {
                 ObservationStatus.FAILED,
+                ObservationStatus.TIMEOUT,
                 ObservationStatus.UNAVAILABLE,
+                ObservationStatus.NOT_CALCULATED,
                 ObservationStatus.INVALID_INPUT,
                 ObservationStatus.REJECTED,
                 ObservationStatus.CANCELLED,
@@ -406,12 +411,13 @@ class LegacyPythonToolAdapter(ToolAdapter):
             raw_validator(raw)
         if isinstance(raw, dict) and (
             ("success" in raw and type(raw["success"]) is not bool)
-            or (raw.get("success") is True and (
-                raw.get("error") is not None
-                or raw.get("status") in {
-                    "failed", "rejected", "cancelled", "unavailable", "invalid_input"
-                }
-            ))
+                or (raw.get("success") is True and (
+                    raw.get("error") is not None
+                    or raw.get("status") in {
+                        "failed", "timeout", "not_calculated", "rejected",
+                        "cancelled", "unavailable", "invalid_input",
+                    }
+                ))
             or (raw.get("success") is False and raw.get("status") == "succeeded")
         ):
             return ToolResult.error_result(

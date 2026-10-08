@@ -3,118 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from .domain import WorkflowArtifact
+from src.system.scientific_contracts import (
+    ToolResult,
+    WorkflowArtifact,
+)
+from src.system.scientific_status import ObservationStatus, RunOutcome
+
 from .errors import AgentErrorCode, AgentExecutionError
-from .scientific import ObservationStatus, RunOutcome, ToolProvenance
-
-
-@dataclass
-class ToolResult:
-    tool_name: str
-    success: bool
-    message: str
-    data: Any = None
-    formatted: str = ""
-    error: AgentExecutionError | None = None
-    elapsed_ms: int | None = None
-    warnings: list[str] = field(default_factory=list)
-    evidence: list[dict[str, Any]] = field(default_factory=list)
-    artifacts: list[WorkflowArtifact] = field(default_factory=list)
-    quality: dict[str, Any] = field(default_factory=dict)
-    status: ObservationStatus | None = None
-    provenance: ToolProvenance | None = None
-
-    def __post_init__(self) -> None:
-        if self.status is None:
-            self.status = (
-                ObservationStatus.SUCCEEDED
-                if self.success
-                else ObservationStatus.FAILED
-            )
-
-    @classmethod
-    def success_result(
-        cls,
-        tool_name: str,
-        data: Any = None,
-        message: str = "",
-        formatted: str = "",
-        elapsed_ms: int | None = None,
-        warnings: list[str] | None = None,
-        evidence: list[dict[str, Any]] | None = None,
-        artifacts: list[WorkflowArtifact] | None = None,
-        quality: dict[str, Any] | None = None,
-        status: ObservationStatus | None = None,
-        provenance: ToolProvenance | None = None,
-    ) -> "ToolResult":
-        return cls(
-            tool_name=tool_name,
-            success=True,
-            message=message,
-            data=data,
-            formatted=formatted,
-            elapsed_ms=elapsed_ms,
-            warnings=warnings or [],
-            evidence=evidence or [],
-            artifacts=artifacts or [],
-            quality=quality or {},
-            status=status,
-            provenance=provenance,
-        )
-
-    @classmethod
-    def error_result(
-        cls,
-        tool_name: str,
-        code: AgentErrorCode,
-        message: str,
-        details: dict | None = None,
-        elapsed_ms: int | None = None,
-        warnings: list[str] | None = None,
-        evidence: list[dict[str, Any]] | None = None,
-        artifacts: list[WorkflowArtifact] | None = None,
-        quality: dict[str, Any] | None = None,
-        status: ObservationStatus | None = None,
-        provenance: ToolProvenance | None = None,
-    ) -> "ToolResult":
-        return cls(
-            tool_name=tool_name,
-            success=False,
-            message=message,
-            data=None,
-            error=AgentExecutionError(code=code, message=message, details=details),
-            elapsed_ms=elapsed_ms,
-            warnings=warnings or [],
-            evidence=evidence or [],
-            artifacts=artifacts or [],
-            quality=quality or {},
-            status=status,
-            provenance=provenance,
-        )
-
-    def to_legacy_dict(self) -> dict:
-        # ``success`` is the terminal success bit in the public contract.
-        # Partial observations may retain usable data internally, but must not
-        # be serialized as succeeded.
-        public_success = (
-            self.success
-            and self.error is None
-            and self.status is ObservationStatus.SUCCEEDED
-        )
-        return {
-            "success": public_success,
-            "message": self.message,
-            "data": self.data,
-            "formatted": self.formatted,
-            "error": self.error.to_dict() if self.error else None,
-            "elapsed_ms": self.elapsed_ms,
-            "warnings": self.warnings,
-            "evidence": self.evidence,
-            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
-            "quality": self.quality,
-            "status": self.status.value if self.status else None,
-            "provenance": self.provenance.to_dict() if self.provenance else None,
-        }
 
 
 @dataclass

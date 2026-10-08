@@ -212,6 +212,40 @@ def test_admet_endpoint_openapi_request_schema_is_strict_and_explicit():
     assert set(admet_schema["properties"]) == {"smiles", "molecule_id"}
 
 
+def test_admet_route_default_support_does_not_import_api_facade():
+    source = (Path(__file__).parents[1] / "src/web/routes/admet_routes.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.web.routes.api_routes" not in source
+
+
+def test_admet_route_uses_domain_predictor_not_agent_tool():
+    source = (Path(__file__).parents[1] / "src/web/routes/admet_routes.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.agent.tools.admet_predictor" not in source
+    domain_module = importlib.import_module("src.admet.predictor")
+    assert inspect.isclass(domain_module.ADMETPredictor)
+    domain_source = (Path(__file__).parents[1] / "src/admet/predictor.py").read_text(
+        encoding="utf-8"
+    )
+    assert "src.agent" not in domain_source
+
+
+def test_admet_agent_import_path_is_a_compatibility_alias():
+    pytest.importorskip("rdkit")
+    domain_module = importlib.import_module("src.admet.predictor")
+    legacy_module = importlib.import_module("src.agent.tools.admet_predictor")
+    assert legacy_module.ADMETPredictor is domain_module.ADMETPredictor
+
+
+def test_admet_runtime_wiring_does_not_depend_on_agent_compatibility_paths():
+    root = Path(__file__).parents[1]
+    for relative in ("src/web/app.py", "scripts/admet_ai_worker.py"):
+        source = (root / relative).read_text(encoding="utf-8")
+        assert "src.agent.tools.admet_ai_backend" not in source
+
+
 @pytest.mark.parametrize("domain,count", DOMAINS)
 def test_domain_module_owns_operations(domain, count):
     # Deliberately inside the test: a missing module is RED, not collection error.
@@ -255,11 +289,189 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
         expected = {"_support": support}
         if domain in {"docking", "docking_report"}:
             expected["docking_service"] = service
+            if domain == "docking":
+                expected["task_runtime"] = runtime
+        if domain == "molecule_utility":
+            expected = {
+                "invoke_in_threadpool": support._ROUTE_INVOKER,
+                "logger": support._ROUTE_LOGGER,
+            }
+        if domain == "docking_report":
+            expected = {
+                "docking_service": service,
+                "validate_report_base64_payload": support._ROUTE_REPORT_VALIDATOR,
+                "logger": support._ROUTE_LOGGER,
+            }
+        if domain == "activity_model":
+            expected = {
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "tempfile_module": support._ROUTE_TEMPFILE,
+                "logger": support._ROUTE_LOGGER,
+            }
+        if domain == "activity_prediction":
+            expected = {
+                "invoke_activity_with_budget": support._ROUTE_ACTIVITY_INVOKER,
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "logger": support._ROUTE_LOGGER,
+            }
+        if domain == "admet":
+            expected = {
+                "env_getter": support._ROUTE_ENV_GETTER,
+                "executor_factory": support._ROUTE_EXECUTOR_FACTORY,
+            }
+        if domain == "reverse_target":
+            expected = {
+                "invoke_in_threadpool": support._ROUTE_INVOKER,
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "logger": support._ROUTE_LOGGER,
+                "get_pharm3d_candidate_pool_limit": support._ROUTE_PHARM3D_LIMIT,
+                "get_pharm3d_timeout": support._ROUTE_PHARM3D_TIMEOUT,
+                "run_pharm3d_job": support._ROUTE_PHARM3D_RUNNER,
+                "build_pharm3d_fallback": support._ROUTE_PHARM3D_FALLBACK,
+                "pharm3d_candidates_job": support._pharm3d_candidates_job,
+                "pharm3d_refine_job": support._pharm3d_refine_job,
+                "pharm3d_query_job": support._pharm3d_query_job,
+            }
         if domain == "docking":
-            expected["task_runtime"] = runtime
+            expected = {
+                "docking_service": service,
+                "task_runtime": runtime,
+                "invoke_in_threadpool": support._ROUTE_INVOKER,
+                "read_upload_limited": support._ROUTE_UPLOAD_READER,
+                "validate_docking_limits": support._ROUTE_DOCKING_LIMITS,
+                "normalize_warning_strings": support._ROUTE_DOCKING_WARNINGS,
+                "get_int_env": support._ROUTE_DOCKING_INT_ENV,
+                "api_success": support._ROUTE_API_SUCCESS,
+                "logger": support._ROUTE_LOGGER,
+                "tempfile_module": support._ROUTE_TEMPFILE,
+            }
+        if domain in {"molecule_properties", "agent_metrics"}:
+            expected = {"logger": support._ROUTE_LOGGER}
         assert owner is app
         assert kwargs == expected
     assert api_routes(app) == []
+
+
+def test_agent_metrics_route_accepts_explicit_logger(monkeypatch):
+    from src.web.routes.agent_metrics_routes import setup_agent_metrics_routes
+
+    fake_metrics = SimpleNamespace(get_report=lambda: {"controlled": True})
+    fake_module(monkeypatch, "src.agent.metrics", metrics_system=fake_metrics)
+    app = FastAPI()
+    setup_agent_metrics_routes(app, logger=Mock())
+
+    with TestClient(app) as client:
+        response = client.get("/api/agent/metrics")
+
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "report": {"controlled": True}}
+
+
+@pytest.mark.parametrize("wiring", ["explicit", "legacy", "default", "facade"])
+def test_metrics_failure_preserves_envelope_and_logger(monkeypatch, wiring):
+    from src.web.routes import api_routes as support
+    from src.web.routes import agent_metrics_routes as metrics
+
+    report = Mock(side_effect=RuntimeError("controlled metrics failure"))
+    fake_module(monkeypatch, "src.agent.metrics", metrics_system=SimpleNamespace(get_report=report))
+    log = Mock()
+    app = FastAPI()
+    if wiring == "explicit":
+        metrics.setup_agent_metrics_routes(app, logger=log)
+    elif wiring == "legacy":
+        metrics.setup_agent_metrics_routes(app, _support=SimpleNamespace(logger=log))
+    elif wiring == "default":
+        monkeypatch.setattr(metrics, "_LOGGER", log)
+        metrics.setup_agent_metrics_routes(app)
+    else:
+        support.setup_api_routes(app)
+        monkeypatch.setattr(support, "logger", log)
+    with TestClient(app) as client:
+        response = client.get("/api/agent/metrics")
+    assert response.status_code == 200
+    assert response.json() == {"success": False, "error": "controlled metrics failure"}
+    report.assert_called_once_with()
+    log.error.assert_called_once_with("获取指标报表失败: controlled metrics failure")
+
+
+@pytest.mark.parametrize("domain", ["molecule_properties", "agent_metrics"])
+def test_direct_legacy_logger_replacement_after_registration(monkeypatch, domain):
+    import importlib
+
+    module = importlib.import_module(f"src.web.routes.{domain}_routes")
+    report = Mock(side_effect=RuntimeError("controlled metrics failure"))
+    fake_module(monkeypatch, "src.agent.metrics", metrics_system=SimpleNamespace(get_report=report))
+    original, replacement = Mock(), Mock()
+    support = SimpleNamespace(logger=original)
+    app = FastAPI()
+    getattr(module, f"setup_{domain}_routes")(app, _support=support)
+    support.logger = replacement
+    with TestClient(app) as client:
+        response = (client.post("/api/molecule/properties", json={})
+                    if domain == "molecule_properties" else client.get("/api/agent/metrics"))
+    assert response.status_code == 200 and response.json()["success"] is False
+    replacement.error.assert_called_once()
+    original.error.assert_not_called()
+
+
+@pytest.mark.parametrize("domain", ["docking", "reverse_target"])
+def test_scientific_routes_legacy_logger_is_resolved_after_registration(monkeypatch, domain):
+    from src.web.routes import api_routes as support
+
+    module = importlib.import_module(f"src.web.routes.{domain}_routes")
+    original, replacement = Mock(), Mock()
+    monkeypatch.setattr(support, "logger", original)
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def session(request, call_next):
+        request.scope["agent_session_id"] = "test-session"
+        return await call_next(request)
+
+    fail = Mock(side_effect=RuntimeError("controlled failure"))
+    if domain == "docking":
+        module.setup_docking_routes(
+            app, docking_service=SimpleNamespace(verify_environment=fail), _support=support,
+        )
+        path = "/api/docking/status"
+    else:
+        fake_module(monkeypatch, "src.reverse_target.predictor", get_predictor=fail)
+        module.setup_reverse_target_routes(app, _support=support)
+        path = "/api/reverse_target/stats"
+    monkeypatch.setattr(support, "logger", replacement)
+    with TestClient(app) as client:
+        response = client.get(path)
+    assert response.status_code == (200 if domain == "docking" else 500)
+    fail.assert_called_once()
+    original.assert_not_called()
+    assert original.method_calls == []
+    assert len(replacement.method_calls) == 1
+
+
+def test_reverse_legacy_job_identity_and_runner_are_resolved_after_registration(monkeypatch):
+    from src.web.routes import api_routes as support, reverse_target_routes
+
+    app = FastAPI()
+    reverse_target_routes.setup_reverse_target_routes(app, _support=support)
+    replacement_target = Mock()
+    seen = []
+
+    async def run(target, *args, timeout_seconds=None):
+        seen.append((target, args, timeout_seconds))
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(support, "_pharm3d_query_job", replacement_target)
+    monkeypatch.setattr(support, "_run_pharm3d_job", run)
+    monkeypatch.setattr(support, "_get_pharm3d_timeout", lambda _: 7.0)
+    from starlette.requests import Request
+    route = next(r for r in app.routes if r.path == "/api/reverse_target/pharmacophore")
+    with pytest.raises(HTTPException) as error:
+        asyncio.run(route.endpoint(
+            request=Request({"type": "http", "agent_session_id": "test-session"}), smiles="CC",
+        ))
+    assert error.value.status_code == 504
+    assert seen == [(replacement_target, ("CC",), 7.0)]
+    replacement_target.assert_not_called()
 
 
 def fake_module(monkeypatch, name, **attributes):
@@ -352,7 +564,7 @@ def controlled_app(monkeypatch, tmp_path):
                 get_molecule_pharmacophore=lambda smiles: {"success": False, "error": "controlled unavailable"})
     from src.web.routes import activity_prediction_routes
 
-    async def controlled_activity_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+    async def controlled_activity_invoke(*, operation, isolated_payload, isolated_target=None):
         return {"success": False, "error": "controlled unavailable"}
 
     monkeypatch.setattr(
@@ -704,7 +916,7 @@ def test_activity_routes_use_isolated_budget_entry_and_keep_batch_order(monkeypa
     from src.web.routes import activity_prediction_routes
     calls = []
 
-    async def controlled_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+    async def controlled_invoke(*, operation, isolated_payload, isolated_target=None):
         calls.append((operation, isolated_payload))
         return {"success": False, "error": "controlled unavailable"}
 
@@ -954,6 +1166,40 @@ def test_docking_report_failure_returns_stable_error_code_without_internal_detai
     assert body["message"] == "生成对接报告失败"
     assert body["details"] is None
     assert secret_detail not in response.text
+
+
+def test_docking_report_route_accepts_explicit_report_dependencies(tmp_path):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.web.routes.docking_report_routes import setup_docking_report_routes
+
+    job = tmp_path / "docking_job"
+    job.mkdir()
+    (job / "result.pdbqt").write_text("REMARK fixture\n", encoding="utf-8")
+    seed_owned_docking_history(tmp_path, "job")
+    service = SimpleNamespace(
+        work_dir=str(tmp_path),
+        parse_vina_results=lambda _path: [],
+    )
+    validator = Mock(return_value=(None, []))
+    app = FastAPI()
+    @app.middleware("http")
+    async def _test_browser_session(request, call_next):
+        request.scope.setdefault("agent_session_id", "test-session")
+        return await call_next(request)
+
+    setup_docking_report_routes(
+        app,
+        docking_service=service,
+        validate_report_base64_payload=validator,
+        logger=Mock(),
+    )
+
+    with TestClient(app) as client:
+        response = client.post("/api/docking/report/job", json={"format": "md"})
+
+    assert response.status_code == 200
+    validator.assert_called_once_with(None, [])
 
 
 def test_pose_sdf_does_not_fallback_to_all_models_for_out_of_range_pose(tmp_path):

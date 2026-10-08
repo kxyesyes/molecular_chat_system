@@ -4,6 +4,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import pytest
 from pydantic import BaseModel
 
 from src.agent.contracts import AgentErrorCode
@@ -89,6 +90,27 @@ def test_adapter_rejects_invalid_output_schema():
             return {"success": True, "message": "ok", "data": {"wrong": 1}}
 
     result = LegacyPythonToolAdapter(make_spec(), InvalidOutputTool()).execute(
+        {"query": "CCO"}
+    )
+
+    assert result.success is False
+    assert result.error.code == AgentErrorCode.INVALID_OUTPUT
+
+
+@pytest.mark.parametrize("status", ["timeout", "not_calculated"])
+def test_adapter_rejects_success_flag_with_non_success_status(status):
+    class ContradictoryTool:
+        name = "legacy_value"
+
+        def execute(self, query):
+            return {
+                "success": True,
+                "status": status,
+                "message": "contradictory fixture",
+                "data": {"value": 3},
+            }
+
+    result = LegacyPythonToolAdapter(make_spec(), ContradictoryTool()).execute(
         {"query": "CCO"}
     )
 

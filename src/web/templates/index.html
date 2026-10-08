@@ -1041,7 +1041,6 @@
       font-size: 17px;
       font-weight: 500;
       color: #222b3f;
-      /* 与 RAG 和智能工具保持一致 */
     }
 
     @media (max-width: 1180px) {
@@ -1967,7 +1966,11 @@
     }
 
     .llm-settings-panel {
-      width: min(520px, 100%);
+      width: min(470px, 100%);
+      min-height: 560px;
+      max-height: calc(100vh - 48px);
+      display: flex;
+      flex-direction: column;
       background: #ffffff;
       border-radius: 18px;
       box-shadow: 0 30px 80px rgba(15, 23, 42, 0.24);
@@ -2010,9 +2013,12 @@
     }
 
     .llm-settings-body {
+      flex: 1 1 auto;
+      min-height: 0;
       padding: 22px 24px 24px;
       display: grid;
       gap: 14px;
+      overflow-y: auto;
     }
 
     .llm-settings-field {
@@ -2056,6 +2062,7 @@
       display: flex;
       gap: 10px;
       justify-content: flex-end;
+      margin-top: auto;
       padding-top: 6px;
     }
 
@@ -2088,6 +2095,11 @@
     }
 
     @media (max-width: 640px) {
+      .llm-settings-panel {
+        min-height: min(560px, calc(100vh - 32px));
+        max-height: calc(100vh - 32px);
+      }
+
       .llm-settings-grid {
         grid-template-columns: 1fr;
       }
@@ -2322,10 +2334,6 @@
             <div class="icon"></div>
             <span>RAG检索</span>
           </div>
-          <div class="item">
-            <div class="icon"></div>
-            <span>智能工具</span>
-          </div>
         </div>
         <div class="more">
           <img src="/static/images/r11.png" alt="" />
@@ -2514,18 +2522,22 @@
   <script src="/static/js/home/config.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/state.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/theme.js"></script>
+  <script src="/static/js/shared/status.js?v=20261008-status-v1"></script>
   <script src="/static/js/shared/safe_render.js?v=20261007-url-policy-v2"></script>
   <script src="/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5"></script>
   <script src="/static/js/home/scientific_references.js?v=20260924-reference-v1"></script>
   <script src="/static/js/home/evidence_report.js?v=20260925-evidence-report-v1"></script>
   <script src="/static/js/home/formatters.js?v=20261007-chat-url-policy-v1"></script>
-  <script src="/static/js/home/molecule_renderer.js"></script>
   <script src="/static/js/home/chat_renderer.js"></script>
+  <script src="/static/js/home/connection.js?v=20261008-home-connection-v1"></script>
+  <script src="/static/js/home/protocol.js?v=20261008-home-protocol-v1"></script>
+  <script src="/static/js/home/task_state.js?v=20261008-home-task-state-v1"></script>
+  <script src="/static/js/home/task_status.js?v=20261008-home-task-status-v1"></script>
+  <script src="/static/js/home/task_panel.js?v=20261008-home-task-panel-v1"></script>
   <script src="/static/js/home/advanced_options.js?v=20261001-explicit-count-v1"></script>
-  <script src="/static/js/home/ws_client.js"></script>
   <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20260925-terminal-labels-v1 -->
-  <script src="/static/js/home/main.js?v=20261007-settings-clean-v9"></script>
+  <script src="/static/js/home/main.js?v=20261007-legacy-payload-v1"></script>
 </body>
 
 </html>

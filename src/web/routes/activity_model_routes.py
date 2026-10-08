@@ -1,11 +1,50 @@
 """Activity model route registration."""
+import logging
+import os
 from typing import Dict, Any
 from fastapi import UploadFile, File, Form, Body, HTTPException, Request
 from src.web.request_auth import require_browser_session
 
+from .route_compat import lazy_dependency
 
-def setup_activity_model_routes(app, *, _support):
-    """Register the original endpoints with dynamically resolved compatibility support."""
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def setup_activity_model_routes(
+    app,
+    *,
+    read_upload_limited=None,
+    tempfile_module=None,
+    logger=None,
+    _support=None,
+):
+    """Register activity-model endpoints with explicit runtime dependencies.
+
+    ``_support`` remains a compatibility-only fallback for older direct callers;
+    application registration passes narrow upload, temporary-file and logging
+    dependencies explicitly.
+    """
+    get_upload_reader = lazy_dependency(
+        read_upload_limited,
+        _support,
+        "_read_upload_limited",
+        label="activity model upload reader",
+    )
+    get_tempfile_module = lazy_dependency(
+        tempfile_module,
+        _support,
+        "tempfile",
+        label="activity model tempfile",
+    )
+    get_logger = lazy_dependency(
+        logger,
+        _support,
+        "logger",
+        label="activity model logger",
+        default=_LOGGER,
+    )
+
     @app.post("/api/activity/train")
     async def start_activity_training(
         request: Request,
@@ -50,13 +89,13 @@ def setup_activity_model_routes(app, *, _support):
                 classification_threshold is not None or classification_direction is not None
             ):
                 raise HTTPException(status_code=400, detail="分类阈值仅适用于 classification")
-            content = await _support._read_upload_limited(file, "activity training dataset")
+            content = await get_upload_reader()(file, "activity training dataset")
 
             # 1. 保存上传的数据集
             from src.activity.trainer import submit_training_job
 
-            ext = _support.os.path.splitext(file.filename)[1] or ".csv"
-            temp_file = _support.tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            ext = os.path.splitext(file.filename)[1] or ".csv"
+            temp_file = get_tempfile_module().NamedTemporaryFile(delete=False, suffix=ext)
             temp_path = temp_file.name
             try:
                 temp_file.write(content)
@@ -92,7 +131,7 @@ def setup_activity_model_routes(app, *, _support):
         except HTTPException:
             raise
         except Exception as e:
-            _support.logger.error(f"启动训练失败: {e}")
+            get_logger().error(f"启动训练失败: {e}")
             raise HTTPException(status_code=500, detail="活性模型训练任务启动失败，请稍后重试")
         finally:
             if temp_file is not None:
@@ -102,8 +141,8 @@ def setup_activity_model_routes(app, *, _support):
                     pass
             if temp_path and not retain_temp_file:
                 try:
-                    if _support.os.path.exists(temp_path):
-                        _support.os.unlink(temp_path)
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
                 except Exception:
                     pass
 
@@ -191,7 +230,7 @@ def setup_activity_model_routes(app, *, _support):
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("切换活性模型失败")
+            get_logger().exception("切换活性模型失败")
             raise HTTPException(status_code=500, detail="切换活性模型失败")
 
     @app.delete("/api/activity/models/{model_id}")
@@ -213,5 +252,5 @@ def setup_activity_model_routes(app, *, _support):
         except ValueError:
             raise HTTPException(status_code=404, detail="模型未注册或记录无效")
         except Exception:
-            _support.logger.exception("删除活性模型失败")
+            get_logger().exception("删除活性模型失败")
             raise HTTPException(status_code=500, detail="删除活性模型失败")

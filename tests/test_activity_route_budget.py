@@ -8,7 +8,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from src.web.routes import activity_prediction_routes as routes, api_routes
+from src.web.routes import activity_prediction_routes as routes
 
 
 def _success_activity_child(smiles: str, target: str | None):
@@ -32,7 +32,6 @@ def admission(monkeypatch):
 def test_success_releases_capacity(admission):
     async def exercise():
         result = await routes._invoke_activity_with_budget(
-            api_routes,
             operation="test",
             isolated_payload=("CC", "PDE5A"),
             isolated_target=_success_activity_child,
@@ -51,7 +50,6 @@ def test_capacity_is_reserved_until_process_is_stopped(admission, monkeypatch, t
     async def exercise():
         task = asyncio.create_task(
             routes._invoke_activity_with_budget(
-                api_routes,
                 operation="isolated-test",
                 isolated_payload=(str(marker), "PDE5A"),
                 isolated_target=_slow_activity_child,
@@ -75,7 +73,6 @@ def test_cancel_terminates_child_and_releases_capacity(admission, monkeypatch, t
     async def exercise():
         task = asyncio.create_task(
             routes._invoke_activity_with_budget(
-                api_routes,
                 operation="isolated-test",
                 isolated_payload=(str(marker), "PDE5A"),
                 isolated_target=_slow_activity_child,
@@ -114,7 +111,6 @@ def test_hung_process_start_consumes_activity_budget(admission, monkeypatch):
         with pytest.raises(HTTPException) as error:
             await asyncio.wait_for(
                 routes._invoke_activity_with_budget(
-                    api_routes,
                     operation="isolated-test",
                     isolated_payload=("CC", "PDE5A"),
                     isolated_target=_success_activity_child,

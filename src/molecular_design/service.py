@@ -10,7 +10,7 @@ from . import ai
 from .chemistry import calculate_properties, detect_sites, substitute_fragment
 from .fragments import FragmentRepository
 from .storage import DesignStorage
-from src.web.model_lifecycle import model_request
+from src.system.model_lifecycle import model_request
 
 
 class MolecularDesignService:

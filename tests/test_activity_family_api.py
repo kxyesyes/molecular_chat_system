@@ -26,7 +26,7 @@ def client(monkeypatch, tmp_path):
     )
     api_routes.setup_api_routes(app)
 
-    async def invoke_activity_in_process(_support, *, operation, isolated_payload, **kwargs):
+    async def invoke_activity_in_process(*, operation, isolated_payload, **kwargs):
         """Keep API unit contracts in-process while isolation has its own tests."""
         from src.activity import prediction_service
 

@@ -17,7 +17,7 @@ def in_process_activity_contract(monkeypatch):
     from src.activity import prediction_service
     from src.web.routes import activity_prediction_routes, api_routes
 
-    async def invoke(_support, *, operation, isolated_payload, **kwargs):
+    async def invoke(*, operation, isolated_payload, **kwargs):
         return await api_routes._invoke_in_threadpool(
             prediction_service.predict_activity,
             isolated_payload[0], target=isolated_payload[1],

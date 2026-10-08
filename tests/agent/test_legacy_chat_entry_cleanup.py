@@ -72,8 +72,8 @@ def _worker(case):
             asyncio.run(model.close())
 
     with ExitStack() as patches, ExitStack() as resources:
-        patches.enter_context(patch("src.web.models.OllamaModel", Model))
-        patches.enter_context(patch("src.agent.openai_compatible_model.OpenAICompatibleModel", Model))
+        patches.enter_context(patch("src.system.model_clients.OllamaModel", Model))
+        patches.enter_context(patch("src.system.model_clients.OpenAICompatibleModel", Model))
         patches.enter_context(patch("src.agent.tools.get_all_tools", return_value=[]))
         patches.enter_context(patch("src.agent.persistence.SQLiteAgentStateStore", return_value=None))
         for name, setup in (("src.web.routes.design_routes", "setup_design_routes"),

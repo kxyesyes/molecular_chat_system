@@ -17,7 +17,7 @@
   let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
-  let agentTaskRunActive = false;
+  let agentTaskState = window.HomeTaskState.create();
   let protocolDesyncedSocket = null;
   let decisionMode = false;
   let decisionAwaitingReady = false;
@@ -26,8 +26,7 @@
   let decisionAbandonAwait = null;
   let decisionControls = null;
   const decisionSeenTurns = new Set();
-  const decisionStatuses = {completed: "已完成", waiting_for_input: "等待补充输入",
-    partial: "部分完成", failed: "失败", rejected: "已拒绝", cancelled: "已取消"};
+  const decisionStatuses = window.MedChatStatus.workflowLabels;
   const maxWebSocketMessageLength = 256 * 1024;
   const moleculeCandidateLifecycle =
     window.HomeMoleculeCandidates.createLifecycle({
@@ -35,7 +34,6 @@
       maxEventsPerRun: 8,
       maxCandidates: 32,
     });
-  let referenceStatusElement = null;
   const evidenceReportLifecycle = window.HomeEvidenceReport?.createLifecycle();
   const evidenceReportViews = new WeakMap(); // live DOM lifetime only; never storage/restore
   let tabStorage;
@@ -50,15 +48,7 @@
       if (!response.ok || envelope.success !== true) throw new Error("Reference unavailable");
       return envelope.data;
     },
-    onStatus: message => {
-      if (referenceStatusElement) referenceStatusElement.textContent = message;
-      HomeChatRenderer.showNotification(message, "warning");
-    },
-    onChange: hint => {
-      if (referenceStatusElement) referenceStatusElement.textContent = hint.selection
-        ? `已选候选：${hint.selection.candidate_id}`
-        : hint.reference ? "候选集合已确认，可按显示序号继续计算。" : "未选择科研引用";
-    },
+    onStatus: message => HomeChatRenderer.showNotification(message, "warning"),
   });
 
   function displayCandidateCollections(element, payloads) {
@@ -79,7 +69,6 @@
     input: null,
     sendBtn: null,
     ragToggle: null,
-    toolsToggle: null,
     themeButtons: null,
     connectionStatus: null,
     chatContainer: null,
@@ -302,9 +291,6 @@
     elements.ragToggle = document.querySelector(
       ".tool .chose .item:nth-child(1) .icon"
     );
-    elements.toolsToggle = document.querySelector(
-      ".tool .chose .item:nth-child(2) .icon"
-    );
     elements.themeButtons = document.querySelectorAll(".theme-option");
     elements.connectionStatus = document.getElementById("connectionStatus");
     elements.modelSelect = document.getElementById("modelSelect");
@@ -332,20 +318,6 @@
 
     // 创建聊天容器（初始隐藏）
     createChatContainer();
-    if (scientificReferences && elements.input?.parentNode) {
-      const controls = document.createElement("div");
-      controls.className = "scientific-reference-controls";
-      referenceStatusElement = document.createElement("span");
-      referenceStatusElement.setAttribute("role", "status");
-      referenceStatusElement.textContent = "未选择科研引用";
-      const clearReference = document.createElement("button");
-      clearReference.type = "button";
-      clearReference.textContent = "清除科研选择";
-      clearReference.addEventListener("click", () => scientificReferences.clear());
-      controls.appendChild(referenceStatusElement);
-      controls.appendChild(clearReference);
-      elements.input.parentNode.appendChild(controls);
-    }
     HomeTheme.init();
 
     // 设置初始连接状态
@@ -423,22 +395,15 @@
       previousSocket.close();
     }
 
-    try {
-      const socket = new WebSocket(wsUrl);
-      ws = socket;
-
-      // 连接超时处理
-      const connectionTimeout = setTimeout(() => {
+    const socket = window.HomeConnection.create({
+      url: wsUrl,
+      timeoutMs: HomeConfig.websocket.connectTimeoutMs,
+      onTimeout: currentSocket => {
+        if (currentSocket === ws) console.log("WebSocket连接超时");
+      },
+      onOpen: currentSocket => {
+        const socket = currentSocket;
         if (socket !== ws) return;
-        if (socket.readyState === WebSocket.CONNECTING) {
-          console.log("WebSocket连接超时");
-          socket.close();
-        }
-      }, 10000); // 10秒超时
-
-      socket.onopen = () => {
-        if (socket !== ws) return;
-        clearTimeout(connectionTimeout);
         console.log("✅ WebSocket连接成功");
         console.log(`WebSocket readyState: ${socket.readyState}`);
 
@@ -449,9 +414,10 @@
 
         // 发送连接确认消息
         sendTestMessage(socket);
-      };
+      },
 
-      socket.onmessage = (event) => {
+      onMessage: (event, currentSocket) => {
+        const socket = currentSocket;
         if (socket !== ws) return;
         console.log("📨 收到WebSocket消息:", {
           timestamp: new Date().toISOString(),
@@ -465,12 +431,12 @@
           console.error("WebSocket message handling failed");
           showErrorMessage("消息处理失败，连接已关闭。");
         }
-      };
+      },
 
-      socket.onerror = (error) => {
+      onError: (error, currentSocket) => {
+        const socket = currentSocket;
         if (socket !== ws) return;
         clearDecisionConnection();
-        clearTimeout(connectionTimeout);
         if (protocolDesyncedSocket !== socket) {
           moleculeCandidateLifecycle.clear();
           if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
@@ -478,12 +444,12 @@
         console.error("WebSocket connection error");
         HomeChatRenderer.updateConnectionStatus("error");
         HomeChatRenderer.showNotification("WebSocket连接出错", "error");
-      };
+      },
 
-      socket.onclose = (event) => {
+      onClose: (event, currentSocket) => {
+        const socket = currentSocket;
         if (socket !== ws) return;
         clearDecisionConnection();
-        clearTimeout(connectionTimeout);
         moleculeCandidateLifecycle.clear();
         protocolDesyncedSocket = null;
         if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
@@ -521,8 +487,8 @@
           console.log("❌ 达到最大重连次数，停止重连");
           HomeChatRenderer.showNotification("连接失败，请刷新页面重试", "error");
         }
-      };
-    } catch (error) {
+      },
+      onCreateError: error => {
       moleculeCandidateLifecycle.clear();
       if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
       console.error("❌ 创建WebSocket连接失败:", {
@@ -535,7 +501,9 @@
         `连接创建失败: ${error.message}`,
         "error"
       );
-    }
+      },
+    });
+    ws = socket;
   }
 
   function closeProtocolSocket(socket, code, reason) {
@@ -570,41 +538,20 @@
   // 增强的消息处理函数
   function handleWebSocketMessage(data, socket = ws) {
     if (socket !== ws) return;
-    // 数据有效性检查
-    if (!data || typeof data !== "string") {
-      closeProtocolSocket(socket, 1002, "invalid message data");
-      console.warn("⚠️ 收到无效消息数据");
-      return;
-    }
-
-    if (data.length > maxWebSocketMessageLength) {
-      closeProtocolSocket(socket, 1009, "message too large");
-      console.warn("Ignored oversized WebSocket message");
-      showErrorMessage("收到的消息过大，已安全忽略");
-      return;
-    }
-
-    if (data.trim() === "") {
-      closeProtocolSocket(socket, 1002, "empty message");
-      console.warn("⚠️ 收到空消息");
+    const parsed = window.HomeProtocol.parseMessage(data, maxWebSocketMessageLength);
+    if (!parsed.ok) {
+      closeProtocolSocket(socket, parsed.code, parsed.reason);
+      if (parsed.code === 1009) {
+        console.warn("Ignored oversized WebSocket message");
+      } else {
+        console.warn(parsed.reason);
+      }
+      showErrorMessage(parsed.userMessage);
       return;
     }
 
     try {
-      const message = JSON.parse(data);
-
-      // 消息格式验证
-      if (!message || typeof message !== "object") {
-        closeProtocolSocket(socket, 1002, "invalid message shape");
-        console.warn("Invalid WebSocket message shape");
-        return;
-      }
-
-      if (!message.type) {
-        closeProtocolSocket(socket, 1002, "missing message type");
-        console.warn("Missing WebSocket message type");
-        return;
-      }
+      const message = parsed.message;
 
       if (decisionAwaitingReady && !["connection_ready", "pong"].includes(message.type)) return;
       if (message.type === "connection_ready") configureDecisionMode(message);
@@ -787,12 +734,6 @@
     if (elements.ragToggle) {
       elements.ragToggle.parentElement.addEventListener("click", toggleRAG);
       console.log("✅ 绑定RAG开关事件");
-    }
-
-    // 工具开关
-    if (elements.toolsToggle) {
-      elements.toolsToggle.parentElement.addEventListener("click", toggleTools);
-      console.log("✅ 绑定工具开关事件");
     }
 
     // 快速操作按钮
@@ -1407,31 +1348,6 @@
     }, 3000);
   }
 
-  // 添加系统消息（仅在聊天模式下）
-  function addSystemMessage(message, isError = false) {
-    // 只在聊天模式下显示系统消息
-    if (!chatMode || !elements.chatContainer) {
-      return;
-    }
-
-    const msgDiv = document.createElement("div");
-    msgDiv.className = "chat-message system-message";
-    msgDiv.style.cssText = `
-      margin: 15px 0;
-      padding: 12px 18px;
-      background: ${isError ? "#fee2e2" : "#f0f9ff"};
-      border-left: 4px solid ${isError ? "#dc2626" : "#0284c7"};
-      border-radius: 8px;
-      font-size: 14px;
-      color: ${isError ? "#991b1b" : "#1e40af"};
-      text-align: center;
-    `;
-    msgDiv.textContent = `ℹ️ ${message}`;
-
-    elements.chatContainer.appendChild(msgDiv);
-    elements.chatContainer.scrollTop = elements.chatContainer.scrollHeight;
-  }
-
   // 修复后的消息发送函数
   function sendMessage() {
     if (decisionAwaitingReady) return; // no legacy fallback before the new server announcement
@@ -1500,7 +1416,6 @@
         temperature: advancedConfig.temperature, // 生成温度
         mol_count: advancedConfig.molCount, // 分子生成数量
         timestamp: Date.now(),
-        client_id: "web_client",
         ...(scientificReferences?.outgoing() || {}),
       };
 
@@ -2052,26 +1967,8 @@
 
   function createAgentTaskPanel() {
     if (!elements.chatContainer) return null;
-
-    let panel = elements.chatContainer.querySelector(".agent-task-panel");
-    if (panel) {
-      elements.agentTaskPanel = panel;
-      return panel;
-    }
-
-    panel = document.createElement("div");
-    panel.className = "agent-task-panel";
-    panel.innerHTML = `
-      <div class="agent-task-header">
-        <div>
-          <div class="agent-task-kicker">AGENT WORKFLOW</div>
-          <div class="agent-task-title">智能任务执行</div>
-        </div>
-        <div class="agent-task-progress">准备中</div>
-      </div>
-      <div class="agent-task-list"></div>
-    `;
-    elements.chatContainer.appendChild(panel);
+    const panel = window.HomeTaskPanel.create(elements.chatContainer, document);
+    if (!panel) return null;
     elements.agentTaskPanel = panel;
     return panel;
   }
@@ -2080,124 +1977,53 @@
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
-    agentTaskRunActive = true;
-    panel.classList.add("is-active");
-    const progress = panel.querySelector(".agent-task-progress");
-    const list = panel.querySelector(".agent-task-list");
-    if (progress) progress.textContent = "执行中";
-    if (list) list.innerHTML = "";
+    agentTaskState = window.HomeTaskState.reset(agentTaskState);
+    window.HomeTaskPanel.reset(panel);
   }
 
   function resolveAgentEventPresentation(event) {
-    const eventType = event.event || event.type || "agent_event";
-    const percent =
-      typeof event.progress === "number"
-        ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
-        : null;
-    const terminalLabels = {
-      task_completed: "已完成",
-      task_partial: "部分完成",
-      task_failed: "失败",
-      task_rejected: "已拒绝",
-      task_cancelled: "已取消",
-    };
-    const progressText =
-      Object.prototype.hasOwnProperty.call(terminalLabels, eventType)
-        ? terminalLabels[eventType]
-        : percent !== null
-        ? `${percent}%`
-        : "执行中";
-    const terminalAgentEvents = new Set([
-      "task_completed",
-      "task_failed",
-      "task_partial",
-      "task_rejected",
-      "task_cancelled",
-    ]);
+    const presentation = window.HomeTaskStatus.resolve(event);
     return {
-      eventType,
-      itemClass: getAgentEventClass(eventType),
-      progressText,
-      terminal: terminalAgentEvents.has(eventType),
+      ...presentation,
+      itemClass: getAgentEventClass(presentation.eventType),
     };
   }
 
   function handleAgentEvent(event) {
     const presentation = resolveAgentEventPresentation(event);
     const eventType = presentation.eventType;
-    if (!agentTaskRunActive) {
+    if (!agentTaskState.active) {
       resetAgentTaskPanel();
     }
 
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
-    panel.classList.add("is-active");
-    const progress = panel.querySelector(".agent-task-progress");
-    const list = panel.querySelector(".agent-task-list");
-    if (!list) return;
-
     const toolName = event.tool_name || event.tool || "";
     const message = event.message || getAgentEventLabel(eventType, toolName);
-    const item = document.createElement("div");
-    item.className = `agent-task-item ${presentation.itemClass}`;
-    item.innerHTML = `
-      <span class="agent-task-dot"></span>
-      <div class="agent-task-copy">
-        <strong>${escapeHtml(getAgentEventLabel(eventType, toolName))}</strong>
-        <span>${escapeHtml(message)}</span>
-      </div>
-    `;
-    list.appendChild(item);
+    const rendered = window.HomeTaskPanel.appendEvent(panel, {
+      label: getAgentEventLabel(eventType, toolName),
+      message,
+      itemClass: presentation.itemClass,
+      progressText: presentation.progressText,
+    }, document);
+    if (!rendered) return;
 
-    if (progress) progress.textContent = presentation.progressText;
-
-    if (presentation.terminal) {
-      agentTaskRunActive = false;
-    }
+    agentTaskState = window.HomeTaskState.record(agentTaskState, presentation);
 
     HomeChatRenderer.scrollToBottom();
   }
 
   function getAgentEventLabel(type, toolName) {
-    const toolText = toolName ? formatToolName(toolName) : "";
-    const labels = {
-      planning_started: "任务规划",
-      planning_completed: "规划完成",
-      task_started: "任务开始",
-      task_completed: "任务完成",
-      task_failed: "任务失败",
-      task_partial: "部分完成",
-      task_rejected: "已拒绝",
-      task_cancelled: "已取消",
-      tool_started: toolText ? `调用 ${toolText}` : "工具调用",
-      tool_completed: toolText ? `${toolText} 完成` : "工具完成",
-      tool_failed: toolText ? `${toolText} 失败` : "工具失败",
-      validation_warning: "结果校验提醒",
-    };
-    return labels[type] || "Agent 事件";
+    return window.HomeTaskStatus.label(type, toolName);
   }
 
   function getAgentEventClass(type) {
-    if (type && type.includes("failed")) return "is-error";
-    if (type === "validation_warning" || type === "task_partial") {
-      return "is-warning";
-    }
-    if (type && type.includes("completed")) return "is-complete";
-    return "is-running";
+    return window.HomeTaskStatus.className(type);
   }
 
   function formatToolName(toolName) {
-    const names = {
-      property_calculator: "属性计算",
-      admet_predictor: "ADMET预测",
-      activity_predictor: "活性预测",
-      reverse_target_predictor: "反向寻靶",
-      target_database_search: "靶点库检索",
-      llm_molecular_generator: "分子生成",
-      molecular_docking: "分子对接",
-    };
-    return names[toolName] || toolName;
+    return window.HomeTaskStatus.formatToolName(toolName);
   }
 
   function escapeHtml(value) {
@@ -2336,17 +2162,6 @@
     console.log("🔄 RAG状态切换:", ragEnabled);
   }
 
-  // 切换工具状态
-  function toggleTools() {
-    toolsEnabled = !toolsEnabled;
-    updateToggleStates();
-    HomeChatRenderer.showNotification(
-      `智能工具已${toolsEnabled ? "启用" : "禁用"}`,
-      "info"
-    );
-    console.log("🔄 工具状态切换:", toolsEnabled);
-  }
-
   // 更新开关状态显示
   function updateToggleStates() {
     if (elements.ragToggle) {
@@ -2355,11 +2170,6 @@
         : "#cbd5e0";
     }
 
-    if (elements.toolsToggle) {
-      elements.toolsToggle.style.backgroundColor = toolsEnabled
-        ? "#667eea"
-        : "#cbd5e0";
-    }
   }
 
   // 快速操作处理
@@ -3028,57 +2838,6 @@
     }
   }
 
-  // 显示通知 - 美化版
-  function showNotification(message, type = "info") {
-    const notification = document.createElement("div");
-    notification.className = `notification notification-${type}`;
-
-    const colors = {
-      info: "linear-gradient(135deg, #667eea 0%, #764ba2 100%)",
-      success: "linear-gradient(135deg, #0fb981 0%, #07c983 100%)",
-      warning: "linear-gradient(135deg, #f59e0b 0%, #fbbf24 100%)",
-      error: "linear-gradient(135deg, #ef4444 0%, #f87171 100%)",
-    };
-
-    notification.style.cssText = `
-            position: fixed;
-            top: 80px;
-            right: 20px;
-            padding: 16px 24px;
-            border-radius: 12px;
-            color: white;
-            font-size: 14px;
-            font-weight: 500;
-            z-index: 10000;
-            animation: slideInRight 0.3s ease-out;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-            background: ${colors[type] || colors.info};
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        `;
-
-    const icons = {
-      info: "ℹ️",
-      success: "✅",
-      warning: "⚠️",
-      error: "❌",
-    };
-
-    const iconSpan = document.createElement("span");
-    iconSpan.textContent = icons[type] || icons.info;
-    const messageSpan = document.createElement("span");
-    messageSpan.textContent = message;
-    notification.append(iconSpan, messageSpan);
-    document.body.appendChild(notification);
-
-    // 3秒后自动移除
-    setTimeout(() => {
-      notification.style.animation = "slideOutRight 0.3s ease-out";
-      setTimeout(() => notification.remove(), 300);
-    }, 3000);
-  }
-
   // 更新连接状态
   function updateConnectionStatus(status) {
     if (!elements.connectionStatus) return;
@@ -3377,7 +3136,7 @@
             <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🔬</div>
             <div>
               <h3 style="margin: 0; color: #2d3748; font-size: 20px;">逆合成分析结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">IBM RXN for Chemistry</p>
+              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">反应路线分析</p>
             </div>
           </div>
       `;
@@ -3464,7 +3223,7 @@
             <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #ec4899 0%, #be185d 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">🧪</div>
             <div>
               <h3 style="margin: 0; color: #2d3748; font-size: 20px;">反应预测结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">IBM RXN for Chemistry</p>
+              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">反应预测</p>
             </div>
           </div>
       `;
@@ -3551,7 +3310,7 @@
             <div style="width: 48px; height: 48px; background: linear-gradient(135deg, #10b981 0%, #059669 100%); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 24px;">📚</div>
             <div>
               <h3 style="margin: 0; color: #2d3748; font-size: 20px;">文献数据搜索结果</h3>
-              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">IBM RXN for Chemistry数据库</p>
+              <p style="margin: 4px 0 0 0; color: #718096; font-size: 14px;">文献检索结果</p>
             </div>
           </div>
       `;

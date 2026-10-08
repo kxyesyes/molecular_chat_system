@@ -1405,13 +1405,6 @@ class ChatHandler:
                 'admet_predictor - ADMET预测'
             ]
         
-        # 合成类任务
-        elif any(kw in user_message_lower for kw in ['合成', '逆合成', '合成路线', 'synthesis', 'retrosynthesis']):
-            intent['intent_type'] = '合成规划'
-            intent['task_description'] = '规划分子的合成路线'
-            intent['rag_usage'] = '提供合成策略参考'
-            intent['suggested_tools'] = ['rxn_chemistry_agent - 反应预测与逆合成']
-        
         # 对接类任务
         elif any(kw in user_message_lower for kw in ['对接', '结合', '靶点', 'docking', 'binding', 'target']):
             intent['intent_type'] = '分子对接'

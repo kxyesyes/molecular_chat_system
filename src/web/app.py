@@ -23,9 +23,11 @@ from .user_llm_config import (
     load_user_llm_config, save_user_llm_config, user_llm_config_path,
     user_llm_signature, resolve_user_llm_request, default_user_llm_config,
 )
-from .models import OllamaModel, generate_for_chat
+from .models import generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 from src.rag.service import RAGSystem
+from src.system.env import load_env_file as _load_env_file
+from src.system.model_clients import OllamaModel
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent.parent
@@ -47,6 +49,14 @@ logger = logging.getLogger(__name__)
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 6001
+
+
+def load_env_file(env_path: str | Path = ".env") -> None:
+    """Load the shared env parser while preserving app logging behavior."""
+    try:
+        _load_env_file(env_path)
+    except Exception as exc:
+        logger.warning(f"Unable to load env file {env_path}: {exc}")
 
 
 def resolve_web_chat_profile(
@@ -79,25 +89,6 @@ def resolve_web_chat_profile(
     if selected_wire not in {"native", "json"}:
         raise ValueError("MEDCHAT_DECISION_WIRE_MODE must be native or json")
     return profiles[selected]
-
-
-def load_env_file(env_path: str | Path = ".env") -> None:
-    """Load simple KEY=VALUE pairs without adding a runtime dependency."""
-    path = Path(env_path)
-    if not path.exists():
-        return
-    try:
-        for raw_line in path.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            key = key.strip()
-            value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = value
-    except Exception as exc:
-        logger.warning(f"Unable to load env file {path}: {exc}")
 
 
 def expand_env_placeholders(value: Any) -> Any:
@@ -211,7 +202,7 @@ class MolecularChatApp:
         if config.get('provider') not in {'openai_compatible', 'custom'}:
             raise ValueError('Semantic assembly requires an approved provider')
         if model is not None:
-            from src.agent.openai_compatible_model import OpenAICompatibleModel
+            from src.system.model_clients import OpenAICompatibleModel
             if (type(model) is not OpenAICompatibleModel or any(
                     not callable(getattr(model, name, None)) for name in
                     ('propose_ordinary_intent', 'decide', 'generate', 'stream_generate', 'close'))):
@@ -536,7 +527,8 @@ class MolecularChatApp:
             )
 
         if config.get("provider") == "modelscope":
-            from src.agent.modelscope_model import ModelScopeModel
+            from src.system.model_clients import ModelScopeModel
+            from src.agent import decision_transport
 
             return ModelScopeModel(
                 api_key=config.get("api_key", ""),
@@ -544,9 +536,11 @@ class MolecularChatApp:
                 base_url=config.get("base_url") or "https://api-inference.modelscope.cn/v1/chat/completions",
                 enforce_url_policy=True,
                 provider="modelscope",
+                decision_transport=decision_transport,
             )
 
-        from src.agent.openai_compatible_model import OpenAICompatibleModel
+        from src.system.model_clients import OpenAICompatibleModel
+        from src.agent import decision_transport
 
         return OpenAICompatibleModel(
             api_key=config.get("api_key", ""),
@@ -555,6 +549,7 @@ class MolecularChatApp:
             provider_name="OpenAI-compatible",
             provider=config.get("provider") or "openai_compatible",
             enforce_url_policy=True,
+            decision_transport=decision_transport,
         )
 
     async def _replace_llm_config(self, config):
@@ -949,7 +944,7 @@ class MolecularChatApp:
         try:
             await finish_on_cancel(self._shutdown())
         finally:
-            from src.agent.tools.admet_ai_backend import reset_admet_ai_backend_cache
+            from src.admet.backend import reset_admet_ai_backend_cache
             reset_admet_ai_backend_cache()
 
     async def _shutdown(self):

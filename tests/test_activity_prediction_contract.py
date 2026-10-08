@@ -414,7 +414,7 @@ def test_activity_api_uses_budgeted_isolated_execution_path(
 
     calls: list[tuple[str, object]] = []
 
-    async def fake_invoke(_support, *, operation, isolated_payload, isolated_target=None):
+    async def fake_invoke(*, operation, isolated_payload, isolated_target=None):
         calls.append((operation, isolated_payload))
         values = isolated_payload[0]
         values = [values] if isinstance(values, str) else list(values)

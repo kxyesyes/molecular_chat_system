@@ -8,7 +8,7 @@ import re
 from typing import Any
 from urllib.parse import unquote
 
-from src.agent.persistence.redaction import (
+from src.system.redaction import (
     contains_sensitive_text,
     redact_sensitive,
     sanitize_sensitive_text,

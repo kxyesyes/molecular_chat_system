@@ -13,17 +13,7 @@
   };
   const DEFAULT_GROUP = "其他端点";
   const GROUP_ORDER = ["物化性质", "药物相似性", "吸收", "分布", "代谢", "排泄", "毒性", "其他端点"];
-  const stateText = {
-    succeeded: "评估完成",
-    partial: "部分完成",
-    failed: "评估失败",
-    unavailable: "工具不可用",
-    timeout: "计算超时",
-    busy: "服务繁忙",
-    invalid_input: "输入无效",
-    not_calculated: "尚未运行",
-    running: "执行中",
-  };
+  const statusCatalog = window.MedChatStatus;
 
   function get(id) { return document.getElementById(id); }
   function text(value, empty) {
@@ -65,18 +55,18 @@
   }
   function normalizedStatus(response) {
     const status = response && typeof response.status === "string" ? response.status : "failed";
-    return stateText[status] ? status : "failed";
+    return statusCatalog.normalize(status);
   }
   function setStatus(status, message) {
     const badge = get("status-badge");
     const runStatus = get("run-status");
     const results = get("results-panel");
-    const safeStatus = stateText[status] ? status : "failed";
+    const safeStatus = statusCatalog.normalize(status);
     if (badge) {
       badge.className = "status-badge state-" + safeStatus;
-      badge.textContent = stateText[safeStatus];
+      badge.textContent = statusCatalog.label(safeStatus);
     }
-    if (runStatus) runStatus.textContent = message || stateText[safeStatus];
+    if (runStatus) runStatus.textContent = message || statusCatalog.label(safeStatus);
     if (results) {
       results.setAttribute("aria-busy", safeStatus === "running" ? "true" : "false");
       results.setAttribute("data-state", safeStatus);
@@ -123,7 +113,7 @@
       return sum + (Number.isInteger(count) && count >= 0 ? count : 0);
     }, 0);
     const hasCounts = trustedRows.length > 0;
-    appendMetric(root, "综合评估", stateText[status] || "未计算", response?.message || "依据本次工具状态", status === "succeeded" ? "success" : status === "partial" ? "warning" : "neutral");
+    appendMetric(root, "综合评估", statusCatalog.label(status), response?.message || "依据本次工具状态", status === "succeeded" ? "success" : status === "partial" ? "warning" : "neutral");
     appendMetric(root, "预测指标", hasCounts ? formatCount(totalEndpoints) : "未计算", hasCounts ? "工具返回的端点数量" : "尚未形成可信结果", "primary");
     appendMetric(root, "风险项", hasCounts ? formatCount(riskCount) : "未计算", hasCounts ? "工具标记的风险端点" : "未形成风险判断", riskCount > 0 ? "danger" : "success");
     const model = first.model_name || first.model_version || first.prediction_method;
@@ -333,17 +323,17 @@
     }
     if (!displayRows.length && ["failed", "unavailable", "invalid_input", "timeout", "busy"].includes(status)) {
       if (empty) empty.hidden = true;
-      const message = response?.message || stateText[status];
+      const message = response?.message || statusCatalog.label(status);
       setError(message);
-      setStatus(status, stateText[status] + "：" + message);
+      setStatus(status, statusCatalog.label(status) + "：" + message);
       return;
     }
     activeGroup = renderTabs(displayRows, activeGroup);
     renderEndpointGroups(displayRows, activeGroup);
     const evidenceInsufficient = displayRows.some(row => row && row.status === "succeeded" && !trustedAdmet(row.admet));
-    const message = evidenceInsufficient ? "证据不足，未展示为真实模型结果。" : response?.message || stateText[status];
+    const message = evidenceInsufficient ? "证据不足，未展示为真实模型结果。" : response?.message || statusCatalog.label(status);
     const displayStatus = evidenceInsufficient ? "partial" : status;
-    setStatus(displayStatus, displayStatus === "succeeded" ? message : stateText[displayStatus] + "：" + message);
+    setStatus(displayStatus, displayStatus === "succeeded" ? message : statusCatalog.label(displayStatus) + "：" + message);
   }
   let inFlight = false;
   let activeGroup = "";
