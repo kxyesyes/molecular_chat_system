@@ -43,32 +43,12 @@ def _mcs_sync(
         raise HTTPException(status_code=400, detail=str(error)) from None
 
 
-def setup_molecule_utility_routes(
+def _register_molecule_utility_routes(
     app,
     *,
-    invoke_in_threadpool=None,
-    logger=None,
-    _support=None,
+    get_invoker,
+    get_logger,
 ):
-    """Register utility endpoints with explicit runtime dependencies.
-
-    ``_support`` remains a compatibility-only fallback for older direct callers;
-    application registration passes the two narrow dependencies explicitly.
-    """
-    get_invoker = lazy_dependency(
-        invoke_in_threadpool,
-        _support,
-        "_invoke_in_threadpool",
-        label="molecule utility threadpool",
-    )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="molecule utility logger",
-        default=_LOGGER,
-    )
-
     @app.post("/api/docking/smiles_to_3d")
     async def smiles_to_3d(payload: Dict[str, Any] = Body(...)):
         """将SMILES转换为3D结构用于预览"""
@@ -136,3 +116,43 @@ def setup_molecule_utility_routes(
         except Exception:
             get_logger().exception("MCS计算失败")
             raise HTTPException(status_code=500, detail="MCS计算失败，请稍后重试") from None
+
+
+def register_molecule_utility_routes(
+    app,
+    *,
+    invoke_in_threadpool,
+    logger=None,
+):
+    """Register production molecule utility routes with narrow providers."""
+    return _register_molecule_utility_routes(
+        app,
+        get_invoker=lambda: invoke_in_threadpool,
+        get_logger=lambda: logger or _LOGGER,
+    )
+
+
+def setup_molecule_utility_routes(
+    app,
+    *,
+    invoke_in_threadpool=None,
+    logger=None,
+    _support=None,
+):
+    """Compatibility registration entry point for older direct callers."""
+    return _register_molecule_utility_routes(
+        app,
+        get_invoker=lazy_dependency(
+            invoke_in_threadpool,
+            _support,
+            "_invoke_in_threadpool",
+            label="molecule utility threadpool",
+        ),
+        get_logger=lazy_dependency(
+            logger,
+            _support,
+            "logger",
+            label="molecule utility logger",
+            default=_LOGGER,
+        ),
+    )

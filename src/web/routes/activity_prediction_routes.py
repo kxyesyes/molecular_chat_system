@@ -270,39 +270,13 @@ def _attach_activity_task_receipt(
     return receipt
 
 
-def setup_activity_prediction_routes(
+def _register_activity_prediction_routes(
     app,
     *,
-    invoke_activity_with_budget=None,
-    read_upload_limited=None,
-    logger=None,
-    _support=None,
+    get_activity_invoker,
+    get_upload_reader,
+    get_logger,
 ):
-    """Register activity prediction endpoints with explicit runtime dependencies.
-
-    ``_support`` remains a compatibility-only fallback for older direct callers;
-    application registration passes narrow budget, upload and logging dependencies.
-    """
-    get_activity_invoker = lazy_dependency(
-        invoke_activity_with_budget,
-        _support,
-        "_ROUTE_ACTIVITY_INVOKER",
-        label="activity budget",
-    )
-    get_upload_reader = lazy_dependency(
-        read_upload_limited,
-        _support,
-        "_read_upload_limited",
-        label="activity upload",
-    )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="activity logger",
-        default=logging.getLogger(__name__),
-    )
-
     async def invoke_with_budget(*, operation, isolated_payload):
         return await get_activity_invoker()(
             operation=operation,
@@ -385,3 +359,52 @@ def setup_activity_prediction_routes(
         except Exception:
             get_logger().error("批量活性预测请求失败")
             raise HTTPException(status_code=500, detail="批量活性预测服务不可用")
+
+
+def register_activity_prediction_routes(
+    app,
+    *,
+    invoke_activity_with_budget,
+    read_upload_limited,
+    logger=None,
+):
+    """Register production activity routes with narrow providers."""
+    return _register_activity_prediction_routes(
+        app,
+        get_activity_invoker=lambda: invoke_activity_with_budget,
+        get_upload_reader=lambda: read_upload_limited,
+        get_logger=lambda: logger or logging.getLogger(__name__),
+    )
+
+
+def setup_activity_prediction_routes(
+    app,
+    *,
+    invoke_activity_with_budget=None,
+    read_upload_limited=None,
+    logger=None,
+    _support=None,
+):
+    """Compatibility registration entry point for older direct callers."""
+    return _register_activity_prediction_routes(
+        app,
+        get_activity_invoker=lazy_dependency(
+            invoke_activity_with_budget,
+            _support,
+            "_ROUTE_ACTIVITY_INVOKER",
+            label="activity budget",
+        ),
+        get_upload_reader=lazy_dependency(
+            read_upload_limited,
+            _support,
+            "_read_upload_limited",
+            label="activity upload",
+        ),
+        get_logger=lazy_dependency(
+            logger,
+            _support,
+            "logger",
+            label="activity logger",
+            default=logging.getLogger(__name__),
+        ),
+    )

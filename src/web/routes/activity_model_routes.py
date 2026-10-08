@@ -11,40 +11,13 @@ from .route_compat import lazy_dependency
 _LOGGER = logging.getLogger(__name__)
 
 
-def setup_activity_model_routes(
+def _register_activity_model_routes(
     app,
     *,
-    read_upload_limited=None,
-    tempfile_module=None,
-    logger=None,
-    _support=None,
+    get_upload_reader,
+    get_tempfile_module,
+    get_logger,
 ):
-    """Register activity-model endpoints with explicit runtime dependencies.
-
-    ``_support`` remains a compatibility-only fallback for older direct callers;
-    application registration passes narrow upload, temporary-file and logging
-    dependencies explicitly.
-    """
-    get_upload_reader = lazy_dependency(
-        read_upload_limited,
-        _support,
-        "_read_upload_limited",
-        label="activity model upload reader",
-    )
-    get_tempfile_module = lazy_dependency(
-        tempfile_module,
-        _support,
-        "tempfile",
-        label="activity model tempfile",
-    )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="activity model logger",
-        default=_LOGGER,
-    )
-
     @app.post("/api/activity/train")
     async def start_activity_training(
         request: Request,
@@ -254,3 +227,52 @@ def setup_activity_model_routes(
         except Exception:
             get_logger().exception("删除活性模型失败")
             raise HTTPException(status_code=500, detail="删除活性模型失败")
+
+
+def register_activity_model_routes(
+    app,
+    *,
+    read_upload_limited,
+    tempfile_module,
+    logger=None,
+):
+    """Register production activity-model routes with narrow dependencies."""
+    return _register_activity_model_routes(
+        app,
+        get_upload_reader=lambda: read_upload_limited,
+        get_tempfile_module=lambda: tempfile_module,
+        get_logger=lambda: logger or _LOGGER,
+    )
+
+
+def setup_activity_model_routes(
+    app,
+    *,
+    read_upload_limited=None,
+    tempfile_module=None,
+    logger=None,
+    _support=None,
+):
+    """Compatibility registration entry point for older direct callers."""
+    return _register_activity_model_routes(
+        app,
+        get_upload_reader=lazy_dependency(
+            read_upload_limited,
+            _support,
+            "_read_upload_limited",
+            label="activity model upload reader",
+        ),
+        get_tempfile_module=lazy_dependency(
+            tempfile_module,
+            _support,
+            "tempfile",
+            label="activity model tempfile",
+        ),
+        get_logger=lazy_dependency(
+            logger,
+            _support,
+            "logger",
+            label="activity model logger",
+            default=_LOGGER,
+        ),
+    )
