@@ -110,6 +110,7 @@ def test_task_manager_never_promotes_non_success_status_to_succeeded(
 
     assert finished.status is expected_status
     assert finished.status is not TaskStatus.SUCCEEDED
+    assert finished.to_public_dict()["scientific_status"] == reported_status
 
 
 def test_task_manager_preserves_non_mapping_json_result(tmp_path):

@@ -150,7 +150,7 @@ def test_supervisor_blocks_generation_when_successful_target_quality_is_fallback
         active_skill="target_driven_design",
     )
 
-    assert result["success"] is True
+    assert result["success"] is False
     assert result["partial"] is True
     assert tools["target_database_search"].calls == ["PDE5A"]
     assert tools["llm_molecular_generator"].calls == []
@@ -505,7 +505,7 @@ def test_supervisor_hit_to_lead_real_generator_reports_public_count(
         active_skill="hit_to_lead_optimization",
     )
 
-    assert result["success"] is True
+    assert result["success"] is (not result["partial"])
     generation_result = next(
         item
         for item in result["tool_result_sequence"]

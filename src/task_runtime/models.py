@@ -815,7 +815,11 @@ def sanitize_public_result(value: Any) -> Any:
 
 
 _RESULT_STATUS_VALUES = frozenset(
-    {"succeeded", "failed", "cancelled", "canceled", "timed_out"}
+    {
+        "succeeded", "partial", "failed", "timeout", "timed_out",
+        "unavailable", "not_calculated", "invalid_input", "rejected",
+        "cancelled", "canceled",
+    }
 )
 _RESULT_ENUM_VALUES = frozenset(
     {
@@ -1555,6 +1559,7 @@ class TaskRecord:
         }
 
     def to_public_dict(self) -> dict[str, Any]:
+        """Expose coarse lifecycle and finer scientific outcome separately."""
         public = self.to_dict()
         for key in (
             "input",
@@ -1573,6 +1578,10 @@ class TaskRecord:
         )
         public["artifacts"] = sanitize_public_artifacts(self.artifacts or [])
         public["result"] = sanitize_public_result(self.result)
+        if isinstance(self.result, dict):
+            scientific_status = self.result.get("status")
+            if scientific_status in _RESULT_STATUS_VALUES:
+                public["scientific_status"] = scientific_status
         if isinstance(self.error, str):
             public["error"] = sanitize_task_message(self.error)
         else:

@@ -101,6 +101,38 @@ def settle(bundle, step=None):
     return bundle.session.execute_step(bundle.session.next_index)
 
 
+@pytest.mark.parametrize(
+    ("status", "expected_outcome"),
+    [
+        (ObservationStatus.TIMEOUT, RunOutcome.TIMEOUT),
+        (ObservationStatus.UNAVAILABLE, RunOutcome.UNAVAILABLE),
+        (ObservationStatus.NOT_CALCULATED, RunOutcome.NOT_CALCULATED),
+    ],
+)
+def test_skipped_steps_preserve_specific_scientific_outcome(
+    make_session, status, expected_outcome
+):
+    bundle = make_session(dynamic=True)
+    bundle.session.start()
+    bundle.session.results = [
+        ToolResult.error_result(
+            "property_calculator",
+            AgentErrorCode.INTERNAL_ERROR,
+            "controlled terminal state",
+            status=status,
+        )
+    ]
+    bundle.session.skipped_steps = [
+        {"step_id": "dependent", "status": "skipped_precondition"}
+    ]
+
+    result, _ = bundle.session._build_final_result()
+
+    assert result.outcome is expected_outcome
+    assert result.success is False
+    assert result.partial is False
+
+
 @pytest.mark.parametrize("outcome", [None, RunOutcome.COMPLETED])
 def test_dynamic_completion_rejects_preserved_structured_error(make_session, outcome):
     # Exercise session-level contradiction handling through the generic adapter;

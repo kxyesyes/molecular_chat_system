@@ -909,7 +909,7 @@ class ChatHandler:
         raw_status = agent_result.get("status")
         status = (
             raw_status
-            if raw_status in {"failed", "rejected", "cancelled"}
+            if raw_status in {"failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated"}
             else "failed"
         )
         trace_id, trace_sensitive = self._sanitize_agent_failure_text(
@@ -1106,7 +1106,9 @@ class ChatHandler:
         websocket: WebSocket,
         agent_result: Dict[str, Any],
     ) -> None:
-        if agent_result.get("status") in {"failed", "rejected", "cancelled"}:
+        if agent_result.get("status") in {
+            "failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated",
+        }:
             return
         sequence = agent_result.get("tool_result_sequence")
         if not isinstance(sequence, list):

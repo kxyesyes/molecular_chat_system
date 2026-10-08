@@ -340,6 +340,9 @@ class SQLiteAgentStateStore:
                 (data["trace_id"],),
             ).fetchone()
             actual = row["status"] if row is not None else None
+            # Scientific timeout/unavailable/not_calculated runs remain
+            # fail-closed here: retrying the same trace could duplicate a
+            # non-idempotent tool. Recovery must use a new explicit request.
             if actual != expected_status or actual not in {
                 None, "pending", "succeeded", "completed", "partial", "failed",
             }:

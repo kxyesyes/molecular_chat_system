@@ -1579,9 +1579,10 @@ class WorkflowRunSession:
             has_success = any(item.success for item in self.results)
             agent_result.success = False
             agent_result.partial = has_success
-            agent_result.outcome = (
-                RunOutcome.PARTIAL if has_success else RunOutcome.FAILED
-            )
+            if has_success:
+                agent_result.outcome = RunOutcome.PARTIAL
+            elif agent_result.outcome is None:
+                agent_result.outcome = RunOutcome.FAILED
             agent_result.message = (
                 "Workflow returned partial results because a scientific "
                 "precondition failed"
