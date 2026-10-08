@@ -26,6 +26,8 @@ assert(template.includes("/static/js/shared/status.js"),
   "homepage must load the shared status contract before the Agent entrypoint");
 assert(!source.includes("const decisionStatuses = {"),
   "homepage workflow labels belong to the shared status contract");
+assert(!source.includes('["failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated"]'),
+  "homepage must not duplicate the shared non-success status list");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
 assert(template.includes("/static/js/home/task_panel.js"),

@@ -265,9 +265,7 @@
     if (message.type === "complete") {
       if (!turn.result) return true;
       const {status, text, metadata} = turn.result;
-      const isNonSuccess = typeof window.MedChatStatus?.isNonSuccess === "function"
-        ? window.MedChatStatus.isNonSuccess(status)
-        : ["failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated"].includes(status);
+      const isNonSuccess = window.MedChatStatus.isNonSuccess(status);
       if (isNonSuccess) {
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
       }
@@ -646,9 +644,7 @@
           break;
 
         case "complete":
-          const isNonSuccess = typeof window.MedChatStatus?.isNonSuccess === "function"
-            ? window.MedChatStatus.isNonSuccess(message.status)
-            : ["failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated"].includes(message.status);
+          const isNonSuccess = window.MedChatStatus.isNonSuccess(message.status);
           if (isNonSuccess) {
             if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
             moleculeCandidateLifecycle.clear();

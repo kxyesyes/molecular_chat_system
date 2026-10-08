@@ -5,6 +5,7 @@ const path = require("path");
 const helper = path.join(__dirname, "../src/web/static/js/home/evidence_report.js");
 assert(fs.existsSync(helper), "ScientificReport@1 helper is missing");
 global.window = {};
+require("../src/web/static/js/shared/status.js");
 require(helper);
 const api = window.HomeEvidenceReport;
 assert(api && api.normalize && api.createLifecycle);
