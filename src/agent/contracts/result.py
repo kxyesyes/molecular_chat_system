@@ -7,7 +7,11 @@ from src.system.scientific_contracts import (
     ToolResult,
     WorkflowArtifact,
 )
-from src.system.scientific_status import ObservationStatus, RunOutcome
+from src.system.scientific_status import (
+    ObservationStatus,
+    RunOutcome,
+    aggregate_run_outcome,
+)
 
 from .errors import AgentErrorCode, AgentExecutionError
 
@@ -53,23 +57,17 @@ class AgentResult:
         any_succeeded = bool(successful_observations)
         success = all_succeeded
         partial = any_succeeded and not all_succeeded
-        if success:
-            outcome = RunOutcome.COMPLETED
-        elif partial:
-            outcome = RunOutcome.PARTIAL
-        elif any(
-            item.status == ObservationStatus.CANCELLED for item in tool_results
-        ):
-            outcome = RunOutcome.CANCELLED
-        elif any(
-            item.status == ObservationStatus.REJECTED for item in tool_results
-        ):
-            outcome = RunOutcome.REJECTED
-        else:
-            outcome = RunOutcome.FAILED
+        outcome = aggregate_run_outcome(
+            (item.status for item in tool_results),
+            all_succeeded=all_succeeded,
+            any_usable=any_succeeded,
+        )
         preferred_error_status = {
             RunOutcome.CANCELLED: ObservationStatus.CANCELLED,
             RunOutcome.REJECTED: ObservationStatus.REJECTED,
+            RunOutcome.TIMEOUT: ObservationStatus.TIMEOUT,
+            RunOutcome.UNAVAILABLE: ObservationStatus.UNAVAILABLE,
+            RunOutcome.NOT_CALCULATED: ObservationStatus.NOT_CALCULATED,
         }.get(outcome)
         first_error = None
         if preferred_error_status:

@@ -148,13 +148,17 @@ def test_strict_partial_flag_supports_legacy_and_contradictory_envelopes(success
     assert_partial(*run_result(result))
 
 
-@pytest.mark.parametrize("status", ["failed", "rejected", "cancelled", "unknown", "succeeded", None, [], {}])
+@pytest.mark.parametrize("status", ["failed", "rejected", "cancelled", "timeout", "unavailable",
+                                    "not_calculated", "unknown", "succeeded", None, [], {}])
 def test_explicit_terminal_or_invalid_status_cannot_be_upgraded(status):
     websocket, model, rag, history = run_result(partial_result(status=status))
     complete = [m for m in websocket.messages if m["type"] == "complete"]
     assert len(complete) == 1
-    expected = status if isinstance(status, str) and status in {"failed", "rejected", "cancelled"} else "failed"
+    expected = status if isinstance(status, str) and status in {
+        "failed", "rejected", "cancelled", "timeout", "unavailable", "not_calculated",
+    } else "failed"
     assert complete[0]["status"] == expected
+    assert next(m for m in websocket.messages if m["type"] == "agent_result")["status"] == expected
     assert not complete[0].get("partial")
     assert not any("✅ 智能代理完成" in m.get("message", "") for m in websocket.messages)
     assert model.generate_calls == 0
@@ -478,7 +482,7 @@ def test_real_supervisor_session_retains_partial_evidence_and_tool_failed():
     supervisor = CapturingSupervisor(tools=tools)
     websocket, model, rag, history = run_result(None, summarize=True, agent=supervisor)
     original = supervisor.last_result
-    assert original["success"] is True  # Existing Supervisor compatibility projection.
+    assert original["success"] is False  # Partial evidence is not completion.
     assert original["status"] == "partial"
     assert len(tools["candidate_ranker"].inputs) == 1
     assert original["tool_results"]["candidate_ranker"]["success"] is False

@@ -54,6 +54,20 @@ def assert_denied(result):
     assert result.get("agent_events", []) == []
 
 
+@pytest.mark.parametrize("status", ["timeout", "unavailable", "not_calculated"])
+def test_terminal_scientific_status_survives_claim_conflict(runtime, status):
+    supervisor, store, tools = runtime
+    store.start_run({"trace_id": "terminal-science", "status": status, "query": "CCO",
+                     "skill_name": SKILL, "session_id": "a"})
+    result = invoke(supervisor, trace_id="terminal-science", session_id="a")
+    assert result["status"] == status
+    assert result["result"]["status"] == status
+    assert result["result"]["success"] is False
+    assert result["result"]["metadata"]["run_claim_conflict"] is True
+    assert result.get("agent_events", []) == []
+    assert tools["property_calculator"].calls == []
+
+
 @pytest.mark.parametrize("owner,caller", [("a", "b"), ("a", None), (None, "a")])
 @pytest.mark.parametrize("by_key", [False, True])
 def test_owner_mismatch_is_read_only(runtime, owner, caller, by_key):

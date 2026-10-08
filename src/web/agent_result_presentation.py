@@ -96,9 +96,13 @@ def presentation_status(agent_result: Mapping[str, Any]) -> str:
     if "status" in agent_result:
         if not isinstance(status, str) or status not in {
             "completed", "partial", "failed", "rejected", "cancelled",
+            "timeout", "unavailable", "not_calculated",
         }:
             return "failed"
-        if status in {"failed", "rejected", "cancelled"}:
+        if status in {
+            "failed", "rejected", "cancelled", "timeout", "unavailable",
+            "not_calculated",
+        }:
             return status
     if status == "partial" or agent_result.get("partial") is True:
         return "partial"

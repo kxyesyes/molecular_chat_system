@@ -359,7 +359,9 @@ class SupervisorAgent:
         result = execution.result
         legacy_result = result.to_legacy_dict()
         return {
-            "success": result.success or result.partial,
+            # Partial evidence is a non-success terminal outcome.  Keep the
+            # legacy envelope aligned with the typed result.
+            "success": result.success,
             "status": legacy_result["status"],
             "error": legacy_result["error"],
             "warnings": legacy_result["warnings"],

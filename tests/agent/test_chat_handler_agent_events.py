@@ -1103,18 +1103,24 @@ def test_malformed_candidate_mapping_is_isolated_from_successful_agent_result(
         assert forbidden not in serialized_messages
 
 
-def test_terminal_agent_failure_never_emits_candidate_event():
+@pytest.mark.parametrize("status", ["failed", "timeout", "unavailable", "not_calculated"])
+def test_terminal_agent_failure_never_emits_candidate_event(status):
     result = _candidate_agent_result(
         _candidate_set().to_dict(),
         agent_success=False,
     )
+    result["status"] = status
+
+    direct_socket = FakeWebSocket()
+    asyncio.run(ChatHandler._send_molecule_candidate_events(direct_socket, result))
+    assert direct_socket.messages == []
 
     websocket, model = _run_fixed_agent_result(result)
 
     assert not any(
         item["type"] == "molecule_candidates" for item in websocket.messages
     )
-    assert websocket.messages[-1]["status"] == "failed"
+    assert websocket.messages[-1]["status"] == status
     assert model.generate_calls == 0
 
 

@@ -69,7 +69,13 @@ class RunClaimConflict(SessionLifecycleError):
         self.status = status
 
     def to_result(self, context: AgentContext) -> AgentResult:
-        outcome = RunOutcome(self.status) if self.status in {"cancelled", "rejected"} else RunOutcome.FAILED
+        outcome = (
+            RunOutcome(self.status)
+            if self.status in {
+                "cancelled", "rejected", "timeout", "unavailable", "not_calculated",
+            }
+            else RunOutcome.FAILED
+        )
         return AgentResult(
             trace_id=context.trace_id, skill_name=context.active_skill,
             success=False, outcome=outcome,
@@ -1344,7 +1350,7 @@ class WorkflowRunSession:
             RunOutcome.REJECTED: TaskEventType.TASK_REJECTED,
             RunOutcome.CANCELLED: TaskEventType.TASK_CANCELLED,
             RunOutcome.FAILED: TaskEventType.TASK_FAILED,
-        }[agent_result.outcome]
+        }.get(agent_result.outcome, TaskEventType.TASK_FAILED)
         if not self._terminal_event_emitted:
             try:
                 self._emit_once(
@@ -1573,9 +1579,10 @@ class WorkflowRunSession:
             has_success = any(item.success for item in self.results)
             agent_result.success = False
             agent_result.partial = has_success
-            agent_result.outcome = (
-                RunOutcome.PARTIAL if has_success else RunOutcome.FAILED
-            )
+            if has_success:
+                agent_result.outcome = RunOutcome.PARTIAL
+            elif agent_result.outcome is None:
+                agent_result.outcome = RunOutcome.FAILED
             agent_result.message = (
                 "Workflow returned partial results because a scientific "
                 "precondition failed"
