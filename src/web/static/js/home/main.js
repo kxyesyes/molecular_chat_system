@@ -253,7 +253,13 @@
     if (message.trace_id !== turn.traceId) return true;
     if (message.type === "agent_result") {
       if (turn.result || !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status)) return true;
-      const text = typeof message.final_answer === "string" ? message.final_answer : message.message || "";
+      const baseText = typeof message.final_answer === "string" ? message.final_answer : message.message || "";
+      const structuredReason = message.error && typeof message.error.message === "string"
+        ? message.error.message : typeof message.metadata?.failure_reason === "string"
+          ? message.metadata.failure_reason : "";
+      const text = window.MedChatStatus.isNonSuccess(message.status) && structuredReason &&
+        !baseText.includes(structuredReason)
+        ? `${baseText}\n\n失败原因：${structuredReason}` : baseText;
       turn.result = {status: message.status, text, metadata: message.metadata || {}};
       const rag = message.metadata?.retrieval_performed === false
         ? (message.metadata.rag_requested === true ? " RAG已开启，本轮未执行检索。" : " 本轮未执行检索。") : "";
@@ -384,7 +390,8 @@
     protocolDesyncedSocket = null;
     moleculeCandidateLifecycle.clear();
     if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
-    const wsUrl = `ws://${window.location.host}/ws`;
+    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const wsUrl = `${wsProtocol}//${window.location.host}/ws`;
 
     console.log(`=== 尝试连接WebSocket ===`);
     console.log(`URL: ${wsUrl}`);

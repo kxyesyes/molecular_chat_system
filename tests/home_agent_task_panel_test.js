@@ -196,8 +196,8 @@ const terminalClasses = {
   task_completed: "is-complete",
   task_partial: "is-warning",
   task_failed: "is-error",
-  task_rejected: "is-running",
-  task_cancelled: "is-running",
+  task_rejected: "is-error",
+  task_cancelled: "is-warning",
 };
 for (const [event, label] of Object.entries(terminalLabels)) {
   for (const progress of [undefined, 0, 0.4, 1]) {

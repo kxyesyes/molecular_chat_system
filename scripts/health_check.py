@@ -439,18 +439,43 @@ def check_activity_models() -> tuple[bool, str]:
     models_dir = resolve_project_path(os.environ.get("ACTIVITY_MODEL_DIR", "data/activity/models"))
     if not models_dir.exists():
         return False, f"activity model dir not found: {models_dir}"
+    registry_dirs = []
     registry_state = models_dir / "registry_state.json"
-    if not registry_state.exists():
+    if registry_state.is_file():
+        registry_dirs.append(models_dir)
+    # Family training stores one isolated registry per model family/run.  The
+    # configured root may therefore contain no models of its own even though
+    # its direct child registries are valid runtime assets.
+    try:
+        registry_dirs.extend(
+            child
+            for child in sorted(models_dir.iterdir(), key=lambda path: path.name)
+            if child.is_dir()
+            and not child.is_symlink()
+            and (child / "registry_state.json").is_file()
+        )
+    except OSError as exc:
+        return False, f"activity model registry cannot be inspected: {exc}"
+    if not registry_dirs:
         return False, f"no registered activity models in {models_dir}"
     try:
         from src.activity.model_registry import ActivityModelRegistry
 
-        models = ActivityModelRegistry(models_dir).list()
+        models = []
+        invalid_registries = []
+        for registry_dir in registry_dirs:
+            try:
+                models.extend(ActivityModelRegistry(registry_dir).list())
+            except (OSError, RuntimeError, ValueError) as exc:
+                invalid_registries.append(f"{registry_dir}: {exc}")
     except (OSError, RuntimeError, ValueError) as exc:
         return False, f"activity model registry is invalid: {exc}"
     if not models:
+        if invalid_registries:
+            return False, f"activity model registry is invalid: {invalid_registries[0]}"
         return False, f"no registered activity models in {models_dir}"
-    return True, f"{models_dir} ({len(models)} registered models)"
+    scope = "family registries" if len(registry_dirs) > 1 or registry_dirs[0] != models_dir else str(models_dir)
+    return True, f"{scope} ({len(models)} registered models)"
 
 
 def check_rag_index() -> tuple[bool, str]:

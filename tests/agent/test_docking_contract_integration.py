@@ -38,7 +38,15 @@ def docking_boundary(tmp_path, monkeypatch):
     ligand.write_text("$$$$\n", encoding="utf-8")
     pose.write_text("MODEL 1\nREMARK VINA RESULT: -7.2 0 0\nENDMDL\n", encoding="utf-8")
     calls, constructed, payloads = [], [], []
-    state = {"available": True, "failed": False, "cancelled": False, "timeout": False}
+    state = {
+        "available": True,
+        "failed": False,
+        "cancelled": False,
+        "timeout": False,
+        "service_error_code": None,
+        "service_warnings": ["synthetic warning"],
+        "service_quality": {},
+    }
 
     class SyntheticService:
         def __init__(self, config=None):
@@ -53,10 +61,18 @@ def docking_boundary(tmp_path, monkeypatch):
         async def perform_docking(self, **kwargs):
             calls.append(kwargs)
             if state["failed"] or state["cancelled"] or state["timeout"]:
-                return {"success": False, "job_id": "synthetic-only",
-                        "error_code": ("cancelled" if state["cancelled"] else
-                                       "timeout" if state["timeout"] else "internal_error"),
-                        "error": "synthetic service failure", "warnings": ["synthetic warning"]}
+                return {
+                    "success": False,
+                    "job_id": "synthetic-only",
+                    "error_code": (
+                        state["service_error_code"]
+                        or ("cancelled" if state["cancelled"] else
+                            "timeout" if state["timeout"] else "internal_error")
+                    ),
+                    "error": "synthetic service failure",
+                    "warnings": list(state["service_warnings"]),
+                    "quality": dict(state["service_quality"]),
+                }
             result = {"success": True, "job_id": "synthetic-only", "total_poses": 1,
                       "best_pose": {"binding_energy": -7.2, "pose_file": str(pose)},
                       "warnings": ["Synthetic fixture; not a real docking result"],
@@ -165,6 +181,73 @@ def test_actual_tool_keeps_legacy_compat_observation(docking_boundary, mode):
     assert len(env["calls"]) == (0 if mode == "unavailable" else 2)
 
 
+@pytest.mark.parametrize("error_code", ["timeout", "cancelled"])
+def test_service_success_conflict_keeps_terminal_failure_status(docking_boundary, error_code):
+    env = docking_boundary
+
+    def rewrite(result):
+        result.update(
+            success=True,
+            error_code=error_code,
+            warnings=["provider cleanup was incomplete"],
+        )
+
+    env["state"]["rewrite"] = rewrite
+    result = env["adapter"].execute({"query": env["request"]})
+
+    assert not result.success
+    assert result.status.value == error_code
+    assert result.data is None
+
+
+@pytest.mark.parametrize("mode", ["cancelled", "timeout"])
+def test_shared_session_preserves_docking_terminal_status(docking_boundary, tmp_path, mode):
+    from src.agent.persistence import SQLiteAgentStateStore
+    from src.agent.planning import WorkflowPlan
+    from src.agent.supervisor import SupervisorAgent
+
+    env = docking_boundary
+    env["state"].update(
+        service_error_code=mode,
+        cancelled=mode == "cancelled",
+        timeout=mode == "timeout",
+    )
+
+    class FixedPlanner:
+        def plan(self, context):
+            return WorkflowPlan(workflow_name="docking_simulation", steps=[
+                WorkflowStep("dock", "molecular_docking", input_data=deepcopy(env["request"]))])
+
+    store = SQLiteAgentStateStore(tmp_path / "synthetic-session.sqlite")
+    supervisor = SupervisorAgent(
+        tools={"molecular_docking": env["tool"]}, planner=FixedPlanner(),
+        tool_registry=env["registry"], specialists={"docking": DockingAgent()}, state_store=store)
+    result = supervisor.run("synthetic docking fixture", skill_name="docking_simulation",
+                            trace_id="synthetic-docking-session")
+
+    assert result["status"] == mode
+    observation = result["result"]["tool_result_sequence"][0]
+    assert observation["status"] == mode
+    assert observation["success"] is False
+    assert observation["data"] is None
+    assert "docking" in " ".join(observation["warnings"]).lower()
+
+
+def test_docking_failure_keeps_provider_warnings_and_quality(docking_boundary):
+    env = docking_boundary
+    env["state"].update(
+        failed=True,
+        service_warnings=["pose cleanup did not complete"],
+        service_quality={"cleanup_confirmed": False},
+    )
+    result = env["adapter"].execute({"query": env["request"]})
+
+    assert not result.success
+    assert "pose cleanup did not complete" in result.warnings
+    assert result.quality["service_quality"] == {"cleanup_confirmed": False}
+    assert result.quality["scientific_usable"] is False
+
+
 @pytest.mark.parametrize("wrap", [False, True])
 def test_text_reaches_domain_missing_parameter_refusal(docking_boundary, wrap):
     env = docking_boundary
@@ -264,7 +347,8 @@ def test_shared_session_records_validated_observation_once(docking_boundary, tmp
     result = supervisor.run("synthetic docking fixture", skill_name="docking_simulation",
                             trace_id="synthetic-docking-session")
     success = mode == "success"
-    assert result["status"] == ("succeeded" if success else "failed")
+    expected_status = "succeeded" if success else "unavailable" if mode == "unavailable" else "failed"
+    assert result["status"] == expected_status
     sequence = result["result"]["tool_result_sequence"]
     assert len(sequence) == 1
     observation = sequence[0]
