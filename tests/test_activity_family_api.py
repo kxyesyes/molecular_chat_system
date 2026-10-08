@@ -223,6 +223,41 @@ def test_batch_order_and_invalid_input_retained(client):
     assert "input" in rows[1]["errors"]
 
 
+def test_legacy_list_receipt_reuses_activity_summary(monkeypatch, client):
+    """The HTTP compatibility path must not re-count scientific rows itself."""
+    from src.activity import prediction_service
+
+    observed = []
+
+    def summarize(rows):
+        observed.append(rows)
+        return {
+            "status": "partial",
+            "success": False,
+            "results": rows,
+            "warnings": ["shared summary"],
+        }
+
+    async def legacy_list(*, operation, isolated_payload, **kwargs):
+        return [{"smiles": isolated_payload[0], "success": True}]
+
+    monkeypatch.setattr(prediction_service, "summarize_predictions", summarize)
+    monkeypatch.setattr(
+        activity_prediction_routes,
+        "_invoke_activity_with_budget",
+        legacy_list,
+    )
+
+    response = client.post(
+        "/api/activity/predict",
+        data={"smiles": "CCO", "target": "PDE5A"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == [{"smiles": "CCO", "success": True}]
+    assert observed == [[{"smiles": "CCO", "success": True}]]
+
+
 def test_empty_batch_not_success(client):
     response = client.post("/api/activity/batch_predict", data={"target": "PDE"},
         files={"file": ("empty.smi", b" \n", "text/plain")})

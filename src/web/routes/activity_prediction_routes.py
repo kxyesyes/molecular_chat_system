@@ -12,7 +12,6 @@ from fastapi import UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, start_isolated_process
 from src.web.request_auth import require_browser_session
-from src.system.scientific_status import summarize_completion
 
 from .route_compat import lazy_dependency
 
@@ -230,17 +229,24 @@ def _attach_activity_task_receipt(
 
     list_response = isinstance(result, list)
     if list_response:
-        completed = sum(
-            isinstance(item, dict) and item.get("success") is True
-            for item in result
-        )
-        status, success = summarize_completion(completed, len(result))
+        # Legacy callers may still return a raw row list.  The rows are
+        # scientific observations, so aggregate them with the same domain
+        # contract used by the service and Agent adapter instead of counting
+        # transport-shaped ``success`` flags in the HTTP layer.
+        from src.activity import prediction_service
+
+        try:
+            domain_summary = prediction_service.summarize_predictions(result)
+        except (TypeError, ValueError):
+            domain_summary = {"status": "failed", "success": False, "warnings": []}
         summary = {
-            "status": status,
-            "success": success,
+            "status": domain_summary["status"],
+            "success": domain_summary["success"],
             "count": len(result),
             "results": result,
         }
+        if domain_summary.get("warnings"):
+            summary["warnings"] = domain_summary["warnings"]
     elif not isinstance(result, dict):
         result = {
             "status": "failed",
