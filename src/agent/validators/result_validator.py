@@ -38,6 +38,9 @@ _GENERATOR_QUALITY_FIELDS = {
 _DOCKING_TOOL_NAMES = frozenset(
     {"molecular_docking", "run_docking", "get_docking_result"}
 )
+_DOCKING_SCIENTIFIC_QUALITY_KEYS = frozenset(
+    {"binding_energy", "best_pose", "total_poses", "pose_file", "output_file", "results"}
+)
 
 
 class AgentResultValidator:
@@ -127,35 +130,84 @@ class AgentResultValidator:
         missing_artifact: bool = False,
     ) -> ToolResult:
         code = result.error.code if result.error else AgentErrorCode.INVALID_OUTPUT
-        cancelled = code == AgentErrorCode.CANCELLED
-        if cancelled:
+        original_status = result.status
+        if rejected:
+            terminal_status = ObservationStatus.FAILED
+        elif original_status in {
+            ObservationStatus.FAILED,
+            ObservationStatus.TIMEOUT,
+            ObservationStatus.UNAVAILABLE,
+            ObservationStatus.NOT_CALCULATED,
+            ObservationStatus.INVALID_INPUT,
+            ObservationStatus.REJECTED,
+            ObservationStatus.CANCELLED,
+        }:
+            terminal_status = original_status
+        elif code == AgentErrorCode.CANCELLED:
+            terminal_status = ObservationStatus.CANCELLED
+        else:
+            terminal_status = ObservationStatus.FAILED
+
+        if terminal_status == ObservationStatus.CANCELLED:
             message = "Docking was cancelled without a verified scientific result."
             warning_code = "docking_execution_cancelled"
+        elif terminal_status == ObservationStatus.TIMEOUT:
+            message = "Docking timed out without a verified scientific result."
+            warning_code = "docking_execution_timeout"
+        elif terminal_status == ObservationStatus.UNAVAILABLE:
+            message = "Docking environment is unavailable; no scientific result was produced."
+            warning_code = "docking_environment_unavailable"
+        elif terminal_status == ObservationStatus.INVALID_INPUT:
+            message = "Docking input validation failed; no scientific result was produced."
+            warning_code = "docking_invalid_input"
+        elif terminal_status == ObservationStatus.NOT_CALCULATED:
+            message = "Docking was not calculated; no scientific result was produced."
+            warning_code = "docking_not_calculated"
         elif rejected:
             message = "Docking evidence failed scientific validation."
             warning_code = "docking_result_rejected"
         else:
             message = "Docking failed without a verified scientific result."
             warning_code = "docking_execution_failed"
-        result.success = False
-        result.status = (
-            ObservationStatus.CANCELLED if cancelled else ObservationStatus.FAILED
+        trusted_diagnostics = bool(
+            result.quality.get("engine") == "AutoDock Vina"
+            or "service_quality" in result.quality
+            or "docking_inputs" in result.quality
         )
+        warnings = [] if rejected or not trusted_diagnostics else list(result.warnings)
+        if missing_artifact:
+            warnings.append("Referenced artifact file does not exist")
+        warnings.append(warning_code)
+        deduplicated_warnings = list(dict.fromkeys(warnings))
+        result.success = False
+        result.status = terminal_status
         result.message = message
         result.data = None
         result.formatted = ""
         result.artifacts = []
         result.evidence = []
+        # Provider provenance may contain endpoint, path or credential-like
+        # material.  A non-success observation is never allowed to retain it;
+        # safe source/engine diagnostics stay in the filtered quality fields.
         result.provenance = None
-        result.warnings = (
-            ["Referenced artifact file does not exist", warning_code]
-            if missing_artifact
-            else [warning_code]
-        )
+        result.warnings = deduplicated_warnings
+        preserved_quality = {
+            key: value
+            for key, value in result.quality.items()
+            if trusted_diagnostics and not rejected
+            and key not in _DOCKING_SCIENTIFIC_QUALITY_KEYS
+            and key in {
+                "engine", "real_execution", "execution_status", "scientific_usable",
+                "service_quality", "source", "model_version", "data_version",
+                "input_structure", "docking_inputs",
+            }
+        }
         result.quality = {
+            **preserved_quality,
             "validated": False,
             "failure_category": "docking_failure",
             "failure_code": code.value,
+            **({"scientific_usable": False} if trusted_diagnostics else {}),
         }
         result.error = AgentExecutionError(
             code=code,
