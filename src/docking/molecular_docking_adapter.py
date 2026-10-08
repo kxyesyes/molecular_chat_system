@@ -30,10 +30,16 @@ _DOCKING_STATUSES = frozenset({
 def _status_from_docking_result(docking_result: Any, *, success: bool) -> str:
     """Translate service terminal codes into the shared observation contract."""
 
+    error_code = docking_result.get("error_code") if isinstance(docking_result, dict) else None
+    normalized = str(error_code).strip().lower() if error_code is not None else ""
+    # A provider can accidentally leave ``success`` set while also reporting a
+    # terminal failure.  The explicit terminal code is more informative and
+    # must win; otherwise the adapter would turn a timeout/cancellation into a
+    # scientifically valid docking result.
+    if success and normalized in _DOCKING_STATUSES and normalized != "succeeded":
+        return normalized
     if success:
         return "succeeded"
-    error_code = docking_result.get("error_code") if isinstance(docking_result, dict) else None
-    normalized = str(error_code or "failed").strip().lower()
     return normalized if normalized in _DOCKING_STATUSES else "failed"
 
 
@@ -245,12 +251,49 @@ class MolecularDocking(BaseMolecularTool):
             warnings = _normalize_warning_strings(docking_result.get("warnings"))
             docking_data = dict(docking_result)
             docking_data["warnings"] = warnings
-            result["success"] = bool(docking_result.get("success"))
-            result["status"] = _status_from_docking_result(docking_result, success=result["success"])
-            result["data"] = docking_data
+            provider_success = bool(docking_result.get("success"))
+            result["status"] = _status_from_docking_result(
+                docking_result, success=provider_success
+            )
+            result["success"] = result["status"] == "succeeded"
+            # Never expose a provider payload containing pose/energy claims
+            # after the execution has entered a non-success terminal state.
+            # Keep only the non-scientific terminal diagnostic required by the
+            # synchronous compatibility contract; the Agent validator still
+            # removes this safe data before a failed result is persisted or
+            # presented as a scientific observation.
+            result["data"] = (
+                docking_data
+                if result["success"]
+                else {
+                    "error_code": result["status"],
+                    "status": result["status"],
+                }
+            )
             result["warnings"] = warnings
             execution_status = "completed" if result["success"] else str(docking_result.get("error_code") or "failed")
-            result["quality"] = {"engine": "AutoDock Vina", "real_execution": bool(result["success"]), "execution_status": execution_status}
+            result["quality"] = {
+                "engine": "AutoDock Vina",
+                "real_execution": bool(result["success"]),
+                "execution_status": execution_status,
+                "scientific_usable": bool(result["success"]),
+            }
+            if isinstance(docking_result.get("quality"), dict):
+                result["quality"]["service_quality"] = dict(docking_result["quality"])
+            if not result["success"]:
+                error_codes = {
+                    "cancelled": "cancelled",
+                    "timeout": "tool_timeout",
+                    "unavailable": "tool_unavailable",
+                    "invalid_input": "invalid_input",
+                    "rejected": "invalid_output",
+                    "not_calculated": "empty_result",
+                    "partial": "provider_error",
+                }
+                result["error"] = {
+                    "code": error_codes.get(result["status"], "internal_error"),
+                    "message": str(docking_result.get("error") or "Docking failed."),
+                }
             if result["success"]:
                 lineage_quality, evidence = _docking_lineage(
                     receptor_path=receptor_path, ligand_input=str(ligand_input), input_type=input_type,
