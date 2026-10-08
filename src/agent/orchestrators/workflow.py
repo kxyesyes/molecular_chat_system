@@ -689,7 +689,10 @@ class WorkflowOrchestrator:
             "cancelled": "Workflow cancelled",
             "rejected": "Workflow rejected",
             "failed": "Workflow failed",
-        }[result.outcome.value]
+            "timeout": "Workflow timed out",
+            "unavailable": "Workflow tool unavailable",
+            "not_calculated": "Workflow did not calculate a result",
+        }.get(result.outcome.value, "Workflow failed")
 
     def _emit(
         self,

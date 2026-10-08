@@ -87,7 +87,7 @@ def test_envelope_is_exact_and_fresh(result_api):
     ({"success": True, "status": "completed", "partial": True}, "partial"),
     ({"success": False, "status": "partial"}, "partial"),
     *[({"success": True, "partial": True, "status": status}, status)
-      for status in ("failed", "cancelled", "rejected")],
+      for status in ("failed", "cancelled", "rejected", "timeout", "unavailable", "not_calculated")],
     *[({"success": True, "partial": True, "status": status}, "failed")
       for status in (None, [], {}, "invalid", "succeeded")],
 ])

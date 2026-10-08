@@ -69,7 +69,13 @@ class RunClaimConflict(SessionLifecycleError):
         self.status = status
 
     def to_result(self, context: AgentContext) -> AgentResult:
-        outcome = RunOutcome(self.status) if self.status in {"cancelled", "rejected"} else RunOutcome.FAILED
+        outcome = (
+            RunOutcome(self.status)
+            if self.status in {
+                "cancelled", "rejected", "timeout", "unavailable", "not_calculated",
+            }
+            else RunOutcome.FAILED
+        )
         return AgentResult(
             trace_id=context.trace_id, skill_name=context.active_skill,
             success=False, outcome=outcome,

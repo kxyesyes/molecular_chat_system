@@ -52,7 +52,9 @@ def build_supervisor(tmp_path, result, *, required=True, second=False, custom_to
     (True, ObservationStatus.PARTIAL, "partial"),
     (False, ObservationStatus.PARTIAL, "failed"),
     (False, ObservationStatus.FAILED, "failed"),
-    (False, ObservationStatus.UNAVAILABLE, "failed"),
+    (False, ObservationStatus.TIMEOUT, "timeout"),
+    (False, ObservationStatus.UNAVAILABLE, "unavailable"),
+    (False, ObservationStatus.NOT_CALCULATED, "not_calculated"),
     (False, ObservationStatus.INVALID_INPUT, "failed"),
     (False, ObservationStatus.CANCELLED, "cancelled"),
     (False, ObservationStatus.REJECTED, "rejected"),
@@ -84,7 +86,13 @@ def test_observation_status_survives_public_entrypoints(tmp_path, entry, success
     assert saved["status"] == status.value
     assert saved["output"]["data"] == observation.data
     terminal = response["agent_events"][-1]
-    assert terminal["event"] == "task_" + ("completed" if expected == "succeeded" else expected)
+    terminal_event = {
+        "succeeded": "task_completed",
+        "partial": "task_partial",
+        "cancelled": "task_cancelled",
+        "rejected": "task_rejected",
+    }.get(expected, "task_failed")
+    assert terminal["event"] == terminal_event
     assert terminal["payload"]["status"] == result["status"]
 
 
@@ -116,7 +124,7 @@ def test_required_optional_and_partial_continuation(tmp_path, entry, required, s
         result = supervisor.execute("evaluate CCO", active_skill="comprehensive_evaluation")["agent_result"].to_legacy_dict()
     continues = success or not required
     assert len(result["tool_result_sequence"]) == (2 if continues else 1)
-    assert result["status"] == ("partial" if continues else "failed")
+    assert result["status"] == ("partial" if continues else status.value)
 
 
 @pytest.mark.parametrize("entry", ["run", "execute"])
