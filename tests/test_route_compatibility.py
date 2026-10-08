@@ -15,6 +15,13 @@ ROUTE_MODULES = (
     "reverse_target_routes",
 )
 
+CONVERGED_ROUTE_MODULES = {
+    "activity_model_routes",
+    "activity_prediction_routes",
+    "molecule_utility_routes",
+    "docking_report_routes",
+}
+
 
 def test_legacy_dependency_lookup_prefers_explicit_value_and_stays_dynamic():
     from src.web.routes.route_compat import lazy_dependency
@@ -28,6 +35,35 @@ def test_legacy_dependency_lookup_prefers_explicit_value_and_stays_dynamic():
     assert getter() == "before"
     legacy.value = "after"
     assert getter() == "after"
+
+
+def test_dependency_getters_keep_explicit_precedence_and_legacy_dynamism():
+    from src.web.routes.route_compat import DependencySpec, dependency_getters
+
+    legacy = type("Legacy", (), {"value": "before", "fallback": "legacy"})()
+    explicit = object()
+
+    getters = dependency_getters(
+        legacy,
+        primary=DependencySpec(explicit, "value", "primary"),
+        dynamic=DependencySpec(None, "value", "dynamic"),
+        fallback=DependencySpec(None, "missing", "fallback", default="default"),
+    )
+
+    assert getters["primary"]() is explicit
+    assert getters["dynamic"]() == "before"
+    assert getters["fallback"]() == "default"
+    legacy.value = "after"
+    assert getters["dynamic"]() == "after"
+
+
+def test_dependency_getters_reject_invalid_specifications():
+    import pytest
+
+    from src.web.routes.route_compat import dependency_getters
+
+    with pytest.raises(TypeError, match="DependencySpec"):
+        dependency_getters(None, broken=object())
 
 
 def test_activity_budget_helper_has_no_support_container_parameter():
@@ -46,6 +82,9 @@ def test_selected_routes_keep_support_access_in_compatibility_adapter(module_nam
         Path(__file__).parents[1] / "src" / "web" / "routes" / f"{module_name}.py"
     ).read_text(encoding="utf-8")
 
-    assert "from .route_compat import lazy_dependency" in source
+    if module_name in CONVERGED_ROUTE_MODULES:
+        assert "from .route_compat import DependencySpec, dependency_getters" in source
+    else:
+        assert "from .route_compat import lazy_dependency" in source
     assert "_support." not in source
     assert "getattr(_support" not in source

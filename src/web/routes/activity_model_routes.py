@@ -5,7 +5,7 @@ from typing import Dict, Any
 from fastapi import UploadFile, File, Form, Body, HTTPException, Request
 from src.web.request_auth import require_browser_session
 
-from .route_compat import lazy_dependency
+from .route_compat import DependencySpec, dependency_getters
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -25,25 +25,28 @@ def setup_activity_model_routes(
     application registration passes narrow upload, temporary-file and logging
     dependencies explicitly.
     """
-    get_upload_reader = lazy_dependency(
-        read_upload_limited,
+    getters = dependency_getters(
         _support,
-        "_read_upload_limited",
-        label="activity model upload reader",
+        upload_reader=DependencySpec(
+            read_upload_limited,
+            "_read_upload_limited",
+            "activity model upload reader",
+        ),
+        tempfile_module=DependencySpec(
+            tempfile_module,
+            "tempfile",
+            "activity model tempfile",
+        ),
+        logger=DependencySpec(
+            logger,
+            "logger",
+            "activity model logger",
+            default=_LOGGER,
+        ),
     )
-    get_tempfile_module = lazy_dependency(
-        tempfile_module,
-        _support,
-        "tempfile",
-        label="activity model tempfile",
-    )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="activity model logger",
-        default=_LOGGER,
-    )
+    get_upload_reader = getters["upload_reader"]
+    get_tempfile_module = getters["tempfile_module"]
+    get_logger = getters["logger"]
 
     @app.post("/api/activity/train")
     async def start_activity_training(

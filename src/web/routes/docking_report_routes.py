@@ -5,7 +5,7 @@ from typing import Dict, Any
 from fastapi import Body, HTTPException, Request
 from src.web.api_response import api_error
 
-from .route_compat import lazy_dependency
+from .route_compat import DependencySpec, dependency_getters
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,19 +24,22 @@ def setup_docking_report_routes(
     ``_support`` remains a compatibility-only fallback for older direct callers;
     application registration passes the narrow dependencies explicitly.
     """
-    get_validator = lazy_dependency(
-        validate_report_base64_payload,
+    getters = dependency_getters(
         _support,
-        "_validate_report_base64_payload",
-        label="docking report validator",
+        validator=DependencySpec(
+            validate_report_base64_payload,
+            "_validate_report_base64_payload",
+            "docking report validator",
+        ),
+        logger=DependencySpec(
+            logger,
+            "logger",
+            "docking report logger",
+            default=_LOGGER,
+        ),
     )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="docking report logger",
-        default=_LOGGER,
-    )
+    get_validator = getters["validator"]
+    get_logger = getters["logger"]
 
     @app.post("/api/docking/report/{job_id}")
     async def get_docking_report(job_id: str, request: Request, payload: Dict[str, Any] = Body(None)):

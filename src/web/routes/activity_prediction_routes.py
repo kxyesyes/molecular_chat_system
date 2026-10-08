@@ -14,7 +14,7 @@ from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, st
 from src.web.request_auth import require_browser_session
 from src.system.scientific_status import summarize_completion
 
-from .route_compat import lazy_dependency
+from .route_compat import DependencySpec, dependency_getters
 
 
 _SMILES_COLUMN_ALIASES = {"smiles", "smile", "canonical_smiles", "structure"}
@@ -277,25 +277,28 @@ def setup_activity_prediction_routes(
     ``_support`` remains a compatibility-only fallback for older direct callers;
     application registration passes narrow budget, upload and logging dependencies.
     """
-    get_activity_invoker = lazy_dependency(
-        invoke_activity_with_budget,
+    getters = dependency_getters(
         _support,
-        "_ROUTE_ACTIVITY_INVOKER",
-        label="activity budget",
+        activity_invoker=DependencySpec(
+            invoke_activity_with_budget,
+            "_ROUTE_ACTIVITY_INVOKER",
+            "activity budget",
+        ),
+        upload_reader=DependencySpec(
+            read_upload_limited,
+            "_read_upload_limited",
+            "activity upload",
+        ),
+        logger=DependencySpec(
+            logger,
+            "logger",
+            "activity logger",
+            default=logging.getLogger(__name__),
+        ),
     )
-    get_upload_reader = lazy_dependency(
-        read_upload_limited,
-        _support,
-        "_read_upload_limited",
-        label="activity upload",
-    )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="activity logger",
-        default=logging.getLogger(__name__),
-    )
+    get_activity_invoker = getters["activity_invoker"]
+    get_upload_reader = getters["upload_reader"]
+    get_logger = getters["logger"]
 
     async def invoke_with_budget(*, operation, isolated_payload):
         return await get_activity_invoker()(

@@ -5,7 +5,7 @@ from typing import Dict, Any
 
 from fastapi import Body, Query, HTTPException, Response
 
-from .route_compat import lazy_dependency
+from .route_compat import DependencySpec, dependency_getters
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -168,19 +168,22 @@ def setup_molecule_utility_routes(
     ``_support`` remains a compatibility-only fallback for older direct callers;
     application registration passes the two narrow dependencies explicitly.
     """
-    get_invoker = lazy_dependency(
-        invoke_in_threadpool,
+    getters = dependency_getters(
         _support,
-        "_invoke_in_threadpool",
-        label="molecule utility threadpool",
+        invoker=DependencySpec(
+            invoke_in_threadpool,
+            "_invoke_in_threadpool",
+            "molecule utility threadpool",
+        ),
+        logger=DependencySpec(
+            logger,
+            "logger",
+            "molecule utility logger",
+            default=_LOGGER,
+        ),
     )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="molecule utility logger",
-        default=_LOGGER,
-    )
+    get_invoker = getters["invoker"]
+    get_logger = getters["logger"]
 
     @app.post("/api/docking/smiles_to_3d")
     async def smiles_to_3d(payload: Dict[str, Any] = Body(...)):

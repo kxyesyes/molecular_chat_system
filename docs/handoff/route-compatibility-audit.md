@@ -6,8 +6,8 @@
 
 正式应用注册不再把整个 `api_routes` 模块作为依赖容器传入。四组路由均通过
 显式窄依赖接收运行资源；`_support` 只保留给旧的直接注册调用方，并通过
-`src/web/routes/route_compat.py::lazy_dependency` 延迟解析，以保持旧调用方在
-注册后替换 logger、上传读取器或执行器的行为。
+`src/web/routes/route_compat.py::dependency_getters` 统一装配规格，并由
+`lazy_dependency` 延迟解析，以保持旧调用方在注册后替换 logger、上传读取器或执行器的行为。
 
 | 路由模块 | 正式注册依赖 | `_support` 保留范围 |
 | --- | --- | --- |
@@ -15,6 +15,9 @@
 | `activity_model_routes` | 上传读取器、临时文件模块、logger | 旧训练/模型直接注册调用 |
 | `molecule_utility_routes` | 线程池执行器、logger | 旧分子工具直接注册调用 |
 | `docking_report_routes` | 对接服务、报告图片验证器、logger | 旧报告直接注册调用 |
+
+四组路由现在都只声明 `DependencySpec`，兼容对象的属性查找集中在
+`route_compat.py`；这一步没有改变公开参数、动态替换语义或正式应用装配路径。
 
 ## 不应继续做的变更
 
