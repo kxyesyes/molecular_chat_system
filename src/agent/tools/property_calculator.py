@@ -9,8 +9,7 @@ import logging
 import math
 
 try:
-    from rdkit import Chem
-    from rdkit.Chem import Descriptors, Crippen, Lipinski, QED
+    import rdkit  # noqa: F401 - availability check for the legacy tool contract
     RDKIT_AVAILABLE = True
 except ImportError:
     RDKIT_AVAILABLE = False
@@ -126,29 +125,30 @@ class PropertyCalculator(BaseMolecularTool):
         return result
 
     def calculate_properties(self, smiles: str) -> Optional[Dict[str, Any]]:
-        """Calculate molecular properties using RDKit"""
+        """Adapt the shared molecular-design calculation to the legacy schema."""
         try:
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
-                return None
+            from src.molecular_design import chemistry
 
-            qed_val = round(QED.qed(mol), 3)
-            logp_val = round(Crippen.MolLogP(mol), 3)
+            result = chemistry.calculate_properties(smiles)
+            if not result.get("success"):
+                return None
+            canonical = result["properties"]
+            raw = result.get("raw_properties", {})
 
             properties = {
-                'molecular_formula': Chem.rdMolDescriptors.CalcMolFormula(mol),
-                'molecular_weight': round(Descriptors.MolWt(mol), 2),
-                'logp': logp_val,                          # ← 新增：脂水分配系数
-                'hba': Lipinski.NumHAcceptors(mol),
-                'hbd': Lipinski.NumHDonors(mol),
-                'tpsa': round(Descriptors.TPSA(mol), 2),
-                'rotatable_bonds': Lipinski.NumRotatableBonds(mol),
-                'qed': qed_val,                            # 范围严格 [0, 1]
+                'molecular_formula': canonical["molecular_formula"],
+                'molecular_weight': round(raw.get("mw", canonical["mw"]), 2),
+                'logp': round(raw.get("logp", canonical["logp"]), 3),
+                'hba': canonical["hba"],
+                'hbd': canonical["hbd"],
+                'tpsa': round(raw.get("tpsa", canonical["tpsa"]), 2),
+                'rotatable_bonds': canonical["rotbonds"],
+                'qed': round(raw.get("qed", canonical["qed"]), 3),
             }
 
             # ── 完整性校验（防止 RDKit 异常导致幻觉）──────────
-            if not (math.isfinite(qed_val) and 0.0 <= qed_val <= 1.0):
-                raise ValueError(f"QED={qed_val} out of [0,1] for {smiles}")
+            if not (math.isfinite(properties["qed"]) and 0.0 <= properties["qed"] <= 1.0):
+                raise ValueError(f"QED={properties['qed']} out of [0,1] for {smiles}")
 
             return properties
 

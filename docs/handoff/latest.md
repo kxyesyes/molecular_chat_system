@@ -1,5 +1,28 @@
 # Latest handoff
 
+## 当前权威状态（2026-10-08）
+
+本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
+
+- `origin/main` 当前为 `d61b7fe`。本地没有直接修改 `main`。
+- 分子性质入口核心收敛已在独立分支
+  `codex/molecular-properties-core-convergence` 完成，提交 `eeefcf3` 已推送但尚未合并：
+  Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`，旧 HTTP/Agent 字段与失败语义保持。
+- 本批验证：全量 Python `21966 passed, 272 skipped, 10 warnings, 173 subtests passed`；
+  三个 Node 回归、全部 JavaScript 语法检查和 `compileall` 通过。
+- 路由兼容层中正式注册路径已使用窄依赖；目标路由的 `_support` 仅保留给旧直接调用者，
+  不应再次把它描述为生产注册依赖。
+- 严格健康检查在 MedChat Conda 环境为 `20/23`：缺少 ChEMBL 反向寻靶表、注册活性模型权重和
+  RAG FAISS 索引。它们是本机运行资产，不得用模拟文件或伪造模型结果填充。
+
+### 当前真正未完成
+
+1. 对 `eeefcf3` 做代码审查、CI 和正式合并。
+2. 对其余科研入口逐项完成核心/适配层和统一结果状态的证据审计；不能把历史分支名或旧交接文字当作完成证据。
+3. 准备真实 ChEMBL、PDE/BuChE 活性模型权重与 RAG 索引，并做真实链路验收。
+4. 完成前端刷新恢复、断线重连、取消和失败原因的真实浏览器验收，以及部署环境验证。
+5. 更新或归档与当前 `main` 不一致的历史台账，最后再执行全项目合并验收。
+
 ## 第2项发布完成／第3项开始（2026-09-25）
 
 [PR #63](https://github.com/kxyesyes/molecular_chat_system/pull/63) 已按用户默认授权 squash 合并为

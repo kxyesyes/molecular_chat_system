@@ -1,8 +1,9 @@
 """Molecule properties route registration."""
 import logging
-import math
 from typing import Dict, Any
 from fastapi import Body, HTTPException
+
+from src.molecular_design import chemistry
 
 from .route_compat import lazy_dependency
 
@@ -33,70 +34,48 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
             
             get_logger().info(f"计算分子属性: {smiles}")
             
-            # 直接使用RDKit计算属性，避免工具的SMILES提取逻辑
             try:
-                from rdkit import Chem
-                from rdkit.Chem import Descriptors, Crippen, Lipinski, QED
-                
-                # 验证SMILES - 尝试多种解析方式
-                mol = Chem.MolFromSmiles(smiles)
-                
-                # 如果标准解析失败，尝试不做清洗的解析（可能包含部分错误但能读取） -> 再手动清洗
-                if mol is None:
-                    mol = Chem.MolFromSmiles(smiles, sanitize=False)
-                    if mol:
-                        try:
-                            Chem.SanitizeMol(mol)
-                        except Exception:
-                            mol = None
-
-                if mol is None:
-                    get_logger().warning(f"RDKit无法解析SMILES: {smiles}")
-                    return {
-                        "success": False,
-                        "error": f"无法识别的分子结构: {smiles}",
-                        "properties": None
-                    }
-                
-                # 计算基础属性
-                qed_value = QED.qed(mol)
-                if not (math.isfinite(qed_value) and 0.0 <= qed_value <= 1.0):
-                    raise ValueError(f"QED={qed_value} out of [0,1]")
-
-                properties = {
-                    'basic': {
-                        'molecular_weight': round(Descriptors.MolWt(mol), 2),
-                        'logp': round(Crippen.MolLogP(mol), 2),
-                        'hbd': Lipinski.NumHDonors(mol),
-                        'hba': Lipinski.NumHAcceptors(mol),
-                        'tpsa': round(Descriptors.TPSA(mol), 2),
-                        'rotatable_bonds': Lipinski.NumRotatableBonds(mol),
-                        'qed': round(qed_value, 3)
-                    },
-                    'admet': {}
-                }
-                
-                # 本接口没有受支持的ADMET计算路径；基础性质不构成这些结论的证据。
-                properties['admet'] = dict.fromkeys((
-                    'bbb_penetration', 'cyp_inhibition', 'hepatotoxicity',
-                    'solubility', 'bioavailability'), 'Unknown')
-                properties['admet_metadata'] = {
-                    'availability': 'unavailable',
-                    'method': 'not_calculated',
-                    'warning': 'ADMET未计算；本接口仅计算基础理化性质，不能据此判断毒性、CNS安全性或体内表现。',
-                }
-                
-                get_logger().info(f"属性计算完成: {len(properties['basic'])} 个基础属性, {len(properties['admet'])} 个ADMET属性")
-                
+                result = chemistry.calculate_properties(smiles)
+            except ValueError:
+                get_logger().warning(f"RDKit无法解析SMILES: {smiles}")
                 return {
-                    "success": True,
-                    "properties": properties,
-                    "smiles": smiles
+                    "success": False,
+                    "error": f"无法识别的分子结构: {smiles}",
+                    "properties": None
                 }
-                
-            except Exception as rdkit_error:
-                get_logger().error(f"RDKit计算失败: {rdkit_error}")
-                raise
+
+            basic_properties = result["properties"]
+            raw_properties = result.get("raw_properties", {})
+            properties = {
+                'basic': {
+                    'molecular_weight': round(raw_properties.get("mw", basic_properties["mw"]), 2),
+                    'logp': round(raw_properties.get("logp", basic_properties["logp"]), 2),
+                    'hbd': basic_properties["hbd"],
+                    'hba': basic_properties["hba"],
+                    'tpsa': round(raw_properties.get("tpsa", basic_properties["tpsa"]), 2),
+                    'rotatable_bonds': basic_properties["rotbonds"],
+                    'qed': round(raw_properties.get("qed", basic_properties["qed"]), 3)
+                },
+                'admet': {}
+            }
+
+            # 本接口没有受支持的ADMET计算路径；基础性质不构成这些结论的证据。
+            properties['admet'] = dict.fromkeys((
+                'bbb_penetration', 'cyp_inhibition', 'hepatotoxicity',
+                'solubility', 'bioavailability'), 'Unknown')
+            properties['admet_metadata'] = {
+                'availability': 'unavailable',
+                'method': 'not_calculated',
+                'warning': 'ADMET未计算；本接口仅计算基础理化性质，不能据此判断毒性、CNS安全性或体内表现。',
+            }
+
+            get_logger().info(f"属性计算完成: {len(properties['basic'])} 个基础属性, {len(properties['admet'])} 个ADMET属性")
+
+            return {
+                "success": True,
+                "properties": properties,
+                "smiles": smiles
+            }
             
         except Exception as e:
             get_logger().error(f"分子属性计算失败: {e}", exc_info=True)

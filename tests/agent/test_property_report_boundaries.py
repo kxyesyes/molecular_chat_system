@@ -70,6 +70,46 @@ def test_real_descriptor_values_and_legacy_schema_are_unchanged(calculator, smil
     assert_bounded(result["reasoning"])
 
 
+def test_agent_property_adapter_reuses_molecular_design_core(monkeypatch, calculator):
+    from src.molecular_design import chemistry
+
+    calls = []
+
+    def fake_calculate_properties(smiles):
+        calls.append(smiles)
+        return {
+            "success": True,
+            "properties": {
+                "molecular_formula": "C2H6O",
+                "mw": 46.069,
+                "logp": -0.001,
+                "tpsa": 20.23,
+                "hbd": 1,
+                "hba": 1,
+                "rotbonds": 0,
+                "qed": 0.4062,
+                "fsp3": 1.0,
+                "sa_score": None,
+            },
+            "goals": {"items": []},
+            "property_status": {"sa_score": "unavailable"},
+        }
+
+    monkeypatch.setattr(chemistry, "calculate_properties", fake_calculate_properties)
+
+    assert calculator.calculate_properties("CCO") == {
+        "molecular_formula": "C2H6O",
+        "molecular_weight": 46.07,
+        "logp": -0.001,
+        "hba": 1,
+        "hbd": 1,
+        "tpsa": 20.23,
+        "rotatable_bonds": 0,
+        "qed": 0.406,
+    }
+    assert calls == ["CCO"]
+
+
 @pytest.mark.parametrize("invalid_qed", [-0.01, 1.01, float("nan"), float("inf")])
 def test_calculate_properties_rejects_invalid_qed_instead_of_clamping(
     calculator, monkeypatch, invalid_qed

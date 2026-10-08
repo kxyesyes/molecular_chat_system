@@ -195,15 +195,26 @@ def calculate_properties(
 
     mol = _mol_from_smiles(smiles)
     property_status = {}
-    props = {
-        "logp": round(float(Descriptors.MolLogP(mol)), 3),
-        "mw": round(float(Descriptors.MolWt(mol)), 3),
-        "tpsa": round(float(rdMolDescriptors.CalcTPSA(mol)), 3),
+    raw_props = {
+        "logp": float(Descriptors.MolLogP(mol)),
+        "mw": float(Descriptors.MolWt(mol)),
+        "tpsa": float(rdMolDescriptors.CalcTPSA(mol)),
         "hbd": int(NumHDonors(mol)),
         "hba": int(NumHAcceptors(mol)),
         "rotbonds": int(rdMolDescriptors.CalcNumRotatableBonds(mol)),
-        "qed": round(float(qed(mol)), 4),
-        "fsp3": round(float(rdMolDescriptors.CalcFractionCSP3(mol)), 3),
+        "qed": float(qed(mol)),
+        "fsp3": float(rdMolDescriptors.CalcFractionCSP3(mol)),
+    }
+    props = {
+        "molecular_formula": rdMolDescriptors.CalcMolFormula(mol),
+        "logp": round(raw_props["logp"], 3),
+        "mw": round(raw_props["mw"], 3),
+        "tpsa": round(raw_props["tpsa"], 3),
+        "hbd": raw_props["hbd"],
+        "hba": raw_props["hba"],
+        "rotbonds": raw_props["rotbonds"],
+        "qed": round(raw_props["qed"], 4),
+        "fsp3": round(raw_props["fsp3"], 3),
     }
     if not (math.isfinite(props["qed"]) and 0.0 <= props["qed"] <= 1.0):
         raise ValueError(f"QED={props['qed']} out of [0,1] for {smiles}")
@@ -233,6 +244,7 @@ def calculate_properties(
     return {
         "success": True,
         "properties": props,
+        "raw_properties": raw_props,
         "goals": evaluate_goals(props, goals),
         "property_status": property_status,
     }

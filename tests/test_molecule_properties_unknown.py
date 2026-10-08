@@ -25,6 +25,48 @@ def test_legacy_support_argument_remains_compatible():
     assert response.status_code == 200 and response.json()["success"] is True
 
 
+def test_route_reuses_molecular_design_core_for_descriptor_calculation(monkeypatch):
+    from src.molecular_design import chemistry
+
+    calls = []
+
+    def fake_calculate_properties(smiles):
+        calls.append(smiles)
+        return {
+            "success": True,
+            "properties": {
+                "molecular_formula": "C2H6O",
+                "mw": 46.069,
+                "logp": -0.001,
+                "tpsa": 20.23,
+                "hbd": 1,
+                "hba": 1,
+                "rotbonds": 0,
+                "qed": 0.4062,
+                "fsp3": 1.0,
+                "sa_score": None,
+            },
+            "goals": {"items": []},
+            "property_status": {"sa_score": "unavailable"},
+        }
+
+    monkeypatch.setattr(chemistry, "calculate_properties", fake_calculate_properties)
+    with client_for_properties() as client:
+        response = client.post("/api/molecule/properties", json={"smiles": "CCO"})
+
+    assert response.status_code == 200
+    assert calls == ["CCO"]
+    assert response.json()["properties"]["basic"] == {
+        "molecular_weight": 46.07,
+        "logp": -0.0,
+        "hbd": 1,
+        "hba": 1,
+        "tpsa": 20.23,
+        "rotatable_bonds": 0,
+        "qed": 0.406,
+    }
+
+
 @pytest.mark.parametrize("smiles", ["CCO", "CC(=O)Oc1ccccc1C(=O)O"])
 def test_basic_values_are_actual_rdkit(smiles):
     mol = Chem.MolFromSmiles(smiles)
