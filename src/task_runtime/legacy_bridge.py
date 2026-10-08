@@ -16,24 +16,28 @@ from uuid import uuid4
 
 from .manager import TaskManager
 from .models import ResultProjectionPolicy, TaskRecord, TaskStatus
+from src.system.scientific_status import (
+    is_cancelled_status,
+    is_non_success_status,
+    is_timeout_status,
+    reported_status,
+)
 
 
 def _terminal_status(result: dict[str, Any]) -> tuple[TaskStatus, str | None]:
-    reported = str(result.get("status") or "").strip().lower()
-    if reported in {"timed_out", "timeout", "timed-out"}:
+    reported = reported_status(result)
+    if is_timeout_status(reported):
         return TaskStatus.TIMED_OUT, str(
             result.get("error") or "Legacy task timed out"
         )
-    if reported in {"canceled", "cancelled"}:
+    if is_cancelled_status(reported):
         # A synchronous endpoint cannot be retroactively canceled. Preserve
         # the provider status as a failed receipt rather than fabricating a
         # successful cancellation transition.
         return TaskStatus.FAILED, str(
             result.get("error") or "Legacy task reported cancellation"
         )
-    if result.get("success") is True and reported not in {
-        "failed", "partial", "unavailable", "rejected", "error", "unknown"
-    }:
+    if result.get("success") is True and not is_non_success_status(reported):
         return TaskStatus.SUCCEEDED, None
     return TaskStatus.FAILED, str(
         result.get("error") or "Legacy task returned a non-success result"

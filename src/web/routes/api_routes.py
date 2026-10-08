@@ -33,6 +33,108 @@ from .agent_metrics_routes import setup_agent_metrics_routes
 logger = logging.getLogger(__name__)
 
 
+class _DynamicLogger:
+    """Keep post-registration logger patching without passing the support module."""
+
+    def __getattr__(self, name):
+        return getattr(logger, name)
+
+
+_ROUTE_LOGGER = _DynamicLogger()
+
+
+class _DynamicInvoker:
+    """Keep post-registration threadpool patching without passing this module."""
+
+    async def __call__(self, func, *args, **kwargs):
+        return await sys.modules[__name__]._invoke_in_threadpool(func, *args, **kwargs)
+
+
+_ROUTE_INVOKER = _DynamicInvoker()
+
+
+class _DynamicReportValidator:
+    """Keep post-registration report validation patching without api_routes injection."""
+
+    def __call__(self, *args, **kwargs):
+        return sys.modules[__name__]._validate_report_base64_payload(*args, **kwargs)
+
+
+_ROUTE_REPORT_VALIDATOR = _DynamicReportValidator()
+
+
+class _DynamicUploadReader:
+    """Keep post-registration upload-limit patching without api_routes injection."""
+
+    async def __call__(self, *args, **kwargs):
+        return await sys.modules[__name__]._read_upload_limited(*args, **kwargs)
+
+
+_ROUTE_UPLOAD_READER = _DynamicUploadReader()
+
+
+class _DynamicTempfile:
+    """Keep post-registration temporary-file factory patching compatible."""
+
+    def __getattr__(self, name):
+        return getattr(sys.modules[__name__].tempfile, name)
+
+
+_ROUTE_TEMPFILE = _DynamicTempfile()
+
+
+class _DynamicActivityInvoker:
+    """Keep post-registration activity budget patching compatible."""
+
+    async def __call__(self, *args, **kwargs):
+        from . import activity_prediction_routes
+
+        return await activity_prediction_routes._invoke_activity_with_budget(*args, **kwargs)
+
+
+_ROUTE_ACTIVITY_INVOKER = _DynamicActivityInvoker()
+
+
+class _DynamicEnvGetter:
+    """Keep post-registration environment patching compatible."""
+
+    def __call__(self, name, default=None):
+        return sys.modules[__name__].os.getenv(name, default)
+
+
+_ROUTE_ENV_GETTER = _DynamicEnvGetter()
+
+
+class _DynamicExecutorFactory:
+    """Keep post-registration executor-factory patching compatible."""
+
+    def __call__(self, *args, **kwargs):
+        return sys.modules[__name__].ThreadPoolExecutor(*args, **kwargs)
+
+
+_ROUTE_EXECUTOR_FACTORY = _DynamicExecutorFactory()
+
+
+class _DynamicSupportCallable:
+    """Resolve a legacy api_routes callable only when the route invokes it."""
+
+    def __init__(self, attribute):
+        self._attribute = attribute
+
+    def __call__(self, *args, **kwargs):
+        return getattr(sys.modules[__name__], self._attribute)(*args, **kwargs)
+
+
+_ROUTE_PHARM3D_LIMIT = _DynamicSupportCallable("_get_pharm3d_candidate_pool_limit")
+_ROUTE_PHARM3D_TIMEOUT = _DynamicSupportCallable("_get_pharm3d_timeout")
+_ROUTE_PHARM3D_RUNNER = _DynamicSupportCallable("_run_pharm3d_job")
+_ROUTE_PHARM3D_FALLBACK = _DynamicSupportCallable("_build_pharm3d_fallback")
+_ROUTE_DOCKING_LIMITS = _DynamicSupportCallable("_validate_docking_limits")
+_ROUTE_DOCKING_WARNINGS = _DynamicSupportCallable("_normalize_warning_strings")
+_ROUTE_DOCKING_INT_ENV = _DynamicSupportCallable("_get_int_env")
+_ROUTE_API_SUCCESS = _DynamicSupportCallable("api_success")
+
+
 def _normalize_warning_strings(values: Any) -> List[str]:
     if not isinstance(values, list):
         return []
@@ -390,13 +492,59 @@ def _build_pharm3d_fallback(candidates: List[Dict[str, Any]], error: str = "") -
 
 def setup_api_routes(app, docking_service=None, task_runtime=None):
     """设置 API 路由。"""
-    support = sys.modules[__name__]
-    setup_docking_routes(app, docking_service=docking_service, task_runtime=task_runtime, _support=support)
-    setup_molecule_utility_routes(app, _support=support)
-    setup_docking_report_routes(app, docking_service=docking_service, _support=support)
-    setup_reverse_target_routes(app, _support=support)
-    setup_activity_prediction_routes(app, _support=support)
-    setup_activity_model_routes(app, _support=support)
-    setup_molecule_properties_routes(app, _support=support)
-    setup_admet_routes(app, _support=support)
-    setup_agent_metrics_routes(app, _support=support)
+    setup_docking_routes(
+        app,
+        docking_service=docking_service,
+        task_runtime=task_runtime,
+        invoke_in_threadpool=_ROUTE_INVOKER,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        validate_docking_limits=_ROUTE_DOCKING_LIMITS,
+        normalize_warning_strings=_ROUTE_DOCKING_WARNINGS,
+        get_int_env=_ROUTE_DOCKING_INT_ENV,
+        api_success=_ROUTE_API_SUCCESS,
+        logger=_ROUTE_LOGGER,
+        tempfile_module=_ROUTE_TEMPFILE,
+    )
+    setup_molecule_utility_routes(
+        app,
+        invoke_in_threadpool=_ROUTE_INVOKER,
+        logger=_ROUTE_LOGGER,
+    )
+    setup_docking_report_routes(
+        app,
+        docking_service=docking_service,
+        validate_report_base64_payload=_ROUTE_REPORT_VALIDATOR,
+        logger=_ROUTE_LOGGER,
+    )
+    setup_reverse_target_routes(
+        app,
+        invoke_in_threadpool=_ROUTE_INVOKER,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        logger=_ROUTE_LOGGER,
+        get_pharm3d_candidate_pool_limit=_ROUTE_PHARM3D_LIMIT,
+        get_pharm3d_timeout=_ROUTE_PHARM3D_TIMEOUT,
+        run_pharm3d_job=_ROUTE_PHARM3D_RUNNER,
+        build_pharm3d_fallback=_ROUTE_PHARM3D_FALLBACK,
+        pharm3d_candidates_job=_pharm3d_candidates_job,
+        pharm3d_refine_job=_pharm3d_refine_job,
+        pharm3d_query_job=_pharm3d_query_job,
+    )
+    setup_activity_prediction_routes(
+        app,
+        invoke_activity_with_budget=_ROUTE_ACTIVITY_INVOKER,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        logger=_ROUTE_LOGGER,
+    )
+    setup_activity_model_routes(
+        app,
+        read_upload_limited=_ROUTE_UPLOAD_READER,
+        tempfile_module=_ROUTE_TEMPFILE,
+        logger=_ROUTE_LOGGER,
+    )
+    setup_molecule_properties_routes(app, logger=_ROUTE_LOGGER)
+    setup_admet_routes(
+        app,
+        env_getter=_ROUTE_ENV_GETTER,
+        executor_factory=_ROUTE_EXECUTOR_FACTORY,
+    )
+    setup_agent_metrics_routes(app, logger=_ROUTE_LOGGER)

@@ -115,7 +115,7 @@ def test_batch_preserves_ids_and_exposes_item_failure_without_row_mixing():
     backend = FakeBackend(fail_ids={"molecule-002"})
     result = ADMETPredictor(backend=backend).execute("SMILES: CCO\nSMILES: CCN")
 
-    assert result["success"] is True
+    assert result["success"] is False
     assert result["status"] == "partial"
     assert [row["molecule_id"] for row in result["data"]] == [
         "molecule-001",
@@ -126,6 +126,15 @@ def test_batch_preserves_ids_and_exposes_item_failure_without_row_mixing():
     assert result["data"][1]["status"] == "failed"
     assert "HIA_Hou" not in result["data"][1]["admet"]
     assert backend.calls == [(["CCO", "CCN"], ["molecule-001", "molecule-002"])]
+
+
+def test_mixed_admet_batch_is_not_reported_as_success():
+    result = ADMETPredictor(backend=FakeBackend(fail_ids={"molecule-002"})).execute(
+        "SMILES: CCO\nSMILES: CCN"
+    )
+
+    assert result["status"] == "partial"
+    assert result["success"] is False
 
 
 def test_admet_result_records_structure_model_data_source_and_evidence():

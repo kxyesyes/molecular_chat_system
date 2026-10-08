@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable
 
-from src.agent.persistence.redaction import sanitize_sensitive_text
+from src.system.redaction import sanitize_sensitive_text
 from src.task_runtime.private_permissions import restrict_private_path
 
 

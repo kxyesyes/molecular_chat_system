@@ -22,8 +22,11 @@ class Element {
 }
 
 const source = read('src/web/static/js/admet.js');
+const statusSource = read('src/web/static/js/shared/status.js');
 const template = read('src/web/templates/admet.html');
 const styles = read('src/web/static/css/admet.css');
+assert(template.includes('/static/js/shared/status.js'), 'load the shared status contract before page rendering');
+assert(!source.includes('const stateText ='), 'status labels belong to the shared status module');
 assert(!source.includes('innerHTML'));
 assert(!/on(?:click|submit)=/.test(template));
 assert(!template.includes('/kermt-admet'));
@@ -51,7 +54,7 @@ assert(template.includes('id="structure-file"'), 'provide a real file input');
 assert(template.includes('id="file-help"'), 'explain supported upload formats');
 assert(styles.includes('align-items: stretch'), 'keep both workspace columns at the same row height');
 assert(template.includes('/static/css/admet.css?v=20261005-38874c3'), 'bust stale ADMET stylesheet caches after layout changes');
-assert(template.includes('/static/js/admet.js?v=20261005-38874c3'), 'bust stale ADMET script caches after behavior changes');
+assert(template.includes('/static/js/admet.js?v=20261008-status-v1'), 'bust stale ADMET script caches after behavior changes');
 assert(!template.includes('置信度'), 'do not imply a confidence score that the API does not return');
 assert(styles.includes('max(460px, calc(100vh - 260px))'), 'fill the initial workspace with meaningful content');
 assert(!styles.includes('min-height: 620px'), 'do not force a large empty result panel');
@@ -63,6 +66,7 @@ function createUI(fetchImpl) {
   const elements = Object.fromEntries([...template.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, new Element()]));
   const document = { getElementById: id => elements[id], createElement: tag => new Element(tag) };
   const sandbox = { document, window: {}, fetch: fetchImpl, console, AbortController, setTimeout, clearTimeout };
+  vm.runInNewContext(statusSource, sandbox, { filename: 'shared/status.js' });
   vm.runInNewContext(source, sandbox, { filename: 'admet.js' });
   return { elements, ui: sandbox.window.MedChatADMET };
 }

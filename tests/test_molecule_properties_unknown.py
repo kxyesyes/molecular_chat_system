@@ -13,8 +13,16 @@ from src.web.routes.molecule_properties_routes import setup_molecule_properties_
 
 def client_for_properties():
     app = FastAPI()
-    setup_molecule_properties_routes(app, _support=SimpleNamespace(logger=Mock()))
+    setup_molecule_properties_routes(app, logger=Mock())
     return TestClient(app)
+
+
+def test_legacy_support_argument_remains_compatible():
+    app = FastAPI()
+    setup_molecule_properties_routes(app, _support=SimpleNamespace(logger=Mock()))
+    with TestClient(app) as client:
+        response = client.post("/api/molecule/properties", json={"smiles": "CCO"})
+    assert response.status_code == 200 and response.json()["success"] is True
 
 
 @pytest.mark.parametrize("smiles", ["CCO", "CC(=O)Oc1ccccc1C(=O)O"])

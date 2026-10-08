@@ -200,6 +200,16 @@ test("initial markup selects compatible provider and shows DeepSeek placeholders
   assert.match(html, /id="llmApiKey" type="password" autocomplete="off"/);
 });
 
+test("settings modal uses compact portrait dimensions", () => {
+  const panel = html.match(/\.llm-settings-panel \{([\s\S]*?)\n    \}/)[1];
+  assert.match(panel, /width:\s*min\(470px, 100%\)/);
+  assert.match(panel, /min-height:\s*560px/);
+  assert.match(panel, /max-height:\s*calc\(100vh - 48px\)/);
+  assert.match(panel, /display:\s*flex/);
+  assert.match(html, /\.llm-settings-body \{([\s\S]*?)\n    \}/);
+  assert.match(html, /\.llm-settings-actions \{([\s\S]*?)margin-top:\s*auto/);
+});
+
 test("homepage model selector contains only the current DeepSeek entry", () => {
   const selector = html.match(/<select id="modelSelect">([\s\S]*?)<\/select>/)[1];
   assert.match(selector, /value="deepseek"/);
@@ -221,5 +231,5 @@ test("settings markup omits verbose persistence and API-key instructions", () =>
 });
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
-  assert.ok(html.includes('<script src="/static/js/home/main.js?v=20261007-settings-clean-v9"></script>'));
+  assert.ok(html.includes('<script src="/static/js/home/main.js?v=20261007-legacy-payload-v1"></script>'));
 });

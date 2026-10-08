@@ -2,6 +2,7 @@
 import asyncio
 import csv
 import io
+import logging
 import math
 import os
 from pathlib import Path
@@ -11,6 +12,9 @@ from fastapi import UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse
 from src.web.process_isolation import IsolatedProcess, ProcessExecutionError, start_isolated_process
 from src.web.request_auth import require_browser_session
+from src.system.scientific_status import summarize_completion
+
+from .route_compat import lazy_dependency
 
 
 _SMILES_COLUMN_ALIASES = {"smiles", "smile", "canonical_smiles", "structure"}
@@ -159,7 +163,6 @@ async def _invoke_isolated_activity(
 
 
 async def _invoke_activity_with_budget(
-    _support,
     *,
     operation: str,
     isolated_payload,
@@ -231,15 +234,10 @@ def _attach_activity_task_receipt(
             isinstance(item, dict) and item.get("success") is True
             for item in result
         )
+        status, success = summarize_completion(completed, len(result))
         summary = {
-            "status": (
-                "completed"
-                if completed == len(result) and result
-                else "failed"
-                if completed == 0
-                else "partial"
-            ),
-            "success": completed == len(result) and bool(result),
+            "status": status,
+            "success": success,
             "count": len(result),
             "results": result,
         }
@@ -266,8 +264,48 @@ def _attach_activity_task_receipt(
     return receipt
 
 
-def setup_activity_prediction_routes(app, *, _support):
-    """Register the original endpoints with dynamically resolved compatibility support."""
+def setup_activity_prediction_routes(
+    app,
+    *,
+    invoke_activity_with_budget=None,
+    read_upload_limited=None,
+    logger=None,
+    _support=None,
+):
+    """Register activity prediction endpoints with explicit runtime dependencies.
+
+    ``_support`` remains a compatibility-only fallback for older direct callers;
+    application registration passes narrow budget, upload and logging dependencies.
+    """
+    get_activity_invoker = lazy_dependency(
+        invoke_activity_with_budget,
+        _support,
+        "_ROUTE_ACTIVITY_INVOKER",
+        label="activity budget",
+    )
+    get_upload_reader = lazy_dependency(
+        read_upload_limited,
+        _support,
+        "_read_upload_limited",
+        label="activity upload",
+    )
+    get_logger = lazy_dependency(
+        logger,
+        _support,
+        "logger",
+        label="activity logger",
+        default=logging.getLogger(__name__),
+    )
+
+    async def invoke_with_budget(*, operation, isolated_payload):
+        return await get_activity_invoker()(
+            operation=operation,
+            isolated_payload=isolated_payload,
+        )
+
+    async def read_upload(upload, label):
+        return await get_upload_reader()(upload, label)
+
     @app.post("/api/activity/predict")
     async def activity_predict(
         request: Request,
@@ -277,8 +315,7 @@ def setup_activity_prediction_routes(app, *, _support):
         """活性预测 API"""
         owner_session_id = require_browser_session(request)
         try:
-            result = await _invoke_activity_with_budget(
-                _support,
+            result = await invoke_with_budget(
                 operation="predict",
                 isolated_payload=(smiles, target),
             )
@@ -290,7 +327,7 @@ def setup_activity_prediction_routes(app, *, _support):
         except HTTPException:
             raise
         except Exception:
-            _support.logger.error("活性预测请求失败")
+            get_logger().error("活性预测请求失败")
             raise HTTPException(status_code=500, detail="活性预测服务不可用")
 
     @app.post("/api/activity/batch_predict")
@@ -303,7 +340,7 @@ def setup_activity_prediction_routes(app, *, _support):
         """活性批量预测 API"""
         owner_session_id = require_browser_session(request)
         try:
-            content = await _support._read_upload_limited(file, "activity batch file")
+            content = await read_upload(file, "activity batch file")
             text = content.decode("utf-8-sig")
             smiles_list = _parse_batch_smiles(
                 text,
@@ -324,8 +361,7 @@ def setup_activity_prediction_routes(app, *, _support):
                     },
                 )
             
-            result = await _invoke_activity_with_budget(
-                _support,
+            result = await invoke_with_budget(
                 operation="batch_predict",
                 isolated_payload=(smiles_list, target),
             )
@@ -341,5 +377,5 @@ def setup_activity_prediction_routes(app, *, _support):
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         except Exception:
-            _support.logger.error("批量活性预测请求失败")
+            get_logger().error("批量活性预测请求失败")
             raise HTTPException(status_code=500, detail="批量活性预测服务不可用")

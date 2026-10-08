@@ -145,7 +145,7 @@ window.HomeFormatters = (function () {
     return withCardFrame(
       "🧪",
       "逆合成分析结果",
-      "IBM RXN for Chemistry",
+      "反应路线分析",
       "linear-gradient(135deg, #667eea20 0%, #764ba220 100%)",
       routesHtml + noteHtml,
     );
@@ -220,7 +220,7 @@ window.HomeFormatters = (function () {
     return withCardFrame(
       "🧬",
       "反应预测结果",
-      "IBM RXN for Chemistry",
+      "反应预测",
       "linear-gradient(135deg, #fbb6ce20 0%, #f687b320 100%)",
       bodyHtml,
     );
@@ -239,7 +239,7 @@ window.HomeFormatters = (function () {
     return withCardFrame(
       "📚",
       "文献数据检索结果",
-      "IBM RXN for Chemistry 数据源",
+      "文献检索结果",
       "linear-gradient(135deg, #a7f3d020 0%, #6ee7b720 100%)",
       withWhitePanel(formattedContent),
     );

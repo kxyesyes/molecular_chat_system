@@ -531,7 +531,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
     
     def _generate_with_llm(self, intent: Dict[str, Any]) -> List[str]:
         """使用LLM从描述生成分子"""
-        from src.web.models.ollama_model import OllamaGenerationError
+        from src.system.model_clients import OllamaGenerationError
 
         try:
             # 构建提示词
@@ -558,7 +558,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
     
     def _optimize_with_llm(self, intent: Dict[str, Any]) -> List[str]:
         """使用LLM优化现有分子"""
-        from src.web.models.ollama_model import OllamaGenerationError
+        from src.system.model_clients import OllamaGenerationError
 
         try:
             base_smiles = intent['base_smiles']
@@ -608,8 +608,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
     def _capture_strict_generate(self):
         """Verify the concrete implementation and signature without invoking it."""
         # Keep client imports lazy: importing the generator must not initialize
-        # the Web client's legacy logging setup or construct any HTTP clients.
-        from src.web.models.ollama_model import OllamaModel
+        # a model client's logging setup or construct any HTTP clients.
+        from src.system.model_clients import OllamaModel
 
         try:
             method = getattr(self.llm, 'generate', None)
@@ -628,7 +628,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
     
     def _call_llm_sync(self, prompt: str, temperature: float = 0.7) -> str:
         """Dispatch once using a verified snapshot of the bound generation method."""
-        from src.web.models.ollama_model import OllamaGenerationError
+        from src.system.model_clients import OllamaGenerationError
 
         try:
             method = self._capture_strict_generate()

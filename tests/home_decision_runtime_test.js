@@ -83,7 +83,7 @@ function loadHome({request, storedPointer = null} = {}) {
   const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
     sessionStorage: {getItem: () => stored, setItem: (_, s) => {stored = s;}, removeItem: () => {stored = null;}},
-    HomeChatRenderer: renderer};
+    HomeChatRenderer: renderer, WebSocket: Socket};
   const context = vm.createContext({window, document, WebSocket: Socket, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
     HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: s => String(s)},
@@ -93,9 +93,10 @@ function loadHome({request, storedPointer = null} = {}) {
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["molecule_candidates.js", "scientific_references.js", "evidence_report.js"]) {
+  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
+  context.HomeConfig = window.HomeConfig;
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
@@ -142,11 +143,11 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
-  await test("legacy announcement has no decision controls and keeps legacy payload", () => {
+  await test("legacy announcement has no decision controls and sends a valid legacy payload", () => {
     const h = loadHome(); h.ready("legacy");
     assert(!h.button("停止") && !h.button("继续") && !h.button("开始新请求"));
     h.input.value = "legacy input"; h.send();
-    assert.equal(h.socket.sent.at(-1).client_id, "web_client");
+    assert(!Object.hasOwn(h.socket.sent.at(-1), "client_id"));
   });
   for (const [previous, mode] of [[null, "decision_a2"], [null, "legacy"], ["legacy", "decision_a2"]]) {
     await test(`${previous || "first connection"} to ${mode} waits for server ready without replay`, () => {
@@ -171,7 +172,7 @@ async function run() {
       h.send();
       assert.equal(socket.sent.filter(f => f.type !== "ping").length, 1);
       if (mode === "legacy") {
-        assert.equal(socket.sent.at(-1).client_id, "web_client");
+        assert(!Object.hasOwn(socket.sent.at(-1), "client_id"));
         assert(!h.button("停止"), "legacy ready retains its existing UI");
       } else {
         socket.emit(accepted()); assert(!h.button("停止").disabled);
@@ -379,7 +380,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261007-settings-clean-v9"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261007-legacy-payload-v1"]);
   });
   await test("strict candidate trace is socket-bound and receive is not mounted ACK", async () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);

@@ -7,7 +7,7 @@ from src.agent.capabilities.catalog import CAPABILITY_CATALOG, TOOL_ALIASES, cap
 from src.agent.contracts import AgentContext
 from src.agent.harness.decision_policy import authorized_catalog
 from src.agent.tooling.factory import (
-    LegacyQueryInput, NON_WORKFLOW_TOOLS, TOOL_AGENT_OWNERS, build_tool_registry,
+    LegacyQueryInput, TOOL_AGENT_OWNERS, build_tool_registry,
 )
 from src.agent.tools.docking_tools import (
     PrepareReceptorTool, PrepareLigandTool, RunDockingTool, GetDockingResultTool,
@@ -23,7 +23,6 @@ def test_registry_inventory_has_no_unclassified_canonical_tools():
     canonical = {TOOL_ALIASES.get(name, name) for name in TOOL_AGENT_OWNERS}
     assert canonical == CAPABILITY_TOOLS | HELPER_NAMES
     assert CAPABILITY_TOOLS.isdisjoint(HELPER_NAMES)
-    assert NON_WORKFLOW_TOOLS == {"rxn_chemistry_agent": "legacy chat-only; no workflow policy"}
 
 
 @pytest.mark.parametrize("name", sorted(CAPABILITY_TOOLS))
@@ -41,17 +40,12 @@ def test_each_capability_has_explicit_input_and_output_contract(name):
         registry.close()
 
 
-def test_alias_is_one_typed_entry_and_legacy_rxn_stays_excluded():
-    registry = build_tool_registry([
-        SimpleNamespace(name="rag_database_search"),
-        SimpleNamespace(name="rxn_chemistry_agent"),
-    ])
+def test_alias_is_one_typed_entry():
+    registry = build_tool_registry([SimpleNamespace(name="rag_database_search")])
     try:
         assert set(registry.as_mapping()) == {"rag_search"}
         assert registry.resolve("rag_search") is registry.resolve("rag_database_search")
         assert registry.resolve("rag_search").spec.output_schema is not None
-        with pytest.raises(KeyError):
-            registry.resolve("rxn_chemistry_agent")
     finally:
         registry.close()
 

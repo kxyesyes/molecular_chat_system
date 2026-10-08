@@ -8,7 +8,10 @@ import threading
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
-from src.agent.persistence.redaction import redact_sensitive
+from src.system.redaction import redact_sensitive
+from src.system.scientific_status import normalize_observation_status, summarize_completion
+
+from .route_compat import lazy_dependency
 
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
@@ -41,21 +44,26 @@ def _positive_float_env(name: str, default: float) -> float:
 def _batch_result(index: int, job: dict, result: object, *, error: str | None = None,
                  status: str | None = None) -> dict:
     payload = result if isinstance(result, dict) else {}
-    payload_status = payload.get("status")
-    non_success_statuses = {"partial", "failed", "cancelled", "timed_out"}
+    raw_payload_status = payload.get("status")
+    payload_status = (
+        normalize_observation_status(raw_payload_status)
+        if raw_payload_status is not None
+        else None
+    )
+    non_success_statuses = {"partial", "failed", "cancelled", "timeout"}
     success_statuses = {"completed", "succeeded"}
     if error is not None:
         success = False
-        resolved_status = status or "failed"
+        resolved_status = normalize_observation_status(status) or "failed"
     elif payload_status in non_success_statuses:
         success = False
-        resolved_status = status or payload_status
+        resolved_status = normalize_observation_status(status) or payload_status
     elif payload_status in success_statuses or payload_status is None:
         success = bool(payload.get("success"))
-        resolved_status = status or ("completed" if success else "failed")
+        resolved_status = normalize_observation_status(status) or ("completed" if success else "failed")
     else:
         success = False
-        resolved_status = status or "failed"
+        resolved_status = normalize_observation_status(status) or "failed"
         error = "Docking result contained an unsupported status."
     best_pose = payload.get("best_pose") if success else None
     return {
@@ -74,7 +82,7 @@ def _batch_result(index: int, job: dict, result: object, *, error: str | None = 
 
 
 async def _run_batch_docking_jobs(
-    *, _support, docking_service, jobs: list[dict], receptor_file: str,
+    *, invoke_in_threadpool=None, _support=None, docking_service, jobs: list[dict], receptor_file: str,
     base_config, owner_session_id: str,
 ) -> dict:
     """Run batch docking through a bounded, physically cancellable queue."""
@@ -84,12 +92,19 @@ async def _run_batch_docking_jobs(
     item_timeout = _positive_float_env("MEDCHAT_DOCKING_ITEM_TIMEOUT_SECONDS", 300.0)
     queue = asyncio.Semaphore(concurrency)
     cancel_events = [threading.Event() for _ in jobs]
+    if invoke_in_threadpool is None:
+        invoke_in_threadpool = lazy_dependency(
+            None,
+            _support,
+            "_invoke_in_threadpool",
+            label="docking threadpool",
+        )()
 
     async def run_one(index: int, job: dict) -> dict:
         async with queue:
             cancel_event = cancel_events[index - 1]
             config = copy.deepcopy(base_config)
-            call = asyncio.create_task(_support._invoke_in_threadpool(
+            call = asyncio.create_task(invoke_in_threadpool(
                 docking_service.perform_docking,
                 receptor_file=receptor_file,
                 ligand_input=job["ligand_input"],
@@ -165,7 +180,7 @@ async def _run_batch_docking_jobs(
 
     completed = sum(row["status"] == "completed" for row in results)
     failed = len(results) - completed
-    status = "completed" if completed == len(results) else "failed" if completed == 0 else "partial"
+    status, _success = summarize_completion(completed, len(results))
     return {
         "status": status,
         "timed_out": timed_out,
@@ -220,8 +235,34 @@ def _clear_owned_history_records(work_dir: str, owner_session_id: str) -> int:
             deleted += 1
 
 
-def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _support):
-    """Register the original endpoints with dynamically resolved compatibility support."""
+def setup_docking_routes(
+    app,
+    docking_service=None,
+    task_runtime=None,
+    *,
+    invoke_in_threadpool=None,
+    read_upload_limited=None,
+    validate_docking_limits=None,
+    normalize_warning_strings=None,
+    get_int_env=None,
+    api_success=None,
+    logger=None,
+    tempfile_module=None,
+    _support=None,
+):
+    """Register docking endpoints with explicit runtime dependencies.
+
+    ``_support`` remains a compatibility-only fallback for older direct callers;
+    application registration passes narrow runtime and response dependencies.
+    """
+    def resolve(explicit, attribute):
+        return lazy_dependency(
+            explicit,
+            _support,
+            attribute,
+            label=f"docking dependency: {attribute}",
+        )()
+
     def current_task_runtime():
         if task_runtime is None:
             return None
@@ -272,7 +313,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         clean_idempotency_key = (idempotency_key or "").strip() or None
         if clean_idempotency_key is not None and len(clean_idempotency_key) > 256:
             raise HTTPException(status_code=422, detail="Idempotency-Key is too long")
-        _support._validate_docking_limits(
+        resolve(validate_docking_limits, "_validate_docking_limits")(
             center_x=center_x,
             center_y=center_y,
             center_z=center_z,
@@ -293,9 +334,9 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 status_code=422,
                 detail="Durable docking currently supports energy_range=3 only",
             )
-        receptor_bytes = await _support._read_upload_limited(protein_file, "protein file")
+        receptor_bytes = await resolve(read_upload_limited, "_read_upload_limited")(protein_file, "protein file")
         ligand_bytes = (
-            await _support._read_upload_limited(ligand_file, "ligand file")
+            await resolve(read_upload_limited, "_read_upload_limited")(ligand_file, "ligand file")
             if ligand_file is not None
             else None
         )
@@ -322,11 +363,11 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         except HTTPException:
             raise
         except Exception as exc:
-            _support.logger.error("Durable docking task submission failed")
+            resolve(logger, "logger").error("Durable docking task submission failed")
             raise HTTPException(status_code=503, detail="Task submission unavailable") from exc
         data = record.to_public_dict()
         data["start_outcome"] = receipt.outcome.value
-        return _support.api_success(data, message="Docking task submitted")
+        return resolve(api_success, "api_success")(data, message="Docking task submitted")
 
     @app.post("/api/docking/submit")
     async def submit_docking_job(
@@ -360,7 +401,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     status_code=400,
                     detail="Provide either a ligand file or SMILES, not both",
                 )
-            _support._validate_docking_limits(
+            resolve(validate_docking_limits, "_validate_docking_limits")(
                 center_x=center_x,
                 center_y=center_y,
                 center_z=center_z,
@@ -374,12 +415,12 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
             # 保存蛋白质文件（保留上传后缀，避免 .pdbqt 被误当成 .pdb）
             protein_name = (protein_file.filename or "protein").lower()
-            _, protein_ext = _support.os.path.splitext(protein_name)
+            _, protein_ext = os.path.splitext(protein_name)
             if protein_ext not in {".pdb", ".pdbqt"}:
                 protein_ext = ".pdb"
-            protein_temp = _support.tempfile.NamedTemporaryFile(delete=False, suffix=protein_ext)
+            protein_temp = resolve(tempfile_module, "tempfile").NamedTemporaryFile(delete=False, suffix=protein_ext)
             temp_paths.append(protein_temp.name)
-            protein_content = await _support._read_upload_limited(protein_file, "protein file")
+            protein_content = await resolve(read_upload_limited, "_read_upload_limited")(protein_file, "protein file")
             protein_temp.write(protein_content)
             protein_temp.close()
 
@@ -397,7 +438,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             # 执行对接
             ligand_temp_path = None
             if clean_smiles is not None:
-                result = await _support._invoke_in_threadpool(
+                result = await resolve(invoke_in_threadpool, "_invoke_in_threadpool")(
                     docking_service.perform_docking,
                     receptor_file=protein_temp.name,
                     ligand_input=clean_smiles,
@@ -407,17 +448,17 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 )
             else:
                 original_name = ligand_file.filename or "ligand"
-                _, ext = _support.os.path.splitext(original_name)
+                _, ext = os.path.splitext(original_name)
                 ext = ext if ext else ".sdf"
 
-                ligand_temp = _support.tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+                ligand_temp = resolve(tempfile_module, "tempfile").NamedTemporaryFile(delete=False, suffix=ext)
                 temp_paths.append(ligand_temp.name)
-                ligand_content = await _support._read_upload_limited(ligand_file, "ligand file")
+                ligand_content = await resolve(read_upload_limited, "_read_upload_limited")(ligand_file, "ligand file")
                 ligand_temp.write(ligand_content)
                 ligand_temp.close()
                 ligand_temp_path = ligand_temp.name
                 
-                result = await _support._invoke_in_threadpool(
+                result = await resolve(invoke_in_threadpool, "_invoke_in_threadpool")(
                     docking_service.perform_docking,
                     receptor_file=protein_temp.name,
                     ligand_input=ligand_temp_path,
@@ -427,19 +468,19 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 )
 
             result = dict(result)
-            result["warnings"] = _support._normalize_warning_strings(result.get("warnings"))
+            result["warnings"] = resolve(normalize_warning_strings, "_normalize_warning_strings")(result.get("warnings"))
             return result
 
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("分子对接任务提交失败")
+            resolve(logger, "logger").exception("分子对接任务提交失败")
             return api_error("DOCKING_EXECUTION_FAILED", "对接计算失败", status_code=500)
         finally:
             for path in temp_paths:
                 try:
-                    if _support.os.path.exists(path):
-                        _support.os.unlink(path)
+                    if os.path.exists(path):
+                        os.unlink(path)
                 except Exception:
                     pass
 
@@ -453,7 +494,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             info = docking_service.env_diagnostics()
             return {"success": info.get("ok", False), "diagnostics": info}
         except Exception:
-            _support.logger.exception("环境自检失败")
+            resolve(logger, "logger").exception("环境自检失败")
             return api_error("DOCKING_ENVIRONMENT_CHECK_FAILED", "环境自检失败", status_code=500)
 
     @app.post("/api/docking/batch_submit")
@@ -492,13 +533,13 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 status_code=400,
                 detail="Provide either ligand files or batch SMILES, not both",
             )
-        max_batch_ligands = _support._get_int_env("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", 100)
+        max_batch_ligands = resolve(get_int_env, "_get_int_env")("MEDCHAT_DOCKING_MAX_BATCH_LIGANDS", 100)
         if len(ligand_files) + len(smiles_rows) > max_batch_ligands:
             raise HTTPException(
                 status_code=413,
                 detail=f"Batch docking accepts at most {max_batch_ligands} ligands",
             )
-        _support._validate_docking_limits(
+        resolve(validate_docking_limits, "_validate_docking_limits")(
             center_x=center_x,
             center_y=center_y,
             center_z=center_z,
@@ -514,12 +555,12 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
 
         try:
             protein_name = (protein_file.filename or "protein").lower()
-            _, protein_ext = _support.os.path.splitext(protein_name)
+            _, protein_ext = os.path.splitext(protein_name)
             if protein_ext not in {".pdb", ".pdbqt"}:
                 protein_ext = ".pdb"
-            protein_temp = _support.tempfile.NamedTemporaryFile(delete=False, suffix=protein_ext)
+            protein_temp = resolve(tempfile_module, "tempfile").NamedTemporaryFile(delete=False, suffix=protein_ext)
             temp_paths.append(protein_temp.name)
-            protein_temp.write(await _support._read_upload_limited(protein_file, "protein file"))
+            protein_temp.write(await resolve(read_upload_limited, "_read_upload_limited")(protein_file, "protein file"))
             protein_temp.close()
 
             from src.docking import DockingConfig
@@ -535,10 +576,10 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             jobs = []
             for index, ligand_file in enumerate(ligand_files, 1):
                 original_name = ligand_file.filename or f"ligand_{index}"
-                _, ext = _support.os.path.splitext(original_name)
-                ligand_temp = _support.tempfile.NamedTemporaryFile(delete=False, suffix=ext or ".sdf")
+                _, ext = os.path.splitext(original_name)
+                ligand_temp = resolve(tempfile_module, "tempfile").NamedTemporaryFile(delete=False, suffix=ext or ".sdf")
                 temp_paths.append(ligand_temp.name)
-                ligand_temp.write(await _support._read_upload_limited(ligand_file, "ligand file"))
+                ligand_temp.write(await resolve(read_upload_limited, "_read_upload_limited")(ligand_file, "ligand file"))
                 ligand_temp.close()
                 jobs.append({
                     "ligand_name": original_name,
@@ -565,7 +606,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 raise HTTPException(status_code=400, detail="没有解析到有效的批量配体输入")
 
             batch = await _run_batch_docking_jobs(
-                _support=_support,
+                invoke_in_threadpool=resolve(invoke_in_threadpool, "_invoke_in_threadpool"),
                 docking_service=docking_service,
                 jobs=jobs,
                 receptor_file=protein_temp.name,
@@ -601,13 +642,13 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("批量分子对接任务提交失败")
+            resolve(logger, "logger").exception("批量分子对接任务提交失败")
             return api_error("DOCKING_BATCH_FAILED", "批量对接失败", status_code=500)
         finally:
             for path in temp_paths:
                 try:
-                    if _support.os.path.exists(path):
-                        _support.os.unlink(path)
+                    if os.path.exists(path):
+                        os.unlink(path)
                 except Exception:
                     pass
 
@@ -626,7 +667,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                 "message": "服务正常" if env_ok else "环境配置有问题"
             }
         except Exception:
-            _support.logger.exception("对接服务状态检查失败")
+            resolve(logger, "logger").exception("对接服务状态检查失败")
             return {
                 "status": "error",
                 "message": "对接服务状态检查失败",
@@ -642,10 +683,10 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         _owned_history(request, docking_service.work_dir, job_id)
 
         try:
-            job_dir = _support.os.path.join(docking_service.work_dir, f"docking_{job_id}")
-            result_file = _support.os.path.join(job_dir, "result.pdbqt")
+            job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")
+            result_file = os.path.join(job_dir, "result.pdbqt")
             
-            if not _support.os.path.exists(result_file):
+            if not os.path.exists(result_file):
                 raise HTTPException(status_code=404, detail="对接结果文件不存在")
 
             with open(result_file, 'r', encoding='utf-8') as f:
@@ -660,7 +701,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("获取对接结果失败")
+            resolve(logger, "logger").exception("获取对接结果失败")
             return api_error("DOCKING_RESULT_READ_FAILED", "获取结果失败", status_code=500)
 
     @app.get("/api/docking/interactions/{job_id}")
@@ -672,15 +713,15 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         required for defensible interaction assignment.
         """
         _validate_job_id(job_id)
-        work_dir = docking_service.work_dir if docking_service else _support.os.path.join(
-            _support.os.getcwd(), "temp_docking"
+        work_dir = docking_service.work_dir if docking_service else os.path.join(
+            os.getcwd(), "temp_docking"
         )
         _owned_history(request, work_dir, job_id)
         if type(pose) is not int or pose <= 0:
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
 
-        job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
-        if not _support.os.path.isdir(job_dir):
+        job_dir = os.path.join(work_dir, f"docking_{job_id}")
+        if not os.path.isdir(job_dir):
             raise HTTPException(status_code=404, detail="对接任务不存在")
 
         from src.docking.interaction_analysis import (
@@ -691,8 +732,8 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         receptor_path, ligand_path = resolve_analysis_inputs(job_dir, pose)
         pose_export_error = None
         if receptor_path is not None and ligand_path is None:
-            result_file = _support.os.path.join(job_dir, "result.pdbqt")
-            if _support.os.path.isfile(result_file):
+            result_file = os.path.join(job_dir, "result.pdbqt")
+            if os.path.isfile(result_file):
                 temporary = None
                 try:
                     from src.docking.pose_export import pose_sdf_from_pdbqt
@@ -704,7 +745,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                         pose,
                         keep_hydrogens=True,
                     )
-                    ligand_candidate = _support.os.path.join(
+                    ligand_candidate = os.path.join(
                         job_dir,
                         f"analysis_pose_{pose}.sdf",
                     )
@@ -712,17 +753,17 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
                     with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
                         stream.write(pose_sdf)
                         stream.flush()
-                        _support.os.fsync(stream.fileno())
-                    _support.os.replace(temporary, ligand_candidate)
+                        os.fsync(stream.fileno())
+                    os.replace(temporary, ligand_candidate)
                     _, ligand_path = resolve_analysis_inputs(job_dir, pose)
                 except Exception as error:
                     pose_export_error = type(error).__name__
-                    if temporary and _support.os.path.exists(temporary):
+                    if temporary and os.path.exists(temporary):
                         try:
-                            _support.os.unlink(temporary)
+                            os.unlink(temporary)
                         except OSError:
                             pass
-                    _support.logger.warning(
+                    resolve(logger, "logger").warning(
                         "Unable to create topology-bearing pose artifact for interaction analysis: %s",
                         type(error).__name__,
                     )
@@ -766,10 +807,10 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
 
         try:
-            job_dir = _support.os.path.join(docking_service.work_dir, f"docking_{job_id}")
-            result_file = _support.os.path.join(job_dir, "result.pdbqt")
+            job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")
+            result_file = os.path.join(job_dir, "result.pdbqt")
 
-            if not _support.os.path.exists(result_file):
+            if not os.path.exists(result_file):
                 raise HTTPException(status_code=404, detail="对接结果文件不存在")
 
             with open(result_file, "r", encoding="utf-8", errors="ignore") as f:
@@ -790,7 +831,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("重建 pose SDF 失败")
+            resolve(logger, "logger").exception("重建 pose SDF 失败")
             return api_error("DOCKING_POSE_EXPORT_FAILED", "重建 pose SDF 失败", status_code=500)
 
     @app.get("/api/docking/history")
@@ -798,8 +839,8 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         """获取对接历史记录列表"""
         owner = _session_id(request)
         try:
-            work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
-            if not _support.os.path.isdir(work_dir):
+            work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
+            if not os.path.isdir(work_dir):
                 return {
                     "success": True,
                     "history": [],
@@ -825,7 +866,7 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             }
 
         except Exception:
-            _support.logger.exception("获取对接历史失败")
+            resolve(logger, "logger").exception("获取对接历史失败")
             return api_error("DOCKING_HISTORY_READ_FAILED", "获取历史失败", status_code=500)
 
     @app.delete("/api/docking/history")
@@ -833,15 +874,15 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         """清除所有对接历史记录"""
         owner = _session_id(request)
         try:
-            work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
-            if not _support.os.path.isdir(work_dir):
+            work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
+            if not os.path.isdir(work_dir):
                 return {"success": True, "message": "无历史记录", "deleted": 0}
 
             deleted = _clear_owned_history_records(work_dir, owner)
 
             return {"success": True, "message": f"已清除 {deleted} 条历史记录", "deleted": deleted}
         except Exception:
-            _support.logger.exception("清除对接历史失败")
+            resolve(logger, "logger").exception("清除对接历史失败")
             return api_error("DOCKING_HISTORY_CLEAR_FAILED", "清除历史失败", status_code=500)
 
     @app.delete("/api/docking/history/{job_id}")
@@ -852,10 +893,10 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
             from src.docking.history_index import remove_history_record
 
             _validate_job_id(job_id)
-            work_dir = docking_service.work_dir if docking_service else _support.os.path.join(_support.os.getcwd(), "temp_docking")
+            work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
             _owned_history(request, work_dir, job_id)
-            job_dir = _support.os.path.join(work_dir, f"docking_{job_id}")
-            if not _support.os.path.isdir(job_dir):
+            job_dir = os.path.join(work_dir, f"docking_{job_id}")
+            if not os.path.isdir(job_dir):
                 raise HTTPException(status_code=404, detail="记录不存在")
             _shutil.rmtree(job_dir)
             remove_history_record(work_dir, job_id)
@@ -863,5 +904,5 @@ def setup_docking_routes(app, docking_service=None, task_runtime=None, *, _suppo
         except HTTPException:
             raise
         except Exception:
-            _support.logger.exception("删除对接记录失败")
+            resolve(logger, "logger").exception("删除对接记录失败")
             return api_error("DOCKING_HISTORY_DELETE_FAILED", "删除对接记录失败", status_code=500)

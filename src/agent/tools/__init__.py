@@ -22,7 +22,6 @@ OPTIONAL_TOOLS = [
     'TargetDatabaseTool',
     'ActivityPredictorTool',
     'RAGSearchTool',
-    'RXNChemistryAgent',
 ]
 
 __all__ = CORE_TOOLS + OPTIONAL_TOOLS
@@ -35,7 +34,7 @@ def get_core_tools(molecular_generator_llm=None):
     generator_llm = molecular_generator_llm
     if generator_llm is None:
         try:
-            from src.web.models.ollama_model import OllamaModel
+            from src.system.model_clients import OllamaModel
             generator_llm = OllamaModel(
                 base_url="http://localhost:11434",
                 model_name="gmm-llama:latest"
@@ -70,9 +69,6 @@ def get_optional_tool(tool_name, llm=None, *, rag_system=None):
     elif tool_name == 'RAGSearchTool':
         from .rag_search_tool import RAGSearchTool
         return RAGSearchTool(rag_system=rag_system)
-    elif tool_name == 'RXNChemistryAgent':
-        from .rxn_chemistry_agent import RXNChemistryAgent
-        return RXNChemistryAgent()
     else:
         raise ValueError(f"Unknown optional tool: {tool_name}")
 

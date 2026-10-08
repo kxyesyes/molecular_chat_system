@@ -65,6 +65,19 @@ def test_batch_result_never_promotes_partial_payload_to_completed():
     assert row["best_pose"] is None
 
 
+def test_batch_result_exposes_canonical_timeout_status():
+    row = docking_routes._batch_result(
+        1,
+        _jobs()[0],
+        {"success": False, "status": "timed_out"},
+        status="timed_out",
+        error="Docking item exceeded its time limit.",
+    )
+
+    assert row["status"] == "timeout"
+    assert row["success"] is False
+
+
 def test_batch_queue_caps_scientific_concurrency(monkeypatch):
     monkeypatch.setenv("MEDCHAT_DOCKING_BATCH_CONCURRENCY", "1")
     monkeypatch.setenv("MEDCHAT_DOCKING_BATCH_TIMEOUT_SECONDS", "5")

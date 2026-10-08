@@ -22,7 +22,7 @@ from src.reverse_target.owned_source import (
     load_owned_source, operation_check, resolve_weights, validate_controls,
     validate_envelope, validate_popcount_rows,
 )
-from src.agent.persistence.redaction import looks_like_credential
+from src.system.redaction import looks_like_credential
 
 
 def _bitvect_to_numpy_array(bitvect) -> np.ndarray:

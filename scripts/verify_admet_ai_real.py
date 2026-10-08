@@ -13,7 +13,7 @@ import json
 import os
 from time import perf_counter
 
-from src.agent.tools.admet_predictor import ADMETPredictor
+from src.admet.predictor import ADMETPredictor
 
 
 def main() -> int:
