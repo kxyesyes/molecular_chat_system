@@ -73,7 +73,9 @@ window.HomeTaskStatus = (() => {
 
   function className(type) {
     if (type && type.includes("failed")) return "is-error";
+    if (type === "task_rejected") return "is-error";
     if (type === "validation_warning" || type === "task_partial") return "is-warning";
+    if (type === "task_cancelled") return "is-warning";
     if (type && type.includes("completed")) return "is-complete";
     return "is-running";
   }

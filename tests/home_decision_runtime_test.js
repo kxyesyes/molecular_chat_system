@@ -380,7 +380,23 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261008-status-boundary-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-terminal-state-v1"]);
+  });
+  await test("WebSocket transport follows the page protocol", () => {
+    const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
+    assert(source.includes('window.location.protocol === "https:" ? "wss:" : "ws:"'),
+      "secure pages must use wss while local HTTP keeps ws");
+    assert(!source.includes("const wsUrl = `ws://${window.location.host}/ws`;"),
+      "WebSocket URL must not be hard-coded to ws");
+  });
+  await test("non-success decision results present structured failure reasons", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const failure = result("failed");
+    failure.final_answer = "任务未完成";
+    failure.error = {code: "tool_timeout", message: "AutoDock Vina 在截止时间内未完成"};
+    h.socket.emit(failure); h.socket.emit(complete("failed"));
+    assert(h.chat.textContent.includes("AutoDock Vina 在截止时间内未完成"),
+      "the UI must expose the structured server failure reason");
   });
   await test("strict candidate trace is socket-bound and receive is not mounted ACK", async () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
