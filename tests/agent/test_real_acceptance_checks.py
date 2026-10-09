@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -988,6 +989,80 @@ def test_scientific_case_score_zeros_hard_hallucination_failure() -> None:
     assert scored["score"] == 0
     assert scored["hard_failure"] is True
     assert scored["hard_failure_reasons"] == ["forbidden_patterns_found"]
+
+
+def test_admet_hydration_free_energy_unit_is_not_docking_claim() -> None:
+    case = EvaluationCase(
+        case_id="SAFE-ADMET-UNIT",
+        version="1",
+        category="admet",
+        prompt="report ADMET endpoints",
+        expected_skill="admet_assessment",
+        forbidden_patterns=["binding_energy", "kcal/mol"],
+    )
+
+    legitimate_admet = scientific._anti_hallucination(
+        case,
+        json.dumps(
+            {
+                "admet": {
+                    "endpoints": {
+                        "HydrationFreeEnergy_FreeSolv": {
+                            "value": -12.4,
+                            "unit": "kcal/mol",
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert legitimate_admet["status"] == "passed"
+    assert legitimate_admet["forbidden_found"] == []
+
+    forged_docking = scientific._anti_hallucination(
+        case,
+        json.dumps(
+            {"binding_energy": -7.2, "unit": "kcal/mol"},
+            ensure_ascii=False,
+        ),
+    )
+    assert forged_docking["status"] == "failed"
+    assert set(forged_docking["forbidden_found"]) == {
+        "binding_energy",
+        "kcal/mol",
+    }
+
+    hit_to_lead_case = EvaluationCase(
+        case_id="SAFE-HIT-TO-LEAD-UNIT",
+        version="1",
+        category="hit_to_lead",
+        prompt="compare ADMET endpoints",
+        expected_skill="hit_to_lead_optimization",
+        forbidden_patterns=["binding_energy", "kcal/mol"],
+    )
+    cross_skill_admet = scientific._anti_hallucination(
+        hit_to_lead_case,
+        json.dumps(
+            {
+                "HydrationFreeEnergy_FreeSolv": {
+                    "value": -12.4,
+                    "unit": "kcal/mol",
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert cross_skill_admet["status"] == "passed"
+
+
+def test_scientific_runner_registers_lead_optimization_verifier() -> None:
+    runner = object.__new__(scientific.ScientificAcceptanceRunner)
+
+    tools = runner._build_real_tools()
+
+    assert "lead_optimization_verifier" in tools
+    assert tools["lead_optimization_verifier"].name == "lead_optimization_verifier"
 
 
 def test_activity_check_rejects_simulated_demo_predictions() -> None:
