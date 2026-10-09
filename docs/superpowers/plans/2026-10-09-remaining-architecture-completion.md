@@ -71,9 +71,9 @@
 
 ## 5. 完整验证与交付
 
-- [x] Web decision runtime 聚焦回归（189 passed）与前端决策测试（39 passed）。
-- [x] `python -m pytest tests/agent -q -p no:cacheprovider`（12912 passed, 3 skipped）。
-- [x] 反幻觉/平台健康/真实验收聚焦集（53 passed）。
+- [x] Web decision runtime、生命周期、恢复和普通 Web 生命周期联合回归（241 passed）与前端决策测试（39 passed）。
+- [x] `python -m pytest tests/agent -q -p no:cacheprovider`（12926 passed, 3 skipped, 7 warnings）。
+- [x] 反幻觉/平台健康/真实验收聚焦集（54 passed）。
 - [x] `python -m compileall -q src scripts`、`node --check`。
 - [x] `python scripts/run_agent_acceptance.py --mode contract`（passed）。
 - [x] `python scripts/run_agent_acceptance.py --mode replay` 使用真实报告离线重放（源报告失败项如实保留）。
@@ -81,7 +81,7 @@
 - [x] `python scripts/run_agent_acceptance.py --mode real --case-set all-real --repeat 3`（partial，原因写入报告）。
 - [x] 对接/部署脚本按环境可用性运行（OpenSandbox skipped；Temporal Windows 报告写入失败）。
 - [x] `git diff --check`、精确检查 `git status --short`，确认未触碰 manifest。
-- [ ] 只暂存本任务文件，提交一个 Conventional Commit；不直接改 main。
+- [x] 只暂存本任务文件，提交一个 Conventional Commit；不直接改 main。
 
 ## 6. 交付报告
 

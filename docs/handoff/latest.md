@@ -1,6 +1,6 @@
 # Latest handoff
 
-## 当前权威状态（2026-10-09）
+## 当前权威状态（2026-10-10）
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
@@ -23,6 +23,8 @@
   继续；`semantic_v1` 在缺少安全 intent journal 时保持 fail-closed。新增 owner-scoped
   `GET /api/agent/runs/{trace_id}` 与 `/events` 只读审计接口，前端只把 sessionStorage 当作
   恢复指针，服务端状态仍是唯一权威来源。
+- 本轮提交 `0d77f70` 收紧恢复控制边界：非法 `trace_id`/`continuation_id` 在访问持久化层前即拒绝，
+  状态存储不可用时统一 fail-closed 为 `continuation_unavailable`，不泄露存储异常或错误重放任务。
 
 ### 当前真正未完成
 
@@ -38,11 +40,12 @@
 5. 历史批次正文仍保留追溯信息；它们的“待合并”描述不代表当前开放 PR。后续只需维护本节，
    不再重复创建同一批架构任务。
 
-### 本分支验收记录（2026-10-09）
+### 本分支验收记录（2026-10-10）
 
-- 聚焦 Web 决策运行时：`189 passed`；前端决策运行时 Node 合同：`39 passed`；
-  `tests/agent` 全量：`12912 passed, 3 skipped, 7 warnings`；反幻觉/平台健康/真实验收聚焦集：
-  `53 passed, 7 warnings`；`compileall`、`node --check` 和 `git diff --check` 通过。
+- Web 决策运行时、生命周期、恢复和普通 Web 生命周期联合回归：`241 passed, 7 warnings`；
+  新增恢复边界测试单独为 `15 passed, 7 warnings`；`tests/agent` 全量：
+  `12926 passed, 3 skipped, 7 warnings`；反幻觉/平台健康/真实验收聚焦集：`54 passed, 7 warnings`；
+  `compileall` 和 `git diff --check` 通过。
 - `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `all-real --repeat 3`：`partial`。
   本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；RG-MPNN 未达到真实模型门槛，
   外部主模型端点返回 HTTP 403，均保留为失败/partial，未包装成科研成功。
