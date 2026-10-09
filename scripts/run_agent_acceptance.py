@@ -732,14 +732,23 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
             "bundle_ids": sorted({
                 row["provenance"]["bundle_id"] for row in real_rows
             }),
+            "real_prediction_count": len(real_rows),
             "predictions": [
                 {
                     "smiles": row.get("smiles"),
+                    "status": row.get("status"),
+                    "success": row.get("success"),
+                    "execution_status": row.get("execution_status"),
                     "predicted_pIC50": row.get("predicted_pIC50"),
                     "activity_probability": row.get("activity_probability"),
                     "activity_class": row.get("activity_class"),
+                    "units": row.get("units"),
+                    "message": row.get("message"),
+                    "warnings": row.get("warnings", []),
+                    "errors": row.get("errors", {}),
+                    "provenance": row.get("provenance"),
                 }
-                for row in valid_rows
+                for row in real_rows
             ],
         }
         summary["latency_ms"] = int((time.perf_counter() - started) * 1000)

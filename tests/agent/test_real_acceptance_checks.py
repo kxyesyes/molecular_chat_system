@@ -107,6 +107,10 @@ def test_activity_acceptance_probe_preserves_real_partial_status(monkeypatch):
     assert result["real_model_used"] is True
     assert result["partial_count"] == 1
     assert result["successful_count"] == 2
+    assert len(result["predictions"]) == 3
+    assert result["predictions"][0]["status"] == "partial"
+    assert result["predictions"][0]["predicted_pIC50"] == 5.01
+    assert result["predictions"][0]["provenance"]["bundle_id"] == "pde-bundle"
 
 
 def test_run_real_reports_both_activity_family_targets(monkeypatch):
