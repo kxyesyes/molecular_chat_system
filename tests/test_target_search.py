@@ -167,6 +167,34 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual([item["gene_symbol"] for item in ligand], ["WDR5"])
         self.assertEqual([item["gene_symbol"] for item in no_ligand], ["MYC"])
 
+    def test_fuzzy_search_binds_all_filter_parameters_in_placeholder_order(self):
+        service = self._seeded_service()
+
+        results = service.search_targets(
+            "lung cancer",
+            target_type="Kinase",
+            source="RCSB_PDB",
+            has_experimental=True,
+            docking_recommended=True,
+            has_ligand=True,
+        )["results"]
+
+        assert results
+        assert all(item["target_type"] == "Kinase" for item in results)
+        assert all(item["has_experimental_structure"] is True for item in results)
+
+    def test_search_parameter_builder_rejects_placeholder_contract_drift(self):
+        from src.target_search.service import TargetSearchService
+
+        with pytest.raises(RuntimeError, match="parameter contract mismatch"):
+            TargetSearchService._search_params(
+                "SELECT ? ?",
+                case_params=(1,),
+                where_params=(),
+                filter_params=[],
+                order_params=(),
+            )
+
     def test_short_keyword_search_avoids_accidental_substring_hits(self):
         from src.target_search.seed import seed_database
         from src.target_search.service import TargetSearchService

@@ -360,6 +360,17 @@ def check_temporal_runtime(
     if warnings:
         return False, f"Temporal configuration warnings={','.join(warnings)}; configured={str(configured).lower()}"
     if config.backend == "local":
+        require_durable = os.environ.get("MEDCHAT_REQUIRE_DURABLE_TASKS", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if require_durable:
+            return False, (
+                "local task runtime does not provide process restart recovery; "
+                "configure a healthy Temporal backend"
+            )
         return True, f"local default; Temporal configured={str(configured).lower()}"
 
     if backend_factory is None:
@@ -466,14 +477,37 @@ def check_activity_models() -> tuple[bool, str]:
         for registry_dir in registry_dirs:
             try:
                 models.extend(ActivityModelRegistry(registry_dir).list())
-            except (OSError, RuntimeError, ValueError) as exc:
+            except (ImportError, OSError, RuntimeError, ValueError) as exc:
                 invalid_registries.append(f"{registry_dir}: {exc}")
-    except (OSError, RuntimeError, ValueError) as exc:
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
         return False, f"activity model registry is invalid: {exc}"
     if not models:
         if invalid_registries:
             return False, f"activity model registry is invalid: {invalid_registries[0]}"
         return False, f"no registered activity models in {models_dir}"
+    require_active = os.environ.get(
+        "MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS", ""
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    if require_active:
+        if models_dir not in registry_dirs:
+            return False, (
+                "active family activity models are not configured: "
+                "root registry is missing"
+            )
+        try:
+            root_registry = ActivityModelRegistry(models_dir)
+            missing_families = [
+                family
+                for family in ("PDE", "BuChE")
+                if root_registry.get_active_family_bundle(family) is None
+            ]
+        except (ImportError, OSError, RuntimeError, ValueError) as exc:
+            return False, f"active family activity models are invalid: {exc}"
+        if missing_families:
+            return False, (
+                "active family activity models are not configured: "
+                + ", ".join(missing_families)
+            )
     scope = "family registries" if len(registry_dirs) > 1 or registry_dirs[0] != models_dir else str(models_dir)
     return True, f"{scope} ({len(models)} registered models)"
 
