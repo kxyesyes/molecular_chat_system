@@ -134,6 +134,7 @@ def test_activity_acceptance_probe_rejects_incomplete_model_provenance(monkeypat
             provenance["models"]["classification"].pop("model_id")
             rows.append({
                 "smiles": value,
+                "requested_target": target,
                 "family_id": "pde-family",
                 "bundle_id": "pde-bundle",
                 "success": True,
@@ -149,6 +150,45 @@ def test_activity_acceptance_probe_rejects_incomplete_model_provenance(monkeypat
                 "errors": {},
                 "warnings": [],
                 "provenance": provenance,
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["real_model_used"] is False
+    assert result["real_prediction_count"] == 0
+    assert all(item["real_model_provenance"] is False for item in result["predictions"])
+
+
+def test_activity_acceptance_probe_rejects_wrong_target_family(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for value in smiles:
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "buche-family",
+                "bundle_id": "buche-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(
+                    bundle_id="buche-bundle", family_id="buche-family"
+                ),
             })
         return {"success": True, "status": "passed", "results": rows}
 

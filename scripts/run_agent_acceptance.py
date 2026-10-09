@@ -664,10 +664,12 @@ def _test_target_search() -> dict[str, Any]:
 def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     try:
+        from src.activity.family_contract import resolve_activity_family
         from src.activity.prediction_service import predict_activity
         from src.activity.request_selection import request_provenance_matches
 
         target = target or os.environ.get("MEDCHAT_ACCEPTANCE_ACTIVITY_TARGET", "PDE")
+        expected_family_id = resolve_activity_family(target)
         summary_result = predict_activity(
             ["CCO", "CCN", "c1ccccc1"],
             target=target,
@@ -680,7 +682,9 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
             provenance = row["provenance"]
             family_id = row.get("family_id")
             bundle_id = row.get("bundle_id")
-            if (not family_id or not bundle_id
+            if (row.get("requested_target") != target
+                    or family_id != expected_family_id
+                    or not family_id or not bundle_id
                     or provenance.get("family_id") != family_id
                     or provenance.get("bundle_id") != bundle_id):
                 return False
