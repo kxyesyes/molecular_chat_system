@@ -1003,14 +1003,24 @@ def _normalize_forbidden_pattern_scan(
     """
     normalized = final_text
     endpoint = r"hydration(?:free|\s+free)[_\s-]*energy(?:[_\s-]*freesolv)?"
+    unit_field = (
+        rf"(?is){endpoint}[\"']?\s*:\s*\{{(?:(?!\}}).){{0,512}}?"
+        rf"[\"']?unit[\"']?\s*:\s*[\"']?kcal/mol"
+    )
+
+    def replace_endpoint_unit(match: re.Match[str]) -> str:
+        value = match.group(0)
+        return value[: -len("kcal/mol")] + "<admet-unit>"
+
     normalized = re.sub(
-        rf"(?is)({endpoint}.{{0,240}}?)kcal/mol",
-        r"\1<admet-unit>",
+        unit_field,
+        replace_endpoint_unit,
         normalized,
     )
     normalized = re.sub(
-        rf"(?is)kcal/mol(?=.{{0,160}}{endpoint})",
-        "<admet-unit>",
+        rf"(?im)^[^\r\n]*{endpoint}[^\r\n]*?(?:=|:)\s*"
+        rf"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s+kcal/mol",
+        lambda match: match.group(0)[: -len("kcal/mol")] + "<admet-unit>",
         normalized,
     )
     return normalized

@@ -1033,6 +1033,48 @@ def test_admet_hydration_free_energy_unit_is_not_docking_claim() -> None:
         "kcal/mol",
     }
 
+    mixed_payload = scientific._anti_hallucination(
+        case,
+        json.dumps(
+            {
+                "HydrationFreeEnergy_FreeSolv": {
+                    "value": -12.4,
+                    "unit": "kcal/mol",
+                },
+                "binding_energy": -7.2,
+                "unit": "kcal/mol",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert mixed_payload["status"] == "failed"
+    assert set(mixed_payload["forbidden_found"]) == {
+        "binding_energy",
+        "kcal/mol",
+    }
+
+    unit_only_case = EvaluationCase(
+        case_id="SAFE-ADMET-UNIT-ONLY",
+        version="1",
+        category="comprehensive",
+        prompt="compare scientific outputs",
+        expected_skill="comprehensive_evaluation",
+        forbidden_patterns=["kcal/mol"],
+    )
+    fabricated_after_label = scientific._anti_hallucination(
+        unit_only_case,
+        json.dumps(
+            {
+                "HydrationFreeEnergy_FreeSolv": {"value": -12.4},
+                "docking_energy": -7.2,
+                "unit": "kcal/mol",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert fabricated_after_label["status"] == "failed"
+    assert fabricated_after_label["forbidden_found"] == ["kcal/mol"]
+
     hit_to_lead_case = EvaluationCase(
         case_id="SAFE-HIT-TO-LEAD-UNIT",
         version="1",
