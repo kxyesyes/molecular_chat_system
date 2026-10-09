@@ -687,6 +687,7 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
             )
 
         real_rows = [row for row in predictions if has_real_model_provenance(row)]
+        reported_rows = [row for row in predictions if isinstance(row, dict)]
         valid_rows = [
             row for row in predictions
             if isinstance(row, dict)
@@ -739,6 +740,7 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
                     "status": row.get("status"),
                     "success": row.get("success"),
                     "execution_status": row.get("execution_status"),
+                    "real_model_provenance": has_real_model_provenance(row),
                     "predicted_pIC50": row.get("predicted_pIC50"),
                     "activity_probability": row.get("activity_probability"),
                     "activity_class": row.get("activity_class"),
@@ -748,7 +750,7 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
                     "errors": row.get("errors", {}),
                     "provenance": row.get("provenance"),
                 }
-                for row in real_rows
+                for row in reported_rows
             ],
         }
         summary["latency_ms"] = int((time.perf_counter() - started) * 1000)

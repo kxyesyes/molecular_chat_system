@@ -113,6 +113,51 @@ def test_activity_acceptance_probe_preserves_real_partial_status(monkeypatch):
     assert result["predictions"][0]["provenance"]["bundle_id"] == "pde-bundle"
 
 
+def test_activity_acceptance_probe_keeps_failed_rows_without_provenance(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = [{
+            "smiles": smiles[0],
+            "success": False,
+            "status": "failed",
+            "execution_status": "failed",
+            "errors": {"model": "activity bundle unavailable"},
+            "provenance": {},
+        }]
+        for value in smiles[1:]:
+            rows.append({
+                "smiles": value,
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.51,
+                "predicted_pIC50": 5.01,
+                "units": "pIC50",
+                "provenance": {
+                    "bundle_id": "pde-bundle",
+                    "models": {
+                        "classification": {"demo_mode": False, "fallback_used": False},
+                        "regression": {"demo_mode": False, "fallback_used": False},
+                    },
+                },
+            })
+        return {"success": False, "status": "failed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["prediction_count"] == 3
+    assert result["failed_count"] == 1
+    assert len(result["predictions"]) == 3
+    assert result["predictions"][0]["status"] == "failed"
+    assert result["predictions"][0]["errors"] == {
+        "model": "activity bundle unavailable"
+    }
+
+
 def test_run_real_reports_both_activity_family_targets(monkeypatch):
     calls = []
 
