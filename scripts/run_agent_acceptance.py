@@ -462,17 +462,37 @@ async def _test_external_model() -> dict[str, Any]:
         or "gemini-3.1-pro"
     )
     started = time.perf_counter()
-    model = OpenAICompatibleModel(
-        api_key=api_key,
-        base_url=base_url,
-        model_name=model_name,
-        provider_name="external-main",
-    )
-    response = await model.generate(
-        "Reply with exactly: AGENT_ACCEPTANCE_OK",
-        temperature=0.0,
-        max_tokens=256,
-    )
+    try:
+        model = OpenAICompatibleModel(
+            api_key=api_key,
+            base_url=base_url,
+            model_name=model_name,
+            provider_name="external-main",
+        )
+    except ValueError:
+        # A real acceptance run must remain reportable when the configured
+        # endpoint is rejected by the outbound network policy. Never leak the
+        # endpoint, credential, or exception text into the report.
+        return {
+            "status": "failed",
+            "error_code": "external_model_configuration_invalid",
+            "provider": "external-main",
+            "model": model_name,
+        }
+    try:
+        response = await model.generate(
+            "Reply with exactly: AGENT_ACCEPTANCE_OK",
+            temperature=0.0,
+            max_tokens=256,
+        )
+    except Exception:
+        return {
+            "status": "failed",
+            "error_code": "external_model_request_failed",
+            "provider": "external-main",
+            "model": model_name,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
     return {
         "status": "passed" if "AGENT_ACCEPTANCE_OK" in response else "failed",
         "provider": "external-main",
@@ -551,7 +571,11 @@ def _evaluate_activity_result(
     }
 
 
-def _evaluate_docking_result(result: dict[str, Any]) -> dict[str, Any]:
+def _evaluate_docking_result(
+    result: dict[str, Any],
+    *,
+    project_root: Path | None = None,
+) -> dict[str, Any]:
     data = result.get("data") if result.get("success") else {}
     data = data if isinstance(data, dict) else {}
     best_pose = data.get("best_pose") or {}
@@ -559,6 +583,14 @@ def _evaluate_docking_result(result: dict[str, Any]) -> dict[str, Any]:
     energy = best_pose.get("binding_energy")
     pose_file = best_pose.get("pose_file") or data.get("pose_file")
     pose_exists = bool(pose_file and Path(str(pose_file)).is_file())
+    safe_pose_file = str(pose_file) if pose_file else None
+    if project_root is not None and pose_file:
+        try:
+            safe_pose_file = Path(pose_file).resolve().relative_to(
+                Path(project_root).resolve()
+            ).as_posix()
+        except (OSError, ValueError):
+            safe_pose_file = None
     passed = (
         pose_count > 0
         and isinstance(energy, (int, float))
@@ -569,7 +601,7 @@ def _evaluate_docking_result(result: dict[str, Any]) -> dict[str, Any]:
         "job_id": data.get("job_id"),
         "pose_count": pose_count,
         "best_binding_energy": energy,
-        "pose_file": str(pose_file) if pose_file else None,
+        "pose_file": safe_pose_file,
         "pose_file_exists": pose_exists,
     }
 
@@ -660,7 +692,7 @@ def _test_docking_execution() -> dict[str, Any]:
                 "num_modes": 3,
             }
         )
-        summary = _evaluate_docking_result(result)
+        summary = _evaluate_docking_result(result, project_root=PROJECT_ROOT)
         summary["latency_ms"] = int((time.perf_counter() - started) * 1000)
         return summary
     except Exception as exc:

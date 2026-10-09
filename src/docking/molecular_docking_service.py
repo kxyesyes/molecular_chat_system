@@ -829,6 +829,24 @@ class MolecularDockingService:
                 logger.error("Unable to persist docking execution manifest before Vina launch")
                 return False
 
+            # The output path belongs to this job. Remove a pre-existing file
+            # before launching Vina so a zero-exit process cannot make a stale
+            # pose look like a fresh scientific result.
+            output_was_present = os.path.isfile(output_path)
+            if output_was_present:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    self._update_run_manifest(
+                        resolved_job_dir,
+                        execution={
+                            "status": "failed",
+                            "failure_reason": "output_artifact_stale",
+                        },
+                    )
+                    logger.error("Unable to clear pre-existing Vina output artifact")
+                    return False
+
             # 运行Vina
             adapter_control = {}
             if cancel_event is not None:
@@ -866,7 +884,11 @@ class MolecularDockingService:
                         execution={
                             "status": "failed",
                             "returncode": result.returncode,
-                            "failure_reason": "output_artifact_missing",
+                            "failure_reason": (
+                                "output_artifact_stale"
+                                if output_was_present
+                                else "output_artifact_missing"
+                            ),
                         },
                     )
                     logger.error("Vina returned success without an output artifact")
@@ -1733,6 +1755,30 @@ class MolecularDockingService:
                         )
             except Exception:
                 heavy_atom_count = 0
+            from .reproducibility import assess_pose_geometry
+
+            pose_geometry = assess_pose_geometry(
+                results,
+                center=(config.center_x, config.center_y, config.center_z),
+                size=(config.size_x, config.size_y, config.size_z),
+                expected_heavy_atom_count=heavy_atom_count or None,
+                box_source=box_provenance.get("source"),
+            )
+            if pose_geometry["status"] != "passed":
+                self._update_run_manifest(
+                    job_dir,
+                    scientific_quality=pose_geometry,
+                    execution={
+                        "status": "failed",
+                        "failure_reason": "scientific_pose_geometry_failed",
+                    },
+                )
+                return self._failed_job_response(
+                    job_dir,
+                    "scientific_pose_geometry_failed",
+                    "Docking pose geometry did not satisfy the recorded input and box evidence.",
+                    **cleanup_control,
+                )
             formatted_results = [
                 {
                     "pose": item.pose_index or index,
@@ -1810,6 +1856,7 @@ class MolecularDockingService:
                     },
                     "manifest": preparation_provenance["manifest"],
                 },
+                "scientific_quality": pose_geometry,
             }
             warnings = list(history_warnings)
             if box_provenance.get("warning"):

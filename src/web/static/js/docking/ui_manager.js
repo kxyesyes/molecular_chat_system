@@ -562,6 +562,10 @@ function startBatchDocking() {
     alert("请上传蛋白质文件，并提供多个配体文件或多行 SMILES");
     return;
   }
+  if (ligandFiles.length > 0 && batchSmiles) {
+    alert("批量模式只能选择配体文件或多行 SMILES，不能同时提供");
+    return;
+  }
 
   const startBtn = document.getElementById("start-btn");
   if (startBtn && !startBtn.disabled) {
@@ -993,6 +997,10 @@ function startDocking() {
     alert("请上传蛋白质文件和配体文件，或输入SMILES字符串");
     return;
   }
+  if (ligandFile && smilesInput) {
+    alert("单配体模式只能选择配体文件或 SMILES，不能同时提供");
+    return;
+  }
   if (ligandFiles.length > 1) {
     alert("单配体模式只能选择一个配体文件；请切换批量模式或仅保留一个文件");
     return;
@@ -1175,7 +1183,10 @@ function showRealResults(data) {
     data.results.forEach((r) => {
       const opt = document.createElement("option");
       opt.value = r.pose;
-      opt.textContent = `Pose ${r.pose} (E=${r.binding_energy.toFixed(1)})`;
+      const poseEnergy = Number.isFinite(r.binding_energy)
+        ? r.binding_energy.toFixed(1)
+        : "不可用";
+      opt.textContent = `Pose ${r.pose} (E=${poseEnergy})`;
       poseSelect.appendChild(opt);
     });
   }

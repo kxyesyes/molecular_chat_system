@@ -276,6 +276,26 @@ def test_external_model_probe_allows_reasoning_model_output_budget(monkeypatch):
     assert captured == {"temperature": 0.0, "max_tokens": 256}
 
 
+def test_external_model_probe_reports_configuration_failure_without_crashing(monkeypatch):
+    class Model:
+        def __init__(self, **_kwargs):
+            raise ValueError("endpoint rejected")
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "runtime-test-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://not-allowlisted.invalid")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "reasoning-model")
+    monkeypatch.setattr("scripts.run_agent_acceptance.OpenAICompatibleModel", Model)
+
+    result = __import__("asyncio").run(_test_external_model())
+
+    assert result == {
+        "status": "failed",
+        "error_code": "external_model_configuration_invalid",
+        "provider": "external-main",
+        "model": "reasoning-model",
+    }
+
+
 def test_claim_truth_check_rejects_claim_without_evidence():
     check = check_scientific_claim_evidence(
         {"claims": [{"claim_id": "pic50", "value": 7.2, "evidence_ids": []}]}
@@ -1013,6 +1033,29 @@ def test_docking_check_requires_actual_pose_and_binding_energy(tmp_path) -> None
         "pose_file": str(pose_file),
         "pose_file_exists": True,
     }
+
+
+def test_docking_report_can_project_pose_path_relative_to_repository(tmp_path) -> None:
+    pose_file = tmp_path / "temp_docking" / "result.pdbqt"
+    pose_file.parent.mkdir()
+    pose_file.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+
+    summary = _evaluate_docking_result(
+        {
+            "success": True,
+            "data": {
+                "total_poses": 1,
+                "best_pose": {
+                    "binding_energy": -5.1,
+                    "pose_file": str(pose_file),
+                },
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert summary["pose_file"] == "temp_docking/result.pdbqt"
+    assert not Path(summary["pose_file"]).is_absolute()
 
 
 def test_replay_mode_reads_existing_structured_report_without_running_tools(tmp_path) -> None:

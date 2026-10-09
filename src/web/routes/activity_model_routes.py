@@ -131,6 +131,17 @@ def setup_activity_model_routes(
         except HTTPException:
             raise
         except Exception as e:
+            from src.activity import trainer as trainer_module
+            capacity_error = getattr(trainer_module, "TrainingCapacityError", ())
+            if capacity_error and isinstance(e, capacity_error):
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "code": "ACTIVITY_TRAINING_BUSY",
+                        "message": str(e),
+                        "retryable": True,
+                    },
+                ) from e
             get_logger().error(f"启动训练失败: {e}")
             raise HTTPException(status_code=500, detail="活性模型训练任务启动失败，请稍后重试")
         finally:

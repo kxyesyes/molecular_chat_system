@@ -17,6 +17,60 @@ def _pose(path, energy=-7.1):
     return str(path)
 
 
+def _pose_result(*, x: float, y: float, z: float, heavy_atoms: int = 1):
+    from src.docking.molecular_docking_service import DockingResult
+
+    atoms = "\n".join(
+        f"HETATM{index:5d}  C   LIG A   1    {x:8.3f}{y:8.3f}{z:8.3f}  1.00  0.00     0.000 C"
+        for index in range(1, heavy_atoms + 1)
+    )
+    return DockingResult(
+        ligand_id="pose_1",
+        binding_energy=-7.1,
+        rmsd_lb=0.0,
+        rmsd_ub=0.0,
+        pose_data=atoms,
+        pose_index=1,
+    )
+
+
+def test_pose_geometry_gate_requires_box_evidence_and_keeps_analysis_explicit():
+    from src.docking.reproducibility import assess_pose_geometry
+
+    report = assess_pose_geometry(
+        [_pose_result(x=0.5, y=-0.5, z=0.0)],
+        center=(0.0, 0.0, 0.0),
+        size=(4.0, 4.0, 4.0),
+        expected_heavy_atom_count=1,
+        box_source="user_explicit",
+    )
+
+    assert report["status"] == "passed"
+    assert report["pose_count"] == 1
+    assert report["valid_pose_count"] == 1
+    assert report["box_evidence"] == {"source": "user_explicit"}
+    assert report["interaction_analysis"] == {
+        "status": "not_run",
+        "reason_code": "optional_analysis_not_requested",
+    }
+
+
+def test_pose_geometry_gate_rejects_out_of_box_or_atom_count_mismatch():
+    from src.docking.reproducibility import assess_pose_geometry
+
+    report = assess_pose_geometry(
+        [_pose_result(x=10.0, y=0.0, z=0.0, heavy_atoms=2)],
+        center=(0.0, 0.0, 0.0),
+        size=(4.0, 4.0, 4.0),
+        expected_heavy_atom_count=1,
+        box_source="user_explicit",
+    )
+
+    assert report["status"] == "failed"
+    assert "pose_centroid_outside_box" in report["failures"]
+    assert "heavy_atom_count_mismatch" in report["failures"]
+
+
 def _record(path, seed, energy=-7.1):
     pose_file = Path(_pose(path, energy))
     manifest_path = pose_file.with_suffix(".manifest.json")

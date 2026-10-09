@@ -29,6 +29,11 @@ from src.docking.molecular_docking_service import (
 )
 
 
+_MINIMAL_POSE_DATA = (
+    "HETATM    1  C   LIG A   1       0.000   0.000   0.000  1.00  0.00     0.000 C"
+)
+
+
 def test_pre_cancelled_command_does_not_spawn(tmp_path):
     cancel = threading.Event()
     cancel.set()
@@ -301,7 +306,7 @@ def _successful_service(tmp_path):
     service.prepare_ligand_from_file = prepare_ligand
     service.run_vina_docking = run_vina
     service.parse_vina_results = lambda _path: [
-        DockingResult("pose-1", -7.2, 0.0, 0.0, "")
+        DockingResult("pose-1", -7.2, 0.0, 0.0, _MINIMAL_POSE_DATA)
     ]
     return service, calls
 
@@ -426,7 +431,7 @@ def test_service_cancellation_after_parse_removes_pose_and_skips_history(tmp_pat
 
     def parse(_path):
         cancel.set()
-        return [DockingResult("pose-1", -9.9, 0.0, 0.0, "")]
+        return [DockingResult("pose-1", -9.9, 0.0, 0.0, _MINIMAL_POSE_DATA)]
 
     service.parse_vina_results = parse
     with patch("src.docking.history_index.upsert_history_record") as history:

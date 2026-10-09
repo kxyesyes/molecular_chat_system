@@ -179,6 +179,7 @@ def _is_valid_cached_result(data: Optional[Dict]) -> bool:
         and data.get("mmff_converged") is True
         and data.get("embedding_method") in {"ETKDGv3", "ETKDG_fallback"}
         and isinstance(data.get("features"), list)
+        and bool(data.get("features"))
         and isinstance(data.get("feature_counts"), dict)
         and isinstance(data.get("mol_block"), str)
         and isinstance(data.get("properties"), dict)
@@ -375,6 +376,12 @@ def get_molecule_pharmacophore(smiles: str) -> Dict:
 
         # 药效团特征提取
         features = extract_pharmacophore_features(mol_3d)
+        if not features:
+            return {
+                "success": False,
+                "error": "未提取到可用于 3D 比对的药效团特征",
+                **conformer_status,
+            }
 
         # 特征统计
         feature_counts = {}
@@ -878,6 +885,8 @@ def compute_pharm3d_score(smiles_query: str, smiles_hit: str) -> Dict:
 
     feats_q = result_q["features"]
     feats_h = result_h["features"]
+    if not feats_q or not feats_h:
+        return {"success": False, "error": "没有可比对的药效团特征"}
 
     pharm_sim = pharmacophore_similarity(feats_q, feats_h)
     alignment = align_pharmacophore_features(feats_q, feats_h)
