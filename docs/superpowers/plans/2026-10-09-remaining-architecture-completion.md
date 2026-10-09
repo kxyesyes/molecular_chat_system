@@ -59,8 +59,8 @@
 - 在现有 `scripts/run_agent_acceptance.py` 对报告增加 runtime recovery contract 结果，不能引入另一套 Agent 执行框架。
 - 当前 acceptance runner 已保留 `contract`/`real`/`replay` 分界；本轮不新增平行执行体系。
 - 运行中恢复由 `tests/agent/test_web_decision_runtime_recovery.py` 和现有 lifecycle 契约覆盖；
-  docking 的 `assess_seed_stability` 仍要求真实 seed/pose/artifact/manifest，目标环境接入时必须显式调用，
-  缺失时标为未通过科学稳定性，不生成伪数据。
+  docking 的 `assess_seed_stability` 已接入 repeated real report；缺失真实 seed/pose/artifact/manifest
+  时标为 `partial`，不生成伪数据。
 - 补充测试覆盖报告字段、依赖缺失和 redaction。
 
 ## 4. 交接与部署边界（P1）
