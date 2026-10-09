@@ -345,6 +345,8 @@ async function run() {
   await test("disconnect preserves a waiting continuation and reconnects it", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    assert(h.storage.has("medchat:decision-recovery-v1"),
+      "waiting continuation must survive a page refresh");
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
     assert(newer.sent.some(f => f.type === "reconnect" && f.trace_id === trace && f.after_sequence === 0));
     assert(h.button("继续").disabled && h.button("开始新请求").disabled);

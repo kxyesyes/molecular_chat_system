@@ -248,6 +248,8 @@
     if (message.type === "continuation_abandoned") {
       if (decisionAbandonAwait?.socket === socket && message.trace_id === decisionAbandonAwait.traceId) {
         decisionAbandonAwait = decisionWaiting = null;
+        try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
+        decisionRecovery = null;
         updateDecisionControls();
       }
       return true;
@@ -351,8 +353,17 @@
       } else {
         decisionWaiting = metadata.stop_reason === "continuation_rejected" ? turn.resume : null;
       }
-      try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
-      decisionRecovery = null;
+      if (decisionWaiting) {
+        try {
+          tabStorage?.setItem(decisionRecoveryKey, JSON.stringify({
+            turnId: turn.turnId, traceId: turn.traceId,
+          }));
+        } catch (_) { /* best effort */ }
+        decisionRecovery = {turnId: turn.turnId, traceId: turn.traceId};
+      } else {
+        try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
+        decisionRecovery = null;
+      }
       updateDecisionControls(); return true;
     }
     return true; // decision mode does not accept legacy stream/message authority
