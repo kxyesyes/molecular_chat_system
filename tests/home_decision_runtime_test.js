@@ -410,7 +410,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-terminal-state-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-reconnect-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
