@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import hashlib
 import json
+import re
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -110,6 +111,138 @@ def symmetry_aware_heavy_atom_rmsd(reference: Any, candidate: Any) -> float:
     if not math.isfinite(rmsd) or rmsd < 0:
         raise ValueError("RMSD validation produced a non-finite value")
     return rmsd
+
+
+def assess_pose_geometry(
+    poses: Iterable[Any],
+    *,
+    center: Any,
+    size: Any,
+    expected_heavy_atom_count: int | None = None,
+    box_source: str | None = None,
+) -> dict[str, Any]:
+    """Check basic, tool-derived pose geometry without inventing interactions.
+
+    This is intentionally a narrow scientific gate: it verifies that parsed
+    pose coordinates are finite, that each pose centroid is inside the
+    recorded search box, and that the prepared pose has the expected number
+    of heavy atoms when that count is available.  It does not claim contacts,
+    affinity, or binding-mode quality.  Those require an explicit topology
+    analyzer or a reference pose and are reported as not run here.
+    """
+
+    report: dict[str, Any] = {
+        "status": "failed",
+        "pose_count": 0,
+        "valid_pose_count": 0,
+        "poses": [],
+        "failures": [],
+        "box_evidence": {"source": box_source} if isinstance(box_source, str) and box_source else {},
+        "interaction_analysis": {
+            "status": "not_run",
+            "reason_code": "optional_analysis_not_requested",
+        },
+        "redocking_rmsd": {
+            "status": "not_run",
+            "reason_code": "reference_pose_not_supplied",
+        },
+    }
+
+    def fail(code: str) -> None:
+        if code not in report["failures"]:
+            report["failures"].append(code)
+
+    if not isinstance(box_source, str) or not box_source.strip():
+        fail("box_evidence_missing")
+    if (
+        not isinstance(center, (list, tuple))
+        or not isinstance(size, (list, tuple))
+        or len(center) != 3
+        or len(size) != 3
+        or any(type(value) not in (int, float) or not math.isfinite(float(value)) for value in (*center, *size))
+        or any(float(value) <= 0 for value in size)
+    ):
+        fail("box_geometry_invalid")
+        return report
+
+    if expected_heavy_atom_count is not None and (
+        type(expected_heavy_atom_count) is not int or expected_heavy_atom_count <= 0
+    ):
+        fail("expected_heavy_atom_count_invalid")
+        return report
+
+    poses = list(poses)
+    report["pose_count"] = len(poses)
+    if not poses:
+        fail("pose_set_empty")
+        return report
+
+    half_size = tuple(float(value) / 2.0 for value in size)
+    center_values = tuple(float(value) for value in center)
+    for index, pose in enumerate(poses, start=1):
+        pose_record: dict[str, Any] = {"pose": index, "valid": False}
+        atom_coordinates: list[tuple[float, float, float]] = []
+        heavy_atom_count = 0
+        pose_data = getattr(pose, "pose_data", None)
+        if isinstance(pose_data, str):
+            for line in pose_data.splitlines():
+                if not line.startswith(("ATOM  ", "HETATM")):
+                    continue
+                try:
+                    coordinates = tuple(float(line[start:start + 8]) for start in (30, 38, 46))
+                except (TypeError, ValueError, IndexError):
+                    fail("pose_coordinate_invalid")
+                    continue
+                if not all(math.isfinite(value) for value in coordinates):
+                    fail("pose_coordinate_invalid")
+                    continue
+                atom_coordinates.append(coordinates)
+                element = line[76:78].strip().upper()
+                if not element:
+                    atom_name = re.sub(r"[^A-Z]", "", line[12:16].upper())
+                    element = atom_name[:2] if atom_name[:2] in {"CL", "BR"} else atom_name[:1]
+                if element not in {"H", "D"}:
+                    heavy_atom_count += 1
+
+        if not atom_coordinates:
+            fail("pose_atoms_missing")
+            report["poses"].append(pose_record)
+            continue
+
+        centroid = tuple(
+            sum(point[axis] for point in atom_coordinates) / len(atom_coordinates)
+            for axis in range(3)
+        )
+        pose_record.update(
+            {
+                "atom_count": len(atom_coordinates),
+                "heavy_atom_count": heavy_atom_count,
+                "centroid": list(centroid),
+            }
+        )
+        if any(
+            abs(centroid[axis] - center_values[axis]) > half_size[axis]
+            for axis in range(3)
+        ):
+            fail("pose_centroid_outside_box")
+        if (
+            expected_heavy_atom_count is not None
+            and heavy_atom_count != expected_heavy_atom_count
+        ):
+            fail("heavy_atom_count_mismatch")
+        if not any(
+            abs(centroid[axis] - center_values[axis]) > half_size[axis]
+            for axis in range(3)
+        ) and (
+            expected_heavy_atom_count is None
+            or heavy_atom_count == expected_heavy_atom_count
+        ):
+            pose_record["valid"] = True
+            report["valid_pose_count"] += 1
+        report["poses"].append(pose_record)
+
+    report["status"] = "passed" if not report["failures"] and report["valid_pose_count"] == len(poses) else "failed"
+    return report
 
 
 def assess_seed_stability(

@@ -410,7 +410,10 @@ class DockingConfigurationTest(unittest.TestCase):
                     binding_energy=-7.25,
                     rmsd_lb=0.0,
                     rmsd_ub=0.0,
-                    pose_data="",
+                    pose_data=(
+                        "HETATM    1  C   LIG A   1       0.000   0.000   0.000  "
+                        "1.00  0.00     0.000 C"
+                    ),
                 )
             ]
 

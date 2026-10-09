@@ -1755,6 +1755,30 @@ class MolecularDockingService:
                         )
             except Exception:
                 heavy_atom_count = 0
+            from .reproducibility import assess_pose_geometry
+
+            pose_geometry = assess_pose_geometry(
+                results,
+                center=(config.center_x, config.center_y, config.center_z),
+                size=(config.size_x, config.size_y, config.size_z),
+                expected_heavy_atom_count=heavy_atom_count or None,
+                box_source=box_provenance.get("source"),
+            )
+            if pose_geometry["status"] != "passed":
+                self._update_run_manifest(
+                    job_dir,
+                    scientific_quality=pose_geometry,
+                    execution={
+                        "status": "failed",
+                        "failure_reason": "scientific_pose_geometry_failed",
+                    },
+                )
+                return self._failed_job_response(
+                    job_dir,
+                    "scientific_pose_geometry_failed",
+                    "Docking pose geometry did not satisfy the recorded input and box evidence.",
+                    **cleanup_control,
+                )
             formatted_results = [
                 {
                     "pose": item.pose_index or index,
@@ -1832,6 +1856,7 @@ class MolecularDockingService:
                     },
                     "manifest": preparation_provenance["manifest"],
                 },
+                "scientific_quality": pose_geometry,
             }
             warnings = list(history_warnings)
             if box_provenance.get("warning"):
