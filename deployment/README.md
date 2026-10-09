@@ -627,6 +627,26 @@ API key 写进了 YAML 或代码
 9. 做全模块功能验收
 10. 设置日志轮转和数据备份
 
+如果部署要求进程重启后仍能恢复后台任务，应在生产环境设置：
+
+```env
+MEDCHAT_REQUIRE_DURABLE_TASKS=1
+```
+
+该开关会让 `python scripts/health_check.py --strict` 在任务后端仍为
+`local` 时失败；生产环境应改用已通过健康检查的 Temporal 后端。开发环境
+不设置该变量时，local 后端仍可用于单进程调试，但其结果不代表具备重启恢复能力。
+
+如果生产环境要提供真实的 PDE/BuChE 活性预测，还应设置：
+
+```env
+MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1
+```
+
+该开关会要求根活动模型 registry 已经原子选择并验证 PDE、BuChE 两个
+family bundle。只有子目录中存在训练注册记录、但根 registry 尚未选择
+active bundle 时，严格健康检查也会失败；不会自动替换或激活模型。
+
 ## 17. 运行时数据库、缓存与日志安全
 
 生产环境建议把靶点数据库和结构缓存放在独立持久化卷，并通过环境变量配置：
