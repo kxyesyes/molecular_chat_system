@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from scripts.run_agent_acceptance import (
     _test_external_model,
+    _test_activity_inference,
     _run_harness_contract_probe,
     _evaluate_activity_result,
     _evaluate_docking_result,
@@ -26,6 +27,121 @@ from src.agent.evaluation.models import EvaluationCase
 from src.agent.contracts import AgentResult, ToolResult
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
+
+
+def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monkeypatch):
+    calls = {}
+
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        calls["smiles"] = smiles
+        calls["target"] = target
+        rows = []
+        for value in smiles:
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "activity_class": "有活性",
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": {
+                    "bundle_id": "pde-bundle",
+                    "models": {
+                        "classification": {"demo_mode": False, "fallback_used": False},
+                        "regression": {"demo_mode": False, "fallback_used": False},
+                    },
+                },
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference()
+
+    assert result["status"] == "passed"
+    assert result["real_model_used"] is True
+    assert calls == {"smiles": ["CCO", "CCN", "c1ccccc1"], "target": "PDE"}
+
+
+def test_activity_acceptance_probe_preserves_real_partial_status(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for index, value in enumerate(smiles):
+            rows.append({
+                "smiles": value,
+                "success": index != 0,
+                "status": "partial" if index == 0 else "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.51,
+                "predicted_pIC50": 5.01,
+                "units": "pIC50",
+                "provenance": {
+                    "bundle_id": "pde-bundle",
+                    "models": {
+                        "classification": {"demo_mode": False, "fallback_used": False},
+                        "regression": {"demo_mode": False, "fallback_used": False},
+                    },
+                },
+            })
+        return {"success": False, "status": "partial", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "partial"
+    assert result["real_model_used"] is True
+    assert result["partial_count"] == 1
+    assert result["successful_count"] == 2
+
+
+def test_run_real_reports_both_activity_family_targets(monkeypatch):
+    calls = []
+
+    async def fake_external_model():
+        return {"status": "skipped"}
+
+    def fake_activity(target=None):
+        calls.append(target)
+        return {
+            "status": "passed",
+            "real_model_used": True,
+            "target": target,
+        }
+
+    class FakeScientificRunner:
+        def __init__(self, dataset_dir, project_root, dataset_path=None):
+            pass
+
+        def run(self, repeat=1):
+            return {"status": "passed", "case_count": 0, "results": [], "stability": {}}
+
+    monkeypatch.setattr("scripts.run_agent_acceptance.ScientificAcceptanceRunner", FakeScientificRunner)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_external_model", fake_external_model)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_ollama", lambda: {"status": "passed"})
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_target_search", lambda: {"status": "passed"})
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_activity_inference", fake_activity)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_docking_execution", lambda: {"status": "passed"})
+
+    report = run_real(repeat=1, case_set="diverse")
+
+    assert calls == ["PDE", "BuChE"]
+    assert set(report["checks"]["activity_model_inference"]["targets"]) == {"PDE", "BuChE"}
+    assert report["checks"]["activity_model_inference"]["status"] == "passed"
 
 
 def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
@@ -1265,7 +1381,7 @@ def test_run_real_accepts_case_set_argument(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "scripts.run_agent_acceptance._test_activity_inference",
-        lambda: {"status": "passed"},
+        lambda target=None: {"status": "passed", "target": target},
     )
     monkeypatch.setattr(
         "scripts.run_agent_acceptance._test_docking_execution",

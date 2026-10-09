@@ -661,18 +661,87 @@ def _test_target_search() -> dict[str, Any]:
         return {"status": "failed", "error": str(exc)}
 
 
-def _test_activity_inference() -> dict[str, Any]:
+def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     try:
-        from src.activity.predictor import ActivityPredictor
+        from src.activity.prediction_service import predict_activity
 
-        predictor = ActivityPredictor()
-        predictions = predictor.predict(["CCO", "CCN", "c1ccccc1"])
-        summary = _evaluate_activity_result(
-            predictor_demo_mode=predictor.demo_mode,
-            model_path=predictor.current_model_path,
-            predictions=predictions,
+        target = target or os.environ.get("MEDCHAT_ACCEPTANCE_ACTIVITY_TARGET", "PDE")
+        summary_result = predict_activity(
+            ["CCO", "CCN", "c1ccccc1"],
+            target=target,
         )
+        predictions = summary_result.get("results", [])
+
+        def has_real_model_provenance(row: Any) -> bool:
+            if not isinstance(row, dict) or not isinstance(row.get("provenance"), dict):
+                return False
+            models = row["provenance"].get("models")
+            if not isinstance(models, dict) or not row["provenance"].get("bundle_id"):
+                return False
+            return all(
+                isinstance(models.get(task), dict)
+                and models[task].get("demo_mode") is False
+                and models[task].get("fallback_used") is False
+                for task in ("classification", "regression")
+            )
+
+        real_rows = [row for row in predictions if has_real_model_provenance(row)]
+        valid_rows = [
+            row for row in predictions
+            if isinstance(row, dict)
+            and row.get("success") is True
+            and row.get("status") == "passed"
+            and row.get("execution_status") == "passed"
+            and isinstance(row.get("predicted_pIC50"), (int, float))
+            and isinstance(row.get("activity_probability"), (int, float))
+            and row.get("units") == "pIC50"
+            and isinstance(row.get("provenance"), dict)
+            and row["provenance"].get("bundle_id")
+            and isinstance(row["provenance"].get("models"), dict)
+            and has_real_model_provenance(row)
+        ]
+        partial_count = sum(
+            1 for row in predictions
+            if isinstance(row, dict) and row.get("status") == "partial"
+        )
+        failed_count = sum(
+            1 for row in predictions
+            if isinstance(row, dict) and row.get("status") == "failed"
+        )
+        real_model_used = len(real_rows) == len(predictions) == 3
+        if not real_model_used:
+            status = "failed"
+        elif (
+            summary_result.get("success") is True
+            and summary_result.get("status") == "passed"
+            and len(valid_rows) == len(predictions)
+        ):
+            status = "passed"
+        else:
+            status = "partial"
+        summary = {
+            "status": status,
+            "real_model_used": real_model_used,
+            "target": target,
+            "result_status": summary_result.get("status"),
+            "prediction_count": len(predictions),
+            "successful_count": len(valid_rows),
+            "partial_count": partial_count,
+            "failed_count": failed_count,
+            "bundle_ids": sorted({
+                row["provenance"]["bundle_id"] for row in real_rows
+            }),
+            "predictions": [
+                {
+                    "smiles": row.get("smiles"),
+                    "predicted_pIC50": row.get("predicted_pIC50"),
+                    "activity_probability": row.get("activity_probability"),
+                    "activity_class": row.get("activity_class"),
+                }
+                for row in valid_rows
+            ],
+        }
         summary["latency_ms"] = int((time.perf_counter() - started) * 1000)
         return summary
     except Exception as exc:
@@ -1116,11 +1185,28 @@ def run_real(
     case_set: str = "golden",
     dataset: Path | None = None,
 ) -> dict[str, Any]:
+    activity_targets = ("PDE", "BuChE")
+    activity_by_target = {
+        target: _test_activity_inference(target=target)
+        for target in activity_targets
+    }
+    activity_statuses = {
+        result.get("status") for result in activity_by_target.values()
+    }
+    if activity_statuses == {"passed"}:
+        activity_status = "passed"
+    elif activity_statuses & {"passed", "partial"}:
+        activity_status = "partial"
+    else:
+        activity_status = "failed"
     checks = {
         "external_main_model": asyncio.run(_test_external_model()),
         "local_molecular_generator": _test_ollama(),
         "target_search": _test_target_search(),
-        "activity_model_inference": _test_activity_inference(),
+        "activity_model_inference": {
+            "status": activity_status,
+            "targets": activity_by_target,
+        },
         "docking_execution": _test_docking_execution(),
     }
     dataset_path = _resolve_real_dataset(case_set=case_set, dataset=dataset)
