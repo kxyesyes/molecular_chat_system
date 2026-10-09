@@ -847,10 +847,17 @@ class WebDecisionRuntime:
             # A normal peer disconnect detaches the transport and leaves the
             # supervised turn running.  Cleanup/shutdown still owns explicit
             # cancellation and retains its existing worker semantics.
-            if sender.websocket is websocket and not transport_failed and not self.closing:
+            if (sender.websocket is websocket and not transport_failed
+                    and not sender.close_attempted and not self.closing):
                 self.sockets.discard(sender)
+                if turn is not None and turn.task is not None and turn.terminal_sent:
+                    # Delivery callbacks run before the parent task returns.
+                    # Join this final bookkeeping without cancelling it; keep
+                    # unsent/in-flight turns owned for normal reconnect.
+                    await retain_until_done(turn.task)
+                if turn is not None and turn.task is not None and turn.task.done():
+                    self.tasks.discard(turn.task)
                 if (turn is not None and turn.task is not None
-                        and not sender.close_attempted
                         and (not turn.task.done() or sender.waiting is not None
                              or sender.replay_frames)):
                     await sender.detach(websocket)
@@ -871,6 +878,7 @@ class WebDecisionRuntime:
                     if turn.started:
                         turn.task.cancel()
                 await retain_until_done(turn.task)
+                self.tasks.discard(turn.task)
                 sender.begin_turn()
             elif turn is not None and turn.task is not None and not turn.task.done() and not self.closing:
                 # This receiver was superseded by a successful reconnect.
