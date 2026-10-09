@@ -318,7 +318,12 @@ class WebDecisionRuntime:
         """
         if self.semantic:
             return None
-        record = self.store.get_run(trace_id)
+        try:
+            record = self.store.get_run(trace_id)
+        except Exception:
+            # A recovery probe must fail closed when the state store is
+            # unavailable; never expose storage diagnostics over WebSocket.
+            return None
         if not isinstance(record, dict) or record.get('status') != 'waiting_for_input':
             return None
         session_id = sender.scope.get('agent_session_id')
@@ -805,6 +810,15 @@ class WebDecisionRuntime:
                 waiting = None
                 if kind in {'resume', 'abandon'}:
                     expected = {'type', 'trace_id', 'continuation_id'} | ({'message'} if kind == 'resume' else set())
+                    control_shape_valid = (
+                        set(payload) == expected
+                        and all(type(payload.get(key)) is str
+                                and re.fullmatch(r'[a-f0-9]{32}', payload[key])
+                                for key in ('trace_id', 'continuation_id'))
+                    )
+                    if not control_shape_valid:
+                        await sender.send({'type': 'error', 'code': 'continuation_unavailable'})
+                        continue
                     waiting = sender.waiting
                     if waiting is None and kind in {'resume', 'abandon'}:
                         waiting = self._restore_durable_waiting(
@@ -813,11 +827,7 @@ class WebDecisionRuntime:
                             or (self.semantic and (type(waiting.remaining_seconds_cap) not in (int, float)
                                 or not 0 < waiting.remaining_seconds_cap <= 300))):
                         sender.waiting = waiting = None
-                    if (set(payload) != expected or waiting is None
-                            or any(type(payload.get(key)) is not str
-                                   or re.fullmatch(r'[a-f0-9]{32}', payload[key]) is None
-                                   for key in ('trace_id', 'continuation_id'))
-                            or payload['trace_id'] != waiting.context.trace_id
+                    if (waiting is None or payload['trace_id'] != waiting.context.trace_id
                             or payload['continuation_id'] != waiting.continuation_id):
                         await sender.send({'type': 'error', 'code': 'continuation_unavailable'})
                         continue

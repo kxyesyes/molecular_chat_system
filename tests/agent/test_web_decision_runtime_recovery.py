@@ -101,3 +101,69 @@ def test_run_snapshot_and_events_are_owner_scoped(actual_app):
                 assert foreign.status_code == 404
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('kind', ['resume', 'abandon'])
+@pytest.mark.parametrize('invalid_id', [None, True, 7, [], {}])
+def test_malformed_recovery_control_is_rejected_before_store_lookup(actual_app, monkeypatch, kind, invalid_id):
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as socket:
+                await socket.ready()
+                def no_lookup(_trace_id):
+                    pytest.fail('malformed control reached durable store')
+                monkeypatch.setattr(b.app.agent_state_store, 'get_run', no_lookup)
+                payload = {'type': kind, 'trace_id': invalid_id, 'continuation_id': 'b' * 32}
+                if kind == 'resume':
+                    payload['message'] = '计算 logP；SMILES: CCO'
+                await socket.send(payload)
+                assert await socket.receive() == {'type': 'error', 'code': 'continuation_unavailable'}
+                await socket.send({'type': 'ping', 'timestamp': 1})
+                assert await socket.receive() == {'type': 'pong', 'timestamp': 1}
+                assert not b.calls and not b.claims
+    asyncio.run(run())
+
+
+def test_recovery_store_failure_is_explicit_and_does_not_replay(actual_app, monkeypatch):
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as socket:
+                await socket.ready()
+                def unavailable(_trace_id):
+                    raise OSError('private-store-diagnostic')
+                monkeypatch.setattr(b.app.agent_state_store, 'get_run', unavailable)
+                await socket.send({'type': 'resume', 'trace_id': 'a' * 32,
+                    'continuation_id': 'b' * 32, 'message': '计算 logP；SMILES: CCO'})
+                assert await socket.receive() == {'type': 'error', 'code': 'continuation_unavailable'}
+                await socket.send({'type': 'ping', 'timestamp': 1})
+                assert await socket.receive() == {'type': 'pong', 'timestamp': 1}
+                assert not b.calls and not b.claims
+    asyncio.run(run())
+
+
+def test_semantic_reconnect_remains_fail_closed_without_process_local_authority(actual_app):
+    from ordinary_chat_fixtures import CAPABILITY_CASES, intent_http_response
+    async def run():
+        calls = 0
+        async def respond(_payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return intent_http_response()
+            return dict(version='1', action='clarify', question='你更关心哪些概念？', missing_fields=['query'])
+        async with actual_app(mode='decision_a2', ordinary_policy='semantic_v1', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as first:
+                assert (await first.ready())['reconnect_supported'] is False
+                frames = await first.turn({'message': CAPABILITY_CASES[0][1]})
+                result = result_of(frames)
+                assert result['status'] == 'waiting_for_input'
+            async with ActualSocket(b.app, cookie) as second:
+                await second.ready()
+                await second.send({'type': 'resume', 'trace_id': result['trace_id'],
+                    'continuation_id': result['metadata']['continuation_id'], 'message': 'Explain logP'})
+                assert await second.receive() == {'type': 'error', 'code': 'continuation_unavailable'}
+                assert calls == 2 and not b.claims
+    asyncio.run(run())
