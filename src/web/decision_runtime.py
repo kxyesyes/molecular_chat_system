@@ -27,7 +27,7 @@ from src.agent.harness.decision_inputs import (
     activity_input_target, effective_molecule, has_explicit_molecule, require_current_reference,
 )
 from src.agent.harness.decision_policy import DecisionBoundaryError, encode_observation
-from src.agent.persistence.redaction import REDACTED, contains_secret_material
+from src.agent.persistence.redaction import REDACTED, contains_secret_material, redact_sensitive
 from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError, retain_until_done
 from .decision_chat import _result_frame, _durable_admission_facts, await_with_deadline, SEND_TIMEOUT_SECONDS
 from .decision_request import (
@@ -38,6 +38,8 @@ from .ordinary_capabilities import ORIGINAL_FOUR
 
 
 _now = time.monotonic
+_WEB_WAITING_TTL_SECONDS = 15 * 60
+_WEB_REQUEST_VERSION = 1
 
 
 class _SemanticFailure(Exception):
@@ -254,6 +256,135 @@ class WebDecisionRuntime:
         except (ValueError, TypeError):
             raise DecisionAdmissionError('ordinary_capabilities_unavailable') from None
 
+    @staticmethod
+    def _bounded_json(value, *, max_bytes=64 * 1024):
+        """Detach a small JSON value before it crosses the web recovery boundary."""
+        try:
+            value = redact_sensitive(value)
+            wire = json.dumps(value, ensure_ascii=False, allow_nan=False)
+            if len(wire.encode('utf-8')) > max_bytes or contains_secret_material(value):
+                return None
+            return json.loads(wire)
+        except (TypeError, ValueError, RecursionError):
+            return None
+
+    def _persist_web_waiting(self, turn, context, sender, *, generation):
+        """Persist only the request envelope needed to reconstruct a wait.
+
+        The scientific continuation itself is written by the existing CAS in
+        ModelDecisionLoop. This metadata is deliberately separate: it contains
+        no live socket, model object, credential, or tool result.
+        """
+        record = self.store.get_run(turn.trace_id)
+        existing = record.get('metadata', {}).get('web_request', {}) if record else {}
+        if not isinstance(existing, dict):
+            existing = {}
+        if turn.waiting is None:
+            payload = turn.payload if isinstance(turn.payload, dict) else {}
+            request = {
+                'version': _WEB_REQUEST_VERSION,
+                'wire_mode': self.wire_mode,
+                # Persist normalized admission values, not wire defaults. A
+                # minimal client frame may omit rag_count/mol_count while the
+                # admission layer applies a different default.
+                'enable_tools': context.metadata['capabilities']['scientific_tools'],
+                'enable_rag': context.metadata['capabilities']['rag'],
+                'mol_count': context.mol_count,
+                'rag_count': context.metadata['rag_count'],
+                'temperature': context.temperature,
+                'config_generation': generation,
+                'reference': payload.get('reference'),
+                'selection': payload.get('selection'),
+                'memory': context.memory,
+            }
+            request = self._bounded_json(request)
+            if not isinstance(request, dict):
+                raise ValueError('web request is not persistable')
+        else:
+            request = dict(existing)
+            request.setdefault('version', _WEB_REQUEST_VERSION)
+        request['expires_at_epoch'] = time.time() + _WEB_WAITING_TTL_SECONDS
+        request = self._bounded_json(request)
+        if not isinstance(request, dict):
+            raise ValueError('web request is not persistable')
+        self.store.update_run_metadata(turn.trace_id, {'web_request': request})
+
+    def _restore_durable_waiting(self, sender, trace_id, continuation_id):
+        """Rebuild an A1 waiting handle after a WebSocket reconnect.
+
+        Running turns are intentionally not recovered here. Only a committed
+        waiting continuation can cross a socket boundary, and the normal loop
+        still performs the owner-bound one-shot CAS before dispatch.
+        """
+        if self.semantic:
+            return None
+        record = self.store.get_run(trace_id)
+        if not isinstance(record, dict) or record.get('status') != 'waiting_for_input':
+            return None
+        session_id = sender.scope.get('agent_session_id')
+        if (not session_id or record.get('session_id') != session_id
+                or record.get('user_id') != session_id):
+            return None
+        metadata = record.get('metadata')
+        continuation = metadata.get('decision_continuation') if isinstance(metadata, dict) else None
+        web_request = metadata.get('web_request') if isinstance(metadata, dict) else None
+        if (not isinstance(continuation, dict) or continuation.get('id') != continuation_id
+                or 'claimed_by' in continuation or not isinstance(continuation.get('snapshot'), dict)
+                or not isinstance(web_request, dict)
+                or web_request.get('version') != _WEB_REQUEST_VERSION):
+            return None
+        try:
+            expires_at_epoch = float(web_request['expires_at_epoch'])
+            remaining = expires_at_epoch - time.time()
+            if remaining <= 0:
+                return None
+            queries = continuation['snapshot']['input_queries']
+            if (not isinstance(queries, list) or not queries or
+                    any(type(query) is not str for query in queries) or
+                    queries[0] != record.get('query')):
+                return None
+            payload = {
+                'type': 'chat',
+                'message': record.get('query'),
+                'enable_tools': web_request.get('enable_tools', True),
+                'enable_rag': web_request.get('enable_rag', True),
+                'mol_count': web_request.get('mol_count', 1),
+                'rag_count': web_request.get('rag_count', 3),
+                'temperature': web_request.get('temperature', 0.7),
+                'reference': web_request.get('reference'),
+                'selection': web_request.get('selection'),
+            }
+            prepared = prepare_decision_request(payload,
+                session_id=session_id, trace_id=trace_id,
+                references=self.references,
+                config_generation=web_request.get('config_generation'))
+            context = prepared.context
+            context.memory = history_pairs(web_request.get('memory', []))
+            return _Waiting(context, prepared, continuation_id,
+                self._clock() + remaining, tuple(queries))
+        except (DecisionAdmissionError, DecisionBoundaryError, KeyError, TypeError,
+                ValueError, OverflowError):
+            return None
+
+    def _abandon_durable_waiting(self, waiting, sender):
+        """Atomically revoke a waiting nonce before acknowledging abandon."""
+        record = self.store.get_run(waiting.context.trace_id)
+        metadata = record.get('metadata', {}) if isinstance(record, dict) else {}
+        current = metadata.get('decision_continuation') if isinstance(metadata, dict) else None
+        if (not isinstance(current, dict) or current.get('id') != waiting.continuation_id
+                or 'claimed_by' in current):
+            return False
+        replacement = dict(current, claimed_by=uuid4().hex)
+        claimed = self.store.transition_decision_continuation(
+            waiting.context.trace_id,
+            user_id=sender.scope['agent_session_id'],
+            session_id=sender.scope['agent_session_id'],
+            expected=current, replacement=replacement, claim=True)
+        if not claimed:
+            return False
+        self.store.update_run_status(waiting.context.trace_id, 'rejected')
+        return True
+
     def _check_retry_authority(self, sender, turn):
         """Rejection is retryable only while the original nonce is still waiting.
 
@@ -467,7 +598,7 @@ class WebDecisionRuntime:
                 if (result.metadata.get('waiting_for_input') is True
                         and type(result.metadata.get('continuation_id')) is str):
                     waiting = _Waiting(frozen_context, prepared,
-                        result.metadata['continuation_id'], bridge_returned_at + 15 * 60, queries)
+                        result.metadata['continuation_id'], bridge_returned_at + _WEB_WAITING_TTL_SECONDS, queries)
                     if self.semantic:
                         try:
                             checkpoint = turn.admission_exchange.verify(trace_id=turn.trace_id,
@@ -481,6 +612,15 @@ class WebDecisionRuntime:
                             intent_record_json=turn.admission_carry.intent_record_json,
                             intent_requests=checkpoint.intent_requests,
                             decision_requests=checkpoint.decision_requests)
+                    try:
+                        self._persist_web_waiting(turn, context, sender,
+                            generation=generation)
+                    except Exception:
+                        try:
+                            self.store.update_run_status(turn.trace_id, 'failed')
+                        except Exception:
+                            pass
+                        raise _SemanticFailure('decision_persistence_failed') from None
                     turn.next_waiting = waiting
                 elif result.metadata.get('stop_reason') != 'continuation_rejected':
                     sender.waiting = None
@@ -617,6 +757,8 @@ class WebDecisionRuntime:
 
         try:
             await sender.send({'type': 'connection_ready', 'normal_chat_mode': 'decision_a2',
+                'reconnect_supported': not self.semantic,
+                'run_snapshot_api': True,
                 'capabilities': {'cancel': True, 'rag_retrieval': False,
                                  'scientific_tools': sorted(set(self.registry.as_mapping()) & {
                                      'property_calculator', 'drug_likeness_assessment',
@@ -664,6 +806,9 @@ class WebDecisionRuntime:
                 if kind in {'resume', 'abandon'}:
                     expected = {'type', 'trace_id', 'continuation_id'} | ({'message'} if kind == 'resume' else set())
                     waiting = sender.waiting
+                    if waiting is None and kind in {'resume', 'abandon'}:
+                        waiting = self._restore_durable_waiting(
+                            sender, payload.get('trace_id'), payload.get('continuation_id'))
                     if waiting is not None and (self._clock() >= waiting.expires_at
                             or (self.semantic and (type(waiting.remaining_seconds_cap) not in (int, float)
                                 or not 0 < waiting.remaining_seconds_cap <= 300))):
@@ -677,9 +822,17 @@ class WebDecisionRuntime:
                         await sender.send({'type': 'error', 'code': 'continuation_unavailable'})
                         continue
                     if kind == 'abandon':
+                        try:
+                            if not self._abandon_durable_waiting(waiting, sender):
+                                await sender.send({'type': 'error', 'code': 'continuation_unavailable'})
+                                continue
+                        except Exception:
+                            await sender.send({'type': 'error', 'code': 'continuation_unavailable'})
+                            continue
                         sender.waiting = None
                         await sender.send({'type': 'continuation_abandoned', 'trace_id': waiting.context.trace_id})
                         continue
+                    sender.waiting = waiting
                 turn = (_Turn(payload, trace_id=waiting.context.trace_id, waiting=waiting)
                         if waiting is not None else _Turn(payload))
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,

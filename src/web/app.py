@@ -875,6 +875,7 @@ class MolecularChatApp:
         try:
             from src.task_runtime.routes import setup_task_routes
             from .routes.agent_workflow_routes import setup_agent_workflow_routes
+            from .routes.agent_run_routes import setup_agent_run_routes
             from .routes.system_routes import setup_system_routes
 
             setup_task_routes(self.app, task_runtime=task_runtime)
@@ -883,6 +884,7 @@ class MolecularChatApp:
                 supervisor_factory=self._create_supervisor_agent,
                 model_request_gate=self.model_request_gate,
             )
+            setup_agent_run_routes(self.app, self._get_agent_state_store())
             setup_system_routes(self.app)
             logger.info("Task runtime and system metadata routes registered")
         except Exception as e:

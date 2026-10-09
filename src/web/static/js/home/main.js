@@ -38,6 +38,27 @@
   const evidenceReportViews = new WeakMap(); // live DOM lifetime only; never storage/restore
   let tabStorage;
   try { tabStorage = window.sessionStorage; } catch (_) { tabStorage = null; }
+  const decisionWaitingStorageKey = "medchat.decision.waiting.v1";
+
+  function readStoredDecisionWaiting() {
+    if (!tabStorage) return null;
+    try {
+      const value = JSON.parse(tabStorage.getItem(decisionWaitingStorageKey) || "null");
+      return value && /^[a-f0-9]{32}$/.test(value.traceId || "") &&
+        /^[a-f0-9]{32}$/.test(value.nonce || "") ? value : null;
+    } catch (_) { return null; }
+  }
+
+  function setDecisionWaiting(value) {
+    decisionWaiting = value || null;
+    if (!tabStorage) return;
+    try {
+      if (decisionWaiting) tabStorage.setItem(decisionWaitingStorageKey, JSON.stringify(decisionWaiting));
+      else tabStorage.removeItem(decisionWaitingStorageKey);
+    } catch (_) { /* Storage is an optional UI cache; server state is authoritative. */ }
+  }
+
+  decisionWaiting = readStoredDecisionWaiting();
   const scientificReferences = window.HomeScientificReferences?.createController({
     storage: tabStorage,
     request: async (action, body) => {
@@ -136,7 +157,7 @@
       }
     }
     decisionMode = false;
-    decisionTurn = decisionWaiting = decisionAbandonAwait = null;
+    decisionTurn = decisionAbandonAwait = null;
     decisionSeenTurns.clear();
     updateDecisionControls();
   }
@@ -144,6 +165,7 @@
   function configureDecisionMode(message) {
     decisionAwaitingReady = false;
     decisionMode = message.normal_chat_mode === "decision_a2";
+    if (decisionMode && !decisionWaiting) decisionWaiting = readStoredDecisionWaiting();
     if (decisionMode && !decisionControls && elements.input?.parentNode) {
       const box = document.createElement("div");
       box.className = "decision-runtime-controls";
@@ -204,7 +226,7 @@
     if (["connection_ready", "pong"].includes(message.type)) return false;
     if (message.type === "continuation_abandoned") {
       if (decisionAbandonAwait?.socket === socket && message.trace_id === decisionAbandonAwait.traceId) {
-        decisionAbandonAwait = decisionWaiting = null;
+        decisionAbandonAwait = null; setDecisionWaiting(null);
         updateDecisionControls();
       }
       return true;
@@ -218,7 +240,7 @@
       // Control errors have no request ID. Do not admit another turn until the
       // outstanding abandon response is consumed; never queue or replay input.
       if (decisionAbandonAwait?.socket === socket) {
-        if (message.code === "continuation_unavailable") decisionWaiting = null;
+        if (message.code === "continuation_unavailable") setDecisionWaiting(null);
         decisionAbandonAwait = null;
         updateDecisionControls();
         return true;
@@ -227,7 +249,7 @@
         (message.code === "continuation_unavailable" && Boolean(turn?.resume));
       if (turn?.phase === "pending" && requestRejected) {
         turn.phase = "ended";
-        if (message.code === "continuation_unavailable") decisionWaiting = null;
+        if (message.code === "continuation_unavailable") setDecisionWaiting(null);
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
         decisionStatus(turn, "请求未被接受。"); removeTypingIndicator();
         turn.box.classList.add("complete"); updateDecisionControls();
@@ -279,9 +301,9 @@
       turn.phase = "ended";
       if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
         message.continuation_id === metadata.continuation_id) {
-        decisionWaiting = {traceId: turn.traceId, nonce: metadata.continuation_id};
+        setDecisionWaiting({traceId: turn.traceId, nonce: metadata.continuation_id});
       } else {
-        decisionWaiting = metadata.stop_reason === "continuation_rejected" ? turn.resume : null;
+        setDecisionWaiting(metadata.stop_reason === "continuation_rejected" ? turn.resume : null);
       }
       updateDecisionControls(); return true;
     }

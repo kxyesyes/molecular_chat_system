@@ -230,6 +230,14 @@ async function run() {
     h.socket.emit({type: "continuation_abandoned", trace_id: trace});
     h.input.value = "Explain logP"; h.send(); assert.equal(h.socket.sent.at(-1).type, "chat");
   });
+  await test("waiting continuation is restored from the tab session cache after refresh", () => {
+    const h = loadHome({storedPointer: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    const next = h.button("继续");
+    assert(next && !next.disabled, "restored waiting state must enable Continue");
+    h.input.value = "计算 logP；SMILES: CCO"; next.click();
+    assert.deepEqual(h.socket.sent.at(-1), {type: "resume", trace_id: trace,
+      continuation_id: nonce, message: "计算 logP；SMILES: CCO"});
+  });
   for (const response of ["success", "expired"]) await test(`abandon awaits ${response} before an explicit new chat`, () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
@@ -336,13 +344,15 @@ async function run() {
       assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
     });
   }
-  await test("disconnect clears pending abandon; old socket responses cannot release a new handle", () => {
+  await test("disconnect retains an unconfirmed abandon until the server settles it", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.button("开始新请求").click(); assert(h.button("开始新请求").disabled);
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
-    assert(h.button("继续").disabled && h.button("开始新请求").disabled);
+    assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
     assert(newer.sent.every(f => f.type === "ping"));
+    h.button("开始新请求").click();
+    newer.emit({type: "continuation_abandoned", trace_id: trace});
     h.input.value = "Explain logP"; h.send();
     const t2 = "4".repeat(32), tr2 = "5".repeat(32);
     newer.emit(accepted(t2, tr2)); newer.emit(result("waiting_for_input", t2, tr2));
@@ -355,12 +365,12 @@ async function run() {
     newer.emit({type: "continuation_abandoned", trace_id: tr2});
     assert.equal(newer.sent.length, sent); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
   });
-  await test("disconnect clears continuation and stale socket cannot restore it; no replay", () => {
+  await test("disconnect restores a durable continuation without replaying stale frames", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
     h.socket.emit(accepted()); h.socket.emit(result("waiting_for_input"));
-    assert(h.button("继续").disabled && h.button("停止").disabled);
+    assert(!h.button("继续").disabled && h.button("停止").disabled);
     assert(newer.sent.every(f => f.type === "ping"));
   });
   await test("transport logging never captures user text or inbound raw frames", () => {

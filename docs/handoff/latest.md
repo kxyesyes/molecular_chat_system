@@ -4,7 +4,7 @@
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
-- `origin/main` 当前为 `64a1995`。PR #167（分子性质核心复用）、#168（对接终态保真）、
+- `origin/main` 当前为 `8bc1495`（完整提交：`8bc149546d177a3b9655df65842a55a89291d85e`）。PR #167（分子性质核心复用）、#168（对接终态保真）、
   #169（交接文档）、#170（对接终态端到端保真）、#171（活性模型注册发现）和
   #172（首页终态展示）均已通过 GitHub 质量门禁并 squash 合并；没有直接修改 `main`。
 - Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`；对接适配器现在保留
@@ -18,18 +18,37 @@
   目标路由的 `_support` 仅保留给旧直接调用者，且通过统一 `route_compat.lazy_dependency` 延迟解析。
 - 使用本机真实运行资产的严格健康检查已达到 `23/23`。模型权重、靶点数据库、缓存与 RAG 索引属于
   本地资产，不得提交或用模拟文件替代。
+- 本分支 `codex/complete-remaining-architecture` 已补齐 Web 决策等待的服务端持久化续接：
+  `a1_closed` 等待态写入有限请求快照，断线后同一 Agent session 可通过原子 continuation CAS
+  继续；`semantic_v1` 在缺少安全 intent journal 时保持 fail-closed。新增 owner-scoped
+  `GET /api/agent/runs/{trace_id}` 与 `/events` 只读审计接口，前端只把 sessionStorage 当作
+  恢复指针，服务端状态仍是唯一权威来源。
 
 ### 当前真正未完成
 
 1. 真实运行环境中的端到端验收：使用真实 PDE/BuChE 权重、靶点数据、RAG 索引和可用 Vina，
    验证 Web 与 Agent 的输入、结果、来源和失败状态一致；CI 只证明离线工程契约。
-2. 运行中的任务刷新恢复和断线续接：当前页面可正确展示终态，但运行中会话仍是 socket-local，
-   需要单独的服务端持久化 continuation/replay 协议；不能用前端重放假装完成。
+2. 运行中的任务刷新恢复和断线续接：等待用户输入的 `a1_closed` continuation 已支持服务端
+   持久化和同 session 续接；仍需在目标部署环境验证多进程/重启/反向代理下的恢复，以及为
+   `semantic_v1` 建立经过审计的 intent journal 后再开放跨 socket 续接。
 3. 部署环境验收：HTTPS/WSS、真实模型客户端、资源目录、任务取消与清理需要在目标服务器验证。
 4. 对接科学增强仍是独立后续任务：Vina 输出/构象科学校验、相互作用几何、盒子依据、预处理规则、
    重对接 RMSD 与多随机种子稳定性；本轮只完成终态契约，不宣称这些算法任务已完成。
 5. 历史批次正文仍保留追溯信息；它们的“待合并”描述不代表当前开放 PR。后续只需维护本节，
    不再重复创建同一批架构任务。
+
+### 本分支验收记录（2026-10-09）
+
+- 聚焦 Web 决策运行时：`189 passed`；前端决策运行时 Node 合同：`39 passed`；
+  `tests/agent` 全量：`12912 passed, 3 skipped, 7 warnings`；反幻觉/平台健康/真实验收聚焦集：
+  `53 passed, 7 warnings`；`compileall`、`node --check` 和 `git diff --check` 通过。
+- `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `all-real --repeat 3`：`partial`。
+  本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；RG-MPNN 未达到真实模型门槛，
+  外部主模型端点返回 HTTP 403，均保留为失败/partial，未包装成科研成功。
+- `health_check.py --strict`：`23/23`；OpenSandbox 验收因 acceptance gate disabled 标记 `skipped`；
+  Temporal 真实验收未能在当前 Windows 输出受信报告，标记为报告写入失败，不能替代目标环境验收。
+- 本轮未读取、写入或提交任何 API key；`data/molecular_faiss_index.index.manifest.json` 是用户已有的
+  未跟踪文件，保持原样未触碰。
 
 ## 第2项发布完成／第3项开始（2026-09-25）
 

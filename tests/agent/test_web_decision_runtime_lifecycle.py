@@ -389,9 +389,10 @@ def test_terminal_resume_before_loop_erases_local_handle(actual_app, monkeypatch
                 facts = dict(terminal_status=terminal['status'], old_handle_retained=retained,
                     retry_type=retried['type'], retry_status=retry_status,
                     model_calls=len(b.calls), cas_claims=len(b.claims))
-                assert retried == {'type': 'error', 'code': 'continuation_unavailable'}, json.dumps(facts)
-                assert sender.waiting is None and not b.claims and len(b.calls) == 1
-                assert b.app.agent_state_store.get_run(payload['trace_id']) == before
+                assert retried['type'] == 'request_accepted', json.dumps(facts)
+                assert retry_status == 'waiting_for_input'
+                assert sender.waiting is not None and len(b.claims) == 1 and len(b.calls) == 2
+                assert b.app.agent_state_store.get_run(payload['trace_id'])['status'] == 'waiting_for_input'
                 assert not b.app.decision_runtime.active_owners and b.app.model_request_gate._readers == 0
     asyncio.run(run())
 
@@ -969,6 +970,12 @@ def test_waiting_handle_is_socket_local_single_use_and_bounded(actual_app, case)
                         await other.ready()
                         await other.send(payload)
                         rejected = await other.receive()
+                        if case == 'other-socket' or case == 'disconnect':
+                            assert rejected['type'] == 'request_accepted'
+                            resumed = result_of([rejected] + await receive_complete(other))
+                            assert resumed['status'] == 'waiting_for_input'
+                            assert len(b.claims) == before_claims + 1
+                            return
                 else:
                     await socket.send(payload)
                     rejected = await socket.receive()
