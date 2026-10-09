@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from scripts.run_agent_acceptance import (
     _test_external_model,
+    _test_activity_inference,
     _run_harness_contract_probe,
     _evaluate_activity_result,
     _evaluate_docking_result,
@@ -26,6 +27,296 @@ from src.agent.evaluation.models import EvaluationCase
 from src.agent.contracts import AgentResult, ToolResult
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
+from src.activity.request_selection import ActivityModelRequest, request_identity
+
+
+def _complete_activity_provenance(*, bundle_id="pde-bundle", family_id="pde-family"):
+    models = {
+        "classification": {
+            "model_id": "pde-classifier",
+            "target_id": family_id,
+            "task_type": "classification",
+            "endpoint": "activity",
+            "units": "probability",
+            "weights_sha256": "a" * 64,
+            "model_card_sha256": "b" * 64,
+            "prepared_dataset_sha256": "c" * 64,
+            "dataset_sha256": "d" * 64,
+            "source_sha256": "e" * 64,
+            "model_contract_key": "pde-classifier-contract",
+            "scientific_readiness": "endpoint_ready",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        "regression": {
+            "model_id": "pde-regressor",
+            "target_id": family_id,
+            "task_type": "regression",
+            "endpoint": "pIC50",
+            "units": "pIC50",
+            "weights_sha256": "f" * 64,
+            "model_card_sha256": "0" * 64,
+            "prepared_dataset_sha256": "1" * 64,
+            "dataset_sha256": "2" * 64,
+            "source_sha256": "3" * 64,
+            "model_contract_key": "pde-regressor-contract",
+            "scientific_readiness": "endpoint_ready",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+    }
+    request = ActivityModelRequest.from_mapping({"target": family_id})
+    return {
+        "family_id": family_id,
+        "bundle_id": bundle_id,
+        "source_sha256": "4" * 64,
+        "assignment_sha256": "5" * 64,
+        "scope": {},
+        "label_threshold": 5.0,
+        "probability_threshold": 0.5,
+        "models": models,
+        "request": {
+            "family_id": request.family_id,
+            "endpoint": request.endpoint,
+            "units": request.units,
+            "species": request.species,
+            "validation": request.validation,
+            "identity": request_identity(request, bundle_id, models),
+        },
+    }
+
+
+def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monkeypatch):
+    calls = {}
+
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        calls["smiles"] = smiles
+        calls["target"] = target
+        rows = []
+        for value in smiles:
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "activity_class": "有活性",
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(),
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference()
+
+    assert result["status"] == "passed"
+    assert result["real_model_used"] is True
+    assert calls == {"smiles": ["CCO", "CCN", "c1ccccc1"], "target": "PDE"}
+
+
+def test_activity_acceptance_probe_rejects_incomplete_model_provenance(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for value in smiles:
+            provenance = _complete_activity_provenance()
+            provenance["models"]["classification"].pop("model_id")
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": provenance,
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["real_model_used"] is False
+    assert result["real_prediction_count"] == 0
+    assert all(item["real_model_provenance"] is False for item in result["predictions"])
+
+
+def test_activity_acceptance_probe_rejects_wrong_target_family(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for value in smiles:
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "buche-family",
+                "bundle_id": "buche-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(
+                    bundle_id="buche-bundle", family_id="buche-family"
+                ),
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["real_model_used"] is False
+    assert result["real_prediction_count"] == 0
+    assert all(item["real_model_provenance"] is False for item in result["predictions"])
+
+
+def test_activity_acceptance_probe_preserves_real_partial_status(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for index, value in enumerate(smiles):
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": index != 0,
+                "status": "partial" if index == 0 else "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.51,
+                "predicted_pIC50": 5.01,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(),
+            })
+        return {"success": False, "status": "partial", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "partial"
+    assert result["real_model_used"] is True
+    assert result["partial_count"] == 1
+    assert result["successful_count"] == 2
+    assert len(result["predictions"]) == 3
+    assert result["predictions"][0]["status"] == "partial"
+    assert result["predictions"][0]["predicted_pIC50"] == 5.01
+    assert result["predictions"][0]["provenance"]["bundle_id"] == "pde-bundle"
+
+
+def test_activity_acceptance_probe_keeps_failed_rows_without_provenance(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = [{
+            "smiles": smiles[0],
+            "success": False,
+            "status": "failed",
+            "execution_status": "failed",
+            "errors": {"model": "activity bundle unavailable"},
+            "provenance": {},
+        }]
+        for value in smiles[1:]:
+            rows.append({
+                "smiles": value,
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.51,
+                "predicted_pIC50": 5.01,
+                "units": "pIC50",
+                "provenance": _complete_activity_provenance(),
+            })
+        return {"success": False, "status": "failed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["prediction_count"] == 3
+    assert result["failed_count"] == 1
+    assert len(result["predictions"]) == 3
+    assert result["predictions"][0]["status"] == "failed"
+    assert result["predictions"][0]["errors"] == {
+        "model": "activity bundle unavailable"
+    }
+
+
+def test_run_real_reports_both_activity_family_targets(monkeypatch):
+    calls = []
+
+    async def fake_external_model():
+        return {"status": "skipped"}
+
+    def fake_activity(target=None):
+        calls.append(target)
+        return {
+            "status": "passed",
+            "real_model_used": True,
+            "target": target,
+        }
+
+    class FakeScientificRunner:
+        def __init__(self, dataset_dir, project_root, dataset_path=None):
+            pass
+
+        def run(self, repeat=1):
+            return {"status": "passed", "case_count": 0, "results": [], "stability": {}}
+
+    monkeypatch.setattr("scripts.run_agent_acceptance.ScientificAcceptanceRunner", FakeScientificRunner)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_external_model", fake_external_model)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_ollama", lambda: {"status": "passed"})
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_target_search", lambda: {"status": "passed"})
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_activity_inference", fake_activity)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_docking_execution", lambda: {"status": "passed"})
+
+    report = run_real(repeat=1, case_set="diverse")
+
+    assert calls == ["PDE", "BuChE"]
+    assert set(report["checks"]["activity_model_inference"]["targets"]) == {"PDE", "BuChE"}
+    assert report["checks"]["activity_model_inference"]["status"] == "passed"
 
 
 def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
@@ -1265,7 +1556,7 @@ def test_run_real_accepts_case_set_argument(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "scripts.run_agent_acceptance._test_activity_inference",
-        lambda: {"status": "passed"},
+        lambda target=None: {"status": "passed", "target": target},
     )
     monkeypatch.setattr(
         "scripts.run_agent_acceptance._test_docking_execution",

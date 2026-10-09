@@ -4,9 +4,8 @@
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
-- `origin/main` 当前为 `8bc1495`（完整提交：`8bc149546d177a3b9655df65842a55a89291d85e`）。PR #167（分子性质核心复用）、#168（对接终态保真）、
-  #169（交接文档）、#170（对接终态端到端保真）、#171（活性模型注册发现）和
-  #172（首页终态展示）均已通过 GitHub 质量门禁并 squash 合并；没有直接修改 `main`。
+- `origin/main` 当前为 `c0bdacf`（PR #176，生产健康检查门禁加固，已通过质量门禁并 squash 合并）；
+  本分支 `codex/production-e2e-acceptance` 基于该稳定基线工作，没有直接修改 `main`。
 - Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`；对接适配器现在保留
   `succeeded`、`unavailable`、`timeout`、`cancelled`、`invalid_input`、`not_calculated` 等统一状态，
   不再把非成功终态降级成普通 `failed`；失败适配器只保留安全状态诊断，Agent Validator 会清除
@@ -30,14 +29,14 @@
   以及 docking 姿态几何/盒子证据门禁。真实 Vina 样例以 3 个不同 seed 完成，均生成 10 个
   pose、存在 pose 文件且几何门禁通过；能量范围为 `0.1 kcal/mol`，这只是本次运行的稳定性观察，
   不是普适科学阈值。
-- 本轮 `tests/agent` 仍为 `12926 passed, 3 skipped`；跨进程/重启相关聚焦集为 `765 passed,
-  1 skipped`；`health_check.py --strict` 为 `23/23`。ADMET 真实探针现在能正确报告缺少
-  `ADMET_AI_PYTHON`，不再被脚本路径错误遮蔽；没有读取、写入或提交 API key。
+- 本轮真实活性验收已切换到正式 `src.activity.prediction_service`，并同时检查 PDE/BuChE
+  family bundle；没有读取、写入或提交 API key。
 
 ### 当前真正未完成
 
-1. 真实运行环境中的端到端验收：使用真实 PDE/BuChE 权重、靶点数据、RAG 索引和可用 Vina，
-   验证 Web 与 Agent 的输入、结果、来源和失败状态一致；CI 只证明离线工程契约。
+1. 目标部署环境中的端到端验收：本机已用真实 PDE/BuChE 权重、靶点数据、RAG 索引和 Vina
+   完成 Agent acceptance，但 Web 入口、反向代理和生产配置下的输入、结果、来源和失败状态一致性
+   仍需在目标服务器验证；CI 只证明离线工程契约。
 2. 运行中的任务刷新恢复和断线续接：等待用户输入的 `a1_closed` continuation 已支持服务端
    持久化和同 session 续接；仍需在目标部署环境验证多进程/重启/反向代理下的恢复，以及为
    `semantic_v1` 建立经过审计的 intent journal 后再开放跨 socket 续接。
@@ -50,16 +49,19 @@
 
 ### 本分支验收记录（2026-10-10）
 
-- Web 决策运行时、生命周期、恢复和普通 Web 生命周期联合回归：`241 passed, 7 warnings`；
-  新增恢复边界测试单独为 `15 passed, 7 warnings`；`tests/agent` 全量：
-  `12926 passed, 3 skipped, 7 warnings`；反幻觉/平台健康/真实验收聚焦集：`54 passed, 7 warnings`；
-  `compileall` 和 `git diff --check` 通过。
-- `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `--mode real --repeat 3`：`partial`。
-  本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；RG-MPNN 未达到真实模型门槛，
-  ADMET-AI worker 未配置，外部主模型配置未成功，均保留为失败/partial，未包装成科研成功。
-- `health_check.py --strict`：`23/23`；OpenSandbox 验收因 acceptance gate disabled 标记 `skipped`；
-  Temporal contract `repeat=3` 通过，但 Temporal real `repeat=3` 因当前 Windows 未配置生产 Temporal/
-  OpenSandbox 失败；生产 preflight 也失败，不能替代目标环境验收。
+- Web 决策运行时、生命周期、恢复和普通 Web 生命周期联合回归的历史证据仍保留；本轮
+  `tests/agent` 全量：`12931 passed, 3 skipped, 7 warnings`；新增真实活性验收聚焦测试：
+  `46 passed`；`compileall` 和 `git diff --check` 通过。
+- `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `--mode real --repeat 3`：`partial`，
+  `run_count=3`、`case_count=36`。本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；
+  PDE 与 BuChE 均确认使用非 demo、非 fallback 的真实 RG-MPNN bundle。PDE 三个固定探针中有一条
+  分类/回归一致性冲突，保持 `partial`；BuChE 三条全部 `passed`。外部主模型仍为配置失败，未包装
+  成科研成功。
+- 默认 `health_check.py --strict`：`23/23`；同时启用
+  `MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1` 和 `MEDCHAT_REQUIRE_DURABLE_TASKS=1` 后为 `21/23`，
+  失败项明确是生产根注册表未激活 PDE/BuChE，以及本机未配置可提供重启恢复的 Temporal 后端。
+- Temporal contract `repeat=3` 通过；Temporal real/生产 preflight 仍需目标服务器的 Temporal、
+  HTTPS/WSS、资源目录和清理环境，不能用本机结果替代。
 - 本轮未读取、写入或提交任何 API key；`data/molecular_faiss_index.index.manifest.json` 是用户已有的
   未跟踪文件，保持原样未触碰。
 
