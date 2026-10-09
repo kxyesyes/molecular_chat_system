@@ -27,6 +27,63 @@ from src.agent.evaluation.models import EvaluationCase
 from src.agent.contracts import AgentResult, ToolResult
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
+from src.activity.request_selection import ActivityModelRequest, request_identity
+
+
+def _complete_activity_provenance(*, bundle_id="pde-bundle", family_id="pde-family"):
+    models = {
+        "classification": {
+            "model_id": "pde-classifier",
+            "target_id": family_id,
+            "task_type": "classification",
+            "endpoint": "activity",
+            "units": "probability",
+            "weights_sha256": "a" * 64,
+            "model_card_sha256": "b" * 64,
+            "prepared_dataset_sha256": "c" * 64,
+            "dataset_sha256": "d" * 64,
+            "source_sha256": "e" * 64,
+            "model_contract_key": "pde-classifier-contract",
+            "scientific_readiness": "endpoint_ready",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        "regression": {
+            "model_id": "pde-regressor",
+            "target_id": family_id,
+            "task_type": "regression",
+            "endpoint": "pIC50",
+            "units": "pIC50",
+            "weights_sha256": "f" * 64,
+            "model_card_sha256": "0" * 64,
+            "prepared_dataset_sha256": "1" * 64,
+            "dataset_sha256": "2" * 64,
+            "source_sha256": "3" * 64,
+            "model_contract_key": "pde-regressor-contract",
+            "scientific_readiness": "endpoint_ready",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+    }
+    request = ActivityModelRequest.from_mapping({"target": family_id})
+    return {
+        "family_id": family_id,
+        "bundle_id": bundle_id,
+        "source_sha256": "4" * 64,
+        "assignment_sha256": "5" * 64,
+        "scope": {},
+        "label_threshold": 5.0,
+        "probability_threshold": 0.5,
+        "models": models,
+        "request": {
+            "family_id": request.family_id,
+            "endpoint": request.endpoint,
+            "units": request.units,
+            "species": request.species,
+            "validation": request.validation,
+            "identity": request_identity(request, bundle_id, models),
+        },
+    }
 
 
 def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monkeypatch):
@@ -54,13 +111,7 @@ def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monk
                 "classification_regression_consistent": True,
                 "errors": {},
                 "warnings": [],
-                "provenance": {
-                    "bundle_id": "pde-bundle",
-                    "models": {
-                        "classification": {"demo_mode": False, "fallback_used": False},
-                        "regression": {"demo_mode": False, "fallback_used": False},
-                    },
-                },
+                "provenance": _complete_activity_provenance(),
             })
         return {"success": True, "status": "passed", "results": rows}
 
@@ -75,25 +126,66 @@ def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monk
     assert calls == {"smiles": ["CCO", "CCN", "c1ccccc1"], "target": "PDE"}
 
 
+def test_activity_acceptance_probe_rejects_incomplete_model_provenance(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for value in smiles:
+            provenance = _complete_activity_provenance()
+            provenance["models"]["classification"].pop("model_id")
+            rows.append({
+                "smiles": value,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": provenance,
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["real_model_used"] is False
+    assert result["real_prediction_count"] == 0
+    assert all(item["real_model_provenance"] is False for item in result["predictions"])
+
+
 def test_activity_acceptance_probe_preserves_real_partial_status(monkeypatch):
     def fake_predict_activity(smiles, *, target=None, model_request=None):
         rows = []
         for index, value in enumerate(smiles):
             rows.append({
                 "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
                 "success": index != 0,
                 "status": "partial" if index == 0 else "passed",
                 "execution_status": "passed",
+                "activity_class": "有活性",
                 "activity_probability": 0.51,
                 "predicted_pIC50": 5.01,
                 "units": "pIC50",
-                "provenance": {
-                    "bundle_id": "pde-bundle",
-                    "models": {
-                        "classification": {"demo_mode": False, "fallback_used": False},
-                        "regression": {"demo_mode": False, "fallback_used": False},
-                    },
-                },
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(),
             })
         return {"success": False, "status": "partial", "results": rows}
 
@@ -132,13 +224,7 @@ def test_activity_acceptance_probe_keeps_failed_rows_without_provenance(monkeypa
                 "activity_probability": 0.51,
                 "predicted_pIC50": 5.01,
                 "units": "pIC50",
-                "provenance": {
-                    "bundle_id": "pde-bundle",
-                    "models": {
-                        "classification": {"demo_mode": False, "fallback_used": False},
-                        "regression": {"demo_mode": False, "fallback_used": False},
-                    },
-                },
+                "provenance": _complete_activity_provenance(),
             })
         return {"success": False, "status": "failed", "results": rows}
 

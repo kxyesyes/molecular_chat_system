@@ -665,6 +665,7 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
     started = time.perf_counter()
     try:
         from src.activity.prediction_service import predict_activity
+        from src.activity.request_selection import request_provenance_matches
 
         target = target or os.environ.get("MEDCHAT_ACCEPTANCE_ACTIVITY_TARGET", "PDE")
         summary_result = predict_activity(
@@ -676,15 +677,69 @@ def _test_activity_inference(*, target: str | None = None) -> dict[str, Any]:
         def has_real_model_provenance(row: Any) -> bool:
             if not isinstance(row, dict) or not isinstance(row.get("provenance"), dict):
                 return False
-            models = row["provenance"].get("models")
-            if not isinstance(models, dict) or not row["provenance"].get("bundle_id"):
+            provenance = row["provenance"]
+            family_id = row.get("family_id")
+            bundle_id = row.get("bundle_id")
+            if (not family_id or not bundle_id
+                    or provenance.get("family_id") != family_id
+                    or provenance.get("bundle_id") != bundle_id):
                 return False
-            return all(
-                isinstance(models.get(task), dict)
-                and models[task].get("demo_mode") is False
-                and models[task].get("fallback_used") is False
-                for task in ("classification", "regression")
+            if any(
+                not isinstance(provenance.get(field), str)
+                or len(provenance[field]) != 64
+                or any(character not in "0123456789abcdefABCDEF" for character in provenance[field])
+                for field in ("source_sha256", "assignment_sha256")
+            ):
+                return False
+            if (provenance.get("label_threshold") != row.get("label_threshold")
+                    or provenance.get("probability_threshold") != row.get("probability_threshold")):
+                return False
+            models = provenance.get("models")
+            if not isinstance(models, dict) or set(models) != {"classification", "regression"}:
+                return False
+            if not request_provenance_matches(provenance):
+                return False
+            request = provenance.get("request")
+            if (not isinstance(request, dict)
+                    or request.get("family_id") != family_id
+                    or request.get("endpoint") != "pIC50"
+                    or request.get("units") != row.get("units")
+                    or request.get("validation") != "endpoint_ready"):
+                return False
+            model_fields = (
+                "model_id", "target_id", "task_type", "endpoint", "units",
+                "weights_sha256", "model_card_sha256", "prepared_dataset_sha256",
+                "dataset_sha256", "source_sha256", "model_contract_key",
+                "scientific_readiness", "demo_mode", "fallback_used",
             )
+            for task, model in models.items():
+                if not isinstance(model, dict) or any(field not in model for field in model_fields):
+                    return False
+                if (model.get("target_id") != family_id
+                        or model.get("task_type") != task
+                        or model.get("scientific_readiness") != "endpoint_ready"
+                        or model.get("demo_mode") is not False
+                        or model.get("fallback_used") is not False
+                        or not isinstance(model.get("model_id"), str)
+                        or not model["model_id"].strip()
+                        or not isinstance(model.get("model_contract_key"), str)
+                        or not model["model_contract_key"].strip()):
+                    return False
+                expected_endpoint = "activity" if task == "classification" else "pIC50"
+                expected_units = "probability" if task == "classification" else "pIC50"
+                if model.get("endpoint") != expected_endpoint or model.get("units") != expected_units:
+                    return False
+                if any(
+                    not isinstance(model.get(field), str)
+                    or len(model[field]) != 64
+                    or any(character not in "0123456789abcdefABCDEF" for character in model[field])
+                    for field in (
+                        "weights_sha256", "model_card_sha256", "prepared_dataset_sha256",
+                        "dataset_sha256", "source_sha256",
+                    )
+                ):
+                    return False
+            return True
 
         real_rows = [row for row in predictions if has_real_model_provenance(row)]
         reported_rows = [row for row in predictions if isinstance(row, dict)]
