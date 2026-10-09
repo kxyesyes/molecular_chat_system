@@ -829,6 +829,24 @@ class MolecularDockingService:
                 logger.error("Unable to persist docking execution manifest before Vina launch")
                 return False
 
+            # The output path belongs to this job. Remove a pre-existing file
+            # before launching Vina so a zero-exit process cannot make a stale
+            # pose look like a fresh scientific result.
+            output_was_present = os.path.isfile(output_path)
+            if output_was_present:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    self._update_run_manifest(
+                        resolved_job_dir,
+                        execution={
+                            "status": "failed",
+                            "failure_reason": "output_artifact_stale",
+                        },
+                    )
+                    logger.error("Unable to clear pre-existing Vina output artifact")
+                    return False
+
             # 运行Vina
             adapter_control = {}
             if cancel_event is not None:
@@ -866,7 +884,11 @@ class MolecularDockingService:
                         execution={
                             "status": "failed",
                             "returncode": result.returncode,
-                            "failure_reason": "output_artifact_missing",
+                            "failure_reason": (
+                                "output_artifact_stale"
+                                if output_was_present
+                                else "output_artifact_missing"
+                            ),
                         },
                     )
                     logger.error("Vina returned success without an output artifact")

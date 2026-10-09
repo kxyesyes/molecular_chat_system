@@ -1489,7 +1489,8 @@
     console.log("=== WebSocket 诊断信息 ===");
     console.log("时间戳:", new Date().toISOString());
     console.log("页面URL:", window.location.href);
-    console.log("WebSocket URL:", `ws://${window.location.host}/ws`);
+    const diagnosticProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    console.log("WebSocket URL:", `${diagnosticProtocol}//${window.location.host}/ws`);
     console.log("重连尝试次数:", reconnectAttempts);
     console.log("isConnected标志:", isConnected);
     console.log("chatMode:", chatMode);

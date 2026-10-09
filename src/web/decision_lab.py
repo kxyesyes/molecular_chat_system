@@ -189,7 +189,7 @@ def create_decision_lab(model, db_path, *, port=6012, mode='native', session_ttl
             'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
             'Referrer-Policy': 'no-referrer',
             'Content-Security-Policy': "default-src 'none'; script-src 'self'; style-src 'self'; "
-                f"connect-src 'self' ws://{host}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+                f"connect-src 'self' ws://{host} wss://{host}; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         })
         return response
 
