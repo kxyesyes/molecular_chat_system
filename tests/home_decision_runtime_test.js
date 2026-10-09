@@ -63,12 +63,18 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, storedPointer = null} = {}) {
+function loadHome({request, storedPointer = null, storedRecovery = null} = {}) {
   const body = new Element("body"); body.root = true;
+  const layout = body.appendChild(new Element("div")); layout.className = "index_con";
+  const right = layout.appendChild(new Element("div")); right.className = "right";
   const input = body.appendChild(new Element("input")), send = body.appendChild(new Element("button"));
   const chat = body.appendChild(new Element("div"));
   const timers = new Map(), sockets = [], logs = [], requests = [];
-  let timer = 0, stored = storedPointer;
+  let timer = 0;
+  const storage = new Map([
+    ["medchat-scientific-reference-v1", storedPointer],
+    ["medchat:decision-recovery-v1", storedRecovery],
+  ]);
   class Socket {
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
     constructor(url) {this.url = url; this.readyState = 0; this.sent = []; sockets.push(this);}
@@ -77,12 +83,12 @@ function loadHome({request, storedPointer = null} = {}) {
     emit(message) {this.onmessage({data: typeof message === "string" ? message : JSON.stringify(message)});}
     close(code = 1000, reason = "") {this.readyState = 3; this.onclose?.({code, reason, wasClean: true});}
   }
-  const document = {readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
+  const document = {body, readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
     querySelector: s => body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     getElementById: id => body.querySelector("#" + id)};
   const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
-    sessionStorage: {getItem: () => stored, setItem: (_, s) => {stored = s;}, removeItem: () => {stored = null;}},
+    sessionStorage: {getItem: k => storage.get(k) ?? null, setItem: (k, s) => storage.set(k, s), removeItem: k => storage.delete(k)},
     HomeChatRenderer: renderer, WebSocket: Socket};
   const context = vm.createContext({window, document, WebSocket: Socket, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
@@ -105,7 +111,7 @@ function loadHome({request, storedPointer = null} = {}) {
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
   vm.runInContext(source, context, {filename: "main.js"});
   window.testHome.prepare(); window.testHome.connectWebSocket(); sockets[0].open();
-  return {body, chat, input, logs, requests, timers, sockets, socket: sockets[0], refs: window.testHome.scientificReferences,
+  return {body, chat, input, logs, requests, timers, sockets, storage, socket: sockets[0], refs: window.testHome.scientificReferences,
     send: () => window.testHome.sendMessage(), reconnect: () => window.testHome.connectWebSocket(),
     button: name => body.querySelectorAll("button").find(b => b.textContent === name),
     ready: mode => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
@@ -336,32 +342,56 @@ async function run() {
       assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
     });
   }
-  await test("disconnect clears pending abandon; old socket responses cannot release a new handle", () => {
+  await test("disconnect preserves a waiting continuation and reconnects it", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
-    h.button("开始新请求").click(); assert(h.button("开始新请求").disabled);
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    assert(newer.sent.some(f => f.type === "reconnect" && f.trace_id === trace && f.after_sequence === 0));
     assert(h.button("继续").disabled && h.button("开始新请求").disabled);
-    assert(newer.sent.every(f => f.type === "ping"));
-    h.input.value = "Explain logP"; h.send();
-    const t2 = "4".repeat(32), tr2 = "5".repeat(32);
-    newer.emit(accepted(t2, tr2)); newer.emit(result("waiting_for_input", t2, tr2));
-    newer.emit(complete("waiting_for_input", t2, tr2)); h.button("开始新请求").click();
-    const sent = newer.sent.length;
-    h.socket.emit({type: "continuation_abandoned", trace_id: tr2});
-    h.socket.emit({type: "error", code: "continuation_unavailable"});
-    h.input.value = "new socket explicit input"; h.send();
-    assert.equal(newer.sent.length, sent); assert(h.button("开始新请求").disabled);
-    newer.emit({type: "continuation_abandoned", trace_id: tr2});
-    assert.equal(newer.sent.length, sent); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
+    newer.emit({type: "reconnected", trace_id: trace, turn_id: turn, status: "waiting_for_input"});
+    assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
+    h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
+    assert.equal(newer.sent.at(-1).type, "resume");
   });
-  await test("disconnect clears continuation and stale socket cannot restore it; no replay", () => {
+  await test("disconnect preserves an active turn and accepts replayed terminal frames", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
-    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
-    h.socket.emit(accepted()); h.socket.emit(result("waiting_for_input"));
-    assert(h.button("继续").disabled && h.button("停止").disabled);
-    assert(newer.sent.every(f => f.type === "ping"));
+    assert(newer.sent.some(f => f.type === "reconnect" && f.trace_id === trace));
+    newer.emit({type: "reconnected", trace_id: trace, turn_id: turn, status: "running"});
+    newer.emit(result("completed")); newer.emit(complete("completed"));
+    assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
+  });
+  await test("disconnect accepts replayed failed and cancelled terminal states", () => {
+    for (const status of ["failed", "cancelled", "timeout", "unavailable"]) {
+      const h = loadHome(); h.ready("decision_a2"); start(h);
+      h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+      newer.emit({type: "reconnected", trace_id: trace, turn_id: turn, status});
+      newer.emit(result(status)); newer.emit(complete(status));
+      assert(h.chat.textContent.includes(windowLabel(status)), `missing ${status} terminal label`);
+      assert(!h.button("停止") || h.button("停止").disabled, `${status} must not remain cancellable`);
+    }
+    function windowLabel(status) {
+      return {failed: "失败", cancelled: "已取消", timeout: "计算超时", unavailable: "工具不可用"}[status];
+    }
+  });
+  await test("a refreshed page restores a persisted decision turn", () => {
+    const h = loadHome({storedRecovery: JSON.stringify({turnId: turn, traceId: trace})});
+    h.ready("decision_a2");
+    assert.equal(h.sockets[0].sent.filter(f => f.type === "reconnect" && f.trace_id === trace).length, 1);
+    h.sockets[0].emit({type: "reconnected", trace_id: trace, turn_id: turn, status: "running"});
+    h.sockets[0].emit(result("completed")); h.sockets[0].emit(complete("completed"));
+    assert(h.chat.textContent.includes("Measured value 0"));
+    assert(!h.logs.some(row => row[0] === "error"));
+  });
+  await test("recovery rejection releases controls without inventing a scientific outcome", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    newer.emit({type: "error", code: "reconnect_unavailable"});
+    assert(h.chat.textContent.includes("任务恢复失败"));
+    assert(!h.chat.textContent.includes("已完成"));
+    assert(!h.storage.has("medchat:decision-recovery-v1"));
+    h.input.value = "Explain logP"; h.send();
+    assert.equal(newer.sent.at(-1).type, "chat");
   });
   await test("transport logging never captures user text or inbound raw frames", () => {
     const h = loadHome(); h.ready("decision_a2");

@@ -38,6 +38,16 @@
   const evidenceReportViews = new WeakMap(); // live DOM lifetime only; never storage/restore
   let tabStorage;
   try { tabStorage = window.sessionStorage; } catch (_) { tabStorage = null; }
+  const decisionRecoveryKey = "medchat:decision-recovery-v1";
+  let decisionRecovery = null;
+  try {
+    const saved = tabStorage?.getItem(decisionRecoveryKey);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && /^[a-f0-9]{32}$/.test(parsed.traceId || "") &&
+        /^[a-f0-9]{32}$/.test(parsed.turnId || "")) decisionRecovery = parsed;
+    }
+  } catch (_) { decisionRecovery = null; }
   const scientificReferences = window.HomeScientificReferences?.createController({
     storage: tabStorage,
     request: async (action, body) => {
@@ -98,14 +108,15 @@
   }
 
   function updateDecisionControls() {
+    const recovering = decisionAwaitingReady || Boolean(decisionTurn?.disconnected);
     if (elements.sendBtn) elements.sendBtn.disabled = decisionAwaitingReady ||
       (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
     if (!decisionControls) return;
     decisionControls.box.hidden = !decisionMode;
-    decisionControls.stop.disabled = !decisionMode || !decisionActive() || !decisionTurn.turnId ||
+    decisionControls.stop.disabled = recovering || !decisionMode || !decisionActive() || !decisionTurn.turnId ||
       Boolean(decisionTurn.result) || decisionTurn.cancelSent;
-    decisionControls.resume.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
-    decisionControls.fresh.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
+    decisionControls.resume.disabled = recovering || !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
+    decisionControls.fresh.disabled = recovering || !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
   }
 
   function decisionStatus(turn, text) {
@@ -122,8 +133,22 @@
     turn.statusElement.textContent = text;
   }
 
-  function clearDecisionConnection() {
+  function clearDecisionConnection(preserveTurn = false) {
     decisionAwaitingReady = true; // every new socket must announce its own mode
+    if (preserveTurn && decisionTurn && decisionTurn.traceId &&
+      (decisionTurn.phase !== "ended" || decisionWaiting)) {
+      decisionTurn.disconnected = true;
+      decisionTurn.socket = null;
+      decisionAbandonAwait = null;
+      scientificReferences?.startRequest();
+      if (decisionTurn.box) {
+        decisionStatus(decisionTurn, decisionTurn.result
+          ? `${decisionStatuses[decisionTurn.result.status]}；结果传输未确认结束，连接已断开，正在恢复任务状态。`
+          : "连接已断开，正在恢复任务状态。");
+      }
+      updateDecisionControls();
+      return;
+    }
     if (decisionMode) {
       scientificReferences?.startRequest(); // invalidate pending ACKs/restores, never replay
       if (decisionActive()) {
@@ -138,12 +163,23 @@
     decisionMode = false;
     decisionTurn = decisionWaiting = decisionAbandonAwait = null;
     decisionSeenTurns.clear();
+    if (!preserveTurn) {
+      try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
+      decisionRecovery = null;
+    }
     updateDecisionControls();
   }
 
   function configureDecisionMode(message) {
     decisionAwaitingReady = false;
     decisionMode = message.normal_chat_mode === "decision_a2";
+    if (decisionMode && decisionRecovery && !decisionTurn) {
+      if (!chatMode) enterChatMode();
+      decisionTurn = {socket: ws, phase: "active", turnId: decisionRecovery.turnId,
+        traceId: decisionRecovery.traceId, resume: null, cancelSent: false, result: null,
+        disconnected: true};
+      decisionStatus(decisionTurn, "正在恢复任务状态。");
+    }
     if (decisionMode && !decisionControls && elements.input?.parentNode) {
       const box = document.createElement("div");
       box.className = "decision-runtime-controls";
@@ -169,11 +205,17 @@
         })};
       elements.input.parentNode.appendChild(box);
     }
+    if (decisionMode && decisionTurn?.disconnected && decisionTurn.traceId && ws) {
+      decisionTurn.socket = ws;
+      if (decisionTurn.box) decisionStatus(decisionTurn, "连接已恢复，正在接收任务状态。");
+      sendDecisionControl({type: "reconnect", trace_id: decisionTurn.traceId, after_sequence: 0});
+    }
     updateDecisionControls();
   }
 
   function sendDecisionControl(payload) {
     if (!decisionMode || !ws || ws.readyState !== WebSocket.OPEN || protocolDesyncedSocket === ws) return false;
+    if ((decisionAwaitingReady || decisionTurn?.disconnected) && payload.type !== "reconnect") return false;
     try {ws.send(JSON.stringify(payload)); return true;}
     catch (_) {closeProtocolSocket(ws, 1011, "request send failed"); return false;}
   }
@@ -189,7 +231,8 @@
         ...(scientificReferences?.outgoing() || {})};
     if (!sendDecisionControl(payload)) return;
     decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null,
-      resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
+      resume: resume ? decisionWaiting : null, cancelSent: false, result: null,
+      disconnected: false};
     scientificReferences?.startRequest();
     moleculeCandidateLifecycle.startRequest();
     evidenceReportLifecycle?.startRequest();
@@ -210,7 +253,29 @@
       return true;
     }
     const turn = decisionTurn;
+    if (message.type === "reconnected") {
+      if (!turn?.disconnected || turn.socket !== socket || turn.traceId !== message.trace_id ||
+        turn.turnId !== message.turn_id ||
+        (message.status !== "running" &&
+          !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status))) return true;
+      turn.socket = socket;
+      turn.disconnected = false;
+      if (turn.phase !== "ended" && turn.box) decisionStatus(turn, "连接已恢复，正在接收任务状态。");
+      updateDecisionControls();
+      return true;
+    }
     if (message.type === "error") {
+      if (message.code === "reconnect_unavailable" && turn?.disconnected && turn.socket === socket) {
+        turn.phase = "ended";
+        turn.disconnected = false;
+        decisionWaiting = decisionRecovery = null;
+        try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
+        decisionStatus(turn, "任务恢复失败，服务端未找到可恢复的执行记录。");
+        removeTypingIndicator();
+        turn.box?.classList.add("complete");
+        updateDecisionControls();
+        return true;
+      }
       HomeChatRenderer.showNotification("请求控制未被接受，请检查当前状态后重试。", "warning");
       // Well-formed chat/resume/abandon cannot yield invalid_control. A late
       // cancel error has no request ID: notify, but retain pending authority.
@@ -234,12 +299,15 @@
       }
       return true;
     }
-    if (!turn || turn.socket !== socket || turn.phase === "ended") return true;
+    if (!turn || turn.socket !== socket || turn.disconnected || turn.phase === "ended") return true;
     if (message.type === "request_accepted") {
       if (turn.phase !== "pending" || !/^[a-f0-9]{32}$/.test(message.turn_id || "") ||
         !/^[a-f0-9]{32}$/.test(message.trace_id || "") || decisionSeenTurns.has(message.turn_id) ||
         (turn.resume && message.trace_id !== turn.resume.traceId)) return true;
       turn.turnId = message.turn_id; turn.traceId = message.trace_id; turn.phase = "active";
+      turn.socket = socket; turn.disconnected = false;
+      try { tabStorage?.setItem(decisionRecoveryKey, JSON.stringify({turnId: turn.turnId, traceId: turn.traceId})); }
+      catch (_) { /* best effort */ }
       decisionSeenTurns.add(turn.turnId);
       if (decisionSeenTurns.size > 64) decisionSeenTurns.delete(decisionSeenTurns.values().next().value);
       updateDecisionControls(); return true;
@@ -283,6 +351,8 @@
       } else {
         decisionWaiting = metadata.stop_reason === "continuation_rejected" ? turn.resume : null;
       }
+      try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
+      decisionRecovery = null;
       updateDecisionControls(); return true;
     }
     return true; // decision mode does not accept legacy stream/message authority
@@ -384,7 +454,7 @@
 
   // WebSocket连接管理 - 修复版
   function connectWebSocket() {
-    clearDecisionConnection();
+    clearDecisionConnection(true);
     const previousSocket = ws;
     ws = null;
     protocolDesyncedSocket = null;
@@ -444,7 +514,7 @@
       onError: (error, currentSocket) => {
         const socket = currentSocket;
         if (socket !== ws) return;
-        clearDecisionConnection();
+        clearDecisionConnection(true);
         if (protocolDesyncedSocket !== socket) {
           moleculeCandidateLifecycle.clear();
           if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();
@@ -457,7 +527,7 @@
       onClose: (event, currentSocket) => {
         const socket = currentSocket;
         if (socket !== ws) return;
-        clearDecisionConnection();
+        clearDecisionConnection(true);
         moleculeCandidateLifecycle.clear();
         protocolDesyncedSocket = null;
         if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.clear();

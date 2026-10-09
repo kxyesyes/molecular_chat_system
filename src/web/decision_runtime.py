@@ -4,6 +4,7 @@ One receiver per socket and one retained owner per accepted turn. The model
 gate covers physical worker settlement, not just an asyncio wrapper lifetime.
 """
 import asyncio
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 import json
@@ -38,6 +39,10 @@ from .ordinary_capabilities import ORIGINAL_FOUR
 
 
 _now = time.monotonic
+_MAX_RECONNECT_FRAMES = 256
+_MAX_RECONNECT_BYTES = 8 * 1024 * 1024
+_MAX_DETACHED_TURNS = 128
+_RECONNECT_RETENTION_SECONDS = 15 * 60
 
 
 class _SemanticFailure(Exception):
@@ -137,24 +142,77 @@ class _Sender:
         self.scope = websocket.scope
         self.lock = asyncio.Lock()
         self.writable = True
+        self.detached = False
+        self.replay_frames = deque()
+        self.replay_bytes = 0
         self.memory = []
         self.waiting = None
         self.close_attempted = False
         self.close_delivered = False
 
-    async def send_text(self, text, *, on_sent=None):
+    def begin_turn(self):
+        self.replay_frames.clear()
+        self.replay_bytes = 0
+
+    async def send_text(self, text, *, on_sent=None, record=False):
         async def deliver():
             async with self.lock:
+                entry = None
+                if record:
+                    size = len(text.encode('utf-8'))
+                    if (len(self.replay_frames) >= _MAX_RECONNECT_FRAMES
+                            or self.replay_bytes + size > _MAX_RECONNECT_BYTES):
+                        raise ConnectionError('Decision reconnect buffer overflow')
+                    entry = [text, on_sent]
+                    self.replay_frames.append(entry)
+                    self.replay_bytes += size
                 if not self.writable:
+                    if self.detached and record:
+                        return
                     raise ConnectionError('Decision socket is unavailable')
                 await self.websocket.send_text(text)
                 if on_sent is not None:
                     on_sent()
+                if entry is not None:
+                    entry[1] = None
         try:
             # Queueing and physical send share ONE deadline.
             await await_with_deadline(deliver(), timeout=SEND_TIMEOUT_SECONDS)
         except BaseException:
             self.writable = False
+            self.detached = False
+            raise
+
+    async def detach(self, websocket):
+        """Detach one browser transport while retaining the server turn."""
+        async with self.lock:
+            if self.websocket is not websocket:
+                return False
+            self.writable = False
+            self.detached = True
+            return True
+
+    async def attach(self, websocket, acknowledgement):
+        """Serialize the replay before any live send, without re-running callbacks."""
+        async def deliver():
+            async with self.lock:
+                self.websocket = websocket
+                self.scope = websocket.scope
+                self.writable = True
+                self.detached = False
+                await websocket.send_text(json.dumps(acknowledgement, allow_nan=False))
+                while self.replay_frames:
+                    entry = self.replay_frames[0]
+                    await websocket.send_text(entry[0])
+                    if entry[1] is not None:
+                        entry[1]()
+                        entry[1] = None
+                    self.replay_frames.popleft()
+                    self.replay_bytes -= len(entry[0].encode('utf-8'))
+        try:
+            await await_with_deadline(deliver(), timeout=SEND_TIMEOUT_SECONDS)
+        except BaseException:
+            self.writable = self.detached = False
             raise
 
     async def send(self, payload):
@@ -166,6 +224,8 @@ class _Sender:
             return
         self.close_attempted = True
         self.writable = False
+        self.detached = False
+        self.begin_turn()
         self.memory = []
         self.waiting = None
 
@@ -202,7 +262,7 @@ class _TurnSender:
             # begin. Strict candidate/report frames receive no extra fields.
             self.turn.pending_complete = text
             return
-        await self.sender.send_text(text, on_sent=(
+        await self.sender.send_text(text, record=True, on_sent=(
             lambda: setattr(self.turn, 'displayed_answer', frame['final_answer'])
             if frame['type'] == 'agent_result' else None))
 
@@ -217,10 +277,34 @@ class WebDecisionRuntime:
         self.active_owners = set()
         self.tasks = set()
         self.sockets = set()
+        # A browser transport is disposable; the turn owner is not.  Entries
+        # remain process-local and are only recoverable by the same agent
+        # session.  Durable run/event records remain the source of truth for
+        # cross-process recovery and auditing.
+        self.detached_turns = {}
         self.closing = False
         self.semantic = getattr(application, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1'
         self.timeout_seconds = 300.0
         self.max_model_requests = 16
+
+    def _prune_detached_turns(self):
+        """Bound process-local recovery state without fabricating a result."""
+        now = _now()
+        expired = [trace_id for trace_id, (_, _, expires_at) in self.detached_turns.items()
+                   if expires_at <= now]
+        overflow = max(0, len(self.detached_turns) - _MAX_DETACHED_TURNS)
+        if overflow:
+            oldest = sorted(self.detached_turns.items(), key=lambda item: item[1][2])
+            expired.extend(trace_id for trace_id, _ in oldest[:overflow])
+        for trace_id in dict.fromkeys(expired):
+            candidate = self.detached_turns.pop(trace_id, None)
+            if candidate is None:
+                continue
+            sender, turn, _ = candidate
+            sender.writable = sender.detached = False
+            sender.waiting = None
+            sender.memory = []
+            sender.begin_turn()
 
     def _clock(self):
         return _now() if self.semantic else time.monotonic()
@@ -526,17 +610,17 @@ class WebDecisionRuntime:
                 await self._execute_segment(handler, sender, turn)
         except _SemanticFailure as exc:
             sender.waiting = turn.next_waiting = None
-            if sender.writable:
+            if sender.writable or sender.detached:
                 if turn.displayed_answer is not None:
                     await sender.close_failed_delivery()
                 else:
                     await self._terminal(handler, sender, turn, RunOutcome.FAILED, str(exc))
         except DecisionAdmissionError as exc:
             self._check_retry_authority(sender, turn)
-            if sender.writable:
+            if sender.writable or sender.detached:
                 await self._terminal(handler, sender, turn, RunOutcome.REJECTED, exc.code)
         except asyncio.CancelledError:
-            if sender.writable:
+            if sender.writable or sender.detached:
                 if turn.displayed_answer is not None:
                     await sender.close_failed_delivery()
                 else:
@@ -549,7 +633,7 @@ class WebDecisionRuntime:
             else:
                 sender.writable = False
         except Exception:
-            if sender.writable:
+            if sender.writable or sender.detached:
                 if turn.displayed_answer is not None:
                     await sender.close_failed_delivery()
                 elif not turn.finishing:
@@ -558,7 +642,7 @@ class WebDecisionRuntime:
             # Also seals owners cancelled during refresh or queued admission.
             await turn.worker_owner.settle()
             self.active_owners.discard(turn)
-        if sender.writable and turn.pending_complete is not None:
+        if (sender.writable or sender.detached) and turn.pending_complete is not None:
             try:
                 if turn.history_update is not None:
                     frame = json.loads(turn.pending_complete)
@@ -591,7 +675,7 @@ class WebDecisionRuntime:
                                 if remaining > 0 and now < sender.waiting.expires_at else None)
                     turn.terminal_sent = True
                 await sender.send_text(turn.pending_complete,
-                    on_sent=completed)
+                    on_sent=completed, record=True)
             except (asyncio.CancelledError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
                 sender.writable = False
                 if self.semantic:
@@ -602,10 +686,12 @@ class WebDecisionRuntime:
         if self.closing or not websocket.scope.get('agent_session_id'):
             await websocket.close(code=1008)
             return
+        self._prune_detached_turns()
         await websocket.accept()
         sender, turn = _Sender(websocket), None
         self.sockets.add(sender)
         receiver = asyncio.current_task()
+        transport_failed = False
 
         def finished(task):
             self.tasks.discard(task)
@@ -652,6 +738,44 @@ class WebDecisionRuntime:
                     else:
                         await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
+                if kind == 'reconnect':
+                    if turn is not None:
+                        await sender.send({'type': 'error', 'code': 'turn_in_progress'})
+                        continue
+                    expected = {'type', 'trace_id', 'after_sequence'}
+                    trace_id = payload.get('trace_id')
+                    after_sequence = payload.get('after_sequence')
+                    candidate = self.detached_turns.get(trace_id) if (
+                        set(payload) == expected and type(trace_id) is str
+                        and re.fullmatch(r'[a-f0-9]{32}', trace_id or '')
+                        and type(after_sequence) is int and not isinstance(after_sequence, bool)
+                        and after_sequence == 0
+                    ) else None
+                    if candidate is None:
+                        await sender.send({'type': 'error', 'code': 'reconnect_unavailable'})
+                        continue
+                    old_sender, recovered, _ = candidate
+                    if (old_sender.scope.get('agent_session_id') != sender.scope.get('agent_session_id')
+                            or not old_sender.detached):
+                        await sender.send({'type': 'error', 'code': 'reconnect_unavailable'})
+                        continue
+                    self.sockets.discard(sender)
+                    sender = old_sender
+                    turn = recovered
+                    self.sockets.add(sender)
+                    # Claim before the first await; a second socket cannot
+                    # steal this binding while replay is in progress.
+                    self.detached_turns.pop(trace_id, None)
+                    if turn.task is None or not turn.task.done():
+                        status = 'running'
+                    elif turn.pending_complete is not None:
+                        status = json.loads(turn.pending_complete)['status']
+                    else:
+                        status = 'unavailable'
+                    await sender.attach(websocket, {'type': 'reconnected', 'trace_id': trace_id,
+                                                  'turn_id': turn.turn_id, 'status': status})
+                    turn.task.add_done_callback(finished)
+                    continue
                 if kind not in {'chat', 'resume', 'abandon'}:
                     await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
@@ -682,6 +806,7 @@ class WebDecisionRuntime:
                         continue
                 turn = (_Turn(payload, trace_id=waiting.context.trace_id, waiting=waiting)
                         if waiting is not None else _Turn(payload))
+                sender.begin_turn()
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
                                    'trace_id': turn.trace_id})
                 if self.closing:
@@ -702,27 +827,63 @@ class WebDecisionRuntime:
                 self.active_owners.add(turn)
                 self.tasks.add(turn.task)
                 turn.task.add_done_callback(finished)
-        except (WebSocketDisconnect, ConnectionError, asyncio.TimeoutError):
+        except WebSocketDisconnect:
+            # A peer closing the browser transport is recoverable.
+            pass
+        except (ConnectionError, asyncio.TimeoutError):
+            transport_failed = True
             pass
         except asyncio.CancelledError:
+            transport_failed = True
             if not sender.close_attempted:
                 raise
+        except BaseException:
+            # Malformed ASGI receive frames and unexpected receiver errors are
+            # not recoverable browser disconnects. Preserve the old fail-closed
+            # cancellation path for these programmer/transport faults.
+            transport_failed = True
+            raise
         finally:
-            sender.writable = False
-            sender.waiting = None
-            sender.memory = []
-            self.sockets.discard(sender)
-            if turn is not None and turn.task is not None:
+            # A normal peer disconnect detaches the transport and leaves the
+            # supervised turn running.  Cleanup/shutdown still owns explicit
+            # cancellation and retains its existing worker semantics.
+            if sender.websocket is websocket and not transport_failed and not self.closing:
+                self.sockets.discard(sender)
+                if (turn is not None and turn.task is not None
+                        and not sender.close_attempted
+                        and (not turn.task.done() or sender.waiting is not None
+                             or sender.replay_frames)):
+                    await sender.detach(websocket)
+                    self.detached_turns[turn.trace_id] = (
+                        sender, turn, _now() + _RECONNECT_RETENTION_SECONDS)
+                else:
+                    sender.writable = False
+                    sender.detached = False
+                    sender.waiting = None
+                    sender.memory = []
+            elif sender.websocket is websocket and turn is not None and turn.task is not None:
+                self.sockets.discard(sender)
+                sender.writable = sender.detached = False
+                sender.waiting = None
+                sender.memory = []
                 if not turn.task.done():
                     turn.cancel_event.set()
                     if turn.started:
                         turn.task.cancel()
                 await retain_until_done(turn.task)
+                sender.begin_turn()
+            elif turn is not None and turn.task is not None and not turn.task.done() and not self.closing:
+                # This receiver was superseded by a successful reconnect.
+                # Its old finally block must not detach the new binding.
+                pass
 
     async def shutdown(self):
         self.closing = True
-        for sender in tuple(self.sockets):
+        senders = set(self.sockets) | {sender for sender, _, _ in self.detached_turns.values()}
+        self.detached_turns.clear()
+        for sender in senders:
             sender.writable = False
+            sender.detached = False
             sender.waiting = None
             sender.memory = []
         owners = tuple(self.active_owners)
@@ -733,3 +894,5 @@ class WebDecisionRuntime:
                 await retain_until_done(turn.task)
         for task in tuple(self.tasks):
             await retain_until_done(task)
+        for sender in senders:
+            sender.begin_turn()

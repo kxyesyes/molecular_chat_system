@@ -17,6 +17,8 @@ import pytest
 
 from src.agent.openai_compatible_model import OpenAICompatibleModel
 from src.agent.tools import get_core_tools
+from src.web.decision_runtime import _Sender
+from src.web import decision_runtime as decision_runtime_module
 
 
 def chat_decision(text='Protocol-only explanation'):
@@ -187,6 +189,269 @@ def result_of(frames):
     assert len(results) == 1
     assert len([f for f in frames if f['type'] == 'complete']) == 1
     return results[0]
+
+
+def test_disconnected_decision_turn_can_reconnect_without_reexecution(actual_app):
+    """A transient browser disconnect must detach transport, not cancel work."""
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(payload):
+            started.set()
+            await release.wait()
+            return chat_decision('Recovered after reconnect')
+
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            first = ActualSocket(b.app, cookie)
+            await first.__aenter__()
+            await first.ready()
+            await first.send({'message': 'Explain logP'})
+            accepted = await first.receive()
+            assert accepted['type'] == 'request_accepted'
+            trace_id = accepted['trace_id']
+            await started.wait()
+
+            await first.incoming.put({'type': 'websocket.disconnect', 'code': 1006})
+            await asyncio.wait_for(first.task, 3)
+            assert len(b.app.decision_runtime.active_owners) == 1
+            assert len(b.calls) == 1
+
+            second = ActualSocket(b.app, cookie)
+            await second.__aenter__()
+            await second.ready()
+            await second.send({'type': 'reconnect', 'trace_id': trace_id, 'after_sequence': 0})
+            assert (await second.receive()) == {
+                'type': 'reconnected', 'trace_id': trace_id,
+                'turn_id': accepted['turn_id'], 'status': 'running',
+            }
+            release.set()
+            frames = []
+            while True:
+                frame = await second.receive()
+                frames.append(frame)
+                if frame['type'] == 'complete':
+                    break
+            result = result_of(frames)
+            assert result['status'] == 'completed'
+            assert result['final_answer'] == 'Recovered after reconnect'
+            assert len(b.calls) == 1
+            await second.__aexit__(None, None, None)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('outcome', ['completed', 'failed', 'cancelled'])
+def test_turn_finishing_while_detached_replays_actual_terminal(actual_app, outcome):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(payload):
+            started.set()
+            await release.wait()
+            if outcome == 'failed':
+                return httpx.Response(500, json={'error': 'synthetic outage'})
+            return chat_decision('Finished while browser was disconnected')
+
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as first:
+                await first.ready()
+                await first.send({'message': 'Explain logP'})
+                accepted = await first.receive()
+                await asyncio.wait_for(started.wait(), 3)
+                owned, = b.app.decision_runtime.active_owners
+            try:
+                if outcome == 'cancelled':
+                    owned.cancel()
+                else:
+                    release.set()
+                await asyncio.wait_for(asyncio.shield(owned.task), 5)
+                assert not b.app.decision_runtime.active_owners
+                async with ActualSocket(b.app, cookie) as second:
+                    await second.ready()
+                    await second.send({'type': 'reconnect', 'trace_id': accepted['trace_id'], 'after_sequence': 0})
+                    ack = await second.receive()
+                    assert ack['type'] == 'reconnected'
+                    assert ack['status'] == outcome
+                    frames = []
+                    for _ in range(150):
+                        frame = await second.receive()
+                        frames.append(frame)
+                        if frame['type'] == 'complete':
+                            break
+                    assert result_of(frames)['status'] == outcome
+                    assert not any(f['type'] in {'connection_ready', 'request_accepted', 'reconnected', 'pong'} for f in frames)
+                    assert len(b.calls) == 1
+            finally:
+                release.set()
+    asyncio.run(run())
+
+
+def test_reconnect_buffer_is_consumed_after_successful_attach(actual_app):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(payload):
+            started.set()
+            await release.wait()
+            return chat_decision('Recovered after a second disconnect')
+
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            first = ActualSocket(b.app, cookie)
+            await first.__aenter__()
+            await first.ready()
+            await first.send({'message': 'Explain logP'})
+            accepted = await first.receive()
+            await started.wait()
+            await first.incoming.put({'type': 'websocket.disconnect', 'code': 1006})
+            await asyncio.wait_for(first.task, 3)
+
+            second = ActualSocket(b.app, cookie)
+            await second.__aenter__()
+            await second.ready()
+            await second.send({'type': 'reconnect', 'trace_id': accepted['trace_id'],
+                               'after_sequence': 0})
+            assert (await second.receive())['type'] == 'reconnected'
+            await second.incoming.put({'type': 'websocket.disconnect', 'code': 1006})
+            await asyncio.wait_for(second.task, 3)
+
+            release.set()
+            third = ActualSocket(b.app, cookie)
+            await third.__aenter__()
+            await third.ready()
+            await third.send({'type': 'reconnect', 'trace_id': accepted['trace_id'],
+                              'after_sequence': 0})
+            assert (await third.receive())['type'] == 'reconnected'
+            frames = []
+            while True:
+                frame = await third.receive()
+                frames.append(frame)
+                if frame['type'] == 'complete':
+                    break
+            assert result_of(frames)['status'] == 'completed'
+            assert sum(frame['type'] == 'agent_result' for frame in frames) == 1
+            await third.__aexit__(None, None, None)
+
+    asyncio.run(run())
+
+
+def test_reconnect_cannot_cross_agent_sessions(actual_app):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(payload):
+            started.set()
+            await release.wait()
+            return chat_decision('Only the owning session may recover this turn')
+
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            owner_cookie = await cookie_for(b.app)
+            attacker_cookie = await cookie_for(b.app)
+            owner = ActualSocket(b.app, owner_cookie)
+            await owner.__aenter__()
+            await owner.ready()
+            await owner.send({'message': 'Explain logP'})
+            accepted = await owner.receive()
+            await started.wait()
+            await owner.incoming.put({'type': 'websocket.disconnect', 'code': 1006})
+            await asyncio.wait_for(owner.task, 3)
+
+            attacker = ActualSocket(b.app, attacker_cookie)
+            await attacker.__aenter__()
+            await attacker.ready()
+            await attacker.send({'type': 'reconnect', 'trace_id': accepted['trace_id'],
+                                 'after_sequence': 0})
+            assert (await attacker.receive()) == {'type': 'error',
+                                                   'code': 'reconnect_unavailable'}
+            await attacker.__aexit__(None, None, None)
+
+            release.set()
+            recovered = ActualSocket(b.app, owner_cookie)
+            await recovered.__aenter__()
+            await recovered.ready()
+            await recovered.send({'type': 'reconnect', 'trace_id': accepted['trace_id'],
+                                  'after_sequence': 0})
+            assert (await recovered.receive())['type'] == 'reconnected'
+            frames = []
+            while True:
+                frame = await recovered.receive()
+                frames.append(frame)
+                if frame['type'] == 'complete':
+                    break
+            assert result_of(frames)['status'] == 'completed'
+            await recovered.__aexit__(None, None, None)
+
+    asyncio.run(run())
+
+
+def test_sender_attach_consumes_only_successfully_replayed_frames():
+    class Socket:
+        def __init__(self, session):
+            self.scope = {'agent_session_id': session}
+            self.sent = []
+
+        async def send_text(self, text):
+            self.sent.append(text)
+
+    async def run():
+        first = Socket('session-a')
+        sender = _Sender(first)
+        delivered = []
+        await sender.send_text('old-frame', record=True, on_sent=lambda: delivered.append('old'))
+        assert len(sender.replay_frames) == 1
+        await sender.detach(first)
+
+        second = Socket('session-a')
+        await sender.attach(second, {'type': 'reconnected'})
+        assert second.sent == ['{"type": "reconnected"}', 'old-frame']
+        assert delivered == ['old']
+        assert not sender.replay_frames
+        assert sender.replay_bytes == 0
+
+        third = Socket('session-a')
+        await sender.detach(second)
+        await sender.attach(third, {'type': 'reconnected'})
+        assert third.sent == ['{"type": "reconnected"}']
+        assert delivered == ['old']
+
+    asyncio.run(run())
+
+
+def test_expired_detached_turn_is_fail_closed(actual_app, monkeypatch):
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def respond(payload):
+            started.set()
+            await release.wait()
+            return chat_decision('This result must not be invented after expiry')
+
+        async with actual_app(mode='decision_a2', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            monkeypatch.setattr(decision_runtime_module, '_RECONNECT_RETENTION_SECONDS', -1)
+            first = ActualSocket(b.app, cookie)
+            await first.__aenter__()
+            await first.ready()
+            await first.send({'message': 'Explain logP'})
+            accepted = await first.receive()
+            await started.wait()
+            await first.incoming.put({'type': 'websocket.disconnect', 'code': 1006})
+            await asyncio.wait_for(first.task, 3)
+            owned, = b.app.decision_runtime.active_owners
+
+            second = ActualSocket(b.app, cookie)
+            await second.__aenter__()
+            await second.ready()
+            await second.send({'type': 'reconnect', 'trace_id': accepted['trace_id'],
+                               'after_sequence': 0})
+            assert (await second.receive()) == {'type': 'error', 'code': 'reconnect_unavailable'}
+            release.set()
+            await asyncio.wait_for(asyncio.shield(owned.task), 5)
+            await second.__aexit__(None, None, None)
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize('mode', ['decision_a2', 'legacy'])
