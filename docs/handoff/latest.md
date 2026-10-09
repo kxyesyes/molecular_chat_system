@@ -25,6 +25,14 @@
   恢复指针，服务端状态仍是唯一权威来源。
 - 本轮提交 `0d77f70` 收紧恢复控制边界：非法 `trace_id`/`continuation_id` 在访问持久化层前即拒绝，
   状态存储不可用时统一 fail-closed 为 `continuation_unavailable`，不泄露存储异常或错误重放任务。
+- 后续提交 `33b1d96` 和 `108ee57` 已补齐本轮剩余代码缺口：单/批量对接输入互斥、Vina
+  旧产物清除、药效团空结果 fail-closed、训练并发上限、WSS CSP、RG-MPNN 日志解析安全性，
+  以及 docking 姿态几何/盒子证据门禁。真实 Vina 样例以 3 个不同 seed 完成，均生成 10 个
+  pose、存在 pose 文件且几何门禁通过；能量范围为 `0.1 kcal/mol`，这只是本次运行的稳定性观察，
+  不是普适科学阈值。
+- 本轮 `tests/agent` 仍为 `12926 passed, 3 skipped`；跨进程/重启相关聚焦集为 `765 passed,
+  1 skipped`；`health_check.py --strict` 为 `23/23`。ADMET 真实探针现在能正确报告缺少
+  `ADMET_AI_PYTHON`，不再被脚本路径错误遮蔽；没有读取、写入或提交 API key。
 
 ### 当前真正未完成
 
@@ -34,9 +42,9 @@
    持久化和同 session 续接；仍需在目标部署环境验证多进程/重启/反向代理下的恢复，以及为
    `semantic_v1` 建立经过审计的 intent journal 后再开放跨 socket 续接。
 3. 部署环境验收：HTTPS/WSS、真实模型客户端、资源目录、任务取消与清理需要在目标服务器验证。
-4. 对接科学增强仍是独立后续任务：Vina 输出/构象科学校验、相互作用几何、盒子依据、预处理规则
-   和重对接 RMSD。验收 runner 已接入多随机种子稳定性门禁；若真实工具没有 seed/manifest/artifact
-   证据只记为 `partial`，不宣称算法稳定性已完成。
+4. 对接科学增强已完成基础门禁：Vina 输出坐标、pose 质心、重原子数量、盒子来源、预处理状态和
+   产物证据会进入结构化结果；相互作用几何和重对接 RMSD 仍需提供目标服务器的拓扑分析器、
+   参考 pose 与真实 redocking 方案，不能用本机 3 次重复替代。
 5. 历史批次正文仍保留追溯信息；它们的“待合并”描述不代表当前开放 PR。后续只需维护本节，
    不再重复创建同一批架构任务。
 
@@ -46,11 +54,12 @@
   新增恢复边界测试单独为 `15 passed, 7 warnings`；`tests/agent` 全量：
   `12926 passed, 3 skipped, 7 warnings`；反幻觉/平台健康/真实验收聚焦集：`54 passed, 7 warnings`；
   `compileall` 和 `git diff --check` 通过。
-- `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `all-real --repeat 3`：`partial`。
+- `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `--mode real --repeat 3`：`partial`。
   本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；RG-MPNN 未达到真实模型门槛，
-  外部主模型端点返回 HTTP 403，均保留为失败/partial，未包装成科研成功。
+  ADMET-AI worker 未配置，外部主模型配置未成功，均保留为失败/partial，未包装成科研成功。
 - `health_check.py --strict`：`23/23`；OpenSandbox 验收因 acceptance gate disabled 标记 `skipped`；
-  Temporal 真实验收未能在当前 Windows 输出受信报告，标记为报告写入失败，不能替代目标环境验收。
+  Temporal contract `repeat=3` 通过，但 Temporal real `repeat=3` 因当前 Windows 未配置生产 Temporal/
+  OpenSandbox 失败；生产 preflight 也失败，不能替代目标环境验收。
 - 本轮未读取、写入或提交任何 API key；`data/molecular_faiss_index.index.manifest.json` 是用户已有的
   未跟踪文件，保持原样未触碰。
 
