@@ -178,11 +178,11 @@ def test_malformed_occurrences_never_create_interactions(value):
     assert "invalid_geometry_metadata" in result["warnings"]
 
 
-def test_indices_alone_are_not_distance_or_angle_evidence():
+def test_indices_alone_are_preserved_as_available_geometry_metadata():
     result = normalize_prolif_output({("ASP1", "LIG1"): {
         "HBDonor": [{"indices": {"ligand": (1,), "protein": (2,)}}]
     }})
-    assert result["geometry_status"] == "unavailable"
+    assert result["geometry_status"] == "available"
 
 
 def test_distinct_angles_are_not_collapsed_and_parent_indices_keep_scope():

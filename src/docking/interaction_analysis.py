@@ -199,6 +199,7 @@ def _normalize_geometry(
         indices, indices_present = _first_valid_indices(index_sources, _INDEX_KEYS[side])
         if indices is not None:
             geometry[output_key] = indices
+            available = True
         elif indices_present:
             warnings.append("invalid_geometry_metadata")
     if "parent_indices" in occurrence:
@@ -207,6 +208,7 @@ def _normalize_geometry(
             validated = {side: _atom_indices(parent.get(side)) for side in ("ligand", "protein")}
             if all(value is not None for value in validated.values()):
                 geometry["parent_atom_indices"] = validated
+                available = True
             else:
                 warnings.append("invalid_geometry_metadata")
         else:
