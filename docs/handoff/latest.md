@@ -896,3 +896,57 @@ python -m compileall -q src scripts
 
 No API key state or value is required for this stage, and no credential was
 recorded in source, tests, logs, or this handoff.
+
+## Local docking interaction geometry acceptance (2026-10-11)
+
+- Branch: `fix/production-acceptance-hardening`.
+- Implementation commits: `79e72d40` and `5fbb2ddc`; the implementation plan is
+  `docs/superpowers/plans/2026-10-11-docking-interaction-geometry-local-acceptance.md`.
+- The adapter now consumes ProLIF metadata through the documented
+  `Fingerprint.generate(..., metadata=True)` boundary. It preserves only
+  validated tool-derived distances, angles, residue-local atom indices and
+  parent atom indices. Count data, PDBQT-only inputs, malformed metadata and
+  unsupported analyzer APIs remain explicitly unavailable or geometry-free.
+- ProLIF and MDAnalysis are not installed in the local `MedChat` environment;
+  the real ProLIF smoke test is therefore skipped. No interaction distance,
+  angle, affinity or docking claim is inferred from that skip.
+
+### Reproducible local checks
+
+```powershell
+conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py -q -p no:cacheprovider
+# 106 passed, 1 skipped in 15.63s
+
+conda run --no-capture-output -n MedChat python -m compileall -q src scripts
+# passed with no output
+
+conda run --no-capture-output -n MedChat python scripts/health_check.py --strict
+# Summary: 23/23 checks passed
+
+node tests/home_agent_task_panel_test.js
+# Homepage agent task panel static and lifecycle checks passed
+node tests/reverse_target_broad_recall_test.js
+# reverse target broad-recall defaults checks passed
+node tests/reverse_target_pagination_test.js
+# reverse target pagination checks passed
+
+# node --check over 54 non-ketcher, non-backup JavaScript files
+# passed
+
+conda run --no-capture-output -n MedChat python scripts/run_agent_acceptance.py --mode contract
+# statuses: ["passed"]
+```
+
+The combined `tests/agent` long run was interrupted near completion after
+unrelated failures appeared while concurrent user activity-training files were
+being edited in the same worktree. It is not used as acceptance evidence for
+this docking change; the focused docking/reproducibility suites and contract
+acceptance above completed successfully. A new full `python -m pytest tests -q`
+result is not claimed for this slice.
+
+The local-only boundary remains: target-server HTTPS/WSS and reverse-proxy
+behavior, production model assets, Temporal/systemd restart and multi-worker
+recovery, real ProLIF/MDAnalysis execution, and real reference-pose redocking
+RMSD still require their respective deployment assets or host. Missing
+evidence remains `unavailable`/`partial`; it is not converted to a scientific
+pass.
