@@ -242,7 +242,7 @@ Expected: the metadata request/provenance assertions fail against the current `F
 
 - [ ] **Step 3: Implement the smallest compatible metadata path**
 
-Construct the fingerprint with `count=True, metadata=True` when that keyword is accepted. If the installed ProLIF raises `TypeError` for the keyword, retry with `count=True`, then inspect whether a documented metadata-bearing `ifp` is present. Prefer `fingerprint.ifp` for geometry; use `to_dataframe()` only for identity/count compatibility. If no metadata structure can be obtained, return:
+Construct the fingerprint with `count=True`, call its documented `generate(selected_pose, protein, metadata=True)` method, and validate that the returned sparse mapping contains residue-pair keys and occurrence mappings. The installed ProLIF 2.x API documents metadata on `generate`, while `to_dataframe()` is count/bit output and must not be treated as geometry evidence. If `generate` does not accept the metadata keyword, or returns a non-metadata/count shape, return:
 
 ```python
 _result(
@@ -258,7 +258,7 @@ _result(
 )
 ```
 
-When metadata exists, pass it through `normalize_prolif_output`, attach `metadata_mode="metadata"` and existing input hashes to provenance, and return `success` only for an analyzer-completed result. A count-only ProLIF dataframe remains supported only where the existing fake/legacy identity contract requires it; it must state `geometry_status="unavailable"` and never include geometry fields.
+When metadata exists, pass it through `normalize_prolif_output(..., pair_order="ligand_protein")`, attach `metadata_mode="metadata"` and existing input hashes to provenance, and return `success` only for an analyzer-completed result. A count-only ProLIF dataframe is rejected as `geometry_metadata_unavailable`; it must never be represented as geometry evidence.
 
 - [ ] **Step 4: Run the focused suite to verify GREEN**
 
