@@ -286,3 +286,77 @@ def test_same_config_republication_changes_watcher_revision(store, path):
     before = store.user_llm_signature(path)
     store.save_user_llm_config(path, config)
     assert store.user_llm_signature(path) != before
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_sidecar_write_failure_never_publishes_new_config(store, path, monkeypatch, existing):
+    raw = store.default_user_llm_config()
+    if existing:
+        store.save_user_llm_config(path, raw)
+    before = path.read_bytes() if existing else None
+    replace = store._atomic_replace_text
+
+    def refuse_sidecar(target, content, **kwargs):
+        if target.name.endswith('.generation'):
+            raise OSError('synthetic-sensitive-error')
+        return replace(target, content, **kwargs)
+
+    monkeypatch.setattr(store, '_atomic_replace_text', refuse_sidecar)
+    with pytest.raises(ValueError, match='本机模型配置不可用'):
+        store.save_user_llm_config(path, dict(raw, model_name='changed'))
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+def test_untrusted_sidecar_save_preserves_config(store, path, monkeypatch):
+    raw = store.default_user_llm_config()
+    store.save_user_llm_config(path, raw)
+    before = path.read_bytes()
+    check = store._check_boundary
+
+    def refuse(target, **kwargs):
+        if target.name.endswith('.generation'):
+            raise ValueError('untrusted synthetic sidecar')
+        return check(target, **kwargs)
+
+    monkeypatch.setattr(store, '_check_boundary', refuse)
+    with pytest.raises(ValueError):
+        store.save_user_llm_config(path, dict(raw, model_name='changed'))
+    assert path.read_bytes() == before
+
+
+def test_plain_config_read_does_not_create_config_directory(store, path, monkeypatch):
+    mkdir = Path.mkdir
+
+    def readonly(target, *args, **kwargs):
+        if target == path.parent:
+            raise PermissionError('synthetic-readonly-config-directory')
+        return mkdir(target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'mkdir', readonly)
+    assert store.load_user_llm_config(path) == store.default_user_llm_config()
+    assert not path.parent.exists()
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_config_replace_failure_recovers_old_config_with_fresh_revision(store, path, monkeypatch, existing):
+    raw = store.default_user_llm_config()
+    if existing:
+        store.save_user_llm_config(path, raw)
+    before = path.read_bytes() if existing else None
+    replace = os.replace
+
+    def refuse_config(source, target):
+        if Path(target) == path:
+            raise OSError('synthetic-config-replace-failure')
+        return replace(source, target)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, 'replace', refuse_config)
+        with pytest.raises(ValueError, match='本机模型配置不可用'):
+            store.save_user_llm_config(path, dict(raw, model_name='changed'))
+    assert (path.read_bytes() if path.exists() else None) == before
+    staged = json.loads(path.with_name(path.name + '.generation').read_text())['generation']
+    config, recovered = store.load_user_llm_runtime_state(path)
+    assert config == raw
+    assert recovered != staged
+    assert store.load_user_llm_runtime_state(path) == (config, recovered)
