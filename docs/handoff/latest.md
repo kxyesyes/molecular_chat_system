@@ -973,3 +973,26 @@ Regression rerun:
 conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py tests/test_api_route_boundary.py -q -p no:cacheprovider
 # 219 passed, 1 skipped in 225.46s
 ```
+
+## 本机验收补充（2026-10-11）
+
+本轮只执行本机验收，不宣称目标服务器部署完成。当前分支为
+`fix/production-acceptance-hardening`；用户已有的活动模型训练/搜索改动及其运行产物未被暂存或修改。
+
+已完成的可复现检查：
+
+```text
+docking interaction/RMSD/API 边界：219 passed, 1 skipped
+目标搜索、对接配置/manifest/取消、RG-MPNN 日志转换：181 passed, 7 skipped
+health_check.py --strict：23/23 checks passed
+run_agent_acceptance.py --mode contract：passed
+compileall：passed
+Node 合同测试：3/3 passed
+非 ketcher/backup JavaScript node --check：passed（54 files）
+```
+
+本机外部兼容模型探针确实到达上游，但上游返回 HTTP 403（配额不足），因此不把它计为真实模型通过，
+也没有改变网络白名单或绕过 DNS/传输安全边界。ProLIF/MDAnalysis、Temporal 后端、目标服务器
+HTTPS/WSS、反向代理/多 worker 重启、真实参考 pose 重对接，以及根注册表激活 PDE/BuChE 仍按
+`unavailable`/`partial` 记录；没有用模拟分数或模拟几何替代这些证据。全仓 `pytest tests -q`
+尚未作为本轮证据声明，因为用户启动的模型搜索进程仍在运行并持续占用训练资源。
