@@ -76,6 +76,107 @@ def test_empty_prolif_output_is_a_tool_result_not_a_successful_hit():
     }
 
 
+def test_prolif_metadata_preserves_tool_derived_geometry_and_atom_indices():
+    result = normalize_prolif_output(
+        {
+            ("ASP:123", "LIG:1"): {
+                "HBDonor": [
+                    {
+                        "distance": 2.91,
+                        "angle": 157.4,
+                        "protein_indices": [4],
+                        "ligand_indices": [0, 1],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert result["geometry_status"] == "available"
+    assert result["interactions"] == [
+        {
+            "type": "hydrogen_bond",
+            "protein_residue": "ASP:123",
+            "ligand_residue": "LIG:1",
+            "count": 1,
+            "distance_angstrom": 2.91,
+            "angle_degrees": 157.4,
+            "protein_atom_indices": [4],
+            "ligand_atom_indices": [0, 1],
+            "method": "prolif",
+            "quality": "tool_derived",
+        }
+    ]
+
+
+def test_invalid_geometry_is_omitted_and_reported_as_unavailable():
+    result = normalize_prolif_output(
+        {
+            ("ASP:123", "LIG:1"): {
+                "HBDonor": [
+                    {
+                        "distance": float("nan"),
+                        "angle": -5,
+                        "protein_indices": ["bad"],
+                    }
+                ]
+            }
+        }
+    )
+
+    assert result["geometry_status"] == "unavailable"
+    assert "invalid_geometry_metadata" in result["warnings"]
+    assert "distance_angstrom" not in result["interactions"][0]
+    assert "angle_degrees" not in result["interactions"][0]
+    assert "protein_atom_indices" not in result["interactions"][0]
+
+
+def test_count_only_output_remains_compatible_but_geometry_is_unavailable():
+    result = normalize_prolif_output(
+        {("ASP:123", "LIG:1"): {"HBDonor": 2}}
+    )
+
+    assert result["geometry_status"] == "unavailable"
+    assert result["interactions"][0]["count"] == 2
+    assert "distance_angstrom" not in result["interactions"][0]
+
+
+def test_metadata_api_absence_returns_explicit_unavailable_result(tmp_path, monkeypatch):
+    receptor = tmp_path / "receptor.pdb"
+    ligand = tmp_path / "pose.sdf"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    ligand.write_text("sdf\n", encoding="utf-8")
+
+    class FakeFingerprint:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_from_iterable(self, _poses, _protein):
+            pass
+
+        def to_dataframe(self):
+            return SimpleNamespace(index=[0], iloc=[SimpleNamespace(to_dict=lambda: {})])
+
+    fake_mda = SimpleNamespace(
+        Universe=lambda _path: SimpleNamespace(atoms=[SimpleNamespace(element="H", name="H1")])
+    )
+    fake_prolif = SimpleNamespace(
+        __version__="test",
+        Molecule=SimpleNamespace(from_mda=lambda _universe: object()),
+        sdf_supplier=lambda _path: [object()],
+        Fingerprint=FakeFingerprint,
+    )
+    monkeypatch.setitem(sys.modules, "MDAnalysis", fake_mda)
+    monkeypatch.setitem(sys.modules, "prolif", fake_prolif)
+    monkeypatch.setattr("src.docking.interaction_analysis._dependency_available", lambda _: True)
+
+    result = analyze_docking_interactions(receptor, ligand)
+
+    assert result["status"] == "unavailable"
+    assert result["reason_code"] == "geometry_metadata_unavailable"
+    assert result["geometry_status"] == "unavailable"
+
+
 def test_pose_export_keeps_hydrogens_for_backend_analysis(tmp_path: Path):
     from src.docking.pose_export import pose_sdf_from_pdbqt
 
