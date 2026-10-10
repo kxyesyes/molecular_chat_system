@@ -950,3 +950,26 @@ recovery, real ProLIF/MDAnalysis execution, and real reference-pose redocking
 RMSD still require their respective deployment assets or host. Missing
 evidence remains `unavailable`/`partial`; it is not converted to a scientific
 pass.
+
+### Review follow-up
+
+Independent review identified and the follow-up commit `48d97f5d` closed these
+compatibility gaps:
+
+- ProLIF `PiCation`/`WaterBridge` are mapped; unknown interaction names are
+  surfaced and make the runtime result `unsupported_interaction_type` instead
+  of being silently dropped.
+- Multiple metadata occurrences preserve the legacy one-record aggregate
+  `count`; validated per-occurrence geometry is retained under
+  `geometry_occurrences`.
+- The interaction route's early pose-export and missing-input responses now
+  include `geometry_status: "unavailable"`.
+- A valid geometry alias paired with an invalid alias remains usable but emits
+  `invalid_geometry_metadata`.
+
+Regression rerun:
+
+```powershell
+conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py tests/test_api_route_boundary.py -q -p no:cacheprovider
+# 219 passed, 1 skipped in 225.46s
+```
