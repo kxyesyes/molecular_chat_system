@@ -4,8 +4,8 @@
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
-- `origin/main` 当前为 `c0bdacf`（PR #176，生产健康检查门禁加固，已通过质量门禁并 squash 合并）；
-  本分支 `codex/production-e2e-acceptance` 基于该稳定基线工作，没有直接修改 `main`。
+- `origin/main` 当前为 `60634b0`（PR #177，真实 PDE/BuChE 活性验收证据门禁，已通过质量门禁并
+  squash 合并）；本次验收改动已进入 `main`，没有直接修改 `main`。
 - Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`；对接适配器现在保留
   `succeeded`、`unavailable`、`timeout`、`cancelled`、`invalid_input`、`not_calculated` 等统一状态，
   不再把非成功终态降级成普通 `failed`；失败适配器只保留安全状态诊断，Agent Validator 会清除
@@ -31,6 +31,9 @@
   不是普适科学阈值。
 - 本轮真实活性验收已切换到正式 `src.activity.prediction_service`，并同时检查 PDE/BuChE
   family bundle；没有读取、写入或提交 API key。
+- PR #177 的审查修复已包含在 `60634b0`：部分成功行和失败行不会再从报告中丢失；真实模型
+  provenance 必须完整且与请求 family、bundle、端点、模型卡和权重摘要绑定；PDE/BuChE
+  不能用另一 family 的“看起来有效”证据冒充通过。
 
 ### 当前真正未完成
 
@@ -47,11 +50,11 @@
 5. 历史批次正文仍保留追溯信息；它们的“待合并”描述不代表当前开放 PR。后续只需维护本节，
    不再重复创建同一批架构任务。
 
-### 本分支验收记录（2026-10-10）
+### 最近验收记录（2026-10-10）
 
 - Web 决策运行时、生命周期、恢复和普通 Web 生命周期联合回归的历史证据仍保留；本轮
   `tests/agent` 全量：`12931 passed, 3 skipped, 7 warnings`；新增真实活性验收聚焦测试：
-  `46 passed`；`compileall` 和 `git diff --check` 通过。
+  `49 passed`；`compileall` 和 `git diff --check` 通过。
 - `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `--mode real --repeat 3`：`partial`，
   `run_count=3`、`case_count=36`。本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；
   PDE 与 BuChE 均确认使用非 demo、非 fallback 的真实 RG-MPNN bundle。PDE 三个固定探针中有一条
