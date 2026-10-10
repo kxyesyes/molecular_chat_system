@@ -4,6 +4,13 @@
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
+- 2026-10-10 的 PR #182 已 squash 合并到 `main`，合并提交为 `9e668a41`：活动模型训练上传新增
+  `MEDCHAT_ACTIVITY_TRAINING_MAX_ROWS` 行数上限（默认 100,000），在创建临时文件和提交后台训练前
+  fail-closed 返回 413；修复了 CSV 解析器可能低估训练记录数的资源风险。相关 API 回归、活动/对接
+  边界测试与 CI 9/9 均通过。已有 `data/molecular_faiss_index.index.manifest.json` 未跟踪且未被修改。
+- 合并后的本机复核：默认 `scripts/health_check.py --strict` 为 23/23；同时设置
+  `MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1` 与 `MEDCHAT_REQUIRE_DURABLE_TASKS=1` 为 21/23，剩余两项
+  明确是 Temporal 后端未配置和根注册表未选择 PDE/BuChE family bundle，不是代码测试失败。
 - 本轮核验快照中，PR #180 合并前的 `origin/main` 为 `5983b71`；PR #180 已通过
   9/9 质量检查并 squash 合并为 `fceb203`。PR #179、PR #178 的交接记录更新和 PR #177
   的真实 PDE/BuChE 活性验收证据门禁均已通过 PR 进入 `main`，
