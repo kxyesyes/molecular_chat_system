@@ -20,8 +20,10 @@ from .llm_runtime_config import (
     public_llm_config,
 )
 from .user_llm_config import (
-    load_user_llm_config, save_user_llm_config, user_llm_config_path,
-    user_llm_signature, resolve_user_llm_request, default_user_llm_config,
+    load_user_llm_config, load_user_llm_runtime_state, save_user_llm_config,
+    user_llm_config_path, user_llm_signature,
+    resolve_user_llm_request,
+    default_user_llm_config,
 )
 from .models import generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
@@ -238,7 +240,10 @@ class MolecularChatApp:
         self._register_assembly_owner(self.model)
         if ordinary_chat_policy == 'semantic_v1':
             self._validate_ordinary_adapter(self.active_llm_config, self.model)
-        self.model_generation = uuid4().hex
+        self.model_generation = (self._loaded_llm_generation
+                                if hasattr(self, '_loaded_llm_generation') else uuid4().hex)
+        if hasattr(self, '_loaded_llm_generation'):
+            self._llm_env_signature = self._loaded_llm_generation
         self._llm_watch_task = None
         logger.info(
             "Active LLM provider: %s / %s",
@@ -466,7 +471,9 @@ class MolecularChatApp:
         )
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
-        return load_user_llm_config(self.runtime_llm_env_path)
+        config, generation = load_user_llm_runtime_state(self.runtime_llm_env_path)
+        self._loaded_llm_generation = generation
+        return config
 
     def _llm_env_file_signature(self) -> str | None:
         return user_llm_signature(self.runtime_llm_env_path)
@@ -582,7 +589,15 @@ class MolecularChatApp:
     def _publish_llm_config(self, config, model):
         # The async caller already owns the writer. Validate all semantic values
         # and epochs BEFORE binding any consumers; never acquire a nested writer.
+        # Adopt a newly persisted revision only with its matching config.
+        # An explicitly process-local replacement (including identical config)
+        # still revokes that worker's prior model epoch.
         generation = uuid4().hex
+        path = getattr(self, 'runtime_llm_env_path', None)
+        if path is not None:
+            persisted, revision = load_user_llm_runtime_state(path)
+            if persisted == config and revision != getattr(self, 'model_generation', None):
+                generation = revision
         capability_generation = getattr(self, 'capability_generation', None)
         base = getattr(self, 'ordinary_capability_base', None)
         if getattr(self, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1':
