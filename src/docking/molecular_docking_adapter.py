@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import re
 import threading
 from pathlib import Path
@@ -243,10 +244,45 @@ class MolecularDocking(BaseMolecularTool):
                     result["message"] = "Ligand file does not exist. No binding energy was calculated."
                     return result
                 ligand_input, input_type = str(ligand_path), "file"
-            control = {key: value for key, value in (("job_id", job_id), ("progress_callback", progress_callback), ("cancel_event", cancel_event)) if value is not None}
+            reference_pose = query.get("reference_pose")
+            if reference_pose is not None:
+                reference_path = Path(str(reference_pose)).expanduser().resolve()
+                if not reference_path.is_file():
+                    result["status"] = "invalid_input"
+                    result["message"] = "Reference pose file does not exist. No binding energy was calculated."
+                    return result
+                reference_pose = str(reference_path)
+            redocking_rmsd_threshold = query.get("redocking_rmsd_threshold")
+            if redocking_rmsd_threshold is not None:
+                try:
+                    if isinstance(redocking_rmsd_threshold, bool):
+                        raise ValueError("boolean is not a threshold")
+                    redocking_rmsd_threshold = float(redocking_rmsd_threshold)
+                except (TypeError, ValueError):
+                    result["status"] = "invalid_input"
+                    result["message"] = "Redocking RMSD threshold must be a finite positive number."
+                    return result
+                if not math.isfinite(redocking_rmsd_threshold) or redocking_rmsd_threshold <= 0:
+                    result["status"] = "invalid_input"
+                    result["message"] = "Redocking RMSD threshold must be a finite positive number."
+                    return result
+            control = {
+                key: value
+                for key, value in (
+                    ("job_id", job_id),
+                    ("progress_callback", progress_callback),
+                    ("cancel_event", cancel_event),
+                )
+                if value is not None
+            }
+            if reference_pose is not None:
+                control["reference_pose"] = reference_pose
+            if redocking_rmsd_threshold is not None:
+                control["redocking_rmsd_threshold"] = redocking_rmsd_threshold
             docking_result = _run_coroutine_sync(lambda: service.perform_docking(
                 receptor_file=str(receptor_path), ligand_input=str(ligand_input), config=config,
-                input_type=input_type, **control,
+                input_type=input_type,
+                **control,
             ))
             warnings = _normalize_warning_strings(docking_result.get("warnings"))
             docking_data = dict(docking_result)
@@ -278,6 +314,29 @@ class MolecularDocking(BaseMolecularTool):
                 "execution_status": execution_status,
                 "scientific_usable": bool(result["success"]),
             }
+            # Keep failed validation diagnostics separate from rejected
+            # scientific result data. Only stable codes and finite RMSD
+            # numbers are allowed across this boundary, never raw exceptions.
+            scientific_quality = docking_result.get("scientific_quality")
+            if isinstance(scientific_quality, dict):
+                safe_quality = {"status": "failed"}
+                if scientific_quality.get("status") in ("passed", "failed"):
+                    safe_quality["status"] = scientific_quality["status"]
+                rmsd = scientific_quality.get("redocking_rmsd")
+                if isinstance(rmsd, dict) and rmsd.get("status") in ("passed", "failed", "not_run"):
+                    safe_rmsd = {"status": rmsd["status"]}
+                    if rmsd.get("reason_code") in (
+                        "reference_pose_not_supplied", "threshold_not_supplied", "threshold_invalid",
+                        "candidate_pose_unavailable", "reference_pose_invalid",
+                        "rmsd_within_threshold", "rmsd_exceeds_threshold",
+                    ):
+                        safe_rmsd["reason_code"] = rmsd["reason_code"]
+                    for key in ("value_angstrom", "threshold_angstrom"):
+                        value = rmsd.get(key)
+                        if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                            safe_rmsd[key] = value
+                    safe_quality["redocking_rmsd"] = safe_rmsd
+                result["quality"]["scientific_quality"] = safe_quality
             if isinstance(docking_result.get("quality"), dict):
                 result["quality"]["service_quality"] = dict(docking_result["quality"])
             if not result["success"]:

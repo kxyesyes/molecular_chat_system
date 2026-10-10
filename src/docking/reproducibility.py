@@ -120,6 +120,9 @@ def assess_pose_geometry(
     size: Any,
     expected_heavy_atom_count: int | None = None,
     box_source: str | None = None,
+    reference_pose: Any = None,
+    candidate_pose: Any = None,
+    redocking_rmsd_threshold: float | None = None,
 ) -> dict[str, Any]:
     """Check basic, tool-derived pose geometry without inventing interactions.
 
@@ -151,6 +154,54 @@ def assess_pose_geometry(
     def fail(code: str) -> None:
         if code not in report["failures"]:
             report["failures"].append(code)
+
+    if reference_pose is None:
+        pass
+    elif redocking_rmsd_threshold is None:
+        report["redocking_rmsd"] = {
+            "status": "not_run",
+            "reason_code": "threshold_not_supplied",
+        }
+    elif (
+        type(redocking_rmsd_threshold) not in (int, float)
+        or not math.isfinite(float(redocking_rmsd_threshold))
+        or float(redocking_rmsd_threshold) <= 0
+    ):
+        report["redocking_rmsd"] = {
+            "status": "not_run",
+            "reason_code": "threshold_invalid",
+        }
+        fail("redocking_rmsd_threshold_invalid")
+    elif candidate_pose is None:
+        report["redocking_rmsd"] = {
+            "status": "failed",
+            "reason_code": "candidate_pose_unavailable",
+        }
+        fail("redocking_rmsd_failed")
+    else:
+        try:
+            rmsd = symmetry_aware_heavy_atom_rmsd(reference_pose, candidate_pose)
+        except (OSError, TypeError, ValueError, RuntimeError):
+            report["redocking_rmsd"] = {
+                "status": "failed",
+                "reason_code": "reference_pose_invalid",
+            }
+            fail("redocking_rmsd_failed")
+        else:
+            threshold = float(redocking_rmsd_threshold)
+            within_threshold = rmsd <= threshold
+            report["redocking_rmsd"] = {
+                "status": "passed" if within_threshold else "failed",
+                "reason_code": (
+                    "rmsd_within_threshold"
+                    if within_threshold
+                    else "rmsd_exceeds_threshold"
+                ),
+                "value_angstrom": rmsd,
+                "threshold_angstrom": threshold,
+            }
+            if not within_threshold:
+                fail("redocking_rmsd_failed")
 
     if not isinstance(box_source, str) or not box_source.strip():
         fail("box_evidence_missing")
