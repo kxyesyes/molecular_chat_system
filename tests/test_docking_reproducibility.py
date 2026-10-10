@@ -336,6 +336,48 @@ def test_vina_candidate_rejects_corrupt_mapping(tmp_path, mapping):
         MolecularDockingService.recover_vina_candidate_pose(str(output), pose_index=2)
 
 
+def test_vina_candidate_rejects_unmapped_extra_heavy_atom(tmp_path):
+    from src.docking.molecular_docking_service import MolecularDockingService
+    output = _meeko_vina_output(tmp_path / "extra-heavy.pdbqt")
+    extra = "HETATM    5  C   UNL     1       2.000   2.000   2.000  1.00  0.00     0.000 C"
+    output.write_text(output.read_text().replace("ENDROOT", extra + "\nENDROOT"))
+    with pytest.raises(ValueError, match="mapping"):
+        MolecularDockingService.recover_vina_candidate_pose(str(output), pose_index=2)
+
+
+def test_vina_candidate_rejects_conformer_count_mismatch(tmp_path):
+    from src.docking.molecular_docking_service import MolecularDockingService
+    output = _meeko_vina_output(tmp_path / "one-model.pdbqt")
+    content = output.read_text()
+    content = content[:content.index("MODEL 2")]
+    output.write_text(content)
+    with pytest.raises(ValueError, match="conformer"):
+        MolecularDockingService.recover_vina_candidate_pose(str(output), pose_index=2)
+
+
+def test_service_rejects_invalid_redocking_threshold_before_vina(tmp_path):
+    import asyncio
+    from src.docking.molecular_docking_service import DockingConfig, MolecularDockingService
+
+    receptor = tmp_path / "receptor.pdbqt"
+    receptor.write_text("fixture", encoding="utf-8")
+    service = MolecularDockingService()
+    service.work_dir = str(tmp_path / "work")
+    Path(service.work_dir).mkdir()
+    service._resolve_docking_box = lambda *args, **kwargs: (_ for _ in ()).throw(
+        AssertionError("invalid threshold reached docking")
+    )
+
+    result = asyncio.run(service.perform_docking(
+        str(receptor), "CCO", DockingConfig(manual_center=True),
+        job_id="invalid-threshold", redocking_rmsd_threshold=True,
+    ))
+
+    assert result["success"] is False
+    assert result["error_code"] == "invalid_redocking_rmsd_threshold"
+    assert not list(Path(service.work_dir).glob("docking_*"))
+
+
 def test_redocking_error_does_not_disclose_reference_path(tmp_path):
     from src.docking.reproducibility import assess_pose_geometry
     report = assess_pose_geometry(

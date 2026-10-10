@@ -1593,6 +1593,18 @@ class MolecularDockingService:
                 "error": "Docking job id is invalid",
             }
 
+        if redocking_rmsd_threshold is not None and (
+            isinstance(redocking_rmsd_threshold, bool)
+            or type(redocking_rmsd_threshold) not in (int, float)
+            or not math.isfinite(float(redocking_rmsd_threshold))
+            or float(redocking_rmsd_threshold) <= 0
+        ):
+            return {
+                "success": False,
+                "error_code": "invalid_redocking_rmsd_threshold",
+                "error": "Redocking RMSD threshold must be a finite positive number",
+            }
+
         if scope is not None:
             try:
                 self._require_command_scope()
