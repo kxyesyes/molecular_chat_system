@@ -51,4 +51,4 @@
 
 - [x] **Step 1:** Inspect the diff for unrelated changes, absolute paths, fabricated scientific values, and API compatibility regressions.
 - [x] **Step 2:** Record the exact tests and the production acceptance boundary; leave HTTPS/WSS, active model weights, server restart, and real Vina redocking as pending when assets are unavailable.
-- [ ] **Step 3:** Commit only the task files with a Conventional Commit message.
+- [x] **Step 3:** Commit only the task files with a Conventional Commit message.
