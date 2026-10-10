@@ -165,10 +165,25 @@ def test_prolif_frame_metadata_normalizes_ligand_first_pairs_and_multiple_occurr
     )
 
     assert result["geometry_status"] == "available"
-    assert len(result["interactions"]) == 2
-    assert all(item["protein_residue"] == "ASP129.A" for item in result["interactions"])
-    assert all(item["ligand_residue"] == "QNB1.G" for item in result["interactions"])
-    assert [item["distance_angstrom"] for item in result["interactions"]] == [2.8, 3.0]
+    assert len(result["interactions"]) == 1
+    item = result["interactions"][0]
+    assert item["count"] == 2
+    assert item["protein_residue"] == "ASP129.A"
+    assert item["ligand_residue"] == "QNB1.G"
+    assert [entry["distance_angstrom"] for entry in item["geometry_occurrences"]] == [2.8, 3.0]
+
+
+def test_known_pication_is_mapped_without_an_unknown_interaction_warning():
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"PiCation": 1}})
+    assert result["interactions"][0]["type"] == "cation_pi"
+    assert "unsupported_interaction_types" not in result
+
+
+def test_unknown_prolif_interaction_is_explicitly_unavailable():
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"FutureInteraction": 1}})
+    assert result["interactions"] == []
+    assert result["unsupported_interaction_types"] == ["FutureInteraction"]
+    assert "unsupported_interaction_type" in result["warnings"]
 
 
 @pytest.mark.parametrize("value", [object(), "bad", [None], [1], float("inf"), -1, 1.5])
@@ -217,6 +232,15 @@ def test_conflicting_geometry_aliases_are_not_silently_chosen():
     assert "invalid_geometry_metadata" in result["warnings"]
 
 
+def test_valid_geometry_alias_with_invalid_alias_emits_warning():
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"HBDonor": [{
+        "distance": 2.0, "distance_angstrom": "bad",
+    }]}})
+    assert result["geometry_status"] == "available"
+    assert result["interactions"][0]["distance_angstrom"] == 2.0
+    assert "invalid_geometry_metadata" in result["warnings"]
+
+
 @pytest.fixture
 def analyzer_inputs(tmp_path, monkeypatch):
     receptor = tmp_path / "receptor.pdb"
@@ -254,6 +278,16 @@ def test_runtime_empty_metadata_is_completed_without_hits(analyzer_inputs):
     assert result["status"] == "success"
     assert result["geometry_status"] == "unavailable"
     assert result["interactions"] == []
+
+
+def test_runtime_unknown_interaction_is_unavailable(analyzer_inputs):
+    receptor, ligand, plf = analyzer_inputs
+    plf.Fingerprint = lambda **_: SimpleNamespace(
+        generate=lambda *args, **kwargs: {("L", "P"): {"FutureInteraction": ({},)}}
+    )
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["status"] == "unavailable"
+    assert result["reason_code"] == "unsupported_interaction_type"
 
 
 def test_runtime_old_generate_api_is_unavailable(analyzer_inputs):

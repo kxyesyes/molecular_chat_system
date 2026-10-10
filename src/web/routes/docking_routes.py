@@ -774,6 +774,7 @@ def setup_docking_routes(
                     "reason_code": "pose_export_failed",
                     "pose": pose,
                     "interactions": [],
+                    "geometry_status": "unavailable",
                     "warnings": [f"pose_export_failed:{pose_export_error}"],
                     "provenance": {"analyzer": "prolif", "tool_derived": False},
                 }
@@ -782,6 +783,7 @@ def setup_docking_routes(
                 "reason_code": "analysis_input_missing",
                 "pose": pose,
                 "interactions": [],
+                "geometry_status": "unavailable",
                 "warnings": [
                     "explicit_analysis_receptor_and_pose_sdf_are_required",
                     "pdbqt_was_not_used_as_a_topology_fallback",

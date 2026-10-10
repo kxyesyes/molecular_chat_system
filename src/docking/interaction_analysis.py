@@ -26,9 +26,11 @@ _TYPE_NAMES = {
     "Hydrophobic": "hydrophobic",
     "PiStacking": "pi_pi",
     "CationPi": "cation_pi",
+    "PiCation": "cation_pi",
     "Anionic": "ionic",
     "Cationic": "ionic",
     "VdWContact": "van_der_waals",
+    "WaterBridge": "water_bridge",
 }
 _DISTANCE_KEYS = ("distance", "distance_angstrom")
 _ANGLE_KEYS = ("angle", "angle_degrees")
@@ -102,10 +104,11 @@ def _atom_indices(value: Any) -> list[int] | None:
 
 def _first_valid_number(
     occurrence: Mapping[str, Any], keys: Sequence[str], *, angle: bool
-) -> tuple[float | None, bool]:
+) -> tuple[float | None, bool, bool]:
     """Return a validated value and whether any candidate key was present."""
 
     present = False
+    invalid = False
     valid_values: list[float] = []
     for key in keys:
         if key not in occurrence:
@@ -116,23 +119,31 @@ def _first_valid_number(
         )
         if value is not None:
             valid_values.append(value)
+        else:
+            invalid = True
     if len({round(value, 12) for value in valid_values}) > 1:
-        return None, True
-    return (valid_values[0] if valid_values else None), present
+        return None, True, True
+    return (valid_values[0] if valid_values else None), present, invalid
 
 
 def _first_valid_indices(
     occurrence: Mapping[str, Any], keys: Sequence[str]
-) -> tuple[list[int] | None, bool]:
+) -> tuple[list[int] | None, bool, bool]:
     present = False
+    invalid = False
+    valid_values: list[list[int]] = []
     for key in keys:
         if key not in occurrence:
             continue
         present = True
         value = _atom_indices(occurrence[key])
         if value is not None:
-            return value, True
-    return None, present
+            valid_values.append(value)
+        else:
+            invalid = True
+    if len({tuple(value) for value in valid_values}) > 1:
+        return None, True, True
+    return (valid_values[0] if valid_values else None), present, invalid
 
 
 def _normalize_geometry(
@@ -141,20 +152,20 @@ def _normalize_geometry(
     geometry: dict[str, Any] = {}
     available = False
 
-    distance, distance_present = _first_valid_number(
+    distance, distance_present, distance_invalid = _first_valid_number(
         occurrence, _DISTANCE_KEYS, angle=False
     )
     if distance is not None:
         geometry["distance_angstrom"] = distance
         available = True
-    elif distance_present:
+    if distance_invalid or (distance is None and distance_present):
         warnings.append("invalid_geometry_metadata")
 
-    angle, angle_present = _first_valid_number(occurrence, _ANGLE_KEYS, angle=True)
+    angle, angle_present, angle_invalid = _first_valid_number(occurrence, _ANGLE_KEYS, angle=True)
     if angle is not None:
         geometry["angle_degrees"] = angle
         available = True
-    elif angle_present:
+    if angle_invalid or (angle is None and angle_present):
         warnings.append("invalid_geometry_metadata")
 
     named_angles = {}
@@ -169,13 +180,13 @@ def _normalize_geometry(
         geometry["angles_degrees"] = named_angles
         available = True
 
-    angle_deviation, deviation_present = _first_valid_number(
+    angle_deviation, deviation_present, deviation_invalid = _first_valid_number(
         occurrence, _ANGLE_DEVIATION_KEYS, angle=True
     )
     if angle_deviation is not None:
         geometry["angle_deviation_degrees"] = angle_deviation
         available = True
-    elif deviation_present:
+    if deviation_invalid or (angle_deviation is None and deviation_present):
         warnings.append("invalid_geometry_metadata")
 
     nested_indices = occurrence.get("indices")
@@ -196,11 +207,13 @@ def _normalize_geometry(
         ("protein", "protein_atom_indices"),
         ("ligand", "ligand_atom_indices"),
     ):
-        indices, indices_present = _first_valid_indices(index_sources, _INDEX_KEYS[side])
+        indices, indices_present, indices_invalid = _first_valid_indices(
+            index_sources, _INDEX_KEYS[side]
+        )
         if indices is not None:
             geometry[output_key] = indices
             available = True
-        elif indices_present:
+        if indices_invalid or (indices is None and indices_present):
             warnings.append("invalid_geometry_metadata")
     if "parent_indices" in occurrence:
         parent = occurrence["parent_indices"]
@@ -265,6 +278,7 @@ def normalize_prolif_output(
 
     interactions: list[dict[str, Any]] = []
     warnings: list[str] = []
+    unsupported_interaction_types: list[str] = []
     geometry_available = False
     for interaction_map in _iter_interaction_maps(output):
         for pair, values in interaction_map.items():
@@ -280,26 +294,33 @@ def normalize_prolif_output(
             for raw_name, raw_value in values.items():
                 interaction_type = _TYPE_NAMES.get(str(raw_name))
                 if interaction_type is None:
+                    if str(raw_name) not in unsupported_interaction_types:
+                        unsupported_interaction_types.append(str(raw_name))
                     continue
                 occurrence_values, count = _occurrences(raw_value)
                 if count is None and not occurrence_values:
                     warnings.append("invalid_geometry_metadata")
                 if occurrence_values:
+                    geometries: list[dict[str, Any]] = []
                     for occurrence in occurrence_values:
-                        interaction = {
-                            "type": interaction_type,
-                            "protein_residue": protein_residue,
-                            "ligand_residue": ligand_residue,
-                            "count": 1,
-                            "method": "prolif",
-                            "quality": "tool_derived",
-                        }
                         geometry, occurrence_has_geometry = _normalize_geometry(
                             occurrence, warnings
                         )
-                        interaction.update(geometry)
+                        geometries.append(geometry)
                         geometry_available = geometry_available or occurrence_has_geometry
-                        interactions.append(interaction)
+                    interaction = {
+                        "type": interaction_type,
+                        "protein_residue": protein_residue,
+                        "ligand_residue": ligand_residue,
+                        "count": len(occurrence_values),
+                        "method": "prolif",
+                        "quality": "tool_derived",
+                    }
+                    if len(geometries) == 1:
+                        interaction.update(geometries[0])
+                    elif any(geometries):
+                        interaction["geometry_occurrences"] = geometries
+                    interactions.append(interaction)
                 elif count is not None and count > 0:
                     interactions.append(
                         {
@@ -313,11 +334,16 @@ def normalize_prolif_output(
                     )
     if not interactions:
         warnings.append("no_interactions_reported_by_prolif")
-    return {
+    if unsupported_interaction_types:
+        warnings.append("unsupported_interaction_type")
+    result = {
         "interactions": interactions,
         "warnings": list(dict.fromkeys(warnings)),
         "geometry_status": "available" if geometry_available else "unavailable",
     }
+    if unsupported_interaction_types:
+        result["unsupported_interaction_types"] = unsupported_interaction_types
+    return result
 
 
 def _dependency_available(module_name: str) -> bool:
@@ -467,6 +493,13 @@ def analyze_docking_interactions(
                 "ligand": _input_summary(ligand),
             },
         }
+        if normalized.get("unsupported_interaction_types"):
+            return _result(
+                "unavailable",
+                "unsupported_interaction_type",
+                warnings=["prolif_returned_unsupported_interaction_type"],
+                provenance={**provenance, "tool_derived": False},
+            )
         return _result("success", "analysis_completed", provenance=provenance, **normalized)
     except Exception as exc:
         return _result(
