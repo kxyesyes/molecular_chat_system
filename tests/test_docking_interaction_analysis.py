@@ -73,6 +73,7 @@ def test_empty_prolif_output_is_a_tool_result_not_a_successful_hit():
     assert result == {
         "interactions": [],
         "warnings": ["no_interactions_reported_by_prolif"],
+        "geometry_status": "unavailable",
     }
 
 
@@ -139,6 +140,159 @@ def test_count_only_output_remains_compatible_but_geometry_is_unavailable():
     assert result["geometry_status"] == "unavailable"
     assert result["interactions"][0]["count"] == 2
     assert "distance_angstrom" not in result["interactions"][0]
+
+
+def test_prolif_frame_metadata_normalizes_ligand_first_pairs_and_multiple_occurrences():
+    result = normalize_prolif_output(
+        {
+            0: {
+                ("QNB1.G", "ASP129.A"): {
+                    "HBDonor": (
+                        {
+                            "indices": {"ligand": (0,), "protein": (4,)},
+                            "distance": 2.8,
+                            "DHA_angle": 151.0,
+                        },
+                        {
+                            "indices": {"ligand": (1,), "protein": (5,)},
+                            "distance": 3.0,
+                            "DHA_angle": 149.0,
+                        },
+                    )
+                }
+            }
+        }, pair_order="ligand_protein"
+    )
+
+    assert result["geometry_status"] == "available"
+    assert len(result["interactions"]) == 2
+    assert all(item["protein_residue"] == "ASP129.A" for item in result["interactions"])
+    assert all(item["ligand_residue"] == "QNB1.G" for item in result["interactions"])
+    assert [item["distance_angstrom"] for item in result["interactions"]] == [2.8, 3.0]
+
+
+@pytest.mark.parametrize("value", [object(), "bad", [None], [1], float("inf"), -1, 1.5])
+def test_malformed_occurrences_never_create_interactions(value):
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"HBDonor": value}})
+    assert result["interactions"] == []
+    assert "invalid_geometry_metadata" in result["warnings"]
+
+
+def test_indices_alone_are_not_distance_or_angle_evidence():
+    result = normalize_prolif_output({("ASP1", "LIG1"): {
+        "HBDonor": [{"indices": {"ligand": (1,), "protein": (2,)}}]
+    }})
+    assert result["geometry_status"] == "unavailable"
+
+
+def test_distinct_angles_are_not_collapsed_and_parent_indices_keep_scope():
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"PiStacking": [{
+        "plane_angle": 25.0, "normal_to_centroid_angle": 30.0,
+        "parent_indices": {"ligand": (12,), "protein": (120,)},
+    }]}})
+    item = result["interactions"][0]
+    assert item["angles_degrees"] == {"plane_angle": 25.0, "normal_to_centroid_angle": 30.0}
+    assert "angle_degrees" not in item
+    assert item["parent_atom_indices"] == {"ligand": [12], "protein": [120]}
+
+
+@pytest.mark.parametrize("field,value", [
+    ("distance", 0), ("distance", -1), ("distance", 21),
+    ("distance", True), ("distance", float("inf")), ("distance", 10**400),
+    ("angle", -1), ("angle", 361), ("angle", float("nan")),
+    ("indices", {"ligand": (), "protein": (False,)}),
+])
+def test_invalid_fields_warn_without_geometry_claim(field, value):
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"HBDonor": [{field: value}]}})
+    assert result["geometry_status"] == "unavailable"
+    assert "invalid_geometry_metadata" in result["warnings"]
+
+
+def test_conflicting_geometry_aliases_are_not_silently_chosen():
+    result = normalize_prolif_output({("ASP1", "LIG1"): {"HBDonor": [{
+        "distance": 2.0, "distance_angstrom": 3.0,
+    }]}})
+    assert result["geometry_status"] == "unavailable"
+    assert "distance_angstrom" not in result["interactions"][0]
+    assert "invalid_geometry_metadata" in result["warnings"]
+
+
+@pytest.fixture
+def analyzer_inputs(tmp_path, monkeypatch):
+    receptor = tmp_path / "receptor.pdb"
+    ligand = tmp_path / "pose.sdf"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    ligand.write_text("sdf\n", encoding="utf-8")
+    fake_prolif = SimpleNamespace(
+        __version__="test",
+        Molecule=SimpleNamespace(from_mda=lambda _: object()),
+        sdf_supplier=lambda _: [object()],
+    )
+    monkeypatch.setitem(sys.modules, "MDAnalysis", SimpleNamespace(
+        Universe=lambda _: SimpleNamespace(atoms=[SimpleNamespace(element="H", name="H1")])
+    ))
+    monkeypatch.setitem(sys.modules, "prolif", fake_prolif)
+    monkeypatch.setattr("src.docking.interaction_analysis._dependency_available", lambda _: True)
+    return receptor, ligand, fake_prolif
+
+
+@pytest.mark.parametrize("metadata", [None, [], {"bad": {}}, {("L", "P"): {"HBDonor": 1}},
+    {("L", "P"): {"HBDonor": (None,)}}])
+def test_runtime_rejects_malformed_metadata(analyzer_inputs, metadata):
+    receptor, ligand, plf = analyzer_inputs
+    plf.Fingerprint = lambda **_: SimpleNamespace(generate=lambda *args, **kwargs: metadata)
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["status"] == "unavailable"
+    assert result["reason_code"] == "geometry_metadata_unavailable"
+    assert result["interactions"] == []
+
+
+def test_runtime_empty_metadata_is_completed_without_hits(analyzer_inputs):
+    receptor, ligand, plf = analyzer_inputs
+    plf.Fingerprint = lambda **_: SimpleNamespace(generate=lambda *args, **kwargs: {})
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["status"] == "success"
+    assert result["geometry_status"] == "unavailable"
+    assert result["interactions"] == []
+
+
+def test_runtime_old_generate_api_is_unavailable(analyzer_inputs):
+    receptor, ligand, plf = analyzer_inputs
+    plf.Fingerprint = lambda **_: SimpleNamespace(generate=lambda lig, prot: {})
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["reason_code"] == "geometry_metadata_unavailable"
+
+
+def test_runtime_analyzer_exception_is_sanitized(analyzer_inputs):
+    receptor, ligand, plf = analyzer_inputs
+    def fail(*args, **kwargs):
+        raise RuntimeError("private-path-secret")
+    plf.Fingerprint = lambda **_: SimpleNamespace(generate=fail)
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["reason_code"] == "analysis_execution_failed"
+    assert "private-path-secret" not in str(result)
+
+
+def test_dependency_missing_is_unavailable(analyzer_inputs, monkeypatch):
+    receptor, ligand, _ = analyzer_inputs
+    monkeypatch.setattr("src.docking.interaction_analysis._dependency_available", lambda _: False)
+    result = analyze_docking_interactions(receptor, ligand)
+    assert result["reason_code"] == "dependency_missing"
+    assert result["geometry_status"] == "unavailable"
+
+
+def test_mol2_uses_matching_supplier(analyzer_inputs):
+    receptor, ligand, plf = analyzer_inputs
+    mol2 = ligand.with_suffix(".mol2")
+    mol2.write_text("mol2\n", encoding="utf-8")
+    selected = object()
+    plf.mol2_supplier = lambda _: [selected]
+    def generate(lig, prot, *, metadata):
+        assert lig is selected
+        return {}
+    plf.Fingerprint = lambda **_: SimpleNamespace(generate=generate)
+    result = analyze_docking_interactions(receptor, mol2)
+    assert result["status"] == "success"
 
 
 def test_metadata_api_absence_returns_explicit_unavailable_result(tmp_path, monkeypatch):
@@ -219,9 +373,27 @@ def test_prolif_success_is_structured_and_tool_derived(tmp_path: Path, monkeypat
     class FakeFingerprint:
         def __init__(self, **_kwargs):
             self.ran = False
+            self.ifp = {
+                0: {
+                    ("QNB:1", "ASP:123"): {
+                        "HBDonor": [
+                            {
+                                "distance": 2.9,
+                                "angle": 156.0,
+                                "protein_indices": [4],
+                                "ligand_indices": [0],
+                            }
+                        ]
+                    }
+                }
+            }
 
         def run_from_iterable(self, _poses, _protein):
             self.ran = True
+
+        def generate(self, _pose, _protein, *, metadata):
+            assert metadata is True
+            return self.ifp[0]
 
         def to_dataframe(self):
             return SimpleNamespace(index=[0], iloc=[FakeFrame()])
@@ -242,7 +414,10 @@ def test_prolif_success_is_structured_and_tool_derived(tmp_path: Path, monkeypat
     assert result["status"] == "success"
     assert result["provenance"]["tool_derived"] is True
     assert result["provenance"]["analyzer"] == "prolif"
+    assert result["provenance"]["metadata_mode"] == "metadata"
+    assert result["geometry_status"] == "available"
     assert result["interactions"][0]["type"] == "hydrogen_bond"
+    assert result["interactions"][0]["protein_residue"] == "ASP:123"
 
 
 def test_real_prolif_adapter_smoke_with_explicit_hydrogens(tmp_path: Path):
