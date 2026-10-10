@@ -1083,6 +1083,107 @@ class MolecularDockingService:
                 diagnostics.append("parser_exception")
             return []
 
+    @staticmethod
+    def recover_vina_candidate_pose(
+        output_path: str,
+        *,
+        pose_index: int,
+    ) -> tuple[Any, Dict[str, Any]]:
+        """Recover one topology-bearing Vina pose through Meeko.
+
+        The output file is parsed in full because ``DockingResult.pose_data``
+        intentionally contains only coordinate records.  Meeko's converted
+        result list represents ligands, while each ligand carries one
+        conformer per Vina model; consequently ``pose_index`` must select a
+        conformer and must never be replaced with an implicit first-pose
+        assumption.
+        """
+        if type(pose_index) is not int or pose_index <= 0:
+            raise ValueError("pose_index must be a positive integer")
+        try:
+            from importlib.metadata import version
+
+            meeko_version = version("meeko")
+        except Exception:
+            meeko_version = "unknown"
+        try:
+            from rdkit import Chem, __version__ as rdkit_version
+            from meeko import PDBQTMolecule, RDKitMolCreate
+        except ImportError as error:
+            raise ValueError("Meeko and RDKit are required for candidate recovery") from error
+
+        try:
+            with open(output_path, "rb") as stream:
+                output_bytes = stream.read(64 * 1024 * 1024 + 1)
+            if len(output_bytes) > 64 * 1024 * 1024:
+                raise ValueError("candidate output exceeds recovery size limit")
+            output_text = output_bytes.decode("utf-8", errors="strict")
+            pdbqt_molecule = PDBQTMolecule(output_text, skip_typing=True)
+            molecule_indices = sorted(set(pdbqt_molecule._atom_annotations["mol_index"]))
+            if len(molecule_indices) != 1:
+                raise ValueError("candidate output must contain exactly one ligand")
+            ligand_index = molecule_indices[0]
+            try:
+                smiles = pdbqt_molecule._pose_data["smiles"][ligand_index]
+                index_map = pdbqt_molecule._pose_data["smiles_index_map"][ligand_index]
+            except (KeyError, IndexError, TypeError) as error:
+                raise ValueError("candidate output lacks SMILES/index mapping") from error
+            if not isinstance(smiles, str) or not smiles or not index_map:
+                raise ValueError("candidate output lacks SMILES/index mapping")
+            topology = Chem.MolFromSmiles(smiles)
+            if topology is None or len(index_map) % 2:
+                raise ValueError("candidate mapping is invalid")
+            atom_indices = pdbqt_molecule._atom_annotations["mol_index"][ligand_index]
+            atoms = pdbqt_molecule.atoms(atom_indices)
+            from meeko.utils.autodock4_atom_types_elements import autodock4_atom_types_elements
+            mapped_mol, mapped_pdbqt = set(), set()
+            for mol_id, pdbqt_id in zip(index_map[::2], index_map[1::2]):
+                if (
+                    type(mol_id) is not int or type(pdbqt_id) is not int
+                    or not 1 <= mol_id <= topology.GetNumAtoms()
+                    or not 1 <= pdbqt_id <= len(atoms)
+                    or mol_id in mapped_mol or pdbqt_id in mapped_pdbqt
+                ):
+                    raise ValueError("candidate mapping is invalid")
+                element = autodock4_atom_types_elements.get(str(atoms[pdbqt_id - 1]["atom_type"]))
+                if element != topology.GetAtomWithIdx(mol_id - 1).GetSymbol():
+                    raise ValueError("candidate mapping element mismatch")
+                mapped_mol.add(mol_id)
+                mapped_pdbqt.add(pdbqt_id)
+            heavy_ids = {atom.GetIdx() + 1 for atom in topology.GetAtoms() if atom.GetAtomicNum() > 1}
+            if not heavy_ids.issubset(mapped_mol):
+                raise ValueError("candidate mapping omits heavy atoms")
+            converted = RDKitMolCreate.from_pdbqt_mol(pdbqt_molecule)
+            if len(converted) != 1 or converted[0] is None:
+                raise ValueError("candidate output did not produce exactly one ligand")
+            molecule = converted[0]
+            conformer_count = molecule.GetNumConformers()
+            model_count = sum(line.startswith("MODEL ") for line in output_text.splitlines())
+            if conformer_count != model_count or pose_index > conformer_count:
+                raise ValueError("candidate output lacks the requested model conformer")
+            selected = Chem.Mol(molecule)
+            selected_conformer = pose_index - 1
+            for conformer_id in range(selected.GetNumConformers() - 1, -1, -1):
+                if conformer_id != selected_conformer:
+                    selected.RemoveConformer(conformer_id)
+            if selected.GetNumConformers() != 1:
+                raise ValueError("candidate model selection did not produce one conformer")
+            return selected, {
+                "selected_model_index": pose_index,
+                "ligand_count": len(converted),
+                "conformer_count": conformer_count,
+                "meeko_version": meeko_version,
+                "rdkit_version": rdkit_version,
+                "output_sha256": hashlib.sha256(output_bytes).hexdigest(),
+                "output_size_bytes": len(output_bytes),
+            }
+        except Exception as error:
+            # External parsers may raise IndexError/AttributeError as well as
+            # ValueError. Normalize failures without exposing input paths.
+            if isinstance(error, ValueError) and str(error).startswith("candidate "):
+                raise
+            raise ValueError("candidate output could not be converted to an independent topology") from error
+
     @classmethod
     def _auto_box_from_co_crystal(cls, pdb_path: str, cancel_event=None):
         minimum = [float("inf"), float("inf"), float("inf")]
@@ -1358,13 +1459,19 @@ class MolecularDockingService:
         source: str,
         destination: str,
         cancel_event,
+        *,
+        max_bytes: int | None = None,
     ) -> None:
         with open(source, "rb") as reader, open(destination, "wb") as writer:
+            total = 0
             while True:
                 cls._raise_if_cancelled(cancel_event)
                 chunk = reader.read(1024 * 1024)
                 if not chunk:
                     break
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise ValueError("reference pose exceeds size limit")
                 writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
@@ -1423,6 +1530,7 @@ class MolecularDockingService:
         error: str,
         *,
         cleanup=None,
+        scientific_quality: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         response: Dict[str, Any] = {
             "success": False,
@@ -1432,6 +1540,8 @@ class MolecularDockingService:
         warnings = cls._discard_partial_job(job_dir) if cleanup is None else cleanup()
         if warnings:
             response["warnings"] = warnings
+        if scientific_quality is not None:
+            response["scientific_quality"] = scientific_quality
         return response
 
     async def perform_docking(
@@ -1445,6 +1555,8 @@ class MolecularDockingService:
         progress_callback=None,
         cancel_event=None,
         owner_session_id: str | None = None,
+        reference_pose: str | None = None,
+        redocking_rmsd_threshold: float | None = None,
     ) -> Dict[str, Any]:
         """Run a traceable docking workflow with cooperative cancellation."""
         import uuid
@@ -1604,6 +1716,48 @@ class MolecularDockingService:
                 config,
                 box_provenance,
             )
+            reference_provenance: Dict[str, Any] = {
+                "supplied": reference_pose is not None,
+            }
+            assessment_reference_pose = reference_pose
+            if reference_pose is not None:
+                try:
+                    reference_path = Path(reference_pose).expanduser()
+                    if reference_path.suffix.lower() not in {".sdf", ".sd", ".mol", ".mol2", ".pdb"}:
+                        raise ValueError("unsupported reference format")
+                    if not reference_path.is_file():
+                        raise ValueError("reference file missing")
+                    reference_provenance["format"] = reference_path.suffix.lower().lstrip(".")
+                    snapshot_name = f"reference_pose{reference_path.suffix.lower()}"
+                    snapshot_path = Path(job_dir) / snapshot_name
+                    self._copy_file_cooperatively(
+                        str(reference_path), str(snapshot_path), cancel_event,
+                        max_bytes=10 * 1024 * 1024,
+                    )
+                    reference_digest, reference_size = self._sha256_file(str(snapshot_path))
+                    if not reference_size:
+                        raise ValueError("empty reference file")
+                    assessment_reference_pose = str(snapshot_path)
+                    reference_provenance.update({
+                        "available": True,
+                        "sha256": reference_digest,
+                        "size_bytes": reference_size,
+                        "snapshot": snapshot_name,
+                        "snapshot_sha256": reference_digest,
+                    })
+                except (OSError, TypeError, ValueError):
+                    quality = {
+                        "status": "failed",
+                        "redocking_rmsd": {"status": "failed", "reason_code": "reference_pose_invalid"},
+                    }
+                    return self._failed_job_response(
+                        job_dir, "reference_pose_invalid", "Reference pose snapshot could not be preserved.",
+                        scientific_quality=quality, **cleanup_control,
+                    )
+            self._update_run_manifest(
+                job_dir,
+                reference_pose=reference_provenance,
+            )
             preparation_trace: Dict[str, Any] = {}
 
             def run_preparation(method, *args):
@@ -1757,13 +1911,58 @@ class MolecularDockingService:
                 heavy_atom_count = 0
             from .reproducibility import assess_pose_geometry
 
+            candidate_pose = None
+            candidate_provenance: Dict[str, Any] = {}
+            if reference_pose is not None and redocking_rmsd_threshold is not None:
+                try:
+                    candidate_pose, candidate_provenance = self.recover_vina_candidate_pose(
+                        output_pdbqt,
+                        pose_index=results[0].pose_index,
+                    )
+                except (AttributeError, IndexError, OSError, TypeError, ValueError, RuntimeError):
+                    candidate_provenance = {
+                        "status": "unavailable",
+                        "reason_code": "candidate_pose_unavailable",
+                    }
+            output_digest = output_size = None
+            if reference_pose is not None:
+                try:
+                    output_digest, output_size = self._sha256_file(output_pdbqt)
+                except (OSError, TypeError, ValueError):
+                    output_digest, output_size = None, None
+
             pose_geometry = assess_pose_geometry(
                 results,
                 center=(config.center_x, config.center_y, config.center_z),
                 size=(config.size_x, config.size_y, config.size_z),
                 expected_heavy_atom_count=heavy_atom_count or None,
                 box_source=box_provenance.get("source"),
+                reference_pose=assessment_reference_pose,
+                candidate_pose=candidate_pose,
+                redocking_rmsd_threshold=redocking_rmsd_threshold,
             )
+            if reference_pose is not None:
+                pose_geometry["redocking_rmsd_provenance"] = {
+                    "reference": reference_provenance,
+                    "candidate": candidate_provenance or None,
+                    "output_sha256": output_digest,
+                    "output_size_bytes": output_size,
+                }
+            manifest_quality_updates: Dict[str, Any] = {
+                "scientific_quality": pose_geometry,
+            }
+            if reference_pose is not None:
+                manifest_quality_updates["output"] = {
+                    "path": "result.pdbqt",
+                    "sha256": output_digest,
+                    "size_bytes": output_size,
+                    "selected_model_index": results[0].pose_index,
+                    "candidate_recovery": candidate_provenance or None,
+                }
+            quality_persisted = self._update_run_manifest(job_dir, **manifest_quality_updates)
+            if not quality_persisted:
+                pose_geometry["status"] = "failed"
+                pose_geometry["failures"].append("scientific_quality_persistence_failed")
             if pose_geometry["status"] != "passed":
                 self._update_run_manifest(
                     job_dir,
@@ -1778,6 +1977,7 @@ class MolecularDockingService:
                     "scientific_pose_geometry_failed",
                     "Docking pose geometry did not satisfy the recorded input and box evidence.",
                     **cleanup_control,
+                    scientific_quality=pose_geometry,
                 )
             formatted_results = [
                 {
