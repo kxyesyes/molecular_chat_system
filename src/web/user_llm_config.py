@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+import re
 from pathlib import Path
 import stat
 from urllib.parse import urlsplit, urlunsplit
+from uuid import uuid4
 
 from src.task_runtime.secure_io import read_file_snapshot
 from src.task_runtime.trusted_files import (
@@ -18,6 +21,8 @@ from .llm_runtime_config import (
 from .security.url_policy import validate_llm_url
 
 _ERROR = "本机模型配置不可用；请检查用户配置目录权限或文件格式。"
+_GENERATION_VERSION = 1
+_GENERATION_LIMIT = 4096
 _DEFAULTS = {
     "openai_compatible": ("https://api.deepseek.com/chat/completions", "deepseek-v4-pro"),
     "custom": ("https://api.deepseek.com/chat/completions", "deepseek-v4-pro"),
@@ -56,6 +61,66 @@ def user_llm_config_path() -> Path:
     else:
         root = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "medchat"
     return _safe_path(root / "llm.env")
+
+
+def _generation_path(path: Path) -> Path:
+    """Return the private sidecar used to share an opaque config revision."""
+    return _safe_path(path.with_name(path.name + ".generation"))
+
+
+def _write_generation(path: Path, content: bytes, *, generation: str | None = None) -> str:
+    sidecar = _generation_path(path)
+    _check_boundary(sidecar)
+    value = generation or uuid4().hex
+    payload = json.dumps({
+        "version": _GENERATION_VERSION,
+        "generation": value,
+        "content_digest": hashlib.sha256(content).hexdigest(),
+    }, sort_keys=True, separators=(",", ":")) + "\n"
+    _atomic_replace_text(sidecar, payload, private=True)
+    return value
+
+
+def user_llm_generation(path: Path | str) -> str:
+    """Read or atomically repair the cross-process opaque config revision.
+
+    The sidecar never contains a credential or a credential-derived value in
+    the Agent state. Its digest is only a private-boundary change detector;
+    the value persisted into a continuation is the random generation token.
+    """
+    return load_user_llm_runtime_state(path)[1]
+
+
+def _user_llm_generation_locked(target: Path, content: bytes | None) -> str:
+    content = content if content is not None else b""
+    sidecar = _generation_path(target)
+    _check_boundary(sidecar)
+    try:
+        sidecar.lstat()
+    except FileNotFoundError:
+        return _write_generation(target, content)
+    raw = read_file_snapshot(sidecar, maximum_bytes=_GENERATION_LIMIT).content
+    try:
+        record = json.loads(raw.decode("utf-8"))
+        if type(record) is not dict or set(record) != {'version', 'generation', 'content_digest'}:
+            raise ValueError(_ERROR)
+        generation = record.get("generation")
+        valid = (
+            type(record.get("version")) is int
+            and record['version'] == _GENERATION_VERSION
+            and type(generation) is str
+            and bool(re.fullmatch(r"[a-f0-9]{32}", generation))
+            and type(record['content_digest']) is str
+            and bool(re.fullmatch(r'[a-f0-9]{64}', record['content_digest']))
+        )
+    except (ValueError, TypeError, UnicodeError):
+        raise ValueError(_ERROR) from None
+    if not valid:
+        raise ValueError(_ERROR)
+    if record['content_digest'] != hashlib.sha256(content).hexdigest():
+        generation = _write_generation(target, content)
+    _check_boundary(sidecar)
+    return generation
 
 
 def _private_windows_acl(acl: bytes, trusted: frozenset | set, *, sid_decoder=None) -> bool:
@@ -109,8 +174,8 @@ def _read(path: Path) -> bytes | None:
 
 def user_llm_signature(path: Path | str) -> str | None:
     try:
-        content = _read(Path(path))
-        return hashlib.sha256(content).hexdigest() if content is not None else None
+        # Observe publications as well as bytes, including same-config saves.
+        return load_user_llm_runtime_state(path)[1]
     except (OSError, ValueError, RuntimeError):
         raise ValueError(_ERROR) from None
 
@@ -164,9 +229,12 @@ def resolve_user_llm_request(raw: dict, current: dict, *, clear_api_key: bool = 
         raise ValueError(_ERROR) from None
 
 
-def load_user_llm_config(path: Path | str) -> dict:
+def _load_user_llm_config_unlocked(path: Path | str) -> dict:
+    return _parse_user_llm_config(_read(Path(path)))
+
+
+def _parse_user_llm_config(content: bytes | None) -> dict:
     try:
-        content = _read(Path(path))
         if content is None:
             return default_user_llm_config()
         values = {}
@@ -192,13 +260,30 @@ def load_user_llm_config(path: Path | str) -> dict:
         raise ValueError(_ERROR) from None
 
 
+def load_user_llm_config(path: Path | str) -> dict:
+    path = _safe_path(Path(path))
+    _check_boundary(path, create=True)
+    with _exclusive_file_lock(path):
+        return _load_user_llm_config_unlocked(path)
+
+
+def load_user_llm_runtime_state(path: Path | str) -> tuple[dict, str]:
+    """Read config and its opaque revision under one cross-process lock."""
+    path = _safe_path(Path(path))
+    _check_boundary(path, create=True)
+    with _exclusive_file_lock(path):
+        content = _read(path)
+        config = _parse_user_llm_config(content)
+        return config, _user_llm_generation_locked(path, content)
+
+
 def save_user_llm_config(path: Path | str, raw: dict, *, clear_api_key: bool = False) -> tuple[dict, str]:
     """Read/modify/write under the existing cross-process lock, with atomic replace."""
     try:
         path = _safe_path(path)
         _check_boundary(path, create=True)
         with _exclusive_file_lock(path):
-            current = load_user_llm_config(path)
+            current = _load_user_llm_config_unlocked(path)
             config = resolve_user_llm_request(raw, current, clear_api_key=clear_api_key)
             fields = PROVIDER_ENV_FIELDS[config["provider"]]
             values = {"MEDCHAT_LLM_PROVIDER": config["provider"], "MEDCHAT_LLM_STREAM": "true" if config["stream"] else "false"}
@@ -208,6 +293,7 @@ def save_user_llm_config(path: Path | str, raw: dict, *, clear_api_key: bool = F
                 raise ValueError(_ERROR)
             _check_boundary(path)
             _atomic_replace_text(path, content, private=True)
-            return config, hashlib.sha256(content.encode("utf-8")).hexdigest()
+            revision = _write_generation(path, content.encode("utf-8"))
+            return config, revision
     except (OSError, ValueError, RuntimeError, TypeError):
         raise ValueError(_ERROR) from None

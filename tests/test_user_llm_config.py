@@ -234,3 +234,55 @@ def test_invalid_serialized_values_preserve_saved_config(store, tmp_path, field,
         store.save_user_llm_config(path, dict(saved, **{field: value}))
     assert path.read_bytes() == before
     assert store.load_user_llm_config(path) == saved
+
+
+def test_generation_does_not_repair_an_untrusted_sidecar(store, path, monkeypatch):
+    store.save_user_llm_config(path, store.default_user_llm_config())
+    sidecar = path.with_name(path.name + '.generation')
+    before = sidecar.read_bytes()
+    check = store._check_boundary
+
+    def refuse(target, **kwargs):
+        if target == sidecar:
+            raise ValueError('untrusted synthetic sidecar')
+        return check(target, **kwargs)
+
+    monkeypatch.setattr(store, '_check_boundary', refuse)
+    with pytest.raises(ValueError):
+        store.user_llm_generation(path)
+    assert sidecar.read_bytes() == before
+
+
+@pytest.mark.parametrize('contents', ['[]', '{"version":true}', 'null'])
+def test_malformed_generation_is_a_sanitized_failure(store, path, contents):
+    store.save_user_llm_config(path, store.default_user_llm_config())
+    sidecar = path.with_name(path.name + '.generation')
+    sidecar.write_text(contents, encoding='utf-8')
+    with pytest.raises(ValueError, match='本机模型配置不可用'):
+        store.user_llm_generation(path)
+    assert sidecar.read_text(encoding='utf-8') == contents
+
+
+def test_runtime_state_reads_one_config_snapshot(store, path, monkeypatch):
+    store.save_user_llm_config(path, store.default_user_llm_config())
+    read = store.read_file_snapshot
+    reads = []
+
+    def observe(target, **kwargs):
+        reads.append(Path(target))
+        return read(target, **kwargs)
+
+    monkeypatch.setattr(store, 'read_file_snapshot', observe)
+    monkeypatch.setattr(Path, 'read_bytes', lambda *_: pytest.fail('unbounded config read'))
+    config, generation = store.load_user_llm_runtime_state(path)
+    assert config == store.default_user_llm_config()
+    assert len(generation) == 32
+    assert reads.count(path) == 1
+
+
+def test_same_config_republication_changes_watcher_revision(store, path):
+    config = store.default_user_llm_config()
+    store.save_user_llm_config(path, config)
+    before = store.user_llm_signature(path)
+    store.save_user_llm_config(path, config)
+    assert store.user_llm_signature(path) != before

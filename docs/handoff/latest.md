@@ -33,6 +33,13 @@
   恢复指针，服务端状态仍是唯一权威来源。
 - 本轮提交 `0d77f70` 收紧恢复控制边界：非法 `trace_id`/`continuation_id` 在访问持久化层前即拒绝，
   状态存储不可用时统一 fail-closed 为 `continuation_unavailable`，不泄露存储异常或错误重放任务。
+- 本分支新增真实独立 Python 进程恢复证据：两个独立 worker 进程可用同一持久化 A1 waiting
+  continuation 续接，已缓存工具结果不重复执行，跨进程竞争时只有一个进程完成 owner-scoped CAS；
+  运行时模型替换仍产生新的进程内 epoch，防止 live replacement 接收旧请求。用户配置边界新增
+  私有 `.generation` sidecar：只把随机 opaque token 写入 continuation，配置文件摘要只留在受保护
+  配置边界内用于变更检测；凭据轮换会使旧 continuation fail-closed。配置与 generation 在同一
+  跨进程锁内读取，避免启动时混合快照。该证据使用真实 SQLite、ASGI/WebSocket 路由和 RDKit，
+  但使用协议夹具，不代表目标服务器 HTTPS/WSS 或真实模型验收。
 - 后续提交 `33b1d96` 和 `108ee57` 已补齐本轮剩余代码缺口：单/批量对接输入互斥、Vina
   旧产物清除、药效团空结果 fail-closed、训练并发上限、WSS CSP、RG-MPNN 日志解析安全性，
   以及 docking 姿态几何/盒子证据门禁。真实 Vina 样例以 3 个不同 seed 完成，均生成 10 个
@@ -50,8 +57,9 @@
    完成 Agent acceptance，但 Web 入口、反向代理和生产配置下的输入、结果、来源和失败状态一致性
    仍需在目标服务器验证；CI 只证明离线工程契约。
 2. 运行中的任务刷新恢复和断线续接：等待用户输入的 `a1_closed` continuation 已支持服务端
-   持久化和同 session 续接；仍需在目标部署环境验证多进程/重启/反向代理下的恢复，以及为
-   `semantic_v1` 建立经过审计的 intent journal 后再开放跨 socket 续接。
+   持久化和同 session 续接，并已有独立进程/SQLite/CAS 回归；仍需在目标部署环境验证真正的
+   多 worker、服务重启、反向代理和 HTTPS/WSS，以及为 `semantic_v1` 建立经过审计的 intent
+   journal 后再开放跨 socket 续接。
 3. 部署环境验收：HTTPS/WSS、真实模型客户端、资源目录、任务取消与清理需要在目标服务器验证。
 4. 对接科学增强已完成基础门禁：Vina 输出坐标、pose 质心、重原子数量、盒子来源、预处理状态和
    产物证据会进入结构化结果；相互作用几何和重对接 RMSD 仍需提供目标服务器的拓扑分析器、

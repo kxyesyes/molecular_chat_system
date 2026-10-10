@@ -20,8 +20,10 @@ from .llm_runtime_config import (
     public_llm_config,
 )
 from .user_llm_config import (
-    load_user_llm_config, save_user_llm_config, user_llm_config_path,
-    user_llm_signature, resolve_user_llm_request, default_user_llm_config,
+    load_user_llm_config, load_user_llm_runtime_state, save_user_llm_config,
+    user_llm_config_path, user_llm_signature,
+    resolve_user_llm_request,
+    default_user_llm_config,
 )
 from .models import generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
@@ -238,7 +240,10 @@ class MolecularChatApp:
         self._register_assembly_owner(self.model)
         if ordinary_chat_policy == 'semantic_v1':
             self._validate_ordinary_adapter(self.active_llm_config, self.model)
-        self.model_generation = uuid4().hex
+        self.model_generation = (self._loaded_llm_generation
+                                if hasattr(self, '_loaded_llm_generation') else uuid4().hex)
+        if hasattr(self, '_loaded_llm_generation'):
+            self._llm_env_signature = self._loaded_llm_generation
         self._llm_watch_task = None
         logger.info(
             "Active LLM provider: %s / %s",
@@ -466,7 +471,9 @@ class MolecularChatApp:
         )
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
-        return load_user_llm_config(self.runtime_llm_env_path)
+        config, generation = load_user_llm_runtime_state(self.runtime_llm_env_path)
+        self._loaded_llm_generation = generation
+        return config
 
     def _llm_env_file_signature(self) -> str | None:
         return user_llm_signature(self.runtime_llm_env_path)
@@ -482,7 +489,9 @@ class MolecularChatApp:
                 if signature == self._llm_env_signature:
                     return False
                 config = self._load_active_llm_config()
-                await self._replace_llm_config(config)
+                await self._replace_llm_config(
+                    config, persisted_generation=self._loaded_llm_generation
+                )
                 self._llm_env_signature = signature
                 return True
         except (OSError, ValueError, RuntimeError):
@@ -501,7 +510,7 @@ class MolecularChatApp:
                     )
                 except (OSError, ValueError, RuntimeError):
                     raise HTTPException(status_code=503, detail="模型配置未保存；请检查输入、配置文件与目录权限。") from None
-                await self._apply_and_close_llm(config)
+                await self._apply_and_close_llm(config, persisted_generation=signature)
                 self._llm_env_signature = signature
                 return config
 
@@ -552,21 +561,25 @@ class MolecularChatApp:
             decision_transport=decision_transport,
         )
 
-    async def _replace_llm_config(self, config):
+    async def _replace_llm_config(self, config, *, persisted_generation=None):
         gate = getattr(self, 'model_request_gate', None)
         if gate is None:
             return self._apply_llm_config(config)
         async with gate.exclusive():
             if gate.closed:
                 raise RuntimeError('Model service is shutting down')
-            return await self._apply_and_close_llm(config)
+            return await self._apply_and_close_llm(
+                config, persisted_generation=persisted_generation
+            )
 
-    async def _apply_and_close_llm(self, config):
+    async def _apply_and_close_llm(self, config, *, persisted_generation=None):
         old_model = getattr(self, 'model', None)
         config = normalize_llm_config(config)
         model = self._create_model_from_llm_config(config)
         try:
-            result = self._publish_llm_config(config, model)
+            result = self._publish_llm_config(
+                config, model, persisted_generation=persisted_generation
+            )
         except BaseException:
             if model is not old_model:
                 await finish_on_cancel(close_owned_model(model))
@@ -575,14 +588,30 @@ class MolecularChatApp:
             await finish_on_cancel(close_owned_model(old_model))
         return result
 
-    def _apply_llm_config(self, llm_config: Dict[str, Any]) -> Dict[str, Any]:
+    def _apply_llm_config(
+        self, llm_config: Dict[str, Any], *, persisted_generation=None
+    ) -> Dict[str, Any]:
         config = normalize_llm_config(llm_config)
-        return self._publish_llm_config(config, self._create_model_from_llm_config(config))
+        return self._publish_llm_config(
+            config,
+            self._create_model_from_llm_config(config),
+            persisted_generation=persisted_generation,
+        )
 
-    def _publish_llm_config(self, config, model):
+    def _publish_llm_config(self, config, model, *, persisted_generation=None):
         # The async caller already owns the writer. Validate all semantic values
         # and epochs BEFORE binding any consumers; never acquire a nested writer.
-        generation = uuid4().hex
+        # Only callers that completed a locked persistent operation may publish
+        # its revision. A direct process-local replacement (including identical
+        # config) must always get a fresh epoch and revoke old continuations.
+        generation = persisted_generation or uuid4().hex
+        if persisted_generation is not None:
+            path = getattr(self, 'runtime_llm_env_path', None)
+            if path is None:
+                raise RuntimeError('Persisted model revision has no config path')
+            persisted, revision = load_user_llm_runtime_state(path)
+            if persisted != config or revision != persisted_generation:
+                raise RuntimeError('Persisted model revision changed before publication')
         capability_generation = getattr(self, 'capability_generation', None)
         base = getattr(self, 'ordinary_capability_base', None)
         if getattr(self, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1':

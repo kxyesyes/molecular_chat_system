@@ -1441,8 +1441,15 @@ def test_common_model_publisher_is_coherent_at_consumer_boundary(
                 config = dict(old_config, api_key='synthetic-rotation-only', stream=not old_stream)
                 if credential_only:
                     config['stream'] = old_stream
+                synthetic_signature = 'a' * 32
                 monkeypatch.setattr(app_module, 'save_user_llm_config',
-                                    lambda *args, **kwargs: (config, 'synthetic-signature'))
+                                    lambda *args, **kwargs: (config, synthetic_signature))
+                if writer == 'persist':
+                    monkeypatch.setattr(
+                        app_module,
+                        'load_user_llm_runtime_state',
+                        lambda *args, **kwargs: (dict(config), synthetic_signature),
+                    )
                 original_set = b.app.agent_system.set_llm
                 def set_llm(model):
                     if model is replacement:
@@ -1704,6 +1711,24 @@ def test_ws_switch_waits_for_captured_model_and_uses_new_epoch_next_turn(actual_
                     assert len(closed) == 1 and b.app.model_generation != old_epoch
                     assert result_of(await socket.turn({'message': '你好'}))['final_answer'] == 'new epoch'
                     assert len(new_calls) == 1
+    asyncio.run(run())
+
+
+def test_repeated_unsaved_identical_replacements_never_restore_persisted_epoch(actual_app):
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            persisted_epoch = b.app.model_generation
+            config = dict(b.app.active_llm_config)
+
+            await b.app._replace_llm_config(config)
+            first_local_epoch = b.app.model_generation
+            await b.app._replace_llm_config(config)
+            second_local_epoch = b.app.model_generation
+
+            assert first_local_epoch != persisted_epoch
+            assert second_local_epoch != first_local_epoch
+            assert second_local_epoch != persisted_epoch
+
     asyncio.run(run())
 
 
