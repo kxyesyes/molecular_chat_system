@@ -262,7 +262,7 @@ def _parse_user_llm_config(content: bytes | None) -> dict:
 
 def load_user_llm_config(path: Path | str) -> dict:
     path = _safe_path(Path(path))
-    _check_boundary(path, create=True)
+    _check_boundary(path)
     with _exclusive_file_lock(path):
         return _load_user_llm_config_unlocked(path)
 
@@ -292,8 +292,13 @@ def save_user_llm_config(path: Path | str, raw: dict, *, clear_api_key: bool = F
             if len(content.encode("utf-8")) > 65536:
                 raise ValueError(_ERROR)
             _check_boundary(path)
-            _atomic_replace_text(path, content, private=True)
+            # Publish the revision first: a failed sidecar write must never
+            # leave rejected settings in the authoritative config. Readers use
+            # this same lock. If config replacement fails or the process exits
+            # between writes, the digest mismatch rotates the revision on the
+            # next runtime read (fail closed), keeping the old config intact.
             revision = _write_generation(path, content.encode("utf-8"))
+            _atomic_replace_text(path, content, private=True)
             return config, revision
     except (OSError, ValueError, RuntimeError, TypeError):
         raise ValueError(_ERROR) from None
