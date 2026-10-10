@@ -151,6 +151,66 @@ def test_two_clarifications_preserve_total_and_paused_credit(actual_app, monkeyp
     asyncio.run(run())
 
 
+def test_waiting_continuation_survives_web_runtime_restart(actual_app):
+    """A persisted waiting turn must not depend on the original socket/runtime."""
+    from src.web.decision_runtime import WebDecisionRuntime
+
+    async def run():
+        count = 0
+
+        async def respond(payload):
+            nonlocal count
+            count += 1
+            if count == 1:
+                return intent_http_response()
+            if count == 2:
+                return clarify()
+            return chat_decision('分子生成是探索分子结构的过程。')
+
+        async with actual_app(mode='decision_a2', ordinary_policy='semantic_v1', respond=respond) as b:
+            cookie = await cookie_for(b.app)
+            async with ActualSocket(b.app, cookie) as first_socket:
+                await first_socket.ready()
+                first = result_of(await first_socket.turn({'message': CAPABILITY_CASES[0][1]}))
+                assert first['status'] == 'waiting_for_input', first.get('metadata')
+
+            old_runtime = b.app.decision_runtime
+            await old_runtime.shutdown()
+            restarted = WebDecisionRuntime(b.app, wire_mode='native')
+            b.app.decision_runtime = restarted
+            b.app.chat_handler.decision_runtime = restarted
+            record = b.app.agent_state_store.get_run(first['trace_id'])
+            original_projection = record['metadata']['web_decision_recovery']
+            tampered = json.loads(json.dumps(original_projection))
+            tampered['turn_id'] = '0' * 32
+            b.app.agent_state_store.update_run_metadata(first['trace_id'], {
+                'web_decision_recovery': tampered,
+            })
+            with pytest.raises(ValueError):
+                restarted._restore_waiting(first['trace_id'], record['session_id'])
+            b.app.agent_state_store.update_run_metadata(first['trace_id'], {
+                'web_decision_recovery': original_projection,
+            })
+            restored = restarted._restore_waiting(first['trace_id'], record['session_id'])
+            assert restored.continuation_id == first['metadata']['continuation_id']
+
+            async with ActualSocket(b.app, cookie) as second_socket:
+                await second_socket.ready()
+                await second_socket.send({
+                    'type': 'reconnect', 'trace_id': first['trace_id'], 'after_sequence': 0,
+                })
+                assert await second_socket.receive() == {
+                    'type': 'reconnected', 'trace_id': first['trace_id'],
+                    'turn_id': first['turn_id'], 'status': 'waiting_for_input',
+                }
+                resumed = result_of(await second_socket.turn(resume(first)))
+                assert resumed['status'] == 'completed'
+                assert resumed['final_answer'] == '分子生成是探索分子结构的过程。'
+                assert len(b.claims) == 1
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('phase', ['projection', 'complete'])
 def test_slow_projection_and_complete_never_refund_credit(actual_app, monkeypatch, logical_clock, phase):
     from starlette.websockets import WebSocket

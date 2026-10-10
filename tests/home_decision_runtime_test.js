@@ -355,6 +355,21 @@ async function run() {
     h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
     assert.equal(newer.sent.at(-1).type, "resume");
   });
+  await test("a refreshed page restores a waiting continuation nonce", () => {
+    const stored = JSON.stringify({turnId: turn, traceId: trace, continuationId: nonce});
+    const h = loadHome({storedRecovery: stored});
+    h.ready("decision_a2");
+    assert(h.sockets[0].sent.some(f => f.type === "reconnect" && f.trace_id === trace));
+    h.sockets[0].emit({type: "reconnected", trace_id: trace, turn_id: turn,
+      status: "waiting_for_input"});
+    assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
+    h.input.value = "解释分子生成的概念";
+    h.button("继续").click();
+    assert.deepEqual(h.sockets[0].sent.at(-1), {
+      type: "resume", trace_id: trace, continuation_id: nonce,
+      message: "解释分子生成的概念",
+    });
+  });
   await test("disconnect preserves an active turn and accepts replayed terminal frames", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
@@ -412,7 +427,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-reconnect-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-durable-reconnect-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

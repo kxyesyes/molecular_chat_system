@@ -79,7 +79,8 @@ class ChatHandler:
                                        request_kind, allowed_tools, required_tools,
                                        requirements=None, continuation_id=None, clarified_query=None,
                                        worker_owner=None, cancel_event=None,
-                                       admission_carry=None, admission_exchange=None):
+                                       admission_carry=None, admission_exchange=None,
+                                       before_result=None):
         """Server-only opt-in bridge; never dispatch browser kwargs into this API."""
         from .decision_chat import process_decision_message
         if (self.decision_runtime is not None and self.decision_runtime.semantic
@@ -92,6 +93,7 @@ class ChatHandler:
             requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
             worker_owner=worker_owner,
             cancel_event=cancel_event,
+            before_result=before_result,
             **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
                if admission_carry is not None else {}),
         )

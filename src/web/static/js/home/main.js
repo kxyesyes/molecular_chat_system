@@ -45,7 +45,8 @@
     if (saved) {
       const parsed = JSON.parse(saved);
       if (parsed && /^[a-f0-9]{32}$/.test(parsed.traceId || "") &&
-        /^[a-f0-9]{32}$/.test(parsed.turnId || "")) decisionRecovery = parsed;
+        /^[a-f0-9]{32}$/.test(parsed.turnId || "") &&
+        (!parsed.continuationId || /^[a-f0-9]{32}$/.test(parsed.continuationId))) decisionRecovery = parsed;
     }
   } catch (_) { decisionRecovery = null; }
   const scientificReferences = window.HomeScientificReferences?.createController({
@@ -178,6 +179,9 @@
       decisionTurn = {socket: ws, phase: "active", turnId: decisionRecovery.turnId,
         traceId: decisionRecovery.traceId, resume: null, cancelSent: false, result: null,
         disconnected: true};
+      if (/^[a-f0-9]{32}$/.test(decisionRecovery.continuationId || "")) {
+        decisionWaiting = {traceId: decisionRecovery.traceId, nonce: decisionRecovery.continuationId};
+      }
       decisionStatus(decisionTurn, "正在恢复任务状态。");
     }
     if (decisionMode && !decisionControls && elements.input?.parentNode) {
@@ -262,6 +266,13 @@
           !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status))) return true;
       turn.socket = socket;
       turn.disconnected = false;
+      if (message.status === "waiting_for_input" &&
+        /^[a-f0-9]{32}$/.test(decisionRecovery?.continuationId || "")) {
+        decisionWaiting = {traceId: message.trace_id, nonce: decisionRecovery.continuationId};
+        turn.phase = "ended";
+      } else if (message.status !== "waiting_for_input") {
+        decisionWaiting = null;
+      }
       if (turn.phase !== "ended" && turn.box) decisionStatus(turn, "连接已恢复，正在接收任务状态。");
       updateDecisionControls();
       return true;
@@ -357,9 +368,11 @@
         try {
           tabStorage?.setItem(decisionRecoveryKey, JSON.stringify({
             turnId: turn.turnId, traceId: turn.traceId,
+            ...(status === "waiting_for_input" ? {continuationId: metadata.continuation_id} : {}),
           }));
         } catch (_) { /* best effort */ }
-        decisionRecovery = {turnId: turn.turnId, traceId: turn.traceId};
+        decisionRecovery = {turnId: turn.turnId, traceId: turn.traceId,
+          ...(status === "waiting_for_input" ? {continuationId: metadata.continuation_id} : {})};
       } else {
         try { tabStorage?.removeItem(decisionRecoveryKey); } catch (_) { /* best effort */ }
         decisionRecovery = null;

@@ -281,7 +281,8 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
                                    request_kind, allowed_tools, required_tools,
                                    requirements=None, continuation_id=None, clarified_query=None,
                                    worker_owner=None, cancel_event=None,
-                                   admission_carry=None, admission_exchange=None):
+                                   admission_carry=None, admission_exchange=None,
+                                   before_result=None):
     """Server binds identity/permissions; scientific text comes only from harness.
 
     Disconnect/send timeout propagates to the caller after cancellation settles.
@@ -365,6 +366,12 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
         finally:
             if watcher is not None:
                 await _settle(watcher)
+
+    if before_result is not None:
+        try:
+            result = await before_result(result)
+        except Exception:
+            result = _failure(context, 'decision_recovery_persistence_failed')
 
     try:
         frames = _result_frame(handler, result, display_changed)

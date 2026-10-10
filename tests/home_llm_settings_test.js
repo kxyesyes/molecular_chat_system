@@ -231,5 +231,5 @@ test("settings markup omits verbose persistence and API-key instructions", () =>
 });
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
-  assert.ok(html.includes('<script src="/static/js/home/main.js?v=20261009-terminal-state-v1"></script>'));
+  assert.ok(html.includes('<script src="/static/js/home/main.js?v=20261009-durable-reconnect-v1"></script>'));
 });
