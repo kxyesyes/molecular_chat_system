@@ -4,8 +4,9 @@
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
-- `origin/main` 当前为 `5983b71`（PR #179，修正本交接记录，已通过质量门禁并 squash 合并）；
-  PR #178 的交接记录更新和 PR #177 的真实 PDE/BuChE 活性验收证据门禁已进入其基线，
+- 本轮核验快照中，PR #180 合并前的 `origin/main` 为 `5983b71`；PR #180 已通过
+  9/9 质量检查并 squash 合并为 `fceb203`。PR #179、PR #178 的交接记录更新和 PR #177
+  的真实 PDE/BuChE 活性验收证据门禁均已通过 PR 进入 `main`，
   本次验收改动均通过 PR 进入 `main`，没有直接修改 `main`。
 - Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`；对接适配器现在保留
   `succeeded`、`unavailable`、`timeout`、`cancelled`、`invalid_input`、`not_calculated` 等统一状态，
