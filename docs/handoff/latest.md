@@ -996,3 +996,8 @@ Node 合同测试：3/3 passed
 HTTPS/WSS、反向代理/多 worker 重启、真实参考 pose 重对接，以及根注册表激活 PDE/BuChE 仍按
 `unavailable`/`partial` 记录；没有用模拟分数或模拟几何替代这些证据。全仓 `pytest tests -q`
 尚未作为本轮证据声明，因为用户启动的模型搜索进程仍在运行并持续占用训练资源。
+
+后续提交 `f8a9f1a2` 仅稳定 Windows docking 进程树回归夹具：增加真实子进程就绪标记，
+再触发受控超时，保留进程树终止、输出、PID 和 marker 不存活断言；未改变生产进程管理代码。
+该配置模块复核为 `10 passed, 1 skipped`，第二组目标搜索/对接/日志转换复核为
+`181 passed, 7 skipped`。
