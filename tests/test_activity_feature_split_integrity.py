@@ -136,3 +136,49 @@ def test_feature_guard_allows_within_split_scaffolds_and_disjoint_splits():
 def test_missing_or_invalid_feature_identity_fails_closed(smiles):
     with pytest.raises(ValueError, match="identity is unavailable"):
         prepared_training._claim_feature_identity(SimpleNamespace(feature_smiles=smiles), "train", {})
+
+
+def test_random_molecule_split_is_a_declared_auxiliary_algorithm(tmp_path):
+    validated, declaration = _synthetic_validation((
+        "c1ccncc1", "c1ccccc1", "C1CCCCC1", "c1ccoc1",
+    ))
+    split = dc._split_prepared_dataset(
+        validated.accepted, seed=17, ratios=(.5, .25, .25),
+        algorithm=dc._RANDOM_SPLIT_ALGORITHM,
+    )
+    assert split.provenance["algorithm"] == dc._RANDOM_SPLIT_ALGORITHM
+    assert sum(map(len, split.frames.values())) == len(validated.accepted)
+    canonical = [set(frame.canonical_smiles) for frame in split.frames.values()]
+    assert all(not left & right for i, left in enumerate(canonical) for right in canonical[i + 1:])
+    path = dc.write_prepared_dataset(validated, split, declaration, tmp_path / "random")
+    loaded = load_prepared_training_data(path)
+    assert loaded.manifest["split"]["algorithm"] == dc._RANDOM_SPLIT_ALGORITHM
+
+
+def test_random_training_guard_can_allow_scaffold_interpolation_only_explicitly():
+    owners = {}
+    prepared_training._claim_feature_identity(
+        SimpleNamespace(feature_smiles="Cc1ccncc1"), "train", owners)
+    prepared_training._claim_feature_identity(
+        SimpleNamespace(feature_smiles="CCc1ccncc1"), "test", owners,
+        allow_scaffold_overlap=True,
+    )
+
+
+def test_random_split_groups_stereo_variants_for_actual_model_identity():
+    validated, _ = _synthetic_validation((
+        "C[C@H](O)C(=O)O", "C[C@@H](O)C(=O)O",
+        "c1ccccc1", "C1CCCCC1",
+    ))
+    split = dc._split_prepared_dataset(
+        validated.accepted, seed=17, ratios=(.34, .33, .33),
+        algorithm=dc._RANDOM_SPLIT_ALGORITHM,
+    )
+    engine = predictor.ActivityPredictor()
+    owners = {}
+    for split_name, frame in split.frames.items():
+        for smiles in frame["canonical_smiles"]:
+            atoms, _ = engine.process_smiles(smiles)
+            prepared_training._claim_feature_identity(
+                atoms, split_name, owners, allow_scaffold_overlap=True,
+            )

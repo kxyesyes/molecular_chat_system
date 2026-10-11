@@ -28,6 +28,7 @@ OPTIONS = dict(epochs=50, patience=12, batch_size=32, lr=.001, num_layers=5,
 FAMILIES = ("pde-family", "buche-family")
 TASKS = ("classification", "regression")
 _RUN_LOCK = threading.Lock()
+_ACTIVE_CHECKPOINT_DIR = None
 _METRICS = ("roc_auc", "pr_auc", "balanced_accuracy", "rmse", "mae", "r2",
             "val_loss", "train_loss")
 
@@ -123,7 +124,17 @@ def train_job(manifest, job_id, progress):
     from src.activity.prepared_training import run_prepared_training
     owner = SimpleNamespace(has_torch=True, device=torch.device("cuda"),
                             job_id=job_id, status={}, _update_progress=progress)
-    run_prepared_training(owner, manifest, **OPTIONS)
+    options = dict(OPTIONS)
+    validation_only = options.pop("evaluation_mode", None) == "validation_only"
+    if validation_only:
+        if _ACTIVE_CHECKPOINT_DIR is None:
+            raise RuntimeError("Validation-only checkpoint directory is unavailable")
+        options.update(
+            evaluate_test=False,
+            publish=False,
+            checkpoint_path=Path(_ACTIVE_CHECKPOINT_DIR) / f"{job_id}.pt",
+        )
+    run_prepared_training(owner, manifest, **options)
     return owner.status
 
 
@@ -185,6 +196,7 @@ def _execute(root, models, run_id, report, report_path, events, *, package_versi
     from src.activity.model_card import build_model_card, write_model_card
     from src.activity.model_registry import validate_endpoint_metadata
     report["device"] = dict(name=torch.cuda.get_device_name(0), torch=torch.__version__)
+    validation_only = OPTIONS.get("evaluation_mode") == "validation_only"
 
     def emit(event, **fields):
         print(json.dumps(dict(event=event, **fields), ensure_ascii=False, allow_nan=False),
@@ -221,6 +233,26 @@ def _execute(root, models, run_id, report, report_path, events, *, package_versi
             try:
                 manifest = path.parent / descriptor["datasets"][task]["path"]
                 status = train_job(manifest, f"{run_id}-{family}-{task}", progress)
+                if validation_only:
+                    checkpoint_path = status.get("checkpoint_path")
+                    if (status.get("state") != "completed"
+                            or not isinstance(checkpoint_path, str)
+                            or not isinstance(status.get("checkpoint_sha256"), str)):
+                        raise RuntimeError("Validation trainer returned no checkpoint")
+                    checkpoint_name = Path(checkpoint_path).name
+                    job.update(
+                        phase="validation",
+                        best_epoch=_epoch(status["best_epoch"]),
+                        epochs_completed=_epoch(status["epochs_completed"]),
+                        validation_metrics=_safe_metrics(status["best_metrics"]),
+                        checkpoint_file=f"checkpoints/{checkpoint_name}",
+                        checkpoint_sha256=status["checkpoint_sha256"],
+                        model_config=status.get("model_config"),
+                        training_code=status.get("training_code"),
+                        prepared_dataset_sha256=status.get("prepared_dataset_sha256"),
+                    )
+                    job.update(status="completed", phase="validation_complete")
+                    continue
                 model_id = status.get("model_id")
                 if (status.get("state") != "completed" or not isinstance(model_id, str)
                         or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}", model_id)):
@@ -250,7 +282,7 @@ def _execute(root, models, run_id, report, report_path, events, *, package_versi
                 emit("job_finished", **job)
                 torch.cuda.empty_cache()
 
-        if len(family_jobs) == 2:
+        if not validation_only and len(family_jobs) == 2:
             try:
                 # Main's registry revalidates weights/cards, shared data/splits,
                 # thresholds and model-group identity. Never trust status alone.
@@ -313,6 +345,9 @@ def _run(run_id, *, root, package_version):
                     "Joint held-out consistency unavailable: individual predictions are not retained; test is not rerun."])
     started = time.monotonic()
     events = sys.stdout
+    global _ACTIVE_CHECKPOINT_DIR
+    previous_checkpoint_dir = _ACTIVE_CHECKPOINT_DIR
+    _ACTIVE_CHECKPOINT_DIR = output / "checkpoints"
     try:
         write_report(report_path, report)
         with _process_overrides(models):
@@ -331,6 +366,7 @@ def _run(run_id, *, root, package_version):
     except Exception as exc:
         report.update(status=_failed_status(report), error_type=_error_type(exc))
     finally:
+        _ACTIVE_CHECKPOINT_DIR = previous_checkpoint_dir
         for job in report["jobs"]:
             if job["status"] == "running":
                 job.update(status="failed", error_type=report.get("error_type", "Exception"))
