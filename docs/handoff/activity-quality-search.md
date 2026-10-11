@@ -28,6 +28,7 @@ python -m pytest tests/test_family_training_search.py tests/test_activity_featur
 - 独立随机拆分诊断的四个 task 均优于常数基线；该结果不替代 scaffold 外推证据，也不构成临床或实验验证。
 - 新搜索的 `classification_regression_chain` 使用独立 `CCO`/`CCN` smoke inputs，两个 family 的 provenance identity 均通过；链路通过不等于部署资格。
 - 最终 `deployment_gate.eligible=false`、`activated=false`。因此不能将该搜索结果注册为生产 root active PDE/BuChE bundle，也不能把本机真实模型输出称为生产就绪或科学性能已充分验证。
+- 最终全仓回归：`C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests -q -p no:cacheprovider`，`22106 passed, 272 skipped, 10 warnings, 173 subtests passed`（3276.30 秒）；`compileall` 与 `health_check.py --strict` 亦通过。
 
 ## 限制与后续
 

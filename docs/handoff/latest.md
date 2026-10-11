@@ -1008,4 +1008,4 @@ HTTPS/WSS、反向代理/多 worker 重启、真实参考 pose 重对接，以�
 
 用户的活动模型搜索进程自然结束后，全仓复核命令
 `C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests -q -p no:cacheprovider --tb=short`
-完成为 `22104 passed, 272 skipped, 10 warnings, 173 subtests passed`（3337.67 秒）。
+完成为 `22106 passed, 272 skipped, 10 warnings, 173 subtests passed`（3276.30 秒）。

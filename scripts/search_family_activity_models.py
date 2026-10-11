@@ -15,7 +15,6 @@ import hashlib
 import importlib.util
 import json
 import math
-import os
 from pathlib import Path
 import re
 import statistics
@@ -313,7 +312,7 @@ def _resolve_candidate_checkpoint(root, run_id, relative_path):
     return candidate
 
 
-def _finalize_selected_models(root, search_id, package_version, selected, new_reports):
+def _finalize_selected_models(root, search_id, package_version, selected):
     """Evaluate selected groups once on test, publish representatives, bind bundles."""
     import torch
     from src.activity.family_dataset import load_family_dataset
@@ -618,7 +617,7 @@ def run_search(search_id, *, root=ROOT, package_version="v2", existing_runs=(),
     selected = select_models(_selection_reports(candidates))
     random_descriptors = _ensure_random_diagnostic_packages(root)
     selected = _finalize_selected_models(
-        root, search_id, package_version, selected, _selection_reports(candidates))
+        root, search_id, package_version, selected)
     random_diagnostics = _run_random_diagnostics(
         root, search_id, selected, random_descriptors)
     comparison = []
