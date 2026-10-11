@@ -22,7 +22,7 @@
 
 ## RG-MPNN 质量搜索（2026-10-11）
 
-本机真实 PDE/BuChE 多种子搜索已完成，但部署门禁仍为 `false`，未激活新模型。候选阶段只用验证集选择，随后对固定 scaffold test split 独立评估；另有随机拆分诊断但不参与部署资格。PDE 回归满足本次门槛，PDE 分类的跨种子 balanced accuracy 稳定性、BuChE 两项相对当前候选/稳定性门禁仍未满足。完整证据、命令和限制见[RG-MPNN 质量搜索交接](activity-quality-search.md)。该结果不代表生产部署、临床验证或实验验证完成。
+本机真实 PDE/BuChE r7 搜索已完成。四个选中的 family/task 均在固定 scaffold test split 上完成两 seed 评估，当前稳定性阈值和常数基线门槛通过；但与当前 r2 候选逐指标比较仍未全部满足，因此 `deployment_gate.eligible=false`，所有 bundle 均保持 `activated=false`。r7 只能用于离线误差分析、排序实验和后续训练，不能复制到根注册表或作为生产 pIC50 结果。完整指标、报告路径和限制见[RG-MPNN r7 质量搜索交接](activity-quality-search-r7.md)；此前 r6 记录仍保留在[RG-MPNN 质量搜索交接](activity-quality-search.md)。该结果不代表生产部署、临床验证或实验验证完成。
 
 ## 当前权威状态（2026-10-10）
 
