@@ -362,6 +362,11 @@ class ADMETPredictor(BaseMolecularTool):
 
     def _check_adme_backend(self, result: Dict[str, Any]) -> bool:
         """Only the real ADMET-AI backend can produce ADMET model results."""
+        if not RDKIT_AVAILABLE:
+            result['message'] = "错误: RDKit未安装；未执行 ADMET-AI 模型预测。"
+            result['reasoning'] = "无法验证完整分子结构，未形成科学结果。"
+            result['status'] = 'unavailable'
+            return False
         if self.backend is None:
             self.backend = get_admet_ai_backend()
             self._owns_backend = False

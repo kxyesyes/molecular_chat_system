@@ -15,14 +15,14 @@ python -m venv <venv-dir>\admet-ai-140
 <venv-dir>\admet-ai-140\Scripts\python.exe -m pip install -r requirements-admet-ai-140.txt
 ```
 
-运行时只设置 worker 解释器路径：
+运行时可以显式设置 worker 解释器路径：
 
 ```powershell
 $env:ADMET_AI_PYTHON = "<venv-dir>\admet-ai-140\Scripts\python.exe"
 python main.py
 ```
 
-`ADMET_AI_PYTHON` 是运行时配置，不写入 `.env`、日志或验收报告。生产调用必须显式配置该 Python 3.10 worker；缺少配置、版本不符或 worker 无法启动时，工具会返回明确的不可用状态，不会改用主进程或规则值。
+`ADMET_AI_PYTHON` 是运行时配置，不写入 `.env`、日志或验收报告。若未设置，Windows/Conda 本地部署会自动检查当前环境同级的 `medchat-admet-ai` Python 3.10 环境；其他目录布局和生产部署仍应显式设置该变量。缺少可用 worker、版本不符或 worker 无法启动时，工具会返回明确的不可用状态，不会改用主进程或规则值。
 
 worker 请求受单批 100 个分子和调用超时约束；超时会终止并回收 worker。应用 shutdown/reload 会清理缓存 worker。ADMET-AI 的可选分子缓存关闭，避免在长生命周期服务中无界增长。
 

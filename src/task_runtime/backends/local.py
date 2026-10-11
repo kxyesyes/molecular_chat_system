@@ -285,6 +285,7 @@ class LocalTaskBackend:
                     submission.task_type,
                     submission.payload,
                     backend="local",
+                    input_manifest_path=submission.input_manifest_path,
                     provenance=provenance,
                     idempotency_digest=digest,
                     submission_digest=request_digest,

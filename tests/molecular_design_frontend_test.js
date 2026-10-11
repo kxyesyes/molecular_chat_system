@@ -8,6 +8,7 @@ const editor = fs.readFileSync("src/web/static/js/design/molecule_editor.js", "u
 const properties = fs.readFileSync("src/web/static/js/design/properties_panel.js", "utf8");
 const history = fs.readFileSync("src/web/static/js/design/history_manager.js", "utf8");
 const uiManager = fs.readFileSync("src/web/static/js/design/ui_manager.js", "utf8");
+const fragments = fs.readFileSync("src/web/static/js/design/fragment_browser.js", "utf8");
 
 assert.ok(template.includes('id="uploadInput"'), "design input must expose a file upload control");
 assert.ok(template.includes('id="candidateCompare"'), "candidate result area must remain available");
@@ -19,6 +20,8 @@ assert.ok(!template.includes("<footer>"), "the design workspace must not reserve
 assert.ok(!template.includes("综合评分") && !template.includes("Top 10"), "fixed candidate scoring must be removed");
 assert.ok(!template.includes("prop-bar-track") && !properties.includes("prop-bar"), "decorative property progress bars must be removed");
 assert.ok(css.includes("grid-template-columns: minmax(300px, 360px) minmax(0, 1fr)"), "workspace must use a compact two-column layout");
+assert.ok(fragments.includes("&height=64"), "fragment thumbnails must satisfy the image endpoint's minimum height");
+assert.ok(!fragments.includes("&height=60"), "fragment thumbnails must not request an invalid 60px endpoint height");
 
 assert.ok(main.includes("propsRequestSeq"), "property requests must be versioned");
 assert.ok(main.includes("pendingPropsSmiles"), "property requests must converge on the latest molecule");

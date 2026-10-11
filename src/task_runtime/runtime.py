@@ -1730,6 +1730,7 @@ class TaskRuntime:
                     submission.task_type,
                     submission.payload,
                     backend=backend,
+                    input_manifest_path=submission.input_manifest_path,
                     provenance=submission.payload["decision"],
                     idempotency_digest=self._submission_idempotency_digest(submission),
                     submission_digest=submission.request_digest,
@@ -1807,6 +1808,7 @@ class TaskRuntime:
                     external_workflow_id=(
                         f"medchat-docking-{submission.task_id}"
                     ),
+                    input_manifest_path=submission.input_manifest_path,
                     phase=TaskPhase.STAGING,
                     warnings=warning,
                     provenance=provenance,

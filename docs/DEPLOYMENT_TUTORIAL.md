@@ -1,5 +1,11 @@
 # MedChat 部署教程
 
+conda run -n medchat-admet-ai python -m pip install \
+  -r /home/user/XIAOKX/molecular_chat_system/requirements-admet-ai-140.txt
+
+conda run -n medchat-admet-ai python -c \
+  "import sys; print(sys.executable); print(sys.version)"
+
 本文档面向一台 Ubuntu 22.04/24.04 服务器，目标是完成一套可维护的单机部署：
 
 ~~~text

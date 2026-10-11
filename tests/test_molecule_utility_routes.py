@@ -118,3 +118,26 @@ def test_molecule_utility_routes_accept_explicit_runtime_dependencies():
     assert response.status_code == 200
     assert response.content == b"png"
     assert len(calls) == 1
+
+
+def test_fragment_library_thumbnail_dimensions_are_accepted_by_image_route():
+    from src.web.routes import molecule_utility_routes
+
+    async def invoke_in_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    app = FastAPI()
+    molecule_utility_routes.setup_molecule_utility_routes(
+        app,
+        invoke_in_threadpool=invoke_in_threadpool,
+    )
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/api/utils/smiles_to_image",
+            params={"smiles": "[16*]c1ccccc1", "width": 120, "height": 64},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/png")
+    assert response.content.startswith(b"\x89PNG\r\n\x1a\n")

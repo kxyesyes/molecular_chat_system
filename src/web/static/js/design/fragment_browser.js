@@ -77,7 +77,7 @@ var FragmentBrowser = (function () {
         var imgUrl =
           "/api/utils/smiles_to_image?smiles=" +
           encodeURIComponent(smi) +
-          "&width=120&height=60";
+          "&width=120&height=64";
         return (
           '<div class="fragment-card" onclick="selFrag(\'' +
           UI.escInlineJs(smi) +

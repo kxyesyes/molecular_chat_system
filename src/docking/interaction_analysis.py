@@ -353,6 +353,41 @@ def _dependency_available(module_name: str) -> bool:
         return False
 
 
+def _attach_display_geometry(interactions, protein, ligand) -> None:
+    """Resolve analyzer-global indices against the exact analyzed conformers.
+
+    Viewer parsers may discard hydrogens or reorder atoms. Never ask the browser
+    to reinterpret these indices. Heavy-atom centroids represent ring contacts;
+    for H-bonds they yield donor/acceptor endpoints, not the donor-H midpoint.
+    """
+    def endpoint(molecule, indices):
+        indices = _atom_indices(indices)
+        if indices is None or any(i >= molecule.GetNumAtoms() for i in indices):
+            return None
+        heavy = [i for i in indices if molecule.GetAtomWithIdx(i).GetAtomicNum() > 1]
+        if not heavy:
+            return None
+        conformer = molecule.GetConformer()
+        points = [conformer.GetAtomPosition(i) for i in heavy]
+        values = {axis: sum(getattr(p, axis) for p in points) / len(points)
+                  for axis in ("x", "y", "z")}
+        return values if all(math.isfinite(v) for v in values.values()) else None
+
+    for item in interactions:
+        for geometry in item.get("geometry_occurrences", [item]):
+            indices = geometry.get("parent_atom_indices")
+            if not isinstance(indices, Mapping):
+                continue
+            start = endpoint(protein, indices.get("protein"))
+            end = endpoint(ligand, indices.get("ligand"))
+            if start is not None and end is not None:
+                geometry["display_geometry"] = {
+                    "protein": start, "ligand": end,
+                    "source": "analyzed_conformer",
+                    "endpoint_rule": "heavy_atom_centroid",
+                }
+
+
 def _valid_metadata(output: Any) -> bool:
     """Validate the sparse one-pose ProLIF v2 shape, not a count dataframe."""
     if not isinstance(output, Mapping):
@@ -401,6 +436,7 @@ def analyze_docking_interactions(
             provenance={"analyzer": "prolif", "tool_derived": False},
         )
 
+    universe = None
     try:
         import MDAnalysis as mda
         import prolif as plf
@@ -483,6 +519,7 @@ def analyze_docking_interactions(
                 },
             )
         normalized = normalize_prolif_output(metadata, pair_order="ligand_protein")
+        _attach_display_geometry(normalized["interactions"], protein, selected_pose)
         provenance = {
             "analyzer": "prolif",
             "tool_derived": True,
@@ -508,6 +545,22 @@ def analyze_docking_interactions(
             warnings=[f"prolif_analysis_failed:{type(exc).__name__}"],
             provenance={"analyzer": "prolif", "tool_derived": False},
         )
+    finally:
+        # MDAnalysis may keep the receptor file open through its Reader.  The
+        # route runs this analyzer inside a leased staging snapshot on Windows,
+        # so release the reader before the snapshot cleanup verifies/removes it.
+        if universe is not None:
+            try:
+                close = getattr(universe, "close", None)
+                if callable(close):
+                    close()
+                else:
+                    trajectory = getattr(universe, "trajectory", None)
+                    close_trajectory = getattr(trajectory, "close", None)
+                    if callable(close_trajectory):
+                        close_trajectory()
+            except Exception:
+                pass
 
 
 def resolve_analysis_inputs(job_dir: str | Path, pose_index: int) -> tuple[Path | None, Path | None]:

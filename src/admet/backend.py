@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import queue
 import subprocess
+import sys
 from threading import RLock, Thread, current_thread
 from typing import Any
 
@@ -48,6 +49,40 @@ def _worker_environment() -> dict[str, str]:
         for key, value in os.environ.items()
         if str(key) in _WORKER_ENV_ALLOWLIST
     }
+
+
+def _worker_python_candidates() -> list[Path]:
+    """Return trusted conventional worker locations next to the active env.
+
+    Local Windows/Conda deployments commonly create ``medchat-admet-ai`` next
+    to the main ``MedChat`` environment.  Discovering only that sibling keeps
+    setup convenient without searching arbitrary PATH entries or importing
+    the model into the web process.  ``ADMET_AI_PYTHON`` remains the explicit
+    override for venvs, Linux layouts, and production deployments.
+    """
+
+    prefix = Path(sys.prefix).resolve()
+    executable = "python.exe" if os.name == "nt" else Path("bin") / "python"
+    return [prefix.parent / "medchat-admet-ai" / executable]
+
+
+def _is_valid_worker_python(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        ADMETAISubprocessBackend._assert_python310(str(path))
+    except RuntimeError:
+        return False
+    return True
+
+
+def _discover_worker_python() -> str | None:
+    """Find a prepared dedicated Python 3.10 worker without loading ADMET-AI."""
+
+    for candidate in _worker_python_candidates():
+        if _is_valid_worker_python(candidate):
+            return str(candidate)
+    return None
 
 
 def _canonical_smiles(value: str) -> str | None:
@@ -457,10 +492,13 @@ def get_admet_ai_backend() -> ADMETAIBackend | None:
             return None
         worker_python = os.environ.get("ADMET_AI_PYTHON", "").strip()
         if not worker_python:
-            _DEFAULT_BACKEND_ERROR = (
-                "ADMET_AI_PYTHON is required; configure the isolated Python 3.10 worker"
-            )
-            return None
+            worker_python = _discover_worker_python()
+            if not worker_python:
+                _DEFAULT_BACKEND_ERROR = (
+                    "ADMET_AI_PYTHON is required, or install the isolated Python 3.10 "
+                    "worker as the conventional medchat-admet-ai environment"
+                )
+                return None
         try:
             _DEFAULT_BACKEND = ADMETAISubprocessBackend(worker_python)
         except Exception as exc:

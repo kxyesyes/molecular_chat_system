@@ -280,6 +280,33 @@ def test_runtime_empty_metadata_is_completed_without_hits(analyzer_inputs):
     assert result["interactions"] == []
 
 
+def test_runtime_closes_mdanalysis_universe_after_analysis(tmp_path, monkeypatch):
+    receptor = tmp_path / "receptor.pdb"
+    ligand = tmp_path / "pose.sdf"
+    receptor.write_text("ATOM\n", encoding="utf-8")
+    ligand.write_text("sdf\n", encoding="utf-8")
+    closed = []
+    universe = SimpleNamespace(
+        atoms=[SimpleNamespace(element="H", name="H1")],
+        close=lambda: closed.append(True),
+    )
+    fake_mda = SimpleNamespace(Universe=lambda _: universe)
+    fake_prolif = SimpleNamespace(
+        __version__="test",
+        Molecule=SimpleNamespace(from_mda=lambda _: object()),
+        sdf_supplier=lambda _: [object()],
+        Fingerprint=lambda **_: SimpleNamespace(generate=lambda *args, **kwargs: {}),
+    )
+    monkeypatch.setitem(sys.modules, "MDAnalysis", fake_mda)
+    monkeypatch.setitem(sys.modules, "prolif", fake_prolif)
+    monkeypatch.setattr("src.docking.interaction_analysis._dependency_available", lambda _: True)
+
+    result = analyze_docking_interactions(receptor, ligand)
+
+    assert result["status"] == "success"
+    assert closed == [True]
+
+
 def test_runtime_unknown_interaction_is_unavailable(analyzer_inputs):
     receptor, ligand, plf = analyzer_inputs
     plf.Fingerprint = lambda **_: SimpleNamespace(
@@ -489,3 +516,48 @@ def test_real_prolif_adapter_smoke_with_explicit_hydrogens(tmp_path: Path):
     assert result["status"] == "success", result
     assert result["provenance"]["tool_derived"] is True
     assert result["provenance"]["analyzer"] == "prolif"
+
+
+def test_display_geometry_uses_analyzed_heavy_atoms_not_viewer_order():
+    from rdkit import Chem
+    from rdkit.Geometry import Point3D
+    from src.docking.interaction_analysis import _attach_display_geometry
+
+    def molecule(smiles, coordinates):
+        mol = Chem.AddHs(Chem.MolFromSmiles(smiles))
+        conformer = Chem.Conformer(mol.GetNumAtoms())
+        for i, xyz in enumerate(coordinates):
+            conformer.SetAtomPosition(i, Point3D(*xyz))
+        mol.AddConformer(conformer)
+        return mol
+
+    protein = molecule("O", [(3, 4, 5), (4, 4, 5), (3, 5, 5)])
+    ligand = molecule("N", [(0, 1, 2), (1, 1, 2), (0, 2, 2), (0, 1, 3)])
+    item = {"parent_atom_indices": {"protein": [0], "ligand": [0, 1]}}
+    _attach_display_geometry([item], protein, ligand)
+    assert item["display_geometry"] == {
+        "protein": {"x": 3.0, "y": 4.0, "z": 5.0},
+        "ligand": {"x": 0.0, "y": 1.0, "z": 2.0},
+        "source": "analyzed_conformer",
+        "endpoint_rule": "heavy_atom_centroid",
+    }
+    invalid = {"parent_atom_indices": {"protein": [999], "ligand": [0]}}
+    _attach_display_geometry([invalid], protein, ligand)
+    assert "display_geometry" not in invalid
+    multi = {"geometry_occurrences": [dict(item), dict(invalid)]}
+    _attach_display_geometry([multi], protein, ligand)
+    assert "display_geometry" in multi["geometry_occurrences"][0]
+    assert "display_geometry" not in multi["geometry_occurrences"][1]
+
+
+def test_real_prolif_returns_renderable_evidence_from_bundled_example():
+    plf = pytest.importorskip("prolif")
+    pytest.importorskip("MDAnalysis")
+    example = Path(plf.__file__).parent / "data" / "vina"
+    if not (example / "rec.pdb").is_file():
+        pytest.skip("ProLIF example is not bundled")
+    result = analyze_docking_interactions(example / "rec.pdb", example / "vina_output.sdf")
+    assert result["status"] == "success", result
+    hbonds = [item for item in result["interactions"] if item["type"] == "hydrogen_bond"]
+    assert hbonds
+    assert all("display_geometry" in item for item in hbonds)

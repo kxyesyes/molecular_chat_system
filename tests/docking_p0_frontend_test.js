@@ -24,6 +24,7 @@ assert.match(interactionSource, /\/api\/docking\/interactions\//);
 assert.match(interactionSource, /requestInteractionAnalysis\("hydrogen_bond"\)/);
 assert.match(interactionSource, /requestInteractionAnalysis\("pi_pi"\)/);
 assert.match(interactionSource, /requestInteractionAnalysis\("hydrophobic"\)/);
+assert.match(template, /static\/js\/docking\/interactions\.js\?v=/);
 assert.doesNotMatch(interactionSource, /InteractionGeometry/);
 assert.doesNotMatch(template, /docking\/interaction_geometry\.js/);
 
