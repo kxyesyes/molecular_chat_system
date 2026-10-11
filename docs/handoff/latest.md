@@ -1,5 +1,9 @@
 # Latest handoff
 
+## RG-MPNN 质量搜索（2026-10-11）
+
+本机真实 PDE/BuChE 多种子搜索已完成，但部署门禁仍为 `false`，未激活新模型。候选阶段只用验证集选择，随后对固定 scaffold test split 独立评估；另有随机拆分诊断但不参与部署资格。PDE 回归满足本次门槛，PDE 分类的跨种子 balanced accuracy 稳定性、BuChE 两项相对当前候选/稳定性门禁仍未满足。完整证据、命令和限制见[RG-MPNN 质量搜索交接](activity-quality-search.md)。该结果不代表生产部署、临床验证或实验验证完成。
+
 ## 当前权威状态（2026-10-10）
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
@@ -896,3 +900,112 @@ python -m compileall -q src scripts
 
 No API key state or value is required for this stage, and no credential was
 recorded in source, tests, logs, or this handoff.
+
+## Local docking interaction geometry acceptance (2026-10-11)
+
+- Branch: `fix/production-acceptance-hardening`.
+- Implementation commits: `79e72d40` and `5fbb2ddc`; the implementation plan is
+  `docs/superpowers/plans/2026-10-11-docking-interaction-geometry-local-acceptance.md`.
+- The adapter now consumes ProLIF metadata through the documented
+  `Fingerprint.generate(..., metadata=True)` boundary. It preserves only
+  validated tool-derived distances, angles, residue-local atom indices and
+  parent atom indices. Count data, PDBQT-only inputs, malformed metadata and
+  unsupported analyzer APIs remain explicitly unavailable or geometry-free.
+- ProLIF and MDAnalysis are not installed in the local `MedChat` environment;
+  the real ProLIF smoke test is therefore skipped. No interaction distance,
+  angle, affinity or docking claim is inferred from that skip.
+
+### Reproducible local checks
+
+```powershell
+conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py -q -p no:cacheprovider
+# 106 passed, 1 skipped in 15.63s
+
+conda run --no-capture-output -n MedChat python -m compileall -q src scripts
+# passed with no output
+
+conda run --no-capture-output -n MedChat python scripts/health_check.py --strict
+# Summary: 23/23 checks passed
+
+node tests/home_agent_task_panel_test.js
+# Homepage agent task panel static and lifecycle checks passed
+node tests/reverse_target_broad_recall_test.js
+# reverse target broad-recall defaults checks passed
+node tests/reverse_target_pagination_test.js
+# reverse target pagination checks passed
+
+# node --check over 54 non-ketcher, non-backup JavaScript files
+# passed
+
+conda run --no-capture-output -n MedChat python scripts/run_agent_acceptance.py --mode contract
+# statuses: ["passed"]
+```
+
+The combined `tests/agent` long run was interrupted near completion after
+unrelated failures appeared while concurrent user activity-training files were
+being edited in the same worktree. It is not used as acceptance evidence for
+this docking change; the focused docking/reproducibility suites and contract
+acceptance above completed successfully. A new full `python -m pytest tests -q`
+result is not claimed for this slice.
+
+The local-only boundary remains: target-server HTTPS/WSS and reverse-proxy
+behavior, production model assets, Temporal/systemd restart and multi-worker
+recovery, real ProLIF/MDAnalysis execution, and real reference-pose redocking
+RMSD still require their respective deployment assets or host. Missing
+evidence remains `unavailable`/`partial`; it is not converted to a scientific
+pass.
+
+### Review follow-up
+
+Independent review identified and the follow-up commit `48d97f5d` closed these
+compatibility gaps:
+
+- ProLIF `PiCation`/`WaterBridge` are mapped; unknown interaction names are
+  surfaced and make the runtime result `unsupported_interaction_type` instead
+  of being silently dropped.
+- Multiple metadata occurrences preserve the legacy one-record aggregate
+  `count`; validated per-occurrence geometry is retained under
+  `geometry_occurrences`.
+- The interaction route's early pose-export and missing-input responses now
+  include `geometry_status: "unavailable"`.
+- A valid geometry alias paired with an invalid alias remains usable but emits
+  `invalid_geometry_metadata`.
+
+Regression rerun:
+
+```powershell
+conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py tests/test_api_route_boundary.py -q -p no:cacheprovider
+# 219 passed, 1 skipped in 225.46s
+```
+
+## 本机验收补充（2026-10-11）
+
+本轮只执行本机验收，不宣称目标服务器部署完成。当前分支为
+`fix/production-acceptance-hardening`；用户已有的活动模型训练/搜索改动及其运行产物未被暂存或修改。
+
+已完成的可复现检查：
+
+```text
+docking interaction/RMSD/API 边界：219 passed, 1 skipped
+目标搜索、对接配置/manifest/取消、RG-MPNN 日志转换：181 passed, 7 skipped
+health_check.py --strict：23/23 checks passed
+run_agent_acceptance.py --mode contract：passed
+compileall：passed
+Node 合同测试：3/3 passed
+非 ketcher/backup JavaScript node --check：passed（54 files）
+```
+
+本机外部兼容模型探针确实到达上游，但上游返回 HTTP 403（配额不足），因此不把它计为真实模型通过，
+也没有改变网络白名单或绕过 DNS/传输安全边界。ProLIF/MDAnalysis、Temporal 后端、目标服务器
+HTTPS/WSS、反向代理/多 worker 重启、真实参考 pose 重对接，以及根注册表激活 PDE/BuChE 仍按
+`unavailable`/`partial` 记录；没有用模拟分数或模拟几何替代这些证据。全仓 `pytest tests -q`
+尚未作为本轮证据声明，因为用户启动的模型搜索进程仍在运行并持续占用训练资源。
+
+后续提交 `f8a9f1a2` 仅稳定 Windows docking 进程树回归夹具：增加真实子进程就绪标记，
+再触发受控超时，保留进程树终止、输出、PID 和 marker 不存活断言；未改变生产进程管理代码。
+该配置模块复核为 `10 passed, 1 skipped`，第二组目标搜索/对接/日志转换复核为
+`181 passed, 7 skipped`。
+
+用户的活动模型搜索进程自然结束后，全仓复核命令
+`C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests -q -p no:cacheprovider --tb=short`
+完成为 `22106 passed, 272 skipped, 10 warnings, 173 subtests passed`（3276.30 秒）。
