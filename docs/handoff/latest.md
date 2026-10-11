@@ -13,6 +13,13 @@
 
 当前仍阻断完整生产发布的证据：根注册表激活且通过部署门禁的 PDE/BuChE bundle、真实主模型端点、Temporal/PostgreSQL/systemd/cgroup、HTTPS/WSS 反向代理、多 worker/重启恢复、真实 ProLIF/MDAnalysis 相互作用几何及参考 pose 重对接 RMSD。以上缺口保持 `partial`/`unavailable`，不以本机 contract 或模拟值替代。
 
+## 生产部署预检补充（2026-10-11）
+
+- `python scripts/validate_opensandbox_deployment.py --static`：通过，部署资产静态检查完成。
+- `python scripts/validate_opensandbox_deployment.py --runtime`：失败，`runsc_unavailable`；当前 Windows 主机没有目标 Linux OpenSandbox runtime，不能把静态通过解释成运行时通过。
+- `python scripts/validate_temporal_worker_production.py --check-config`：失败，`backend_not_temporal_canary`；当前环境没有目标 Temporal canary 后端。
+- `python scripts/run_temporal_production_preflight.py --output scratch/temporal-production-preflight-20261011.json`：失败，报告中的 `all_required_gates=false`；contract、real science 为 `failed`，backup/alert/deployment/infrastructure 为 `skipped`。这进一步确认目标 Linux/Temporal/PostgreSQL/代理环境仍需现场验收。
+
 ## RG-MPNN 质量搜索（2026-10-11）
 
 本机真实 PDE/BuChE 多种子搜索已完成，但部署门禁仍为 `false`，未激活新模型。候选阶段只用验证集选择，随后对固定 scaffold test split 独立评估；另有随机拆分诊断但不参与部署资格。PDE 回归满足本次门槛，PDE 分类的跨种子 balanced accuracy 稳定性、BuChE 两项相对当前候选/稳定性门禁仍未满足。完整证据、命令和限制见[RG-MPNN 质量搜索交接](activity-quality-search.md)。该结果不代表生产部署、临床验证或实验验证完成。
