@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -200,6 +201,7 @@ class DockingConfigurationTest(unittest.TestCase):
             root = Path(tmp)
             child_script = root / "delayed_marker.py"
             child_pid_file = root / "child.pid"
+            ready_file = root / "child.ready"
             marker_file = root / "survived.marker"
             batch_file = root / "launch_child.bat"
             child_script.write_text(
@@ -209,9 +211,12 @@ class DockingConfigurationTest(unittest.TestCase):
                         "import sys",
                         "import time",
                         "from pathlib import Path",
+                        # Deliberately exceed the old 0.75s startup assumption.
+                        "time.sleep(1.0)",
                         "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')",
                         "print('child-started', flush=True)",
                         "print('child-stderr', file=sys.stderr, flush=True)",
+                        "Path(sys.argv[3]).touch()",
                         "time.sleep(2.0)",
                         "Path(sys.argv[2]).write_text('survived', encoding='utf-8')",
                     ]
@@ -221,21 +226,37 @@ class DockingConfigurationTest(unittest.TestCase):
             batch_file.write_text(
                 (
                     "@echo off\r\n"
-                    "echo child-started\r\n"
-                    "echo child-stderr 1>&2\r\n"
-                    f'"{sys.executable}" "{child_script}" "%~1" "%~2"\r\n'
+                    f'"{sys.executable}" "{child_script}" "%~1" "%~2" "%~3"\r\n'
                 ),
                 encoding="utf-8",
             )
             adapter = CommandAdapter(str(batch_file))
 
-            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            # Keep real process creation/termination; advance only the adapter's
+            # clock once the child has published its PID and flushed both streams.
+            # Startup remains bounded if readiness never arrives. Other tests
+            # separately cover real elapsed startup/request deadlines.
+            clock_lock = threading.Lock()
+            offset = 0.0
+
+            def ready_deadline_clock():
+                nonlocal offset
+                with clock_lock:
+                    if ready_file.exists():
+                        offset = 30.0
+                    return time.monotonic() + offset
+
+            controlled_time = SimpleNamespace(monotonic=ready_deadline_clock, sleep=time.sleep)
+            with patch("src.docking.adapters.base.time", controlled_time), self.assertRaises(
+                subprocess.TimeoutExpired
+            ) as caught:
                 adapter.run(
-                    adapter.wrap_command(str(child_pid_file), str(marker_file)),
+                    adapter.wrap_command(str(child_pid_file), str(marker_file), str(ready_file)),
                     cwd=str(root),
-                    timeout=0.75,
+                    timeout=15.0,
                 )
 
+            self.assertTrue(ready_file.is_file(), "child startup did not finish within 15s")
             self.assertIn("child-started", _decoded_stream(caught.exception.stdout))
             self.assertIn("child-stderr", _decoded_stream(caught.exception.stderr))
             self.assertTrue(child_pid_file.is_file())
