@@ -1,5 +1,14 @@
 # Latest handoff
 
+## 活动 worker 清理回归修复（2026-10-11，待发布）
+
+发现并复现一个本地可重复的资源清理缺陷：活动预测超时终止子进程后，子进程管道可能先关闭，后台 waiter 已经以 `ProcessExecutionError` 完成；旧清理逻辑只等待尚未完成的 waiter，因而会留下 `Task exception was never retrieved`。修复 `_stop_activity_process()` 统一观察 waiter，并保留一秒清理上限、取消和进程关闭行为；新增事件循环异常处理器与垃圾回收回归测试，确认已完成失败被消费且不再泄漏。
+
+- 聚焦 activity/Pharm3D/process-isolation：`37 passed`。
+- 领域矩阵：靶点/数据库 `54 passed`；Docking `160 passed, 1 skipped`；ADMET、反向寻靶、活动、Pharm3D、task runtime `2222 passed, 25 skipped, 2 warnings`。
+- 严格健康检查 `23/23`；Agent contract 通过；Node 三项脚本、全部非 vendor JavaScript 语法检查、`compileall` 和 `git diff --check` 通过。
+- 独立只读审查：P0/P1/P2 均无发现。以上是本机/离线证据，不替代目标 Linux 服务器上的真实模型、Temporal/PostgreSQL、多 worker/重启、HTTPS/WSS、Vina 及参考 pose RMSD 验收；PDE/BuChE 根 registry 仍未激活生产 bundle。
+
 ## 继续生产验收（2026-10-11）
 
 本轮在正确的 `MedChat` Conda 环境重新执行了真实模块验收；没有把缺失依赖、外部服务失败或未激活模型转换为成功。

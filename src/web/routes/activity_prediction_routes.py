@@ -61,7 +61,9 @@ def _activity_child_job(payload, target):
 
 async def _stop_activity_process(process, waiter):
     await asyncio.to_thread(process.terminate)
-    if waiter is not None and not waiter.done():
+    if waiter is not None:
+        # Retrieve completed failures too: terminating the child can close its
+        # pipe before cleanup reaches this waiter.
         try:
             await asyncio.wait_for(asyncio.shield(waiter), timeout=1.0)
         except asyncio.TimeoutError:
