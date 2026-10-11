@@ -1,5 +1,18 @@
 # Latest handoff
 
+## 继续生产验收（2026-10-11）
+
+本轮在正确的 `MedChat` Conda 环境重新执行了真实模块验收；没有把缺失依赖、外部服务失败或未激活模型转换为成功。
+
+- `conda run --no-capture-output -n MedChat python scripts/health_check.py --strict`：`23/23` 通过。基础 Anaconda Python 3.13 不含 RDKit，不能作为 MedChat 验收环境；这不是 MedChat 环境的结论。
+- `scripts/run_agent_acceptance.py --mode real --repeat 3 --case-set all-real`：总体 `partial`，结构化报告为 `outputs/agent_evaluation/continuation-real-agent-20261011.json`。本轮本地 Ollama 分子生成、靶点搜索和真实 Vina 对接检查通过；Vina 产生了 3 个 pose。外部主模型配置/上游不可用，PDE/BuChE 根注册表没有 active family bundle，因此活性预测明确失败并返回 `family_model_bundle_unavailable_or_invalid`，没有返回 pIC50 或概率数值。
+- `ADMET_AI_PYTHON` 指向独立 `admet-ai==1.4.0` worker 后，`scripts/verify_admet_ai_real.py --repeat 3`：退出码 0；3/3 次成功，2/2 行每次均返回 49 个端点，方法 `admet_ai`，模型版本 `1.4.0`，使用同一权重 SHA-256 标识。该结果是本地真实 ADMET 权重证据，不代表实验或临床验证。
+- `scripts/run_temporal_docking_acceptance.py --mode contract --repeat 3`：通过，`run_count=3`；这是生命周期 contract，不是真实 Temporal/Vina 科学执行。
+- `scripts/validate_temporal_deployment.py`：`partial`，Python 静态检查通过；Docker Compose、promtool 和 systemd 因当前 Windows 主机不可用而 `skipped`。目标 Linux 主机验收仍未完成。
+- `scripts/run_decision_chat_acceptance.py --mode native`：`failed`，`isolated_acceptance_unavailable`；外部主模型仍不能作为可用生产端点。未记录或输出密钥。
+
+当前仍阻断完整生产发布的证据：根注册表激活且通过部署门禁的 PDE/BuChE bundle、真实主模型端点、Temporal/PostgreSQL/systemd/cgroup、HTTPS/WSS 反向代理、多 worker/重启恢复、真实 ProLIF/MDAnalysis 相互作用几何及参考 pose 重对接 RMSD。以上缺口保持 `partial`/`unavailable`，不以本机 contract 或模拟值替代。
+
 ## RG-MPNN 质量搜索（2026-10-11）
 
 本机真实 PDE/BuChE 多种子搜索已完成，但部署门禁仍为 `false`，未激活新模型。候选阶段只用验证集选择，随后对固定 scaffold test split 独立评估；另有随机拆分诊断但不参与部署资格。PDE 回归满足本次门槛，PDE 分类的跨种子 balanced accuracy 稳定性、BuChE 两项相对当前候选/稳定性门禁仍未满足。完整证据、命令和限制见[RG-MPNN 质量搜索交接](activity-quality-search.md)。该结果不代表生产部署、临床验证或实验验证完成。
