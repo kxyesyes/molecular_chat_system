@@ -14,8 +14,8 @@
 
 ## 0. 部署边界和约定
 
-- 推荐部署目录：/opt/medchat/molecular_chat_system。
-- 推荐服务用户：medchat，只拥有运行目录的写权限。
+- 本服务器项目目录固定为：/home/user/XIAOKX/molecular_chat_system。
+- 本教程按登录用户 user 运行 systemd；项目位于该用户的 home 目录时，不要直接套用 medchat 用户模板，否则可能没有权限穿过 /home/user。
 - 应用只监听 127.0.0.1:6001，公网只暴露 nginx 的 80/443。
 - 生产环境关闭自动重载，使用 python main.py --no-reload。
 - deployment/requirements.txt 是 Linux/CUDA 12.1/RTX3090 服务器 profile；根目录 requirements.txt 是 CPU/CI profile。两者不要混装。
@@ -24,9 +24,14 @@
 文档中的以下值都要替换成自己的真实值：
 
 ~~~text
-<server-user>       你登录服务器的普通用户
+<server-user>       user
+<project-dir>       /home/user/XIAOKX/molecular_chat_system
 <domain>            解析到服务器的域名，例如 medchat.example.com
 <github-repo>       GitHub 仓库地址
+<python-bin>        conda 环境中 python -c "import sys; print(sys.executable)" 的输出
+<tools-dir>         Vina/ADFRsuite 等外部工具的实际安装目录
+<vina-path>         which vina 的输出
+<meeko-path>        which mk_prepare_ligand.py 或 which mk_prepare_ligand 的输出
 ~~~
 
 不要把 API key、密码、证书私钥或用户聊天内容写进 Git、报告和日志。
@@ -111,13 +116,13 @@ cat ~/.ssh/id_ed25519.pub
 
 ### 2.2 克隆仓库
 
-创建发布目录，并让当前部署账号临时拥有代码目录：
+项目目录已经确定为 /home/user/XIAOKX/molecular_chat_system。首次部署时执行：
 
 ~~~bash
-sudo install -d -o "$USER" -g "$USER" -m 0755 /opt/medchat
-cd /opt/medchat
-git clone <github-repo> molecular_chat_system
-cd /opt/medchat/molecular_chat_system
+mkdir -p /home/user/XIAOKX
+cd /home/user/XIAOKX
+test -d molecular_chat_system/.git || git clone <github-repo> molecular_chat_system
+cd /home/user/XIAOKX/molecular_chat_system
 ~~~
 
 例如 SSH 仓库地址通常是：
@@ -149,7 +154,7 @@ conda activate medchat
 GPU/CUDA 12.1 服务器安装部署 profile：
 
 ~~~bash
-cd /opt/medchat/molecular_chat_system
+cd /home/user/XIAOKX/molecular_chat_system
 python -m pip install --upgrade pip
 python -m pip install -r deployment/requirements.txt
 ~~~
@@ -216,40 +221,32 @@ pip install meeko==0.5.0
 which vina
 vina --help
 which mk_prepare_ligand.py || which mk_prepare_ligand
-ls /opt/medchat/tools/ADFRsuite/bin/prepare_receptor*
+ls <tools-dir>/ADFRsuite/bin/prepare_receptor*
 ~~~
 
 把服务器上实际存在的路径写入环境文件；不要照抄不存在的路径：
 
 ~~~env
-MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
-MOLECULAR_DOCKING_VINA=/opt/conda/envs/medchat/bin/vina
-MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
-MOLECULAR_DOCKING_PREPARE_RECEPTOR=/opt/medchat/tools/ADFRsuite/bin/prepare_receptor
-MOLECULAR_DOCKING_PREPARE_LIGAND=/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
+MOLECULAR_DOCKING_ROOT=<tools-dir>/autodock
+MOLECULAR_DOCKING_VINA=<vina-path>
+MOLECULAR_DOCKING_ADFR_BIN=<tools-dir>/ADFRsuite/bin
+MOLECULAR_DOCKING_PREPARE_RECEPTOR=<tools-dir>/ADFRsuite/bin/prepare_receptor
+MOLECULAR_DOCKING_PREPARE_LIGAND=<meeko-path>
 ~~~
 
 ## 5. 准备持久化目录和数据资产
 
-先创建服务用户：
+本机项目位于 user 的 home 目录，本教程让 systemd 也使用 user 运行。先创建项目运行目录：
 
 ~~~bash
-sudo groupadd --system medchat 2>/dev/null || true
-sudo useradd --system --home /opt/medchat --shell /usr/sbin/nologin -g medchat medchat 2>/dev/null || true
-~~~
-
-创建运行目录：
-
-~~~bash
-sudo install -d -o medchat -g medchat -m 0750 \
-  /var/lib/medchat/target/cache \
-  /var/lib/medchat/reverse_target \
-  /var/lib/medchat/activity/models \
-  /var/lib/medchat/rag \
-  /var/lib/medchat/runtime \
-  /opt/medchat/molecular_chat_system/logs \
-  /opt/medchat/molecular_chat_system/scratch \
-  /opt/medchat/molecular_chat_system/temp_docking
+PROJECT_DIR=/home/user/XIAOKX/molecular_chat_system
+mkdir -p "$PROJECT_DIR"/logs \
+  "$PROJECT_DIR"/scratch \
+  "$PROJECT_DIR"/temp_docking \
+  "$PROJECT_DIR"/data/target_db/cache \
+  "$PROJECT_DIR"/data/reverse_target \
+  "$PROJECT_DIR"/data/activity/models
+chmod 750 "$PROJECT_DIR"/logs "$PROJECT_DIR"/scratch "$PROJECT_DIR"/temp_docking
 ~~~
 
 把代码、模型和数据分开管理。运行所需的大型资产不应提交 Git：
@@ -265,12 +262,12 @@ sudo install -d -o medchat -g medchat -m 0750 \
 这些资产的来源、版本、生成命令和 SHA256 应单独记录；清单见 data/REGISTRY.md。例如从受控备份复制到服务器：
 
 ~~~bash
-sudo rsync -a --info=progress2 <backup>/target_database.sqlite /var/lib/medchat/target/
-sudo rsync -a --info=progress2 <backup>/target-cache/ /var/lib/medchat/target/cache/
-sudo rsync -a --info=progress2 <backup>/reverse_target/ /var/lib/medchat/reverse_target/
-sudo rsync -a --info=progress2 <backup>/activity-models/ /var/lib/medchat/activity/models/
-sudo rsync -a --info=progress2 <backup>/molecular_faiss_index.index /var/lib/medchat/rag/
-sudo chown -R medchat:medchat /var/lib/medchat
+PROJECT_DIR=/home/user/XIAOKX/molecular_chat_system
+rsync -a --info=progress2 <backup>/target_database.sqlite "$PROJECT_DIR/data/target_db/"
+rsync -a --info=progress2 <backup>/target-cache/ "$PROJECT_DIR/data/target_db/cache/"
+rsync -a --info=progress2 <backup>/reverse_target/ "$PROJECT_DIR/data/reverse_target/"
+rsync -a --info=progress2 <backup>/activity-models/ "$PROJECT_DIR/data/activity/models/"
+rsync -a --info=progress2 <backup>/molecular_faiss_index.index "$PROJECT_DIR/data/"
 ~~~
 
 如果没有靶点数据库，可在确认数据来源和许可后构建轻量种子库：
@@ -284,15 +281,17 @@ python -m src.target_search.seed
 
 ## 6. 创建生产环境文件
 
-创建 root 可读、服务可间接使用的环境文件：
+创建由当前部署用户 user 读取、同时可被 systemd 加载的环境文件：
 
 ~~~bash
 sudo install -d -o root -g root -m 0755 /etc/medchat
 sudo touch /etc/medchat/medchat.env
-sudo chown root:root /etc/medchat/medchat.env
+sudo chown user:user /etc/medchat/medchat.env
 sudo chmod 600 /etc/medchat/medchat.env
 sudoedit /etc/medchat/medchat.env
 ~~~
+
+本教程的 systemd unit 使用 User=user，因此环境文件必须让 user 可读。若以后把服务迁移到独立的 medchat 用户，应改为 root:medchat、权限 640，并同步调整项目目录和运行目录权限。
 
 基础模板如下。空值保持为空，不要填入示例 key：
 
@@ -306,9 +305,9 @@ MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
 MEDCHAT_LOG_LEVEL=info
 MEDCHAT_FORWARDED_ALLOW_IPS=127.0.0.1
-MEDCHAT_LOG_DIR=/opt/medchat/molecular_chat_system/logs
-MEDCHAT_TEMP_DOCKING_DIR=/opt/medchat/molecular_chat_system/temp_docking
-MEDCHAT_SCRATCH_DIR=/opt/medchat/molecular_chat_system/scratch
+MEDCHAT_LOG_DIR=/home/user/XIAOKX/molecular_chat_system/logs
+MEDCHAT_TEMP_DOCKING_DIR=/home/user/XIAOKX/molecular_chat_system/temp_docking
+MEDCHAT_SCRATCH_DIR=/home/user/XIAOKX/molecular_chat_system/scratch
 
 # Main LLM: choose ollama, modelscope, or openai_compatible
 MEDCHAT_LLM_PROVIDER=ollama
@@ -327,19 +326,19 @@ OPENAI_COMPATIBLE_MODEL=
 OPENAI_COMPATIBLE_API_KEY=
 
 # Persistent data assets; use real paths only when the assets exist
-TARGET_DB_PATH=/var/lib/medchat/target/target_database.sqlite
-TARGET_CACHE_DIR=/var/lib/medchat/target/cache
-REVERSE_TARGET_DATA_DIR=/var/lib/medchat/reverse_target
-ACTIVITY_MODEL_DIR=/var/lib/medchat/activity/models
-RAG_INDEX_PATH=/var/lib/medchat/rag/molecular_faiss_index.index
-MEDCHAT_TASK_DB_PATH=/var/lib/medchat/runtime/tasks.sqlite
+TARGET_DB_PATH=/home/user/XIAOKX/molecular_chat_system/data/target_db/target_database.sqlite
+TARGET_CACHE_DIR=/home/user/XIAOKX/molecular_chat_system/data/target_db/cache
+REVERSE_TARGET_DATA_DIR=/home/user/XIAOKX/molecular_chat_system/data/reverse_target
+ACTIVITY_MODEL_DIR=/home/user/XIAOKX/molecular_chat_system/data/activity/models
+RAG_INDEX_PATH=/home/user/XIAOKX/molecular_chat_system/data/molecular_faiss_index.index
+MEDCHAT_TASK_DB_PATH=/home/user/XIAOKX/molecular_chat_system/scratch/tasks.sqlite
 
 # Docking tools; replace each path with the verified path on this server
-MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
-MOLECULAR_DOCKING_VINA=/opt/conda/envs/medchat/bin/vina
-MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
-MOLECULAR_DOCKING_PREPARE_RECEPTOR=/opt/medchat/tools/ADFRsuite/bin/prepare_receptor
-MOLECULAR_DOCKING_PREPARE_LIGAND=/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
+MOLECULAR_DOCKING_ROOT=<tools-dir>/autodock
+MOLECULAR_DOCKING_VINA=<vina-path>
+MOLECULAR_DOCKING_ADFR_BIN=<tools-dir>/ADFRsuite/bin
+MOLECULAR_DOCKING_PREPARE_RECEPTOR=<tools-dir>/ADFRsuite/bin/prepare_receptor
+MOLECULAR_DOCKING_PREPARE_LIGAND=<meeko-path>
 
 # Development/local task backend. Do not call this restart-durable production.
 MEDCHAT_TASK_BACKEND=local
@@ -356,7 +355,7 @@ sudo stat -c '%U:%G %a %n' /etc/medchat/medchat.env
 先在仓库根目录运行非严格检查，查看缺失项：
 
 ~~~bash
-cd /opt/medchat/molecular_chat_system
+cd /home/user/XIAOKX/molecular_chat_system
 conda activate medchat
 python scripts/health_check.py
 ~~~
@@ -383,7 +382,7 @@ python scripts/health_check.py --env-file /etc/medchat/medchat.env --strict
 直接启动一次，确认应用本身正常：
 
 ~~~bash
-cd /opt/medchat/molecular_chat_system
+cd /home/user/XIAOKX/molecular_chat_system
 conda activate medchat
 python main.py --env-file /etc/medchat/medchat.env --no-reload
 ~~~
@@ -404,22 +403,45 @@ ssh -L 6001:127.0.0.1:6001 <server-user>@<server-ip>
 
 ## 9. 配置 systemd
 
-仓库已经提供 deployment/medchat.service，其中默认路径为：
-
-~~~text
-User=medchat
-Group=medchat
-WorkingDirectory=/opt/medchat/molecular_chat_system
-EnvironmentFile=/etc/medchat/medchat.env
-ExecStart=/opt/conda/envs/medchat/bin/python main.py --no-reload
-~~~
-
-如果 Conda 环境不在 /opt/conda/envs/medchat，复制前先编辑 ExecStart 为服务器上的真实 Python 路径：
+仓库中的 deployment/medchat.service 是通用模板，默认仍是 /opt 路径，不能在本服务器上原样复制。先找出 Conda 环境的真实 Python：
 
 ~~~bash
-grep -nE '^(User|Group|WorkingDirectory|EnvironmentFile|ExecStart)=' deployment/medchat.service
-sudo install -o root -g root -m 0644 \
-  deployment/medchat.service /etc/systemd/system/medchat.service
+conda activate medchat
+python -c "import sys; print(sys.executable)"
+~~~
+
+例如输出可能是 /home/user/miniconda3/envs/medchat/bin/python。使用该真实路径创建本服务器的 unit：
+
+~~~bash
+sudoedit /etc/systemd/system/medchat.service
+~~~
+
+写入以下内容，并把 <python-bin> 替换为上一条命令的实际输出：
+
+~~~ini
+[Unit]
+Description=MedChat Web Service
+After=network.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/home/user/XIAOKX/molecular_chat_system
+EnvironmentFile=/etc/medchat/medchat.env
+ExecStart=<python-bin> main.py --no-reload
+Restart=always
+RestartSec=3
+TimeoutStartSec=120
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+~~~
+
+保存后执行：
+
+~~~bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now medchat
 ~~~
@@ -539,7 +561,7 @@ python scripts/health_check.py --env-file /etc/medchat/medchat.env --strict
 在维护窗口执行，并保留当前 commit：
 
 ~~~bash
-cd /opt/medchat/molecular_chat_system
+cd /home/user/XIAOKX/molecular_chat_system
 git fetch origin
 git status --short
 git log -1 --oneline
@@ -559,7 +581,7 @@ sudo systemctl reload nginx
 至少备份以下内容：
 
 - /etc/medchat/medchat.env，通过受控密钥管理保存，不能进入 Git；
-- /var/lib/medchat/ 中的 SQLite、模型元数据、FAISS 索引和结构缓存；
+- /home/user/XIAOKX/molecular_chat_system/data/ 和 scratch/ 中的 SQLite、模型元数据、FAISS 索引和结构缓存；
 - logs/ 中需要留存的脱敏运维日志；
 - 当前代码 commit SHA 和依赖 profile。
 
@@ -570,7 +592,7 @@ sudo systemctl reload nginx
 回滚应切回已验证的代码 commit，再重启服务：
 
 ~~~bash
-cd /opt/medchat/molecular_chat_system
+cd /home/user/XIAOKX/molecular_chat_system
 git switch --detach <previous-reviewed-commit-sha>
 sudo systemctl restart medchat
 curl -fsS https://<domain>/health
