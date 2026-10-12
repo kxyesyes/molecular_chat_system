@@ -180,7 +180,6 @@
                 name="file"
                 accept=".csv,.txt,.smi"
                 style="display: none"
-                required
               />
               <div class="form-group" style="margin-bottom: 24px">
                 <label for="batchSmilesColumn">CSV / TSV 的 SMILES 列名</label>
@@ -191,6 +190,7 @@
 
 
 
+              <div id="batchValidationMessage" class="batch-validation-message" role="alert" hidden></div>
               <button type="submit" class="submit-btn" id="batchSubmitBtn">
                 📦 批量预测
               </button>
