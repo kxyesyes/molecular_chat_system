@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 DEFAULT_WEB_HOST = "127.0.0.1"
-DEFAULT_WEB_PORT = 6001
+DEFAULT_WEB_PORT = 6000
 
 
 def load_env_file(env_path: str | Path = ".env") -> None:

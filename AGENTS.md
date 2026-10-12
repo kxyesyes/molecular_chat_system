@@ -94,18 +94,21 @@ ollama serve
 python main.py
 ```
 
-默认访问地址：
+默认后端监听地址（生产环境经 nginx HTTPS 访问）：
 
 ```text
-http://127.0.0.1:6001
+http://127.0.0.1:6000
 ```
+
+浏览器会限制直接访问 6000（`ERR_UNSAFE_PORT`）。本机浏览器调试可显式使用
+`python main.py --port 6001`，再打开 `http://127.0.0.1:6001`；服务器后端仍使用默认 6000。
 
 常用变体：
 
 ```powershell
 python main.py --reload
 python main.py --debug
-python main.py --host 127.0.0.1 --port 6001
+python main.py --host 127.0.0.1 --port 6000
 python main.py --no-reload
 python main.py --modelscope
 python main.py --config config/modelscope_config.yaml
@@ -116,7 +119,7 @@ python main.py --config config/modelscope_config.yaml
 来源：`main.py` 中的 Uvicorn 调用、`src/web/app.py` 导出的 `app`。
 
 ```powershell
-python -m uvicorn src.web.app:app --host 127.0.0.1 --port 6001
+python -m uvicorn src.web.app:app --host 127.0.0.1 --port 6000
 ```
 
 这是可行的底层启动方式；日常开发优先使用 `python main.py`，因为它负责 `.env`、目录检查和配置选择。

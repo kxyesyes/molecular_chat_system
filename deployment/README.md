@@ -282,7 +282,7 @@ scratch/
 ```env
 MEDCHAT_ENV_FILE=.env
 MEDCHAT_HOST=127.0.0.1
-MEDCHAT_PORT=6001
+MEDCHAT_PORT=6000
 MEDCHAT_DEBUG=false
 MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
@@ -382,19 +382,23 @@ python main.py --no-reload
 检查：
 
 ```bash
-curl http://127.0.0.1:6001/health
+curl http://127.0.0.1:6000/health
 ```
 
-浏览器访问：
+浏览器不要直接访问服务器 6000：应用仅监听本机，且 6000 是浏览器受限端口。
+配置下文 nginx HTTPS 后访问实际域名（将 `<domain>` 替换为真实值）：
 
 ```text
-http://<server-ip>:6001/
-http://<server-ip>:6001/target-search
-http://<server-ip>:6001/molecular-docking
-http://<server-ip>:6001/reverse-target
-http://<server-ip>:6001/activity-prediction
-http://<server-ip>:6001/molecular-design
+https://<domain>/
+https://<domain>/target-search
+https://<domain>/molecular-docking
+https://<domain>/reverse-target
+https://<domain>/activity-prediction
+https://<domain>/molecular-design
 ```
+
+nginx 配置前可按 [部署教程](../docs/DEPLOYMENT_TUTORIAL.md#8-先绕过-nginx-做本机验证)
+建立本地 6001 到服务器 6000 的 SSH 隧道进行浏览器验证。
 
 ## 11. systemd 服务
 

@@ -9,7 +9,7 @@ conda run -n medchat-admet-ai python -c \
 本文档面向一台 Ubuntu 22.04/24.04 服务器，目标是完成一套可维护的单机部署：
 
 ~~~text
-浏览器 --HTTPS/WSS--> nginx --HTTP/WS--> MedChat (127.0.0.1:6001)
+浏览器 --HTTPS/WSS--> nginx --HTTP/WS--> MedChat (127.0.0.1:6000)
                                       |
                                       +--> Ollama（可选，本机 127.0.0.1:11434）
                                       +--> Vina / ADFRsuite / Meeko（按需）
@@ -22,7 +22,7 @@ conda run -n medchat-admet-ai python -c \
 
 - 本服务器项目目录固定为：/home/user/XIAOKX/molecular_chat_system。
 - 本教程按登录用户 user 运行 systemd；项目位于该用户的 home 目录时，不要直接套用 medchat 用户模板，否则可能没有权限穿过 /home/user。
-- 应用只监听 127.0.0.1:6001，公网只暴露 nginx 的 80/443。
+- 应用只监听 127.0.0.1:6000，公网只暴露 nginx 的 80/443。
 - 生产环境关闭自动重载，使用 python main.py --no-reload。
 - deployment/requirements.txt 是 Linux/CUDA 12.1/RTX3090 服务器 profile；根目录 requirements.txt 是 CPU/CI profile。两者不要混装。
 - 默认 MEDCHAT_TASK_BACKEND=local 适合单机开发和基础验证，不代表进程重启后后台任务一定能恢复。需要持久化任务时，必须另外部署并验收 Temporal；见 deployment/temporal/ 和 deployment/README.md。
@@ -305,7 +305,7 @@ sudoedit /etc/medchat/medchat.env
 # Web
 MEDCHAT_ENV_FILE=/etc/medchat/medchat.env
 MEDCHAT_HOST=127.0.0.1
-MEDCHAT_PORT=6001
+MEDCHAT_PORT=6000
 MEDCHAT_DEBUG=false
 MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
@@ -396,16 +396,39 @@ python main.py --env-file /etc/medchat/medchat.env --no-reload
 另开终端执行：
 
 ~~~bash
-curl -fsS http://127.0.0.1:6001/health
+curl -fsS http://127.0.0.1:6000/health
 ~~~
 
-浏览器暂时只从服务器本机或 SSH 隧道访问：
+浏览器暂时使用 SSH 隧道访问（在自己的电脑上执行）：
 
 ~~~bash
-ssh -L 6001:127.0.0.1:6001 <server-user>@<server-ip>
+ssh -L 6001:127.0.0.1:6000 <server-user>@<server-ip>
 ~~~
 
-然后打开 http://127.0.0.1:6001/。验证完成后回到运行服务的终端按 Ctrl+C 停止。
+然后打开 http://127.0.0.1:6001/。本地 6001 转发到服务器后端 6000，不改变服务默认端口。
+6000 被 [Chromium 列为受限端口](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/net/base/port_util.cc)，
+直接在浏览器访问会出现 `ERR_UNSAFE_PORT`；`curl` 检查后端不受此限制。
+正式访问使用 nginx 的 HTTPS 域名（443），不要关闭浏览器端口保护。
+验证完成后回到运行服务的终端按 Ctrl+C 停止。
+
+### 默认端口从 6001 迁移到 6000
+
+Git 更新仅修改仓库内默认值和部署模板，不会改写已有 `.env`、
+`/etc/medchat/medchat.env` 或 `/etc/nginx/` 下实际生效的配置。
+
+1. 检查实际使用的环境文件，将 `MEDCHAT_PORT` 设为 `6000`；如 systemd 的
+   `ExecStart` 或手动启动命令带有 `--port 6001`，也需改为 `--port 6000` 或移除覆盖。
+2. 在实际生效的 nginx 站点配置中，将首页和 `/ws` 的上游分别设为
+   `http://127.0.0.1:6000` 和 `http://127.0.0.1:6000/ws`。
+   保留真实域名、证书路径、访问控制、WebSocket 升级头和 `X-Forwarded-Proto https`；
+   不要直接用含占位域名和证书路径的模板覆盖现有站点。
+3. 先执行 `sudo nginx -t`；如果修改了 systemd unit，再执行 `sudo systemctl daemon-reload`。
+   重启应用后用 `curl -fsS http://127.0.0.1:6000/health` 检查，成功后执行
+   `sudo systemctl reload nginx`，最后验证 HTTPS 首页和 WebSocket。
+
+端口调整本身不能证明原先的首页 403 已修复。若响应为 `{"detail":"HTTPS required"}`，
+应核对 nginx 是否传递 HTTPS 协议头、实际代理来源是否在 `MEDCHAT_FORWARDED_ALLOW_IPS`
+中受信任；仅信任真实代理地址，不应设为 `*` 或关闭安全校验。
 
 ## 9. 配置 systemd
 
@@ -463,7 +486,7 @@ sudo journalctl -u medchat -f
 服务启动后再次验证：
 
 ~~~bash
-curl -fsS http://127.0.0.1:6001/health
+curl -fsS http://127.0.0.1:6000/health
 ~~~
 
 常用运维命令：
@@ -502,8 +525,8 @@ sudoedit /etc/nginx/conf.d/medchat.conf
 
 ~~~nginx
 server_name <domain>;
-proxy_pass http://127.0.0.1:6001;
-proxy_pass http://127.0.0.1:6001/ws;
+proxy_pass http://127.0.0.1:6000;
+proxy_pass http://127.0.0.1:6000/ws;
 ssl_certificate /etc/letsencrypt/live/<domain>/fullchain.pem;
 ssl_certificate_key /etc/letsencrypt/live/<domain>/privkey.pem;
 ~~~
@@ -536,7 +559,7 @@ sudo ufw enable
 sudo ufw status
 ~~~
 
-不要开放 6001 或 11434 到公网。应用端口和 Ollama 应只监听本机。
+不要开放 6000 或 11434 到公网。应用端口和 Ollama 应只监听本机。
 
 ## 11. 上线验收
 
@@ -629,26 +652,26 @@ sudo systemctl cat medchat
 
 重点检查 Python 路径、WorkingDirectory、环境文件权限、依赖环境和 MEDCHAT_PORT 是否冲突。
 
-### curl 127.0.0.1:6001/health 失败
+### curl 127.0.0.1:6000/health 失败
 
 ~~~bash
 sudo systemctl status medchat --no-pager
-sudo ss -ltnp | grep 6001
+sudo ss -ltnp | grep 6000
 sudo journalctl -u medchat -n 100 --no-pager
 ~~~
 
-先修复应用本身，再排查 nginx；不要通过暴露 6001 到公网来绕过问题。
+先修复应用本身，再排查 nginx；不要通过暴露 6000 到公网来绕过问题。
 
 ### nginx 502 Bad Gateway
 
 ~~~bash
 sudo nginx -t
 sudo systemctl status medchat --no-pager
-curl -v http://127.0.0.1:6001/health
+curl -v http://127.0.0.1:6000/health
 sudo tail -n 100 /var/log/nginx/error.log
 ~~~
 
-通常是应用没有监听 6001、systemd 用户无权限，或 nginx proxy_pass 写错。
+通常是应用没有监听 6000、systemd 用户无权限，或 nginx proxy_pass 写错。
 
 ### 页面能打开但聊天断开
 
@@ -667,7 +690,7 @@ sudo tail -n 100 /var/log/nginx/error.log
 - scripts/health_check.py --strict 的失败项已解释，真实启用的功能对应检查通过；
 - systemd 重启后应用可恢复；
 - nginx -t 通过，HTTPS 和 WebSocket 均已验证；
-- 防火墙未暴露 6001、11434 和内部数据库；
+- 防火墙未暴露 6000、11434 和内部数据库；
 - API key、证书私钥、用户数据和运行产物没有进入 Git；
 - 备份和回滚路径已经实际验证。
 
