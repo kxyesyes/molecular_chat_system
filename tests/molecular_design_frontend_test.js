@@ -20,6 +20,10 @@ assert.ok(!template.includes("<footer>"), "the design workspace must not reserve
 assert.ok(!template.includes("综合评分") && !template.includes("Top 10"), "fixed candidate scoring must be removed");
 assert.ok(!template.includes("prop-bar-track") && !properties.includes("prop-bar"), "decorative property progress bars must be removed");
 assert.ok(css.includes("grid-template-columns: minmax(300px, 360px) minmax(0, 1fr)"), "workspace must use a compact two-column layout");
+assert.ok(css.includes(".results-body { flex: 1 1 auto;"), "results content must fill the result panel height");
+assert.ok(css.includes(".candidate-compare { flex: 1 1 280px;"), "candidate comparison must occupy the remaining result height");
+assert.ok(css.includes(".candidate-compare-empty { flex: 1 1 auto;"), "candidate empty state must stretch with its result area");
+assert.ok(css.includes(".result-footer-actions { margin-top: auto;"), "result actions must stay at the bottom of the result panel");
 assert.ok(fragments.includes("&height=64"), "fragment thumbnails must satisfy the image endpoint's minimum height");
 assert.ok(!fragments.includes("&height=60"), "fragment thumbnails must not request an invalid 60px endpoint height");
 
