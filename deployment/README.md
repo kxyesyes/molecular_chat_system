@@ -316,6 +316,33 @@ MEDCHAT_SYSTEMD_SERVICE=deployment/medchat.service
 MEDCHAT_NGINX_CONFIG=deployment/nginx-medchat.conf
 ```
 
+### 7.1 当前 HTTP 映射（无 HTTPS 终止）
+
+如果公网映射 `http://medchat.tdd-lab.com` 直接转发到服务器的
+`127.0.0.1:6000`，而映射平台没有提供 HTTPS 终止，请在项目根目录的 `.env`
+中加入下面这一行：
+
+```env
+MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com
+```
+
+仓库提供了不含密钥的示例文件
+[`deployment/medchat-http.env.example`](medchat-http.env.example)。它不会被
+`main.py --env-file .env` 自动加载，也不会覆盖现有 `.env`；请将该行合并到
+`/home/user/XIAOKX/molecular_chat_system/.env`，保留 `.env` 中已有的模型密钥和
+其他本机配置。该设置只允许精确的 Host，其他域名仍会返回
+`{"detail":"HTTPS required"}`。
+
+应用配置更新后，用现有的手动启动方式重启：
+
+```bash
+cd /home/user/XIAOKX/molecular_chat_system
+python main.py --env-file .env --host 127.0.0.1 --port 6000 --no-reload
+```
+
+该设置是明文 HTTP 的显式例外，仅适合已接受传输风险的临时或受控网络；长期
+公网部署仍应配置 HTTPS/WSS。
+
 ## 8. 权限配置
 
 建议创建独立用户运行服务，但不要把整个 `/opt/medchat` 交给服务用户：
