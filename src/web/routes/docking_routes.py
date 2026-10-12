@@ -406,11 +406,27 @@ def setup_docking_routes(
                             "warnings": [f"pose_export_failed:{type(exc).__name__}"],
                             "provenance": {"analyzer": "prolif", "tool_derived": False},
                         }
-                    result = analyze_docking_interactions(
-                        inputs.receptor_path,
-                        ligand_path,
-                        pose_index=1,
-                    )
+                    def analyze_prepared_inputs():
+                        receptor_path = inputs.receptor_path
+                        receptor_suffix = Path(receptor_path).suffix.lower()
+                        prepare_analysis_receptor = getattr(
+                            docking_service, "prepare_analysis_receptor", None
+                        ) if docking_service is not None else None
+                        if callable(prepare_analysis_receptor) and receptor_suffix in {".pdb", ".cif", ".mmcif"}:
+                            prepared_receptor = Path(analysis_root) / f"analysis_receptor{receptor_suffix}"
+                            prepare_analysis_receptor(
+                                receptor_path,
+                                str(prepared_receptor),
+                                trace={},
+                            )
+                            receptor_path = str(prepared_receptor)
+                        return analyze_docking_interactions(
+                            receptor_path,
+                            str(ligand_path),
+                            pose_index=1,
+                        )
+
+                    result = await asyncio.to_thread(analyze_prepared_inputs)
                     result["pose"] = pose
                     return result
         except (CompletionError, ManifestError, OSError, RuntimeError, ValueError) as exc:
@@ -899,13 +915,14 @@ def setup_docking_routes(
             resolve_analysis_inputs,
         )
 
-        receptor_path, ligand_path = resolve_analysis_inputs(job_dir, pose)
+        receptor_path, ligand_path = await asyncio.to_thread(
+            resolve_analysis_inputs, job_dir, pose
+        )
         pose_export_error = None
         if receptor_path is not None and ligand_path is None:
             result_file = os.path.join(job_dir, "result.pdbqt")
             if os.path.isfile(result_file):
-                temporary = None
-                try:
+                def export_pose_artifact():
                     from src.docking.pose_export import pose_sdf_from_pdbqt
 
                     with open(result_file, "r", encoding="utf-8", errors="ignore") as stream:
@@ -920,23 +937,47 @@ def setup_docking_routes(
                         f"analysis_pose_{pose}.sdf",
                     )
                     temporary = f"{ligand_candidate}.tmp"
-                    with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
-                        stream.write(pose_sdf)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(temporary, ligand_candidate)
-                    _, ligand_path = resolve_analysis_inputs(job_dir, pose)
-                except Exception as error:
-                    pose_export_error = type(error).__name__
-                    if temporary and os.path.exists(temporary):
+                    try:
+                        with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
+                            stream.write(pose_sdf)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temporary, ligand_candidate)
+                    except BaseException:
                         try:
                             os.unlink(temporary)
                         except OSError:
                             pass
+                        raise
+                    return ligand_candidate
+
+                try:
+                    await asyncio.to_thread(export_pose_artifact)
+                    _, ligand_path = await asyncio.to_thread(
+                        resolve_analysis_inputs, job_dir, pose
+                    )
+                except Exception as error:
+                    pose_export_error = type(error).__name__
                     resolve(logger, "logger").warning(
                         "Unable to create topology-bearing pose artifact for interaction analysis: %s",
                         type(error).__name__,
                     )
+
+        prepare_analysis_receptor = getattr(
+            docking_service, "prepare_analysis_receptor", None
+        ) if docking_service is not None else None
+        if receptor_path is not None and callable(prepare_analysis_receptor):
+            receptor_suffix = Path(receptor_path).suffix.lower()
+            if receptor_suffix in {".pdb", ".cif", ".mmcif"}:
+                prepared_receptor = os.path.join(
+                    job_dir, f"analysis_receptor_interactions{receptor_suffix}"
+                )
+                await asyncio.to_thread(
+                    prepare_analysis_receptor,
+                    receptor_path,
+                    prepared_receptor,
+                )
+                receptor_path = prepared_receptor
         if receptor_path is None or ligand_path is None:
             if pose_export_error:
                 return {
@@ -960,7 +1001,8 @@ def setup_docking_routes(
                 ],
                 "provenance": {"analyzer": "prolif", "tool_derived": False},
             }
-        result = analyze_docking_interactions(
+        result = await asyncio.to_thread(
+            analyze_docking_interactions,
             receptor_path,
             ligand_path,
             pose_index=1,

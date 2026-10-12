@@ -74,6 +74,40 @@ const INTERACTION_COLORS = {
   hydrophobic: "#f59e0b",
 };
 
+// A single backend analysis supplies all interaction classes for one job/pose.
+// Cache the in-flight promise as well as its response so toggling several
+// overlays does not launch duplicate (and comparatively expensive) analyses.
+const interactionAnalysisCache = new Map();
+
+function interactionAnalysisKey(jobId, pose) {
+  return `${jobId}:${pose}`;
+}
+
+function fetchInteractionAnalysis(jobId, pose) {
+  const key = interactionAnalysisKey(jobId, pose);
+  const cached = interactionAnalysisCache.get(key);
+  if (cached) return cached;
+
+  const request = fetch(
+    `/api/docking/interactions/${encodeURIComponent(jobId)}?pose=${pose}`,
+  )
+    .then(async (response) => {
+      const analysis = await response.json();
+      if (!response.ok) {
+        throw new Error(analysis.detail || analysis.message || "interaction analysis failed");
+      }
+      return analysis;
+    })
+    .catch((error) => {
+      // A transient transport failure should be retryable; a valid unavailable
+      // or failed scientific response remains cached and fail-closed.
+      interactionAnalysisCache.delete(key);
+      throw error;
+    });
+  interactionAnalysisCache.set(key, request);
+  return request;
+}
+
 function interactionGeometryOccurrences(interaction) {
   if (Array.isArray(interaction?.geometry_occurrences)) {
     return interaction.geometry_occurrences;
@@ -126,9 +160,8 @@ async function requestInteractionAnalysis(kind) {
     return;
   }
   try {
-    const response = await fetch(`/api/docking/interactions/${encodeURIComponent(jobId)}?pose=${pose}`);
-    const analysis = await response.json();
-    if (!response.ok || analysis.status === "failed") {
+    const analysis = await fetchInteractionAnalysis(jobId, pose);
+    if (analysis.status === "failed") {
       const detail = analysis.warnings?.[0] || analysis.detail;
       Utils.showToast(
         detail

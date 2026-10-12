@@ -94,6 +94,51 @@ def _windows_handle_count() -> int:
 
 
 class DockingConfigurationTest(unittest.TestCase):
+    def test_configure_discovers_reduce_command_from_adfr_bin(self):
+        with tempfile.TemporaryDirectory(prefix="docking_reduce_config_") as tmp:
+            root = Path(tmp)
+            reduce = root / ("reduce.exe" if os.name == "nt" else "reduce")
+            reduce.write_text("", encoding="utf-8")
+
+            service = MolecularDockingService({"adfrsuite_bin": str(root)})
+
+        self.assertEqual(service.reduce_cmd, str(reduce.resolve()))
+
+    def test_prepare_analysis_receptor_preserves_explicit_hydrogens(self):
+        source_pdb = (
+            "ATOM      1  C   ALA A   1       0.000   0.000   0.000  1.00 20.00           C  \n"
+        )
+        prepared_pdb = source_pdb + (
+            "ATOM      2  H   ALA A   1       0.000   0.000   1.090  1.00 20.00           H  \n"
+        )
+
+        class FakeReduceAdapter:
+            def wrap_command(self, *args):
+                return ["reduce", *args]
+
+            def run(self, args, cwd=None, timeout=None, *, cancel_event=None):
+                return subprocess.CompletedProcess(args, 0, stdout=prepared_pdb, stderr="")
+
+        with tempfile.TemporaryDirectory(prefix="docking_analysis_receptor_") as tmp:
+            root = Path(tmp)
+            source = root / "input.pdb"
+            output = root / "analysis_receptor.pdb"
+            source.write_text(source_pdb, encoding="utf-8")
+            service = MolecularDockingService()
+            service.reduce_cmd = "reduce"
+            service.reduce_adapter = FakeReduceAdapter()
+            trace = {}
+
+            self.assertTrue(
+                service.prepare_analysis_receptor(
+                    str(source), str(output), trace=trace
+                )
+            )
+
+            self.assertIn(" H ", output.read_text(encoding="utf-8"))
+            self.assertEqual(trace["analysis_receptor_method"], "reduce")
+            self.assertEqual(trace["analysis_receptor_hydrogens"], "explicit")
+
     def test_configure_accepts_direct_prepare_receptor_command(self):
         with tempfile.TemporaryDirectory(prefix="docking_config_") as tmp:
             root = Path(tmp)

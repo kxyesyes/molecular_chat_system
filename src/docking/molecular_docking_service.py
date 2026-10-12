@@ -106,6 +106,8 @@ class MolecularDockingService:
         self.adfrsuite_path = ""
         # 可直接指定 prepare_receptor 命令；优先于 ADFRsuite bin 自动推断
         self.prepare_receptor_cmd = ""
+        # reduce 用于为相互作用分析准备带显式氢的拓扑受体；失败时不阻断对接
+        self.reduce_cmd = ""
         # Meeko 命令行工具（用于配体准备，来自 Anaconda 环境）
         self.prepare_ligand_cmd = ""
         # 保留兼容字段
@@ -119,6 +121,9 @@ class MolecularDockingService:
         ownership = self._adapter_ownership()
         self.vina_adapter = VinaAdapter(**ownership)
         self.receptor_adapter = ADFRAdapter(**ownership)
+        # Instantiate lazily so environments without reduce do not alter the
+        # existing command-adapter lifecycle or ownership probes.
+        self.reduce_adapter = None
         self.ligand_adapter = MeekoAdapter(**ownership)
         self.openbabel_adapter = OpenBabelAdapter(**ownership)
         self._require_command_scope()
@@ -130,6 +135,7 @@ class MolecularDockingService:
         ownership = self._adapter_ownership()
         self.vina_adapter = VinaAdapter(self.vina_exe, **ownership)
         self.receptor_adapter = ADFRAdapter(self.prepare_receptor_cmd, **ownership)
+        self.reduce_adapter = None
         self.ligand_adapter = MeekoAdapter(self.prepare_ligand_cmd, **ownership)
         self.openbabel_adapter = OpenBabelAdapter(shutil.which("obabel") or "", **ownership)
         self._require_command_scope()
@@ -143,9 +149,14 @@ class MolecularDockingService:
             return
         if os.path.normcase(os.path.abspath(self.work_dir)) != os.path.normcase(self._allowed_output_root):
             raise CommandOwnershipUncertainError()
-        if any(getattr(adapter, "_ownership_scope", None) is not scope for adapter in (
-            self.vina_adapter, self.receptor_adapter, self.ligand_adapter, self.openbabel_adapter,
-        )):
+        adapters = (
+            self.vina_adapter, self.receptor_adapter, self.reduce_adapter,
+            self.ligand_adapter, self.openbabel_adapter,
+        )
+        if any(
+            adapter is not None and getattr(adapter, "_ownership_scope", None) is not scope
+            for adapter in adapters
+        ):
             raise CommandOwnershipUncertainError()
 
     def _require_finished_commands(self):
@@ -247,6 +258,14 @@ class MolecularDockingService:
             os.path.join(self.adfrsuite_path, "prepare_receptor") if self.adfrsuite_path else None,
             os.path.join(self.adfrsuite_path, "prepare_receptor.py") if self.adfrsuite_path else None,
         )
+        self.reduce_cmd = self._first_existing_path(
+            docking_config.get("reduce_cmd"),
+            os.environ.get("MOLECULAR_DOCKING_REDUCE"),
+            os.path.join(self.adfrsuite_path, "reduce.exe") if self.adfrsuite_path else None,
+            os.path.join(self.adfrsuite_path, "reduce.bat") if self.adfrsuite_path else None,
+            os.path.join(self.adfrsuite_path, "reduce") if self.adfrsuite_path else None,
+            shutil.which("reduce") or shutil.which("reduce.exe"),
+        )
         self.prepare_ligand_cmd = self._first_existing_path(
             docking_config.get("prepare_ligand_cmd"),
             os.environ.get("MOLECULAR_DOCKING_PREPARE_LIGAND"),
@@ -256,6 +275,109 @@ class MolecularDockingService:
             prepare_ligand_in_path,
         )
         self._refresh_adapters()
+
+    @staticmethod
+    def _pdb_text_has_explicit_hydrogens(text: str) -> bool:
+        """Return whether PDB text contains at least one explicit H atom."""
+        for line in text.splitlines():
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            element = line[76:78].strip().upper() if len(line) >= 78 else ""
+            atom_name = line[12:16].strip().upper() if len(line) >= 16 else ""
+            if element == "H" or atom_name.startswith("H"):
+                return True
+        return False
+
+    @classmethod
+    def _pdb_has_explicit_hydrogens(cls, path: str) -> bool:
+        """Return whether a PDB contains at least one explicit hydrogen atom."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as stream:
+                return cls._pdb_text_has_explicit_hydrogens(stream.read())
+        except OSError:
+            return False
+
+    def prepare_analysis_receptor(
+        self,
+        source_path: str,
+        output_path: str,
+        *,
+        cancel_event=None,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Preserve a topology-bearing receptor for interaction analysis.
+
+        ProLIF requires explicit protein hydrogens for defensible geometry.  The
+        docking receptor preparation output is PDBQT and is therefore not used
+        as a topology fallback.  ``reduce`` is best-effort here: if it is not
+        installed or fails, the original receptor is still preserved and the
+        analyzer will report an unavailable result rather than inventing claims.
+        """
+        source_path = os.path.abspath(source_path)
+        output_path = os.path.abspath(output_path)
+        trace = trace if trace is not None else {}
+        trace.setdefault("analysis_receptor_source", os.path.basename(source_path))
+        try:
+            self._raise_if_cancelled(cancel_event)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            suffix = Path(source_path).suffix.lower()
+            if suffix != ".pdb" or self._pdb_has_explicit_hydrogens(source_path):
+                self._copy_file_cooperatively(source_path, output_path, cancel_event)
+                trace.update({
+                    "analysis_receptor_method": "copy",
+                    "analysis_receptor_hydrogens": "explicit" if suffix == ".pdb" else "not_verified",
+                })
+                return True
+
+            if self.reduce_cmd:
+                adapter = getattr(self, "reduce_adapter", None)
+                adapter_executable = getattr(adapter, "executable", None)
+                if adapter is None or (
+                    adapter_executable is not None
+                    and adapter_executable != os.path.abspath(self.reduce_cmd)
+                ):
+                    adapter = CommandAdapter(self.reduce_cmd, **self._adapter_ownership())
+                    self.reduce_adapter = adapter
+                result = adapter.run(
+                    adapter.wrap_command("-NOFLIP", "-Quiet", "-DB", "dict", source_path),
+                    cwd=os.path.dirname(source_path) or self.work_dir,
+                    timeout=60,
+                    cancel_event=cancel_event,
+                )
+                stdout = result.stdout or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if result.returncode == 0 and stdout:
+                    temporary = f"{output_path}.tmp"
+                    with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
+                        stream.write(stdout)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if self._pdb_has_explicit_hydrogens(temporary):
+                        os.replace(temporary, output_path)
+                        trace.update({
+                            "analysis_receptor_method": "reduce",
+                            "analysis_receptor_hydrogens": "explicit",
+                        })
+                        return True
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                logger.warning("reduce did not produce an explicit-H receptor (returncode=%s)", result.returncode)
+            else:
+                logger.info("reduce unavailable; preserving original receptor for fail-closed analysis")
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
+        except Exception:
+            logger.warning("Unable to add explicit hydrogens to analysis receptor", exc_info=True)
+
+        self._copy_file_cooperatively(source_path, output_path, cancel_event)
+        trace.update({
+            "analysis_receptor_method": "copy_unavailable",
+            "analysis_receptor_hydrogens": "unavailable",
+        })
+        return True
 
     def _prepare_receptor_candidates(self) -> List[str]:
         candidates = []
@@ -1641,13 +1763,18 @@ class MolecularDockingService:
         # interaction analyzer.  The prepared PDBQT is intentionally not used
         # as an analysis fallback because it may lack bond orders and explicit
         # hydrogens.
+        analysis_receptor_trace: Dict[str, Any] = {}
         try:
             receptor_suffix = Path(receptor_file).suffix.lower()
             if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
-                shutil.copyfile(
+                self.prepare_analysis_receptor(
                     receptor_file,
                     os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
+                    cancel_event=cancel_event,
+                    trace=analysis_receptor_trace,
                 )
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
         except OSError:
             logger.warning("Unable to preserve receptor analysis artifact", exc_info=True)
 
@@ -1771,6 +1898,8 @@ class MolecularDockingService:
                 reference_pose=reference_provenance,
             )
             preparation_trace: Dict[str, Any] = {}
+            if analysis_receptor_trace:
+                preparation_trace["analysis_receptor"] = analysis_receptor_trace
 
             def run_preparation(method, *args):
                 kwargs = dict(command_control)
