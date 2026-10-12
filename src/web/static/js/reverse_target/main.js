@@ -18,6 +18,17 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // 5. 绑定模态框点击关闭
   _bindModalDismiss();
+
+  document.querySelectorAll(".preset-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyReverseTargetPreset(button.dataset.mode || "broad");
+    });
+  });
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      switchTab(tab.dataset.tab || "single");
+    });
+  });
 });
 
 function applyReverseTargetPreset(mode) {
@@ -180,6 +191,18 @@ function toggleSpin() {
 function closePharm3DModal() {
   RtViewer.closePharm3DModal();
 }
+
+// Expose the legacy HTML onclick bridge explicitly.  Some deployments wrap
+// classic scripts in a scoped loader, so top-level function declarations are
+// not guaranteed to become window properties.
+window.applyReverseTargetPreset = applyReverseTargetPreset;
+window.switchTab = switchTab;
+window.exportData = exportData;
+window.closeSimilarModal = closeSimilarModal;
+window.resetCamera = resetCamera;
+window.toggleSpin = toggleSpin;
+window.closePharm3DModal = closePharm3DModal;
 function openPharmacophore3D(s, id) {
   RtViewer.openPharmacophore3D(s, id);
 }
+window.openPharmacophore3D = openPharmacophore3D;

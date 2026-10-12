@@ -6,11 +6,11 @@
     <title>反向寻靶分析 - MedChat</title>
 
     <!-- 外部依赖 -->
-    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script async src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
       window.reverseTargetDependencyStatus = { threeDmolLoaded: true };
     </script>
-    <script src="https://3dmol.org/build/3Dmol-min.js"
+    <script async src="https://3dmol.org/build/3Dmol-min.js"
             onerror="window.reverseTargetDependencyStatus.threeDmolLoaded=false"></script>
 
     <!-- 独立样式表 -->
@@ -69,8 +69,8 @@
         <!-- ── 主功能卡片 ── -->
         <div class="content-card">
           <div class="tabs">
-            <div class="tab active" onclick="switchTab('single')">单分子查询</div>
-            <div class="tab" onclick="switchTab('batch')">批量预测</div>
+            <div class="tab active" data-tab="single">单分子查询</div>
+            <div class="tab" data-tab="batch">批量预测</div>
           </div>
 
           <!-- 单分子查询面板 -->
@@ -81,11 +81,11 @@
             </div>
 
             <div class="recall-presets" aria-label="反向寻靶参数预设">
-              <button type="button" class="preset-btn active" onclick="applyReverseTargetPreset('broad')">
+              <button type="button" class="preset-btn active" data-mode="broad">
                 广谱召回
                 <span>Top 100 · 阈值 0.5</span>
               </button>
-              <button type="button" class="preset-btn" onclick="applyReverseTargetPreset('precise')">
+              <button type="button" class="preset-btn" data-mode="precise">
                 精准模式
                 <span>Top 20 · 阈值 0.6</span>
               </button>
@@ -323,9 +323,9 @@
     <script src="/static/js/shared/safe_render.js?v=20261007-url-policy-v1"></script>
     <script src="/static/js/reverse_target/config.js?v=20260516a"></script>
     <script src="/static/js/reverse_target/api_client.js?v=20260508a"></script>
-    <script src="/static/js/reverse_target/ui_manager.js?v=20261007-safe-errors-v1"></script>
+    <script src="/static/js/reverse_target/ui_manager.js?v=20261013a"></script>
     <script src="/static/js/reverse_target/results_renderer.js?v=20261007-safe-dom-v3"></script>
     <script src="/static/js/reverse_target/viewer_3d.js?v=20261007-safe-dom-v3"></script>
-    <script src="/static/js/reverse_target/main.js?v=20260516a"></script>
+    <script src="/static/js/reverse_target/main.js?v=20261013"></script>
   </body>
 </html>

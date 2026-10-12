@@ -61,6 +61,13 @@ window.ActivityMain = (function () {
     });
   }
 
+  function setBatchValidationMessage(text) {
+    const message = document.getElementById("batchValidationMessage");
+    if (!message) return;
+    message.textContent = text || "";
+    message.hidden = !text;
+  }
+
   async function handlePredict(url, formData, btnId) {
     const btn = document.getElementById(btnId);
     const loading = document.getElementById("loading");
@@ -312,6 +319,8 @@ window.ActivityMain = (function () {
 
   function init() {
     bindFileDisplay("batchFile", "fileInfo", "批量文件");
+    const batchFile = document.getElementById("batchFile");
+    batchFile && batchFile.addEventListener("change", () => setBatchValidationMessage(""));
     ActivityPreflight.init();
     ActivityModels.initPopover();
     ActivityModels.loadModels();
@@ -328,6 +337,12 @@ window.ActivityMain = (function () {
     batchForm &&
       batchForm.addEventListener("submit", function (e) {
         e.preventDefault();
+        setBatchValidationMessage("");
+        const batchFile = document.getElementById("batchFile");
+        if (!batchFile || !batchFile.files || !batchFile.files[0]) {
+          setBatchValidationMessage("请先上传批量分子文件。");
+          return;
+        }
         handlePredict(
           "/api/activity/batch_predict",
           new FormData(e.target),

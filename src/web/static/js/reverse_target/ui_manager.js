@@ -12,7 +12,7 @@ const RtUI = (() => {
     document
       .querySelectorAll(".tab")
       .forEach((t) => t.classList.remove("active"));
-    event.currentTarget.classList.add("active");
+    document.querySelector(`.tab[data-tab="${tabName}"]`)?.classList.add("active");
 
     $("single-panel").style.display = tabName === "single" ? "block" : "none";
     $("batch-panel").style.display = tabName === "batch" ? "block" : "none";
