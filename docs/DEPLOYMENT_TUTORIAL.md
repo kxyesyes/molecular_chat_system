@@ -311,6 +311,9 @@ MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
 MEDCHAT_LOG_LEVEL=info
 MEDCHAT_FORWARDED_ALLOW_IPS=127.0.0.1
+# Optional HTTP-only exception; use only when the public mapping has no HTTPS.
+# This exposes cookies and application traffic in plaintext.
+MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com
 MEDCHAT_LOG_DIR=/home/user/XIAOKX/molecular_chat_system/logs
 MEDCHAT_TEMP_DOCKING_DIR=/home/user/XIAOKX/molecular_chat_system/temp_docking
 MEDCHAT_SCRATCH_DIR=/home/user/XIAOKX/molecular_chat_system/scratch
@@ -429,6 +432,12 @@ Git 更新仅修改仓库内默认值和部署模板，不会改写已有 `.env`
 端口调整本身不能证明原先的首页 403 已修复。若响应为 `{"detail":"HTTPS required"}`，
 应核对 nginx 是否传递 HTTPS 协议头、实际代理来源是否在 `MEDCHAT_FORWARDED_ALLOW_IPS`
 中受信任；仅信任真实代理地址，不应设为 `*` 或关闭安全校验。
+
+如果部署平台只能提供 HTTP 映射、无法终止 TLS，可在实际环境文件中显式配置
+`MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com`。该值只接受精确主机名，
+不会放开其他域名；但这会让会话 Cookie、聊天内容和 API 请求以明文传输，
+仅应在已接受该风险的网络中使用。默认留空时，公网 HTTP 仍会返回
+`{"detail":"HTTPS required"}`。
 
 ## 9. 配置 systemd
 
