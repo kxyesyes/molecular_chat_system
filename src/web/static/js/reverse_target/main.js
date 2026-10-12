@@ -52,7 +52,7 @@ function applyReverseTargetPreset(mode) {
   document.querySelectorAll(".preset-btn").forEach((button) => {
     button.classList.toggle(
       "active",
-      button.getAttribute("onclick")?.includes(`'${mode}'`) || false,
+      button.dataset.mode === mode,
     );
   });
 }

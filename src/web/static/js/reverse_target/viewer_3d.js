@@ -47,7 +47,7 @@ const RtViewer = (() => {
     await new Promise((r) => setTimeout(r, 50));
 
     try {
-      _ensureViewer();
+      await _ensureViewer();
       glViewer.clear();
 
       const data = await RtApi.fetchPharmacophore(smiles);
@@ -135,8 +135,17 @@ const RtViewer = (() => {
   }
 
   // ── 确保 3Dmol viewer 存在 ──
-  function _ensureViewer() {
+  async function _ensureViewer() {
     if (glViewer) return;
+    if (window.reverseTargetDependencyReady) {
+      const ready = await Promise.race([
+        window.reverseTargetDependencyReady,
+        new Promise((resolve) => setTimeout(() => resolve(null), 8000)),
+      ]);
+      if (ready === false || typeof $3Dmol === "undefined") {
+        throw new Error("3Dmol.js 加载失败，当前网络可能无法访问外部 CDN；请联网后刷新页面，或后续改为本地静态依赖。");
+      }
+    }
     if (
       typeof $3Dmol === "undefined" ||
       window.reverseTargetDependencyStatus?.threeDmolLoaded === false

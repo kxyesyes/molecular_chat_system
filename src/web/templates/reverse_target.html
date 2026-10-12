@@ -8,10 +8,21 @@
     <!-- 外部依赖 -->
     <script async src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
     <script>
-      window.reverseTargetDependencyStatus = { threeDmolLoaded: true };
+      window.reverseTargetDependencyStatus = { threeDmolLoaded: false };
+      window.reverseTargetDependencyReady = new Promise((resolve) => {
+        window.resolveReverseTarget3D = resolve;
+      });
+      window.markReverseTarget3D = function (loaded) {
+        window.reverseTargetDependencyStatus.threeDmolLoaded = loaded;
+        if (window.resolveReverseTarget3D) {
+          window.resolveReverseTarget3D(loaded);
+          window.resolveReverseTarget3D = null;
+        }
+      };
     </script>
     <script async src="https://3dmol.org/build/3Dmol-min.js"
-            onerror="window.reverseTargetDependencyStatus.threeDmolLoaded=false"></script>
+            onload="markReverseTarget3D(true)"
+            onerror="markReverseTarget3D(false)"></script>
 
     <!-- 独立样式表 -->
     <link rel="stylesheet" href="/static/css/reverse_target.css?v=20260516a" />
