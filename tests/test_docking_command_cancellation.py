@@ -2477,7 +2477,9 @@ def test_c4a_tool_scope_and_root_are_private_constructor_inputs(
     assert not foreign_root.exists()
     if scoped:
         assert not (tmp_path / "temp_docking").exists(), "C created the legacy root first"
-        assert _c4a_snapshot(rig.scope)["command_count"] == 3
+        # Receptor analysis now has an owned, best-effort reduce invocation in
+        # addition to receptor prep, ligand prep, and Vina.
+        assert _c4a_snapshot(rig.scope)["command_count"] == 4
     assert "CommandOwnershipScope" not in repr(result) and "C4A_PRIVATE" not in repr(result)
     rig.scope.seal()
     assert rig.scope.settle() is True

@@ -70,7 +70,7 @@ class _OwnedStore:
         )
 
 
-def _build_client(tmp_path: Path):
+def _build_client(tmp_path: Path, docking_service=None):
     from src.task_runtime.staging import DockingInputStager
 
     manifest_path = DockingInputStager(tmp_path).stage(
@@ -139,7 +139,7 @@ def _build_client(tmp_path: Path):
         request.scope["agent_session_id"] = OWNER
         return await call_next(request)
 
-    setup_docking_routes(app, docking_service=None, task_runtime=runtime)
+    setup_docking_routes(app, docking_service=docking_service, task_runtime=runtime)
     return TestClient(app, base_url="https://localhost")
 
 
@@ -236,6 +236,50 @@ def test_durable_interaction_analysis_reports_missing_optional_backend(
     assert response.json()["reason_code"] == "dependency_missing"
     assert response.json()["interactions"] == []
     assert "prolif_and_mdanalysis_are_required" in response.json()["warnings"][0]
+
+
+def test_durable_interaction_analysis_preserves_receptor_preparation_trace(tmp_path, monkeypatch):
+    from src.docking import interaction_analysis
+    from src.docking import pose_export
+
+    observed = {}
+
+    def fake_prepare(source, destination, *, trace=None):
+        Path(destination).write_text(Path(source).read_text(encoding="utf-8"), encoding="utf-8")
+        trace.update({
+            "analysis_receptor_method": "reduce",
+            "analysis_receptor_hydrogens": "explicit",
+        })
+        return True
+
+    def fake_analysis(receptor_path, ligand_path, *, pose_index):
+        observed["receptor"] = Path(receptor_path)
+        return {
+            "status": "success",
+            "reason_code": "analysis_completed",
+            "interactions": [],
+            "geometry_status": "available",
+            "warnings": [],
+            "provenance": {"analyzer": "test", "tool_derived": True},
+        }
+
+    monkeypatch.setattr(interaction_analysis, "analyze_docking_interactions", fake_analysis)
+    monkeypatch.setattr(pose_export, "pose_sdf_from_pdbqt", lambda *_args, **_kwargs: "synthetic SDF\n  V2000\n")
+    service = SimpleNamespace(
+        work_dir=str(tmp_path),
+        prepare_analysis_receptor=fake_prepare,
+    )
+
+    response = _build_client(tmp_path, docking_service=service).get(
+        f"/api/docking/interactions/{TASK_ID}?pose=2"
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["provenance"]["analysis_receptor"] == {
+        "analysis_receptor_method": "reduce",
+        "analysis_receptor_hydrogens": "explicit",
+    }
+    assert observed["receptor"].name == "analysis_receptor.pdb"
 
 
 def test_legacy_result_route_remains_owner_scoped(tmp_path):

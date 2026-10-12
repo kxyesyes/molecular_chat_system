@@ -921,6 +921,8 @@ function applyDockingTaskRecord(record) {
   return true;
 }
 
+const DOCKING_POLL_INTERVAL_MS = 500;
+
 async function pollDockingTask(taskId) {
   clearDockingPoll();
   let response;
@@ -946,7 +948,7 @@ async function pollDockingTask(taskId) {
   if (!terminal && readRememberedDockingTask() === taskId) {
     dockingPollTimer = setTimeout(() => {
       pollDockingTask(taskId).catch(handleDockingTaskError);
-    }, 1000);
+    }, DOCKING_POLL_INTERVAL_MS);
   }
 }
 

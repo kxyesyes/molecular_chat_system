@@ -20,6 +20,7 @@ assert.doesNotMatch(source, /selectedAtoms\(\{\}\)/);
 assert.doesNotMatch(source, /selectedAtoms\(/);
 assert.doesNotMatch(template, /docking\/interaction_geometry\.js/);
 assert.match(template, /docking\/interactions\.js\?v=20261012-interaction-analysis-v2/);
+assert.match(source, /interactionAnalysisCache/);
 
 const shapes = [];
 const context = vm.createContext({
@@ -54,5 +55,43 @@ assert.equal(
   0,
 );
 
-console.log("docking interaction fail-closed checks passed");
+const requests = [];
+const requestContext = vm.createContext({
+  viewer: { addCylinder() {}, render() {} },
+  interactionsState: {},
+  console,
+  setTimeout,
+  getCurrentJobId: () => "job-1",
+  document: { getElementById: () => ({ value: "1" }) },
+  Utils: { showToast() {} },
+  fetch: async () => {
+    requests.push("interaction");
+    return {
+      ok: true,
+      json: async () => ({
+        status: "success",
+        interactions: [{
+          type: "hydrogen_bond",
+          display_geometry: {
+            protein: {x: 1, y: 2, z: 3},
+            ligand: {x: 4, y: 5, z: 6},
+          },
+        }],
+      }),
+    };
+  },
+});
+vm.runInContext(source, requestContext);
+
+async function main() {
+  await requestContext.requestInteractionAnalysis("hydrogen_bond");
+  await requestContext.requestInteractionAnalysis("hydrogen_bond");
+  assert.equal(requests.length, 1);
+  console.log("docking interaction fail-closed checks passed");
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
 
