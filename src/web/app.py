@@ -317,7 +317,11 @@ class MolecularChatApp:
         @self.app.middleware("http")
         async def _security_headers(request: Request, call_next):
             response = await call_next(request)
-            apply_security_headers(response, secure=request.url.scheme == "https")
+            apply_security_headers(
+                response,
+                secure=request.url.scheme == "https",
+                request_path=request.url.path,
+            )
             return response
 
         from .agent_session_config import setup_agent_sessions
