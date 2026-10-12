@@ -20,7 +20,7 @@ from src.docking.molecular_docking_service import (
     DockingResult,
     MolecularDockingService,
 )
-from src.docking.adapters.base import CommandAdapter
+from src.docking.adapters.base import CommandAdapter, CommandCancelledError
 from src.docking.adapters.vina_adapter import VinaAdapter
 from src.web.routes.api_routes import setup_api_routes
 from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
@@ -94,6 +94,35 @@ def _windows_handle_count() -> int:
 
 
 class DockingConfigurationTest(unittest.TestCase):
+    def test_analysis_receptor_cancellation_uses_structured_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix="docking_analysis_cancel_") as tmp:
+            root = Path(tmp)
+            source = root / "receptor.pdb"
+            source.write_text(
+                "ATOM      1  C   ALA A   1       0.000   0.000   0.000\n",
+                encoding="utf-8",
+            )
+            service = MolecularDockingService()
+            service.work_dir = str(root / "jobs")
+            Path(service.work_dir).mkdir()
+
+            def cancel_before_analysis(*_args, **_kwargs):
+                raise CommandCancelledError()
+
+            service.prepare_analysis_receptor = cancel_before_analysis
+            result = asyncio.run(
+                service.perform_docking(
+                    str(source),
+                    "CC",
+                    DockingConfig(manual_center=True),
+                    job_id="cancel-analysis",
+                )
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "cancelled")
+        self.assertFalse((root / "jobs" / "docking_cancel-analysis").exists())
+
     def test_configure_discovers_reduce_command_from_adfr_bin(self):
         with tempfile.TemporaryDirectory(prefix="docking_reduce_config_") as tmp:
             root = Path(tmp)

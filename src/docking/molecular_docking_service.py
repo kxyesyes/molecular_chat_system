@@ -1764,19 +1764,6 @@ class MolecularDockingService:
         # as an analysis fallback because it may lack bond orders and explicit
         # hydrogens.
         analysis_receptor_trace: Dict[str, Any] = {}
-        try:
-            receptor_suffix = Path(receptor_file).suffix.lower()
-            if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
-                self.prepare_analysis_receptor(
-                    receptor_file,
-                    os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
-                    cancel_event=cancel_event,
-                    trace=analysis_receptor_trace,
-                )
-        except (CommandCancelledError, CommandOwnershipUncertainError):
-            raise
-        except OSError:
-            logger.warning("Unable to preserve receptor analysis artifact", exc_info=True)
 
         # Capture only the directory created above. No conflicting invocation,
         # mutable service root or neighbor can acquire this cleanup obligation.
@@ -1823,6 +1810,20 @@ class MolecularDockingService:
             command_control = {}
             if cancel_event is not None:
                 command_control["cancel_event"] = cancel_event
+
+            try:
+                receptor_suffix = Path(receptor_file).suffix.lower()
+                if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
+                    self.prepare_analysis_receptor(
+                        receptor_file,
+                        os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
+                        cancel_event=cancel_event,
+                        trace=analysis_receptor_trace,
+                    )
+            except (CommandCancelledError, CommandOwnershipUncertainError):
+                raise
+            except OSError:
+                logger.warning("Unable to preserve receptor analysis artifact", exc_info=True)
 
             self._emit_phase(*_DOCKING_PHASES[0], progress_callback, cancel_event)
             try:

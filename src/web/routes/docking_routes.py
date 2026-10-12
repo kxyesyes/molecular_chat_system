@@ -406,7 +406,9 @@ def setup_docking_routes(
                             "warnings": [f"pose_export_failed:{type(exc).__name__}"],
                             "provenance": {"analyzer": "prolif", "tool_derived": False},
                         }
+                    analysis_receptor_trace = {}
                     def analyze_prepared_inputs():
+                        nonlocal analysis_receptor_trace
                         receptor_path = inputs.receptor_path
                         receptor_suffix = Path(receptor_path).suffix.lower()
                         prepare_analysis_receptor = getattr(
@@ -414,11 +416,13 @@ def setup_docking_routes(
                         ) if docking_service is not None else None
                         if callable(prepare_analysis_receptor) and receptor_suffix in {".pdb", ".cif", ".mmcif"}:
                             prepared_receptor = Path(analysis_root) / f"analysis_receptor{receptor_suffix}"
-                            prepare_analysis_receptor(
+                            prepared = prepare_analysis_receptor(
                                 receptor_path,
                                 str(prepared_receptor),
-                                trace={},
+                                trace=analysis_receptor_trace,
                             )
+                            if prepared is not True:
+                                raise RuntimeError("analysis receptor preparation was unavailable")
                             receptor_path = str(prepared_receptor)
                         return analyze_docking_interactions(
                             receptor_path,
@@ -428,6 +432,8 @@ def setup_docking_routes(
 
                     result = await asyncio.to_thread(analyze_prepared_inputs)
                     result["pose"] = pose
+                    if analysis_receptor_trace:
+                        result.setdefault("provenance", {})["analysis_receptor"] = analysis_receptor_trace
                     return result
         except (CompletionError, ManifestError, OSError, RuntimeError, ValueError) as exc:
             logging.getLogger(__name__).warning(
@@ -966,17 +972,40 @@ def setup_docking_routes(
         prepare_analysis_receptor = getattr(
             docking_service, "prepare_analysis_receptor", None
         ) if docking_service is not None else None
+        analysis_receptor_trace = {}
         if receptor_path is not None and callable(prepare_analysis_receptor):
             receptor_suffix = Path(receptor_path).suffix.lower()
             if receptor_suffix in {".pdb", ".cif", ".mmcif"}:
                 prepared_receptor = os.path.join(
                     job_dir, f"analysis_receptor_interactions{receptor_suffix}"
                 )
-                await asyncio.to_thread(
-                    prepare_analysis_receptor,
-                    receptor_path,
-                    prepared_receptor,
-                )
+                try:
+                    prepared = await asyncio.to_thread(
+                        prepare_analysis_receptor,
+                        receptor_path,
+                        prepared_receptor,
+                        trace=analysis_receptor_trace,
+                    )
+                    if prepared is not True:
+                        raise RuntimeError("analysis receptor preparation was unavailable")
+                except Exception as error:
+                    resolve(logger, "logger").warning(
+                        "Unable to materialize analysis receptor: %s",
+                        type(error).__name__,
+                    )
+                    return {
+                        "status": "unavailable",
+                        "reason_code": "analysis_receptor_unavailable",
+                        "pose": pose,
+                        "interactions": [],
+                        "geometry_status": "unavailable",
+                        "warnings": [f"analysis_receptor_unavailable:{type(error).__name__}"],
+                        "provenance": {
+                            "analyzer": "prolif",
+                            "tool_derived": False,
+                            "analysis_receptor": analysis_receptor_trace,
+                        },
+                    }
                 receptor_path = prepared_receptor
         if receptor_path is None or ligand_path is None:
             if pose_export_error:
@@ -1008,6 +1037,8 @@ def setup_docking_routes(
             pose_index=1,
         )
         result["pose"] = pose
+        if analysis_receptor_trace:
+            result.setdefault("provenance", {})["analysis_receptor"] = analysis_receptor_trace
         return result
 
     @app.get("/api/docking/pose_sdf/{job_id}")
