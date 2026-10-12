@@ -94,11 +94,14 @@ ollama serve
 python main.py
 ```
 
-默认访问地址：
+默认后端监听地址（生产环境经 nginx HTTPS 访问）：
 
 ```text
 http://127.0.0.1:6000
 ```
+
+浏览器会限制直接访问 6000（`ERR_UNSAFE_PORT`）。本机浏览器调试可显式使用
+`python main.py --port 6001`，再打开 `http://127.0.0.1:6001`；服务器后端仍使用默认 6000。
 
 常用变体：
 

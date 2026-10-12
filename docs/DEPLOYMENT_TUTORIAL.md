@@ -399,13 +399,36 @@ python main.py --env-file /etc/medchat/medchat.env --no-reload
 curl -fsS http://127.0.0.1:6000/health
 ~~~
 
-浏览器暂时只从服务器本机或 SSH 隧道访问：
+浏览器暂时使用 SSH 隧道访问（在自己的电脑上执行）：
 
 ~~~bash
-ssh -L 6000:127.0.0.1:6000 <server-user>@<server-ip>
+ssh -L 6001:127.0.0.1:6000 <server-user>@<server-ip>
 ~~~
 
-然后打开 http://127.0.0.1:6000/。验证完成后回到运行服务的终端按 Ctrl+C 停止。
+然后打开 http://127.0.0.1:6001/。本地 6001 转发到服务器后端 6000，不改变服务默认端口。
+6000 被 [Chromium 列为受限端口](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/net/base/port_util.cc)，
+直接在浏览器访问会出现 `ERR_UNSAFE_PORT`；`curl` 检查后端不受此限制。
+正式访问使用 nginx 的 HTTPS 域名（443），不要关闭浏览器端口保护。
+验证完成后回到运行服务的终端按 Ctrl+C 停止。
+
+### 默认端口从 6001 迁移到 6000
+
+Git 更新仅修改仓库内默认值和部署模板，不会改写已有 `.env`、
+`/etc/medchat/medchat.env` 或 `/etc/nginx/` 下实际生效的配置。
+
+1. 检查实际使用的环境文件，将 `MEDCHAT_PORT` 设为 `6000`；如 systemd 的
+   `ExecStart` 或手动启动命令带有 `--port 6001`，也需改为 `--port 6000` 或移除覆盖。
+2. 在实际生效的 nginx 站点配置中，将首页和 `/ws` 的上游分别设为
+   `http://127.0.0.1:6000` 和 `http://127.0.0.1:6000/ws`。
+   保留真实域名、证书路径、访问控制、WebSocket 升级头和 `X-Forwarded-Proto https`；
+   不要直接用含占位域名和证书路径的模板覆盖现有站点。
+3. 先执行 `sudo nginx -t`；如果修改了 systemd unit，再执行 `sudo systemctl daemon-reload`。
+   重启应用后用 `curl -fsS http://127.0.0.1:6000/health` 检查，成功后执行
+   `sudo systemctl reload nginx`，最后验证 HTTPS 首页和 WebSocket。
+
+端口调整本身不能证明原先的首页 403 已修复。若响应为 `{"detail":"HTTPS required"}`，
+应核对 nginx 是否传递 HTTPS 协议头、实际代理来源是否在 `MEDCHAT_FORWARDED_ALLOW_IPS`
+中受信任；仅信任真实代理地址，不应设为 `*` 或关闭安全校验。
 
 ## 9. 配置 systemd
 

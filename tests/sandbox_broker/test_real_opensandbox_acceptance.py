@@ -28,6 +28,12 @@ def _module():
     return acceptance
 
 
+def test_network_probe_blocks_the_current_medchat_backend_port():
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "for port in (8080,6000,2375):" in source
+    assert "for port in (8080,6001,2375):" not in source
+
+
 def _pose(tmp_path: Path, name: str = "pose.pdbqt") -> tuple[Path, str]:
     path = tmp_path / name
     content = (
