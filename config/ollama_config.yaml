@@ -29,7 +29,7 @@ inference:
 
 web:
   host: "${MEDCHAT_HOST:-127.0.0.1}"
-  port: ${MEDCHAT_PORT:-6001}
+  port: ${MEDCHAT_PORT:-6000}
   debug: ${MEDCHAT_DEBUG:-false}
 
 logging:

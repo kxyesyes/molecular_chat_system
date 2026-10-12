@@ -282,7 +282,7 @@ scratch/
 ```env
 MEDCHAT_ENV_FILE=.env
 MEDCHAT_HOST=127.0.0.1
-MEDCHAT_PORT=6001
+MEDCHAT_PORT=6000
 MEDCHAT_DEBUG=false
 MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
@@ -382,18 +382,18 @@ python main.py --no-reload
 检查：
 
 ```bash
-curl http://127.0.0.1:6001/health
+curl http://127.0.0.1:6000/health
 ```
 
 浏览器访问：
 
 ```text
-http://<server-ip>:6001/
-http://<server-ip>:6001/target-search
-http://<server-ip>:6001/molecular-docking
-http://<server-ip>:6001/reverse-target
-http://<server-ip>:6001/activity-prediction
-http://<server-ip>:6001/molecular-design
+http://<server-ip>:6000/
+http://<server-ip>:6000/target-search
+http://<server-ip>:6000/molecular-docking
+http://<server-ip>:6000/reverse-target
+http://<server-ip>:6000/activity-prediction
+http://<server-ip>:6000/molecular-design
 ```
 
 ## 11. systemd 服务

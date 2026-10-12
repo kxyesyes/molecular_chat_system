@@ -13,7 +13,7 @@ from pathlib import Path
 from src.system.env import load_env_file as _load_env_file
 
 DEFAULT_HOST = "127.0.0.1"
-DEFAULT_PORT = 6001
+DEFAULT_PORT = 6000
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent
@@ -245,7 +245,7 @@ inference:
 
 web:
   host: "${MEDCHAT_HOST:-127.0.0.1}"
-  port: ${MEDCHAT_PORT:-6001}
+  port: ${MEDCHAT_PORT:-6000}
   debug: false
 
 logging:
@@ -276,7 +276,7 @@ def main():
         epilog="""
 示例:
   python main.py                    # 使用默认配置启动
-  python main.py --port 6001        # 指定端口
+  python main.py --port 6000        # 指定端口
   python main.py --debug            # 调试模式
   python main.py --reload           # 开发模式启用自动重载
         """
