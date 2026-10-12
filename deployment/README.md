@@ -287,6 +287,8 @@ MEDCHAT_DEBUG=false
 MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
 MEDCHAT_LOG_LEVEL=info
+# Optional exact host allowlist for HTTP-only deployments; plaintext traffic is exposed.
+MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com
 MEDCHAT_LOG_DIR=logs
 MEDCHAT_TEMP_DOCKING_DIR=temp_docking
 MEDCHAT_SCRATCH_DIR=scratch

@@ -2,6 +2,7 @@
 
 import hashlib
 import asyncio
+import os
 import secrets
 import sqlite3
 import threading
@@ -20,6 +21,8 @@ UNAVAILABLE_BODY = b'{"detail":"Session service unavailable"}'
 HTTPS_REQUIRED_BODY = b'{"detail":"HTTPS required"}'
 ORIGIN_DENIED_BODY = b'{"detail":"Origin not allowed"}'
 EXPIRED_CLEANUP_LIMIT = 100
+INSECURE_HTTP_HOSTS_ENV = "MEDCHAT_INSECURE_HTTP_HOSTS"
+LOCAL_HTTP_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 class AgentSessionStore:
@@ -202,14 +205,47 @@ def _host_authority(scope) -> tuple[str, int] | None:
         return None
 
 
+def _configured_insecure_http_hosts() -> frozenset[str]:
+    """Return explicitly configured exact hostnames allowed over plain HTTP."""
+    configured = os.environ.get(INSECURE_HTTP_HOSTS_ENV, "")
+    hosts = set()
+    for candidate in configured.split(","):
+        host = candidate.strip().lower()
+        if (
+            not host
+            or "*" in host
+            or "://" in host
+            or any(character in host for character in "/?#")
+            or any(character.isspace() for character in host)
+        ):
+            continue
+        try:
+            parsed = urlsplit(f"//{host}")
+            if (
+                parsed.hostname != host
+                or parsed.username is not None
+                or parsed.password is not None
+                or parsed.port is not None
+            ):
+                continue
+        except ValueError:
+            continue
+        hosts.add(host)
+    return frozenset(hosts)
+
+
 def _is_safe_transport(scope) -> bool:
-    if scope.get("scheme") in {"https", "wss"}:
-        return _host_authority(scope) is not None
+    scheme = scope.get("scheme")
     authority = _host_authority(scope)
+    if scheme in {"https", "wss"}:
+        return authority is not None
     return bool(
-        scope.get("scheme") in {"http", "ws"}
+        scheme in {"http", "ws"}
         and authority
-        and authority[0] in {"localhost", "127.0.0.1", "::1"}
+        and (
+            authority[0] in LOCAL_HTTP_HOSTS
+            or authority[0] in _configured_insecure_http_hosts()
+        )
     )
 
 
