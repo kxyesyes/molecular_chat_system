@@ -543,7 +543,6 @@ class ChatHandler:
         if (
             not agent_used
             and enable_rag
-            and self.rag_service is not None
             and self._should_use_legacy_rag(message)
         ):
             await self._send_status(websocket, f"🔍 搜索相关分子数据 (top {rag_count})...")
