@@ -251,13 +251,14 @@ class _ProjectionSender:
 
 
 async def _deliver_result(handler, websocket, frames, execution):
-    """Deliver validated display frames around one full settled legacy projection."""
+    """Publish an intermediate result, drain its projection, then queue completion."""
     sender = _ProjectionSender(websocket)
 
     async def project_after_result():
-        # Establish task ownership before publishing a result. Scheduling
-        # failure can then be finalized once by the runtime, without replacing
-        # an already displayed outcome. Projection still follows result delivery.
+        # Establish task ownership before publishing an intermediate result.
+        # Scheduling failure can then be finalized once by the runtime, without
+        # replacing an already displayed outcome. Projection still follows result
+        # delivery, and completion is queued only after the projection drains.
         await sender.send_text(frames[0])
         await handler._send_reference_candidate_events(sender, execution, strict_transport=True)
 

@@ -110,6 +110,7 @@ class _Turn:
     task: object = None
     started: bool = False
     dispatching: bool = False
+    result_started: bool = False
     finishing: bool = False
     pending_complete: str | None = None
     terminal_sent: bool = False
@@ -124,7 +125,7 @@ class _Turn:
     admission_exchange: object = None
 
     def cancel(self):
-        if self.finishing or self.cancel_event.is_set():
+        if self.result_started or self.finishing or self.cancel_event.is_set():
             return
         self.cancel_event.set()
         # The bridge watches cancellation after dispatch. Before that, cancel
@@ -192,7 +193,7 @@ class _TurnSender:
         if frame['type'] in {'agent_event', 'agent_result', 'complete'}:
             frame['turn_id'] = self.turn.turn_id
         if frame['type'] == 'agent_result':
-            self.turn.finishing = True
+            self.turn.result_started = True
             frame['metadata']['retrieval_performed'] = False
             flag = self.turn.payload.get('enable_rag', True)
             if self.turn.waiting is not None:
@@ -530,6 +531,19 @@ class WebDecisionRuntime:
         for frame in _result_frame(handler, result, False):
             await _TurnSender(sender, turn).send_text(frame)
 
+    async def _projection_failed(self, sender, turn):
+        if turn.terminal_sent or not sender.writable:
+            return
+        sender.waiting = None
+        turn.next_waiting = None
+        turn.history_update = None
+        turn.pending_complete = None
+        await _TurnSender(sender, turn).send_text(json.dumps({
+            'type': 'complete', 'trace_id': turn.trace_id, 'status': 'failed',
+            'content': '结果展示未完成，请稍后重试。已完成的计算记录仍保留。',
+            'error': {'code': 'result_projection_failed', 'message': '结果投影失败'},
+        }, ensure_ascii=False))
+
     async def _retain_unresolved(self, turn):
         # Failed joins are cached by the ownership dependency. Retain the task,
         # owner and reader forever, even on repeated cancellation. No retry,
@@ -690,13 +704,13 @@ class WebDecisionRuntime:
             # Reference/store failures can share transport exception classes.
             # Actual send failure already marks the sender unwritable.
             if sender.writable and turn.displayed_answer is not None:
-                await sender.close_failed_delivery()
+                await self._projection_failed(sender, turn)
             else:
                 sender.writable = False
         except Exception:
             if sender.writable:
                 if turn.displayed_answer is not None:
-                    await sender.close_failed_delivery()
+                    await self._projection_failed(sender, turn)
                 elif not turn.finishing:
                     await self._terminal(handler, sender, turn, RunOutcome.FAILED, 'decision_request_failed')
         finally:
@@ -734,6 +748,7 @@ class WebDecisionRuntime:
                                 snapshot_remaining=turn.waiting.remaining_seconds_cap)
                             sender.waiting = (replace(sender.waiting, remaining_seconds_cap=remaining)
                                 if remaining > 0 and now < sender.waiting.expires_at else None)
+                    turn.finishing = True
                     turn.terminal_sent = True
                 await sender.send_text(turn.pending_complete,
                     on_sent=completed)
@@ -859,7 +874,10 @@ class WebDecisionRuntime:
                         raise
                     await self._terminal(handler, sender, turn, RunOutcome.FAILED, 'turn_dispatch_failed')
                     if turn.pending_complete is not None:
-                        await sender.send_text(turn.pending_complete)
+                        def mark_terminal_sent():
+                            turn.finishing = True
+                            turn.terminal_sent = True
+                        await sender.send_text(turn.pending_complete, on_sent=mark_terminal_sent)
                     turn = None
                     continue
                 self.active_owners.add(turn)

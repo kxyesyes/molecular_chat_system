@@ -91,7 +91,7 @@ def historical_source(bundle):
     return source, event
 
 
-@pytest.mark.parametrize('error', [RuntimeError, asyncio.CancelledError, ConnectionError, asyncio.TimeoutError])
+@pytest.mark.parametrize('error', [asyncio.CancelledError])
 @pytest.mark.parametrize('close_fault', [None, 'raise', 'timeout', 'peer-disconnect'])
 def test_actual_projection_exception_closes_socket_without_rewriting_result(actual_app, monkeypatch, error, close_fault):
     """Fault injection at the service boundary, not a naturally failing input."""
@@ -159,6 +159,50 @@ def test_actual_projection_exception_closes_socket_without_rewriting_result(actu
                 # A queued request after local close cannot create another owner.
                 await socket.send({'message': 'Explain logP'})
                 assert not b.app.decision_runtime.active_owners and len(b.calls) == 1
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('error', [RuntimeError, ConnectionError, asyncio.TimeoutError])
+def test_projection_failure_finishes_failed_and_keeps_socket_usable(actual_app, monkeypatch, error):
+    async def run():
+        async with actual_app(mode='decision_a2') as b:
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+
+                def fail_project(*args, **kwargs):
+                    raise error('private-projection-diagnostic')
+
+                original = b.app.decision_runtime.references.project
+                monkeypatch.setattr(b.app.decision_runtime.references, 'project', fail_project)
+                await socket.send({'message': 'Explain logP'})
+                frames = []
+                while not frames or frames[-1]['type'] != 'complete':
+                    frames.append(await asyncio.wait_for(socket.receive(), 3))
+                result = next(f for f in frames if f['type'] == 'agent_result')
+                terminal = frames[-1]
+                assert result['status'] == 'completed'
+                assert terminal['status'] == 'failed'
+                assert terminal['error']['code'] == 'result_projection_failed'
+                assert terminal['turn_id'] == result['turn_id']
+                assert terminal['trace_id'] == result['trace_id']
+                assert sum(f['type'] == 'complete' for f in frames) == 1
+                assert 'private-projection-diagnostic' not in json.dumps(frames)
+                assert b.app.agent_state_store.get_run(result['trace_id'])['status'] == 'succeeded'
+                sender, = b.app.decision_runtime.sockets
+                assert not sender.memory and sender.waiting is None
+                assert not b.app.decision_runtime.active_owners
+                assert b.app.model_request_gate._readers == 0
+
+                monkeypatch.setattr(b.app.decision_runtime.references, 'project', original)
+                await socket.send({'type': 'ping', 'timestamp': 13})
+                assert await socket.receive() == {'type': 'pong', 'timestamp': 13}
+                # Reuse the same known-good request shape; the assertion is about
+                # socket admission after a failed projection, not a new routing
+                # or clarification branch.
+                second = result_of(await socket.turn({'message': 'Explain logP'}))
+                assert second['status'] == 'completed'
+                assert second['trace_id'] != result['trace_id']
+
     asyncio.run(run())
 
 
