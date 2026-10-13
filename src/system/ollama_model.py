@@ -27,10 +27,12 @@ logger = logging.getLogger("src.web.models.ollama_model")
 class OllamaGenerationError(Exception):
     """Strict generation failure without provider diagnostics or request objects."""
 
-    def __init__(self, reason: str):
+    def __init__(self, reason: str, *, http_status=None):
         self.reason = reason if type(reason) is str and reason in {
-            "http_error", "transport_error", "invalid_response", "client_error"
+            "http_error", "timeout", "transport_error", "invalid_response", "client_error"
         } else "client_error"
+        self.http_status = (http_status if type(http_status) is int
+                            and 100 <= http_status <= 599 else None)
         super().__init__("Ollama generation failed")
 
 
@@ -49,7 +51,8 @@ def _strict_generation_text(response: httpx.Response) -> str:
                 return result["response"]
     # Outside the decoding except: neither cause nor context retains raw data.
     logger.error("Ollama strict generation failed")
-    raise OllamaGenerationError(reason)
+    raise OllamaGenerationError(
+        reason, http_status=response.status_code if reason == "http_error" else None)
 
 
 class OllamaModel:
@@ -130,7 +133,9 @@ class OllamaModel:
             return "I apologize, but I'm experiencing technical difficulties."
         except Exception as e:
             if strict_errors:
-                reason = "transport_error" if isinstance(e, httpx.TransportError) else "client_error"
+                reason = ("timeout" if isinstance(e, httpx.TimeoutException) else
+                          "transport_error" if isinstance(e, httpx.TransportError) else
+                          "client_error")
             else:
                 logger.error(f"Error calling Ollama: {e}")
                 return "I apologize, but I'm experiencing technical difficulties."
@@ -182,15 +187,54 @@ class OllamaModel:
             return "I apologize, but I'm experiencing technical difficulties."
         except Exception as e:
             if strict_errors:
-                reason = "transport_error" if isinstance(e, httpx.TransportError) else "client_error"
+                reason = ("timeout" if isinstance(e, httpx.TimeoutException) else
+                          "transport_error" if isinstance(e, httpx.TransportError) else
+                          "client_error")
             else:
                 logger.error(f"Error calling Ollama: {e}")
                 return "I apologize, but I'm experiencing technical difficulties."
         logger.error("Ollama strict generation failed")
         raise OllamaGenerationError(reason)
 
+    async def _stream_generate_strict(self, prompt, temperature, max_tokens):
+        reason, status = "invalid_response", None
+        try:
+            async with self.client.stream(
+                "POST", f"{self.base_url}/api/generate",
+                json={"model": self.model_name, "prompt": prompt, "stream": True,
+                      "options": {"temperature": temperature, "num_predict": max_tokens}},
+                timeout=150.0,
+            ) as response:
+                if response.status_code != 200:
+                    reason, status = "http_error", response.status_code
+                else:
+                    response.encoding = "utf-8"
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except (ValueError, UnicodeError):
+                            break
+                        if (type(data) is not dict or "error" in data
+                                or type(data.get("response")) is not str
+                                or ("done" in data and type(data["done"]) is not bool)):
+                            break
+                        if data["response"]:
+                            yield data["response"]
+                        if data.get("done") is True:
+                            return
+        except httpx.TimeoutException:
+            reason = "timeout"
+        except httpx.TransportError:
+            reason = "transport_error"
+        except Exception:
+            reason = "client_error"
+        logger.error("Ollama strict generation failed")
+        raise OllamaGenerationError(reason, http_status=status)
+
     async def stream_generate(self, prompt: str, temperature: float = 0.7,
-                             max_tokens: int = 1500):
+                             max_tokens: int = 1500, *, strict_errors: bool = False):
         """
         流式生成响应
 
@@ -202,6 +246,17 @@ class OllamaModel:
         Yields:
             str: 生成的文本片段
         """
+        if type(strict_errors) is not bool:
+            raise ValueError("invalid_strict_errors")
+        if strict_errors:
+            stream = self._stream_generate_strict(prompt, temperature, max_tokens)
+            try:
+                async for chunk in stream:
+                    yield chunk
+            finally:
+                await stream.aclose()
+            return
+
         import time
         start_time = time.time()
 
