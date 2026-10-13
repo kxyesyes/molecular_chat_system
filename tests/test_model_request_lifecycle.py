@@ -134,7 +134,9 @@ async def test_actual_http_stream_cleanup_precedes_request_release(provider, fai
         assert stream.finished.is_set() and retirement == [True]
         assert close_order and all(close_order)
         assert all(client.is_closed for client in clients)
-        assert stream.request_modes == ([True, False] if failure == 'disconnect' else [True])
+        # A socket delivery failure must propagate after stream cleanup; it is
+        # not permission to redispatch the provider request through fallback.
+        assert stream.request_modes == [True]
         if provider != 'ollama' and failure == 'disconnect':
             assert model.last_response_metadata['finish_reason'] == 'stop'
     finally:
