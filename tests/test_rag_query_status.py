@@ -140,3 +140,33 @@ def test_legacy_chat_retrieval_unavailable_is_not_an_empty_success():
         "search local knowledge base", 5
     )
     assert handler.conversation_history == []
+
+
+def test_legacy_chat_without_rag_service_is_not_an_empty_success():
+    from src.web.chat_handler import ChatHandler
+
+    model = SimpleNamespace(generate_async=AsyncMock(return_value="must not be used"))
+    handler = ChatHandler(
+        model,
+        None,
+        None,
+        {"inference": {"stream": False}},
+    )
+    socket = Socket()
+
+    asyncio.run(
+        handler._process_message(
+            socket,
+            "search local knowledge base",
+            True,
+            False,
+        )
+    )
+
+    complete = [item for item in socket.messages if item["type"] == "complete"]
+    assert len(complete) == 1
+    assert complete[0]["status"] == "failed"
+    assert complete[0]["retrieval_status"] == "unavailable"
+    assert complete[0]["error"]["code"] == "rag_unavailable"
+    model.generate_async.assert_not_awaited()
+    assert handler.conversation_history == []
