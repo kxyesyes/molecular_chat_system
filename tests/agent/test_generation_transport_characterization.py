@@ -76,15 +76,18 @@ def production(tmp_path):
 class FiniteAsyncBody(httpx.AsyncByteStream):
     """Finite synthetic response bytes, with real HTTPX response cleanup."""
 
-    def __init__(self, chunks, request, *, disconnect=False):
+    def __init__(self, chunks, request, *, disconnect=False, read_timeout=False):
         self.chunks = tuple(chunks)
         self.request = request
         self.disconnect = disconnect
+        self.read_timeout = read_timeout
         self.close_calls = 0
 
     async def __aiter__(self):
         for chunk in self.chunks:
             yield chunk
+        if self.read_timeout:
+            raise httpx.ReadTimeout(PROVIDER_MARKER, request=self.request)
         if self.disconnect:
             raise httpx.ReadError(PROVIDER_MARKER, request=self.request)
 
@@ -141,8 +144,12 @@ class ScriptedHTTP:
                  "prompt_eval_count": 11, "eval_count": 7})
         if kind == "json":
             body = text
-        if kind in {"stream-ok", "stream-http-error", "stream-disconnect"}:
-            stream = FiniteAsyncBody(text, request, disconnect=kind == "stream-disconnect")
+        if kind in {"stream-ok", "stream-http-error", "stream-disconnect", "stream-timeout"}:
+            stream = FiniteAsyncBody(
+                text, request,
+                disconnect=kind == "stream-disconnect",
+                read_timeout=kind == "stream-timeout",
+            )
             self.streams.append(stream)
             response = httpx.Response(status, stream=stream, request=request)
         else:
@@ -719,6 +726,31 @@ def test_strict_stream_timeout_is_fixed_failure(production, fault, caplog):
         assert PROVIDER_MARKER not in repr(vars(caught.value))
         assert len(transport.calls) == 1
         assert all(response.is_closed for response in transport.responses)
+    assert PROVIDER_MARKER not in caplog.text
+
+
+def test_strict_stream_read_timeout_closes_response(production, caplog):
+    caplog.set_level(logging.DEBUG, logger="src.web.models.ollama_model")
+    step = ("stream-timeout", (b'{"response":"I"}\n',))
+    chunks = []
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            async for chunk in model.stream_generate(QUERY, strict_errors=True):
+                chunks.append(chunk)
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == "timeout"
+        assert caught.value.args == (CLIENT_MESSAGE,)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert PROVIDER_MARKER not in repr(vars(caught.value))
+        assert chunks == ["I"]
+        assert len(transport.calls) == 1
+        assert len(transport.responses) == 1
+        assert transport.responses[0].is_closed
+        assert len(transport.streams) == 1
+        assert transport.streams[0].close_calls == 1
     assert PROVIDER_MARKER not in caplog.text
 
 
