@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 from types import SimpleNamespace
 
@@ -56,6 +57,59 @@ def test_ollama_runtime_failures_have_one_bounded_terminal(
         assert complete[0]["error"]["code"] == code
         assert not handler.conversation_history
         assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_strict_failure_preserves_existing_history(production, streaming):
+    step = (("stream-http-error", (b"private-provider-body",)) if streaming else
+            ("http-error", ""))
+    with mocked_client(production, (step,)) as (model, transport):
+        handler = ChatHandler(model, SimpleNamespace(is_initialized=False), None,
+                              {"inference": {"stream": streaming}})
+        handler.conversation_history = [{
+            "user": "Earlier question", "assistant": "Earlier answer",
+            "agent_used": False,
+        }]
+        before = copy.deepcopy(handler.conversation_history)
+        socket = Socket()
+
+        asyncio.run(handler._process_message(socket, "Explain logP", False, False))
+
+        assert handler.conversation_history == before
+        complete = [f for f in socket.messages if f["type"] == "complete"]
+        assert len(complete) == 1 and complete[0]["status"] == "failed"
+        assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_failed_terminal_socket_error_propagates_without_redispatch(production, streaming):
+    step = (("stream-http-error", (b"private-provider-body",)) if streaming else
+            ("http-error", ""))
+
+    class FailingSocket(Socket):
+        def __init__(self):
+            super().__init__()
+            self.failed_terminal_attempts = 0
+
+        async def send_text(self, text):
+            frame = json.loads(text)
+            if frame.get("type") == "complete" and frame.get("status") == "failed":
+                self.failed_terminal_attempts += 1
+                raise RuntimeError("synthetic failed-terminal socket error")
+            self.messages.append(frame)
+
+    with mocked_client(production, (step,)) as (model, transport):
+        handler = ChatHandler(model, SimpleNamespace(is_initialized=False), None,
+                              {"inference": {"stream": streaming}})
+        socket = FailingSocket()
+
+        with pytest.raises(RuntimeError, match="synthetic failed-terminal socket error"):
+            asyncio.run(handler._process_message(socket, "Explain logP", False, False))
+
+        assert socket.failed_terminal_attempts == 1
+        assert not [f for f in socket.messages if f["type"] == "complete"]
+        assert len(transport.calls) == 1
+        assert not handler.conversation_history
 
 
 def test_ollama_midstream_disconnect_keeps_real_chunks_but_not_history(production):
