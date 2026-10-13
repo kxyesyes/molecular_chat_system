@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 import copy
 import hashlib
@@ -867,6 +868,46 @@ class ActivityModelRegistry:
             return record
         except (KeyError, TypeError, OSError):
             raise ValueError("Invalid family bundle evidence") from None
+
+    @staticmethod
+    def _normalize_family_bundle_selections(selections: Mapping[str, str]) -> Dict[str, str]:
+        from .family_contract import resolve_activity_family
+
+        if not isinstance(selections, Mapping) or not selections:
+            raise ValueError("Family bundle selections must be a non-empty mapping")
+        normalized: Dict[str, str] = {}
+        for family, bundle_id in selections.items():
+            family_id = resolve_activity_family(family)
+            if family_id in normalized:
+                raise ValueError("Family bundle selections contain a duplicate family")
+            normalized[family_id] = ActivityModelRegistry._validate_model_id(bundle_id)
+        return normalized
+
+    def _resolve_family_bundles_unlocked(self, state, selections: Mapping[str, str]) -> Dict[str, dict]:
+        normalized = self._normalize_family_bundle_selections(selections)
+        records: Dict[str, dict] = {}
+        for family_id, bundle_id in normalized.items():
+            record = self._get_family_bundle_unlocked(state, bundle_id)
+            if record.get("family_id") != family_id:
+                raise ValueError("Family bundle does not match requested family")
+            records[family_id] = record
+        return records
+
+    def validate_family_bundles(self, selections: Mapping[str, str]) -> Dict[str, dict]:
+        """Revalidate several pinned family bundles without changing active state."""
+        with self._transaction():
+            state = self._load_state_unlocked()
+            return copy.deepcopy(self._resolve_family_bundles_unlocked(state, selections))
+
+    def select_family_bundles(self, selections: Mapping[str, str]) -> Dict[str, dict]:
+        """Revalidate and activate several family bundles in one registry write."""
+        with self._transaction():
+            state = self._load_state_unlocked()
+            records = self._resolve_family_bundles_unlocked(state, selections)
+            for family_id, record in records.items():
+                state["active_family_bundles"][family_id] = record["bundle_id"]
+            self._atomic_write_json_unlocked(self.state_path, state)
+            return copy.deepcopy(records)
 
     def select_family_bundle(self, bundle_id) -> dict:
         """Revalidate both pinned models before one atomic family selection."""
