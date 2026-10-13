@@ -8,7 +8,8 @@ from tests.family_model_test_support import make_package, make_pair, register_bu
 
 
 def test_family_bundle_registry_api_exists():
-    for name in ("register_family_bundle", "select_family_bundle", "get_active_family_bundle"):
+    for name in ("register_family_bundle", "validate_family_bundles", "select_family_bundles",
+                 "select_family_bundle", "get_active_family_bundle"):
         assert callable(getattr(ActivityModelRegistry, name, None)), name
 
 
@@ -39,6 +40,34 @@ def test_register_select_restart_and_detached_snapshot(setup):
     assert registry.get_active_family_bundle("PDE")["models"] == models
     assert registry.get_active_family_bundle("BuChE") is None
     assert json.loads(registry.state_path.read_bytes())["version"] == 3
+
+
+def test_batch_family_selection_validates_all_before_one_atomic_write(setup, tmp_path, monkeypatch):
+    registry, path, models = setup
+    register_bundle(registry, path, models, "pde-bundle")
+    buche_path = make_package(tmp_path, monkeypatch, "BuChE", "synthetic-buche")
+    buche_models = make_pair(registry, buche_path, "buche")
+    register_bundle(registry, buche_path, buche_models, "buche-bundle")
+
+    before = registry.state_path.read_bytes()
+    with pytest.raises(ValueError, match="Family bundle is not registered"):
+        registry.select_family_bundles({"PDE": "pde-bundle", "BuChE": "missing"})
+    assert registry.state_path.read_bytes() == before
+
+    writes = []
+    original_write = registry._atomic_write_json_unlocked
+
+    def write_once(destination, payload):
+        writes.append(destination)
+        return original_write(destination, payload)
+
+    monkeypatch.setattr(registry, "_atomic_write_json_unlocked", write_once)
+    selected = registry.select_family_bundles({"PDE": "pde-bundle", "BChE": "buche-bundle"})
+
+    assert set(selected) == {"pde-family", "buche-family"}
+    assert len(writes) == 1
+    assert registry.get_active_family_bundle("PDE")["bundle_id"] == "pde-bundle"
+    assert registry.get_active_family_bundle("BuChE")["bundle_id"] == "buche-bundle"
 
 
 def test_duplicate_bundle_rejected_without_write(setup):
