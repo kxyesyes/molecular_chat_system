@@ -37,6 +37,10 @@ class _RecordingRagService:
         self.calls.append((query, count))
         return []
 
+    async def search_similar_molecules_with_status(self, query, count):
+        records = await self.search_similar_molecules(query, count)
+        return {"status": "succeeded" if records else "no_hits", "records": records}
+
 
 class _RecordingAgentSystem:
     llm = None

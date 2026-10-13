@@ -182,7 +182,9 @@ def test_missing_status_legacy_boolean_behavior_requires_strict_partial(partial,
     complete = websocket.messages[-1]
     assert not complete.get("partial")
     if success:
-        assert complete == {"type": "complete", "content": BODY}
+        assert complete == {
+            "type": "complete", "status": "succeeded", "content": BODY,
+        }
     else:
         assert complete["status"] == "failed"
     assert model.generate_calls == 0
@@ -385,7 +387,9 @@ def test_rag_projection_does_not_swallow_transport_failure_or_cancellation(failu
 def test_completed_result_also_survives_optional_rag_failure_without_retrieval():
     result = partial_result(status="completed", partial=False, tool_results=ExplodingToolResults())
     websocket, model, rag, history = run_result(result)
-    assert websocket.messages[-1] == {"type": "complete", "content": BODY}
+    assert websocket.messages[-1] == {
+        "type": "complete", "status": "succeeded", "content": BODY,
+    }
     assert any("检索卡片" in message.get("message", "") for message in websocket.messages)
     assert model.generate_calls == 0 and rag.calls == []
     assert history[-1]["assistant"] == BODY

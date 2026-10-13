@@ -620,11 +620,41 @@ class RAGSystem:
         self._require_retrieval_ready()
         return self._search_embedding(self.get_embedding_sync(query), k)
 
-    async def search_similar_molecules(self, query: str, k: int = 2) -> List[Dict[str, Any]]:
-        """Keep the legacy list interface, using the same validated retrieval core."""
+    async def search_similar_molecules_with_status(
+        self, query: str, k: int = 2
+    ) -> Dict[str, Any]:
+        """Return an explicit legacy retrieval outcome without hiding failures."""
+        stage = "rag_not_ready"
         try:
             self._require_retrieval_ready()
-            return self._search_embedding(await self.get_embedding(query), k)
+            stage = "rag_embedding_failed"
+            embedding = await self.get_embedding(query)
+            embedding_array = np.asarray(embedding)
+            if (embedding_array.ndim != 1 or embedding_array.size == 0
+                    or not np.all(np.isfinite(embedding_array))):
+                raise ValueError("RAG query embedding is unavailable")
+            stage = "rag_index_failed"
+            records = self._search_embedding(embedding, k)
+            if not isinstance(records, list):
+                raise TypeError("RAG retrieval records are invalid")
+        except httpx.TransportError:
+            code = "rag_transport_failed"
         except Exception:
-            logger.warning("RAG retrieval unavailable; no unverified records returned")
-            return []
+            code = stage
+        else:
+            return {
+                "status": "succeeded" if records else "no_hits",
+                "records": records,
+            }
+
+        logger.warning("RAG retrieval unavailable; no unverified records returned")
+        return {
+            "status": "unavailable",
+            "records": [],
+            "error": {"code": code},
+        }
+
+    async def search_similar_molecules(self, query: str, k: int = 2) -> List[Dict[str, Any]]:
+        """Keep the legacy list interface over the explicit status boundary."""
+        outcome = await self.search_similar_molecules_with_status(query, k)
+        return outcome["records"]

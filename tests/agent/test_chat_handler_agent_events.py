@@ -379,6 +379,13 @@ class TruncatedStreamingModel:
 class FakeRagService:
     is_initialized = False
 
+    async def search_similar_molecules_with_status(self, query, count):
+        return {
+            "status": "unavailable",
+            "records": [],
+            "error": {"code": "rag_not_ready"},
+        }
+
 
 class ConfirmationAgentSystem:
     llm = None
@@ -444,6 +451,13 @@ class RecordingLegacyRagService:
                 "source": "legacy-rag",
             }
         ]
+
+    async def search_similar_molecules_with_status(self, query, count):
+        records = await self.search_similar_molecules(query, count)
+        return {
+            "status": "succeeded" if records else "no_hits",
+            "records": records,
+        }
 
 
 class RecordingTool:
@@ -789,6 +803,7 @@ def test_chat_handler_forwards_agent_events_before_agent_result():
     assert websocket.messages[2]["event"]["tool_name"] == "property_calculator"
     assert websocket.messages[-1] == {
         "type": "complete",
+        "status": "succeeded",
         "content": "workflow completed",
     }
     assert model.generate_calls == 0
@@ -1087,6 +1102,7 @@ def test_malformed_candidate_mapping_is_isolated_from_successful_agent_result(
     )["active_skill"] == "molecular_design"
     assert websocket.messages[-1] == {
         "type": "complete",
+        "status": "succeeded",
         "content": "generated validated candidates",
     }
     assert "Skipped malformed molecule candidate observation" in caplog.text
@@ -1856,6 +1872,7 @@ def test_non_workflow_agent_result_can_still_use_model_interpretation():
     assert model.generate_calls == 1
     assert websocket.messages[-1] == {
         "type": "complete",
+        "status": "succeeded",
         "content": "assistant response",
     }
 
@@ -2074,6 +2091,7 @@ def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
     assert model.generate_calls == 1
     assert websocket.messages[-1] == {
         "type": "complete",
+        "status": "succeeded",
         "content": "assistant response",
     }
 
@@ -2331,6 +2349,7 @@ def test_conceptual_question_skips_molecular_rag_and_uses_main_model():
     assert model.generate_calls == 1
     assert websocket.messages[-1] == {
         "type": "complete",
+        "status": "succeeded",
         "content": "assistant response",
     }
 
@@ -2355,6 +2374,7 @@ def test_greeting_uses_main_model_without_agent_or_rag():
     assert not any(item["type"] == "agent_event" for item in websocket.messages)
     assert websocket.messages[-1] == {
         "type": "complete",
+        "status": "succeeded",
         "content": "assistant response",
     }
 

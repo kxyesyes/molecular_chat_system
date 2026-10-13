@@ -543,21 +543,52 @@ class ChatHandler:
         if (
             not agent_used
             and enable_rag
-            and self.rag_service.is_initialized
+            and self.rag_service is not None
             and self._should_use_legacy_rag(message)
         ):
+            await self._send_status(websocket, f"🔍 搜索相关分子数据 (top {rag_count})...")
+            outcome = {"status": "unavailable", "records": []}
             try:
-                await self._send_status(websocket, f"🔍 搜索相关分子数据 (top {rag_count})...")
-                retrieved_molecules = await self.rag_service.search_similar_molecules(message, rag_count)
-                if retrieved_molecules:
-                    rag_context = self._format_rag_context(retrieved_molecules)
-                    await websocket.send_text(json.dumps(self._rag_info_payload(
-                        retrieved_molecules,
-                        f"✅ 找到 {len(retrieved_molecules)} 个相关分子",
-                    )))
-                    await self._send_status(websocket, f"📊 基于 {len(retrieved_molecules)} 个分子数据生成回答...")
-            except Exception as e:
-                logger.error(f"Legacy RAG search failed: {e}")
+                search = getattr(
+                    self.rag_service,
+                    "search_similar_molecules_with_status",
+                    None,
+                )
+                if callable(search):
+                    outcome = await search(message, rag_count)
+            except Exception:
+                logger.warning("Legacy RAG unavailable; details omitted")
+
+            records = outcome.get("records") if isinstance(outcome, dict) else None
+            valid = (
+                isinstance(outcome, dict)
+                and isinstance(records, list)
+                and outcome.get("status") in {"succeeded", "no_hits"}
+                and (outcome.get("status") == "succeeded") == bool(records)
+            )
+            if not valid:
+                await websocket.send_text(json.dumps({
+                    "type": "complete",
+                    "status": "failed",
+                    "retrieval_status": "unavailable",
+                    "content": "知识库检索暂时不可用，未生成基于检索的回答。",
+                    "error": {
+                        "code": "rag_unavailable",
+                        "message": "知识库检索未完成",
+                    },
+                }, ensure_ascii=False))
+                return
+
+            retrieved_molecules = records
+            if retrieved_molecules:
+                rag_context = self._format_rag_context(retrieved_molecules)
+                await websocket.send_text(json.dumps(self._rag_info_payload(
+                    retrieved_molecules,
+                    f"✅ 找到 {len(retrieved_molecules)} 个相关分子",
+                )))
+                await self._send_status(websocket, f"📊 基于 {len(retrieved_molecules)} 个分子数据生成回答...")
+            else:
+                await self._send_status(websocket, "知识库检索完成，未找到匹配分子。")
         
         # 构建提示词
         summarize_workflow = self.config.get("agent", {}).get(
@@ -577,6 +608,7 @@ class ChatHandler:
             await websocket.send_text(json.dumps({
                 "type": "complete",
                 "content": full_response,
+                "status": "succeeded",
             }, ensure_ascii=False))
             self._append_history(history, {
                 "user": message,

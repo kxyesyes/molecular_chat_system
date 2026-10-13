@@ -65,6 +65,13 @@ class Rag:
         self.calls.append((message, count))
         return deepcopy(self.rows)
 
+    async def search_similar_molecules_with_status(self, message, count):
+        records = await self.search_similar_molecules(message, count)
+        return {
+            "status": "succeeded" if records else "no_hits",
+            "records": records,
+        }
+
 
 class Agent:
     def __init__(self, failed=False, rag=False, interpretation_overflow=False):
