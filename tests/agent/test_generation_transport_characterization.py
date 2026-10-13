@@ -645,16 +645,147 @@ def test_real_stream_consumer_close_closes_response_before_client(production):
         assert_chat_http(transport, "async", 0.7, 1500, streaming=True)
 
 
-def test_stream_signature_remains_legacy_without_strict_keyword(production):
+def test_stream_has_explicit_opt_in_strict_keyword(production):
     signature = inspect.signature(production.model.stream_generate)
-    assert tuple(signature.parameters) == ("self", "prompt", "temperature", "max_tokens")
+    assert tuple(signature.parameters) == (
+        "self", "prompt", "temperature", "max_tokens", "strict_errors")
     assert signature.parameters["temperature"].default == 0.7
     assert signature.parameters["max_tokens"].default == 1500
+    assert signature.parameters["strict_errors"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["strict_errors"].default is False
     assert inspect.isasyncgenfunction(production.model.stream_generate)
+
+
+@pytest.mark.parametrize("step,reason", [
+    pytest.param(("stream-http-error", (PROVIDER_MARKER.encode(),)), "http_error",
+                 id="http-error"),
+    pytest.param(("disconnect", ""), "transport_error", id="disconnect"),
+    pytest.param(("type-error", ""), "client_error", id="type-error"),
+    pytest.param(("stream-ok", (b"not-json\n",)), "invalid_response",
+                 id="malformed-json"),
+    pytest.param(("stream-ok", (b'{"error":"private-body"}\n',)), "invalid_response",
+                 id="error-envelope"),
+    pytest.param(("stream-ok", (b'{"response":"I"}\n',)), "invalid_response",
+                 id="missing-done"),
+    pytest.param(("stream-disconnect", (b'{"response":"I"}\n',)), "transport_error",
+                 id="stream-disconnect"),
+])
+def test_strict_stream_never_yields_failure_text(production, step, reason, caplog):
+    caplog.set_level(logging.DEBUG, logger="src.web.models.ollama_model")
+    chunks = []
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            async for chunk in model.stream_generate(QUERY, strict_errors=True):
+                chunks.append(chunk)
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == reason
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert all(chunk == "I" for chunk in chunks)
+        assert len(transport.calls) == 1
+        assert all(response.is_closed for response in transport.responses)
+    assert PROVIDER_MARKER not in caplog.text
+    assert QUERY not in caplog.text
+
+
+def test_strict_stream_accepts_done_tail_without_newline(production):
+    step = ("stream-ok", (b'{"response":"I"}\n',
+                          b'{"response":"CCO","done":true}'))
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        assert asyncio.run(consume()) == ["I", "CCO"]
+        assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("fault", [httpx.ReadTimeout, httpx.ConnectTimeout])
+def test_strict_stream_timeout_is_fixed_failure(production, fault, caplog):
+    caplog.set_level(logging.DEBUG, logger="src.web.models.ollama_model")
     with mocked_client(production, ()) as (model, transport):
-        with pytest.raises(TypeError):
-            model.stream_generate(QUERY, strict_errors=True)
+        transport.on_request = lambda event: (_ for _ in ()).throw(fault(PROVIDER_MARKER))
+
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == "timeout"
+        assert caught.value.args == (CLIENT_MESSAGE,)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert PROVIDER_MARKER not in repr(vars(caught.value))
+        assert len(transport.calls) == 1
+        assert all(response.is_closed for response in transport.responses)
+    assert PROVIDER_MARKER not in caplog.text
+
+
+def test_strict_stream_http500_preserves_only_numeric_status(production):
+    with mocked_client(production, (("stream-http-error", (PROVIDER_MARKER.encode(),)),)) as (model, transport):
+        transport.on_response = lambda event: setattr(transport.responses[-1], "status_code", 500)
+
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == "http_error"
+        assert caught.value.http_status == 500
+        assert PROVIDER_MARKER not in repr(vars(caught.value))
+        assert len(transport.calls) == 1
+
+
+def test_strict_stream_consumer_close_closes_response_before_client(production):
+    step = ("stream-ok", (b'{"response":"I"}\n', b'{"response":"CCO","done":true}\n'))
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume_one():
+            stream = model.stream_generate(QUERY, strict_errors=True)
+            try:
+                assert await stream.__anext__() == "I"
+                assert not transport.responses[0].is_closed
+            finally:
+                await stream.aclose()
+            assert transport.responses[0].is_closed
+            assert transport.streams[0].close_calls == 1
+            assert not model.client.is_closed and not model.sync_client.is_closed
+
+        asyncio.run(consume_one())
+        assert_chat_http(transport, "async", 0.7, 1500, streaming=True)
+
+
+def test_strict_stream_handles_split_utf8(production):
+    step = ("stream-ok", (b'{"response":"\xe4', b'\xb8\xad","done":true}\n'))
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        assert asyncio.run(consume()) == ["中"]
+        assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_strict_stream_flag_requires_native_bool(production, value):
+    with mocked_client(production, ()) as (model, transport):
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=value)]
+
+        with pytest.raises(ValueError, match="^invalid_strict_errors$"):
+            asyncio.run(consume())
         assert transport.calls == []
+
+
+@pytest.mark.parametrize("status,expected", [
+    (None, None), (True, None), (False, None), (99, None), (600, None),
+    (200, 200), (599, 599), ("500", None),
+])
+def test_strict_stream_error_sanitizes_http_status(production, status, expected):
+    error_type = strict_error_type(production)
+    error = error_type("http_error", http_status=status)
+    assert error.http_status == expected
+    assert error.args == (CLIENT_MESSAGE,)
+    assert PROVIDER_MARKER not in repr(vars(error))
 
 
 @pytest.mark.parametrize("method_name", ["generate", "generate_async"])
