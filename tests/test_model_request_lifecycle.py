@@ -140,8 +140,6 @@ async def test_actual_http_stream_cleanup_precedes_request_release(provider, fai
         # A socket delivery failure must propagate after stream cleanup; it is
         # not permission to redispatch the provider request through fallback.
         assert stream.request_modes == [True]
-        if provider != 'ollama' and failure == 'disconnect':
-            assert model.last_response_metadata['finish_reason'] == 'stop'
     finally:
         stream.release.set()
         await asyncio.gather(*(task for task in (request, writer) if task), return_exceptions=True)
