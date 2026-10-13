@@ -916,6 +916,81 @@ def test_running_loop_executor_failure_never_redispatches(production, monkeypatc
         assert event["thread"] != probe.worker_thread
 
 
+def test_bridge_timeout_does_not_join_still_running_provider(production, monkeypatch):
+    import concurrent.futures
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    entered, release, exited, returned = (threading.Event() for _ in range(4))
+    real_submit = ThreadPoolExecutor.submit
+    real_shutdown = ThreadPoolExecutor.shutdown
+    futures, shutdowns, errors = [], [], []
+    with mocked_client(production, (ok("I"),)) as (model, transport):
+        binding = SimpleNamespace(model_name=model.model_name, generate=model.generate_async)
+        tool = production.generator(binding)
+
+        def blocked(event):
+            entered.set()
+            try:
+                assert release.wait(5), "test watchdog released blocked provider"
+            finally:
+                exited.set()
+
+        transport.on_request = blocked
+
+        def submit(executor, function, *args, **kwargs):
+            future = real_submit(executor, function, *args, **kwargs)
+            if getattr(function, "__func__", None) is not production.generator._run_async_in_new_loop:
+                return future
+            futures.append((executor, future))
+
+            class DeadlineFuture:
+                def result(self, timeout=None):
+                    assert timeout == 30
+                    assert entered.wait(3)
+                    raise FutureTimeout()
+
+            return DeadlineFuture()
+
+        def shutdown(executor, wait=True, *, cancel_futures=False):
+            if any(owner is executor for owner, _ in futures):
+                shutdowns.append((wait, cancel_futures))
+            return real_shutdown(executor, wait=wait, cancel_futures=cancel_futures)
+
+        def caller():
+            async def invoke():
+                try:
+                    tool._call_llm_sync("generate 1 molecule")
+                except Exception as exc:
+                    errors.append(exc)
+
+            try:
+                asyncio.run(invoke())
+            finally:
+                returned.set()
+
+        monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "submit", submit)
+        monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "shutdown", shutdown)
+        thread = threading.Thread(target=caller)
+        thread.start()
+        try:
+            assert entered.wait(3)
+            assert returned.wait(1), "caller blocked joining the provider after timeout"
+            assert not exited.is_set()
+            assert shutdowns == [(False, True)]
+            assert len(errors) == 1 and errors[0].reason == "timeout"
+        finally:
+            release.set()
+            thread.join(5)
+            for executor, future in futures:
+                try:
+                    future.result(timeout=5)
+                finally:
+                    real_shutdown(executor, wait=True)
+        assert not thread.is_alive()
+        assert len(futures) == 1
+        assert len(transport.calls) == 1
+
+
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("text", ["", " \n", "C1CC"])
 def test_no_valid_response_candidate_does_not_manufacture_optimization_seed(production, mode, text):
