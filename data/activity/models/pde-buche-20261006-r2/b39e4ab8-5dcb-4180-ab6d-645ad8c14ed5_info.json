@@ -1,0 +1,162 @@
+{
+  "model_id": "b39e4ab8-5dcb-4180-ab6d-645ad8c14ed5",
+  "created_at": 1791282433.1902242,
+  "task_type": "regression",
+  "target_id": "buche-family",
+  "target_name": "buche-family",
+  "endpoint": "pIC50",
+  "units": "pIC50",
+  "endpoint_key": "buche-family:pic50:pic50:regression",
+  "label_transform": "identity",
+  "dataset_sha256": "ccd63ac3c9a826c5378168ba5dd1b3fde487a3d40f5b9a52bd34afdd9c160f05",
+  "prepared_dataset_sha256": "8ee2a68a23a04b3f6d2d5ff3da3e36c4a7f9f14e556d80ebecf0d116d3d6b3ca",
+  "weights_file": "model_rgmpnn_b39e4ab8-5dcb-4180-ab6d-645ad8c14ed5.pt",
+  "weights_sha256": "acdcd89bd9a401ca536abaa0d4c5f2f08997c81aa86af1db3cb66996aefacad5",
+  "model_config": {
+    "in_channels": 37,
+    "edge_dim": 4,
+    "channels": 256,
+    "out_channels": 1,
+    "num_passing_atom": 5,
+    "num_passing_pool": 1,
+    "num_passing_rg": 1,
+    "num_passing_mol": 1,
+    "dropout": 0.2
+  },
+  "model_format": "pytorch_state_dict",
+  "split_strategy": "scaffold",
+  "requested_split_strategy": "scaffold",
+  "random_seed": 42,
+  "split_counts": {
+    "test": 343,
+    "train": 1599,
+    "validation": 343
+  },
+  "split_scaffold_counts": {
+    "test": 23,
+    "train": 752,
+    "validation": 21
+  },
+  "metrics": {
+    "rmse": 1.0110707810707227,
+    "mae": 0.8139872516209461,
+    "r2": 0.2718728756609935,
+    "val_loss": 1.0222641325205477,
+    "train_loss": 0.8025962509461833
+  },
+  "best_metrics": {
+    "rmse": 1.0110707810707227,
+    "mae": 0.8139872516209461,
+    "r2": 0.2718728756609935,
+    "val_loss": 1.0222641325205477,
+    "train_loss": 0.8025962509461833
+  },
+  "test_metrics": {
+    "rmse": 1.0373922619201286,
+    "mae": 0.8139836885491196,
+    "r2": 0.42857410537622365
+  },
+  "scientific_readiness": "endpoint_ready",
+  "demo_mode": false,
+  "fallback_used": false,
+  "samples": 2285,
+  "best_epoch": 29,
+  "epochs_completed": 41,
+  "source": "user-provided",
+  "license": "project-training-only",
+  "source_sha256": "b77bb32ba53cc1aa64a79b09a51d7890b0805d3c5bd7efda693f2157f0e4481d",
+  "model_contract_key": "buche-family:pic50:pic50:regression|source_endpoint=pic50|source_units=pic50|label_transform=identity",
+  "dataset_split_seed": 42,
+  "data_quality_summary": {
+    "counts": {
+      "accepted_rows": 2285,
+      "duplicate_rows_collapsed": 50,
+      "input_rows": 2361,
+      "rejected_rows": 26,
+      "unique_molecules": 2285,
+      "unique_scaffolds": 796
+    },
+    "rejection_reason_counts": {
+      "ambiguous_multifragment": 26
+    },
+    "split_summary": {
+      "achieved_ratios": {
+        "test": 0.150109409190372,
+        "train": 0.6997811816192561,
+        "validation": 0.150109409190372
+      },
+      "counts": {
+        "test": 343,
+        "train": 1599,
+        "validation": 343
+      },
+      "ratio_deviations": {
+        "test": 0.0001094091903720007,
+        "train": -0.00021881838074389037,
+        "validation": 0.0001094091903720007
+      },
+      "scaffold_counts": {
+        "test": 23,
+        "train": 752,
+        "validation": 21
+      }
+    },
+    "warnings": []
+  },
+  "test_prediction_summary": {
+    "sample_count": 343,
+    "output_kind": "endpoint_value",
+    "minimum": 1.597224235534668,
+    "maximum": 6.525389194488525,
+    "mean": 5.1286604640782745
+  },
+  "training_code": {
+    "files": {
+      "src/activity/dataset_contract.py": "2b655a9b955ad28c331cc9f65c8486cb201efd57a5d8a6d9d5c599dbc76b116b",
+      "src/activity/model_card.py": "6023250f468de4004c4e29e201a8a98a8d13cd3088d92ea59571c1b58503c985",
+      "src/activity/model_registry.py": "5232e5b83019d8a2713d201a66e56fc575665fc8cec26e10b764b29d6393be8c",
+      "src/activity/predictor.py": "e4dfe0af761f77c0ffcf01c52e870a11497149af47c6965cf68c4ee0dcd0a428",
+      "src/activity/prepared_training.py": "72db5c2a2f065313bce36fbec05657a999b336d9d11939a5b918f0a28f62dd63",
+      "src/activity/rg_mpnn/configs/configs.py": "02731e7d48e895721b9866cded53ca48177adf4ee7381af20fbc42a785a14818",
+      "src/activity/rg_mpnn/molecular_network/__init__.py": "e87a3deefb2ecc2e1a51bbe185b7c3575f9e36eae0111e0d2ecdf4245e5d4cfe",
+      "src/activity/rg_mpnn/molecular_network/mol_dataset/__init__.py": "b0d57133cab97cccac7f5e235b76f6e50b2c40a052e468de00b0adfc210b68bb",
+      "src/activity/rg_mpnn/molecular_network/mol_dataset/raw_dataset_4rgnn.py": "bc0329d77ac8b44e80e6075ff1b236e12f11385682e8a6e5a7e5f00c26cb0b03",
+      "src/activity/rg_mpnn/molecular_network/mol_dataset/reduceGraph_dataset.py": "10613f68049a15bbc5e58f6bb5b84d4d5579db2d0113555948774543abdad931",
+      "src/activity/rg_mpnn/molecular_network/mol_feature/__init__.py": "f54fd5c56a89dbd9896d63b71945cb5341a51522143983a7739f4170af60d3fd",
+      "src/activity/rg_mpnn/molecular_network/mol_feature/atom_feature.py": "d74525fb57f46cedc5103d38f1086a67ed71c8371aceee22d054857600c91c6d",
+      "src/activity/rg_mpnn/molecular_network/mol_feature/atom_pos.py": "db056ce8c7509641a772966c10a7c19b17460e1db164a83d2fa20486eda5ac38",
+      "src/activity/rg_mpnn/molecular_network/mol_feature/bond_feature.py": "ff61300b170e9cbb44172cf342205cd771e2122309ebcd033690b11910ec2fd8",
+      "src/activity/rg_mpnn/molecular_network/mol_feature/reduceGraph_feature.py": "d64b41397d24463db741754782986673c335228479ea602f341aaf22f00b3d24",
+      "src/activity/rg_mpnn/molecular_network/transform/complete.py": "a6ef6c5b0651190beddde4fc5cee24001e8a13181124f58080d629c81b578f2f",
+      "src/activity/rg_mpnn/molecular_network/transform/reduce_graph.py": "05301ae8eacf686a3e5e7a8562f7610332087e7434249e858cbb15827ad9cd50",
+      "src/activity/rg_mpnn/molecular_network/util/__init__.py": "4d35017a8460e385965686a082d7f7df945c231abd8824f8363bcbef6dee312c",
+      "src/activity/rg_mpnn/molecular_network/util/ConvertSdfToSmi.py": "5b1c94d12c6d8462aff9fd0ab0cb9bb20587df556e81660469226442b9acb278",
+      "src/activity/rg_mpnn/molecular_network/util/generate_descriptor.py": "a1110284818a6ed0f066ca30c00d54d7f5300cf01b4bf9388ec7b524b191947b",
+      "src/activity/rg_mpnn/molecular_network/util/get_files.py": "747b170e1a246252148d5687ff26a0f09966dc1c425a366393ef7354cbaf2683",
+      "src/activity/rg_mpnn/molecular_network/util/model_performance.py": "9378a0f91b8e2ea3b38ada816d6fccc0f2691b84759fcdc6843d9a0e62d4d884",
+      "src/activity/rg_mpnn/molecular_network/util/onehot.py": "2c182b0510dffa8378dab25ebf8f0b98a25f0e16b30ccfe7de046277c5069498",
+      "src/activity/rg_mpnn/molecular_network/util/rdkit_tools.py": "b6493c3684be55faca71992b07e3206d45a63f771cbb9b9b58d75926f1592484",
+      "src/activity/rg_mpnn/molecular_network/util/ringsize.py": "171c12a3b89e8fdef26146ecb2d9d7cbee619e86208c62f21aa0b316b61cb8c8",
+      "src/activity/rg_mpnn/molecular_network/util/smi2data.py": "f33278b255df24c26ba0ed0f24cd78181b8e88beeb82b2eccf3a1833cd564259",
+      "src/activity/rg_mpnn/molecular_network/util/smi2NoIsomericSmi.py": "b10453a17006db34e5fd4706f1a5ed55fce8e09bc1ff5d79212ddb554be87685",
+      "src/activity/rg_mpnn/molecular_network/util/wash.py": "807e42f0a2498b9ea9dd544d3204da12cfdcd44ce86b14da25589fdd009ead15",
+      "src/activity/rg_mpnn/molecular_network/util/wash_rm_salt.py": "bc3b9883f873683a63a12e9f7d2b34b3f58b35d23b8476cb265bbc9ffb541edc",
+      "src/activity/rg_mpnn/molecular_network/visualization/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "src/activity/rg_mpnn/Nets/AttentiveFP.py": "fbac92971ab3692586538663732c1b73c41aa5fdbe14ad66db23845737d7b4b5",
+      "src/activity/rg_mpnn/Nets/NN.py": "fbc34f6f403252a7d6baece30942c92a431f43014ba1ee8b5bdc0e772ecdc785",
+      "src/activity/rg_mpnn/Nets/ReduceGNN.py": "fa937f39b9843e939d87e3edd4fcbf5c33a5f226486dd1b6ac4107061531a88f",
+      "src/activity/rg_mpnn/Nets/ReduceGNN_explain.py": "7d48bf53172d230ed360bc48544bfc2eda80ae3ec789a5fce97a4df3e72905f5",
+      "src/activity/rg_mpnn/Utils/EdgeHandle.py": "0d0d3d85a7a2f744a44fb319033acc58026b1954d5a6f5c6602dfd48e9c64a7a",
+      "src/activity/rg_mpnn/Utils/log2csv_cls.py": "56803f394b683f112c7fcdc2f9f47f7f3e2c94914ae5a27f702ebaa6444a0b99",
+      "src/activity/rg_mpnn/Utils/log2csv_rgs.py": "f5bd1d9c6a33658b1dff3578f8bb15f0a6b55515d16fc045d70f53322bf26c28",
+      "src/activity/rg_mpnn/Utils/logging.py": "db2618f1d416a29af08b968a6173fbf399c1532beb7d91ffeac30c9a3b28f00d",
+      "src/activity/rg_mpnn/Utils/metrics.py": "2e3b5a824795c295439c046ecf12ca88f017406601e09e69132464b230576fc6",
+      "src/activity/rg_mpnn/Utils/sort_tid.py": "e307f088107414308ad3334ff2c3996c17f7d5513e19a7eb19f57970144e2597",
+      "src/activity/trainer.py": "cb170bf7ae5f6dd1526351e644546da9840b0485fc1b161bd86403faea9a782d"
+    },
+    "source_sha256": "b5a25ffc1aa42d5e70af68ac3bd21feb6351e028c80116d4f6db3af03fd40ac9",
+    "git_commit": "6adba2d15b936fbe89a5b7b0ff0cb51b436f8043"
+  },
+  "model_card_file": "model_rgmpnn_b39e4ab8-5dcb-4180-ab6d-645ad8c14ed5.card.json",
+  "model_card_sha256": "bcea6d4bed685254886da75aeb750600f627914b883392392feadd8dc836999b"
+}
