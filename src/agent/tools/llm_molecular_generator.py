@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 import asyncio
+from concurrent.futures import TimeoutError as FutureTimeout
 import inspect
 import logging
 import math
@@ -643,17 +644,24 @@ class LLMMolecularGenerator(BaseMolecularTool):
                     running = True
                 if running:
                     import concurrent.futures
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                    executor = concurrent.futures.ThreadPoolExecutor()
+                    try:
                         future = executor.submit(self._run_async_in_new_loop, prompt, temperature,
                                                  generate_method=method)
                         return future.result(timeout=30)
+                    finally:
+                        # Pending work may be cancelled, but a running provider is not
+                        # terminated. Do not turn caller timeout into a blocking join.
+                        executor.shutdown(wait=False, cancel_futures=True)
                 return self._run_async_in_new_loop(prompt, temperature, generate_method=method)
             return method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True)
         except (OllamaGenerationError, _StrictGenerationUnavailable):
             raise
+        except (FutureTimeout, asyncio.TimeoutError):
+            reason = 'timeout'
         except Exception:
-            pass
-        raise OllamaGenerationError("client_error")
+            reason = 'client_error'
+        raise OllamaGenerationError(reason)
     
     def _run_async_in_new_loop(self, prompt: str, temperature: float = 0.7, *,
                                generate_method) -> str:
