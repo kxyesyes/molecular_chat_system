@@ -24,6 +24,23 @@ function needsReview(row) {
       || (row.activity_probability >= .5) !== (row.predicted_pIC50 >= 5));
 }
 
+function expectedSourceVersion(row) {
+  const provenance = row.provenance || {};
+  if (typeof provenance.model_version === "string" && provenance.model_version.trim()) {
+    return provenance.model_version.trim();
+  }
+  const bundleId = row.bundle_id || provenance.bundle_id || "";
+  const match = String(bundleId).match(/(?:^|-)\b(r\d+)\b(?:-|$)/i);
+  return match ? match[1].toLowerCase() : (bundleId ? "已绑定模型" : "不可用");
+}
+
+function expectedValidationNote(row) {
+  const scope = row.provenance && row.provenance.scope;
+  return scope && typeof scope === "object" && scope.experimental_replication_verified === true
+    ? "已记录实验复核，不代表本次预测实验验证"
+    : (row.bundle_id || row.provenance.bundle_id ? "模型推理结果，非实验验证" : "来源不可用");
+}
+
 function assertDisplayedPrediction(row, expected) {
   const shown = cells(row);
   assert.equal(shown.length, 6);
@@ -40,13 +57,10 @@ function assertDisplayedPrediction(row, expected) {
   const source = detailCell.children.find(node => node.tagName === "details");
   assert.ok(source);
   assert.deepEqual(source.children.filter(node => node.tagName === "p").map(node => node.textContent), [
-    "请求靶点：" + (expected.requested_target || "不可用"),
-    "家族：" + (expected.family_id || expected.provenance.family_id || "不可用"),
-    "模型组：" + (expected.bundle_id || expected.provenance.bundle_id || "不可用"),
+    "模型版本：" + expectedSourceVersion(expected),
+    "验证说明：" + expectedValidationNote(expected),
   ]);
-  const evidence = source.children.find(node => node.tagName === "pre");
-  assert.ok(evidence);
-  assert.deepEqual(JSON.parse(evidence.textContent), expected.provenance);
+  assert.ok(!source.children.some(node => node.tagName === "pre"));
   const notes = [...expected.warnings];
   if (expected.error) notes.push(expected.error);
   if (expected.note) notes.push(expected.note);

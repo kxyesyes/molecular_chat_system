@@ -256,6 +256,36 @@ window.ActivityResults = (function () {
     });
   }
 
+  function sourceVersion(provenance, bundleId) {
+    const explicitVersion = provenance && typeof provenance.model_version === "string"
+      ? provenance.model_version.trim() : "";
+    if (explicitVersion) return explicitVersion;
+
+    const match = String(bundleId || "").match(/(?:^|-)\b(r\d+)\b(?:-|$)/i);
+    return match ? match[1].toLowerCase() : (bundleId ? "已绑定模型" : "不可用");
+  }
+
+  function validationNote(provenance) {
+    const scope = provenance && provenance.scope;
+    const verified = scope && typeof scope === "object"
+      && scope.experimental_replication_verified === true;
+    return verified ? "已记录实验复核，不代表本次预测实验验证"
+      : "模型推理结果，非实验验证";
+  }
+
+  function appendSourceLine(container, label, value) {
+    const line = document.createElement("p");
+    line.className = "result-source-line";
+    const labelEl = document.createElement("span");
+    labelEl.className = "result-source-label";
+    labelEl.textContent = `${label}：`;
+    const valueEl = document.createElement("span");
+    valueEl.className = "result-source-value";
+    valueEl.textContent = value;
+    line.append(labelEl, valueEl);
+    container.appendChild(line);
+  }
+
   function resultDetails(item) {
     const notes = warningStrings(item.warnings);
     if (item.error) notes.push(item.error);
@@ -278,21 +308,13 @@ window.ActivityResults = (function () {
     const cell = createCell(notes.join("；") || "—", "word-break: break-word;");
     const provenance = item.provenance || item.model_provenance || {};
     const source = document.createElement("details");
+    source.className = "result-source-details";
     const summary = document.createElement("summary");
     summary.textContent = "查看本次预测来源";
     source.appendChild(summary);
-    [["请求靶点", item.requested_target], ["家族", item.family_id || provenance.family_id],
-      ["模型组", item.bundle_id || provenance.bundle_id]].forEach(function ([label, value]) {
-      const line = document.createElement("p");
-      line.textContent = `${label}：${value || "不可用"}`;
-      source.appendChild(line);
-    });
-    // Keep the complete returned evidence (hashes, scope, model identities, flags).
-    // JSON is inert text, not HTML, and does not depend on mutable form state.
-    const evidence = document.createElement("pre");
-    evidence.style.cssText = "white-space: pre-wrap; overflow-wrap: anywhere;";
-    evidence.textContent = item.provenance ? JSON.stringify(item.provenance, null, 2) : "来源不可用";
-    source.appendChild(evidence);
+    const bundleId = item.bundle_id || provenance.bundle_id;
+    appendSourceLine(source, "模型版本", sourceVersion(provenance, bundleId));
+    appendSourceLine(source, "验证说明", bundleId ? validationNote(provenance) : "来源不可用");
     cell.appendChild(source);
     return cell;
   }

@@ -816,6 +816,37 @@ body {
   background: #f8fafc;
 }
 
+.result-source-details {
+  min-width: 170px;
+  color: var(--text, #1e293b);
+}
+
+.result-source-details summary {
+  cursor: pointer;
+  color: #475569;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+.result-source-line {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 6px;
+  margin: 7px 0 0;
+  line-height: 1.45;
+}
+
+.result-source-label {
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+.result-source-value {
+  min-width: 0;
+  color: #334155;
+  overflow-wrap: anywhere;
+}
+
 .tag {
   display: inline-block;
   padding: 3px 9px;

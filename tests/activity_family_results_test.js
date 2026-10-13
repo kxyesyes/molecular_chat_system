@@ -48,7 +48,7 @@ function setup() {
     "singleConfidenceValue", "singleClassValue", "singleTaskTypeValue", "singleModelMeta",
     "activityBandSubtitle", "activityBandRange", "activityBandMarkerLabel", "bandTickStart",
     "bandTickLow", "bandTickHigh", "bandTickEnd", "singleScoreValue", "singleClassTag",
-    "activityBandMarker",
+    "activityBandMarker", "batchFile",
   ].map(id => [id, new Element()]));
   const calls = {histogram: [], model: 0, alerts: [], chartClears: 0, requests: []};
   let frame = 0;
@@ -95,16 +95,18 @@ function assertNoExecutableNodes(node) {
   node.children.forEach(assertNoExecutableNodes);
 }
 
-test("family passed retains probability zero, class and returned source without global gauge", () => {
+test("family passed keeps the result source concise and independent of global state", () => {
   const h = setup();
   h.render([family()], {isSingleRequest: true});
   assert.match(h.ids.resultsBody.textContent, /4\.3210/);
   assert.match(h.ids.resultsBody.textContent, /0\.0%/);
   assert.match(h.ids.resultsBody.textContent, /无活性/);
   assert.match(h.ids.resultsHeader.textContent, /活性概率/);
+  assert.match(h.ids.resultsBody.textContent, /模型版本：已绑定模型/);
+  assert.match(h.ids.resultsBody.textContent, /模型推理结果，非实验验证/);
   for (const text of ["PDE5A", "pde-family", "synthetic-bundle", "fixture-classifier",
     "fixture-regressor", "fixture-source-hash", "fixture-class-hash", "fixture-card-hash", "fixture-only"]) {
-    assert.ok(h.ids.resultsBody.textContent.includes(text), "Missing returned provenance: " + text);
+    assert.ok(!h.ids.resultsBody.textContent.includes(text), "Internal provenance leaked into the summary: " + text);
   }
   assert.equal(h.ids.singleSummary.style.display, "none");
   assert.equal(h.ids.batchHistogram.style.display, "none");
@@ -116,6 +118,28 @@ test("family passed retains probability zero, class and returned source without 
   assert.equal(h.ids.resultsBody.textContent, rendered);
   h.render([family()]);
   assert.equal(h.ids.resultsBody.textContent, rendered, "Rerender also uses returned source");
+});
+
+test("family source summary exposes only a readable bundle version and validation note", () => {
+  const h = setup();
+  const row = family({
+    bundle_id: "pde-buche-20261006-r2-buche-family",
+    provenance: {
+      family_id: "buche-family",
+      bundle_id: "pde-buche-20261006-r2-buche-family",
+      scope: {experimental_replication_verified: false},
+      source_sha256: "a".repeat(64),
+      models: {classification: {model_id: "classifier"}, regression: {model_id: "regressor"}},
+    },
+  });
+  h.render([row]);
+  const text = h.ids.resultsBody.textContent;
+  assert.match(text, /模型版本：r2/);
+  assert.match(text, /模型推理结果，非实验验证/);
+  assert.ok(!text.includes("pde-buche-20261006-r2-buche-family"));
+  assert.ok(!text.includes("source_sha256"));
+  assert.ok(!text.includes("classifier"));
+  assertNoExecutableNodes(h.ids.resultsBody);
 });
 
 test("partial regression unavailable retains independent classification and stage error", () => {
@@ -197,8 +221,10 @@ test("mixed batch preserves order, duplicates and each row's own status and sour
   h.render(rows, {}, {success: false, status: "partial"});
   assert.equal(h.ids.resultsBody.children.length, 3);
   assert.deepEqual(h.ids.resultsBody.children.map(row => cells(row)[0]), ["CCO", "invalid", "CCO"]);
-  assert.match(h.ids.resultsBody.children[1].textContent, /失败.*BuChE/);
-  assert.match(h.ids.resultsBody.children[2].textContent, /部分完成.*PDE5A/);
+  assert.match(h.ids.resultsBody.children[1].textContent, /失败/);
+  assert.match(h.ids.resultsBody.children[2].textContent, /部分完成/);
+  assert.ok(!h.ids.resultsBody.children[1].textContent.includes("BuChE"));
+  assert.ok(!h.ids.resultsBody.children[2].textContent.includes("PDE5A"));
   assert.equal(h.calls.histogram.length, 0);
 });
 
@@ -211,7 +237,8 @@ test("hostile fields reach text only, including all nested provenance and aggreg
   h.render([row], {}, {warnings: [hostile]});
   assert.ok(cells(h.ids.resultsBody.children[0])[0].includes(hostile));
   assert.ok(cells(h.ids.resultsBody.children[0])[2].includes(hostile));
-  assert.ok(h.ids.resultsBody.textContent.includes('"extra"'));
+  assert.ok(!h.ids.resultsBody.textContent.includes('"extra"'));
+  assert.ok(!h.ids.resultsBody.textContent.includes("model_id"));
   assert.ok(h.ids.predictionStatus.textContent.includes(hostile));
   assertNoExecutableNodes(h.ids.resultsBody);
   assertNoExecutableNodes(h.ids.predictionStatus);
@@ -479,6 +506,7 @@ test("registered submit handlers pass each form's own target and file/smiles", a
   };
   h.context.ActivityMain.init();
   const file = {name: "fixture.smi"};
+  h.ids.batchFile.files = [file];
   h.ids.predictForm.fields = [["target", "PDE"], ["smiles", "CCO"]];
   h.ids.batchForm.fields = [["target", "BuChE"], ["file", file]];
   for (const id of ["predictForm", "batchForm"]) {
