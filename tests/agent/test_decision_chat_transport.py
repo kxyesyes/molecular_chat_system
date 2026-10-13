@@ -191,6 +191,8 @@ def test_settled_candidate_fixture_uses_one_projection_before_complete(tmp_path,
         await decision_chat._deliver_result(handler, _TurnSender(_Sender(socket), turn), frames, legacy)
         # Exercise the actual strict-frame wrapper. This supplementary fixture
         # has no request lease; normal-route release is tested independently.
+        assert not turn.finishing
+        assert not turn.terminal_sent
         assert turn.pending_complete is not None
         await socket.send_text(turn.pending_complete)
         assert socket.messages[0]['turn_id'] == turn.turn_id
