@@ -128,6 +128,9 @@ async def test_actual_http_stream_cleanup_precedes_request_release(provider, fai
         if cancel_owner or failure == 'consumer_cancel':
             with pytest.raises(asyncio.CancelledError):
                 await request
+        elif failure == 'disconnect':
+            with pytest.raises(RuntimeError, match='synthetic socket disconnect'):
+                await request
         else:
             await request
         await writer

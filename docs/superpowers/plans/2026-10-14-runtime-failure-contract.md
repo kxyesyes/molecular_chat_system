@@ -249,7 +249,7 @@ git commit -m "fix: expose strict Ollama stream failures"
 
 ## Task 2: Web chat consumes strict provider failures
 
-**Files:** Modify `src/web/models/__init__.py` and `src/web/chat_handler.py`; create `tests/agent/test_chat_runtime_failures.py`.
+**Files:** Modify `src/web/models/__init__.py`, `src/web/chat_handler.py`, and `tests/test_model_request_lifecycle.py`; create `tests/agent/test_chat_runtime_failures.py`.
 
 - [ ] **Step 1: Add a real-model/real-handler failing regression.**
 
@@ -441,14 +441,14 @@ await websocket.send_text(json.dumps({
 }, ensure_ascii=False))
 ```
 
-Inspect legacy adapters for synchronous exceptions during stream creation; keep their existing fallback behavior in a provider-only catch, without enclosing socket sends. Do not broaden strict claims to unknown provider adapters. Model-request lifecycle tests must prove that response closure still precedes lease release. Failure terminal delivery itself must propagate socket failure, not retry it.
+Inspect legacy adapters for synchronous exceptions during stream creation; keep their existing fallback behavior in a provider-only catch, without enclosing socket sends. Do not broaden strict claims to unknown provider adapters. Model-request lifecycle tests must prove that response closure still precedes lease release. Update `tests/test_model_request_lifecycle.py` so a synthetic socket disconnect is asserted as the propagated `RuntimeError` and exactly one streaming provider request (`[True]`), while normal and cancellation cases retain their existing expectations. Failure terminal delivery itself must propagate socket failure, not retry it.
 
 - [ ] **Step 5: Run GREEN and commit.**
 
 ```powershell
 python -m pytest tests/agent/test_chat_runtime_failures.py tests/agent/test_generation_transport_characterization.py tests/agent/test_chat_handler_agent_events.py tests/agent/test_chat_handler_partial_results.py tests/test_model_request_lifecycle.py -q
 git diff --check
-git add src/web/models/__init__.py src/web/chat_handler.py tests/agent/test_chat_runtime_failures.py
+git add src/web/models/__init__.py src/web/chat_handler.py tests/test_model_request_lifecycle.py tests/agent/test_chat_runtime_failures.py
 git commit -m "fix: terminate chat on strict provider failures"
 ```
 
