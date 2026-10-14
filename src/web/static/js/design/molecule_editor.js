@@ -370,6 +370,10 @@ var MoleculeEditor = (function () {
   /* ── 导入确认 ── */
   async function confirmImport() {
     var smi = document.getElementById("importInput").value.trim();
+    if (!smi) {
+      UI.toast("请输入 SMILES", "error");
+      return;
+    }
     if (smi) {
       try {
         if (await restoreCandidate(smi, "已导入分子，属性已更新。")) UI.closeImport();

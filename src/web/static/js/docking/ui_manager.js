@@ -659,6 +659,7 @@ let activeDockingTaskId = null;
 let dockingPollTimer = null;
 
 const DOCKING_TASK_STORAGE_KEY = "medchat.docking.active_task_id";
+const DOCKING_TASK_QUERY_PARAM = "docking_task";
 const TERMINAL_DOCKING_TASK_STATUSES = new Set([
   "succeeded",
   "failed",
@@ -687,17 +688,32 @@ function setDockingTaskButtonState(active) {
   if (cancelBtn) cancelBtn.disabled = !active;
 }
 
+function updateRememberedDockingTaskUrl(taskId) {
+  try {
+    if (!window.history || typeof window.history.replaceState !== "function") return;
+    const url = new URL(window.location.href);
+    if (taskId) url.searchParams.set(DOCKING_TASK_QUERY_PARAM, taskId);
+    else url.searchParams.delete(DOCKING_TASK_QUERY_PARAM);
+    window.history.replaceState(window.history.state, "", url.toString());
+  } catch (_) {}
+}
+
 function rememberDockingTask(taskId) {
   activeDockingTaskId = taskId || null;
   try {
     if (taskId) sessionStorage.setItem(DOCKING_TASK_STORAGE_KEY, taskId);
     else sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY);
   } catch (_) {}
+  updateRememberedDockingTaskUrl(activeDockingTaskId);
 }
 
 function readRememberedDockingTask() {
   try {
-    return sessionStorage.getItem(DOCKING_TASK_STORAGE_KEY);
+    const storedTaskId = sessionStorage.getItem(DOCKING_TASK_STORAGE_KEY);
+    if (storedTaskId) return storedTaskId;
+  } catch (_) {}
+  try {
+    return new URL(window.location.href).searchParams.get(DOCKING_TASK_QUERY_PARAM);
   } catch (_) {
     return null;
   }
@@ -911,13 +927,13 @@ function applyDockingTaskRecord(record) {
       indicator.className = "status-indicator status-completed";
       indicator.textContent = "已完成";
     });
-    try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
+    rememberDockingTask(null);
     return true;
   }
   renderDockingProgress(Math.min(dockingProgressPercent(record.progress), 99));
   if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || status);
   renderDurableTaskFailure(record);
-  try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
+  rememberDockingTask(null);
   return true;
 }
 
