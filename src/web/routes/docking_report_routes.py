@@ -11,33 +11,13 @@ from .route_compat import lazy_dependency
 _LOGGER = logging.getLogger(__name__)
 
 
-def setup_docking_report_routes(
+def _register_docking_report_routes(
     app,
     docking_service=None,
     *,
-    validate_report_base64_payload=None,
-    logger=None,
-    _support=None,
+    get_validator,
+    get_logger,
 ):
-    """Register report endpoints with explicit validation and logging dependencies.
-
-    ``_support`` remains a compatibility-only fallback for older direct callers;
-    application registration passes the narrow dependencies explicitly.
-    """
-    get_validator = lazy_dependency(
-        validate_report_base64_payload,
-        _support,
-        "_validate_report_base64_payload",
-        label="docking report validator",
-    )
-    get_logger = lazy_dependency(
-        logger,
-        _support,
-        "logger",
-        label="docking report logger",
-        default=_LOGGER,
-    )
-
     @app.post("/api/docking/report/{job_id}")
     async def get_docking_report(job_id: str, request: Request, payload: Dict[str, Any] = Body(None)):
         """生成并返回对接报告"""
@@ -86,3 +66,47 @@ def setup_docking_report_routes(
         except Exception:
             get_logger().exception("生成报告失败")
             return api_error("DOCKING_REPORT_FAILED", "生成对接报告失败", status_code=500)
+
+
+def register_docking_report_routes(
+    app,
+    docking_service=None,
+    *,
+    validate_report_base64_payload,
+    logger=None,
+):
+    """Register production report routes with narrow dependencies."""
+    return _register_docking_report_routes(
+        app,
+        docking_service=docking_service,
+        get_validator=lambda: validate_report_base64_payload,
+        get_logger=lambda: logger or _LOGGER,
+    )
+
+
+def setup_docking_report_routes(
+    app,
+    docking_service=None,
+    *,
+    validate_report_base64_payload=None,
+    logger=None,
+    _support=None,
+):
+    """Compatibility registration entry point for older direct callers."""
+    return _register_docking_report_routes(
+        app,
+        docking_service=docking_service,
+        get_validator=lazy_dependency(
+            validate_report_base64_payload,
+            _support,
+            "_validate_report_base64_payload",
+            label="docking report validator",
+        ),
+        get_logger=lazy_dependency(
+            logger,
+            _support,
+            "logger",
+            label="docking report logger",
+            default=_LOGGER,
+        ),
+    )

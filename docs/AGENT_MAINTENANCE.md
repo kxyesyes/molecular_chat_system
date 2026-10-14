@@ -11,7 +11,7 @@
 |---|---|---|
 | 正式网页聊天 | [main.py](../main.py) → [MolecularChatApp](../src/web/app.py) 注册 `/ws` → [ChatHandler.handle_websocket](../src/web/chat_handler.py) | `_create_chat_agent()` 构造 `SupervisorAgent`；没有 ChatHandler 时以 1011 失败关闭，不回退到旧聊天实现。普通聊天不等于科研工具调用。 |
 | 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 `/api/agent/workflows/plan`、`/run` | 使用应用注入的 `_create_supervisor_agent()`，注册表审计、specialist 委派；正式应用的 `run` 经 `ModelRequestGate.submit_background()` 转交 TaskManager，再调用 `SupervisorAgent.run()`，模型使用权覆盖实际 worker 生命周期。没有注入 gate 的独立构造仍兼容直接 submit。 |
-| 领域 HTTP API | [api_routes.py](../src/web/routes/api_routes.py) 兼容注册入口 → 同目录八个领域注册模块 | 原30个操作按原顺序注册；docking/runtime 按应用注入，getter仅在请求时解析。兼容 helper、logger 和 pharm3d 资源仍由 facade 持有，子模块动态使用显式 `_support`，不能每次 setup 新建线程池或运行时。 |
+| 领域 HTTP API | [api_routes.py](../src/web/routes/api_routes.py) 兼容注册入口 → 同目录八个领域注册模块 | 原30个操作按原顺序注册；正式应用对活性预测、活性模型、分子工具和报告使用 `register_*_routes()` 的窄依赖入口。旧 `setup_*_routes(..., _support=...)` 仅保留给直接调用者，并通过 `route_compat.lazy_dependency` 动态解析；不能每次 setup 新建线程池或运行时。 |
 | 隔离模型决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[decision_chat.py](../src/web/decision_chat.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | 独立 loopback 验收应用；`ChatHandler.process_decision_message()` 是显式服务端桥接，正式 `/ws` 不根据浏览器参数自动启用它。不能把隔离验收通过描述为已切换生产 Agent。 |
 
 当前正式科学入口仍包含路由、计划和工作流执行。仓库同时有模型决策循环，但“代码已存在”不代表正式聊天已使用该循环，也不意味着可以删掉验证、任务运行时或恢复保护。
@@ -82,6 +82,15 @@ ChatHandler / 工作流 API
 本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
 
 T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下节；T11-B 两个旧 Agent 的公共接口已薄适配，不再把这项列作完全未实施。两个无状态聊天模块已通过 PR #63 合并，原 helper 保留薄委托。当前领域路由拆分按八个模块维护：`docking_routes`、`molecule_utility_routes`、`docking_report_routes`、`reverse_target_routes`、`activity_prediction_routes`、`activity_model_routes`、`molecule_properties_routes`、`agent_metrics_routes`；发布/验证以本批交接为准。固定 API 基线保留各已验证 FastAPI/Pydantic profile 的完整描述，不抹去框架差异；未知版本要求补旧实现基线。性质端点的既有启发式 ADMET 标签问题单独登记，搬迁测试不构成科学有效性证明。
+
+### 路由兼容边界（2026-10-09）
+
+四个仍需要动态旧调用兼容的模块已经拆成两层：`register_activity_prediction_routes`、
+`register_activity_model_routes`、`register_molecule_utility_routes` 和
+`register_docking_report_routes` 只接受窄依赖，`api_routes.setup_api_routes()` 只调用这些生产入口；
+同名 `setup_*_routes` 仅作为旧直接调用的兼容包装器保留 `_support`。因此 `_support` 不再进入正式应用注册路径，
+但旧调用者的注册后替换行为仍保持不变。对应边界回归见
+`tests/test_route_compatibility.py` 与 `tests/test_api_route_boundary.py`。
 
 仍未完成：其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。
 

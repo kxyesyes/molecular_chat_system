@@ -283,6 +283,13 @@
         !baseText.includes(structuredReason)
         ? `${baseText}\n\n失败原因：${structuredReason}` : baseText;
       turn.result = {status: message.status, text, metadata: message.metadata || {}};
+      if (message.status === "waiting_for_input" && message.metadata?.waiting_for_input === true
+          && /^[a-f0-9]{32}$/.test(message.metadata.continuation_id || "")) {
+        // Cache the opaque pointer before complete can be lost. The active
+        // turn still disables controls; reconnect never dispatches by itself,
+        // and only the server's durable owner-bound CAS authorizes a resume.
+        setDecisionWaiting({traceId: turn.traceId, nonce: message.metadata.continuation_id});
+      }
       const rag = message.metadata?.retrieval_performed === false
         ? (message.metadata.rag_requested === true ? " RAG已开启，本轮未执行检索。" : " 本轮未执行检索。") : "";
       decisionStatus(turn, decisionStatuses[message.status] + rag);

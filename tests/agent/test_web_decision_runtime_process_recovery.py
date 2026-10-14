@@ -83,6 +83,18 @@ def test_competing_processes_claim_waiting_continuation_exactly_once(tmp_path):
     assert winner['terminal_frames'] == 1
 
 
+def test_abandoned_wait_cannot_be_revived_by_another_process(tmp_path):
+    waiting = run_phase(tmp_path, 'wait')
+    pointer = waiting.pop('pointer')
+    abandoned = run_phase(tmp_path, 'abandon', pointer)
+    assert abandoned['status'] == 'rejected' and abandoned['claimed'] is True
+    assert abandoned['invocations'] == abandoned['model_calls'] == 0
+    replay = run_phase(tmp_path, 'replay', pointer)
+    assert replay['status'] == 'rejected'
+    assert replay['invocations'] == replay['model_calls'] == 0
+    assert len({waiting['pid'], abandoned['pid'], replay['pid']}) == 3
+
+
 @pytest.mark.parametrize('phase', ['wait_rotated', 'wait_refreshed'])
 def test_restart_after_live_config_publication_can_resume(tmp_path, phase):
     waiting = run_phase(tmp_path, phase)

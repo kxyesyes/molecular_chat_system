@@ -40,6 +40,24 @@ def test_activity_budget_helper_has_no_support_container_parameter():
     assert "_support" not in inspect.signature(_invoke_activity_with_budget).parameters
 
 
+@pytest.mark.parametrize(
+    ("module_name", "register_name"),
+    (
+        ("activity_model_routes", "register_activity_model_routes"),
+        ("activity_prediction_routes", "register_activity_prediction_routes"),
+        ("molecule_utility_routes", "register_molecule_utility_routes"),
+        ("docking_report_routes", "register_docking_report_routes"),
+    ),
+)
+def test_production_registration_has_no_legacy_support_parameter(module_name, register_name):
+    import importlib
+    import inspect
+
+    module = importlib.import_module(f"src.web.routes.{module_name}")
+    register = getattr(module, register_name)
+    assert "_support" not in inspect.signature(register).parameters
+
+
 @pytest.mark.parametrize("module_name", ROUTE_MODULES)
 def test_selected_routes_keep_support_access_in_compatibility_adapter(module_name):
     source = (

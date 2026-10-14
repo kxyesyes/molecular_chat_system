@@ -281,7 +281,12 @@ def test_facade_delegates_in_order_with_original_dependencies(monkeypatch):
         def capture(app, *, _domain=domain, **kwargs):
             calls.append((_domain, app, kwargs))
         # raising=True deliberately proves the pre-extraction facade lacks delegation.
-        monkeypatch.setattr(support, f"setup_{domain}_routes", capture)
+        registration_name = (
+            f"register_{domain}_routes"
+            if domain in {"molecule_utility", "docking_report", "activity_prediction", "activity_model"}
+            else f"setup_{domain}_routes"
+        )
+        monkeypatch.setattr(support, registration_name, capture)
     app = FastAPI()
     assert support.setup_api_routes(app, service, runtime) is None
     assert [domain for domain, _, _ in calls] == [d for d, _ in DOMAINS]

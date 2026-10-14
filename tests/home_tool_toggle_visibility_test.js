@@ -5,7 +5,7 @@ const template = fs.readFileSync("src/web/templates/index.html", "utf8");
 const main = fs.readFileSync("src/web/static/js/home/main.js", "utf8");
 
 assert(
-  template.includes("main.js?v=20261015-projection-failure-v2"),
+  template.includes("main.js?v=20261015-durable-waiting-v3"),
   "the homepage script cache version must change with the protocol fix"
 );
 assert(!template.includes("智能工具"), "the smart-tool toggle must not render");

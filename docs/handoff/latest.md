@@ -1,5 +1,22 @@
 # Latest handoff
 
+## PR #183 恢复逻辑兼容审查（2026-10-15）
+
+- 以当前 `main` 的 `web_request`、owner-scoped continuation CAS 和独立进程恢复契约为准；
+  不引入旧分支的 detached-turn 内存重放，也不从恢复投影重建 `semantic_v1` 权限。
+  semantic 模式仍在缺少安全持久化 intent journal 时拒绝跨连接恢复；运行中任务断线的取消、
+  物理 worker 清理和结果投影失败语义不变。
+- 前端收到当前 turn 的合法 waiting result 后立即缓存有限 trace/nonce 指针，即使后续 `complete`
+  丢失仍可在重新连接或刷新后显式请求续接。当前 turn 未结束时控件仍锁定；不自动执行，
+  不重放旧帧，服务端持久化状态、归属校验和一次性 CAS 仍是唯一授权来源。尚未收到合法 waiting
+  result 或服务端尚未完成持久化的中断不承诺恢复；服务端拒绝时清除缓存。
+- 修复重建 waiting 后下一个新聊天丢失先前普通对话历史的问题：只在正常终帧交付时恢复已验证
+  历史前缀，不把未显示回答、工具结果写成普通聊天，也不覆盖新 socket 已有的更新历史。
+- 保留生产路由 `register_*_routes` 与旧 `setup_*_routes` 兼容包装器分离；活动训练的行数 413、
+  并发容量 429 限制和当前失败契约保留。
+- 新回归覆盖丢失终帧、旧 receiver 尚未清理时续接、恢复后历史、放弃后换运行时/独立进程拒绝复活。
+  测试使用离线协议夹具、真实 SQLite/ASGI/RDKit；不代表真实外部模型、HTTPS/WSS 或生产部署验收。
+
 ## 活动 worker 清理回归修复（2026-10-11，待发布）
 
 发现并复现一个本地可重复的资源清理缺陷：活动预测超时终止子进程后，子进程管道可能先关闭，后台 waiter 已经以 `ProcessExecutionError` 完成；旧清理逻辑只等待尚未完成的 waiter，因而会留下 `Task exception was never retrieved`。修复 `_stop_activity_process()` 统一观察 waiter，并保留一秒清理上限、取消和进程关闭行为；新增事件循环异常处理器与垃圾回收回归测试，确认已完成失败被消费且不再泄漏。
@@ -57,6 +74,8 @@
   跨层依赖扫描均通过。
 - 路由兼容层已完成审计：正式注册路径使用窄依赖，不再把整个 `api_routes` 作为生产依赖；
   目标路由的 `_support` 仅保留给旧直接调用者，且通过统一 `route_compat.lazy_dependency` 延迟解析。
+- 2026-10-09 已将活性预测、活性模型、分子工具和对接报告的生产注册函数与旧兼容包装器分离；
+  `api_routes.setup_api_routes()` 不再调用这四个 `setup_*_routes` 兼容入口，旧直接调用及其动态替换测试仍保留。
 - 使用本机真实运行资产的严格健康检查已达到 `23/23`。模型权重、靶点数据库、缓存与 RAG 索引属于
   本地资产，不得提交或用模拟文件替代。
 - 本分支 `codex/complete-remaining-architecture` 已补齐 Web 决策等待的服务端持久化续接：

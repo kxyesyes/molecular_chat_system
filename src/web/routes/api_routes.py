@@ -21,11 +21,11 @@ from src.web.api_response import api_success
 from src.web.process_isolation import IsolatedProcess, start_isolated_process
 
 from .docking_routes import setup_docking_routes
-from .molecule_utility_routes import setup_molecule_utility_routes
-from .docking_report_routes import setup_docking_report_routes
+from .molecule_utility_routes import register_molecule_utility_routes
+from .docking_report_routes import register_docking_report_routes
 from .reverse_target_routes import setup_reverse_target_routes
-from .activity_prediction_routes import setup_activity_prediction_routes
-from .activity_model_routes import setup_activity_model_routes
+from .activity_prediction_routes import register_activity_prediction_routes
+from .activity_model_routes import register_activity_model_routes
 from .molecule_properties_routes import setup_molecule_properties_routes
 from .admet_routes import setup_admet_routes
 from .agent_metrics_routes import setup_agent_metrics_routes
@@ -505,12 +505,12 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
         logger=_ROUTE_LOGGER,
         tempfile_module=_ROUTE_TEMPFILE,
     )
-    setup_molecule_utility_routes(
+    register_molecule_utility_routes(
         app,
         invoke_in_threadpool=_ROUTE_INVOKER,
         logger=_ROUTE_LOGGER,
     )
-    setup_docking_report_routes(
+    register_docking_report_routes(
         app,
         docking_service=docking_service,
         validate_report_base64_payload=_ROUTE_REPORT_VALIDATOR,
@@ -529,13 +529,13 @@ def setup_api_routes(app, docking_service=None, task_runtime=None):
         pharm3d_refine_job=_pharm3d_refine_job,
         pharm3d_query_job=_pharm3d_query_job,
     )
-    setup_activity_prediction_routes(
+    register_activity_prediction_routes(
         app,
         invoke_activity_with_budget=_ROUTE_ACTIVITY_INVOKER,
         read_upload_limited=_ROUTE_UPLOAD_READER,
         logger=_ROUTE_LOGGER,
     )
-    setup_activity_model_routes(
+    register_activity_model_routes(
         app,
         read_upload_limited=_ROUTE_UPLOAD_READER,
         tempfile_module=_ROUTE_TEMPFILE,

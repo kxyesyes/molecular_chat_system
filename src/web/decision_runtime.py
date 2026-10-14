@@ -645,7 +645,11 @@ class WebDecisionRuntime:
                     sender.waiting = None
                 else:
                     self._check_retry_authority(sender, turn)
-                turn.history_update = retain_history_pair(sender.memory,
+                # A restored wait carries a validated historical prefix, but
+                # its new socket starts empty. Publish that prefix only with
+                # normal terminal delivery; never overwrite a newer live one.
+                history_memory = sender.memory or (context.memory if turn.waiting is not None else [])
+                turn.history_update = retain_history_pair(history_memory,
                     user=turn.payload['message'] if turn.waiting is not None else context.query,
                     assistant=turn.displayed_answer or '',
                     request_kind=prepared.request_kind, outcome=result.outcome,
@@ -654,7 +658,7 @@ class WebDecisionRuntime:
                     has_tool_content=bool(result.tool_results or result.evidence or result.artifacts))
                 if (contains_secret_material(result.final_answer or result.message)
                         or REDACTED in (turn.displayed_answer or '')):
-                    turn.history_update = HistoryUpdate(history_pairs(sender.memory), 'history_pair_sensitive')
+                    turn.history_update = HistoryUpdate(history_pairs(history_memory), 'history_pair_sensitive')
             finally:
                 try:
                     await turn.worker_owner.settle()

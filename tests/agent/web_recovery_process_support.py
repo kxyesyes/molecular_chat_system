@@ -90,6 +90,16 @@ async def exercise(directory, phase, pointer):
                             'status': state['status'], 'invocations': len(invocations),
                             'results': result['tool_result_sequence']}
 
+                if phase == 'abandon':
+                    await socket.send({'type': 'abandon', 'trace_id': pointer['trace_id'],
+                                       'continuation_id': pointer['continuation_id']})
+                    assert await socket.receive() == {'type': 'continuation_abandoned',
+                                                       'trace_id': pointer['trace_id']}
+                    state = case.app.agent_state_store.get_run(pointer['trace_id'])
+                    return {'phase': phase, 'pid': os.getpid(), 'status': state['status'],
+                            'claimed': bool(state['metadata']['decision_continuation'].get('claimed_by')),
+                            'invocations': len(invocations), 'model_calls': len(case.calls)}
+
                 await socket.send({'type': 'resume', 'trace_id': pointer['trace_id'],
                                    'continuation_id': pointer['continuation_id'],
                                    'message': '计算 logP；SMILES: CCO'})

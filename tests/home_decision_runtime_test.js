@@ -63,12 +63,13 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, storedPointer = null} = {}) {
+function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   const body = new Element("body"); body.root = true;
   const input = body.appendChild(new Element("input")), send = body.appendChild(new Element("button"));
   const chat = body.appendChild(new Element("div"));
   const timers = new Map(), sockets = [], logs = [], requests = [];
   let timer = 0, stored = storedPointer;
+  const storage = new Map(storedWaiting ? [["medchat.decision.waiting.v1", storedWaiting]] : []);
   class Socket {
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
     constructor(url) {this.url = url; this.readyState = 0; this.sent = []; sockets.push(this);}
@@ -82,7 +83,11 @@ function loadHome({request, storedPointer = null} = {}) {
     getElementById: id => body.querySelector("#" + id)};
   const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
-    sessionStorage: {getItem: () => stored, setItem: (_, s) => {stored = s;}, removeItem: () => {stored = null;}},
+    sessionStorage: {
+      getItem: key => key === "medchat.decision.waiting.v1" ? storage.get(key) || null : stored,
+      setItem: (key, value) => {if (key === "medchat.decision.waiting.v1") storage.set(key, value); else stored = value;},
+      removeItem: key => {if (key === "medchat.decision.waiting.v1") storage.delete(key); else stored = null;},
+    },
     HomeChatRenderer: renderer, WebSocket: Socket};
   const context = vm.createContext({window, document, WebSocket: Socket, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
@@ -105,7 +110,7 @@ function loadHome({request, storedPointer = null} = {}) {
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
   vm.runInContext(source, context, {filename: "main.js"});
   window.testHome.prepare(); window.testHome.connectWebSocket(); sockets[0].open();
-  return {body, chat, input, logs, requests, timers, sockets, socket: sockets[0], refs: window.testHome.scientificReferences,
+  return {body, chat, input, logs, requests, timers, sockets, storage, socket: sockets[0], refs: window.testHome.scientificReferences,
     send: () => window.testHome.sendMessage(), reconnect: () => window.testHome.connectWebSocket(),
     button: name => body.querySelectorAll("button").find(b => b.textContent === name),
     ready: mode => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
@@ -231,7 +236,7 @@ async function run() {
     h.input.value = "Explain logP"; h.send(); assert.equal(h.socket.sent.at(-1).type, "chat");
   });
   await test("waiting continuation is restored from the tab session cache after refresh", () => {
-    const h = loadHome({storedPointer: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
     const next = h.button("继续");
     assert(next && !next.disabled, "restored waiting state must enable Continue");
     h.input.value = "计算 logP；SMILES: CCO"; next.click();
@@ -344,6 +349,38 @@ async function run() {
       assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
     });
   }
+  await test("waiting result caches a recovery pointer before complete without enabling live controls", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    h.socket.emit(result("waiting_for_input"));
+    const stored = h.storage.get("medchat.decision.waiting.v1");
+    assert.equal(typeof stored, "string", "waiting pointer must survive loss of complete");
+    assert.deepEqual(JSON.parse(stored), {traceId: trace, nonce});
+    assert(h.button("继续").disabled && h.button("开始新请求").disabled);
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    assert(!h.button("继续").disabled);
+    assert(newer.sent.every(f => f.type === "ping"), "recovery must not execute automatically");
+    h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
+    assert.deepEqual(newer.sent.at(-1), {type: "resume", trace_id: trace,
+      continuation_id: nonce, message: "计算 logP；SMILES: CCO"});
+    const refreshed = loadHome({storedWaiting: stored}); refreshed.ready("decision_a2");
+    assert(!refreshed.button("继续").disabled);
+    assert(refreshed.socket.sent.every(f => f.type === "ping"));
+  });
+  await test("unconfirmed recovery pointer is discarded by authoritative rejection", () => {
+    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
+    h.socket.emit({type: "error", code: "continuation_unavailable"});
+    assert(!h.storage.has("medchat.decision.waiting.v1"));
+    assert(h.button("继续").disabled);
+    h.input.value = "Explain logP"; h.send();
+    assert.equal(h.socket.sent.at(-1).type, "chat");
+  });
+  await test("stale or malformed waiting results cannot cache a recovery pointer", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    h.socket.emit(result("waiting_for_input", "9".repeat(32)));
+    h.socket.emit({...result("waiting_for_input"), metadata: {waiting_for_input: true, continuation_id: "bad"}});
+    assert(!h.storage.has("medchat.decision.waiting.v1"));
+  });
   await test("disconnect retains an unconfirmed abandon until the server settles it", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
@@ -390,7 +427,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261015-projection-failure-v2"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261015-durable-waiting-v3"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
