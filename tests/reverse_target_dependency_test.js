@@ -19,8 +19,13 @@ assert.match(
 );
 assert.match(
   template,
-  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261013"><\/script>/,
-  'the local reverse-target entry point must execute during parsing',
+  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261014-input-validation-v2"><\/script>/,
+  'the local reverse-target entry point must invalidate validation changes',
+);
+assert.match(
+  template,
+  /<script\s+src="\/static\/js\/reverse_target\/ui_manager\.js\?v=20261014-batch-input-state-v1"><\/script>/,
+  'the reverse-target UI manager cache must invalidate batch file-state changes',
 );
 
 const main = fs.readFileSync(
@@ -47,8 +52,15 @@ assert.match(
 );
 assert.match(template, /class="preset-btn active" data-mode="broad"/, 'preset buttons must expose a data mode for delegated binding');
 assert.match(template, /class="tab" data-tab="batch"/, 'tabs must expose a data tab for delegated binding');
+assert.match(template, /<form id="predictForm" novalidate>/, 'single prediction must use explicit UI validation instead of a stale native required bubble');
+assert.match(template, /<form id="batchForm" novalidate>/, 'batch prediction must use explicit file validation');
+assert.doesNotMatch(template, /id="batchFile"[^>]*required/, 'hidden batch file input must not block the submit handler before explicit validation');
+assert.match(template, /id="batchFile"[^>]*accept="\.csv,\.txt"/, 'batch upload choices must match the backend parser contract');
 assert.match(main, /querySelectorAll\("\.preset-btn"\)/, 'preset buttons must have a direct event binding');
 assert.match(main, /querySelectorAll\("\.tab"\)/, 'tabs must have a direct event binding');
+assert.match(main, /请输入 SMILES/, 'empty single prediction must show an explicit validation message');
+assert.match(main, /请先上传批量分子文件/, 'empty batch prediction must show an explicit validation message');
+assert.match(uiManager, /clearError\(\)/, 'selecting a batch file must clear an earlier validation error');
 assert.match(
   main,
   /classList\.toggle\([\s\S]*?button\.dataset\.mode\s*===\s*mode/,

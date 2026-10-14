@@ -6,7 +6,7 @@ var PropertiesPanel = (function () {
   var UI = DesignUI;
   var MISSING = "—";
 
-  function clearPropsUI() {
+  function clearPropsUI(resetResultState) {
     S.curProps = null;
     S.prevProps = null;
     S.curGoals = null;
@@ -27,6 +27,12 @@ var PropertiesPanel = (function () {
     }).join("");
     var goals = document.getElementById("goalList");
     if (goals) goals.innerHTML = '<div class="empty-inline">未指定优化目标</div>';
+    if (resetResultState !== false) {
+      var status = document.getElementById("designStatus");
+      if (status) status.textContent = "尚未运行";
+      var caption = document.getElementById("resultCaption");
+      if (caption) caption.textContent = "输入分子后开始计算";
+    }
   }
 
   async function calcProps(smi, referenceSmiles, requestToken) {
@@ -58,7 +64,11 @@ var PropertiesPanel = (function () {
       } else {
         S.curProps = null;
         S.propsSmiles = "";
-        clearPropsUI();
+        clearPropsUI(false);
+        var failedStatus = document.getElementById("designStatus");
+        if (failedStatus) failedStatus.textContent = "计算失败";
+        var failedCaption = document.getElementById("resultCaption");
+        if (failedCaption) failedCaption.textContent = "属性计算失败，请检查输入或计算服务后重试。";
         UI.toast(d.error || "属性计算失败", "error");
       }
       return d;
@@ -66,7 +76,11 @@ var PropertiesPanel = (function () {
       if (token !== S.propsRequestSeq || smi !== S.smiles) return { stale: true };
       S.curProps = null;
       S.propsSmiles = "";
-      clearPropsUI();
+      clearPropsUI(false);
+      var failedStatus = document.getElementById("designStatus");
+      if (failedStatus) failedStatus.textContent = "计算失败";
+      var failedCaption = document.getElementById("resultCaption");
+      if (failedCaption) failedCaption.textContent = "属性计算失败，请检查输入或计算服务后重试。";
       UI.toast("属性计算请求失败", "error");
       return { success: false, error: e.message };
     }
