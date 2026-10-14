@@ -143,6 +143,12 @@ def test_three_way_feasibility_checked_even_with_lower_manifest_gate(tmp_path):
     ("data/activity/raw/README.md", False),
     ("data/activity/prepared/README.md", False),
     ("data/activity/models/README.md", True),
+    ("data/activity/models/unapproved.json", True),
+    ("data/activity/models/local-training/model.card.json", True),
+    ("data/activity/models/pde-buche-20261006-r2-extra/model.card.json", True),
+    ("data/activity/models/pde-buche-20261006-r2/weights.pt", False),
+    ("data/activity/models/pde-buche-20261006-r2/model.card.json", False),
+    ("data/activity/models/pde-buche-20261006-r2/nested/model.card.json", False),
 ])
 def test_activity_assets_ignored_but_documentation_trackable(filename, ignored):
     result = subprocess.run(["git", "check-ignore", "--no-index", "-q", filename],

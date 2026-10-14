@@ -233,6 +233,7 @@ last_run.log
 data/activity/models/
 !data/activity/
 !data/activity/models/
+data/activity/models/*
 !data/activity/models/pde-buche-20261006-r2/
 !data/activity/models/pde-buche-20261006-r2/**
 data/activity/raw/**
