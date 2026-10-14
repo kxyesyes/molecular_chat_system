@@ -123,6 +123,7 @@ test("family passed keeps the result source concise and independent of global st
 test("family source summary exposes only a readable bundle version and validation note", () => {
   const h = setup();
   const row = family({
+    family_id: "buche-family",
     bundle_id: "pde-buche-20261006-r2-buche-family",
     provenance: {
       family_id: "buche-family",
@@ -140,6 +141,45 @@ test("family source summary exposes only a readable bundle version and validatio
   assert.ok(!text.includes("source_sha256"));
   assert.ok(!text.includes("classifier"));
   assertNoExecutableNodes(h.ids.resultsBody);
+});
+
+test("failed or unbound source evidence never claims a model inference or verification", () => {
+  const source = family().provenance;
+  for (const changes of [
+    {success: false, status: "failed", execution_status: "failed",
+      activity_probability: null, predicted_pIC50: null, activity_class: null,
+      errors: {classification: "classification_failed_or_invalid_output"}},
+    ...[null, {}, [], "invalid", {bundle_id: "synthetic-bundle", models: {}}]
+      .map(provenance => ({provenance})),
+    {provenance: {...source, bundle_id: "another-r9-bundle", model_version: "r9",
+      scope: {experimental_replication_verified: true}}},
+    {provenance: {...source, family_id: "wrong-family"}},
+    {activity_probability: null, predicted_pIC50: null},
+  ]) {
+    const h = setup();
+    const row = family(changes);
+    const before = JSON.stringify(row);
+    h.render([row]);
+    const text = h.ids.resultsBody.textContent;
+    assert.match(text, /模型版本：不可用/);
+    assert.match(text, /验证说明：来源不可用/);
+    assert.ok(!text.includes("模型推理结果") && !text.includes("已记录实验复核"));
+    assert.equal(JSON.stringify(row), before);
+    if (row.errors.classification) assert.match(text, /classification_failed_or_invalid_output/);
+  }
+});
+
+test("valid partial sources preserve classification and qualify experimental evidence", () => {
+  const h = setup();
+  h.render([family({status: "partial", execution_status: "partial", success: false,
+    predicted_pIC50: null, errors: {regression: "regression_execution_failed"},
+    provenance: {...family().provenance, model_version: "r3",
+      scope: {experimental_replication_verified: true}}})]);
+  const text = h.ids.resultsBody.textContent;
+  assert.match(text, /0\.0%/);
+  assert.match(text, /regression_execution_failed/);
+  assert.match(text, /模型版本：r3/);
+  assert.match(text, /已记录实验复核，不代表本次预测实验验证/);
 });
 
 test("partial regression unavailable retains independent classification and stage error", () => {

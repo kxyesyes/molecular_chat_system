@@ -24,7 +24,23 @@ function needsReview(row) {
       || (row.activity_probability >= .5) !== (row.predicted_pIC50 >= 5));
 }
 
+function expectedSourceAvailable(row) {
+  const source = row.provenance;
+  if (row.status === "failed" || row.execution_status === "failed" || !isRecord(source)
+      || typeof row.bundle_id !== "string" || !row.bundle_id.trim()
+      || source.bundle_id !== row.bundle_id
+      || source.family_id !== undefined && source.family_id !== row.family_id
+      || !isRecord(source.models)) return false;
+  return [
+    [Number.isFinite(row.activity_probability) && row.activity_probability >= 0
+      && row.activity_probability <= 1, source.models.classification],
+    [Number.isFinite(row.predicted_pIC50), source.models.regression],
+  ].some(([observed, model]) => observed && isRecord(model)
+    && typeof model.model_id === "string" && model.model_id.trim());
+}
+
 function expectedSourceVersion(row) {
+  if (!expectedSourceAvailable(row)) return "不可用";
   const provenance = row.provenance || {};
   if (typeof provenance.model_version === "string" && provenance.model_version.trim()) {
     return provenance.model_version.trim();
@@ -35,10 +51,11 @@ function expectedSourceVersion(row) {
 }
 
 function expectedValidationNote(row) {
+  if (!expectedSourceAvailable(row)) return "来源不可用";
   const scope = row.provenance && row.provenance.scope;
   return scope && typeof scope === "object" && scope.experimental_replication_verified === true
     ? "已记录实验复核，不代表本次预测实验验证"
-    : (row.bundle_id || row.provenance.bundle_id ? "模型推理结果，非实验验证" : "来源不可用");
+    : "模型推理结果，非实验验证";
 }
 
 function assertDisplayedPrediction(row, expected) {
