@@ -75,6 +75,7 @@ function _bindPredictForm() {
       document.getElementById("smiles")?.focus();
       return;
     }
+    if (!form.reportValidity()) return;
     RtUI.setSubmitEnabled("submitBtn", false);
     RtUI.showLoading();
 
@@ -93,7 +94,7 @@ function _bindPredictForm() {
         fd.append("smiles", formData.get("smiles"));
         fd.append("threshold", formData.get("threshold"));
         fd.append("top_k", formData.get("top_k"));
-        const requestedMaxRefine = parseInt(document.getElementById("maxRefine").value || "50", 10);
+        const requestedMaxRefine = Number(document.getElementById("maxRefine").value || "50");
         fd.append("max_refine", String(requestedMaxRefine));
         fd.append(
           "alpha_3d",
@@ -156,6 +157,7 @@ function _bindBatchForm() {
       fileInput?.focus();
       return;
     }
+    if (!form.reportValidity()) return;
     RtUI.setSubmitEnabled("batchSubmitBtn", false);
     RtUI.showLoading();
 

@@ -19,7 +19,7 @@ assert.match(
 );
 assert.match(
   template,
-  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261014-input-validation-v2"><\/script>/,
+  /<script\s+src="\/static\/js\/reverse_target\/main\.js\?v=20261015-numeric-validation-v3"><\/script>/,
   'the local reverse-target entry point must invalidate validation changes',
 );
 assert.match(
