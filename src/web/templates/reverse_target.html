@@ -105,7 +105,7 @@
               </div>
             </div>
 
-            <form id="predictForm">
+            <form id="predictForm" novalidate>
               <div class="form-group">
                 <label for="smiles">🧬 分子结构 (SMILES) <span style="color:#ef4444">*</span></label>
                 <input type="text" id="smiles" name="smiles"
@@ -153,7 +153,7 @@
               <p>支持上传 CSV 或 TXT 文件进行批量预测。CSV 文件需包含 "smiles" 列，TXT 文件每行一个 SMILES。单次建议不超过 100 个分子。</p>
             </div>
 
-            <form id="batchForm">
+            <form id="batchForm" novalidate>
               <div class="form-group">
                 <label>上传文件</label>
                 <div class="upload-area" id="uploadArea"
@@ -162,7 +162,7 @@
                   <div class="upload-text">点击或拖拽文件到此处上传</div>
                   <div class="file-info" id="fileInfo"></div>
                 </div>
-                <input type="file" id="batchFile" name="file" accept=".csv,.txt,.smi" style="display:none" required />
+                <input type="file" id="batchFile" name="file" accept=".csv,.txt" style="display:none" />
               </div>
 
               <div class="section-title">⚙️ 分析参数</div>
@@ -334,9 +334,9 @@
     <script src="/static/js/shared/safe_render.js?v=20261007-url-policy-v1"></script>
     <script src="/static/js/reverse_target/config.js?v=20260516a"></script>
     <script src="/static/js/reverse_target/api_client.js?v=20260508a"></script>
-    <script src="/static/js/reverse_target/ui_manager.js?v=20261013a"></script>
+    <script src="/static/js/reverse_target/ui_manager.js?v=20261014-batch-input-state-v1"></script>
     <script src="/static/js/reverse_target/results_renderer.js?v=20261007-safe-dom-v3"></script>
     <script src="/static/js/reverse_target/viewer_3d.js?v=20261007-safe-dom-v3"></script>
-    <script src="/static/js/reverse_target/main.js?v=20261013"></script>
+    <script src="/static/js/reverse_target/main.js?v=20261014-input-validation-v2"></script>
   </body>
 </html>

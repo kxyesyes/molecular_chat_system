@@ -66,10 +66,19 @@ function _bindPredictForm() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const formData = new FormData(e.target);
+    const requestedSmiles = String(formData.get("smiles") || "").trim();
+    if (!requestedSmiles) {
+      RtUI.setSubmitEnabled("submitBtn", true);
+      RtUI.hideLoading();
+      RtUI.showError("请输入 SMILES");
+      document.getElementById("smiles")?.focus();
+      return;
+    }
     RtUI.setSubmitEnabled("submitBtn", false);
     RtUI.showLoading();
 
-    const formData = new FormData(e.target);
+    formData.set("smiles", requestedSmiles);
     window.lastQuerySmiles = formData.get("smiles");
     window.lastThreshold = formData.get("threshold");
     window.lastOrganismFilter = document.getElementById("humanOnly")?.checked ? "Human" : "";
@@ -139,6 +148,14 @@ function _bindBatchForm() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const fileInput = document.getElementById("batchFile");
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      RtUI.setSubmitEnabled("batchSubmitBtn", true);
+      RtUI.hideLoading();
+      RtUI.showError("请先上传批量分子文件");
+      fileInput?.focus();
+      return;
+    }
     RtUI.setSubmitEnabled("batchSubmitBtn", false);
     RtUI.showLoading();
 

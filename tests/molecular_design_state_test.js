@@ -197,6 +197,15 @@ test("missing properties never become zero or passing rules", () => {
   assert.equal(elements.get("pLogP").textContent, "0.00");
 });
 
+test("clearing properties resets the result status to the empty state", () => {
+  const { P, context, elements } = setup();
+  context.document.getElementById("designStatus").textContent = "已计算";
+  context.document.getElementById("resultCaption").textContent = "性质来自 RDKit；不可用项不会被填充为数值。";
+  P.clearPropsUI();
+  assert.equal(elements.get("designStatus").textContent, "尚未运行");
+  assert.equal(elements.get("resultCaption").textContent, "输入分子后开始计算");
+});
+
 test("candidate changes are neutral and missing values have no fabricated delta", () => {
   const { E, elements } = setup();
   E.addCandidateComparison({ logp: null, mw: 100 }, { logp: null, mw: 120 }, "CCO", "test");
