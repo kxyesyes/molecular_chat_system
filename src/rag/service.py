@@ -620,6 +620,14 @@ class RAGSystem:
         self._require_retrieval_ready()
         return self._search_embedding(self.get_embedding_sync(query), k)
 
+    def _search_embedding_outcome(self, embedding, k):
+        self._require_retrieval_ready()
+        return search_molecular_index_outcome(
+            index=self.vector_index, manifest=self.manifest, molecules=self.molecules_df,
+            source_path=self.source_path, index_sha256=self._index_sha256,
+            embedding_model=self.embedding_model_name, embedding=embedding, k=k,
+        )
+
     async def search_similar_molecules_with_status(
         self, query: str, k: int = 2
     ) -> Dict[str, Any]:
@@ -634,7 +642,10 @@ class RAGSystem:
                     or not np.all(np.isfinite(embedding_array))):
                 raise ValueError("RAG query embedding is unavailable")
             stage = "rag_index_failed"
-            records = self._search_embedding(embedding, k)
+            outcome = self._search_embedding_outcome(embedding, k)
+            if outcome["diagnostics"]["status"] not in {"valid_hits", "valid_empty"}:
+                raise ValueError("RAG retrieval output is invalid")
+            records = outcome["records"]
             if not isinstance(records, list):
                 raise TypeError("RAG retrieval records are invalid")
         except httpx.TransportError:

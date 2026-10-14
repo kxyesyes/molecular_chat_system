@@ -9,6 +9,81 @@ import pytest
 from src.rag.service import RAGSystem
 
 
+@pytest.fixture
+def indexed_service(tmp_path):
+    """Real retrieval validation over a synthetic, temporary FAISS generation."""
+    import faiss
+    import numpy as np
+    import pandas as pd
+    from src.rag.index import (
+        CURRENT_SCHEMA_VERSION, RAGIndexManifest, atomic_save_index_pair,
+        file_sha256, load_manifest, manifest_path,
+    )
+
+    source = tmp_path / "synthetic.csv"
+    frame = pd.DataFrame({"SMILES": ["CCO", "CCN"]})
+    frame.to_csv(source, index=False)
+    index = faiss.IndexFlatIP(2)
+    index.add(np.asarray([[1., 0.], [0., 1.]], dtype=np.float32))
+    manifest = RAGIndexManifest(
+        schema_version=CURRENT_SCHEMA_VERSION, source_path=str(source),
+        source_sha256=file_sha256(source), index_sha256="",
+        embedding_model="synthetic-test-model", vector_dimension=2,
+        vector_count=2, row_mapping=[0, 1], created_at="2026-10-15T00:00:00+00:00",
+    )
+    path = tmp_path / "synthetic.index"
+    atomic_save_index_pair(index, path, manifest, faiss_module=faiss)
+    service = object.__new__(RAGSystem)
+    service._require_retrieval_ready = Mock()
+    service.get_embedding = AsyncMock(return_value=[1., 0.])
+    service.vector_index = faiss.read_index(str(path))
+    service.manifest = load_manifest(manifest_path(path))
+    service.molecules_df = frame
+    service.source_path = source
+    service._index_sha256 = file_sha256(path)
+    service.embedding_model_name = "synthetic-test-model"
+    return service
+
+
+@pytest.mark.parametrize(("scores", "labels"), [
+    ([[float("nan"), float("inf")]], [[0, 1]]),
+    ([[1., .5]], [[-1, -1]]),
+    ([[1., .5]], [[2, 3]]),
+    ([[1., .5]], [[0.5, 1.5]]),
+    ([[1., .5]], [[0, -1]]),
+    ([[1., float("nan")]], [[0, 1]]),
+    ([[1., .5]], [[0, 0]]),
+    ([[1., .5]], [[0]]),
+    ([[], []], [[], []]),
+])
+def test_query_status_rejects_invalid_retrieval_output(indexed_service, monkeypatch, scores, labels):
+    import numpy as np
+
+    search = Mock(return_value=(np.asarray(scores), np.asarray(labels)))
+    monkeypatch.setattr(indexed_service.vector_index, "search", search)
+    outcome = asyncio.run(indexed_service.search_similar_molecules_with_status("query", 2))
+
+    assert outcome == {"status": "unavailable", "records": [], "error": {"code": "rag_index_failed"}}
+    assert search.call_count == 1
+
+
+def test_query_status_accepts_real_valid_hits(indexed_service):
+    outcome = asyncio.run(indexed_service.search_similar_molecules_with_status("query", 2))
+    assert outcome["status"] == "succeeded"
+    assert [record["SMILES"] for record in outcome["records"]] == ["CCO", "CCN"]
+    assert all(record["provenance"]["index_sha256"] == indexed_service._index_sha256
+               for record in outcome["records"])
+
+
+def test_query_status_valid_empty_index_is_no_hits(indexed_service):
+    from dataclasses import replace
+
+    indexed_service.vector_index.reset()
+    indexed_service.manifest = replace(indexed_service.manifest, vector_count=0, row_mapping=[])
+    outcome = asyncio.run(indexed_service.search_similar_molecules_with_status("query", 2))
+    assert outcome == {"status": "no_hits", "records": []}
+
+
 class Socket:
     def __init__(self):
         self.messages = []
@@ -27,7 +102,9 @@ def test_query_status_distinguishes_hits(records, status):
     service = object.__new__(RAGSystem)
     service._require_retrieval_ready = Mock()
     service.get_embedding = AsyncMock(return_value=[1.0])
-    service._search_embedding = Mock(return_value=records)
+    service._search_embedding_outcome = Mock(return_value={
+        "records": records, "diagnostics": {"status": "valid_hits" if records else "valid_empty"},
+    })
 
     result = asyncio.run(
         service.search_similar_molecules_with_status("query", 2)
@@ -49,11 +126,13 @@ def test_query_status_does_not_disguise_failure_as_no_hits(stage, code, caplog):
     service = object.__new__(RAGSystem)
     service._require_retrieval_ready = Mock()
     service.get_embedding = AsyncMock(return_value=[1.0])
-    service._search_embedding = Mock(return_value=[])
+    service._search_embedding_outcome = Mock(return_value={
+        "records": [], "diagnostics": {"status": "valid_empty"},
+    })
     boundary = {
         "ready": service._require_retrieval_ready,
         "embedding": service.get_embedding,
-        "index": service._search_embedding,
+        "index": service._search_embedding_outcome,
     }[stage]
     boundary.side_effect = RuntimeError("private-retrieval-diagnostic")
 
@@ -75,7 +154,7 @@ def test_query_status_classifies_embedding_transport_failures(error):
     service = object.__new__(RAGSystem)
     service._require_retrieval_ready = Mock()
     service.get_embedding = AsyncMock(side_effect=error)
-    service._search_embedding = Mock(return_value=[])
+    service._search_embedding_outcome = Mock()
 
     result = asyncio.run(
         service.search_similar_molecules_with_status("query", 2)
@@ -92,7 +171,7 @@ def test_query_status_propagates_cancellation():
     service = object.__new__(RAGSystem)
     service._require_retrieval_ready = Mock()
     service.get_embedding = AsyncMock(side_effect=asyncio.CancelledError())
-    service._search_embedding = Mock(return_value=[])
+    service._search_embedding_outcome = Mock()
 
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(service.search_similar_molecules_with_status("query", 2))

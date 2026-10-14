@@ -1,6 +1,7 @@
 # Runtime Failure Contract Design
 
-**Date:** 2026-10-14  
+**Date:** 2026-10-14
+
 **Scope:** PR 1 of 3 — Ollama/chat transport, decision_a2 terminal delivery, RAG compatibility retrieval, and molecular-generation timeout settlement.
 
 ## Goal
