@@ -294,12 +294,23 @@
       if (!turn.result) return true;
       const {status, text, metadata} = turn.result;
       const isNonSuccess = window.MedChatStatus.isNonSuccess(status);
-      if (isNonSuccess) {
+      const projectionFailed = message.status === "failed" && message.error?.code === "result_projection_failed";
+      let finalText = text;
+      if (projectionFailed) {
+        // Delivery failure does not rewrite the scientific workflow result.
+        const notice = typeof message.content === "string" && message.content.trim()
+          ? message.content : "结果展示未完成，请稍后重试。已完成的计算记录仍保留。";
+        decisionStatus(turn, `${turn.statusElement.textContent} 结果展示失败。`);
+        finalText = `${text}\n\n${notice}`;
+      }
+      if (isNonSuccess || projectionFailed) {
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
       }
-      completeLastMessage(text); clearToolStatus();
+      completeLastMessage(finalText); clearToolStatus();
       turn.phase = "ended";
-      if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
+      if (projectionFailed) {
+        setDecisionWaiting(null);
+      } else if (status === "waiting_for_input" && /^[a-f0-9]{32}$/.test(metadata.continuation_id || "") &&
         message.continuation_id === metadata.continuation_id) {
         setDecisionWaiting({traceId: turn.traceId, nonce: metadata.continuation_id});
       } else {

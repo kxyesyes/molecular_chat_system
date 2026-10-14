@@ -576,15 +576,22 @@ def test_tool_cannot_bypass_unavailable_service(retrieval_service, state):
 
 @pytest.mark.parametrize("labels", [[1, -1, 99, -2], []])
 @pytest.mark.parametrize('rag_ip_loader', ['native', 'base-flat-ip'], indirect=True)
-def test_shared_search_skips_invalid_labels_and_empty_hits(retrieval_service, monkeypatch, labels):
+def test_status_search_rejects_malformed_hits_without_changing_legacy_or_owned_search(
+    retrieval_service, monkeypatch, labels,
+):
     rag = retrieval_service
     monkeypatch.setattr(rag.vector_index, "search", lambda vector, k: (
         np.ones((1, len(labels)), dtype=np.float32), np.asarray([labels], dtype=np.int64)))
     ordinary = asyncio.run(rag.search_similar_molecules("query", k=20))
+    outcome = asyncio.run(rag.search_similar_molecules_with_status("query", k=20))
+    assert outcome == {"status": "unavailable", "records": [], "error": {"code": "rag_index_failed"}}
+    assert ordinary == []
+    # The explicit sync compatibility adapter still filters invalid labels.
+    legacy = rag.search_similar_molecules_sync("query", k=20)
+    assert [row["SMILES"] for row in legacy] == (["CCC"] if labels else [])
     result = RAGSearchTool(rag).execute("query", k=20)
     assert result["success"] is True
     assert [row['source_index'] for row in result['data']] == [2, 0]
-    assert [row["SMILES"] for row in ordinary] == (["CCC"] if labels else [])
     # Fault the actual strict FAISS search only after its initialized baseline.
     monkeypatch.setattr(rag._generation.index, 'search', lambda vector, k: (
         np.ones((1, len(labels)), dtype=np.float32), np.asarray([labels], dtype=np.int64)))

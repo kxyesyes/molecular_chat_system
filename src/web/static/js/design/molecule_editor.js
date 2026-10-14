@@ -8,6 +8,7 @@ var MoleculeEditor = (function () {
   var S = DesignState;
   var Api = DesignApi;
   var UI = DesignUI;
+  var editorLoadChannels = new WeakMap();
 
   /* ── Ketcher iframe 桥接 ── */
   function getK() {
@@ -23,19 +24,94 @@ var MoleculeEditor = (function () {
     return k ? await k.getSmiles() : "";
   }
 
+  function labelEditorAttachmentPoints(smiles) {
+    // Ketcher 3.7 imports a bare wildcard as an unlabelled R-group, which its
+    // Indigo exporter cannot read back ("invalid atom type: rg-label"). Give
+    // only plain placeholders distinct unused labels; preserve all atoms,
+    // bonds, existing mappings, isotope labels and trailing CXSMILES data.
+    return smiles.replace(/^\S+/, function (structure) {
+      var used = new Set();
+      structure.replace(/:(\d+)\]/g, function (_, value) { used.add(Number(value)); });
+      var next = 1;
+      return structure.replace(/\[[^\]]*\]|\*/g, function (atom) {
+        if (atom !== "*" && atom !== "[*]") return atom;
+        while (used.has(next)) next++;
+        if (next > 32) throw new Error("Ketcher 最多支持 32 个 R-group 连接点标签");
+        used.add(next);
+        return "[*:" + next++ + "]";
+      });
+    });
+  }
+
+  async function loadEditorMolecule(k, smiles) {
+    if (!k.editor || typeof k.editor.subscribe !== "function") return k.setMolecule(smiles);
+    var channel = editorLoadChannels.get(k);
+    if (!channel) {
+      channel = { pending: null, failed: false };
+      // One listener per iframe lifetime: Ketcher 3.7's public unsubscribe
+      // removes from a different event bus than subscribe('change').
+      k.editor.subscribe("change", function (events) {
+        var operations = Array.isArray(events) ? events : [events];
+        if (channel.pending && operations.some(function (event) {
+          return event && event.operation === "Load canvas";
+        })) channel.pending();
+      });
+      editorLoadChannels.set(k, channel);
+    }
+    if (channel.failed) throw new Error("编辑器加载超时，请刷新页面后重试");
+    if (!smiles) {
+      try { if ((await k.getSmiles()) === "") return; } catch (_) {
+        // An unexportable old canvas must still be replaceable by an empty one.
+      }
+    }
+    // The vendored setMolecule resolves before its detached loader commits
+    // the canvas. Wait for the actual load event, not a guessed delay.
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer;
+      function finish(error) {
+        if (settled) return;
+        settled = true;
+        channel.pending = null;
+        clearTimeout(timer);
+        if (error) reject(error); else resolve();
+      }
+      channel.pending = finish;
+      timer = setTimeout(function () {
+        // A detached timed-out loader may still finish later. Do not let its
+        // late event satisfy a subsequent write in this same iframe.
+        channel.failed = true;
+        finish(new Error("编辑器加载超时，请刷新页面后重试"));
+      }, 15000);
+      Promise.resolve().then(function () { return k.setMolecule(smiles); }).catch(finish);
+    });
+  }
+
   async function setSMILES(smi) {
     var k = getK();
-    if (!k) return Promise.resolve();
+    if (!k) return smi;
     S.editorWriteSeq = (S.editorWriteSeq || 0) + 1;
+    var writeSeq = S.editorWriteSeq;
+    var mutationSeq = S.mutationSeq;
+    var frame = document.getElementById("ketcher-frame");
+    if (!S.editorWriteDepth) S.editorPreviousInert = !!frame.inert;
+    frame.inert = true;
+    if (document.activeElement === frame && typeof frame.blur === "function") frame.blur();
     S.editorWriteDepth = (S.editorWriteDepth || 0) + 1;
     S.editorWriteInFlight = true;
     var previous = S.editorWriteQueue || Promise.resolve();
     var operation = previous.catch(function () {}).then(async function () {
       try {
-        await k.setMolecule(smi);
+        await loadEditorMolecule(k, labelEditorAttachmentPoints(smi));
+        // Capture the editor's canonical/CXSMILES form before releasing the
+        // write guard, so polling cannot mistake our import for a user edit.
+        var exported = await k.getSmiles();
+        if (writeSeq === S.editorWriteSeq && mutationSeq === S.mutationSeq) S.smiles = exported;
+        return exported;
       } finally {
         S.editorWriteDepth = Math.max(0, (S.editorWriteDepth || 1) - 1);
         S.editorWriteInFlight = S.editorWriteDepth > 0;
+        if (!S.editorWriteInFlight) frame.inert = S.editorPreviousInert;
       }
     });
     S.editorWriteQueue = operation.catch(function () {});
@@ -174,7 +250,7 @@ var MoleculeEditor = (function () {
     S.curGoals = null;
     S.propsSmiles = "";
     S.pendingPropsSmiles = "";
-    await setSMILES(smiles);
+    smiles = await setSMILES(smiles);
     if (mutationToken !== S.mutationSeq) return;
     S.smiles = smiles;
     document.getElementById("curSmiles").textContent = smiles;
@@ -258,13 +334,13 @@ var MoleculeEditor = (function () {
         var currentEditorSmiles = await getSMILES();
         if (currentEditorSmiles !== smi || mutationToken !== S.mutationSeq) return;
         if (mutationToken !== S.mutationSeq || S.smiles !== smi) return;
-        S.smiles = d.new_smiles;
-        document.getElementById("curSmiles").textContent = d.new_smiles;
-        await setSMILES(d.new_smiles);
+        var productSmiles = await setSMILES(d.new_smiles);
         if (mutationToken !== S.mutationSeq) return;
-        var propertyResult = await PropertiesPanel.calcProps(d.new_smiles, smi);
+        S.smiles = productSmiles;
+        document.getElementById("curSmiles").textContent = productSmiles;
+        var propertyResult = await PropertiesPanel.calcProps(productSmiles, smi);
         if (mutationToken !== S.mutationSeq) return;
-        if (!propertyResult || propertyResult.success !== true || propertyResult.stale || !S.curProps || S.propsSmiles !== d.new_smiles) {
+        if (!propertyResult || propertyResult.success !== true || propertyResult.stale || !S.curProps || S.propsSmiles !== productSmiles) {
           resetConnectionState();
           UI.setFeedback("结构取代已完成，但属性计算失败；该候选未加入历史，请检查计算工具后重试。", "warn");
           return;
@@ -272,8 +348,8 @@ var MoleculeEditor = (function () {
         S.iter++;
         var iterEl = document.getElementById("iterCount");
         if (iterEl) iterEl.textContent = S.iter;
-        HistoryManager.addHist(d.new_smiles, S.curProps);
-        renderCandidateComparison(beforeProps, S.curProps, d.new_smiles, fragment.label);
+        HistoryManager.addHist(productSmiles, S.curProps);
+        renderCandidateComparison(beforeProps, S.curProps, productSmiles, fragment.label);
         resetConnectionState();
         UI.setFeedback("取代完成，候选分子的属性变化已更新。", "success");
         UI.toast("取代成功", "success");
@@ -294,8 +370,16 @@ var MoleculeEditor = (function () {
   /* ── 导入确认 ── */
   async function confirmImport() {
     var smi = document.getElementById("importInput").value.trim();
+    if (!smi) {
+      UI.toast("请输入 SMILES", "error");
+      return;
+    }
     if (smi) {
-      if (await restoreCandidate(smi, "已导入分子，属性已更新。")) UI.closeImport();
+      try {
+        if (await restoreCandidate(smi, "已导入分子，属性已更新。")) UI.closeImport();
+      } catch (_) {
+        UI.toast("分子载入失败，请检查 SMILES；若编辑器超时请刷新页面。", "error");
+      }
     }
   }
 

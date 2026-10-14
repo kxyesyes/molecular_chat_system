@@ -128,15 +128,18 @@ async def test_actual_http_stream_cleanup_precedes_request_release(provider, fai
         if cancel_owner or failure == 'consumer_cancel':
             with pytest.raises(asyncio.CancelledError):
                 await request
+        elif failure == 'disconnect':
+            with pytest.raises(RuntimeError, match='synthetic socket disconnect'):
+                await request
         else:
             await request
         await writer
         assert stream.finished.is_set() and retirement == [True]
         assert close_order and all(close_order)
         assert all(client.is_closed for client in clients)
-        assert stream.request_modes == ([True, False] if failure == 'disconnect' else [True])
-        if provider != 'ollama' and failure == 'disconnect':
-            assert model.last_response_metadata['finish_reason'] == 'stop'
+        # A socket delivery failure must propagate after stream cleanup; it is
+        # not permission to redispatch the provider request through fallback.
+        assert stream.request_modes == [True]
     finally:
         stream.release.set()
         await asyncio.gather(*(task for task in (request, writer) if task), return_exceptions=True)

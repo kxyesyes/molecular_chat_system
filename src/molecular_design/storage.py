@@ -63,6 +63,10 @@ class DesignStorage:
         for key, supplied in (properties or {}).items():
             if key not in calculated or supplied in (None, "") or calculated.get(key) is None:
                 continue
+            if key == "molecular_formula":
+                if not isinstance(supplied, str) or supplied != calculated[key]:
+                    raise ValueError(f"属性 {key} 与当前 SMILES 不一致，未保存")
+                continue
             try:
                 supplied_value = float(supplied)
                 calculated_value = float(calculated[key])
