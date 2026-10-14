@@ -39,10 +39,21 @@ def test_app_allows_only_its_ketcher_entrypoint_to_be_framed(tmp_path, monkeypat
     assert editor.status_code == 200
     assert "Ketcher" in editor.text
     assert editor.headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert editor.headers["Cache-Control"] == "no-cache"
     assert "frame-ancestors 'self'" in editor.headers["Content-Security-Policy"]
     assert "object-src 'none'" in editor.headers["Content-Security-Policy"]
     assert editor.headers["X-Content-Type-Options"] == "nosniff"
     assert "Strict-Transport-Security" in editor.headers
+
+    # A versioned URL must escape previously cached DENY responses after upgrade.
+    import re
+    page = client.get("/molecular-design")
+    match = re.search(r'id="ketcher-frame"\s+src="([^"]+)"', page.text)
+    assert match and match.group(1).startswith("/static/ketcher/index.html?v=")
+    refreshed_editor = client.get(match.group(1))
+    assert refreshed_editor.status_code == 200
+    assert refreshed_editor.headers["X-Frame-Options"] == "SAMEORIGIN"
+    assert refreshed_editor.headers["Cache-Control"] == "no-cache"
 
     for path in ("/molecular-design", "/static/ketcher/iframe.html", "/not-found"):
         response = client.get(path)

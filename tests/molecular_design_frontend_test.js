@@ -15,7 +15,7 @@ assert.ok(template.includes('id="candidateCompare"'), "candidate result area mus
 assert.ok(!template.includes('class="ai-bar"'), "the primary design flow must not expose a redundant AI control bar");
 assert.ok(!template.includes('id="aiInput"'), "AI free-form reply input must not crowd the design workspace");
 assert.ok(template.includes('id="optimizationInput"'), "explicit optimization goals must remain available without an AI reply panel");
-assert.ok(template.includes('molecule_editor.js?v=20261014-empty-smiles-v1'), "empty SMILES import fix must not be hidden by browser cache");
+assert.ok(template.includes('molecule_editor.js?v=20261014-ketcher-load-v7'), "editor import fixes must not be hidden by browser cache");
 assert.ok(template.includes('properties_panel.js?v=20261014-reset-result-state-v1'), "result status reset fix must not be hidden by browser cache");
 assert.ok(!template.includes('class="props-panel"'), "the old persistent third property column must be removed");
 assert.ok(!template.includes("<footer>"), "the design workspace must not reserve a giant unrelated footer");

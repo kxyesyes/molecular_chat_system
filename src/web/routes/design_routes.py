@@ -42,8 +42,6 @@ def _ensure_private_save_root() -> Path:
     return root
 
 
-_ensure_private_save_root()
-
 _DESIGN_ROUTE_PATHS = {
     "/api/design/fragments",
     "/api/design/detect_sites",

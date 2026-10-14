@@ -17,6 +17,10 @@ def apply_security_headers(response, *, secure: bool, request_path: str = "") ->
     headers = response.headers
     headers.setdefault("X-Content-Type-Options", "nosniff")
     headers.setdefault("X-Frame-Options", "SAMEORIGIN" if same_origin_frame else "DENY")
+    if same_origin_frame:
+        # Revalidate this un-hashed HTML entrypoint so an older framing policy
+        # cannot outlive a deployment. Hashed JS/WASM assets keep normal caching.
+        headers.setdefault("Cache-Control", "no-cache")
     headers.setdefault("Referrer-Policy", "no-referrer")
     headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
     headers.setdefault(

@@ -102,7 +102,7 @@
   }
 
   async function syncSmilesFromEditor() {
-    if (document.hidden || S.propsPollInFlight) return;
+    if (document.hidden || S.propsPollInFlight || S.editorWriteInFlight) return;
 
     S.propsPollInFlight = true;
     var writeSeq = S.editorWriteSeq || 0;
