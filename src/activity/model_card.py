@@ -257,6 +257,12 @@ def _load(path: Path) -> PreparedTrainingData:
         check_feature_identity=(
             manifest["split"]["algorithm"] == dc._SPLIT_ALGORITHM
         ),
+        check_molecule_identity=(
+            manifest["split"]["algorithm"] == dc._RANDOM_SPLIT_ALGORITHM
+        ),
+        check_scaffold_identity=(
+            manifest["split"]["algorithm"] != dc._RANDOM_SPLIT_ALGORITHM
+        ),
     )
     validated_sha = dc._validated_content_sha256(combined)
     _digest(validated_sha, manifest["validated_content_sha256"], "validated scientific content")
@@ -268,12 +274,21 @@ def _load(path: Path) -> PreparedTrainingData:
         "canonical_scientific_content_sha256": validated_sha,
         "artifact_sha256": {name: artifacts[name]["sha256"] for name in (*dc._SPLIT_NAMES, "quality_report")},
     })), manifest["prepared_dataset_sha256"], "prepared aggregate")
-    assignments = {scaffold: name for name, frame in frames.items() for scaffold in frame["scaffold_smiles"].unique()}
+    assignment_column = (
+        "canonical_smiles"
+        if manifest["split"]["algorithm"] == dc._RANDOM_SPLIT_ALGORITHM
+        else "scaffold_smiles"
+    )
+    assignments = {
+        str(value): name
+        for name, frame in frames.items()
+        for value in frame[assignment_column].unique()
+    }
     provenance = dict(manifest["split"], assignments_sha256=dc._assignment_sha256(assignments))
     split = dc._normalized_split_provenance(combined, dc.DatasetSplitResult(frames, assignments, provenance))
     counts = quality["counts"]
     expected = dict(accepted_rows=len(combined), unique_molecules=len(combined),
-                    unique_scaffolds=len(assignments),
+                    unique_scaffolds=int(combined["scaffold_smiles"].nunique(dropna=False)),
                     duplicate_rows_collapsed=int(combined["replicate_count"].sum()) - len(combined))
     for key, value in expected.items():
         if type(counts.get(key)) is not int or counts[key] != value:

@@ -23,6 +23,7 @@ from src.agent.tools.admet_predictor import ADMETPredictor
 from src.agent.tools.candidate_ranker import CandidateRanker
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
+from src.agent.tools.lead_optimization_verifier import LeadOptimizationVerifier
 from src.agent.tools.molecular_docking import MolecularDocking
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.rag_search_tool import RAGSearchTool
@@ -100,6 +101,111 @@ def check_data_flow_evidence(result: dict[str, Any]) -> dict[str, Any]:
     return {"passed": True, "reason": "generated_output_consumed"}
 
 
+def _docking_stability_records(
+    iterations: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Project only the reproducibility fields needed by the docking gate."""
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for iteration in iterations:
+        for case_result in iteration.get("results", []):
+            if not isinstance(case_result, Mapping):
+                continue
+            if not ({case_result.get("expected_skill"), case_result.get("actual_skill")}
+                    & {"docking_simulation"}):
+                continue
+            case_id = str(case_result.get("case_id") or "")
+            if not case_id:
+                continue
+            for event in case_result.get("events", []):
+                if not isinstance(event, Mapping) or event.get("event") != "tool_completed":
+                    continue
+                if event.get("tool") != "molecular_docking":
+                    continue
+                payload = event.get("payload")
+                data = payload.get("data") if isinstance(payload, Mapping) else None
+                if not isinstance(data, Mapping):
+                    continue
+                provenance = data.get("provenance")
+                reproducibility = (
+                    provenance.get("reproducibility")
+                    if isinstance(provenance, Mapping)
+                    else None
+                )
+                best_pose = data.get("best_pose")
+                pose_file = data.get("pose_file")
+                if not pose_file and isinstance(best_pose, Mapping):
+                    pose_file = best_pose.get("pose_file")
+                grouped.setdefault(case_id, []).append({
+                    "success": data.get("success") is True,
+                    "seed": (
+                        reproducibility.get("random_seed")
+                        if isinstance(reproducibility, Mapping)
+                        else None
+                    ),
+                    "binding_energy": _extract_binding_energy(data),
+                    "pose_file": pose_file,
+                    "manifest_path": (
+                        data.get("manifest_path")
+                        or (provenance.get("manifest_path")
+                            if isinstance(provenance, Mapping)
+                            else None)
+                    ),
+                })
+    return grouped
+
+
+def _summarize_docking_seed_stability(
+    iterations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Require auditable seed and artifact metadata before claiming stability."""
+    if len(iterations) < 2:
+        return {"status": "skipped", "reason": "repeat_not_requested", "case_count": 0}
+    grouped = _docking_stability_records(iterations)
+    if not grouped:
+        return {"status": "skipped", "reason": "docking_case_not_present", "case_count": 0}
+    if any(len(records) < 2 for records in grouped.values()):
+        return {
+            "status": "partial",
+            "reason": "minimum_docking_runs_not_reached",
+            "case_count": len(grouped),
+        }
+    records = [record for case_records in grouped.values() for record in case_records]
+    if any(type(record.get("seed")) is not int or record["seed"] <= 0 for record in records):
+        return {
+            "status": "partial",
+            "reason": "seed_metadata_not_available",
+            "case_count": len(grouped),
+        }
+    if any(
+        not isinstance(record.get("pose_file"), (str, Path))
+        or not isinstance(record.get("manifest_path"), (str, Path))
+        for record in records
+    ):
+        return {
+            "status": "partial",
+            "reason": "artifact_metadata_not_available",
+            "case_count": len(grouped),
+        }
+    try:
+        from src.docking.reproducibility import assess_seed_stability
+
+        assessment = assess_seed_stability(records, minimum_runs=2)
+    except Exception:
+        return {
+            "status": "partial",
+            "reason": "seed_stability_check_unavailable",
+            "case_count": len(grouped),
+        }
+    return {
+        "status": "passed" if assessment.get("status") == "passed" else "failed",
+        "reason": "seed_stability_validated"
+        if assessment.get("status") == "passed"
+        else "seed_stability_validation_failed",
+        "case_count": len(grouped),
+        "assessment": assessment,
+    }
+
+
 def summarize_scientific_stability(iterations: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize repeated real scientific acceptance runs.
 
@@ -132,6 +238,7 @@ def summarize_scientific_stability(iterations: list[dict[str, Any]]) -> dict[str
         **rates,
         "latency": latency_metrics(latencies),
         "failure_types": dict(failure_types),
+        "docking_seed_stability": _summarize_docking_seed_stability(iterations),
     }
 
 
@@ -216,9 +323,15 @@ class ScientificAcceptanceRunner:
         latest = iterations[-1] if iterations else {"results": []}
         stability = summarize_scientific_stability(iterations)
         results = latest.get("results", [])
+        overall_status = _overall_status(results)
+        docking_stability = stability.get("docking_seed_stability", {})
+        if overall_status == "passed" and docking_stability.get("status") == "partial":
+            overall_status = "partial"
+        elif overall_status == "passed" and docking_stability.get("status") == "failed":
+            overall_status = "failed"
         return redact_sensitive(
             {
-                "status": _overall_status(results),
+                "status": overall_status,
                 "case_count": len(results),
                 "passed_or_partial_count": sum(
                     1
@@ -685,6 +798,7 @@ class ScientificAcceptanceRunner:
             "admet_predictor": ADMETPredictor(),
             "activity_predictor": ActivityPredictorTool(),
             "candidate_ranker": CandidateRanker(),
+            "lead_optimization_verifier": LeadOptimizationVerifier(),
             "reverse_target_predictor": ReverseTargetTool(),
             "target_database_search": TargetDatabaseTool(),
             "molecular_docking": MolecularDocking(),
@@ -860,7 +974,7 @@ def _anti_hallucination(
     case: EvaluationCase,
     final_text: str,
 ) -> dict[str, Any]:
-    lowered = final_text.lower()
+    lowered = _normalize_forbidden_pattern_scan(case, final_text).lower()
     forbidden_found = [
         pattern
         for pattern in case.forbidden_patterns
@@ -871,6 +985,45 @@ def _anti_hallucination(
         "forbidden_found": forbidden_found,
         "checked_patterns": list(case.forbidden_patterns),
     }
+
+
+def _normalize_forbidden_pattern_scan(
+    case: EvaluationCase,
+    final_text: str,
+) -> str:
+    """Remove only unambiguous non-docking units before keyword scanning.
+
+    ADMET-AI exposes hydration free-energy endpoints in ``kcal/mol``.  That
+    unit is scientifically valid for the ADMET endpoint, but a naive scan of
+    the serialized tool payload mistakes it for a docking claim.  Keep the
+    scan fail-closed for all other contexts: only mask the unit when it is
+    explicitly adjacent to the hydration-free-energy endpoint name.  This
+    remains safe for composite workflows because the endpoint name, rather
+    than the selected skill, disambiguates the unit from docking output.
+    """
+    normalized = final_text
+    endpoint = r"hydration(?:free|\s+free)[_\s-]*energy(?:[_\s-]*freesolv)?"
+    unit_field = (
+        rf"(?is){endpoint}[\"']?\s*:\s*\{{(?:(?!\}}).){{0,512}}?"
+        rf"[\"']?unit[\"']?\s*:\s*[\"']?kcal/mol"
+    )
+
+    def replace_endpoint_unit(match: re.Match[str]) -> str:
+        value = match.group(0)
+        return value[: -len("kcal/mol")] + "<admet-unit>"
+
+    normalized = re.sub(
+        unit_field,
+        replace_endpoint_unit,
+        normalized,
+    )
+    normalized = re.sub(
+        rf"(?im)^[^\r\n]*{endpoint}[^\r\n]*?(?:=|:)\s*"
+        rf"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?\s+kcal/mol",
+        lambda match: match.group(0)[: -len("kcal/mol")] + "<admet-unit>",
+        normalized,
+    )
+    return normalized
 
 
 def _tool_provenance(

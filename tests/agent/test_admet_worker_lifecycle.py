@@ -25,11 +25,23 @@ def isolated_backend(monkeypatch):
 
 def test_missing_worker_configuration_never_imports_model_in_web_process(monkeypatch):
     imports = []
+    monkeypatch.setattr(backend_module, "_worker_python_candidates", lambda: [])
     monkeypatch.setattr(backend_module.ADMETAIBackend, "from_installed_package",
                         lambda: imports.append(True) or object())
     assert backend_module.get_admet_ai_backend() is None
     assert imports == []
     assert "ADMET_AI_PYTHON" in backend_module.admet_ai_backend_error()
+
+
+def test_dedicated_conda_worker_is_discovered_when_environment_is_prepared(monkeypatch, tmp_path):
+    worker_python = tmp_path / "medchat-admet-ai" / "python.exe"
+    worker_python.parent.mkdir()
+    worker_python.write_text("fixture", encoding="utf-8")
+    monkeypatch.setattr(backend_module.sys, "prefix", str(tmp_path / "MedChat"))
+    monkeypatch.setattr(backend_module, "_worker_python_candidates", lambda: [worker_python])
+    monkeypatch.setattr(backend_module, "_is_valid_worker_python", lambda path: path == worker_python)
+
+    assert backend_module._discover_worker_python() == str(worker_python)
 
 
 def test_explicit_worker_is_used_even_if_main_process_has_model(monkeypatch):

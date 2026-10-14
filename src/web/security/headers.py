@@ -1,7 +1,7 @@
 """HTTP response headers for the public MedChat web boundary."""
 
 
-def apply_security_headers(response, *, secure: bool) -> None:
+def apply_security_headers(response, *, secure: bool, request_path: str = "") -> None:
     """Apply headers that are safe for both the UI and JSON endpoints.
 
     The application still contains legacy inline UI scripts, so this policy
@@ -9,15 +9,23 @@ def apply_security_headers(response, *, secure: bool) -> None:
     behaviour without claiming a CSP that would silently break the page.
     HSTS is emitted only after the request was actually served over HTTPS;
     local HTTP development must not be pinned to a non-TLS port.
+    Only the vendored Ketcher entrypoint is embedded by our own UI. Keep all
+    other responses unframeable and never allow cross-origin embedding.
     """
+    same_origin_frame = request_path == "/static/ketcher/index.html"
+    frame_ancestors = "'self'" if same_origin_frame else "'none'"
     headers = response.headers
     headers.setdefault("X-Content-Type-Options", "nosniff")
-    headers.setdefault("X-Frame-Options", "DENY")
+    headers.setdefault("X-Frame-Options", "SAMEORIGIN" if same_origin_frame else "DENY")
+    if same_origin_frame:
+        # Revalidate this un-hashed HTML entrypoint so an older framing policy
+        # cannot outlive a deployment. Hashed JS/WASM assets keep normal caching.
+        headers.setdefault("Cache-Control", "no-cache")
     headers.setdefault("Referrer-Policy", "no-referrer")
     headers.setdefault("Permissions-Policy", "camera=(), geolocation=(), microphone=()")
     headers.setdefault(
         "Content-Security-Policy",
-        "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'",
+        f"frame-ancestors {frame_ancestors}; object-src 'none'; base-uri 'self'; form-action 'self'",
     )
     if secure:
         headers.setdefault(

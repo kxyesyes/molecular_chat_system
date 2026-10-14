@@ -1,10 +1,13 @@
 """Docking route registration."""
 import asyncio
 import copy
+import logging
 import math
 import os
 import re
+import tempfile
 import threading
+from pathlib import Path
 from typing import List, Optional
 from fastapi import UploadFile, File, Form, Header, HTTPException, Request, Response
 from src.web.api_response import api_error
@@ -267,6 +270,185 @@ def setup_docking_routes(
         if task_runtime is None:
             return None
         return task_runtime() if callable(task_runtime) else task_runtime
+
+    async def read_owned_docking_pose(job_id: str, request: Request) -> bytes:
+        """Read either a legacy result or a verified durable task artifact."""
+        if docking_service:
+            work_dir = docking_service.work_dir
+            try:
+                _owned_history(request, work_dir, job_id)
+            except HTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+            else:
+                result_file = Path(work_dir) / f"docking_{job_id}" / "result.pdbqt"
+                if not result_file.is_file():
+                    raise HTTPException(status_code=404, detail="对接结果文件不存在")
+                try:
+                    return await asyncio.to_thread(result_file.read_bytes)
+                except OSError as exc:
+                    raise HTTPException(status_code=500, detail="获取结果失败") from exc
+
+        try:
+            runtime = current_task_runtime()
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Task runtime unavailable") from exc
+        if runtime is None:
+            status_code = 404 if docking_service else 503
+            detail = "对接任务不存在" if docking_service else "Task runtime unavailable"
+            raise HTTPException(status_code=status_code, detail=detail)
+        store = getattr(runtime, "store", None)
+        get_owned = getattr(store, "get_owned", None)
+        if not callable(get_owned):
+            raise HTTPException(status_code=503, detail="Task ownership storage unavailable")
+        try:
+            record = await asyncio.to_thread(
+                get_owned, job_id, _session_id(request)
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="对接任务不存在") from None
+        status = getattr(
+            getattr(record, "status", None),
+            "value",
+            getattr(record, "status", None),
+        )
+        if getattr(record, "task_type", None) != "docking" or status != "succeeded":
+            raise HTTPException(status_code=404, detail="对接任务不存在")
+
+        staging_root = getattr(getattr(runtime, "config", None), "staging_root", None)
+        if staging_root is None:
+            raise HTTPException(status_code=503, detail="Task artifact storage unavailable")
+        try:
+            from src.task_runtime.completion import CompletionError, DockingCompletionStore
+
+            return await asyncio.to_thread(
+                DockingCompletionStore(staging_root).read_pose, job_id
+            )
+        except CompletionError as exc:
+            raise HTTPException(status_code=404, detail="对接结果文件不存在") from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=500, detail="获取结果失败") from exc
+
+    async def resolve_owned_durable_docking_task(job_id: str, request: Request):
+        """Resolve an owned durable docking task after the legacy lookup misses."""
+        try:
+            runtime = current_task_runtime()
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail="Task runtime unavailable") from exc
+        if runtime is None:
+            return None
+        store = getattr(runtime, "store", None)
+        get_owned = getattr(store, "get_owned", None)
+        if not callable(get_owned):
+            return None
+        try:
+            record = await asyncio.to_thread(
+                get_owned, job_id, _session_id(request)
+            )
+        except KeyError:
+            return None
+        status = getattr(
+            getattr(record, "status", None),
+            "value",
+            getattr(record, "status", None),
+        )
+        if getattr(record, "task_type", None) != "docking":
+            return None
+        if status != "succeeded":
+            raise HTTPException(status_code=404, detail="对接任务不存在")
+        staging_root = getattr(getattr(runtime, "config", None), "staging_root", None)
+        manifest_path = getattr(record, "input_manifest_path", None)
+        if staging_root is None or not isinstance(manifest_path, str) or not manifest_path:
+            raise HTTPException(status_code=503, detail="Task artifact storage unavailable")
+        return runtime, staging_root, manifest_path
+
+    async def analyze_owned_durable_interactions(
+        job_id: str,
+        pose: int,
+        staging_root,
+        manifest_path: str,
+    ):
+        """Analyze one durable pose using verified, immutable staged inputs."""
+        from src.docking.interaction_analysis import analyze_docking_interactions
+        from src.docking.pose_export import PoseExportError, pose_sdf_from_pdbqt
+        from src.task_runtime.completion import CompletionError, DockingCompletionStore
+        from src.task_runtime.staging import DockingInputStager, ManifestError
+
+        try:
+            stager = DockingInputStager(staging_root)
+            with stager.execution_snapshot(job_id, manifest_path) as inputs:
+                pose_text = DockingCompletionStore(staging_root).read_pose(job_id).decode(
+                    "utf-8", errors="ignore"
+                )
+                with tempfile.TemporaryDirectory(
+                    prefix="docking_interaction_"
+                ) as analysis_root:
+                    ligand_path = Path(analysis_root) / f"analysis_pose_{pose}.sdf"
+                    try:
+                        ligand_path.write_text(
+                            pose_sdf_from_pdbqt(
+                                pose_text,
+                                pose,
+                                keep_hydrogens=True,
+                            ),
+                            encoding="utf-8",
+                            newline="\n",
+                        )
+                    except PoseExportError as exc:
+                        return {
+                            "status": "failed",
+                            "reason_code": "pose_export_failed",
+                            "pose": pose,
+                            "interactions": [],
+                            "geometry_status": "unavailable",
+                            "warnings": [f"pose_export_failed:{type(exc).__name__}"],
+                            "provenance": {"analyzer": "prolif", "tool_derived": False},
+                        }
+                    analysis_receptor_trace = {}
+                    def analyze_prepared_inputs():
+                        nonlocal analysis_receptor_trace
+                        receptor_path = inputs.receptor_path
+                        receptor_suffix = Path(receptor_path).suffix.lower()
+                        prepare_analysis_receptor = getattr(
+                            docking_service, "prepare_analysis_receptor", None
+                        ) if docking_service is not None else None
+                        if callable(prepare_analysis_receptor) and receptor_suffix in {".pdb", ".cif", ".mmcif"}:
+                            prepared_receptor = Path(analysis_root) / f"analysis_receptor{receptor_suffix}"
+                            prepared = prepare_analysis_receptor(
+                                receptor_path,
+                                str(prepared_receptor),
+                                trace=analysis_receptor_trace,
+                            )
+                            if prepared is not True:
+                                raise RuntimeError("analysis receptor preparation was unavailable")
+                            receptor_path = str(prepared_receptor)
+                        return analyze_docking_interactions(
+                            receptor_path,
+                            str(ligand_path),
+                            pose_index=1,
+                        )
+
+                    result = await asyncio.to_thread(analyze_prepared_inputs)
+                    result["pose"] = pose
+                    if analysis_receptor_trace:
+                        result.setdefault("provenance", {})["analysis_receptor"] = analysis_receptor_trace
+                    return result
+        except (CompletionError, ManifestError, OSError, RuntimeError, ValueError) as exc:
+            logging.getLogger(__name__).warning(
+                "Unable to prepare durable docking inputs for interaction analysis: %s",
+                type(exc).__name__,
+            )
+            return {
+                "status": "unavailable",
+                "reason_code": "analysis_input_missing",
+                "pose": pose,
+                "interactions": [],
+                "geometry_status": "unavailable",
+                "warnings": [f"durable_analysis_inputs_unavailable:{type(exc).__name__}"],
+                "provenance": {"analyzer": "prolif", "tool_derived": False},
+            }
 
     # ==================== 分子对接 API ====================
     
@@ -677,20 +859,15 @@ def setup_docking_routes(
     @app.get("/api/docking/result/{job_id}")
     async def get_docking_result(job_id: str, request: Request):
         """获取分子对接结果文件"""
-        if not docking_service:
-            raise HTTPException(status_code=503, detail="分子对接服务不可用")
         _validate_job_id(job_id)
-        _owned_history(request, docking_service.work_dir, job_id)
 
         try:
-            job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")
-            result_file = os.path.join(job_dir, "result.pdbqt")
-            
-            if not os.path.exists(result_file):
-                raise HTTPException(status_code=404, detail="对接结果文件不存在")
-
-            with open(result_file, 'r', encoding='utf-8') as f:
-                content = f.read()
+            # Preserve the legacy text response's universal-newline behavior
+            # while durable artifacts continue to be read through the same
+            # ownership-checked byte path.
+            content = (await read_owned_docking_pose(job_id, request)).replace(
+                b"\r\n", b"\n"
+            )
 
             return Response(
                 content=content,
@@ -716,9 +893,24 @@ def setup_docking_routes(
         work_dir = docking_service.work_dir if docking_service else os.path.join(
             os.getcwd(), "temp_docking"
         )
-        _owned_history(request, work_dir, job_id)
         if type(pose) is not int or pose <= 0:
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
+
+        try:
+            _owned_history(request, work_dir, job_id)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            durable_task = await resolve_owned_durable_docking_task(job_id, request)
+            if durable_task is not None:
+                _, staging_root, manifest_path = durable_task
+                return await analyze_owned_durable_interactions(
+                    job_id,
+                    pose,
+                    staging_root,
+                    manifest_path,
+                )
+            raise
 
         job_dir = os.path.join(work_dir, f"docking_{job_id}")
         if not os.path.isdir(job_dir):
@@ -729,13 +921,14 @@ def setup_docking_routes(
             resolve_analysis_inputs,
         )
 
-        receptor_path, ligand_path = resolve_analysis_inputs(job_dir, pose)
+        receptor_path, ligand_path = await asyncio.to_thread(
+            resolve_analysis_inputs, job_dir, pose
+        )
         pose_export_error = None
         if receptor_path is not None and ligand_path is None:
             result_file = os.path.join(job_dir, "result.pdbqt")
             if os.path.isfile(result_file):
-                temporary = None
-                try:
+                def export_pose_artifact():
                     from src.docking.pose_export import pose_sdf_from_pdbqt
 
                     with open(result_file, "r", encoding="utf-8", errors="ignore") as stream:
@@ -750,23 +943,70 @@ def setup_docking_routes(
                         f"analysis_pose_{pose}.sdf",
                     )
                     temporary = f"{ligand_candidate}.tmp"
-                    with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
-                        stream.write(pose_sdf)
-                        stream.flush()
-                        os.fsync(stream.fileno())
-                    os.replace(temporary, ligand_candidate)
-                    _, ligand_path = resolve_analysis_inputs(job_dir, pose)
-                except Exception as error:
-                    pose_export_error = type(error).__name__
-                    if temporary and os.path.exists(temporary):
+                    try:
+                        with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
+                            stream.write(pose_sdf)
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                        os.replace(temporary, ligand_candidate)
+                    except BaseException:
                         try:
                             os.unlink(temporary)
                         except OSError:
                             pass
+                        raise
+                    return ligand_candidate
+
+                try:
+                    await asyncio.to_thread(export_pose_artifact)
+                    _, ligand_path = await asyncio.to_thread(
+                        resolve_analysis_inputs, job_dir, pose
+                    )
+                except Exception as error:
+                    pose_export_error = type(error).__name__
                     resolve(logger, "logger").warning(
                         "Unable to create topology-bearing pose artifact for interaction analysis: %s",
                         type(error).__name__,
                     )
+
+        prepare_analysis_receptor = getattr(
+            docking_service, "prepare_analysis_receptor", None
+        ) if docking_service is not None else None
+        analysis_receptor_trace = {}
+        if receptor_path is not None and callable(prepare_analysis_receptor):
+            receptor_suffix = Path(receptor_path).suffix.lower()
+            if receptor_suffix in {".pdb", ".cif", ".mmcif"}:
+                prepared_receptor = os.path.join(
+                    job_dir, f"analysis_receptor_interactions{receptor_suffix}"
+                )
+                try:
+                    prepared = await asyncio.to_thread(
+                        prepare_analysis_receptor,
+                        receptor_path,
+                        prepared_receptor,
+                        trace=analysis_receptor_trace,
+                    )
+                    if prepared is not True:
+                        raise RuntimeError("analysis receptor preparation was unavailable")
+                except Exception as error:
+                    resolve(logger, "logger").warning(
+                        "Unable to materialize analysis receptor: %s",
+                        type(error).__name__,
+                    )
+                    return {
+                        "status": "unavailable",
+                        "reason_code": "analysis_receptor_unavailable",
+                        "pose": pose,
+                        "interactions": [],
+                        "geometry_status": "unavailable",
+                        "warnings": [f"analysis_receptor_unavailable:{type(error).__name__}"],
+                        "provenance": {
+                            "analyzer": "prolif",
+                            "tool_derived": False,
+                            "analysis_receptor": analysis_receptor_trace,
+                        },
+                    }
+                receptor_path = prepared_receptor
         if receptor_path is None or ligand_path is None:
             if pose_export_error:
                 return {
@@ -774,6 +1014,7 @@ def setup_docking_routes(
                     "reason_code": "pose_export_failed",
                     "pose": pose,
                     "interactions": [],
+                    "geometry_status": "unavailable",
                     "warnings": [f"pose_export_failed:{pose_export_error}"],
                     "provenance": {"analyzer": "prolif", "tool_derived": False},
                 }
@@ -782,39 +1023,35 @@ def setup_docking_routes(
                 "reason_code": "analysis_input_missing",
                 "pose": pose,
                 "interactions": [],
+                "geometry_status": "unavailable",
                 "warnings": [
                     "explicit_analysis_receptor_and_pose_sdf_are_required",
                     "pdbqt_was_not_used_as_a_topology_fallback",
                 ],
                 "provenance": {"analyzer": "prolif", "tool_derived": False},
             }
-        result = analyze_docking_interactions(
+        result = await asyncio.to_thread(
+            analyze_docking_interactions,
             receptor_path,
             ligand_path,
             pose_index=1,
         )
         result["pose"] = pose
+        if analysis_receptor_trace:
+            result.setdefault("provenance", {})["analysis_receptor"] = analysis_receptor_trace
         return result
 
     @app.get("/api/docking/pose_sdf/{job_id}")
     async def get_docking_pose_sdf(job_id: str, request: Request, pose: int = 1):
         """将指定 pose 重建为标准 SDF，保留原始化学拓扑并应用对接坐标"""
-        if not docking_service:
-            raise HTTPException(status_code=503, detail="分子对接服务不可用")
         _validate_job_id(job_id)
-        _owned_history(request, docking_service.work_dir, job_id)
         if type(pose) is not int or pose <= 0:
             raise HTTPException(status_code=422, detail="pose 必须是正整数")
 
         try:
-            job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")
-            result_file = os.path.join(job_dir, "result.pdbqt")
-
-            if not os.path.exists(result_file):
-                raise HTTPException(status_code=404, detail="对接结果文件不存在")
-
-            with open(result_file, "r", encoding="utf-8", errors="ignore") as f:
-                pdbqt_text = f.read()
+            pdbqt_text = (await read_owned_docking_pose(job_id, request)).decode(
+                "utf-8", errors="ignore"
+            )
             from src.docking.pose_export import PoseExportError, pose_sdf_from_pdbqt
 
             try:

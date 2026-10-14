@@ -194,7 +194,8 @@ def load_family_dataset(path):
 
 
 def prepare_family_dataset(input_path, *, family, package_id, output_dir,
-                           validate_only=True):
+                           validate_only=True,
+                           split_algorithm=dc._SPLIT_ALGORITHM):
     """Validate or atomically publish two paired prepared datasets.
 
     The returned report contains only aggregate statistics and logical IDs.
@@ -203,6 +204,8 @@ def prepare_family_dataset(input_path, *, family, package_id, output_dir,
     """
     if type(validate_only) is not bool:
         raise ValueError("validate_only must be boolean")
+    if split_algorithm not in (dc._SPLIT_ALGORITHM, dc._RANDOM_SPLIT_ALGORITHM):
+        raise ValueError("Invalid split algorithm")
     package_id = _package_id(package_id)
     family_id = fc.resolve_activity_family(family)
     input_path = Path(os.path.abspath(input_path))
@@ -218,9 +221,18 @@ def prepare_family_dataset(input_path, *, family, package_id, output_dir,
             results[task] = dc.validate_activity_dataset(frame, manifests[task], input_bytes=adapter_bytes, input_format="csv")
             if not results[task].ready_for_training:
                 raise ValueError("Family dataset quality gate rejected")
-        reg_split = dc.split_prepared_dataset(results["regression"].accepted)
+        reg_split = dc._split_prepared_dataset(
+            results["regression"].accepted,
+            seed=42,
+            ratios=(0.70, 0.15, 0.15),
+            algorithm=split_algorithm,
+        )
         cls_frame = dc._validate_split_input(results["classification"].accepted)
-        frames = {name: cls_frame[cls_frame.scaffold_smiles.map(reg_split.assignments) == name].copy().reset_index(drop=True)
+        assignment_column = (
+            "canonical_smiles" if split_algorithm == dc._RANDOM_SPLIT_ALGORITHM
+            else "scaffold_smiles"
+        )
+        frames = {name: cls_frame[cls_frame[assignment_column].map(reg_split.assignments) == name].copy().reset_index(drop=True)
                   for name in dc._SPLIT_NAMES}
         cls_split = dc.DatasetSplitResult(frames, reg_split.assignments, reg_split.provenance)
         _verify_shared_frames(reg_split.frames, cls_split.frames)

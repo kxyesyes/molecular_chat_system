@@ -17,11 +17,14 @@ const template = fs.readFileSync(
 assert.match(source, /Number\.isFinite\(item\.best_energy\)/);
 assert.match(source, /"未计算"/);
 assert.match(source, /ligand_efficiency: null/);
+assert.match(source, /Number\.isFinite\(r\.binding_energy\)/);
+assert.match(source, /const poseEnergy = Number\.isFinite\(r\.binding_energy\)/);
 assert.doesNotMatch(source, /item\.best_energy !== null \? item\.best_energy\.toFixed/);
 assert.match(interactionSource, /\/api\/docking\/interactions\//);
 assert.match(interactionSource, /requestInteractionAnalysis\("hydrogen_bond"\)/);
 assert.match(interactionSource, /requestInteractionAnalysis\("pi_pi"\)/);
 assert.match(interactionSource, /requestInteractionAnalysis\("hydrophobic"\)/);
+assert.match(template, /static\/js\/docking\/interactions\.js\?v=/);
 assert.doesNotMatch(interactionSource, /InteractionGeometry/);
 assert.doesNotMatch(template, /docking\/interaction_geometry\.js/);
 

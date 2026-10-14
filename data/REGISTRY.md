@@ -19,14 +19,16 @@
 | 靶点结构缓存 | `data/target_db/cache/` | 靶点搜索下载器 / 批量结构同步 | `Target Cache` | 不提交 |
 | 反向寻靶 ChEMBL 表 | `data/reverse_target/chembl_data_with_fps.tsv` 或 `chembl_training_data.tsv` | `src/reverse_target/*build*`、`download_chembl.py` 相关脚本 | `Reverse Target Data` | 不提交 |
 | 反向寻靶指纹矩阵 | `data/reverse_target/morgan_fingerprints.npy`、`maccs_fingerprints.npy` | `src/reverse_target/generate_fingerprints.py` | `Reverse Target Data` | 不提交 |
-| 活性预测模型 | `data/activity/models/` | 训练产物或服务器侧模型目录 | `Activity Models` | 不提交 |
+| 活性预测模型（已批准 r2 部署包） | `data/activity/models/pde-buche-20261006-r2/` | 已验收 PDE/BuChE family bundle；模型卡、权重与 v3 registry 一并维护 | `Activity Models` + r2 registry 校验 | 按明确批准范围提交；其他训练产物不提交 |
+| 其他活性预测模型/训练产物 | `data/activity/models/` 下其他目录 | 本地训练或搜索输出 | `Activity Models` | 不提交 |
 | RAG FAISS 索引 | `data/molecular_faiss_index.index` | RAG 索引构建流程 | `RAG Index` | 不提交 |
 | 分子设计导出结果 | `data/design_results/` | 用户运行时保存/导出 | 手动检查 | 不提交 |
 
 ## 部署约定
 
 - 生产环境优先通过 `.env` 配置 `TARGET_DB_PATH`、`TARGET_CACHE_DIR`、`REVERSE_TARGET_DATA_DIR`、`ACTIVITY_MODEL_DIR`、`RAG_INDEX_PATH`。
-- 数据库、模型、缓存和索引建议放在服务器持久化目录；Git 仓库只保存代码、轻量样例和构建/校验脚本。
+- 数据库、未批准模型、缓存和索引建议放在服务器持久化目录；本仓库明确批准的
+  `pde-buche-20261006-r2` 部署包例外纳入 Git，并由 registry 摘要校验。
 - 更新任何数据资产时，应记录来源、版本、生成命令和日期；后续可扩展为带 SHA256 校验的 `scripts/fetch_data.py`。
 
 ## 靶点数据库运行时安全约定

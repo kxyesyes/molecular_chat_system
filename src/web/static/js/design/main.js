@@ -21,13 +21,46 @@
   }
 
   var KF = document.getElementById("ketcher-frame");
-  KF.addEventListener("load", function () {
-    setTimeout(function () {
+  var editorReadyTimer = null;
+  var editorReadyAttempts = 0;
+
+  function setEditorStatus(message) {
+    var status = document.getElementById("editorStatus");
+    if (status) status.textContent = message;
+  }
+
+  function checkEditorReady() {
+    editorReadyTimer = null;
+    var editor = Editor.getK();
+    if (editor && typeof editor.getSmiles === "function" && typeof editor.setMolecule === "function") {
       S.ketcherReady = true;
+      setEditorStatus("分子编辑器就绪");
       UI.toast("编辑器就绪", "success");
       startTimer();
-    }, 900);
-  });
+      return;
+    }
+    if (++editorReadyAttempts >= 120) {
+      setEditorStatus("分子编辑器未能加载，请刷新页面；若仍失败，请检查 Ketcher 静态资源及同源嵌入策略。");
+      UI.toast("分子编辑器加载失败", "error");
+      return;
+    }
+    editorReadyTimer = setTimeout(checkEditorReady, 250);
+  }
+
+  function waitForEditor() {
+    if (editorReadyTimer) clearTimeout(editorReadyTimer);
+    if (S.propsTimer) clearInterval(S.propsTimer);
+    S.propsTimer = null;
+    S.ketcherReady = false;
+    editorReadyAttempts = 0;
+    setEditorStatus("分子编辑器加载中…");
+    checkEditorReady();
+  }
+
+  // A blocked iframe also fires load; its actual API is the readiness signal.
+  KF.addEventListener("load", waitForEditor);
+  // Cached frames may have finished loading before this script attached.
+  waitForEditor();
 
   function updateCurrentSmilesText(smi) {
     document.getElementById("curSmiles").textContent =
@@ -69,7 +102,7 @@
   }
 
   async function syncSmilesFromEditor() {
-    if (document.hidden || S.propsPollInFlight) return;
+    if (document.hidden || S.propsPollInFlight || S.editorWriteInFlight) return;
 
     S.propsPollInFlight = true;
     var writeSeq = S.editorWriteSeq || 0;

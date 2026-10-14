@@ -18,6 +18,17 @@ document.addEventListener("DOMContentLoaded", function () {
 
   // 5. 绑定模态框点击关闭
   _bindModalDismiss();
+
+  document.querySelectorAll(".preset-btn").forEach((button) => {
+    button.addEventListener("click", () => {
+      applyReverseTargetPreset(button.dataset.mode || "broad");
+    });
+  });
+  document.querySelectorAll(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      switchTab(tab.dataset.tab || "single");
+    });
+  });
 });
 
 function applyReverseTargetPreset(mode) {
@@ -41,7 +52,7 @@ function applyReverseTargetPreset(mode) {
   document.querySelectorAll(".preset-btn").forEach((button) => {
     button.classList.toggle(
       "active",
-      button.getAttribute("onclick")?.includes(`'${mode}'`) || false,
+      button.dataset.mode === mode,
     );
   });
 }
@@ -55,10 +66,20 @@ function _bindPredictForm() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const formData = new FormData(e.target);
+    const requestedSmiles = String(formData.get("smiles") || "").trim();
+    if (!requestedSmiles) {
+      RtUI.setSubmitEnabled("submitBtn", true);
+      RtUI.hideLoading();
+      RtUI.showError("请输入 SMILES");
+      document.getElementById("smiles")?.focus();
+      return;
+    }
+    if (!form.reportValidity()) return;
     RtUI.setSubmitEnabled("submitBtn", false);
     RtUI.showLoading();
 
-    const formData = new FormData(e.target);
+    formData.set("smiles", requestedSmiles);
     window.lastQuerySmiles = formData.get("smiles");
     window.lastThreshold = formData.get("threshold");
     window.lastOrganismFilter = document.getElementById("humanOnly")?.checked ? "Human" : "";
@@ -73,7 +94,7 @@ function _bindPredictForm() {
         fd.append("smiles", formData.get("smiles"));
         fd.append("threshold", formData.get("threshold"));
         fd.append("top_k", formData.get("top_k"));
-        const requestedMaxRefine = parseInt(document.getElementById("maxRefine").value || "50", 10);
+        const requestedMaxRefine = Number(document.getElementById("maxRefine").value || "50");
         fd.append("max_refine", String(requestedMaxRefine));
         fd.append(
           "alpha_3d",
@@ -128,6 +149,15 @@ function _bindBatchForm() {
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
+    const fileInput = document.getElementById("batchFile");
+    if (!fileInput || !fileInput.files || fileInput.files.length === 0) {
+      RtUI.setSubmitEnabled("batchSubmitBtn", true);
+      RtUI.hideLoading();
+      RtUI.showError("请先上传批量分子文件");
+      fileInput?.focus();
+      return;
+    }
+    if (!form.reportValidity()) return;
     RtUI.setSubmitEnabled("batchSubmitBtn", false);
     RtUI.showLoading();
 
@@ -180,6 +210,18 @@ function toggleSpin() {
 function closePharm3DModal() {
   RtViewer.closePharm3DModal();
 }
+
+// Expose the legacy HTML onclick bridge explicitly.  Some deployments wrap
+// classic scripts in a scoped loader, so top-level function declarations are
+// not guaranteed to become window properties.
+window.applyReverseTargetPreset = applyReverseTargetPreset;
+window.switchTab = switchTab;
+window.exportData = exportData;
+window.closeSimilarModal = closeSimilarModal;
+window.resetCamera = resetCamera;
+window.toggleSpin = toggleSpin;
+window.closePharm3DModal = closePharm3DModal;
 function openPharmacophore3D(s, id) {
   RtViewer.openPharmacophore3D(s, id);
 }
+window.openPharmacophore3D = openPharmacophore3D;

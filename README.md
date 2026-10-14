@@ -53,7 +53,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-启动后访问 `http://127.0.0.1:6001` 即可开始使用。端口、主机、worker 数等运行参数可通过 `.env` 或命令行覆盖；命令行参数优先级最高。
+应用默认监听 `127.0.0.1:6000`，生产环境通过 nginx 的 HTTPS 域名访问。6000 是浏览器受限端口，直接打开可能出现 `ERR_UNSAFE_PORT`；本机浏览器调试可用 `python main.py --port 6001`，再访问 `http://127.0.0.1:6001`。端口、主机、worker 数等运行参数可通过 `.env` 或命令行覆盖；命令行参数优先级最高。已有 `.env` 和服务器 nginx 配置不会随 Git 更新自动改写，迁移步骤见 [部署教程](docs/DEPLOYMENT_TUTORIAL.md#默认端口从-6001-迁移到-6000)。
 
 聊天运行链路默认保持稳定的 `legacy` 入口。完成决策链验收后，可在启动前显式启用：
 

@@ -201,6 +201,45 @@ class PharmacophoreAlignmentTest(unittest.TestCase):
 
         self.assertEqual(_feature_distance_cutoff("LumpedHydrophobe", 1.8), 3.0)
 
+    @unittest.skipUnless(HAS_RDKIT, "RDKit is not installed in this Python environment")
+    def test_empty_feature_extraction_is_not_a_scientific_success(self):
+        from rdkit import Chem
+        from src.reverse_target.pharmacophore_refiner import get_molecule_pharmacophore
+
+        molecule = Chem.AddHs(Chem.MolFromSmiles("CC"))
+        with patch(
+            "src.reverse_target.pharmacophore_refiner._try_load_cache",
+            return_value=None,
+        ), patch(
+            "src.reverse_target.pharmacophore_refiner.generate_3d_conformer_with_status",
+            return_value=(molecule, {
+                "conformer_status": "optimized",
+                "embedding_method": "ETKDGv3",
+                "mmff_converged": True,
+                "conformer_energy": 0.0,
+            }),
+        ), patch(
+            "src.reverse_target.pharmacophore_refiner.extract_pharmacophore_features",
+            return_value=[],
+        ):
+            result = get_molecule_pharmacophore("CC")
+
+        self.assertFalse(result["success"])
+        self.assertIn("药效团特征", result["error"])
+
+    def test_pharm3d_score_rejects_empty_feature_results(self):
+        from src.reverse_target.pharmacophore_refiner import compute_pharm3d_score
+
+        empty = {"success": True, "features": [], "feature_counts": {}}
+        with patch(
+            "src.reverse_target.pharmacophore_refiner.get_molecule_pharmacophore",
+            return_value=empty,
+        ):
+            result = compute_pharm3d_score("CC", "CC")
+
+        self.assertFalse(result["success"])
+        self.assertIn("没有可比对的药效团特征", result["error"])
+
     def test_refinement_timeout_logs_once_and_returns_all_candidates(self):
         from src.reverse_target.pharmacophore_refiner import refine_with_pharmacophore
 

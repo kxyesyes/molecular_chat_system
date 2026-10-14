@@ -250,6 +250,24 @@ async def test_local_backend_submits_and_requests_cancel(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
+async def test_local_backend_persists_manifest_locator_for_terminal_docking(
+    tmp_path: Path,
+) -> None:
+    async def handler(submission, cancel_event, progress):
+        return {"success": True, "data": {"score": -7.2}}
+
+    store = TaskStore(tmp_path / "tasks.sqlite")
+    backend = LocalTaskBackend(store, {"docking": handler})
+    try:
+        submission = _submission("manifest-task")
+        await backend.submit(submission)
+        record = await _wait_for_terminal(backend, submission.task_id)
+        assert record.input_manifest_path == submission.input_manifest_path
+    finally:
+        await backend.close()
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("result", "expected", "error_code"),
     [

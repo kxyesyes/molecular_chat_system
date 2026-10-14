@@ -46,10 +46,11 @@
           <div class="smiles-display" id="curSmiles" onclick="copySmiles()" title="点击复制">等待输入分子…</div>
 
           <div class="ketcher-container">
-            <iframe id="ketcher-frame" src="/static/ketcher/index.html" allow="clipboard-read; clipboard-write"></iframe>
+            <iframe id="ketcher-frame" src="/static/ketcher/index.html?v=20261014-frame-cache-v1" allow="clipboard-read; clipboard-write"></iframe>
             <div class="site-indicator" id="siteInd" style="opacity:0"><div class="site-dot"></div><span id="siteText">检测到取代位点</span></div>
             <div class="loading-overlay" id="loadingOverlay"><div class="spinner"></div><span>正在执行真实结构处理…</span></div>
           </div>
+          <p class="source-note" id="editorStatus" role="status">分子编辑器加载中…</p>
           <div class="canvas-actions">
             <button class="tool-btn" onclick="detectSites()">识别 [*] 连接点</button>
             <button class="tool-btn primary" id="subBtn" disabled onclick="execSubstitute()">执行片段取代</button>
@@ -111,9 +112,9 @@
   <script src="/static/js/design/api_client.js"></script>
   <script src="/static/js/design/ui_manager.js"></script>
   <script src="/static/js/design/fragment_browser.js"></script>
-  <script src="/static/js/design/properties_panel.js"></script>
+  <script src="/static/js/design/properties_panel.js?v=20261014-reset-result-state-v1"></script>
   <script src="/static/js/design/history_manager.js"></script>
-  <script src="/static/js/design/molecule_editor.js"></script>
-  <script src="/static/js/design/main.js"></script>
+  <script src="/static/js/design/molecule_editor.js?v=20261015-browser-validation-v8"></script>
+  <script src="/static/js/design/main.js?v=20261014-editor-write-guard-v1"></script>
 </body>
 </html>

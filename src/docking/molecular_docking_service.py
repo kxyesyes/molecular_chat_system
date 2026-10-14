@@ -106,6 +106,8 @@ class MolecularDockingService:
         self.adfrsuite_path = ""
         # 可直接指定 prepare_receptor 命令；优先于 ADFRsuite bin 自动推断
         self.prepare_receptor_cmd = ""
+        # reduce 用于为相互作用分析准备带显式氢的拓扑受体；失败时不阻断对接
+        self.reduce_cmd = ""
         # Meeko 命令行工具（用于配体准备，来自 Anaconda 环境）
         self.prepare_ligand_cmd = ""
         # 保留兼容字段
@@ -119,6 +121,9 @@ class MolecularDockingService:
         ownership = self._adapter_ownership()
         self.vina_adapter = VinaAdapter(**ownership)
         self.receptor_adapter = ADFRAdapter(**ownership)
+        # Instantiate lazily so environments without reduce do not alter the
+        # existing command-adapter lifecycle or ownership probes.
+        self.reduce_adapter = None
         self.ligand_adapter = MeekoAdapter(**ownership)
         self.openbabel_adapter = OpenBabelAdapter(**ownership)
         self._require_command_scope()
@@ -130,6 +135,7 @@ class MolecularDockingService:
         ownership = self._adapter_ownership()
         self.vina_adapter = VinaAdapter(self.vina_exe, **ownership)
         self.receptor_adapter = ADFRAdapter(self.prepare_receptor_cmd, **ownership)
+        self.reduce_adapter = None
         self.ligand_adapter = MeekoAdapter(self.prepare_ligand_cmd, **ownership)
         self.openbabel_adapter = OpenBabelAdapter(shutil.which("obabel") or "", **ownership)
         self._require_command_scope()
@@ -143,9 +149,14 @@ class MolecularDockingService:
             return
         if os.path.normcase(os.path.abspath(self.work_dir)) != os.path.normcase(self._allowed_output_root):
             raise CommandOwnershipUncertainError()
-        if any(getattr(adapter, "_ownership_scope", None) is not scope for adapter in (
-            self.vina_adapter, self.receptor_adapter, self.ligand_adapter, self.openbabel_adapter,
-        )):
+        adapters = (
+            self.vina_adapter, self.receptor_adapter, self.reduce_adapter,
+            self.ligand_adapter, self.openbabel_adapter,
+        )
+        if any(
+            adapter is not None and getattr(adapter, "_ownership_scope", None) is not scope
+            for adapter in adapters
+        ):
             raise CommandOwnershipUncertainError()
 
     def _require_finished_commands(self):
@@ -247,6 +258,14 @@ class MolecularDockingService:
             os.path.join(self.adfrsuite_path, "prepare_receptor") if self.adfrsuite_path else None,
             os.path.join(self.adfrsuite_path, "prepare_receptor.py") if self.adfrsuite_path else None,
         )
+        self.reduce_cmd = self._first_existing_path(
+            docking_config.get("reduce_cmd"),
+            os.environ.get("MOLECULAR_DOCKING_REDUCE"),
+            os.path.join(self.adfrsuite_path, "reduce.exe") if self.adfrsuite_path else None,
+            os.path.join(self.adfrsuite_path, "reduce.bat") if self.adfrsuite_path else None,
+            os.path.join(self.adfrsuite_path, "reduce") if self.adfrsuite_path else None,
+            shutil.which("reduce") or shutil.which("reduce.exe"),
+        )
         self.prepare_ligand_cmd = self._first_existing_path(
             docking_config.get("prepare_ligand_cmd"),
             os.environ.get("MOLECULAR_DOCKING_PREPARE_LIGAND"),
@@ -256,6 +275,109 @@ class MolecularDockingService:
             prepare_ligand_in_path,
         )
         self._refresh_adapters()
+
+    @staticmethod
+    def _pdb_text_has_explicit_hydrogens(text: str) -> bool:
+        """Return whether PDB text contains at least one explicit H atom."""
+        for line in text.splitlines():
+            if not line.startswith(("ATOM", "HETATM")):
+                continue
+            element = line[76:78].strip().upper() if len(line) >= 78 else ""
+            atom_name = line[12:16].strip().upper() if len(line) >= 16 else ""
+            if element == "H" or atom_name.startswith("H"):
+                return True
+        return False
+
+    @classmethod
+    def _pdb_has_explicit_hydrogens(cls, path: str) -> bool:
+        """Return whether a PDB contains at least one explicit hydrogen atom."""
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as stream:
+                return cls._pdb_text_has_explicit_hydrogens(stream.read())
+        except OSError:
+            return False
+
+    def prepare_analysis_receptor(
+        self,
+        source_path: str,
+        output_path: str,
+        *,
+        cancel_event=None,
+        trace: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Preserve a topology-bearing receptor for interaction analysis.
+
+        ProLIF requires explicit protein hydrogens for defensible geometry.  The
+        docking receptor preparation output is PDBQT and is therefore not used
+        as a topology fallback.  ``reduce`` is best-effort here: if it is not
+        installed or fails, the original receptor is still preserved and the
+        analyzer will report an unavailable result rather than inventing claims.
+        """
+        source_path = os.path.abspath(source_path)
+        output_path = os.path.abspath(output_path)
+        trace = trace if trace is not None else {}
+        trace.setdefault("analysis_receptor_source", os.path.basename(source_path))
+        try:
+            self._raise_if_cancelled(cancel_event)
+            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            suffix = Path(source_path).suffix.lower()
+            if suffix != ".pdb" or self._pdb_has_explicit_hydrogens(source_path):
+                self._copy_file_cooperatively(source_path, output_path, cancel_event)
+                trace.update({
+                    "analysis_receptor_method": "copy",
+                    "analysis_receptor_hydrogens": "explicit" if suffix == ".pdb" else "not_verified",
+                })
+                return True
+
+            if self.reduce_cmd:
+                adapter = getattr(self, "reduce_adapter", None)
+                adapter_executable = getattr(adapter, "executable", None)
+                if adapter is None or (
+                    adapter_executable is not None
+                    and adapter_executable != os.path.abspath(self.reduce_cmd)
+                ):
+                    adapter = CommandAdapter(self.reduce_cmd, **self._adapter_ownership())
+                    self.reduce_adapter = adapter
+                result = adapter.run(
+                    adapter.wrap_command("-NOFLIP", "-Quiet", "-DB", "dict", source_path),
+                    cwd=os.path.dirname(source_path) or self.work_dir,
+                    timeout=60,
+                    cancel_event=cancel_event,
+                )
+                stdout = result.stdout or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if result.returncode == 0 and stdout:
+                    temporary = f"{output_path}.tmp"
+                    with open(temporary, "w", encoding="utf-8", newline="\n") as stream:
+                        stream.write(stdout)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    if self._pdb_has_explicit_hydrogens(temporary):
+                        os.replace(temporary, output_path)
+                        trace.update({
+                            "analysis_receptor_method": "reduce",
+                            "analysis_receptor_hydrogens": "explicit",
+                        })
+                        return True
+                    try:
+                        os.unlink(temporary)
+                    except OSError:
+                        pass
+                logger.warning("reduce did not produce an explicit-H receptor (returncode=%s)", result.returncode)
+            else:
+                logger.info("reduce unavailable; preserving original receptor for fail-closed analysis")
+        except (CommandCancelledError, CommandOwnershipUncertainError):
+            raise
+        except Exception:
+            logger.warning("Unable to add explicit hydrogens to analysis receptor", exc_info=True)
+
+        self._copy_file_cooperatively(source_path, output_path, cancel_event)
+        trace.update({
+            "analysis_receptor_method": "copy_unavailable",
+            "analysis_receptor_hydrogens": "unavailable",
+        })
+        return True
 
     def _prepare_receptor_candidates(self) -> List[str]:
         candidates = []
@@ -829,6 +951,24 @@ class MolecularDockingService:
                 logger.error("Unable to persist docking execution manifest before Vina launch")
                 return False
 
+            # The output path belongs to this job. Remove a pre-existing file
+            # before launching Vina so a zero-exit process cannot make a stale
+            # pose look like a fresh scientific result.
+            output_was_present = os.path.isfile(output_path)
+            if output_was_present:
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    self._update_run_manifest(
+                        resolved_job_dir,
+                        execution={
+                            "status": "failed",
+                            "failure_reason": "output_artifact_stale",
+                        },
+                    )
+                    logger.error("Unable to clear pre-existing Vina output artifact")
+                    return False
+
             # 运行Vina
             adapter_control = {}
             if cancel_event is not None:
@@ -866,7 +1006,11 @@ class MolecularDockingService:
                         execution={
                             "status": "failed",
                             "returncode": result.returncode,
-                            "failure_reason": "output_artifact_missing",
+                            "failure_reason": (
+                                "output_artifact_stale"
+                                if output_was_present
+                                else "output_artifact_missing"
+                            ),
                         },
                     )
                     logger.error("Vina returned success without an output artifact")
@@ -1060,6 +1204,107 @@ class MolecularDockingService:
             if diagnostics is not None:
                 diagnostics.append("parser_exception")
             return []
+
+    @staticmethod
+    def recover_vina_candidate_pose(
+        output_path: str,
+        *,
+        pose_index: int,
+    ) -> tuple[Any, Dict[str, Any]]:
+        """Recover one topology-bearing Vina pose through Meeko.
+
+        The output file is parsed in full because ``DockingResult.pose_data``
+        intentionally contains only coordinate records.  Meeko's converted
+        result list represents ligands, while each ligand carries one
+        conformer per Vina model; consequently ``pose_index`` must select a
+        conformer and must never be replaced with an implicit first-pose
+        assumption.
+        """
+        if type(pose_index) is not int or pose_index <= 0:
+            raise ValueError("pose_index must be a positive integer")
+        try:
+            from importlib.metadata import version
+
+            meeko_version = version("meeko")
+        except Exception:
+            meeko_version = "unknown"
+        try:
+            from rdkit import Chem, __version__ as rdkit_version
+            from meeko import PDBQTMolecule, RDKitMolCreate
+        except ImportError as error:
+            raise ValueError("Meeko and RDKit are required for candidate recovery") from error
+
+        try:
+            with open(output_path, "rb") as stream:
+                output_bytes = stream.read(64 * 1024 * 1024 + 1)
+            if len(output_bytes) > 64 * 1024 * 1024:
+                raise ValueError("candidate output exceeds recovery size limit")
+            output_text = output_bytes.decode("utf-8", errors="strict")
+            pdbqt_molecule = PDBQTMolecule(output_text, skip_typing=True)
+            molecule_indices = sorted(set(pdbqt_molecule._atom_annotations["mol_index"]))
+            if len(molecule_indices) != 1:
+                raise ValueError("candidate output must contain exactly one ligand")
+            ligand_index = molecule_indices[0]
+            try:
+                smiles = pdbqt_molecule._pose_data["smiles"][ligand_index]
+                index_map = pdbqt_molecule._pose_data["smiles_index_map"][ligand_index]
+            except (KeyError, IndexError, TypeError) as error:
+                raise ValueError("candidate output lacks SMILES/index mapping") from error
+            if not isinstance(smiles, str) or not smiles or not index_map:
+                raise ValueError("candidate output lacks SMILES/index mapping")
+            topology = Chem.MolFromSmiles(smiles)
+            if topology is None or len(index_map) % 2:
+                raise ValueError("candidate mapping is invalid")
+            atom_indices = pdbqt_molecule._atom_annotations["mol_index"][ligand_index]
+            atoms = pdbqt_molecule.atoms(atom_indices)
+            from meeko.utils.autodock4_atom_types_elements import autodock4_atom_types_elements
+            mapped_mol, mapped_pdbqt = set(), set()
+            for mol_id, pdbqt_id in zip(index_map[::2], index_map[1::2]):
+                if (
+                    type(mol_id) is not int or type(pdbqt_id) is not int
+                    or not 1 <= mol_id <= topology.GetNumAtoms()
+                    or not 1 <= pdbqt_id <= len(atoms)
+                    or mol_id in mapped_mol or pdbqt_id in mapped_pdbqt
+                ):
+                    raise ValueError("candidate mapping is invalid")
+                element = autodock4_atom_types_elements.get(str(atoms[pdbqt_id - 1]["atom_type"]))
+                if element != topology.GetAtomWithIdx(mol_id - 1).GetSymbol():
+                    raise ValueError("candidate mapping element mismatch")
+                mapped_mol.add(mol_id)
+                mapped_pdbqt.add(pdbqt_id)
+            heavy_ids = {atom.GetIdx() + 1 for atom in topology.GetAtoms() if atom.GetAtomicNum() > 1}
+            if not heavy_ids.issubset(mapped_mol):
+                raise ValueError("candidate mapping omits heavy atoms")
+            converted = RDKitMolCreate.from_pdbqt_mol(pdbqt_molecule)
+            if len(converted) != 1 or converted[0] is None:
+                raise ValueError("candidate output did not produce exactly one ligand")
+            molecule = converted[0]
+            conformer_count = molecule.GetNumConformers()
+            model_count = sum(line.startswith("MODEL ") for line in output_text.splitlines())
+            if conformer_count != model_count or pose_index > conformer_count:
+                raise ValueError("candidate output lacks the requested model conformer")
+            selected = Chem.Mol(molecule)
+            selected_conformer = pose_index - 1
+            for conformer_id in range(selected.GetNumConformers() - 1, -1, -1):
+                if conformer_id != selected_conformer:
+                    selected.RemoveConformer(conformer_id)
+            if selected.GetNumConformers() != 1:
+                raise ValueError("candidate model selection did not produce one conformer")
+            return selected, {
+                "selected_model_index": pose_index,
+                "ligand_count": len(converted),
+                "conformer_count": conformer_count,
+                "meeko_version": meeko_version,
+                "rdkit_version": rdkit_version,
+                "output_sha256": hashlib.sha256(output_bytes).hexdigest(),
+                "output_size_bytes": len(output_bytes),
+            }
+        except Exception as error:
+            # External parsers may raise IndexError/AttributeError as well as
+            # ValueError. Normalize failures without exposing input paths.
+            if isinstance(error, ValueError) and str(error).startswith("candidate "):
+                raise
+            raise ValueError("candidate output could not be converted to an independent topology") from error
 
     @classmethod
     def _auto_box_from_co_crystal(cls, pdb_path: str, cancel_event=None):
@@ -1336,13 +1581,19 @@ class MolecularDockingService:
         source: str,
         destination: str,
         cancel_event,
+        *,
+        max_bytes: int | None = None,
     ) -> None:
         with open(source, "rb") as reader, open(destination, "wb") as writer:
+            total = 0
             while True:
                 cls._raise_if_cancelled(cancel_event)
                 chunk = reader.read(1024 * 1024)
                 if not chunk:
                     break
+                total += len(chunk)
+                if max_bytes is not None and total > max_bytes:
+                    raise ValueError("reference pose exceeds size limit")
                 writer.write(chunk)
             writer.flush()
             os.fsync(writer.fileno())
@@ -1401,6 +1652,7 @@ class MolecularDockingService:
         error: str,
         *,
         cleanup=None,
+        scientific_quality: Dict[str, Any] | None = None,
     ) -> Dict[str, Any]:
         response: Dict[str, Any] = {
             "success": False,
@@ -1410,6 +1662,8 @@ class MolecularDockingService:
         warnings = cls._discard_partial_job(job_dir) if cleanup is None else cleanup()
         if warnings:
             response["warnings"] = warnings
+        if scientific_quality is not None:
+            response["scientific_quality"] = scientific_quality
         return response
 
     async def perform_docking(
@@ -1423,6 +1677,8 @@ class MolecularDockingService:
         progress_callback=None,
         cancel_event=None,
         owner_session_id: str | None = None,
+        reference_pose: str | None = None,
+        redocking_rmsd_threshold: float | None = None,
     ) -> Dict[str, Any]:
         """Run a traceable docking workflow with cooperative cancellation."""
         import uuid
@@ -1457,6 +1713,18 @@ class MolecularDockingService:
                 "success": False,
                 "error_code": "invalid_job_id",
                 "error": "Docking job id is invalid",
+            }
+
+        if redocking_rmsd_threshold is not None and (
+            isinstance(redocking_rmsd_threshold, bool)
+            or type(redocking_rmsd_threshold) not in (int, float)
+            or not math.isfinite(float(redocking_rmsd_threshold))
+            or float(redocking_rmsd_threshold) <= 0
+        ):
+            return {
+                "success": False,
+                "error_code": "invalid_redocking_rmsd_threshold",
+                "error": "Redocking RMSD threshold must be a finite positive number",
             }
 
         if scope is not None:
@@ -1495,15 +1763,7 @@ class MolecularDockingService:
         # interaction analyzer.  The prepared PDBQT is intentionally not used
         # as an analysis fallback because it may lack bond orders and explicit
         # hydrogens.
-        try:
-            receptor_suffix = Path(receptor_file).suffix.lower()
-            if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
-                shutil.copyfile(
-                    receptor_file,
-                    os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
-                )
-        except OSError:
-            logger.warning("Unable to preserve receptor analysis artifact", exc_info=True)
+        analysis_receptor_trace: Dict[str, Any] = {}
 
         # Capture only the directory created above. No conflicting invocation,
         # mutable service root or neighbor can acquire this cleanup obligation.
@@ -1551,6 +1811,20 @@ class MolecularDockingService:
             if cancel_event is not None:
                 command_control["cancel_event"] = cancel_event
 
+            try:
+                receptor_suffix = Path(receptor_file).suffix.lower()
+                if receptor_suffix in {".pdb", ".cif", ".mmcif"} and os.path.isfile(receptor_file):
+                    self.prepare_analysis_receptor(
+                        receptor_file,
+                        os.path.join(job_dir, f"analysis_receptor{receptor_suffix}"),
+                        cancel_event=cancel_event,
+                        trace=analysis_receptor_trace,
+                    )
+            except (CommandCancelledError, CommandOwnershipUncertainError):
+                raise
+            except OSError:
+                logger.warning("Unable to preserve receptor analysis artifact", exc_info=True)
+
             self._emit_phase(*_DOCKING_PHASES[0], progress_callback, cancel_event)
             try:
                 box_provenance = self._resolve_docking_box(
@@ -1582,7 +1856,51 @@ class MolecularDockingService:
                 config,
                 box_provenance,
             )
+            reference_provenance: Dict[str, Any] = {
+                "supplied": reference_pose is not None,
+            }
+            assessment_reference_pose = reference_pose
+            if reference_pose is not None:
+                try:
+                    reference_path = Path(reference_pose).expanduser()
+                    if reference_path.suffix.lower() not in {".sdf", ".sd", ".mol", ".mol2", ".pdb"}:
+                        raise ValueError("unsupported reference format")
+                    if not reference_path.is_file():
+                        raise ValueError("reference file missing")
+                    reference_provenance["format"] = reference_path.suffix.lower().lstrip(".")
+                    snapshot_name = f"reference_pose{reference_path.suffix.lower()}"
+                    snapshot_path = Path(job_dir) / snapshot_name
+                    self._copy_file_cooperatively(
+                        str(reference_path), str(snapshot_path), cancel_event,
+                        max_bytes=10 * 1024 * 1024,
+                    )
+                    reference_digest, reference_size = self._sha256_file(str(snapshot_path))
+                    if not reference_size:
+                        raise ValueError("empty reference file")
+                    assessment_reference_pose = str(snapshot_path)
+                    reference_provenance.update({
+                        "available": True,
+                        "sha256": reference_digest,
+                        "size_bytes": reference_size,
+                        "snapshot": snapshot_name,
+                        "snapshot_sha256": reference_digest,
+                    })
+                except (OSError, TypeError, ValueError):
+                    quality = {
+                        "status": "failed",
+                        "redocking_rmsd": {"status": "failed", "reason_code": "reference_pose_invalid"},
+                    }
+                    return self._failed_job_response(
+                        job_dir, "reference_pose_invalid", "Reference pose snapshot could not be preserved.",
+                        scientific_quality=quality, **cleanup_control,
+                    )
+            self._update_run_manifest(
+                job_dir,
+                reference_pose=reference_provenance,
+            )
             preparation_trace: Dict[str, Any] = {}
+            if analysis_receptor_trace:
+                preparation_trace["analysis_receptor"] = analysis_receptor_trace
 
             def run_preparation(method, *args):
                 kwargs = dict(command_control)
@@ -1733,6 +2051,76 @@ class MolecularDockingService:
                         )
             except Exception:
                 heavy_atom_count = 0
+            from .reproducibility import assess_pose_geometry
+
+            candidate_pose = None
+            candidate_provenance: Dict[str, Any] = {}
+            if reference_pose is not None and redocking_rmsd_threshold is not None:
+                try:
+                    candidate_pose, candidate_provenance = self.recover_vina_candidate_pose(
+                        output_pdbqt,
+                        pose_index=results[0].pose_index,
+                    )
+                except (AttributeError, IndexError, OSError, TypeError, ValueError, RuntimeError):
+                    candidate_provenance = {
+                        "status": "unavailable",
+                        "reason_code": "candidate_pose_unavailable",
+                    }
+            output_digest = output_size = None
+            if reference_pose is not None:
+                try:
+                    output_digest, output_size = self._sha256_file(output_pdbqt)
+                except (OSError, TypeError, ValueError):
+                    output_digest, output_size = None, None
+
+            pose_geometry = assess_pose_geometry(
+                results,
+                center=(config.center_x, config.center_y, config.center_z),
+                size=(config.size_x, config.size_y, config.size_z),
+                expected_heavy_atom_count=heavy_atom_count or None,
+                box_source=box_provenance.get("source"),
+                reference_pose=assessment_reference_pose,
+                candidate_pose=candidate_pose,
+                redocking_rmsd_threshold=redocking_rmsd_threshold,
+            )
+            if reference_pose is not None:
+                pose_geometry["redocking_rmsd_provenance"] = {
+                    "reference": reference_provenance,
+                    "candidate": candidate_provenance or None,
+                    "output_sha256": output_digest,
+                    "output_size_bytes": output_size,
+                }
+            manifest_quality_updates: Dict[str, Any] = {
+                "scientific_quality": pose_geometry,
+            }
+            if reference_pose is not None:
+                manifest_quality_updates["output"] = {
+                    "path": "result.pdbqt",
+                    "sha256": output_digest,
+                    "size_bytes": output_size,
+                    "selected_model_index": results[0].pose_index,
+                    "candidate_recovery": candidate_provenance or None,
+                }
+            quality_persisted = self._update_run_manifest(job_dir, **manifest_quality_updates)
+            if not quality_persisted:
+                pose_geometry["status"] = "failed"
+                pose_geometry["failures"].append("scientific_quality_persistence_failed")
+            if pose_geometry["status"] != "passed":
+                self._update_run_manifest(
+                    job_dir,
+                    scientific_quality=pose_geometry,
+                    execution={
+                        "status": "failed",
+                        "failure_reason": "scientific_pose_geometry_failed",
+                    },
+                )
+                return self._failed_job_response(
+                    job_dir,
+                    "scientific_pose_geometry_failed",
+                    "Docking pose geometry did not satisfy the recorded input and box evidence.",
+                    **cleanup_control,
+                    scientific_quality=pose_geometry,
+                )
             formatted_results = [
                 {
                     "pose": item.pose_index or index,
@@ -1810,6 +2198,7 @@ class MolecularDockingService:
                     },
                     "manifest": preparation_provenance["manifest"],
                 },
+                "scientific_quality": pose_geometry,
             }
             warnings = list(history_warnings)
             if box_provenance.get("warning"):

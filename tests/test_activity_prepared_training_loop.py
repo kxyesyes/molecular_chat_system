@@ -78,6 +78,68 @@ def test_epochs_select_validation_then_evaluate_test_once(monkeypatch):
     assert result["test_prediction_summary"]["sample_count"] == 2
 
 
+def test_validation_only_fit_never_touches_held_out_loader(monkeypatch):
+    import torch
+    from src.activity import prepared_training as prepared
+    model = torch.nn.Linear(1, 1)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
+    calls = []
+
+    def train_epoch(*args):
+        calls.append("train")
+        return 1.0
+
+    def evaluate(model_arg, loader, *args, prediction_summary=None):
+        calls.append(loader)
+        assert loader != "test"
+        epoch = calls.count("validation")
+        return float(epoch), {"rmse": float(epoch), "mae": 1., "r2": 0.}
+
+    monkeypatch.setattr(prepared, "train_epoch", train_epoch)
+    monkeypatch.setattr(prepared, "evaluate", evaluate)
+    result = prepared.fit_prepared(
+        model, optimizer, {"train": "train", "validation": "validation", "test": "test"},
+        torch.nn.MSELoss(), task_type="regression", device="cpu", epochs=3, patience=1,
+        evaluate_test=False,
+    )
+    assert calls == ["train", "validation"] * 2
+    assert result["test_metrics"] is None
+    assert result["test_prediction_summary"] is None
+
+
+def test_validation_checkpoint_is_reloaded_and_test_evaluated_separately(tmp_path, monkeypatch):
+    import torch
+    from types import SimpleNamespace
+    from tests.test_activity_prepared_training_data import prepared
+    from src.activity.prepared_training import evaluate_checkpoint, run_prepared_training
+
+    manifest = prepared(tmp_path / "prepared")
+    checkpoint = tmp_path / "search" / "checkpoint.pt"
+    owner = SimpleNamespace(
+        has_torch=True,
+        device=torch.device("cpu"),
+        job_id="validation-only-checkpoint",
+        status={},
+        _update_progress=lambda *_args, **_kwargs: None,
+    )
+    threads = torch.get_num_threads()
+    try:
+        torch.set_num_threads(1)
+        run_prepared_training(
+            owner, str(manifest), epochs=1, lr=.001, batch_size=4,
+            dropout=0., num_layers=2, hidden_size=8, weight_decay=0.,
+            patience=1, loss_metric="MSE", lr_scheduler="Cosine", random_seed=42,
+            evaluate_test=False, publish=False, checkpoint_path=checkpoint,
+        )
+        assert owner.status["state"] == "completed"
+        assert owner.status["test_metrics"] is None
+        evaluated = evaluate_checkpoint(checkpoint, manifest, torch.device("cpu"))
+        assert set(evaluated["test_metrics"]) == {"rmse", "mae", "r2"}
+        assert evaluated["test_prediction_summary"]["sample_count"] == 4
+    finally:
+        torch.set_num_threads(threads)
+
+
 def test_prepared_dispatch_does_not_run_legacy_cleanup(tmp_path, monkeypatch):
     path = tmp_path / "dataset_manifest.json"
     path.write_text("synthetic", encoding="utf-8")

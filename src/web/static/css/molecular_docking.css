@@ -1466,6 +1466,7 @@ select.viewer-btn option {
   margin-top: 10px;
   max-height: 140px;
   overflow-y: auto;
+  overflow-x: hidden;
   padding-right: 6px;
   border: 1px dashed #e2e8f0;
   border-radius: 6px;
@@ -1488,6 +1489,8 @@ select.viewer-btn option {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  min-width: 0;
+  gap: 8px;
   padding: 8px 12px;
   background: #f7fafc;
   border-radius: 6px;
@@ -1495,11 +1498,18 @@ select.viewer-btn option {
 }
 
 .file-name {
+  min-width: 0;
+  flex: 1 1 auto;
   font-size: 13px;
   color: #4a5568;
+  line-height: 1.45;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .file-remove {
+  flex: 0 0 auto;
   background: #fed7d7;
   color: #c53030;
   border: none;
@@ -1507,6 +1517,7 @@ select.viewer-btn option {
   padding: 4px 8px;
   font-size: 12px;
   cursor: pointer;
+  white-space: nowrap;
 }
 
 /* ==================== 对接历史侧边面板 ==================== */

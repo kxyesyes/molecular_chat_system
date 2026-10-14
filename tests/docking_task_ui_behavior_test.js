@@ -22,7 +22,8 @@ function harness() {
     sessionStorage: { getItem: (key) => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: (key) => storage.delete(key) },
     setTimeout: (fn, ms) => { const id = ++timerId; timers.set(id, { fn, ms }); return id; },
     clearTimeout: (id) => timers.delete(id), AbortController, console,
-    AppState: { dockingMode: "single", dockingBoxCenterTouched: true },
+    AppState: { dockingMode: "single", dockingBoxCenterTouched: true, currentJobId: null },
+    setCurrentJobId: (jobId) => { context.AppState.currentJobId = jobId; },
     DOCKING_STEPS: ["prepare_protein", "prepare_ligand", "setup_docking", "run_docking", "parse_results"].map((id) => ({ id, title: id })),
     stepManager: { reset() {}, startStep() {}, completeStep: (id) => completedSteps.push(id), updateStepProgress() {}, errorStep() {} },
     Utils: { showToast() {} },
@@ -70,6 +71,14 @@ test("durable result uses explicit legacy identity and best pose mapping", () =>
   c.renderDurableTaskSuccess(r, summary);
   assert.match(get("results-content").innerHTML, /loadComplexStructure\('result-job-7', 2\)/);
   assert.doesNotMatch(get("results-content").innerHTML, /映射为 Pose 1/);
+  assert.equal(c.AppState.currentJobId, "result-job-7");
+  assert.equal(get("docking-progress").style.width, "100%");
+  assert.equal(get("progress-log").children[1].textContent, "完成 · 100%");
+  assert.deepEqual(
+    get("pose-select").children.map((option) => option.value),
+    ["1", "2", "3"],
+  );
+  assert.equal(get("show-complex-btn").disabled, false);
 });
 test("running is not proof that any preparation step completed", () => {
   const { context: c, completedSteps, get } = harness();

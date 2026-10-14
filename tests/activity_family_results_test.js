@@ -44,7 +44,7 @@ function setup() {
   const ids = Object.fromEntries([
     "resultsBody", "resultsHeader", "predictionStatus", "results", "singleSummary",
     "batchHistogram", "statusStat", "submitBtn", "batchSubmitBtn", "loading",
-    "activityTarget", "batchActivityTarget", "predictForm", "batchForm",
+    "activityTarget", "batchActivityTarget", "predictForm", "batchForm", "batchFile",
     "singleConfidenceValue", "singleClassValue", "singleTaskTypeValue", "singleModelMeta",
     "activityBandSubtitle", "activityBandRange", "activityBandMarkerLabel", "bandTickStart",
     "bandTickLow", "bandTickHigh", "bandTickEnd", "singleScoreValue", "singleClassTag",
@@ -479,6 +479,7 @@ test("registered submit handlers pass each form's own target and file/smiles", a
   };
   h.context.ActivityMain.init();
   const file = {name: "fixture.smi"};
+  h.ids.batchFile.files = [file];
   h.ids.predictForm.fields = [["target", "PDE"], ["smiles", "CCO"]];
   h.ids.batchForm.fields = [["target", "BuChE"], ["file", file]];
   for (const id of ["predictForm", "batchForm"]) {

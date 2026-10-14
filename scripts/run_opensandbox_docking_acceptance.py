@@ -742,7 +742,7 @@ class DockerSandboxObserver:
             "\n try:"
             "\n  (socket.getaddrinfo(target,443) if mode=='dns' else socket.create_connection((target,443),1));ok=False"
             "\n except OSError: pass"
-            "\nfor port in (8080,6001,2375):"
+            "\nfor port in (8080,6000,2375):"
             f"\n try: socket.create_connection(({network_gateway!r},port),1);ok=False"
             "\n except OSError: pass"
             "\nsys.exit(0 if ok else 1)"

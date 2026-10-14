@@ -20,6 +20,7 @@ joblib==1.4.2
 # 分子处理 - 核心功能
 rdkit==2023.9.2
 pubchempy==1.0.4
+meeko==0.5.0
 
 # 向量数据库 - RAG功能
 faiss-cpu==1.7.4

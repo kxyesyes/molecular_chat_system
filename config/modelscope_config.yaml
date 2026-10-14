@@ -47,11 +47,11 @@ inference:
 # Web服务配置
 web:
   host: "${MEDCHAT_HOST:-127.0.0.1}"
-  port: ${MEDCHAT_PORT:-6001}
+  port: ${MEDCHAT_PORT:-6000}
   debug: ${MEDCHAT_DEBUG:-false}
   cors_origins:
-    - "http://localhost:${MEDCHAT_PORT:-6001}"
-    - "http://127.0.0.1:${MEDCHAT_PORT:-6001}"
+    - "http://localhost:${MEDCHAT_PORT:-6000}"
+    - "http://127.0.0.1:${MEDCHAT_PORT:-6000}"
 
 # 日志配置
 logging:

@@ -92,6 +92,21 @@ def test_vina_zero_exit_without_pose_artifact_is_failure(run_inputs, monkeypatch
     assert execution['failure_reason'] == 'output_artifact_missing'
 
 
+def test_vina_zero_exit_cannot_reuse_preexisting_pose_artifact(run_inputs, monkeypatch):
+    service, receptor, ligand, config, output = run_inputs
+    output.write_text('stale pose from an earlier run', encoding='utf-8')
+    monkeypatch.setattr(
+        service.vina_adapter,
+        'run_config',
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0),
+    )
+
+    assert service.run_vina_docking(str(receptor), str(ligand), config, str(output)) is False
+    execution = manifest(run_inputs)['execution']
+    assert execution['status'] == 'failed'
+    assert execution['failure_reason'] == 'output_artifact_stale'
+
+
 @pytest.mark.parametrize('bad_config', [DockingConfig(center_x=float('nan')),
                                       DockingConfig(size_y=0), DockingConfig(size_z=float('inf'))])
 def test_direct_vina_cannot_bypass_box_validation(run_inputs, monkeypatch, bad_config):

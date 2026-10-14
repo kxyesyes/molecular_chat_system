@@ -1,7 +1,9 @@
 const TargetSearchApp = (() => {
+  const STRUCTURES_PER_PAGE = 8;
   let currentResults = [];
   let selectedTargetId = null;
   let currentDetail = null;
+  let structurePage = 1;
 
   function init() {
     const form = document.getElementById("targetSearchForm");
@@ -22,6 +24,17 @@ const TargetSearchApp = (() => {
       if (card) loadDetail(card.dataset.targetId);
     });
 
+    document.getElementById("targetDetail").addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-structure-page]");
+      if (!button || !currentDetail) return;
+      const requestedPage = Number(button.dataset.structurePage);
+      if (!Number.isInteger(requestedPage)) return;
+      structurePage = requestedPage;
+      const detail = document.getElementById("targetDetail");
+      detail.innerHTML = renderDetail(currentDetail);
+      hydrateExternalLinks(detail, currentDetail.external_links);
+    });
+
     document.querySelectorAll(".quick-row button").forEach((button) => {
       button.addEventListener("click", () => {
         input.value = button.dataset.query;
@@ -35,6 +48,7 @@ const TargetSearchApp = (() => {
       });
     document.getElementById("filterDockingGrade").addEventListener("change", () => {
       if (currentDetail) {
+        structurePage = 1;
         const detail = document.getElementById("targetDetail");
         detail.innerHTML = renderDetail(currentDetail);
         hydrateExternalLinks(detail, currentDetail.external_links);
@@ -182,6 +196,7 @@ const TargetSearchApp = (() => {
 
     selectedTargetId = null;
     currentDetail = null;
+    structurePage = 1;
     setLoading(true);
     hideMessage();
     renderResultLoading(trimmed);
@@ -280,6 +295,7 @@ const TargetSearchApp = (() => {
   async function loadDetail(targetId) {
     hideMessage();
     selectedTargetId = Number(targetId);
+    structurePage = 1;
     refreshSelectedCards();
 
     const detail = document.getElementById("targetDetail");
@@ -311,8 +327,12 @@ const TargetSearchApp = (() => {
   function renderDetail(data) {
     const allStructures = data.structures || [];
     const structures = filterStructuresByGrade(allStructures);
-    const visibleStructures = structures.slice(0, 8);
-    const hiddenCount = Math.max(structures.length - visibleStructures.length, 0);
+    const totalPages = Math.max(1, Math.ceil(structures.length / STRUCTURES_PER_PAGE));
+    structurePage = Math.min(Math.max(structurePage, 1), totalPages);
+    const startIndex = (structurePage - 1) * STRUCTURES_PER_PAGE;
+    const visibleStructures = structures.slice(startIndex, startIndex + STRUCTURES_PER_PAGE);
+    const rangeStart = structures.length ? startIndex + 1 : 0;
+    const rangeEnd = Math.min(startIndex + visibleStructures.length, structures.length);
     const diseases = (data.disease_keywords || [])
       .map((name) => `<span class="badge warn">${escapeHtml(name)}</span>`)
       .join("");
@@ -372,7 +392,7 @@ const TargetSearchApp = (() => {
           ${renderGradeGuide()}
           <div class="structure-list">
             ${visibleStructures.map(renderStructureCard).join("") || renderNoStructureForCurrentFilter(grade)}
-            ${hiddenCount ? `<div class="structure-truncated-note">已按推荐分数展示前 ${visibleStructures.length} 条，另有 ${hiddenCount} 条结构保留在当前筛选结果中。</div>` : ""}
+            ${structures.length > STRUCTURES_PER_PAGE ? renderStructurePagination(structures.length, totalPages, rangeStart, rangeEnd) : ""}
           </div>
         </section>
       </div>
@@ -395,6 +415,22 @@ const TargetSearchApp = (() => {
       return `<div class="detail-empty"><strong>当前靶点没有 ${escapeHtml(grade)} 级结构</strong><span>可以切换 Docking 等级，或取消等级筛选查看全部结构。</span></div>`;
     }
     return "<div class=\"detail-empty\"><strong>暂无结构</strong><span>该靶点还没有可展示的本地结构索引。</span></div>";
+  }
+
+  function renderStructurePagination(totalCount, totalPages, rangeStart, rangeEnd) {
+    const firstPageDisabled = structurePage === 1 ? " disabled" : "";
+    const lastPageDisabled = structurePage === totalPages ? " disabled" : "";
+    return `
+      <nav class="structure-pagination" aria-label="结构列表分页">
+        <span class="structure-page-status">结构 ${rangeStart}–${rangeEnd} / ${totalCount} · 第 ${structurePage} / ${totalPages} 页</span>
+        <div class="structure-page-controls">
+          <button class="structure-page-btn" type="button" data-structure-page="1" aria-label="第一页"${firstPageDisabled}>首页</button>
+          <button class="structure-page-btn" type="button" data-structure-page="${structurePage - 1}" aria-label="上一页"${firstPageDisabled}>上一页</button>
+          <button class="structure-page-btn" type="button" data-structure-page="${structurePage + 1}" aria-label="下一页"${lastPageDisabled}>下一页</button>
+          <button class="structure-page-btn" type="button" data-structure-page="${totalPages}" aria-label="最后一页"${lastPageDisabled}>末页</button>
+        </div>
+      </nav>
+    `;
   }
 
   function renderGradeGuide() {

@@ -332,6 +332,43 @@ class DockingAgentArchitectureTests(unittest.TestCase):
         self.assertEqual(response.status_code, 413, response.text)
         get_predictor.assert_not_called()
 
+    def test_activity_training_rejects_row_limit_before_creating_temp_file(self):
+        from fastapi import FastAPI
+        from src.activity import trainer as trainer_module
+        from src.web.routes.api_routes import setup_api_routes
+
+        app = FastAPI()
+        setup_api_routes(app)
+        csv_payload = b"smiles,y\nCCO,1\nCCN,2\nCCC,3\n"
+
+        with patch.dict(
+            os.environ,
+            {"MEDCHAT_ACTIVITY_TRAINING_MAX_ROWS": "2"},
+        ), patch.object(tempfile, "NamedTemporaryFile") as named_temp_file, patch.object(
+            trainer_module,
+            "submit_training_job",
+        ) as submit_training_job:
+            response = _secure_client(app).post(
+                "/api/activity/train",
+                files={"file": ("train.csv", csv_payload, "text/csv")},
+                data={"target_column": "y"},
+            )
+
+        self.assertEqual(response.status_code, 413, response.text)
+        self.assertEqual(response.json()["detail"]["code"], "ACTIVITY_TRAINING_ROW_LIMIT_EXCEEDED")
+        named_temp_file.assert_not_called()
+        submit_training_job.assert_not_called()
+
+    def test_activity_training_row_counter_does_not_underestimate_pandas_rows(self):
+        from src.web.routes.activity_model_routes import _count_training_rows
+
+        # pandas treats the single quote as ordinary data here and therefore
+        # sees three records; a standard csv.reader using double quotes would
+        # incorrectly treat the embedded newlines as one quoted record.
+        content = b"smiles,y\n'CCO\nCCN\nCCC',1\n"
+
+        self.assertGreaterEqual(_count_training_rows(content, "train.csv"), 3)
+
     def test_activity_training_rejects_oversized_upload_before_creating_temp_file(self):
         from fastapi import FastAPI
         from fastapi.testclient import TestClient

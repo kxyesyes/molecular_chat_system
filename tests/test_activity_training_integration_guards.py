@@ -84,6 +84,26 @@ def test_new_training_job_exposes_input_audit_fields_before_worker_runs(monkeypa
         trainer.training_jobs.pop(job_id, None)
 
 
+def test_training_submission_has_bounded_active_job_admission(monkeypatch):
+    class Thread:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        def start(self):
+            return None
+
+    monkeypatch.setattr(trainer.threading, "Thread", Thread)
+    monkeypatch.setattr(trainer, "training_jobs", {})
+    monkeypatch.setenv("MEDCHAT_ACTIVITY_TRAINING_MAX_CONCURRENCY", "1")
+
+    first = trainer.submit_training_job(file_path="first.csv")
+    try:
+        with pytest.raises(trainer.TrainingCapacityError):
+            trainer.submit_training_job(file_path="second.csv")
+    finally:
+        trainer.training_jobs.pop(first, None)
+
+
 HISTORICAL_PATHS = (
     "data/activity/rg_mpnn/best_model.pt",
     "data/activity/rg_mpnn/model.pt",

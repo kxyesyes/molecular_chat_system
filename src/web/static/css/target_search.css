@@ -1171,6 +1171,52 @@ h1 {
   line-height: 1.5;
 }
 
+.structure-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 2px 2px;
+  border-top: 1px solid var(--line);
+}
+
+.structure-page-status {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.structure-page-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.structure-page-btn {
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #f5f7fb;
+  color: #334155;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.structure-page-btn:hover:not(:disabled) {
+  border-color: #9ad8ce;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.structure-page-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
 .reason-row {
   display: flex;
   flex-wrap: wrap;

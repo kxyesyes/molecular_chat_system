@@ -75,7 +75,7 @@ Update the facade test to capture production registration calls and assert that 
 Run:
 
 ```powershell
-python -m pytest tests/test_route_compatibility.py tests/test_api_route_boundary.py tests/test_web_route_modules.py -q
+python -m pytest tests/test_route_compatibility.py tests/test_api_route_boundary.py tests/test_molecule_utility_routes.py -q
 python -m compileall -q src/web/routes
 ```
 

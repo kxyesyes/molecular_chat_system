@@ -92,6 +92,7 @@ def test_cookie_private_and_host_origin_are_enforced(tmp_path):
         assert response.json() == {'success': True}
         assert 'no-store' in response.headers['cache-control']
         assert "frame-ancestors 'none'" in response.headers['content-security-policy']
+        assert 'wss://127.0.0.1:6012' in response.headers['content-security-policy']
 
 
 @pytest.mark.parametrize('origin', [None, 'null', 'http://localhost:6012', 'http://127.0.0.1:6001'])

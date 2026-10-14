@@ -1049,12 +1049,28 @@ def test_interaction_endpoint_materializes_topology_bearing_pose_artifact(tmp_pa
         ),
         encoding="utf-8",
     )
-    service = SimpleNamespace(work_dir=str(tmp_path))
+    def prepare_analysis_receptor(source, destination, *, trace=None):
+        Path(destination).write_text(Path(source).read_text(encoding="utf-8"), encoding="utf-8")
+        trace.update({
+            "analysis_receptor_method": "copy",
+            "analysis_receptor_hydrogens": "unavailable",
+        })
+        return True
+
+    service = SimpleNamespace(
+        work_dir=str(tmp_path),
+        prepare_analysis_receptor=prepare_analysis_receptor,
+    )
     with TestClient(registered_app(docking_service=service)) as client:
         response = client.get("/api/docking/interactions/demo", params={"pose": 1})
 
     assert response.status_code == 200, response.text
     assert response.json()["reason_code"] == "dependency_missing"
+    assert response.json()["geometry_status"] == "unavailable"
+    assert response.json()["provenance"]["analysis_receptor"] == {
+        "analysis_receptor_method": "copy",
+        "analysis_receptor_hydrogens": "unavailable",
+    }
     pose_artifact = job / "analysis_pose_1.sdf"
     assert pose_artifact.is_file()
     assert "V2000" in pose_artifact.read_text(encoding="utf-8")
@@ -1074,6 +1090,38 @@ def test_interaction_endpoint_preserves_pose_export_failure(tmp_path):
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "failed"
     assert response.json()["reason_code"] == "pose_export_failed"
+    assert response.json()["geometry_status"] == "unavailable"
+
+
+def test_interaction_endpoint_fails_closed_when_receptor_materialization_raises(tmp_path):
+    job = tmp_path / "docking_demo"
+    job.mkdir()
+    seed_owned_docking_history(tmp_path, "demo")
+    (job / "analysis_receptor.pdb").write_text(
+        "ATOM      1  C   ALA A   1       0.000   0.000   0.000\n",
+        encoding="utf-8",
+    )
+    (job / "result.pdbqt").write_text(
+        "REMARK SMILES C\nREMARK SMILES IDX 1 1\nMODEL 1\n"
+        "HETATM    1  C   LIG A   1       1.000   2.000   3.000  1.00  0.00     0.000 C\n"
+        "ENDMDL\n",
+        encoding="utf-8",
+    )
+
+    def fail_prepare(*_args, **_kwargs):
+        raise OSError("controlled receptor materialization failure")
+
+    service = SimpleNamespace(
+        work_dir=str(tmp_path),
+        prepare_analysis_receptor=fail_prepare,
+    )
+    with TestClient(registered_app(docking_service=service)) as client:
+        response = client.get("/api/docking/interactions/demo", params={"pose": 1})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "unavailable"
+    assert response.json()["reason_code"] == "analysis_receptor_unavailable"
+    assert response.json()["interactions"] == []
 
 
 @pytest.mark.parametrize("pose", [0, -1])

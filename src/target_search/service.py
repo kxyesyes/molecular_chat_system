@@ -220,7 +220,13 @@ class TargetSearchService:
         try:
             exact_rows = conn.execute(
                 exact_sql,
-                (query, query, query, like, like, query, query, query, *filter_params, query, query, query, like),
+                self._search_params(
+                    exact_sql,
+                    case_params=(query, query, query, like, like),
+                    where_params=(query, query, query),
+                    filter_params=filter_params,
+                    order_params=(query, query, query, like),
+                ),
             ).fetchall()
         finally:
             conn.close()
@@ -242,7 +248,13 @@ class TargetSearchService:
         try:
             rows = conn.execute(
                 sql,
-                (query, query, query, like, like, like, like, like, like, like, *filter_params, query, query, query, like),
+                self._search_params(
+                    sql,
+                    case_params=(query, query, query, like, like),
+                    where_params=(like, like, like, like, like),
+                    filter_params=filter_params,
+                    order_params=(query, query, query, like),
+                ),
             ).fetchall()
         finally:
             conn.close()
@@ -972,6 +984,31 @@ class TargetSearchService:
                 END,
                 t.gene_symbol
         """
+
+    @staticmethod
+    def _search_params(
+        sql: str,
+        *,
+        case_params: tuple[object, ...],
+        where_params: tuple[object, ...],
+        filter_params: list[object],
+        order_params: tuple[object, ...],
+    ) -> tuple[object, ...]:
+        """Build and validate positional parameters for a search query.
+
+        The query intentionally uses positional placeholders because the filter
+        clause is assembled dynamically. Keeping the placeholder groups
+        explicit prevents a future fuzzy-search or filter change from silently
+        shifting values or causing SQLite's opaque parameter-count error.
+        """
+        params = (*case_params, *where_params, *filter_params, *order_params)
+        placeholder_count = sql.count("?")
+        if len(params) != placeholder_count:
+            raise RuntimeError(
+                "target search SQL parameter contract mismatch: "
+                f"expected {placeholder_count}, built {len(params)}"
+            )
+        return params
 
     def _filter_clause(
         self,

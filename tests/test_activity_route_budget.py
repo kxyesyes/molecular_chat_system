@@ -156,6 +156,40 @@ def test_activity_cleanup_cancels_waiter_that_outlives_cleanup_window(monkeypatc
     asyncio.run(exercise())
 
 
+def test_activity_cleanup_consumes_waiter_process_failure():
+    async def exercise():
+        import gc
+
+        from src.web.process_isolation import ProcessExecutionError
+
+        errors = []
+        loop = asyncio.get_running_loop()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+
+        async def fail_fast():
+            raise ProcessExecutionError("child pipe closed")
+
+        waiter = asyncio.create_task(fail_fast())
+        await asyncio.sleep(0)
+        process = type(
+            "StoppedProcess",
+            (),
+            {
+                "terminate": lambda self: None,
+                "close": lambda self: None,
+            },
+        )()
+
+        await routes._stop_activity_process(process, waiter)
+        assert waiter.done()
+        del waiter
+        gc.collect()
+        await asyncio.sleep(0)
+        assert errors == []
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("value", ["inf", "nan", "-1", "0", "not-a-number"])
 def test_invalid_timeout_cannot_disable_budget(monkeypatch, value):
     monkeypatch.setenv("MEDCHAT_ACTIVITY_TIMEOUT_SECONDS", value)

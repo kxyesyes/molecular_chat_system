@@ -28,8 +28,20 @@ class TrainingCancelled(RuntimeError):
     """Internal control flow used when an owned training job is cancelled."""
 
 
+class TrainingCapacityError(RuntimeError):
+    """Raised when the bounded training worker capacity is exhausted."""
+
+
 _TERMINAL_TRAINING_STATES = {"completed", "failed", "canceled"}
 _PRIVATE_TRAINING_FIELDS = {"owner_session_id", "_cancel_event", "_cancel_log_written"}
+
+
+def _training_max_concurrency() -> int:
+    try:
+        configured = int(os.environ.get("MEDCHAT_ACTIVITY_TRAINING_MAX_CONCURRENCY", "1"))
+    except (TypeError, ValueError):
+        configured = 1
+    return max(1, min(configured, 8))
 
 
 def _remove_training_input(file_path: str | None) -> None:
@@ -965,33 +977,50 @@ def submit_training_job(**kwargs):
         if type(owner_session_id) is not str or not owner_session_id.strip():
             raise ValueError("owner_session_id must be a non-empty string")
         owner_session_id = owner_session_id.strip()
-    job_id = str(uuid.uuid4())[:8]
-    training_jobs[job_id] = {
-        "job_id": job_id,
-        "owner_session_id": owner_session_id,
-        "_cancel_event": threading.Event(),
-        "cancel_requested": False,
-        "state": "pending",
-        "progress": 0,
-        "epoch": 0,
-        "metrics": {},
-        "best_metrics": {},
-        "best_epoch": 0,
-        "train_loss": None,
-        "val_loss": None,
-        "learning_rate": None,
-        "input_rows": 0,
-        "rows_dropped_missing_required_fields": 0,
-        "rows_after_required_field_validation": 0,
-        "rows_attempted_featurization": 0,
-        "rows_rejected_invalid_smiles": 0,
-        "rows_used_for_training": 0,
-        "logs": [],
-        "warnings": [],
-        "elapsed": 0
-    }
-    trainer = ActivityTrainer(job_id)
-    trainer.start_training(**kwargs)
+    with training_jobs_lock:
+        active_jobs = sum(
+            1
+            for status in training_jobs.values()
+            if status.get("state") not in _TERMINAL_TRAINING_STATES
+        )
+        if active_jobs >= _training_max_concurrency():
+            raise TrainingCapacityError(
+                "活性模型训练资源繁忙，当前不会创建新的后台训练线程"
+            )
+
+        job_id = str(uuid.uuid4())[:8]
+        training_jobs[job_id] = {
+            "job_id": job_id,
+            "owner_session_id": owner_session_id,
+            "_cancel_event": threading.Event(),
+            "cancel_requested": False,
+            "state": "pending",
+            "progress": 0,
+            "epoch": 0,
+            "metrics": {},
+            "best_metrics": {},
+            "best_epoch": 0,
+            "train_loss": None,
+            "val_loss": None,
+            "learning_rate": None,
+            "input_rows": 0,
+            "rows_dropped_missing_required_fields": 0,
+            "rows_after_required_field_validation": 0,
+            "rows_attempted_featurization": 0,
+            "rows_rejected_invalid_smiles": 0,
+            "rows_used_for_training": 0,
+            "logs": [],
+            "warnings": [],
+            "elapsed": 0
+        }
+
+    try:
+        trainer = ActivityTrainer(job_id)
+        trainer.start_training(**kwargs)
+    except Exception:
+        with training_jobs_lock:
+            training_jobs.pop(job_id, None)
+        raise
     return job_id
 
 

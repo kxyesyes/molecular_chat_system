@@ -138,7 +138,7 @@ def evaluate(model, loader, criterion, task_type, device, *, prediction_summary=
 
 def fit_prepared(model, optimizer, loaders, criterion, *, task_type, device,
                  epochs, patience, scheduler=None, plateau=False, progress=None,
-                 cancel_check=None):
+                 cancel_check=None, evaluate_test=True):
     if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in (epochs, patience)):
         raise ValueError("epochs and patience must be positive integers")
     best_score, best_weights, best_epoch = math.inf, None, 0
@@ -163,9 +163,14 @@ def fit_prepared(model, optimizer, loaders, criterion, *, task_type, device,
             break
     model.load_state_dict(best_weights)
     # The held-out loader is never visited during optimization or checkpoint selection.
-    summary = {}
-    _, test_metrics = evaluate(model, loaders["test"], criterion, task_type, device,
-                               prediction_summary=summary)
+    # Validation-only searches must leave it untouched until the selected
+    # checkpoint is evaluated in a separate finalization phase.
+    summary = None
+    test_metrics = None
+    if evaluate_test:
+        summary = {}
+        _, test_metrics = evaluate(model, loaders["test"], criterion, task_type, device,
+                                   prediction_summary=summary)
     return {"best_epoch": best_epoch, "epochs_completed": epoch,
             "validation_metrics": best_metrics, "test_metrics": test_metrics,
             "test_prediction_summary": summary}
@@ -187,7 +192,7 @@ class _PairedBatches:
                    Batch.from_data_list([p[1] for p in pairs]))
 
 
-def _claim_feature_identity(atoms, split, owners):
+def _claim_feature_identity(atoms, split, owners, *, allow_scaffold_overlap=False):
     """Keep held-out inputs disjoint after the predictor's actual preprocessing."""
     from rdkit import Chem
     from src.activity.dataset_contract import _scaffold_identity
@@ -201,7 +206,10 @@ def _claim_feature_identity(atoms, split, owners):
     Chem.RemoveStereochemistry(mol)
     identity = Chem.MolToSmiles(mol, canonical=True, isomericSmiles=False)
     scaffold = _scaffold_identity(mol)
-    for kind, value in (("molecule", identity), ("scaffold", scaffold)):
+    identities = [("molecule", identity)]
+    if not allow_scaffold_overlap:
+        identities.append(("scaffold", scaffold))
+    for kind, value in identities:
         if not value:
             continue
         key = (kind, value)
@@ -224,11 +232,16 @@ def run_prepared_training(owner, manifest_path, **options):
 
 def _run_prepared_training(owner, manifest_path, *, epochs, lr, batch_size, dropout,
                           num_layers, hidden_size, weight_decay, patience,
-                          loss_metric, lr_scheduler, random_seed):
+                           loss_metric, lr_scheduler, random_seed,
+                           evaluate_test=True, publish=True, checkpoint_path=None):
     from src.activity.model_card import load_prepared_training_data
     prepared = load_prepared_training_data(manifest_path)
     if not owner.has_torch:
         raise ValueError("PyTorch not installed")
+    if type(evaluate_test) is not bool or type(publish) is not bool:
+        raise ValueError("evaluate_test and publish must be boolean")
+    if not evaluate_test and publish:
+        raise ValueError("Validation-only training cannot publish an endpoint-ready model")
     for name, value in {"epochs": epochs, "batch_size": batch_size, "num_layers": num_layers,
                         "hidden_size": hidden_size, "patience": patience}.items():
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -246,7 +259,13 @@ def _run_prepared_training(owner, manifest_path, *, epochs, lr, batch_size, drop
     code_provenance = training_code_provenance()
     torch.manual_seed(random_seed)
     task_type = manifest["task_type"]
-    owner.status.update(task_type=task_type, split_strategy="scaffold", random_seed=random_seed,
+    split_algorithm = manifest["split"]["algorithm"]
+    random_diagnostic = split_algorithm == "deterministic_random_molecule_v1"
+    if publish and random_diagnostic:
+        raise ValueError("Random split diagnostics cannot publish an endpoint-ready model")
+    owner.status.update(task_type=task_type,
+                        split_strategy="random" if random_diagnostic else "scaffold",
+                        random_seed=random_seed,
                         dataset_split_seed=manifest["split"]["seed"])
     # Only graph featurization is reused; no active/demo predictor output is used.
     predictor = get_predictor()
@@ -260,7 +279,10 @@ def _run_prepared_training(owner, manifest_path, *, epochs, lr, batch_size, drop
             if processed is None:
                 raise ValueError(f"Featurization failed in {split}; no rows may be silently dropped")
             atoms, reduced = processed
-            _claim_feature_identity(atoms, split, feature_owners)
+            _claim_feature_identity(
+                atoms, split, feature_owners,
+                allow_scaffold_overlap=random_diagnostic,
+            )
             atoms.y = torch.tensor([float(value)], dtype=torch.float32)
             reduced.y = atoms.y.clone()
             pairs.append((atoms, reduced))
@@ -290,15 +312,148 @@ def _run_prepared_training(owner, manifest_path, *, epochs, lr, batch_size, drop
     result = fit_prepared(model, optimizer, loaders, criterion, task_type=task_type,
                           device=owner.device, epochs=epochs, patience=patience,
                           scheduler=scheduler, plateau=lr_scheduler == "Plateau", progress=progress,
-                          cancel_check=getattr(owner, "_raise_if_cancelled", None))
+                          cancel_check=getattr(owner, "_raise_if_cancelled", None),
+                          evaluate_test=evaluate_test)
     if training_code_provenance()["source_sha256"] != code_provenance["source_sha256"]:
         raise ValueError("Training source files changed during the job; refusing registration")
+    checkpoint = None
+    if checkpoint_path is not None:
+        checkpoint = write_training_checkpoint(
+            checkpoint_path, model, prepared, config, result, random_seed,
+            loss_metric=loss_metric, batch_size=batch_size,
+            code_provenance=code_provenance,
+        )
+    if not publish:
+        owner.status.update(state="completed", progress=100,
+                            metrics=result["validation_metrics"],
+                            best_metrics=result["validation_metrics"],
+                            test_metrics=result["test_metrics"],
+                            test_prediction_summary=result["test_prediction_summary"],
+                            best_epoch=result["best_epoch"],
+                            epochs_completed=result["epochs_completed"],
+                            checkpoint_path=checkpoint["path"] if checkpoint else None,
+                            checkpoint_sha256=checkpoint["sha256"] if checkpoint else None,
+                            model_config=config, training_code=code_provenance,
+                            prepared_dataset_sha256=prepared.manifest["prepared_dataset_sha256"])
+        return
     metadata = publish_model(owner.job_id, model, prepared, config, result, random_seed,
                              code_provenance=code_provenance)
     owner.status.update(state="completed", progress=100, metrics=result["validation_metrics"],
                         best_metrics=result["validation_metrics"], test_metrics=result["test_metrics"],
                         best_epoch=result["best_epoch"], epochs_completed=result["epochs_completed"],
                         model_id=metadata["model_id"], scientific_readiness="endpoint_ready")
+
+
+def write_training_checkpoint(path, model, prepared, config, result, random_seed, *,
+                              loss_metric, batch_size, code_provenance):
+    """Write an unregistered, hash-addressed checkpoint for validation search."""
+    import torch
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema_version": 1,
+        "task_type": prepared.manifest["task_type"],
+        "model_config": copy.deepcopy(config),
+        "state_dict": model.state_dict(),
+        "validation_metrics": copy.deepcopy(result["validation_metrics"]),
+        "best_epoch": result["best_epoch"],
+        "epochs_completed": result["epochs_completed"],
+        "random_seed": random_seed,
+        "batch_size": batch_size,
+        "loss_metric": loss_metric,
+        "dataset": {
+            "manifest_sha256": prepared.manifest_sha256,
+            "prepared_dataset_sha256": prepared.manifest["prepared_dataset_sha256"],
+            "split": copy.deepcopy(prepared.manifest["split"]),
+        },
+        "training_code": copy.deepcopy(code_provenance),
+    }
+    with destination.open("xb") as handle:
+        torch.save(payload, handle)
+    digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+    return {"path": str(destination), "sha256": digest}
+
+
+def evaluate_checkpoint(checkpoint_path, manifest_path, device):
+    """Evaluate one validation-selected checkpoint on the fixed test split once."""
+    import torch
+    from src.activity.model_card import load_prepared_training_data
+    from src.activity.predictor import get_predictor
+    from src.activity.rg_mpnn.Nets.ReduceGNN import RGNN
+
+    checkpoint_path = Path(checkpoint_path).resolve(strict=True)
+    payload = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("Invalid training checkpoint")
+    prepared = load_prepared_training_data(manifest_path)
+    dataset = payload.get("dataset")
+    if (not isinstance(dataset, dict)
+            or dataset.get("manifest_sha256") != prepared.manifest_sha256
+            or dataset.get("prepared_dataset_sha256") != prepared.manifest["prepared_dataset_sha256"]
+            or dataset.get("split") != prepared.manifest["split"]):
+        raise ValueError("Checkpoint dataset provenance does not match manifest")
+    if payload.get("task_type") != prepared.manifest["task_type"]:
+        raise ValueError("Checkpoint task does not match manifest")
+    config = payload.get("model_config")
+    if not isinstance(config, dict):
+        raise ValueError("Checkpoint model configuration is missing")
+
+    predictor = get_predictor()
+    loaders = {}
+    feature_owners = {}
+    first = None
+    batch_size = payload.get("batch_size")
+    random_seed = payload.get("random_seed")
+    if (type(batch_size) is not int or batch_size < 1
+            or type(random_seed) is not int or not 0 <= random_seed < 2**32):
+        raise ValueError("Invalid checkpoint training options")
+    for split, frame in prepared.frames.items():
+        pairs = []
+        for smi, value in zip(frame["canonical_smiles"], frame["normalized_value"]):
+            processed = predictor.process_smiles(smi)
+            if processed is None:
+                raise ValueError(f"Featurization failed in {split}; no rows may be silently dropped")
+            atoms, reduced = processed
+            _claim_feature_identity(
+                atoms, split, feature_owners,
+                allow_scaffold_overlap=(
+                    prepared.manifest["split"]["algorithm"] == "deterministic_random_molecule_v1"
+                ),
+            )
+            atoms.y = torch.tensor([float(value)], dtype=torch.float32)
+            reduced.y = atoms.y.clone()
+            pairs.append((atoms, reduced))
+            if first is None:
+                first = atoms
+        loaders[split] = _PairedBatches(pairs, batch_size, shuffle=False, seed=random_seed)
+    model = RGNN(**config).to(device)
+    try:
+        model.load_state_dict(payload["state_dict"])
+    except (KeyError, TypeError, RuntimeError):
+        raise ValueError("Invalid checkpoint model weights") from None
+    loss_metric = payload.get("loss_metric")
+    criteria = {"MSE": torch.nn.MSELoss, "MAE": torch.nn.L1Loss, "Huber": torch.nn.HuberLoss}
+    if loss_metric not in criteria:
+        raise ValueError("Invalid checkpoint loss metric")
+    criterion = (criteria[loss_metric]() if prepared.manifest["task_type"] == "regression"
+                 else torch.nn.BCEWithLogitsLoss())
+    summary = {}
+    _, test_metrics = evaluate(model, loaders["test"], criterion,
+                               prepared.manifest["task_type"], device,
+                               prediction_summary=summary)
+    return {
+        "model": model,
+        "prepared": prepared,
+        "model_config": copy.deepcopy(config),
+        "validation_metrics": copy.deepcopy(payload["validation_metrics"]),
+        "test_metrics": test_metrics,
+        "test_prediction_summary": summary,
+        "random_seed": random_seed,
+        "training_code": copy.deepcopy(payload.get("training_code", {})),
+        "best_epoch": payload.get("best_epoch"),
+        "epochs_completed": payload.get("epochs_completed"),
+    }
 
 
 def publish_model(job_id, model, prepared, config, result, random_seed, *, code_provenance=None):

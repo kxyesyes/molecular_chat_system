@@ -261,6 +261,7 @@ function autoSetBoxToLigand() {
     document.getElementById("center_x").value = center.x.toFixed(2);
     document.getElementById("center_y").value = center.y.toFixed(2);
     document.getElementById("center_z").value = center.z.toFixed(2);
+    if (!silent) AppState.dockingBoxCenterTouched = true;
 
     const sxEl = document.getElementById("size_x");
     const syEl = document.getElementById("size_y");

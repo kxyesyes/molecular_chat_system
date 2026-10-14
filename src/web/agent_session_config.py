@@ -24,15 +24,19 @@ def setup_agent_sessions(app) -> None:
 
 
 class AgentEntrySessionMiddleware(AgentSessionMiddleware):
-    """Limit session requirements to the home/Agent/task entry points."""
+    """Install identity at browser entry points and session-owned APIs."""
 
     async def __call__(self, scope, receive, send):
         path = scope.get("path", "")
-        protected = path in {"/", "/ws", "/api/tasks"} or any(
+        protected = path in {
+            "/", "/ws", "/api/tasks", "/molecular-design",
+            "/api/design/save_molecule", "/api/design/export_history",
+        } or any(
             path.startswith(prefix)
             for prefix in (
                 "/api/tasks/",
                 "/api/agent/workflows/",
+                "/api/agent/runs/",
                 "/api/llm/",
                 "/api/switch_model",
                 "/api/docking/",

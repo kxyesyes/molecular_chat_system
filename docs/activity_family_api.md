@@ -22,6 +22,11 @@
 `ACTIVITY_CAPACITY_EXCEEDED`；超出批量上限返回 HTTP 413、错误码
 `ACTIVITY_BATCH_LIMIT_EXCEEDED`。这些限制在进入模型推理前生效。
 
+训练上传另有独立的行数上限，默认每个数据集最多 100,000 条数据记录（不含表头），
+可用 `MEDCHAT_ACTIVITY_TRAINING_MAX_ROWS` 调整。它与
+`MEDCHAT_MAX_UPLOAD_BYTES` 一起在创建临时文件、启动后台训练之前检查；超出时返回
+HTTP 413、错误码 `ACTIVITY_TRAINING_ROW_LIMIT_EXCEEDED`，不会占用训练并发槽位。
+
 请求等待活性计算的默认上限为 60 秒，可用 `MEDCHAT_ACTIVITY_TIMEOUT_SECONDS` 调整。
 超时返回 HTTP 504、错误码 `ACTIVITY_REQUEST_TIMEOUT`，并明确标记
 `compute_disposition=draining`：这表示请求停止等待，但不能安全地强制终止正在执行的
@@ -54,7 +59,8 @@ Agent 对已校验的冲突观察保留数值、来源和警告，但不作为�
 实际 status/success，并独立核对行状态；不以生产 summarizer 自我验证替代验收。
 
 内部异常返回固定错误消息，不回显堆栈/路径；显式 HTTPException 的状态码与 headers 保留。
-原有上传限制和模型管理接口不在本批变更范围。
+训练上传的字节和行数限制、以及模型管理接口不在科学预测契约中；二者均属于入口资源
+保护，不能被解释为训练质量或模型性能保证。
 
 ## 服务生命周期
 

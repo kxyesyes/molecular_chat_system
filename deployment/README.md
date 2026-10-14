@@ -282,11 +282,13 @@ scratch/
 ```env
 MEDCHAT_ENV_FILE=.env
 MEDCHAT_HOST=127.0.0.1
-MEDCHAT_PORT=6001
+MEDCHAT_PORT=6000
 MEDCHAT_DEBUG=false
 MEDCHAT_RELOAD=false
 MEDCHAT_WORKERS=1
 MEDCHAT_LOG_LEVEL=info
+# Optional exact host allowlist for HTTP-only deployments; plaintext traffic is exposed.
+MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com
 MEDCHAT_LOG_DIR=logs
 MEDCHAT_TEMP_DOCKING_DIR=temp_docking
 MEDCHAT_SCRATCH_DIR=scratch
@@ -313,6 +315,33 @@ RAG_INDEX_PATH=data/molecular_faiss_index.index
 MEDCHAT_SYSTEMD_SERVICE=deployment/medchat.service
 MEDCHAT_NGINX_CONFIG=deployment/nginx-medchat.conf
 ```
+
+### 7.1 当前 HTTP 映射（无 HTTPS 终止）
+
+如果公网映射 `http://medchat.tdd-lab.com` 直接转发到服务器的
+`127.0.0.1:6000`，而映射平台没有提供 HTTPS 终止，请在项目根目录的 `.env`
+中加入下面这一行：
+
+```env
+MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com
+```
+
+仓库提供了不含密钥的示例文件
+[`deployment/medchat-http.env.example`](medchat-http.env.example)。它不会被
+`main.py --env-file .env` 自动加载，也不会覆盖现有 `.env`；请将该行合并到
+`/home/user/XIAOKX/molecular_chat_system/.env`，保留 `.env` 中已有的模型密钥和
+其他本机配置。该设置只允许精确的 Host，其他域名仍会返回
+`{"detail":"HTTPS required"}`。
+
+应用配置更新后，用现有的手动启动方式重启：
+
+```bash
+cd /home/user/XIAOKX/molecular_chat_system
+python main.py --env-file .env --host 127.0.0.1 --port 6000 --no-reload
+```
+
+该设置是明文 HTTP 的显式例外，仅适合已接受传输风险的临时或受控网络；长期
+公网部署仍应配置 HTTPS/WSS。
 
 ## 8. 权限配置
 
@@ -382,19 +411,23 @@ python main.py --no-reload
 检查：
 
 ```bash
-curl http://127.0.0.1:6001/health
+curl http://127.0.0.1:6000/health
 ```
 
-浏览器访问：
+浏览器不要直接访问服务器 6000：应用仅监听本机，且 6000 是浏览器受限端口。
+配置下文 nginx HTTPS 后访问实际域名（将 `<domain>` 替换为真实值）：
 
 ```text
-http://<server-ip>:6001/
-http://<server-ip>:6001/target-search
-http://<server-ip>:6001/molecular-docking
-http://<server-ip>:6001/reverse-target
-http://<server-ip>:6001/activity-prediction
-http://<server-ip>:6001/molecular-design
+https://<domain>/
+https://<domain>/target-search
+https://<domain>/molecular-docking
+https://<domain>/reverse-target
+https://<domain>/activity-prediction
+https://<domain>/molecular-design
 ```
+
+nginx 配置前可按 [部署教程](../docs/DEPLOYMENT_TUTORIAL.md#8-先绕过-nginx-做本机验证)
+建立本地 6001 到服务器 6000 的 SSH 隧道进行浏览器验证。
 
 ## 11. systemd 服务
 
@@ -626,6 +659,26 @@ API key 写进了 YAML 或代码
 8. 用 HTTPS 页面和 `wss://` 连接完成一次验收；未完成前不得对公网开放明文 HTTP
 9. 做全模块功能验收
 10. 设置日志轮转和数据备份
+
+如果部署要求进程重启后仍能恢复后台任务，应在生产环境设置：
+
+```env
+MEDCHAT_REQUIRE_DURABLE_TASKS=1
+```
+
+该开关会让 `python scripts/health_check.py --strict` 在任务后端仍为
+`local` 时失败；生产环境应改用已通过健康检查的 Temporal 后端。开发环境
+不设置该变量时，local 后端仍可用于单进程调试，但其结果不代表具备重启恢复能力。
+
+如果生产环境要提供真实的 PDE/BuChE 活性预测，还应设置：
+
+```env
+MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1
+```
+
+该开关会要求根活动模型 registry 已经原子选择并验证 PDE、BuChE 两个
+family bundle。只有子目录中存在训练注册记录、但根 registry 尚未选择
+active bundle 时，严格健康检查也会失败；不会自动替换或激活模型。
 
 ## 17. 运行时数据库、缓存与日志安全
 

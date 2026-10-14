@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from fastapi import FastAPI
@@ -19,7 +20,7 @@ from src.docking.molecular_docking_service import (
     DockingResult,
     MolecularDockingService,
 )
-from src.docking.adapters.base import CommandAdapter
+from src.docking.adapters.base import CommandAdapter, CommandCancelledError
 from src.docking.adapters.vina_adapter import VinaAdapter
 from src.web.routes.api_routes import setup_api_routes
 from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
@@ -93,6 +94,80 @@ def _windows_handle_count() -> int:
 
 
 class DockingConfigurationTest(unittest.TestCase):
+    def test_analysis_receptor_cancellation_uses_structured_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix="docking_analysis_cancel_") as tmp:
+            root = Path(tmp)
+            source = root / "receptor.pdb"
+            source.write_text(
+                "ATOM      1  C   ALA A   1       0.000   0.000   0.000\n",
+                encoding="utf-8",
+            )
+            service = MolecularDockingService()
+            service.work_dir = str(root / "jobs")
+            Path(service.work_dir).mkdir()
+
+            def cancel_before_analysis(*_args, **_kwargs):
+                raise CommandCancelledError()
+
+            service.prepare_analysis_receptor = cancel_before_analysis
+            result = asyncio.run(
+                service.perform_docking(
+                    str(source),
+                    "CC",
+                    DockingConfig(manual_center=True),
+                    job_id="cancel-analysis",
+                )
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "cancelled")
+        self.assertFalse((root / "jobs" / "docking_cancel-analysis").exists())
+
+    def test_configure_discovers_reduce_command_from_adfr_bin(self):
+        with tempfile.TemporaryDirectory(prefix="docking_reduce_config_") as tmp:
+            root = Path(tmp)
+            reduce = root / ("reduce.exe" if os.name == "nt" else "reduce")
+            reduce.write_text("", encoding="utf-8")
+
+            service = MolecularDockingService({"adfrsuite_bin": str(root)})
+
+        self.assertEqual(service.reduce_cmd, str(reduce.resolve()))
+
+    def test_prepare_analysis_receptor_preserves_explicit_hydrogens(self):
+        source_pdb = (
+            "ATOM      1  C   ALA A   1       0.000   0.000   0.000  1.00 20.00           C  \n"
+        )
+        prepared_pdb = source_pdb + (
+            "ATOM      2  H   ALA A   1       0.000   0.000   1.090  1.00 20.00           H  \n"
+        )
+
+        class FakeReduceAdapter:
+            def wrap_command(self, *args):
+                return ["reduce", *args]
+
+            def run(self, args, cwd=None, timeout=None, *, cancel_event=None):
+                return subprocess.CompletedProcess(args, 0, stdout=prepared_pdb, stderr="")
+
+        with tempfile.TemporaryDirectory(prefix="docking_analysis_receptor_") as tmp:
+            root = Path(tmp)
+            source = root / "input.pdb"
+            output = root / "analysis_receptor.pdb"
+            source.write_text(source_pdb, encoding="utf-8")
+            service = MolecularDockingService()
+            service.reduce_cmd = "reduce"
+            service.reduce_adapter = FakeReduceAdapter()
+            trace = {}
+
+            self.assertTrue(
+                service.prepare_analysis_receptor(
+                    str(source), str(output), trace=trace
+                )
+            )
+
+            self.assertIn(" H ", output.read_text(encoding="utf-8"))
+            self.assertEqual(trace["analysis_receptor_method"], "reduce")
+            self.assertEqual(trace["analysis_receptor_hydrogens"], "explicit")
+
     def test_configure_accepts_direct_prepare_receptor_command(self):
         with tempfile.TemporaryDirectory(prefix="docking_config_") as tmp:
             root = Path(tmp)
@@ -200,6 +275,7 @@ class DockingConfigurationTest(unittest.TestCase):
             root = Path(tmp)
             child_script = root / "delayed_marker.py"
             child_pid_file = root / "child.pid"
+            ready_file = root / "child.ready"
             marker_file = root / "survived.marker"
             batch_file = root / "launch_child.bat"
             child_script.write_text(
@@ -209,9 +285,12 @@ class DockingConfigurationTest(unittest.TestCase):
                         "import sys",
                         "import time",
                         "from pathlib import Path",
+                        # Deliberately exceed the old 0.75s startup assumption.
+                        "time.sleep(1.0)",
                         "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8')",
                         "print('child-started', flush=True)",
                         "print('child-stderr', file=sys.stderr, flush=True)",
+                        "Path(sys.argv[3]).touch()",
                         "time.sleep(2.0)",
                         "Path(sys.argv[2]).write_text('survived', encoding='utf-8')",
                     ]
@@ -221,21 +300,37 @@ class DockingConfigurationTest(unittest.TestCase):
             batch_file.write_text(
                 (
                     "@echo off\r\n"
-                    "echo child-started\r\n"
-                    "echo child-stderr 1>&2\r\n"
-                    f'"{sys.executable}" "{child_script}" "%~1" "%~2"\r\n'
+                    f'"{sys.executable}" "{child_script}" "%~1" "%~2" "%~3"\r\n'
                 ),
                 encoding="utf-8",
             )
             adapter = CommandAdapter(str(batch_file))
 
-            with self.assertRaises(subprocess.TimeoutExpired) as caught:
+            # Keep real process creation/termination; advance only the adapter's
+            # clock once the child has published its PID and flushed both streams.
+            # Startup remains bounded if readiness never arrives. Other tests
+            # separately cover real elapsed startup/request deadlines.
+            clock_lock = threading.Lock()
+            offset = 0.0
+
+            def ready_deadline_clock():
+                nonlocal offset
+                with clock_lock:
+                    if ready_file.exists():
+                        offset = 30.0
+                    return time.monotonic() + offset
+
+            controlled_time = SimpleNamespace(monotonic=ready_deadline_clock, sleep=time.sleep)
+            with patch("src.docking.adapters.base.time", controlled_time), self.assertRaises(
+                subprocess.TimeoutExpired
+            ) as caught:
                 adapter.run(
-                    adapter.wrap_command(str(child_pid_file), str(marker_file)),
+                    adapter.wrap_command(str(child_pid_file), str(marker_file), str(ready_file)),
                     cwd=str(root),
-                    timeout=0.75,
+                    timeout=15.0,
                 )
 
+            self.assertTrue(ready_file.is_file(), "child startup did not finish within 15s")
             self.assertIn("child-started", _decoded_stream(caught.exception.stdout))
             self.assertIn("child-stderr", _decoded_stream(caught.exception.stderr))
             self.assertTrue(child_pid_file.is_file())
@@ -410,7 +505,10 @@ class DockingConfigurationTest(unittest.TestCase):
                     binding_energy=-7.25,
                     rmsd_lb=0.0,
                     rmsd_ub=0.0,
-                    pose_data="",
+                    pose_data=(
+                        "HETATM    1  C   LIG A   1       0.000   0.000   0.000  "
+                        "1.00  0.00     0.000 C"
+                    ),
                 )
             ]
 

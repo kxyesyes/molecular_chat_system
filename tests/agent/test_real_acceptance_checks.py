@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from scripts.run_agent_acceptance import (
     _test_external_model,
+    _test_activity_inference,
     _run_harness_contract_probe,
     _evaluate_activity_result,
     _evaluate_docking_result,
@@ -25,6 +27,296 @@ from src.agent.evaluation.models import EvaluationCase
 from src.agent.contracts import AgentResult, ToolResult
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
+from src.activity.request_selection import ActivityModelRequest, request_identity
+
+
+def _complete_activity_provenance(*, bundle_id="pde-bundle", family_id="pde-family"):
+    models = {
+        "classification": {
+            "model_id": "pde-classifier",
+            "target_id": family_id,
+            "task_type": "classification",
+            "endpoint": "activity",
+            "units": "probability",
+            "weights_sha256": "a" * 64,
+            "model_card_sha256": "b" * 64,
+            "prepared_dataset_sha256": "c" * 64,
+            "dataset_sha256": "d" * 64,
+            "source_sha256": "e" * 64,
+            "model_contract_key": "pde-classifier-contract",
+            "scientific_readiness": "endpoint_ready",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+        "regression": {
+            "model_id": "pde-regressor",
+            "target_id": family_id,
+            "task_type": "regression",
+            "endpoint": "pIC50",
+            "units": "pIC50",
+            "weights_sha256": "f" * 64,
+            "model_card_sha256": "0" * 64,
+            "prepared_dataset_sha256": "1" * 64,
+            "dataset_sha256": "2" * 64,
+            "source_sha256": "3" * 64,
+            "model_contract_key": "pde-regressor-contract",
+            "scientific_readiness": "endpoint_ready",
+            "demo_mode": False,
+            "fallback_used": False,
+        },
+    }
+    request = ActivityModelRequest.from_mapping({"target": family_id})
+    return {
+        "family_id": family_id,
+        "bundle_id": bundle_id,
+        "source_sha256": "4" * 64,
+        "assignment_sha256": "5" * 64,
+        "scope": {},
+        "label_threshold": 5.0,
+        "probability_threshold": 0.5,
+        "models": models,
+        "request": {
+            "family_id": request.family_id,
+            "endpoint": request.endpoint,
+            "units": request.units,
+            "species": request.species,
+            "validation": request.validation,
+            "identity": request_identity(request, bundle_id, models),
+        },
+    }
+
+
+def test_activity_acceptance_probe_uses_canonical_family_prediction_service(monkeypatch):
+    calls = {}
+
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        calls["smiles"] = smiles
+        calls["target"] = target
+        rows = []
+        for value in smiles:
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "activity_class": "有活性",
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(),
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference()
+
+    assert result["status"] == "passed"
+    assert result["real_model_used"] is True
+    assert calls == {"smiles": ["CCO", "CCN", "c1ccccc1"], "target": "PDE"}
+
+
+def test_activity_acceptance_probe_rejects_incomplete_model_provenance(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for value in smiles:
+            provenance = _complete_activity_provenance()
+            provenance["models"]["classification"].pop("model_id")
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": provenance,
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["real_model_used"] is False
+    assert result["real_prediction_count"] == 0
+    assert all(item["real_model_provenance"] is False for item in result["predictions"])
+
+
+def test_activity_acceptance_probe_rejects_wrong_target_family(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for value in smiles:
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "buche-family",
+                "bundle_id": "buche-bundle",
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.8,
+                "predicted_pIC50": 6.2,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(
+                    bundle_id="buche-bundle", family_id="buche-family"
+                ),
+            })
+        return {"success": True, "status": "passed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["real_model_used"] is False
+    assert result["real_prediction_count"] == 0
+    assert all(item["real_model_provenance"] is False for item in result["predictions"])
+
+
+def test_activity_acceptance_probe_preserves_real_partial_status(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = []
+        for index, value in enumerate(smiles):
+            rows.append({
+                "smiles": value,
+                "requested_target": target,
+                "family_id": "pde-family",
+                "bundle_id": "pde-bundle",
+                "success": index != 0,
+                "status": "partial" if index == 0 else "passed",
+                "execution_status": "passed",
+                "activity_class": "有活性",
+                "activity_probability": 0.51,
+                "predicted_pIC50": 5.01,
+                "units": "pIC50",
+                "label_threshold": 5.0,
+                "probability_threshold": 0.5,
+                "classification_regression_consistent": True,
+                "errors": {},
+                "warnings": [],
+                "provenance": _complete_activity_provenance(),
+            })
+        return {"success": False, "status": "partial", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "partial"
+    assert result["real_model_used"] is True
+    assert result["partial_count"] == 1
+    assert result["successful_count"] == 2
+    assert len(result["predictions"]) == 3
+    assert result["predictions"][0]["status"] == "partial"
+    assert result["predictions"][0]["predicted_pIC50"] == 5.01
+    assert result["predictions"][0]["provenance"]["bundle_id"] == "pde-bundle"
+
+
+def test_activity_acceptance_probe_keeps_failed_rows_without_provenance(monkeypatch):
+    def fake_predict_activity(smiles, *, target=None, model_request=None):
+        rows = [{
+            "smiles": smiles[0],
+            "success": False,
+            "status": "failed",
+            "execution_status": "failed",
+            "errors": {"model": "activity bundle unavailable"},
+            "provenance": {},
+        }]
+        for value in smiles[1:]:
+            rows.append({
+                "smiles": value,
+                "success": True,
+                "status": "passed",
+                "execution_status": "passed",
+                "activity_probability": 0.51,
+                "predicted_pIC50": 5.01,
+                "units": "pIC50",
+                "provenance": _complete_activity_provenance(),
+            })
+        return {"success": False, "status": "failed", "results": rows}
+
+    monkeypatch.setattr(
+        "src.activity.prediction_service.predict_activity", fake_predict_activity
+    )
+
+    result = _test_activity_inference(target="PDE")
+
+    assert result["status"] == "failed"
+    assert result["prediction_count"] == 3
+    assert result["failed_count"] == 1
+    assert len(result["predictions"]) == 3
+    assert result["predictions"][0]["status"] == "failed"
+    assert result["predictions"][0]["errors"] == {
+        "model": "activity bundle unavailable"
+    }
+
+
+def test_run_real_reports_both_activity_family_targets(monkeypatch):
+    calls = []
+
+    async def fake_external_model():
+        return {"status": "skipped"}
+
+    def fake_activity(target=None):
+        calls.append(target)
+        return {
+            "status": "passed",
+            "real_model_used": True,
+            "target": target,
+        }
+
+    class FakeScientificRunner:
+        def __init__(self, dataset_dir, project_root, dataset_path=None):
+            pass
+
+        def run(self, repeat=1):
+            return {"status": "passed", "case_count": 0, "results": [], "stability": {}}
+
+    monkeypatch.setattr("scripts.run_agent_acceptance.ScientificAcceptanceRunner", FakeScientificRunner)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_external_model", fake_external_model)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_ollama", lambda: {"status": "passed"})
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_target_search", lambda: {"status": "passed"})
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_activity_inference", fake_activity)
+    monkeypatch.setattr("scripts.run_agent_acceptance._test_docking_execution", lambda: {"status": "passed"})
+
+    report = run_real(repeat=1, case_set="diverse")
+
+    assert calls == ["PDE", "BuChE"]
+    assert set(report["checks"]["activity_model_inference"]["targets"]) == {"PDE", "BuChE"}
+    assert report["checks"]["activity_model_inference"]["status"] == "passed"
 
 
 def test_generation_truth_check_rejects_invalid_or_duplicate_candidates():
@@ -274,6 +566,26 @@ def test_external_model_probe_allows_reasoning_model_output_budget(monkeypatch):
     assert result["status"] == "passed"
     assert result["response_matched"] is True
     assert captured == {"temperature": 0.0, "max_tokens": 256}
+
+
+def test_external_model_probe_reports_configuration_failure_without_crashing(monkeypatch):
+    class Model:
+        def __init__(self, **_kwargs):
+            raise ValueError("endpoint rejected")
+
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "runtime-test-key")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://not-allowlisted.invalid")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_MODEL", "reasoning-model")
+    monkeypatch.setattr("scripts.run_agent_acceptance.OpenAICompatibleModel", Model)
+
+    result = __import__("asyncio").run(_test_external_model())
+
+    assert result == {
+        "status": "failed",
+        "error_code": "external_model_configuration_invalid",
+        "provider": "external-main",
+        "model": "reasoning-model",
+    }
 
 
 def test_claim_truth_check_rejects_claim_without_evidence():
@@ -970,6 +1282,122 @@ def test_scientific_case_score_zeros_hard_hallucination_failure() -> None:
     assert scored["hard_failure_reasons"] == ["forbidden_patterns_found"]
 
 
+def test_admet_hydration_free_energy_unit_is_not_docking_claim() -> None:
+    case = EvaluationCase(
+        case_id="SAFE-ADMET-UNIT",
+        version="1",
+        category="admet",
+        prompt="report ADMET endpoints",
+        expected_skill="admet_assessment",
+        forbidden_patterns=["binding_energy", "kcal/mol"],
+    )
+
+    legitimate_admet = scientific._anti_hallucination(
+        case,
+        json.dumps(
+            {
+                "admet": {
+                    "endpoints": {
+                        "HydrationFreeEnergy_FreeSolv": {
+                            "value": -12.4,
+                            "unit": "kcal/mol",
+                        }
+                    }
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert legitimate_admet["status"] == "passed"
+    assert legitimate_admet["forbidden_found"] == []
+
+    forged_docking = scientific._anti_hallucination(
+        case,
+        json.dumps(
+            {"binding_energy": -7.2, "unit": "kcal/mol"},
+            ensure_ascii=False,
+        ),
+    )
+    assert forged_docking["status"] == "failed"
+    assert set(forged_docking["forbidden_found"]) == {
+        "binding_energy",
+        "kcal/mol",
+    }
+
+    mixed_payload = scientific._anti_hallucination(
+        case,
+        json.dumps(
+            {
+                "HydrationFreeEnergy_FreeSolv": {
+                    "value": -12.4,
+                    "unit": "kcal/mol",
+                },
+                "binding_energy": -7.2,
+                "unit": "kcal/mol",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert mixed_payload["status"] == "failed"
+    assert set(mixed_payload["forbidden_found"]) == {
+        "binding_energy",
+        "kcal/mol",
+    }
+
+    unit_only_case = EvaluationCase(
+        case_id="SAFE-ADMET-UNIT-ONLY",
+        version="1",
+        category="comprehensive",
+        prompt="compare scientific outputs",
+        expected_skill="comprehensive_evaluation",
+        forbidden_patterns=["kcal/mol"],
+    )
+    fabricated_after_label = scientific._anti_hallucination(
+        unit_only_case,
+        json.dumps(
+            {
+                "HydrationFreeEnergy_FreeSolv": {"value": -12.4},
+                "docking_energy": -7.2,
+                "unit": "kcal/mol",
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert fabricated_after_label["status"] == "failed"
+    assert fabricated_after_label["forbidden_found"] == ["kcal/mol"]
+
+    hit_to_lead_case = EvaluationCase(
+        case_id="SAFE-HIT-TO-LEAD-UNIT",
+        version="1",
+        category="hit_to_lead",
+        prompt="compare ADMET endpoints",
+        expected_skill="hit_to_lead_optimization",
+        forbidden_patterns=["binding_energy", "kcal/mol"],
+    )
+    cross_skill_admet = scientific._anti_hallucination(
+        hit_to_lead_case,
+        json.dumps(
+            {
+                "HydrationFreeEnergy_FreeSolv": {
+                    "value": -12.4,
+                    "unit": "kcal/mol",
+                }
+            },
+            ensure_ascii=False,
+        ),
+    )
+    assert cross_skill_admet["status"] == "passed"
+
+
+def test_scientific_runner_registers_lead_optimization_verifier() -> None:
+    runner = object.__new__(scientific.ScientificAcceptanceRunner)
+
+    tools = runner._build_real_tools()
+
+    assert "lead_optimization_verifier" in tools
+    assert tools["lead_optimization_verifier"].name == "lead_optimization_verifier"
+
+
 def test_activity_check_rejects_simulated_demo_predictions() -> None:
     summary = _evaluate_activity_result(
         predictor_demo_mode=True,
@@ -1013,6 +1441,29 @@ def test_docking_check_requires_actual_pose_and_binding_energy(tmp_path) -> None
         "pose_file": str(pose_file),
         "pose_file_exists": True,
     }
+
+
+def test_docking_report_can_project_pose_path_relative_to_repository(tmp_path) -> None:
+    pose_file = tmp_path / "temp_docking" / "result.pdbqt"
+    pose_file.parent.mkdir()
+    pose_file.write_text("MODEL 1\nENDMDL\n", encoding="utf-8")
+
+    summary = _evaluate_docking_result(
+        {
+            "success": True,
+            "data": {
+                "total_poses": 1,
+                "best_pose": {
+                    "binding_energy": -5.1,
+                    "pose_file": str(pose_file),
+                },
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    assert summary["pose_file"] == "temp_docking/result.pdbqt"
+    assert not Path(summary["pose_file"]).is_absolute()
 
 
 def test_replay_mode_reads_existing_structured_report_without_running_tools(tmp_path) -> None:
@@ -1105,7 +1556,7 @@ def test_run_real_accepts_case_set_argument(monkeypatch) -> None:
     )
     monkeypatch.setattr(
         "scripts.run_agent_acceptance._test_activity_inference",
-        lambda: {"status": "passed"},
+        lambda target=None: {"status": "passed", "target": target},
     )
     monkeypatch.setattr(
         "scripts.run_agent_acceptance._test_docking_execution",

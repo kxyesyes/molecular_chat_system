@@ -1534,6 +1534,14 @@ class TaskRecord:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        # Keep the resolved manifest path private.  Runtime code uses the
+        # dataclass field directly; serialized records only need the stable
+        # filename locator and must not disclose the server staging root.
+        manifest_locator = None
+        if self.input_manifest_path:
+            manifest_locator = (
+                self.input_manifest_path.replace("\\", "/").rsplit("/", 1)[-1]
+            )
         return {
             "task_id": self.task_id,
             "task_type": self.task_type,
@@ -1547,7 +1555,7 @@ class TaskRecord:
             "heartbeat_at": self.heartbeat_at,
             "error_code": self.error_code,
             "warnings": self.warnings or [],
-            "input_manifest_path": self.input_manifest_path,
+            "input_manifest_path": manifest_locator,
             "provenance": self.provenance or {},
             "result": self.result,
             "error": self.error,

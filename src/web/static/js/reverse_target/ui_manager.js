@@ -12,7 +12,7 @@ const RtUI = (() => {
     document
       .querySelectorAll(".tab")
       .forEach((t) => t.classList.remove("active"));
-    event.currentTarget.classList.add("active");
+    document.querySelector(`.tab[data-tab="${tabName}"]`)?.classList.add("active");
 
     $("single-panel").style.display = tabName === "single" ? "block" : "none";
     $("batch-panel").style.display = tabName === "batch" ? "block" : "none";
@@ -36,6 +36,11 @@ const RtUI = (() => {
   function showError(message) {
     $("error").style.display = "block";
     $("errorText").textContent = message;
+  }
+
+  function clearError() {
+    $("error").style.display = "none";
+    $("errorText").textContent = "";
   }
 
   function setSubmitEnabled(btnId, enabled) {
@@ -106,6 +111,7 @@ const RtUI = (() => {
     fileInput.addEventListener("change", function () {
       if (this.files && this.files[0]) {
         const f = this.files[0];
+        clearError();
         fileInfo.textContent = `已选择: ${f.name} (${(f.size / 1024).toFixed(1)} KB)`;
         uploadArea.style.borderColor = "#4f46e5";
         uploadArea.style.backgroundColor = "#eff6ff";
@@ -238,6 +244,7 @@ const RtUI = (() => {
     showLoading,
     hideLoading,
     showError,
+    clearError,
     setSubmitEnabled,
     loadStats,
     initFileUpload,

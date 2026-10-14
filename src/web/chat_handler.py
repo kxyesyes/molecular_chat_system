@@ -35,7 +35,8 @@ from src.web.agent_result_presentation import (
     _AGENT_FAILURE_WARNING_MAX_CHARS,
     _AGENT_FAILURE_WARNING_LIMIT,
 )
-from src.web.models import generate_for_chat
+from src.web.models import generate_for_chat, stream_for_chat
+from src.system.ollama_model import OllamaGenerationError
 from src.web.model_lifecycle import model_request, finish_on_cancel
 from src.web.rag_presentation import format_rag_context, rag_info_molecule
 from src.web.legacy_websocket_protocol import LegacyFrameError, decode_legacy_frame
@@ -75,12 +76,31 @@ class ChatHandler:
             raise ValueError("temperature must be a finite number between 0 and 2")
         return float(value)
 
+    @staticmethod
+    async def _send_model_failure(websocket, error):
+        messages = {
+            "http_error": "Ollama 返回 HTTP 错误",
+            "timeout": "Ollama 请求超时",
+            "transport_error": "无法连接或读取 Ollama 服务",
+            "invalid_response": "Ollama 返回无效响应",
+            "client_error": "Ollama 客户端请求失败",
+        }
+        reason = error.reason if error.reason in messages else "client_error"
+        message = messages[reason]
+        if reason == "http_error" and error.http_status is not None:
+            message = f"Ollama 返回 HTTP {error.http_status}"
+        await websocket.send_text(json.dumps({
+            "type": "complete",
+            "status": "failed",
+            "content": "模型服务暂时不可用，请稍后重试。",
+            "error": {"code": f"ollama_{reason}", "message": message},
+        }, ensure_ascii=False))
+
     async def process_decision_message(self, websocket, *, context, decision_loop,
                                        request_kind, allowed_tools, required_tools,
                                        requirements=None, continuation_id=None, clarified_query=None,
                                        worker_owner=None, cancel_event=None,
-                                       admission_carry=None, admission_exchange=None,
-                                       before_result=None):
+                                       admission_carry=None, admission_exchange=None):
         """Server-only opt-in bridge; never dispatch browser kwargs into this API."""
         from .decision_chat import process_decision_message
         if (self.decision_runtime is not None and self.decision_runtime.semantic
@@ -93,7 +113,6 @@ class ChatHandler:
             requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
             worker_owner=worker_owner,
             cancel_event=cancel_event,
-            before_result=before_result,
             **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
                if admission_carry is not None else {}),
         )
@@ -524,21 +543,51 @@ class ChatHandler:
         if (
             not agent_used
             and enable_rag
-            and self.rag_service.is_initialized
             and self._should_use_legacy_rag(message)
         ):
+            await self._send_status(websocket, f"🔍 搜索相关分子数据 (top {rag_count})...")
+            outcome = {"status": "unavailable", "records": []}
             try:
-                await self._send_status(websocket, f"🔍 搜索相关分子数据 (top {rag_count})...")
-                retrieved_molecules = await self.rag_service.search_similar_molecules(message, rag_count)
-                if retrieved_molecules:
-                    rag_context = self._format_rag_context(retrieved_molecules)
-                    await websocket.send_text(json.dumps(self._rag_info_payload(
-                        retrieved_molecules,
-                        f"✅ 找到 {len(retrieved_molecules)} 个相关分子",
-                    )))
-                    await self._send_status(websocket, f"📊 基于 {len(retrieved_molecules)} 个分子数据生成回答...")
-            except Exception as e:
-                logger.error(f"Legacy RAG search failed: {e}")
+                search = getattr(
+                    self.rag_service,
+                    "search_similar_molecules_with_status",
+                    None,
+                )
+                if callable(search):
+                    outcome = await search(message, rag_count)
+            except Exception:
+                logger.warning("Legacy RAG unavailable; details omitted")
+
+            records = outcome.get("records") if isinstance(outcome, dict) else None
+            valid = (
+                isinstance(outcome, dict)
+                and isinstance(records, list)
+                and outcome.get("status") in {"succeeded", "no_hits"}
+                and (outcome.get("status") == "succeeded") == bool(records)
+            )
+            if not valid:
+                await websocket.send_text(json.dumps({
+                    "type": "complete",
+                    "status": "failed",
+                    "retrieval_status": "unavailable",
+                    "content": "知识库检索暂时不可用，未生成基于检索的回答。",
+                    "error": {
+                        "code": "rag_unavailable",
+                        "message": "知识库检索未完成",
+                    },
+                }, ensure_ascii=False))
+                return
+
+            retrieved_molecules = records
+            if retrieved_molecules:
+                rag_context = self._format_rag_context(retrieved_molecules)
+                await websocket.send_text(json.dumps(self._rag_info_payload(
+                    retrieved_molecules,
+                    f"✅ 找到 {len(retrieved_molecules)} 个相关分子",
+                )))
+                await self._send_status(websocket, f"📊 基于 {len(retrieved_molecules)} 个分子数据生成回答...")
+            else:
+                await self._send_status(websocket, "知识库检索完成，未找到匹配分子。")
         
         # 构建提示词
         summarize_workflow = self.config.get("agent", {}).get(
@@ -558,6 +607,7 @@ class ChatHandler:
             await websocket.send_text(json.dumps({
                 "type": "complete",
                 "content": full_response,
+                "status": "succeeded",
             }, ensure_ascii=False))
             self._append_history(history, {
                 "user": message,
@@ -597,87 +647,75 @@ class ChatHandler:
         
         model_max_tokens = self._model_max_tokens(request_model)
 
-        if self.config.get("inference", {}).get("stream", True):
+        use_nonstream = not self.config.get("inference", {}).get("stream", True)
+        failure = None
+        if not use_nonstream:
             try:
+                stream = stream_for_chat(
+                    request_model, prompt, temperature, model_max_tokens)
+            except OllamaGenerationError as exc:
+                failure = exc
+                stream = None
+            except Exception:
+                # An unknown legacy adapter may fail while constructing its iterator.
+                # Only that adapter path may fall back to non-streaming generation.
+                logger.error("Legacy stream setup failed; details omitted")
+                use_nonstream = True
+                stream = None
+            if stream is not None:
                 chunk_count = 0
-                stream = request_model.stream_generate(
-                    prompt,
-                    temperature=temperature,
-                    max_tokens=model_max_tokens,
-                )
                 try:
-                    async for chunk in stream:
+                    while True:
+                        try:
+                            chunk = await stream.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        except OllamaGenerationError as exc:
+                            failure = exc
+                            break
+                        except Exception:
+                            # Preserve the existing fallback for non-Ollama legacy adapters.
+                            # Known Ollama strict failures are always handled above.
+                            logger.error("Legacy stream generation failed; details omitted")
+                            use_nonstream = True
+                            break
                         if chunk:
                             full_response += chunk
                             chunk_count += 1
                             await websocket.send_text(json.dumps({
-                                "type": "stream",
-                                "content": chunk
+                                "type": "stream", "content": chunk
                             }))
-                            # 让出事件循环，允许处理其他连接。
-                            if chunk_count % 5 == 0:  # 每5个chunk才sleep一次
+                            if chunk_count % 5 == 0:
                                 await asyncio.sleep(0.001)
                 finally:
-                    # Consumer errors do not close async generators implicitly.
-                    # Keep the request lease until its HTTP response has drained.
                     close = getattr(stream, "aclose", None)
                     if callable(close):
                         await finish_on_cancel(close())
-                
-                full_response, warning_chunk, completion_meta = (
-                    self._finalize_model_response(full_response, request_model)
-                )
-                if warning_chunk:
-                    await websocket.send_text(json.dumps({
-                        "type": "stream",
-                        "content": warning_chunk,
-                    }, ensure_ascii=False))
+        if failure is not None:
+            await self._send_model_failure(websocket, failure)
+            return
 
-                completion_payload = {
-                    "type": "complete",
-                    "content": full_response,
-                    **completion_meta,
-                }
-                await websocket.send_text(json.dumps(
-                    completion_payload,
-                    ensure_ascii=False,
-                ))
-                
-                elapsed = time.time() - start_time
-                logger.info(f"消息处理完成，总耗时: {elapsed:.2f}秒，生成{len(full_response)}字符")
-                
-            except Exception as stream_error:
-                logger.error(f"流式生成错误: {stream_error}")
-                await self._send_status(websocket, "⚠️ 切换到标准生成模式...")
+        if use_nonstream:
+            try:
                 full_response = await generate_for_chat(
-                    request_model,
-                    prompt,
-                    temperature=temperature,
-                    max_tokens=model_max_tokens,
-                )
-                full_response, _, completion_meta = self._finalize_model_response(
-                    full_response, request_model
-                )
-                await websocket.send_text(json.dumps({
-                    "type": "complete",
-                    "content": full_response,
-                    **completion_meta,
-                }, ensure_ascii=False))
-        else:
-            full_response = await generate_for_chat(
-                request_model,
-                prompt,
-                temperature=temperature,
-                max_tokens=model_max_tokens,
-            )
-            full_response, _, completion_meta = self._finalize_model_response(
-                full_response, request_model
-            )
+                    request_model, prompt, temperature=temperature,
+                    max_tokens=model_max_tokens, strict_errors=True)
+            except OllamaGenerationError as exc:
+                failure = exc
+            if failure is not None:
+                await self._send_model_failure(websocket, failure)
+                return
+
+        full_response, warning_chunk, completion_meta = self._finalize_model_response(
+            full_response, request_model)
+        if warning_chunk and not use_nonstream:
             await websocket.send_text(json.dumps({
-                "type": "complete",
-                "content": full_response,
-                **completion_meta,
+                "type": "stream", "content": warning_chunk,
             }, ensure_ascii=False))
+        await websocket.send_text(json.dumps({
+            "type": "complete", "content": full_response,
+            **completion_meta, "status": "succeeded",
+        }, ensure_ascii=False))
         
         # 保存本轮结果并限制历史长度
         self._append_history(history, {

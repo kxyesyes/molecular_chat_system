@@ -68,6 +68,88 @@ function toggleHydrophobicInteractions() {
   }
 }
 
+const INTERACTION_COLORS = {
+  hydrogen_bond: "#16a3ff",
+  pi_pi: "#a855f7",
+  hydrophobic: "#f59e0b",
+};
+
+// A single backend analysis supplies all interaction classes for one job/pose.
+// Cache the in-flight promise as well as its response so toggling several
+// overlays does not launch duplicate (and comparatively expensive) analyses.
+const interactionAnalysisCache = new Map();
+
+function interactionAnalysisKey(jobId, pose) {
+  return `${jobId}:${pose}`;
+}
+
+function fetchInteractionAnalysis(jobId, pose) {
+  const key = interactionAnalysisKey(jobId, pose);
+  const cached = interactionAnalysisCache.get(key);
+  if (cached) return cached;
+
+  const request = fetch(
+    `/api/docking/interactions/${encodeURIComponent(jobId)}?pose=${pose}`,
+  )
+    .then(async (response) => {
+      const analysis = await response.json();
+      if (!response.ok) {
+        throw new Error(analysis.detail || analysis.message || "interaction analysis failed");
+      }
+      return analysis;
+    })
+    .catch((error) => {
+      // A transient transport failure should be retryable; a valid unavailable
+      // or failed scientific response remains cached and fail-closed.
+      interactionAnalysisCache.delete(key);
+      throw error;
+    });
+  interactionAnalysisCache.set(key, request);
+  return request;
+}
+
+function interactionGeometryOccurrences(interaction) {
+  if (Array.isArray(interaction?.geometry_occurrences)) {
+    return interaction.geometry_occurrences;
+  }
+  return [interaction];
+}
+
+// 只绘制分析器根据同一组构象解析出的坐标；浏览器端不自行映射原子索引。
+function renderInteractionEvidence(kind, interactions) {
+  if (!viewer || !Array.isArray(interactions)) return 0;
+  const color = INTERACTION_COLORS[kind] || "#16a3ff";
+  let rendered = 0;
+  interactions.forEach((interaction) => {
+    interactionGeometryOccurrences(interaction).forEach((geometry) => {
+      const displayGeometry = geometry?.display_geometry;
+      const start = displayGeometry?.protein;
+      const end = displayGeometry?.ligand;
+      if (
+        !start ||
+        !end ||
+        ![start, end].every((point) =>
+          ["x", "y", "z"].every((axis) => Number.isFinite(Number(point[axis]))),
+        )
+      ) {
+        return;
+      }
+      viewer.addCylinder({
+        start,
+        end,
+        radius: 0.1,
+        color,
+        dashed: true,
+        fromCap: 1,
+        toCap: 1,
+      });
+      rendered += 1;
+    });
+  });
+  if (rendered > 0) viewer.render();
+  return rendered;
+}
+
 // 相互作用只展示后端成熟分析器的结构化证据；浏览器端不再自行猜测化学作用。
 async function requestInteractionAnalysis(kind) {
   const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
@@ -78,10 +160,15 @@ async function requestInteractionAnalysis(kind) {
     return;
   }
   try {
-    const response = await fetch(`/api/docking/interactions/${encodeURIComponent(jobId)}?pose=${pose}`);
-    const analysis = await response.json();
-    if (!response.ok || analysis.status === "failed") {
-      Utils.showToast("相互作用分析失败，未显示推测结果", "warning");
+    const analysis = await fetchInteractionAnalysis(jobId, pose);
+    if (analysis.status === "failed") {
+      const detail = analysis.warnings?.[0] || analysis.detail;
+      Utils.showToast(
+        detail
+          ? `相互作用分析失败：${detail}`
+          : "相互作用分析失败，未显示推测结果",
+        "warning",
+      );
       return;
     }
     const interactions = (analysis.interactions || []).filter((item) => item.type === kind);
@@ -92,12 +179,17 @@ async function requestInteractionAnalysis(kind) {
       );
       return;
     }
-    Utils.showToast(
-      interactions.length > 0
-        ? `后端分析确认 ${interactions.length} 条${kind}证据`
-        : "后端分析未报告该类相互作用",
-      interactions.length > 0 ? "success" : "warning",
-    );
+    const rendered = renderInteractionEvidence(kind, interactions);
+    if (interactions.length === 0) {
+      Utils.showToast("后端分析未报告该类相互作用", "warning");
+    } else if (rendered === 0) {
+      Utils.showToast(
+        `后端分析确认 ${interactions.length} 条${kind}证据，但缺少可绘制的分析坐标`,
+        "warning",
+      );
+    } else {
+      Utils.showToast(`已显示 ${rendered} 条${kind}相互作用证据`, "success");
+    }
   } catch (error) {
     console.warn("后端相互作用分析不可用:", error);
     Utils.showToast("相互作用分析服务不可用，未显示推测结果", "warning");

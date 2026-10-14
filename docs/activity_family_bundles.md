@@ -49,3 +49,42 @@ descriptor 与模型卡/权重的一致性。模型或证据损坏时抛出错�
 隔离 Python 预测入口见 [activity_family_inference.md](activity_family_inference.md)。
 API/UI、Agent 调用与真实模型晋级保留在后续独立批次。
 运行记录及迁移来源见 [本批交接](handoff/activity-family-bundle-integration.md)。
+
+## 生产启用已验收 r2 bundle
+
+本仓库已按明确部署批准提交完整的、已验收的
+`data/activity/models/pde-buche-20261006-r2` 模型目录；不要用 r7 搜索输出替代它。
+服务器拉取代码后，先在该目录上执行只读预检：
+
+```bash
+python scripts/activate_activity_family_bundles.py \
+  --models-dir /path/to/pde-buche-20261006-r2
+```
+
+该仓库内的 r2 registry 已包含经过校验的 `active_family_bundles` 映射；预检输出应显示两个
+family bundle ID。若服务器已有旧的、未激活的同一目录，才执行一次显式启用。脚本会备份
+`registry_state.json`，重新校验 PDE 和 BuChE 两个 bundle，并在一次原子写入中更新
+`active_family_bundles`：
+
+```bash
+python scripts/activate_activity_family_bundles.py \
+  --models-dir /path/to/pde-buche-20261006-r2 \
+  --apply
+```
+
+将服务环境指向同一目录并开启严格检查，然后重启服务：
+
+```env
+ACTIVITY_MODEL_DIR=/path/to/pde-buche-20261006-r2
+MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1
+```
+
+```bash
+sudo systemctl restart medchat
+python scripts/health_check.py --strict
+```
+
+若预检或启用失败，不要手工编辑 JSON，也不要重启期待自动修复；先确认该目录包含
+两套完整权重、模型卡、数据证据和 v3 registry。脚本默认的两个 bundle ID 是
+`pde-buche-20261006-r2-pde-family` 与 `pde-buche-20261006-r2-buche-family`；如服务器
+上的已验收 ID 不同，必须显式传入 `--pde-bundle-id` 和 `--buche-bundle-id`。

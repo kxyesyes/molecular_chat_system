@@ -29,6 +29,11 @@ from src.docking.molecular_docking_service import (
 )
 
 
+_MINIMAL_POSE_DATA = (
+    "HETATM    1  C   LIG A   1       0.000   0.000   0.000  1.00  0.00     0.000 C"
+)
+
+
 def test_pre_cancelled_command_does_not_spawn(tmp_path):
     cancel = threading.Event()
     cancel.set()
@@ -301,7 +306,7 @@ def _successful_service(tmp_path):
     service.prepare_ligand_from_file = prepare_ligand
     service.run_vina_docking = run_vina
     service.parse_vina_results = lambda _path: [
-        DockingResult("pose-1", -7.2, 0.0, 0.0, "")
+        DockingResult("pose-1", -7.2, 0.0, 0.0, _MINIMAL_POSE_DATA)
     ]
     return service, calls
 
@@ -426,7 +431,7 @@ def test_service_cancellation_after_parse_removes_pose_and_skips_history(tmp_pat
 
     def parse(_path):
         cancel.set()
-        return [DockingResult("pose-1", -9.9, 0.0, 0.0, "")]
+        return [DockingResult("pose-1", -9.9, 0.0, 0.0, _MINIMAL_POSE_DATA)]
 
     service.parse_vina_results = parse
     with patch("src.docking.history_index.upsert_history_record") as history:
@@ -2076,7 +2081,7 @@ class _C4aServiceRig:
         self.receptor.write_text("REMARK synthetic receptor fixture\n", encoding="utf-8")
         self.ligand.write_text("synthetic ligand fixture\n", encoding="utf-8")
         self.config = {"vina_exe": sys.executable, "prepare_receptor_cmd": sys.executable,
-                       "prepare_ligand_cmd": sys.executable}
+                       "prepare_ligand_cmd": sys.executable, "reduce_cmd": sys.executable}
         self.service = MolecularDockingService(
             self.config, command_scope=self.scope, allowed_output_root=self.root,
         )
@@ -2151,6 +2156,18 @@ class _C4aServiceRig:
         monkeypatch.setattr(ADFRAdapter, "build_prepare_command", receptor_argv)
         monkeypatch.setattr(MeekoAdapter, "build_prepare_command", ligand_argv)
         monkeypatch.setattr(VinaAdapter, "build_run_command", vina_argv)
+
+        real_wrap = CommandAdapter.wrap_command
+
+        def analysis_argv(adapter, *args):
+            if type(adapter) is CommandAdapter and args[:4] == ("-NOFLIP", "-Quiet", "-DB", "dict"):
+                # Exercise real process ownership without a host reduce install.
+                # Empty synthetic stdout deliberately leaves analysis unavailable.
+                self._spawn_phase = "analysis-receptor"
+                return [sys.executable, "-I", "-S", "-B", "-c", "raise SystemExit(0)"]
+            return real_wrap(adapter, *args)
+
+        monkeypatch.setattr(CommandAdapter, "wrap_command", analysis_argv)
 
         def observe_run(adapter, *args, **kwargs):
             # Never repair dropped ownership in a test wrapper. Production must
@@ -2267,6 +2284,28 @@ class _C4aServiceRig:
         assert (self.neighbor / "keep").read_bytes() == b"neighbor bytes"
         records, _, _, _ = read_history_page(self.root)
         assert next(r for r in records if r["job_id"] == "neighbor")["timestamp"] == 1
+
+
+def test_c4a_analysis_receptor_uses_controlled_owned_subprocess(tmp_path, c4a_resources, monkeypatch):
+    rig = _C4aServiceRig(tmp_path, c4a_resources, monkeypatch)
+    assert Path(rig.service.reduce_cmd) == Path(sys.executable)
+    output = rig.root / "analysis.pdb"
+    trace = {}
+    assert rig.service.prepare_analysis_receptor(
+        str(rig.receptor), str(output), cancel_event=c4a_resources.cancel, trace=trace,
+    ) is True
+    assert rig.service.reduce_adapter._ownership_scope is rig.scope
+    assert c4a_resources.popen_calls == len(c4a_resources.processes) == 1
+    process = c4a_resources.processes[0]
+    assert Path(process.args[0]) == Path(sys.executable)
+    assert process.returncode == 0
+    assert trace["analysis_receptor_method"] == "copy_unavailable"
+    assert trace["analysis_receptor_hydrogens"] == "unavailable"
+    assert output.read_bytes() == rig.receptor.read_bytes()
+    assert _c4a_snapshot(rig.scope)["command_count"] == 1
+    rig.scope.seal()
+    assert rig.scope.settle() is True
+    c4a_resources.assert_physically_stopped()
 
 
 def test_c4a_service_refresh_keeps_exact_scope(tmp_path, c4a_resources, monkeypatch):
@@ -2472,7 +2511,9 @@ def test_c4a_tool_scope_and_root_are_private_constructor_inputs(
     assert not foreign_root.exists()
     if scoped:
         assert not (tmp_path / "temp_docking").exists(), "C created the legacy root first"
-        assert _c4a_snapshot(rig.scope)["command_count"] == 3
+        # Receptor analysis now has an owned, best-effort reduce invocation in
+        # addition to receptor prep, ligand prep, and Vina.
+        assert _c4a_snapshot(rig.scope)["command_count"] == 4
     assert "CommandOwnershipScope" not in repr(result) and "C4A_PRIVATE" not in repr(result)
     rig.scope.seal()
     assert rig.scope.settle() is True

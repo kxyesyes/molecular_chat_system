@@ -63,18 +63,13 @@ class Element {
   closest(selector) {return this.matches(selector) ? this : this.parentNode?.closest(selector) || null;}
 }
 
-function loadHome({request, storedPointer = null, storedRecovery = null} = {}) {
+function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   const body = new Element("body"); body.root = true;
-  const layout = body.appendChild(new Element("div")); layout.className = "index_con";
-  const right = layout.appendChild(new Element("div")); right.className = "right";
   const input = body.appendChild(new Element("input")), send = body.appendChild(new Element("button"));
   const chat = body.appendChild(new Element("div"));
   const timers = new Map(), sockets = [], logs = [], requests = [];
-  let timer = 0;
-  const storage = new Map([
-    ["medchat-scientific-reference-v1", storedPointer],
-    ["medchat:decision-recovery-v1", storedRecovery],
-  ]);
+  let timer = 0, stored = storedPointer;
+  const storage = new Map(storedWaiting ? [["medchat.decision.waiting.v1", storedWaiting]] : []);
   class Socket {
     static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
     constructor(url) {this.url = url; this.readyState = 0; this.sent = []; sockets.push(this);}
@@ -83,12 +78,16 @@ function loadHome({request, storedPointer = null, storedRecovery = null} = {}) {
     emit(message) {this.onmessage({data: typeof message === "string" ? message : JSON.stringify(message)});}
     close(code = 1000, reason = "") {this.readyState = 3; this.onclose?.({code, reason, wasClean: true});}
   }
-  const document = {body, readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
+  const document = {readyState: "loading", addEventListener() {}, createElement: tag => new Element(tag),
     querySelector: s => body.querySelector(s), querySelectorAll: s => body.querySelectorAll(s),
     getElementById: id => body.querySelector("#" + id)};
   const renderer = {scrollToBottom() {}, getCurrentTime: () => "12:00", updateConnectionStatus() {}, showNotification() {}};
   const window = {location: {host: "example.invalid", protocol: "http:"}, addEventListener() {},
-    sessionStorage: {getItem: k => storage.get(k) ?? null, setItem: (k, s) => storage.set(k, s), removeItem: k => storage.delete(k)},
+    sessionStorage: {
+      getItem: key => key === "medchat.decision.waiting.v1" ? storage.get(key) || null : stored,
+      setItem: (key, value) => {if (key === "medchat.decision.waiting.v1") storage.set(key, value); else stored = value;},
+      removeItem: key => {if (key === "medchat.decision.waiting.v1") storage.delete(key); else stored = null;},
+    },
     HomeChatRenderer: renderer, WebSocket: Socket};
   const context = vm.createContext({window, document, WebSocket: Socket, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
@@ -236,6 +235,14 @@ async function run() {
     h.socket.emit({type: "continuation_abandoned", trace_id: trace});
     h.input.value = "Explain logP"; h.send(); assert.equal(h.socket.sent.at(-1).type, "chat");
   });
+  await test("waiting continuation is restored from the tab session cache after refresh", () => {
+    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    const next = h.button("继续");
+    assert(next && !next.disabled, "restored waiting state must enable Continue");
+    h.input.value = "计算 logP；SMILES: CCO"; next.click();
+    assert.deepEqual(h.socket.sent.at(-1), {type: "resume", trace_id: trace,
+      continuation_id: nonce, message: "计算 logP；SMILES: CCO"});
+  });
   for (const response of ["success", "expired"]) await test(`abandon awaits ${response} before an explicit new chat`, () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
@@ -342,73 +349,66 @@ async function run() {
       assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
     });
   }
-  await test("disconnect preserves a waiting continuation and reconnects it", () => {
+  await test("waiting result caches a recovery pointer before complete without enabling live controls", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    h.socket.emit(result("waiting_for_input"));
+    const stored = h.storage.get("medchat.decision.waiting.v1");
+    assert.equal(typeof stored, "string", "waiting pointer must survive loss of complete");
+    assert.deepEqual(JSON.parse(stored), {traceId: trace, nonce});
+    assert(h.button("继续").disabled && h.button("开始新请求").disabled);
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    assert(!h.button("继续").disabled);
+    assert(newer.sent.every(f => f.type === "ping"), "recovery must not execute automatically");
+    h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
+    assert.deepEqual(newer.sent.at(-1), {type: "resume", trace_id: trace,
+      continuation_id: nonce, message: "计算 logP；SMILES: CCO"});
+    const refreshed = loadHome({storedWaiting: stored}); refreshed.ready("decision_a2");
+    assert(!refreshed.button("继续").disabled);
+    assert(refreshed.socket.sent.every(f => f.type === "ping"));
+  });
+  await test("unconfirmed recovery pointer is discarded by authoritative rejection", () => {
+    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
+    h.socket.emit({type: "error", code: "continuation_unavailable"});
+    assert(!h.storage.has("medchat.decision.waiting.v1"));
+    assert(h.button("继续").disabled);
+    h.input.value = "Explain logP"; h.send();
+    assert.equal(h.socket.sent.at(-1).type, "chat");
+  });
+  await test("stale or malformed waiting results cannot cache a recovery pointer", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    h.socket.emit(result("waiting_for_input", "9".repeat(32)));
+    h.socket.emit({...result("waiting_for_input"), metadata: {waiting_for_input: true, continuation_id: "bad"}});
+    assert(!h.storage.has("medchat.decision.waiting.v1"));
+  });
+  await test("disconnect retains an unconfirmed abandon until the server settles it", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
-    assert(h.storage.has("medchat:decision-recovery-v1"),
-      "waiting continuation must survive a page refresh");
+    h.button("开始新请求").click(); assert(h.button("开始新请求").disabled);
     h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
-    assert(newer.sent.some(f => f.type === "reconnect" && f.trace_id === trace && f.after_sequence === 0));
-    assert(h.button("继续").disabled && h.button("开始新请求").disabled);
-    newer.emit({type: "reconnected", trace_id: trace, turn_id: turn, status: "waiting_for_input"});
     assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
-    h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
-    assert.equal(newer.sent.at(-1).type, "resume");
-  });
-  await test("a refreshed page restores a waiting continuation nonce", () => {
-    const stored = JSON.stringify({turnId: turn, traceId: trace, continuationId: nonce});
-    const h = loadHome({storedRecovery: stored});
-    h.ready("decision_a2");
-    assert(h.sockets[0].sent.some(f => f.type === "reconnect" && f.trace_id === trace));
-    h.sockets[0].emit({type: "reconnected", trace_id: trace, turn_id: turn,
-      status: "waiting_for_input"});
-    assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
-    h.input.value = "解释分子生成的概念";
-    h.button("继续").click();
-    assert.deepEqual(h.sockets[0].sent.at(-1), {
-      type: "resume", trace_id: trace, continuation_id: nonce,
-      message: "解释分子生成的概念",
-    });
-  });
-  await test("disconnect preserves an active turn and accepts replayed terminal frames", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
-    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
-    assert(newer.sent.some(f => f.type === "reconnect" && f.trace_id === trace));
-    newer.emit({type: "reconnected", trace_id: trace, turn_id: turn, status: "running"});
-    newer.emit(result("completed")); newer.emit(complete("completed"));
-    assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
-  });
-  await test("disconnect accepts replayed failed and cancelled terminal states", () => {
-    for (const status of ["failed", "cancelled", "timeout", "unavailable"]) {
-      const h = loadHome(); h.ready("decision_a2"); start(h);
-      h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
-      newer.emit({type: "reconnected", trace_id: trace, turn_id: turn, status});
-      newer.emit(result(status)); newer.emit(complete(status));
-      assert(h.chat.textContent.includes(windowLabel(status)), `missing ${status} terminal label`);
-      assert(!h.button("停止") || h.button("停止").disabled, `${status} must not remain cancellable`);
-    }
-    function windowLabel(status) {
-      return {failed: "失败", cancelled: "已取消", timeout: "计算超时", unavailable: "工具不可用"}[status];
-    }
-  });
-  await test("a refreshed page restores a persisted decision turn", () => {
-    const h = loadHome({storedRecovery: JSON.stringify({turnId: turn, traceId: trace})});
-    h.ready("decision_a2");
-    assert.equal(h.sockets[0].sent.filter(f => f.type === "reconnect" && f.trace_id === trace).length, 1);
-    h.sockets[0].emit({type: "reconnected", trace_id: trace, turn_id: turn, status: "running"});
-    h.sockets[0].emit(result("completed")); h.sockets[0].emit(complete("completed"));
-    assert(h.chat.textContent.includes("Measured value 0"));
-    assert(!h.logs.some(row => row[0] === "error"));
-  });
-  await test("recovery rejection releases controls without inventing a scientific outcome", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
-    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
-    newer.emit({type: "error", code: "reconnect_unavailable"});
-    assert(h.chat.textContent.includes("任务恢复失败"));
-    assert(!h.chat.textContent.includes("已完成"));
-    assert(!h.storage.has("medchat:decision-recovery-v1"));
+    assert(newer.sent.every(f => f.type === "ping"));
+    h.button("开始新请求").click();
+    newer.emit({type: "continuation_abandoned", trace_id: trace});
     h.input.value = "Explain logP"; h.send();
-    assert.equal(newer.sent.at(-1).type, "chat");
+    const t2 = "4".repeat(32), tr2 = "5".repeat(32);
+    newer.emit(accepted(t2, tr2)); newer.emit(result("waiting_for_input", t2, tr2));
+    newer.emit(complete("waiting_for_input", t2, tr2)); h.button("开始新请求").click();
+    const sent = newer.sent.length;
+    h.socket.emit({type: "continuation_abandoned", trace_id: tr2});
+    h.socket.emit({type: "error", code: "continuation_unavailable"});
+    h.input.value = "new socket explicit input"; h.send();
+    assert.equal(newer.sent.length, sent); assert(h.button("开始新请求").disabled);
+    newer.emit({type: "continuation_abandoned", trace_id: tr2});
+    assert.equal(newer.sent.length, sent); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
+  });
+  await test("disconnect restores a durable continuation without replaying stale frames", () => {
+    const h = loadHome(); h.ready("decision_a2"); start(h);
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    h.socket.emit(accepted()); h.socket.emit(result("waiting_for_input"));
+    assert(!h.button("继续").disabled && h.button("停止").disabled);
+    assert(newer.sent.every(f => f.type === "ping"));
   });
   await test("transport logging never captures user text or inbound raw frames", () => {
     const h = loadHome(); h.ready("decision_a2");
@@ -427,7 +427,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-durable-reconnect-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261015-durable-waiting-v3"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -500,6 +500,33 @@ async function run() {
     h.socket.emit(complete("completed", freshTurn, freshTrace));
     assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("部分完成"));
   });
+  for (const [status, label] of Object.entries({completed: "已完成", partial: "部分完成", waiting_for_input: "等待补充输入"})) {
+    await test(`projection failure after ${status} is visible without rewriting scientific status`, async () => {
+      const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result(status));
+      h.socket.emit(candidateEvent());
+      const failedCompletion = {...complete("failed"),
+        content: "结果展示未完成，请稍后重试。已完成的计算记录仍保留。",
+        error: {code: "result_projection_failed", message: "结果投影失败"}};
+      h.socket.emit({...failedCompletion, turn_id: "9".repeat(32)});
+      h.socket.emit({...failedCompletion, trace_id: "9".repeat(32)});
+      assert(!h.chat.textContent.includes("结果展示失败"), "foreign terminal frames are ignored");
+      h.socket.emit(failedCompletion); await tick();
+      const state = h.chat.querySelector(".decision-runtime-status");
+      assert(state.textContent.includes(label), "retain the earlier scientific status");
+      assert(state.textContent.includes("结果展示失败"), "delivery failure must remain visible");
+      assert(h.chat.textContent.includes(failedCompletion.content));
+      assert(h.chat.textContent.includes("Measured value 0; unavailable is not zero."));
+      assert.equal(h.requests.length, 0, "discard incomplete candidate projection without ACK");
+      assert.equal(h.chat.querySelectorAll(".molecule-card").length, 0);
+      assert(h.button("继续").disabled && h.button("停止").disabled);
+      assert(!h.chat.querySelector(".typing-indicator-wrapper"));
+      const prior = state.textContent;
+      h.socket.emit(complete("completed")); h.flushTimers();
+      assert.equal(state.textContent, prior);
+      h.input.value = "Explicit new request"; h.send();
+      assert.equal(h.socket.sent.at(-1).type, "chat", "projection failure cannot authorize resume");
+    });
+  }
   await test("1011 after result preserves science status but never claims delivery complete", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result("partial"));
     h.socket.close(1011); const state = h.chat.querySelector(".decision-runtime-status");

@@ -11,7 +11,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
+from pathlib import Path
 from time import perf_counter
+
+# Executing a script by path makes ``scripts/`` the first import directory.
+# Add the repository root explicitly so this probe reports model-environment
+# failures instead of masking them as ``No module named 'src'``.
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.admet.predictor import ADMETPredictor
 

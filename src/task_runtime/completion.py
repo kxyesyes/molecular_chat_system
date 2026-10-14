@@ -591,6 +591,48 @@ class DockingCompletionStore:
                 raise CompletionError("completion_artifact_invalid")
         return completion
 
+    def read_pose(self, task_id: str) -> bytes:
+        """Read the committed pose after revalidating its completion manifest."""
+        task_root = self._task_root(task_id)
+        if self.has_invalidation_marker(task_id):
+            raise CompletionError("completion_ownership_uncertain")
+        try:
+            raw, _ = _secure_read_regular(
+                task_root / _MANIFEST_NAME,
+                max_bytes=MAX_COMPLETION_MANIFEST_BYTES,
+                containment_root=task_root,
+                missing_code="completion_missing",
+                invalid_code="completion_malformed",
+            )
+            payload = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_json_constant,
+            )
+        except CompletionError:
+            raise
+        except (
+            UnicodeError,
+            json.JSONDecodeError,
+            MemoryError,
+            RecursionError,
+            ValueError,
+        ):
+            raise CompletionError("completion_malformed") from None
+
+        completion = _parse_manifest(payload, task_id)
+        pose_path = _pose_path(task_root, completion.pose.path)
+        content, digest = _secure_read_regular(
+            pose_path,
+            max_bytes=MAX_DOCKING_POSE_BYTES,
+            containment_root=task_root,
+            expected_size=completion.pose.size,
+            invalid_code="completion_artifact_invalid",
+        )
+        if digest != completion.pose.sha256:
+            raise CompletionError("completion_artifact_invalid")
+        return content
+
     def invalidate_published(self, task_id: str) -> tuple[bool, bool]:
         """Persistently block reuse, then best-effort quarantine the manifest."""
 

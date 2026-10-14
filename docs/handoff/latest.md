@@ -1,12 +1,70 @@
 # Latest handoff
 
-## 当前权威状态（2026-10-09）
+## PR #183 恢复逻辑兼容审查（2026-10-15）
+
+- 以当前 `main` 的 `web_request`、owner-scoped continuation CAS 和独立进程恢复契约为准；
+  不引入旧分支的 detached-turn 内存重放，也不从恢复投影重建 `semantic_v1` 权限。
+  semantic 模式仍在缺少安全持久化 intent journal 时拒绝跨连接恢复；运行中任务断线的取消、
+  物理 worker 清理和结果投影失败语义不变。
+- 前端收到当前 turn 的合法 waiting result 后立即缓存有限 trace/nonce 指针，即使后续 `complete`
+  丢失仍可在重新连接或刷新后显式请求续接。当前 turn 未结束时控件仍锁定；不自动执行，
+  不重放旧帧，服务端持久化状态、归属校验和一次性 CAS 仍是唯一授权来源。尚未收到合法 waiting
+  result 或服务端尚未完成持久化的中断不承诺恢复；服务端拒绝时清除缓存。
+- 修复重建 waiting 后下一个新聊天丢失先前普通对话历史的问题：只在正常终帧交付时恢复已验证
+  历史前缀，不把未显示回答、工具结果写成普通聊天，也不覆盖新 socket 已有的更新历史。
+- 保留生产路由 `register_*_routes` 与旧 `setup_*_routes` 兼容包装器分离；活动训练的行数 413、
+  并发容量 429 限制和当前失败契约保留。
+- 新回归覆盖丢失终帧、旧 receiver 尚未清理时续接、恢复后历史、放弃后换运行时/独立进程拒绝复活。
+  测试使用离线协议夹具、真实 SQLite/ASGI/RDKit；不代表真实外部模型、HTTPS/WSS 或生产部署验收。
+
+## 活动 worker 清理回归修复（2026-10-11，待发布）
+
+发现并复现一个本地可重复的资源清理缺陷：活动预测超时终止子进程后，子进程管道可能先关闭，后台 waiter 已经以 `ProcessExecutionError` 完成；旧清理逻辑只等待尚未完成的 waiter，因而会留下 `Task exception was never retrieved`。修复 `_stop_activity_process()` 统一观察 waiter，并保留一秒清理上限、取消和进程关闭行为；新增事件循环异常处理器与垃圾回收回归测试，确认已完成失败被消费且不再泄漏。
+
+- 聚焦 activity/Pharm3D/process-isolation：`37 passed`。
+- 领域矩阵：靶点/数据库 `54 passed`；Docking `160 passed, 1 skipped`；ADMET、反向寻靶、活动、Pharm3D、task runtime `2222 passed, 25 skipped, 2 warnings`。
+- 严格健康检查 `23/23`；Agent contract 通过；Node 三项脚本、全部非 vendor JavaScript 语法检查、`compileall` 和 `git diff --check` 通过。
+- 独立只读审查：P0/P1/P2 均无发现。以上是本机/离线证据，不替代目标 Linux 服务器上的真实模型、Temporal/PostgreSQL、多 worker/重启、HTTPS/WSS、Vina 及参考 pose RMSD 验收；PDE/BuChE 根 registry 仍未激活生产 bundle。
+
+## 继续生产验收（2026-10-11）
+
+本轮在正确的 `MedChat` Conda 环境重新执行了真实模块验收；没有把缺失依赖、外部服务失败或未激活模型转换为成功。
+
+- `conda run --no-capture-output -n MedChat python scripts/health_check.py --strict`：`23/23` 通过。基础 Anaconda Python 3.13 不含 RDKit，不能作为 MedChat 验收环境；这不是 MedChat 环境的结论。
+- `scripts/run_agent_acceptance.py --mode real --repeat 3 --case-set all-real`：总体 `partial`，结构化报告为 `outputs/agent_evaluation/continuation-real-agent-20261011.json`。本轮本地 Ollama 分子生成、靶点搜索和真实 Vina 对接检查通过；Vina 产生了 3 个 pose。外部主模型配置/上游不可用，PDE/BuChE 根注册表没有 active family bundle，因此活性预测明确失败并返回 `family_model_bundle_unavailable_or_invalid`，没有返回 pIC50 或概率数值。
+- `ADMET_AI_PYTHON` 指向独立 `admet-ai==1.4.0` worker 后，`scripts/verify_admet_ai_real.py --repeat 3`：退出码 0；3/3 次成功，2/2 行每次均返回 49 个端点，方法 `admet_ai`，模型版本 `1.4.0`，使用同一权重 SHA-256 标识。该结果是本地真实 ADMET 权重证据，不代表实验或临床验证。
+- `scripts/run_temporal_docking_acceptance.py --mode contract --repeat 3`：通过，`run_count=3`；这是生命周期 contract，不是真实 Temporal/Vina 科学执行。
+- `scripts/validate_temporal_deployment.py`：`partial`，Python 静态检查通过；Docker Compose、promtool 和 systemd 因当前 Windows 主机不可用而 `skipped`。目标 Linux 主机验收仍未完成。
+- `scripts/run_decision_chat_acceptance.py --mode native`：`failed`，`isolated_acceptance_unavailable`；外部主模型仍不能作为可用生产端点。未记录或输出密钥。
+
+当前仍阻断完整生产发布的证据：根注册表激活且通过部署门禁的 PDE/BuChE bundle、真实主模型端点、Temporal/PostgreSQL/systemd/cgroup、HTTPS/WSS 反向代理、多 worker/重启恢复、真实 ProLIF/MDAnalysis 相互作用几何及参考 pose 重对接 RMSD。以上缺口保持 `partial`/`unavailable`，不以本机 contract 或模拟值替代。
+
+## 生产部署预检补充（2026-10-11）
+
+- `python scripts/validate_opensandbox_deployment.py --static`：通过，部署资产静态检查完成。
+- `python scripts/validate_opensandbox_deployment.py --runtime`：失败，`runsc_unavailable`；当前 Windows 主机没有目标 Linux OpenSandbox runtime，不能把静态通过解释成运行时通过。
+- `python scripts/validate_temporal_worker_production.py --check-config`：失败，`backend_not_temporal_canary`；当前环境没有目标 Temporal canary 后端。
+- `python scripts/run_temporal_production_preflight.py --output scratch/temporal-production-preflight-20261011.json`：失败，报告中的 `all_required_gates=false`；contract、real science 为 `failed`，backup/alert/deployment/infrastructure 为 `skipped`。这进一步确认目标 Linux/Temporal/PostgreSQL/代理环境仍需现场验收。
+
+## RG-MPNN 质量搜索（2026-10-11）
+
+本机真实 PDE/BuChE r7 搜索已完成。四个选中的 family/task 均在固定 scaffold test split 上完成两 seed 评估，当前稳定性阈值和常数基线门槛通过；但与当前 r2 候选逐指标比较仍未全部满足，因此 `deployment_gate.eligible=false`，所有 bundle 均保持 `activated=false`。r7 只能用于离线误差分析、排序实验和后续训练，不能复制到根注册表或作为生产 pIC50 结果。完整指标、报告路径和限制见[RG-MPNN r7 质量搜索交接](activity-quality-search-r7.md)；此前 r6 记录仍保留在[RG-MPNN 质量搜索交接](activity-quality-search.md)。该结果不代表生产部署、临床验证或实验验证完成。
+
+## 当前权威状态（2026-10-10）
 
 本节优先于下方历史批次阅读；下方内容保留用于追溯，不代表当前仍待执行。
 
-- `origin/main` 当前为 `8bc1495`。PR #167（分子性质核心复用）、#168（对接终态保真）、
-  #169（交接文档）、#170（对接终态端到端保真）、#171（活性模型注册发现）和
-  #172（首页终态展示）均已通过 GitHub 质量门禁并 squash 合并；没有直接修改 `main`。
+- 2026-10-10 的 PR #182 已 squash 合并到 `main`，合并提交为 `9e668a41`：活动模型训练上传新增
+  `MEDCHAT_ACTIVITY_TRAINING_MAX_ROWS` 行数上限（默认 100,000），在创建临时文件和提交后台训练前
+  fail-closed 返回 413；修复了 CSV 解析器可能低估训练记录数的资源风险。相关 API 回归、活动/对接
+  边界测试与 CI 9/9 均通过。已有 `data/molecular_faiss_index.index.manifest.json` 未跟踪且未被修改。
+- 合并后的本机复核：默认 `scripts/health_check.py --strict` 为 23/23；同时设置
+  `MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1` 与 `MEDCHAT_REQUIRE_DURABLE_TASKS=1` 为 21/23，剩余两项
+  明确是 Temporal 后端未配置和根注册表未选择 PDE/BuChE family bundle，不是代码测试失败。
+- 本轮核验快照中，PR #180 合并前的 `origin/main` 为 `5983b71`；PR #180 已通过
+  9/9 质量检查并 squash 合并为 `fceb203`。PR #179、PR #178 的交接记录更新和 PR #177
+  的真实 PDE/BuChE 活性验收证据门禁均已通过 PR 进入 `main`，
+  本次验收改动均通过 PR 进入 `main`，没有直接修改 `main`。
 - Web 路由和 Agent 工具均复用 `src/molecular_design/chemistry.py`；对接适配器现在保留
   `succeeded`、`unavailable`、`timeout`、`cancelled`、`invalid_input`、`not_calculated` 等统一状态，
   不再把非成功终态降级成普通 `failed`；失败适配器只保留安全状态诊断，Agent Validator 会清除
@@ -20,18 +78,64 @@
   `api_routes.setup_api_routes()` 不再调用这四个 `setup_*_routes` 兼容入口，旧直接调用及其动态替换测试仍保留。
 - 使用本机真实运行资产的严格健康检查已达到 `23/23`。模型权重、靶点数据库、缓存与 RAG 索引属于
   本地资产，不得提交或用模拟文件替代。
+- 本分支 `codex/complete-remaining-architecture` 已补齐 Web 决策等待的服务端持久化续接：
+  `a1_closed` 等待态写入有限请求快照，断线后同一 Agent session 可通过原子 continuation CAS
+  继续；`semantic_v1` 在缺少安全 intent journal 时保持 fail-closed。新增 owner-scoped
+  `GET /api/agent/runs/{trace_id}` 与 `/events` 只读审计接口，前端只把 sessionStorage 当作
+  恢复指针，服务端状态仍是唯一权威来源。
+- 本轮提交 `0d77f70` 收紧恢复控制边界：非法 `trace_id`/`continuation_id` 在访问持久化层前即拒绝，
+  状态存储不可用时统一 fail-closed 为 `continuation_unavailable`，不泄露存储异常或错误重放任务。
+- 本分支新增真实独立 Python 进程恢复证据：两个独立 worker 进程可用同一持久化 A1 waiting
+  continuation 续接，已缓存工具结果不重复执行，跨进程竞争时只有一个进程完成 owner-scoped CAS；
+  运行时模型替换仍产生新的进程内 epoch，防止 live replacement 接收旧请求。用户配置边界新增
+  私有 `.generation` sidecar：只把随机 opaque token 写入 continuation，配置文件摘要只留在受保护
+  配置边界内用于变更检测；凭据轮换会使旧 continuation fail-closed。配置与 generation 在同一
+  跨进程锁内读取，避免启动时混合快照。该证据使用真实 SQLite、ASGI/WebSocket 路由和 RDKit，
+  但使用协议夹具，不代表目标服务器 HTTPS/WSS 或真实模型验收。
+- 后续提交 `33b1d96` 和 `108ee57` 已补齐本轮剩余代码缺口：单/批量对接输入互斥、Vina
+  旧产物清除、药效团空结果 fail-closed、训练并发上限、WSS CSP、RG-MPNN 日志解析安全性，
+  以及 docking 姿态几何/盒子证据门禁。真实 Vina 样例以 3 个不同 seed 完成，均生成 10 个
+  pose、存在 pose 文件且几何门禁通过；能量范围为 `0.1 kcal/mol`，这只是本次运行的稳定性观察，
+  不是普适科学阈值。
+- 本轮真实活性验收已切换到正式 `src.activity.prediction_service`，并同时检查 PDE/BuChE
+  family bundle；没有读取、写入或提交 API key。
+- PR #177 的审查修复已包含在 `60634b0`：部分成功行和失败行不会再从报告中丢失；真实模型
+  provenance 必须完整且与请求 family、bundle、端点、模型卡和权重摘要绑定；PDE/BuChE
+  不能用另一 family 的“看起来有效”证据冒充通过。
 
 ### 当前真正未完成
 
-1. 真实运行环境中的端到端验收：使用真实 PDE/BuChE 权重、靶点数据、RAG 索引和可用 Vina，
-   验证 Web 与 Agent 的输入、结果、来源和失败状态一致；CI 只证明离线工程契约。
-2. 运行中的任务刷新恢复和断线续接：当前页面可正确展示终态，但运行中会话仍是 socket-local，
-   需要单独的服务端持久化 continuation/replay 协议；不能用前端重放假装完成。
+1. 目标部署环境中的端到端验收：本机已用真实 PDE/BuChE 权重、靶点数据、RAG 索引和 Vina
+   完成 Agent acceptance，但 Web 入口、反向代理和生产配置下的输入、结果、来源和失败状态一致性
+   仍需在目标服务器验证；CI 只证明离线工程契约。
+2. 运行中的任务刷新恢复和断线续接：等待用户输入的 `a1_closed` continuation 已支持服务端
+   持久化和同 session 续接，并已有独立进程/SQLite/CAS 回归；仍需在目标部署环境验证真正的
+   多 worker、服务重启、反向代理和 HTTPS/WSS，以及为 `semantic_v1` 建立经过审计的 intent
+   journal 后再开放跨 socket 续接。
 3. 部署环境验收：HTTPS/WSS、真实模型客户端、资源目录、任务取消与清理需要在目标服务器验证。
-4. 对接科学增强仍是独立后续任务：Vina 输出/构象科学校验、相互作用几何、盒子依据、预处理规则、
-   重对接 RMSD 与多随机种子稳定性；本轮只完成终态契约，不宣称这些算法任务已完成。
+4. 对接科学增强已完成基础门禁：Vina 输出坐标、pose 质心、重原子数量、盒子来源、预处理状态和
+   产物证据会进入结构化结果；相互作用几何和重对接 RMSD 仍需提供目标服务器的拓扑分析器、
+   参考 pose 与真实 redocking 方案，不能用本机 3 次重复替代。
 5. 历史批次正文仍保留追溯信息；它们的“待合并”描述不代表当前开放 PR。后续只需维护本节，
    不再重复创建同一批架构任务。
+
+### 最近验收记录（2026-10-10）
+
+- Web 决策运行时、生命周期、恢复和普通 Web 生命周期联合回归的历史证据仍保留；本轮
+  `tests/agent` 全量：`12931 passed, 3 skipped, 7 warnings`；新增真实活性验收聚焦测试：
+  `49 passed`；`compileall` 和 `git diff --check` 通过。
+- `scripts/run_agent_acceptance.py --mode contract`：`passed`；真实 `--mode real --repeat 3`：`partial`，
+  `run_count=3`、`case_count=36`。本机 Ollama `gmm-llama:latest`、靶点搜索、样例 Vina 对接通过；
+  PDE 与 BuChE 均确认使用非 demo、非 fallback 的真实 RG-MPNN bundle。PDE 三个固定探针中有一条
+  分类/回归一致性冲突，保持 `partial`；BuChE 三条全部 `passed`。外部主模型仍为配置失败，未包装
+  成科研成功。
+- 默认 `health_check.py --strict`：`23/23`；同时启用
+  `MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS=1` 和 `MEDCHAT_REQUIRE_DURABLE_TASKS=1` 后为 `21/23`，
+  失败项明确是生产根注册表未激活 PDE/BuChE，以及本机未配置可提供重启恢复的 Temporal 后端。
+- Temporal contract `repeat=3` 通过；Temporal real/生产 preflight 仍需目标服务器的 Temporal、
+  HTTPS/WSS、资源目录和清理环境，不能用本机结果替代。
+- 本轮未读取、写入或提交任何 API key；`data/molecular_faiss_index.index.manifest.json` 是用户已有的
+  未跟踪文件，保持原样未触碰。
 
 ## 第2项发布完成／第3项开始（2026-09-25）
 
@@ -844,3 +948,112 @@ python -m compileall -q src scripts
 
 No API key state or value is required for this stage, and no credential was
 recorded in source, tests, logs, or this handoff.
+
+## Local docking interaction geometry acceptance (2026-10-11)
+
+- Branch: `fix/production-acceptance-hardening`.
+- Implementation commits: `79e72d40` and `5fbb2ddc`; the implementation plan is
+  `docs/superpowers/plans/2026-10-11-docking-interaction-geometry-local-acceptance.md`.
+- The adapter now consumes ProLIF metadata through the documented
+  `Fingerprint.generate(..., metadata=True)` boundary. It preserves only
+  validated tool-derived distances, angles, residue-local atom indices and
+  parent atom indices. Count data, PDBQT-only inputs, malformed metadata and
+  unsupported analyzer APIs remain explicitly unavailable or geometry-free.
+- ProLIF and MDAnalysis are not installed in the local `MedChat` environment;
+  the real ProLIF smoke test is therefore skipped. No interaction distance,
+  angle, affinity or docking claim is inferred from that skip.
+
+### Reproducible local checks
+
+```powershell
+conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py -q -p no:cacheprovider
+# 106 passed, 1 skipped in 15.63s
+
+conda run --no-capture-output -n MedChat python -m compileall -q src scripts
+# passed with no output
+
+conda run --no-capture-output -n MedChat python scripts/health_check.py --strict
+# Summary: 23/23 checks passed
+
+node tests/home_agent_task_panel_test.js
+# Homepage agent task panel static and lifecycle checks passed
+node tests/reverse_target_broad_recall_test.js
+# reverse target broad-recall defaults checks passed
+node tests/reverse_target_pagination_test.js
+# reverse target pagination checks passed
+
+# node --check over 54 non-ketcher, non-backup JavaScript files
+# passed
+
+conda run --no-capture-output -n MedChat python scripts/run_agent_acceptance.py --mode contract
+# statuses: ["passed"]
+```
+
+The combined `tests/agent` long run was interrupted near completion after
+unrelated failures appeared while concurrent user activity-training files were
+being edited in the same worktree. It is not used as acceptance evidence for
+this docking change; the focused docking/reproducibility suites and contract
+acceptance above completed successfully. A new full `python -m pytest tests -q`
+result is not claimed for this slice.
+
+The local-only boundary remains: target-server HTTPS/WSS and reverse-proxy
+behavior, production model assets, Temporal/systemd restart and multi-worker
+recovery, real ProLIF/MDAnalysis execution, and real reference-pose redocking
+RMSD still require their respective deployment assets or host. Missing
+evidence remains `unavailable`/`partial`; it is not converted to a scientific
+pass.
+
+### Review follow-up
+
+Independent review identified and the follow-up commit `48d97f5d` closed these
+compatibility gaps:
+
+- ProLIF `PiCation`/`WaterBridge` are mapped; unknown interaction names are
+  surfaced and make the runtime result `unsupported_interaction_type` instead
+  of being silently dropped.
+- Multiple metadata occurrences preserve the legacy one-record aggregate
+  `count`; validated per-occurrence geometry is retained under
+  `geometry_occurrences`.
+- The interaction route's early pose-export and missing-input responses now
+  include `geometry_status: "unavailable"`.
+- A valid geometry alias paired with an invalid alias remains usable but emits
+  `invalid_geometry_metadata`.
+
+Regression rerun:
+
+```powershell
+conda run --no-capture-output -n MedChat python -m pytest tests/test_docking_interaction_analysis.py tests/test_docking_reproducibility.py tests/test_api_route_boundary.py -q -p no:cacheprovider
+# 219 passed, 1 skipped in 225.46s
+```
+
+## 本机验收补充（2026-10-11）
+
+本轮只执行本机验收，不宣称目标服务器部署完成。当前分支为
+`fix/production-acceptance-hardening`；用户已有的活动模型训练/搜索改动及其运行产物未被暂存或修改。
+
+已完成的可复现检查：
+
+```text
+docking interaction/RMSD/API 边界：219 passed, 1 skipped
+目标搜索、对接配置/manifest/取消、RG-MPNN 日志转换：181 passed, 7 skipped
+health_check.py --strict：23/23 checks passed
+run_agent_acceptance.py --mode contract：passed
+compileall：passed
+Node 合同测试：3/3 passed
+非 ketcher/backup JavaScript node --check：passed（54 files）
+```
+
+本机外部兼容模型探针确实到达上游，但上游返回 HTTP 403（配额不足），因此不把它计为真实模型通过，
+也没有改变网络白名单或绕过 DNS/传输安全边界。ProLIF/MDAnalysis、Temporal 后端、目标服务器
+HTTPS/WSS、反向代理/多 worker 重启、真实参考 pose 重对接，以及根注册表激活 PDE/BuChE 仍按
+`unavailable`/`partial` 记录；没有用模拟分数或模拟几何替代这些证据。全仓 `pytest tests -q`
+尚未作为本轮证据声明，因为用户启动的模型搜索进程仍在运行并持续占用训练资源。
+
+后续提交 `f8a9f1a2` 仅稳定 Windows docking 进程树回归夹具：增加真实子进程就绪标记，
+再触发受控超时，保留进程树终止、输出、PID 和 marker 不存活断言；未改变生产进程管理代码。
+该配置模块复核为 `10 passed, 1 skipped`，第二组目标搜索/对接/日志转换复核为
+`181 passed, 7 skipped`。
+
+用户的活动模型搜索进程自然结束后，全仓复核命令
+`C:\Users\xkx52\.conda\envs\MedChat\python.exe -m pytest tests -q -p no:cacheprovider --tb=short`
+完成为 `22106 passed, 272 skipped, 10 warnings, 173 subtests passed`（3276.30 秒）。

@@ -851,6 +851,44 @@ def test_scientific_stability_summary_reports_latency_and_failure_types():
     assert stability["failure_types"] == {"rg_mpnn_demo": 1, "vina_missing": 1}
 
 
+def test_repeated_docking_without_seed_metadata_is_not_reported_as_stable():
+    docking_event = {
+        "event": "tool_completed",
+        "tool": "molecular_docking",
+        "payload": {
+            "data": {
+                "success": True,
+                "best_pose": {"binding_energy": -3.5, "pose_file": "pose.pdbqt"},
+                "provenance": {
+                    "reproducibility": {"random_seed": None, "seed_recorded": False},
+                },
+            }
+        },
+    }
+    stability = summarize_scientific_stability([
+        {"results": [{
+            "case_id": "DOCK-001",
+            "expected_skill": "docking_simulation",
+            "actual_skill": "docking_simulation",
+            "status": "passed",
+            "events": [docking_event],
+        }]},
+        {"results": [{
+            "case_id": "DOCK-001",
+            "expected_skill": "docking_simulation",
+            "actual_skill": "docking_simulation",
+            "status": "passed",
+            "events": [docking_event],
+        }]},
+    ])
+
+    assert stability["docking_seed_stability"] == {
+        "status": "partial",
+        "reason": "seed_metadata_not_available",
+        "case_count": 1,
+    }
+
+
 def test_replay_never_promotes_original_failure_to_passed():
     result = _complete_replay_case(status="failed")
 

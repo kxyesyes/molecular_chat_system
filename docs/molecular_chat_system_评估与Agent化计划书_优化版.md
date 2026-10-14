@@ -101,7 +101,7 @@ src/
 
 重点需要统一：
 
-- 服务端口，例如本地默认 6001，服务器部署通过 `.env` 覆盖。
+- 服务端口，例如本地默认 6000，服务器部署通过 `.env` 覆盖。
 - 模型配置，例如 Ollama、ModelScope、OpenAI-compatible API。
 - 对接工具路径，例如 Vina、ADFRsuite、Meeko。
 - 数据资产路径，例如靶点库、ChEMBL、FAISS、模型文件。

@@ -114,6 +114,7 @@ def rig(tmp_path, monkeypatch):
     from src.activity import family_dataset, model_card, model_registry, trainer
     from tests.family_model_test_support import make_pair
     runner = module()
+    real_train_job = runner.train_job
     real_load = family_dataset.load_family_dataset
     real_prepared = model_card.load_prepared_training_data
     real_registry = model_registry.ActivityModelRegistry
@@ -161,6 +162,7 @@ def rig(tmp_path, monkeypatch):
     return SimpleNamespace(runner=runner, torch=torch, calls=calls, bundles=bundles,
                            verified=verified, train=train, load=load, Registry=Registry,
                            real_load=real_load, real_prepared=real_prepared, real_registry=real_registry,
+                           real_train_job=real_train_job,
                            make_pair=make_pair)
 
 
@@ -171,6 +173,7 @@ def report_file(root, run_id="synthetic"):
 @pytest.mark.parametrize("failure", [None, "job", "bundle"])
 def test_serial_run_progress_partial_status_and_no_activation(rig, tmp_path, monkeypatch, failure):
     runner = rig.runner
+    monkeypatch.setattr(runner, "train_job", rig.real_train_job)
     snapshots = []
     write = runner.write_report
 
@@ -330,6 +333,33 @@ def test_training_adapter_preserves_main_owner_and_fixed_cuda(rig, tmp_path, mon
     monkeypatch.setattr(prepared_training, "run_prepared_training", train)
     assert runner.train_job(tmp_path / "manifest.json", "synthetic-job", callback) == {"state": "completed"}
     assert len(calls) == 1
+
+
+def test_validation_only_training_forwards_checkpoint_without_test_or_publish(
+    rig, tmp_path, monkeypatch,
+):
+    from src.activity import prepared_training
+    runner = rig.runner
+    monkeypatch.setattr(runner, "train_job", rig.real_train_job)
+    captured = {}
+    monkeypatch.setattr(prepared_training, "run_prepared_training",
+                        lambda owner, path, **options: (
+                            captured.update(options),
+                            owner.status.update(state="completed"),
+                        ))
+    previous_options = runner.OPTIONS
+    previous_checkpoint_dir = runner._ACTIVE_CHECKPOINT_DIR
+    runner.OPTIONS = dict(runner.OPTIONS, evaluation_mode="validation_only")
+    runner._ACTIVE_CHECKPOINT_DIR = tmp_path / "checkpoints"
+    try:
+        result = runner.train_job(tmp_path / "manifest.json", "search-job", lambda *_a, **_k: None)
+    finally:
+        runner.OPTIONS = previous_options
+        runner._ACTIVE_CHECKPOINT_DIR = previous_checkpoint_dir
+    assert result["state"] == "completed"
+    assert captured["evaluate_test"] is False
+    assert captured["publish"] is False
+    assert captured["checkpoint_path"] == tmp_path / "checkpoints" / "search-job.pt"
 
 
 @pytest.mark.parametrize("state", ["failed", "running", "missing_id"])

@@ -534,7 +534,13 @@ def test_issue_dates_session_and_cleans_expired_rows_after_sqlite_lock_wait(
 
 
 def run_http_session_request(
-    store, *, method="POST", scheme="https", headers=(), response_headers=()
+    store,
+    *,
+    method="POST",
+    scheme="https",
+    host="localhost",
+    headers=(),
+    response_headers=(),
 ):
     sent = []
     handled = []
@@ -542,7 +548,7 @@ def run_http_session_request(
         "type": "http",
         "scheme": scheme,
         "method": method,
-        "headers": [(b"host", b"localhost"), *headers],
+        "headers": [(b"host", host.encode("ascii")), *headers],
     }
 
     async def app(request_scope, _receive, send):
@@ -557,6 +563,54 @@ def run_http_session_request(
 
     asyncio.run(AgentSessionMiddleware(app, store)(scope, None, capture))
     return sent, handled
+
+
+@pytest.mark.parametrize(
+    "configured_hosts, request_host, admitted",
+    [
+        ("medchat.tdd-lab.com", "medchat.tdd-lab.com", True),
+        (" MEDCHAT.TDD-LAB.COM ", "medchat.tdd-lab.com", True),
+        ("medchat.tdd-lab.com", "evil.tdd-lab.com", False),
+        ("*.tdd-lab.com", "medchat.tdd-lab.com", False),
+        ("https://medchat.tdd-lab.com", "medchat.tdd-lab.com", False),
+        ("", "medchat.tdd-lab.com", False),
+    ],
+)
+def test_insecure_http_host_allowlist_controls_public_http_transport(
+    monkeypatch, tmp_path, configured_hosts, request_host, admitted
+):
+    monkeypatch.setenv("MEDCHAT_INSECURE_HTTP_HOSTS", configured_hosts)
+    sent, handled = run_http_session_request(
+        AgentSessionStore(tmp_path / "sessions.sqlite"),
+        method="GET",
+        scheme="http",
+        host=request_host,
+    )
+
+    assert admitted == (sent[0]["status"] == 204)
+    assert bool(handled) is admitted
+
+
+def test_insecure_http_host_allowlist_admits_websocket_with_matching_http_origin(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setenv("MEDCHAT_INSECURE_HTTP_HOSTS", "medchat.tdd-lab.com")
+    client = make_client(
+        AgentSessionStore(tmp_path / "sessions.sqlite"),
+        base_url="http://medchat.tdd-lab.com",
+    )
+    identity = client.get("/who").json()["id"]
+    token = client.cookies.get(COOKIE_NAME)
+
+    with client.websocket_connect(
+        "/ws",
+        headers={
+            "host": "medchat.tdd-lab.com",
+            "origin": "http://medchat.tdd-lab.com",
+            "cookie": f"{COOKIE_NAME}={token}",
+        },
+    ) as websocket:
+        assert websocket.receive_text() == identity
 
 
 @pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])

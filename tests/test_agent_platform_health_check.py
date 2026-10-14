@@ -67,6 +67,69 @@ def test_temporal_health_local_default_is_safe_and_non_blocking(monkeypatch):
     assert "configured=" in detail
 
 
+def test_temporal_health_fails_closed_when_production_requires_durable_tasks(monkeypatch):
+    monkeypatch.setenv("MEDCHAT_TASK_BACKEND", "local")
+    monkeypatch.setenv("MEDCHAT_REQUIRE_DURABLE_TASKS", "1")
+
+    ok, detail = health_check.check_temporal_runtime()
+
+    assert ok is False
+    assert "restart recovery" in detail
+    assert "local" in detail
+
+
+def test_activity_health_fails_closed_when_production_requires_active_family_models(
+    monkeypatch, tmp_path
+):
+    class _FakeRegistry:
+        def __init__(self, _directory):
+            pass
+
+        def list(self):
+            return [{"model_id": "registered-model"}]
+
+        def get_active_family_bundle(self, _family):
+            return None
+
+    (tmp_path / "registry_state.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(tmp_path))
+    monkeypatch.setenv("MEDCHAT_REQUIRE_ACTIVE_ACTIVITY_MODELS", "1")
+
+    import src.activity.model_registry as model_registry
+
+    monkeypatch.setattr(model_registry, "ActivityModelRegistry", _FakeRegistry)
+
+    ok, detail = health_check.check_activity_models()
+
+    assert ok is False
+    assert "active family" in detail
+    assert "PDE" in detail
+    assert "BuChE" in detail
+
+
+def test_activity_health_reports_missing_rdkit_without_traceback(monkeypatch, tmp_path):
+    class _Registry:
+        def __init__(self, _directory):
+            raise ModuleNotFoundError("No module named 'rdkit'")
+
+    (tmp_path / "registry_state.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("ACTIVITY_MODEL_DIR", str(tmp_path))
+
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules,
+        "src.activity.model_registry",
+        types.SimpleNamespace(ActivityModelRegistry=_Registry),
+    )
+
+    ok, detail = health_check.check_activity_models()
+
+    assert ok is False
+    assert "rdkit" in detail
+    assert "Traceback" not in detail
+
+
 def test_temporal_health_requires_reachable_service_and_fresh_worker():
     from src.task_runtime.models import BackendHealth
 

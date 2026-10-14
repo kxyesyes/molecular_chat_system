@@ -29,7 +29,7 @@ const UIManager = {
     // 更新复合物按钮状态
     const resultsContent = document.getElementById("results-content");
     const hasResults = resultsContent.innerHTML.includes("结构编号");
-    const complexEnabled = !!(AppState.currentComplexData || hasResults);
+    const complexEnabled = !!(AppState.currentComplexData || AppState.currentJobId || hasResults);
     complexBtn.disabled = !complexEnabled;
     complexBtn.style.opacity = complexEnabled ? "1" : "0.5";
   },
@@ -562,6 +562,10 @@ function startBatchDocking() {
     alert("请上传蛋白质文件，并提供多个配体文件或多行 SMILES");
     return;
   }
+  if (ligandFiles.length > 0 && batchSmiles) {
+    alert("批量模式只能选择配体文件或多行 SMILES，不能同时提供");
+    return;
+  }
 
   const startBtn = document.getElementById("start-btn");
   if (startBtn && !startBtn.disabled) {
@@ -655,6 +659,7 @@ let activeDockingTaskId = null;
 let dockingPollTimer = null;
 
 const DOCKING_TASK_STORAGE_KEY = "medchat.docking.active_task_id";
+const DOCKING_TASK_QUERY_PARAM = "docking_task";
 const TERMINAL_DOCKING_TASK_STATUSES = new Set([
   "succeeded",
   "failed",
@@ -683,17 +688,32 @@ function setDockingTaskButtonState(active) {
   if (cancelBtn) cancelBtn.disabled = !active;
 }
 
+function updateRememberedDockingTaskUrl(taskId) {
+  try {
+    if (!window.history || typeof window.history.replaceState !== "function") return;
+    const url = new URL(window.location.href);
+    if (taskId) url.searchParams.set(DOCKING_TASK_QUERY_PARAM, taskId);
+    else url.searchParams.delete(DOCKING_TASK_QUERY_PARAM);
+    window.history.replaceState(window.history.state, "", url.toString());
+  } catch (_) {}
+}
+
 function rememberDockingTask(taskId) {
   activeDockingTaskId = taskId || null;
   try {
     if (taskId) sessionStorage.setItem(DOCKING_TASK_STORAGE_KEY, taskId);
     else sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY);
   } catch (_) {}
+  updateRememberedDockingTaskUrl(activeDockingTaskId);
 }
 
 function readRememberedDockingTask() {
   try {
-    return sessionStorage.getItem(DOCKING_TASK_STORAGE_KEY);
+    const storedTaskId = sessionStorage.getItem(DOCKING_TASK_STORAGE_KEY);
+    if (storedTaskId) return storedTaskId;
+  } catch (_) {}
+  try {
+    return new URL(window.location.href).searchParams.get(DOCKING_TASK_QUERY_PARAM);
   } catch (_) {
     return null;
   }
@@ -762,6 +782,23 @@ function renderDockingProgress(percent) {
   progressBar.setAttribute("data-progress", `${Math.round(value)}%`);
 }
 
+function populatePoseSelector(totalPoses, selectedPose = 1) {
+  const poseSelect = document.getElementById("pose-select");
+  const count = Number.isInteger(totalPoses) && totalPoses > 0 ? totalPoses : 0;
+  if (!poseSelect || count === 0) return;
+  poseSelect.replaceChildren();
+  for (let pose = 1; pose <= count; pose += 1) {
+    const option = document.createElement("option");
+    option.value = String(pose);
+    option.textContent = pose === selectedPose ? `Pose ${pose}（最佳）` : `Pose ${pose}`;
+    poseSelect.appendChild(option);
+  }
+  const selected = Number.isInteger(selectedPose) && selectedPose > 0 && selectedPose <= count
+    ? selectedPose
+    : 1;
+  poseSelect.value = String(selected);
+}
+
 function dockingProgressPercent(value) {
   const numeric = Number(value);
   if (!Number.isFinite(numeric)) return 0;
@@ -808,6 +845,12 @@ function durableDockingResult(record) {
 }
 
 function renderDurableTaskSuccess(record, result) {
+  renderDockingProgress(100);
+  renderDockingStepLog("parse_results", "完成 · 100%");
+  populatePoseSelector(result.total_poses, result.best_pose_index || 1);
+  if (typeof setCurrentJobId === "function") {
+    setCurrentJobId(result.result_job_id || null);
+  }
   const warnings = Array.isArray(record.warnings) ? record.warnings : [];
   const artifacts = Array.isArray(record.artifacts) ? record.artifacts : [];
   const warningText = warnings.length
@@ -843,6 +886,7 @@ function renderDurableTaskSuccess(record, result) {
       <button class="action-btn btn-secondary" onclick="resetDocking()">重新对接</button>
     </div>`;
   setResultsMinHeightToLeft();
+  updateButtonStates();
 }
 
 function renderDurableTaskFailure(record) {
@@ -883,15 +927,17 @@ function applyDockingTaskRecord(record) {
       indicator.className = "status-indicator status-completed";
       indicator.textContent = "已完成";
     });
-    try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
+    rememberDockingTask(null);
     return true;
   }
   renderDockingProgress(Math.min(dockingProgressPercent(record.progress), 99));
   if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || status);
   renderDurableTaskFailure(record);
-  try { sessionStorage.removeItem(DOCKING_TASK_STORAGE_KEY); } catch (_) {}
+  rememberDockingTask(null);
   return true;
 }
+
+const DOCKING_POLL_INTERVAL_MS = 500;
 
 async function pollDockingTask(taskId) {
   clearDockingPoll();
@@ -918,7 +964,7 @@ async function pollDockingTask(taskId) {
   if (!terminal && readRememberedDockingTask() === taskId) {
     dockingPollTimer = setTimeout(() => {
       pollDockingTask(taskId).catch(handleDockingTaskError);
-    }, 1000);
+    }, DOCKING_POLL_INTERVAL_MS);
   }
 }
 
@@ -993,8 +1039,16 @@ function startDocking() {
     alert("请上传蛋白质文件和配体文件，或输入SMILES字符串");
     return;
   }
+  if (ligandFile && smilesInput) {
+    alert("单配体模式只能选择配体文件或 SMILES，不能同时提供");
+    return;
+  }
   if (ligandFiles.length > 1) {
     alert("单配体模式只能选择一个配体文件；请切换批量模式或仅保留一个文件");
+    return;
+  }
+  if (!AppState.dockingBoxCenterTouched) {
+    Utils.showToast("请先手动确认对接盒中心后再提交持久化任务", "warning");
     return;
   }
 
@@ -1040,10 +1094,6 @@ function startDocking() {
 
   Object.entries(params).forEach(([k, v]) => formData.append(k, v));
 
-  if (!AppState.dockingBoxCenterTouched) {
-    handleDockingTaskError(new Error("请先手动确认对接盒中心后再提交持久化任务"));
-    return;
-  }
   rememberDockingTask(null);
   setDockingTaskButtonState(true);
   renderDockingProgress(0);
@@ -1175,7 +1225,10 @@ function showRealResults(data) {
     data.results.forEach((r) => {
       const opt = document.createElement("option");
       opt.value = r.pose;
-      opt.textContent = `Pose ${r.pose} (E=${r.binding_energy.toFixed(1)})`;
+      const poseEnergy = Number.isFinite(r.binding_energy)
+        ? r.binding_energy.toFixed(1)
+        : "不可用";
+      opt.textContent = `Pose ${r.pose} (E=${poseEnergy})`;
       poseSelect.appendChild(opt);
     });
   }
@@ -1427,12 +1480,16 @@ function loadComplexStructure(jobId, poseNumber = 1) {
         }, 100);
       } catch (e) {
         console.error("复合物渲染失败:", e);
-        if (currentProteinData) loadMolecule(currentProteinData, "protein");
+        if (typeof Utils?.showToast === "function") {
+          Utils.showToast("复合物结构加载失败，请重试", "error");
+        }
       }
     })
     .catch((error) => {
       console.warn("无法加载复合物结构:", error);
-      if (currentProteinData) loadMolecule(currentProteinData, "protein");
+      if (typeof Utils?.showToast === "function") {
+        Utils.showToast("复合物结构加载失败，请重试", "error");
+      }
     });
 }
 

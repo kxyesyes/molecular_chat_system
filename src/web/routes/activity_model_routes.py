@@ -1,4 +1,6 @@
 """Activity model route registration."""
+import csv
+import io
 import logging
 import os
 from typing import Dict, Any
@@ -9,6 +11,80 @@ from .route_compat import lazy_dependency
 
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_DEFAULT_ACTIVITY_TRAINING_MAX_ROWS = 100_000
+
+
+def _activity_training_max_rows() -> int:
+    """Return the bounded row budget for one uploaded training dataset."""
+    try:
+        value = int(
+            os.getenv(
+                "MEDCHAT_ACTIVITY_TRAINING_MAX_ROWS",
+                str(_DEFAULT_ACTIVITY_TRAINING_MAX_ROWS),
+            )
+        )
+    except (TypeError, ValueError):
+        return _DEFAULT_ACTIVITY_TRAINING_MAX_ROWS
+    return max(1, value)
+
+
+def _count_training_rows(content: bytes, filename: str | None) -> int:
+    """Count data records without loading the dataset into pandas.
+
+    The route already holds the bounded upload bytes in memory.  Using the CSV
+    parser here preserves quoted multiline fields; malformed input falls back
+    to a conservative physical-line count and is still rejected by the
+    trainer's normal parser later.
+    """
+    text = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin1"):
+        try:
+            text = content.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if text is None:
+        return max(0, content.count(b"\n"))
+
+    suffix = os.path.splitext(filename or "")[1].lower()
+    try:
+        sample = text[:8192]
+        dialect = csv.Sniffer().sniff(sample, delimiters=",\t;")
+    except csv.Error:
+        dialect = csv.excel_tab if suffix == ".tsv" else csv.excel
+
+    try:
+        rows = csv.reader(io.StringIO(text), dialect=dialect)
+        next(rows, None)  # header
+        parsed_rows = sum(1 for _ in rows)
+    except csv.Error:
+        parsed_rows = 0
+
+    # The training worker uses pandas, whose permissive parser can treat an
+    # unmatched single quote as ordinary data rather than a quote delimiter.
+    # Taking the physical data-line count as a lower-bound guard prevents the
+    # preflight parser from underestimating what the worker will receive.  It
+    # is intentionally conservative for valid multiline quoted fields.
+    physical_rows = max(0, len(text.splitlines()) - 1)
+    return max(parsed_rows, physical_rows)
+
+
+def _validate_activity_training_row_limit(content: bytes, filename: str | None) -> None:
+    max_rows = _activity_training_max_rows()
+    row_count = _count_training_rows(content, filename)
+    if row_count <= max_rows:
+        return
+    raise HTTPException(
+        status_code=413,
+        detail={
+            "code": "ACTIVITY_TRAINING_ROW_LIMIT_EXCEEDED",
+            "message": "activity training dataset exceeds the configured row limit",
+            "max_rows": max_rows,
+            "received_rows": row_count,
+        },
+    )
 
 
 def _register_activity_model_routes(
@@ -63,6 +139,7 @@ def _register_activity_model_routes(
             ):
                 raise HTTPException(status_code=400, detail="分类阈值仅适用于 classification")
             content = await get_upload_reader()(file, "activity training dataset")
+            _validate_activity_training_row_limit(content, file.filename)
 
             # 1. 保存上传的数据集
             from src.activity.trainer import submit_training_job
@@ -104,6 +181,17 @@ def _register_activity_model_routes(
         except HTTPException:
             raise
         except Exception as e:
+            from src.activity import trainer as trainer_module
+            capacity_error = getattr(trainer_module, "TrainingCapacityError", ())
+            if capacity_error and isinstance(e, capacity_error):
+                raise HTTPException(
+                    status_code=429,
+                    detail={
+                        "code": "ACTIVITY_TRAINING_BUSY",
+                        "message": str(e),
+                        "retryable": True,
+                    },
+                ) from e
             get_logger().error(f"启动训练失败: {e}")
             raise HTTPException(status_code=500, detail="活性模型训练任务启动失败，请稍后重试")
         finally:
