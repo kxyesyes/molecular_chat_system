@@ -15,7 +15,11 @@ function setup() {
         textContent: "", innerHTML: "", className: "", style: {},
         classList: { add() {} },
         addEventListener() {},
-        contentWindow: { ketcher: { async setMolecule() {} } },
+        contentWindow: { ketcher: {
+          smiles: "",
+          async setMolecule(value) { this.smiles = value; },
+          async getSmiles() { return this.smiles; },
+        } },
       });
       return elements.get(id);
     } },
@@ -30,6 +34,156 @@ function setup() {
   context.DesignUI.closeImport = () => {};
   return { context, elements, requests, S: context.DesignState, P: context.PropertiesPanel, E: context.MoleculeEditor };
 }
+
+test("Ketcher imports plain attachment placeholders with distinct unused R-group labels", async () => {
+  const { context, E } = setup();
+  const loaded = [];
+  context.document.getElementById("ketcher-frame").contentWindow.ketcher.setMolecule = async value => loaded.push(value);
+  await E.setSMILES("c1cc([*])ccc1");
+  await E.setSMILES("[CH:1](*)C[*]");
+  await E.setSMILES("C[*:2].CC[*]");
+  await E.setSMILES("C[13*] |$;label*$|");
+  await E.setSMILES("N[C@@H](C)O");
+  await E.setSMILES("");
+  assert.deepEqual(loaded, ["c1cc([*:1])ccc1", "[CH:1]([*:2])C[*:3]", "C[*:2].CC[*:1]",
+    "C[13*] |$;label*$|", "N[C@@H](C)O", ""]);
+});
+
+test("Ketcher refuses exhausted attachment labels without changing the canvas", async () => {
+  const { context, E, S } = setup();
+  let calls = 0;
+  context.document.getElementById("ketcher-frame").contentWindow.ketcher.setMolecule = async () => { calls++; };
+  await assert.rejects(E.setSMILES(Array(33).fill("[*]").join(".")), /32/);
+  assert.equal(calls, 0);
+  assert.equal(S.editorWriteInFlight, false);
+});
+
+test("import binds properties and completion to Ketcher's exported representation", async () => {
+  const { context, E, S } = setup();
+  const canonical = "c1cccc%91c1.[*:1]%91 |$;;;;;;_R1$|";
+  const ketcher = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  ketcher.getSmiles = async () => canonical;
+  const requested = [];
+  context.DesignApi.calcProperties = async smiles => {
+    requested.push(smiles);
+    return { success: true, properties: { mw: 77.11 } };
+  };
+  let closed = 0;
+  context.DesignUI.closeImport = () => { closed++; };
+  context.document.getElementById("importInput").value = "c1cc([*])ccc1";
+  await E.confirmImport();
+  assert.deepEqual(requested, [canonical]);
+  assert.equal(S.smiles, canonical);
+  assert.equal(S.propsSmiles, canonical);
+  assert.equal(closed, 1);
+});
+
+test("editor writes remain in flight until the exported structure is captured", async () => {
+  const { context, E, S } = setup();
+  let resolveExport;
+  context.document.getElementById("ketcher-frame").contentWindow.ketcher.getSmiles =
+    () => new Promise(resolve => { resolveExport = resolve; });
+  const written = E.setSMILES("OCC");
+  for (let i = 0; i < 15 && !resolveExport; i++) await Promise.resolve();
+  assert.equal(typeof resolveExport, "function");
+  assert.equal(S.editorWriteInFlight, true);
+  resolveExport("CCO");
+  assert.equal(await written, "CCO");
+  assert.equal(S.editorWriteInFlight, false);
+});
+
+test("exported SMILES is published before the write guard is released to polling", async () => {
+  const { context, E, S } = setup();
+  const ketcher = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  ketcher.getSmiles = async () => "CCO";
+  S.smiles = "old";
+  const written = E.setSMILES("OCC");
+  await S.editorWriteQueue;
+  assert.equal(S.editorWriteInFlight, false);
+  assert.equal(S.smiles, "CCO");
+  await written;
+});
+
+test("Ketcher 3.7 early setMolecule resolution waits for the Load canvas event", async () => {
+  const { context, E, S } = setup();
+  const ketcher = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  let handler, subscriptions = 0, loads = 0;
+  ketcher.editor = { subscribe(name, callback) { subscriptions++; handler = callback; } };
+  ketcher.smiles = "old";
+  ketcher.setMolecule = async () => { loads++; }; // Actual canvas mutation is detached.
+  let settled = false;
+  const written = E.setSMILES("OCC").then(value => { settled = true; return value; });
+  for (let i = 0; i < 30; i++) await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(S.editorWriteInFlight, true);
+  handler([{ operation: "Add atom" }]);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  ketcher.smiles = "CCO";
+  handler([{ operation: "Load canvas" }]);
+  assert.equal(await written, "CCO");
+  const second = E.setSMILES("CCN");
+  for (let i = 0; i < 30 && loads < 2; i++) await Promise.resolve();
+  ketcher.smiles = "CCN";
+  handler([{ operation: "Load canvas" }]);
+  assert.equal(await second, "CCN");
+  assert.equal(subscriptions, 1, "do not leak a new Ketcher subscription per import");
+});
+
+test("canvas-load timeout clears the write guard and rejects further writes until reload", async () => {
+  const { context, E, S } = setup();
+  const ketcher = context.document.getElementById("ketcher-frame").contentWindow.ketcher;
+  let expire;
+  context.setTimeout = fn => { expire = fn; return 1; };
+  context.clearTimeout = () => {};
+  ketcher.editor = { subscribe() {} };
+  ketcher.setMolecule = async () => {};
+  const written = E.setSMILES("CCO");
+  const rejected = assert.rejects(written, /超时/);
+  for (let i = 0; i < 30 && !expire; i++) await Promise.resolve();
+  assert.equal(typeof expire, "function");
+  expire();
+  await rejected;
+  assert.equal(S.editorWriteInFlight, false);
+  await assert.rejects(E.setSMILES("CCN"), /刷新/);
+});
+
+test("clearing an unexportable canvas still loads the empty structure", async () => {
+  const { context, E } = setup();
+  const frame = context.document.getElementById("ketcher-frame");
+  const k = frame.contentWindow.ketcher;
+  let handler, calls = 0;
+  k.editor = { subscribe(name, callback) { handler = callback; } };
+  k.getSmiles = async () => { throw new Error("invalid atom type: rg-label"); };
+  k.setMolecule = async value => {
+    calls++;
+    assert.equal(value, "");
+    k.getSmiles = async () => "";
+    handler([{ operation: "Load canvas" }]);
+  };
+  await E.setSMILES("");
+  assert.equal(calls, 1);
+});
+
+test("iframe stays inert until the owned canvas load and export complete", async () => {
+  const { context, E } = setup();
+  const frame = context.document.getElementById("ketcher-frame");
+  frame.inert = false;
+  const k = frame.contentWindow.ketcher;
+  let handler, started = false;
+  k.editor = { subscribe(name, callback) { handler = callback; } };
+  k.setMolecule = async () => { started = true; };
+  k.getSmiles = async () => {
+    assert.equal(frame.inert, true);
+    return "CCO";
+  };
+  const written = E.setSMILES("OCC");
+  for (let i = 0; i < 30 && !started; i++) await Promise.resolve();
+  assert.equal(frame.inert, true);
+  handler([{ operation: "Load canvas" }]);
+  await written;
+  assert.equal(frame.inert, false);
+});
 
 test("missing properties never become zero or passing rules", () => {
   const { P, elements } = setup();
@@ -126,7 +280,7 @@ test("restore clears prior properties immediately and binds refreshed values to 
   S.curProps = { mw: 30 };
   const restore = E.restoreCandidate("CCO");
   assert.equal(S.curProps, null);
-  for (let i = 0; i < 10 && !requests.length; i++) await Promise.resolve();
+  for (let i = 0; i < 30 && !requests.length; i++) await Promise.resolve();
   requests[0]({ success: true, properties: { mw: 46 } });
   await restore;
   assert.equal(S.propsSmiles, "CCO");
@@ -146,7 +300,7 @@ test("clearing while substitution runs never restores the obsolete product", asy
   const { context, E, S, elements } = setup();
   let resolve;
   context.DesignApi.substitute = () => new Promise(r => { resolve = r; });
-  context.document.getElementById("ketcher-frame").contentWindow.ketcher.getSmiles = async () => "CC*";
+  context.document.getElementById("ketcher-frame").contentWindow.ketcher.smiles = "CC*";
   S.smiles = "CC*";
   S.selectedFrag = { smi: "*O", label: "O" };
   S.detectedSiteCount = 1;
@@ -222,6 +376,10 @@ function loadMain(context) {
   let id = 0;
   context.setTimeout = fn => { timers.set(++id, fn); return id; };
   context.clearTimeout = token => timers.delete(token);
+  context.setInterval = () => ++id;
+  context.clearInterval = () => {};
+  // These tests drive property debounce explicitly, not the background editor poll.
+  context.document.hidden = true;
   context.window = {};
   context.FragmentBrowser = { renderCommon() {}, async loadFrags() {} };
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/web/static/js/design/main.js"), "utf8"), context);

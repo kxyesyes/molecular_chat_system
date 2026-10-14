@@ -347,3 +347,21 @@ def test_storage_rejects_properties_from_a_different_smiles(tmp_path):
     storage = DesignStorage(tmp_path)
     with pytest.raises(ValueError, match="不一致"):
         storage.save_molecule("CCO", {"mw": 30.0})
+
+
+def test_storage_accepts_complete_calculated_properties_including_formula(tmp_path):
+    properties = calculate_properties("Fc1ccccc1")["properties"]
+    result = DesignStorage(tmp_path).save_molecule("Fc1ccccc1", properties)
+    assert result["success"] is True
+    saved = pd.read_csv(tmp_path / "saved_molecules.csv")
+    assert saved.iloc[0]["smiles"] == "Fc1ccccc1"
+    assert saved.iloc[0]["prop_mw"] == properties["mw"]
+
+
+@pytest.mark.parametrize("formula", ["C2H6O", 96.1, {"formula": "C6H5F"}])
+def test_storage_rejects_mismatched_or_nonstring_formula(tmp_path, formula):
+    properties = calculate_properties("Fc1ccccc1")["properties"]
+    properties["molecular_formula"] = formula
+    with pytest.raises(ValueError, match="molecular_formula.*不一致"):
+        DesignStorage(tmp_path).save_molecule("Fc1ccccc1", properties)
+    assert not (tmp_path / "saved_molecules.csv").exists()

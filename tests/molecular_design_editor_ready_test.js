@@ -5,16 +5,17 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-function setup(initialEditor) {
+function setup(initialEditor, initialState = {}) {
   let editor = initialEditor;
   let sequence = 0;
   const timers = new Map();
   const intervals = new Map();
   const listeners = {};
   const toasts = [];
+  let reads = 0;
   const status = { textContent: "" };
   const frame = { addEventListener: (name, fn) => { listeners[name] = fn; } };
-  const state = { ketcherReady: false, smiles: "" };
+  const state = { ketcherReady: false, smiles: "", ...initialState };
   const context = vm.createContext({
     console, window: {},
     document: {
@@ -25,7 +26,7 @@ function setup(initialEditor) {
     DesignUI: { toast: (text, type) => toasts.push({ text, type }), setFeedback() {} },
     DesignApi: {},
     FragmentBrowser: { renderCommon() {}, async loadFrags() {} },
-    MoleculeEditor: { getK: () => editor, async getSMILES() { return ""; } },
+    MoleculeEditor: { getK: () => editor, async getSMILES() { reads++; return ""; } },
     PropertiesPanel: {}, HistoryManager: {},
     setTimeout(fn) { timers.set(++sequence, fn); return sequence; },
     clearTimeout(id) { timers.delete(id); },
@@ -35,6 +36,7 @@ function setup(initialEditor) {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../src/web/static/js/design/main.js"), "utf8"), context);
   return {
     state, status, toasts, intervals, timers, listeners,
+    get reads() { return reads; },
     setEditor(value) { editor = value; },
     async tick() {
       const current = [...timers.values()];
@@ -45,6 +47,15 @@ function setup(initialEditor) {
 }
 
 function readyEditor() { return { getSmiles() {}, setMolecule() {} }; }
+
+test("polling never starts a conversion during an owned editor write", async () => {
+  const app = setup(readyEditor(), { editorWriteInFlight: true });
+  await Promise.resolve();
+  assert.equal(app.reads, 0);
+  app.state.editorWriteInFlight = false;
+  await Promise.all([...app.intervals.values()].map(fn => fn()));
+  assert.equal(app.reads, 1);
+});
 
 test("blocked iframe load never reports ready and times out visibly", async () => {
   const app = setup(null);
