@@ -76,15 +76,18 @@ def production(tmp_path):
 class FiniteAsyncBody(httpx.AsyncByteStream):
     """Finite synthetic response bytes, with real HTTPX response cleanup."""
 
-    def __init__(self, chunks, request, *, disconnect=False):
+    def __init__(self, chunks, request, *, disconnect=False, read_timeout=False):
         self.chunks = tuple(chunks)
         self.request = request
         self.disconnect = disconnect
+        self.read_timeout = read_timeout
         self.close_calls = 0
 
     async def __aiter__(self):
         for chunk in self.chunks:
             yield chunk
+        if self.read_timeout:
+            raise httpx.ReadTimeout(PROVIDER_MARKER, request=self.request)
         if self.disconnect:
             raise httpx.ReadError(PROVIDER_MARKER, request=self.request)
 
@@ -141,8 +144,12 @@ class ScriptedHTTP:
                  "prompt_eval_count": 11, "eval_count": 7})
         if kind == "json":
             body = text
-        if kind in {"stream-ok", "stream-http-error", "stream-disconnect"}:
-            stream = FiniteAsyncBody(text, request, disconnect=kind == "stream-disconnect")
+        if kind in {"stream-ok", "stream-http-error", "stream-disconnect", "stream-timeout"}:
+            stream = FiniteAsyncBody(
+                text, request,
+                disconnect=kind == "stream-disconnect",
+                read_timeout=kind == "stream-timeout",
+            )
             self.streams.append(stream)
             response = httpx.Response(status, stream=stream, request=request)
         else:
@@ -645,16 +652,172 @@ def test_real_stream_consumer_close_closes_response_before_client(production):
         assert_chat_http(transport, "async", 0.7, 1500, streaming=True)
 
 
-def test_stream_signature_remains_legacy_without_strict_keyword(production):
+def test_stream_has_explicit_opt_in_strict_keyword(production):
     signature = inspect.signature(production.model.stream_generate)
-    assert tuple(signature.parameters) == ("self", "prompt", "temperature", "max_tokens")
+    assert tuple(signature.parameters) == (
+        "self", "prompt", "temperature", "max_tokens", "strict_errors")
     assert signature.parameters["temperature"].default == 0.7
     assert signature.parameters["max_tokens"].default == 1500
+    assert signature.parameters["strict_errors"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert signature.parameters["strict_errors"].default is False
     assert inspect.isasyncgenfunction(production.model.stream_generate)
+
+
+@pytest.mark.parametrize("step,reason", [
+    pytest.param(("stream-http-error", (PROVIDER_MARKER.encode(),)), "http_error",
+                 id="http-error"),
+    pytest.param(("disconnect", ""), "transport_error", id="disconnect"),
+    pytest.param(("type-error", ""), "client_error", id="type-error"),
+    pytest.param(("stream-ok", (b"not-json\n",)), "invalid_response",
+                 id="malformed-json"),
+    pytest.param(("stream-ok", (b'{"error":"private-body"}\n',)), "invalid_response",
+                 id="error-envelope"),
+    pytest.param(("stream-ok", (b'{"response":"I"}\n',)), "invalid_response",
+                 id="missing-done"),
+    pytest.param(("stream-disconnect", (b'{"response":"I"}\n',)), "transport_error",
+                 id="stream-disconnect"),
+])
+def test_strict_stream_never_yields_failure_text(production, step, reason, caplog):
+    caplog.set_level(logging.DEBUG, logger="src.web.models.ollama_model")
+    chunks = []
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            async for chunk in model.stream_generate(QUERY, strict_errors=True):
+                chunks.append(chunk)
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == reason
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert all(chunk == "I" for chunk in chunks)
+        assert len(transport.calls) == 1
+        assert all(response.is_closed for response in transport.responses)
+    assert PROVIDER_MARKER not in caplog.text
+    assert QUERY not in caplog.text
+
+
+def test_strict_stream_accepts_done_tail_without_newline(production):
+    step = ("stream-ok", (b'{"response":"I"}\n',
+                          b'{"response":"CCO","done":true}'))
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        assert asyncio.run(consume()) == ["I", "CCO"]
+        assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("fault", [httpx.ReadTimeout, httpx.ConnectTimeout])
+def test_strict_stream_timeout_is_fixed_failure(production, fault, caplog):
+    caplog.set_level(logging.DEBUG, logger="src.web.models.ollama_model")
     with mocked_client(production, ()) as (model, transport):
-        with pytest.raises(TypeError):
-            model.stream_generate(QUERY, strict_errors=True)
+        transport.on_request = lambda event: (_ for _ in ()).throw(fault(PROVIDER_MARKER))
+
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == "timeout"
+        assert caught.value.args == (CLIENT_MESSAGE,)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert PROVIDER_MARKER not in repr(vars(caught.value))
+        assert len(transport.calls) == 1
+        assert all(response.is_closed for response in transport.responses)
+    assert PROVIDER_MARKER not in caplog.text
+
+
+def test_strict_stream_read_timeout_closes_response(production, caplog):
+    caplog.set_level(logging.DEBUG, logger="src.web.models.ollama_model")
+    step = ("stream-timeout", (b'{"response":"I"}\n',))
+    chunks = []
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            async for chunk in model.stream_generate(QUERY, strict_errors=True):
+                chunks.append(chunk)
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == "timeout"
+        assert caught.value.args == (CLIENT_MESSAGE,)
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert PROVIDER_MARKER not in repr(vars(caught.value))
+        assert chunks == ["I"]
+        assert len(transport.calls) == 1
+        assert len(transport.responses) == 1
+        assert transport.responses[0].is_closed
+        assert len(transport.streams) == 1
+        assert transport.streams[0].close_calls == 1
+    assert PROVIDER_MARKER not in caplog.text
+
+
+def test_strict_stream_http500_preserves_only_numeric_status(production):
+    with mocked_client(production, (("stream-http-error", (PROVIDER_MARKER.encode(),)),)) as (model, transport):
+        transport.on_response = lambda event: setattr(transport.responses[-1], "status_code", 500)
+
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        with pytest.raises(strict_error_type(production)) as caught:
+            asyncio.run(consume())
+        assert caught.value.reason == "http_error"
+        assert caught.value.http_status == 500
+        assert PROVIDER_MARKER not in repr(vars(caught.value))
+        assert len(transport.calls) == 1
+
+
+def test_strict_stream_consumer_close_closes_response_before_client(production):
+    step = ("stream-ok", (b'{"response":"I"}\n', b'{"response":"CCO","done":true}\n'))
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume_one():
+            stream = model.stream_generate(QUERY, strict_errors=True)
+            try:
+                assert await stream.__anext__() == "I"
+                assert not transport.responses[0].is_closed
+            finally:
+                await stream.aclose()
+            assert transport.responses[0].is_closed
+            assert transport.streams[0].close_calls == 1
+            assert not model.client.is_closed and not model.sync_client.is_closed
+
+        asyncio.run(consume_one())
+        assert_chat_http(transport, "async", 0.7, 1500, streaming=True)
+
+
+def test_strict_stream_handles_split_utf8(production):
+    step = ("stream-ok", (b'{"response":"\xe4', b'\xb8\xad","done":true}\n'))
+    with mocked_client(production, (step,)) as (model, transport):
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=True)]
+
+        assert asyncio.run(consume()) == ["中"]
+        assert len(transport.calls) == 1
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
+def test_strict_stream_flag_requires_native_bool(production, value):
+    with mocked_client(production, ()) as (model, transport):
+        async def consume():
+            return [chunk async for chunk in model.stream_generate(QUERY, strict_errors=value)]
+
+        with pytest.raises(ValueError, match="^invalid_strict_errors$"):
+            asyncio.run(consume())
         assert transport.calls == []
+
+
+@pytest.mark.parametrize("status,expected", [
+    (None, None), (True, None), (False, None), (99, None), (600, None),
+    (200, 200), (599, 599), ("500", None),
+])
+def test_strict_stream_error_sanitizes_http_status(production, status, expected):
+    error_type = strict_error_type(production)
+    error = error_type("http_error", http_status=status)
+    assert error.http_status == expected
+    assert error.args == (CLIENT_MESSAGE,)
+    assert PROVIDER_MARKER not in repr(vars(error))
 
 
 @pytest.mark.parametrize("method_name", ["generate", "generate_async"])
@@ -751,6 +914,81 @@ def test_running_loop_executor_failure_never_redispatches(production, monkeypatc
     for event in probe.calls:
         assert event["channel"] == "async" and event["has_loop"]
         assert event["thread"] != probe.worker_thread
+
+
+def test_bridge_timeout_does_not_join_still_running_provider(production, monkeypatch):
+    import concurrent.futures
+    from concurrent.futures import TimeoutError as FutureTimeout
+
+    entered, release, exited, returned = (threading.Event() for _ in range(4))
+    real_submit = ThreadPoolExecutor.submit
+    real_shutdown = ThreadPoolExecutor.shutdown
+    futures, shutdowns, errors = [], [], []
+    with mocked_client(production, (ok("I"),)) as (model, transport):
+        binding = SimpleNamespace(model_name=model.model_name, generate=model.generate_async)
+        tool = production.generator(binding)
+
+        def blocked(event):
+            entered.set()
+            try:
+                assert release.wait(5), "test watchdog released blocked provider"
+            finally:
+                exited.set()
+
+        transport.on_request = blocked
+
+        def submit(executor, function, *args, **kwargs):
+            future = real_submit(executor, function, *args, **kwargs)
+            if getattr(function, "__func__", None) is not production.generator._run_async_in_new_loop:
+                return future
+            futures.append((executor, future))
+
+            class DeadlineFuture:
+                def result(self, timeout=None):
+                    assert timeout == 30
+                    assert entered.wait(3)
+                    raise FutureTimeout()
+
+            return DeadlineFuture()
+
+        def shutdown(executor, wait=True, *, cancel_futures=False):
+            if any(owner is executor for owner, _ in futures):
+                shutdowns.append((wait, cancel_futures))
+            return real_shutdown(executor, wait=wait, cancel_futures=cancel_futures)
+
+        def caller():
+            async def invoke():
+                try:
+                    tool._call_llm_sync("generate 1 molecule")
+                except Exception as exc:
+                    errors.append(exc)
+
+            try:
+                asyncio.run(invoke())
+            finally:
+                returned.set()
+
+        monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "submit", submit)
+        monkeypatch.setattr(concurrent.futures.ThreadPoolExecutor, "shutdown", shutdown)
+        thread = threading.Thread(target=caller)
+        thread.start()
+        try:
+            assert entered.wait(3)
+            assert returned.wait(1), "caller blocked joining the provider after timeout"
+            assert not exited.is_set()
+            assert shutdowns == [(False, True)]
+            assert len(errors) == 1 and errors[0].reason == "timeout"
+        finally:
+            release.set()
+            thread.join(5)
+            for executor, future in futures:
+                try:
+                    future.result(timeout=5)
+                finally:
+                    real_shutdown(executor, wait=True)
+        assert not thread.is_alive()
+        assert len(futures) == 1
+        assert len(transport.calls) == 1
 
 
 @pytest.mark.parametrize("mode", MODES)

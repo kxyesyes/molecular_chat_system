@@ -390,7 +390,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261009-terminal-state-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261015-projection-failure-v2"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -463,6 +463,33 @@ async function run() {
     h.socket.emit(complete("completed", freshTurn, freshTrace));
     assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("部分完成"));
   });
+  for (const [status, label] of Object.entries({completed: "已完成", partial: "部分完成", waiting_for_input: "等待补充输入"})) {
+    await test(`projection failure after ${status} is visible without rewriting scientific status`, async () => {
+      const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result(status));
+      h.socket.emit(candidateEvent());
+      const failedCompletion = {...complete("failed"),
+        content: "结果展示未完成，请稍后重试。已完成的计算记录仍保留。",
+        error: {code: "result_projection_failed", message: "结果投影失败"}};
+      h.socket.emit({...failedCompletion, turn_id: "9".repeat(32)});
+      h.socket.emit({...failedCompletion, trace_id: "9".repeat(32)});
+      assert(!h.chat.textContent.includes("结果展示失败"), "foreign terminal frames are ignored");
+      h.socket.emit(failedCompletion); await tick();
+      const state = h.chat.querySelector(".decision-runtime-status");
+      assert(state.textContent.includes(label), "retain the earlier scientific status");
+      assert(state.textContent.includes("结果展示失败"), "delivery failure must remain visible");
+      assert(h.chat.textContent.includes(failedCompletion.content));
+      assert(h.chat.textContent.includes("Measured value 0; unavailable is not zero."));
+      assert.equal(h.requests.length, 0, "discard incomplete candidate projection without ACK");
+      assert.equal(h.chat.querySelectorAll(".molecule-card").length, 0);
+      assert(h.button("继续").disabled && h.button("停止").disabled);
+      assert(!h.chat.querySelector(".typing-indicator-wrapper"));
+      const prior = state.textContent;
+      h.socket.emit(complete("completed")); h.flushTimers();
+      assert.equal(state.textContent, prior);
+      h.input.value = "Explicit new request"; h.send();
+      assert.equal(h.socket.sent.at(-1).type, "chat", "projection failure cannot authorize resume");
+    });
+  }
   await test("1011 after result preserves science status but never claims delivery complete", () => {
     const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result("partial"));
     h.socket.close(1011); const state = h.chat.querySelector(".decision-runtime-status");

@@ -35,6 +35,9 @@ def test_actual_model_input_keeps_complete_question_and_constraints(stream, sour
         is_initialized = True
         async def search_similar_molecules(self, *args, **kwargs):
             return [{"SMILES": "CCO", "source": "source-id-1", "notes": "资料" * 20000}]
+        async def search_similar_molecules_with_status(self, *args, **kwargs):
+            records = await self.search_similar_molecules(*args, **kwargs)
+            return {"status": "succeeded", "records": records}
     class Agent:
         def should_use_tools(self, message):
             return True
