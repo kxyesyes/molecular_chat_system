@@ -161,6 +161,12 @@ Original text/digest and exact field spans remain available for subsequent C
 proposal/ownership checks. Generic ligand labels are syntax only; scientific
 input identity must still be independently verified and displayed by the
 coordinator. No old route is enabled by this helper.
+`validate_docking_text_proposal` recomputes that whole-query assessment and
+checks the private C DTO's exact values and original query spans. Initial-text
+mode requires one complete request span and one exact value span per explicit
+field, with no omitted fields or unused/extra-obligation spans. Non-query spans
+and refinement/observation modes require their separate owned-source handling;
+this helper does not silently borrow assistant prose or authenticate references.
 
 - [ ] RED against real temporary SQLite: original request reserves one future task ID; refinement
   retains it, owner/query digest/admission/source identity, fixed expiry and spent model budget.
@@ -249,6 +255,23 @@ not an application latency guarantee. `CCC/CCC` remains literal chemical text,
 not a mounted file. Existing owned-evidence behavior is unchanged. This helper
 still does not validate C proposal spans, chemistry, source authenticity or
 complete admission, and enables no HTTP/chat execution path.
+
+### D2 initial-text proposal consistency (partial, 2026-10-16)
+
+The private initial-text checker now compares the closed C proposal with the
+complete original request, all six explicitly supplied fields and exact original
+codepoint spans. Missing/extra/borrowed spans and invented or omitted fields
+clarify; model completeness never fills server-side missing inputs. Both
+`input_ready` and `execution_authorized` remain false.
+
+Measured missing-helper RED: 22 failures. Parent consent/protocol regression
+passed 601 tests in 13.65 seconds. Independent SPEC passed the same 601 tests
+and 164 additional probes; fresh QUALITY APPROVED passed 157 focused tests,
+340 boundary probes with zero custom-hook executions, and 3,000 validations
+in 0.330 seconds. The later nine-module joint run had 1,722 passes and one
+failure in the preparation-owner thread-entry synchronization test; that run
+is not claimed green and its failure remains tracked in P5. This slice does
+not authenticate sources or complete D2 admission, coordinator or routes.
 
 ## D3 — HTTP and C runtime bridge
 

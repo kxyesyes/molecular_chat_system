@@ -13,6 +13,7 @@ import json
 import math
 import re
 import time
+from typing import get_args
 
 from src.agent.contracts import ObservationStatus, ToolProvenance, ToolResult
 from src.agent.evidence.ledger import EvidenceLedger
@@ -179,6 +180,84 @@ def assess_docking_request_text(query, *, enabled, enable_tools):
             input_ready=False, execution_authorized=False)
     except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
         return _text_rejection()
+
+
+def validate_docking_text_proposal(query, proposal, *, enabled, enable_tools):
+    """Recompute whole-query facts and check a private C transport DTO against them.
+
+    This initial-text mode accepts only unchanged ``query`` spans: one full
+    request span and one exact value span per explicit named field. It does not
+    borrow assistant/history prose, mount a named file or infer numeric values
+    from a descriptor. Other span styles/refinement/observation modes clarify.
+    The coordinator still binds an available owned call, generations and source
+    descriptors; even complete textual agreement grants no scientific authority.
+    """
+    from src.agent.contracts.docking_preparation import DockingPreparationProposal
+
+    rejected = dict(consistent=False, reason_code='docking_proposal_clarification_required',
+                    input_ready=False, execution_authorized=False)
+    assessment = assess_docking_request_text(query, enabled=enabled, enable_tools=enable_tools)
+    if not assessment['assessed'] or type(proposal) is not DockingPreparationProposal:
+        return rejected
+    try:
+        if (type(proposal.version) is not str or proposal.version != '1'
+                or type(proposal.kind) is not str or proposal.kind != 'docking_request'
+                or type(proposal.unresolved) is not bool):
+            return rejected
+        # Use the actual closed DTO's declared types, not duck typing, equality
+        # against classes or a second serialization of a potentially mutated DTO.
+        fields_type = DockingPreparationProposal.model_fields['fields'].annotation
+        span_type = get_args(DockingPreparationProposal.model_fields['source_spans'].annotation)[0]
+        fields, spans = proposal.fields, proposal.source_spans
+        if (type(fields) is not fields_type or type(spans) is not list
+                or not 1 <= len(spans) <= 16):
+            return rejected
+        names = fields.model_fields_set
+        expected = assessment['fields']
+        if (type(names) is not set or len(names) > 6
+                or any(type(name) is not str or name not in _DOCKING_FIELDS for name in names)
+                or names != set(expected)):
+            return rejected
+        requests = []
+        for index, span in enumerate(spans):
+            if (type(span) is not span_type or type(span.source_id) is not str
+                    or span.source_id != 'query' or type(span.start) is not int
+                    or type(span.end) is not int or not 0 <= span.start < span.end <= len(query)
+                    or type(span.role) is not str or span.role not in {'request', 'field'}):
+                return rejected
+            if span.role == 'request':
+                if span.start != 0 or span.end != len(query):
+                    return rejected
+                requests.append(index)
+        if len(requests) != 1:
+            return rejected
+        used = {requests[0]}
+        for name in names:
+            field = getattr(fields, name)
+            if type(field) is not fields_type.model_fields[name].annotation:
+                return rejected
+            indices = field.span_indices
+            if (type(indices) is not list or len(indices) != 1 or type(indices[0]) is not int
+                    or not 0 <= indices[0] < len(spans) or indices[0] in used):
+                return rejected
+            span, value, original = spans[indices[0]], field.value, expected[name]
+            if (span.role != 'field'
+                    or [span.start, span.end] != assessment['field_spans'][name]):
+                return rejected
+            if type(original) is list:
+                if (type(value) is not list or len(value) != 3
+                        or any((type(v) is not int and type(v) is not float)
+                               or not math.isfinite(v) for v in value) or value != original):
+                    return rejected
+            elif type(value) is not type(original) or value != original:
+                return rejected
+            used.add(indices[0])
+        if used != set(range(len(spans))):
+            return rejected  # No unused span can hide an additional obligation.
+        return dict(consistent=True, assessment=assessment, model_unresolved=proposal.unresolved,
+                    input_ready=False, execution_authorized=False)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return rejected
 
 
 _TARGET_TOOL = 'target_database_search'

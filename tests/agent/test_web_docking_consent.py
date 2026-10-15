@@ -137,6 +137,120 @@ def test_d2_smiles_lexical_controls_preserve_bond_slashes(smiles):
     assert result['assessed'] is True and result['inputs']['smiles'] == smiles
 
 
+_FIELD_QUERY = ('请做一次对接；receptor_ref=receptor-1；ligand_ref=ligand-1；'
+                'center=[-1,2.5,0]；size=[10,20,30]；exhaustiveness=4；num_modes=3。')
+_FIELD_TEXT = {'receptor_ref': 'receptor-1', 'ligand_ref': 'ligand-1',
+               'center': '[-1,2.5,0]', 'size': '[10,20,30]', 'exhaustiveness': '4', 'num_modes': '3'}
+
+
+def source_proposal(query=_FIELD_QUERY):
+    spans = [dict(source_id='query', start=0, end=len(query), role='request')]
+    fields = {}
+    if query == _FIELD_QUERY:
+        for name, text in _FIELD_TEXT.items():
+            start = query.index(name + '=') + len(name) + 1
+            fields[name] = dict(value=text if name.endswith('_ref') else json.loads(text),
+                                span_indices=[len(spans)])
+            spans.append(dict(source_id='query', start=start, end=start + len(text), role='field'))
+    return dict(version='1', kind='docking_request', unresolved=False, source_spans=spans, fields=fields)
+
+
+def proposal_boundary(query, value):
+    from src.agent.contracts.docking_preparation import parse_docking_preparation_json
+    call = getattr(api(), 'validate_docking_text_proposal', None)
+    assert callable(call), 'D2 original-text proposal consistency validation is missing'
+    proposal = parse_docking_preparation_json(json.dumps({'proposal': value}))
+    return call(query, proposal, enabled=True, enable_tools=True)
+
+
+def test_d2_proposal_matches_every_original_field_but_is_not_ready():
+    result = proposal_boundary(_FIELD_QUERY, source_proposal())
+    assert result['consistent'] is True
+    assert result['assessment']['fields'] == {k: (v if k.endswith('_ref') else json.loads(v))
+                                               for k, v in _FIELD_TEXT.items()}
+    assert result['input_ready'] is False and result['execution_authorized'] is False
+
+
+def test_d2_model_complete_claim_cannot_fill_missing_inputs():
+    result = proposal_boundary(_S10, source_proposal(_S10))
+    assert result['consistent'] is True
+    assert len(result['assessment']['missing_fields']) == 6
+    assert result['input_ready'] is False and result['execution_authorized'] is False
+
+
+@pytest.mark.parametrize('mutation', [
+    'value', 'drop', 'field_source', 'field_bounds', 'request_prefix', 'request_source',
+    'request_bounds', 'request_role', 'field_role', 'field_index', 'duplicate_span',
+    'unused_span', 'extra_obligation', 'split_span',
+])
+def test_d2_proposal_omission_invention_or_forged_span_requires_clarification(mutation):
+    value = source_proposal()
+    if mutation == 'value': value['fields']['center']['value'][0] = 999
+    elif mutation == 'drop': del value['fields']['num_modes']
+    elif mutation == 'field_source': value['source_spans'][1]['source_id'] = 'history-0'
+    elif mutation == 'field_bounds': value['source_spans'][1]['end'] += 1
+    elif mutation == 'request_prefix': value['source_spans'][0]['end'] -= 1
+    elif mutation == 'request_source': value['source_spans'][0]['source_id'] = 'refinement'
+    elif mutation == 'request_bounds': value['source_spans'][0]['end'] += 10
+    elif mutation == 'request_role': value['source_spans'][0]['role'] = 'field'
+    elif mutation == 'field_role': value['source_spans'][1]['role'] = 'request'
+    elif mutation == 'field_index': value['fields']['receptor_ref']['span_indices'] = [0]
+    elif mutation == 'duplicate_span': value['source_spans'].append(deepcopy(value['source_spans'][0]))
+    elif mutation == 'unused_span': value['source_spans'].append(dict(source_id='query', start=0, end=1, role='field'))
+    elif mutation == 'extra_obligation':
+        value['source_spans'].append(dict(source_id='query', start=0, end=1, role='extra_obligation'))
+    elif mutation == 'split_span': value['fields']['center']['span_indices'] = [1, 3]
+    result = proposal_boundary(_FIELD_QUERY, value)
+    assert result == {'consistent': False, 'reason_code': 'docking_proposal_clarification_required',
+                      'input_ready': False, 'execution_authorized': False}
+
+
+@pytest.mark.parametrize('kind', ['not_c', 'mixed', 'uncertain', 'docking_observation', 'docking_refinement'])
+def test_d2_other_proposal_kinds_cannot_become_original_request(kind):
+    value = source_proposal(_S10)
+    value.update(kind=kind, unresolved=True)
+    assert proposal_boundary(_S10, value)['consistent'] is False
+
+
+def test_d2_model_cannot_drop_extra_original_obligation():
+    query = _S10 + '再预测毒性。'
+    assert proposal_boundary(query, source_proposal(query))['consistent'] is False
+
+
+def test_d2_proposal_unresolved_signal_is_preserved_not_silently_cleared():
+    value = source_proposal()
+    value['unresolved'] = True
+    result = proposal_boundary(_FIELD_QUERY, value)
+    assert result['consistent'] is True and result['model_unresolved'] is True
+    assert result['input_ready'] is False
+
+
+@pytest.mark.parametrize('part', ['spans', 'span', 'fields', 'field', 'indices', 'value'])
+def test_d2_mutated_private_dto_cannot_run_custom_hooks(part):
+    from src.agent.contracts.docking_preparation import parse_docking_preparation_json
+    proposal = parse_docking_preparation_json(json.dumps({'proposal': source_proposal()}))
+    hooks = []
+    class Meta(type):
+        def __eq__(cls, other):
+            hooks.append('eq')
+            return True
+        __hash__ = type.__hash__
+    class Trap(metaclass=Meta):
+        def __len__(self): hooks.append('len'); return 0
+        def __iter__(self): hooks.append('iter'); return iter(())
+        def __getattr__(self, name): hooks.append('getattr'); raise AttributeError(name)
+        def __reduce__(self): hooks.append('reduce'); return (dict, ())
+    value = Trap()
+    if part == 'spans': object.__setattr__(proposal, 'source_spans', value)
+    elif part == 'span': proposal.source_spans[0] = value
+    elif part == 'fields': object.__setattr__(proposal, 'fields', value)
+    elif part == 'field': object.__setattr__(proposal.fields, 'receptor_ref', value)
+    elif part == 'indices': object.__setattr__(proposal.fields.receptor_ref, 'span_indices', value)
+    elif part == 'value': object.__setattr__(proposal.fields.center, 'value', [value, 2.5, 0])
+    result = api().validate_docking_text_proposal(_FIELD_QUERY, proposal, enabled=True, enable_tools=True)
+    assert result['consistent'] is False and hooks == []
+
+
 def api():
     name = 'src.web.docking_request'
     assert importlib.util.find_spec(name) is not None, 'D2 owned request evidence is missing'
