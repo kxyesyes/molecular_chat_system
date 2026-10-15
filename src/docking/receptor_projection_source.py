@@ -70,7 +70,7 @@ def _list_cap(context):
             "xyz_milli": 3, "symmetry": 2, "atom_serials": 5}.get(context, 99999)
 
 
-def check_projection_resources(value, *, budget=None, kind="source") -> ResourceFacts:
+def check_projection_resources(value, *, budget=None, kind="source", _capture=False):
     """Iterative exact-native walk BEFORE hashing/copying/serialization/IPC.
 
     Root depth is zero; dict keys count as scalar nodes. Only dict/list/str/int
@@ -83,8 +83,14 @@ def check_projection_resources(value, *, budget=None, kind="source") -> Resource
     scratch. Containers add 256 bytes + 32/child for growth and temporary refs.
     Actual indexes/frozen facts and serialization capacity are reserved separately
     on the SAME ledger. Reservations are never refunded or reset per stage.
+
+    Private P5 mode _capture=True returns (facts, detached native tree). Capture
+    happens DURING this same validated walk, reserving each copied container
+    before allocation; immutable scalars are shared, mutable aliases are not.
+    Default callers still receive ResourceFacts without constructing a copy.
     """
     _require(type(kind) is str and kind in {"source", "selection"})
+    _require(type(_capture) is bool)
     budget = pdb.AllocationBudget(MAX_LOGICAL_BYTES) if budget is None else budget
     _require(type(budget) is pdb.AllocationBudget)
     budget.reserve(64 * 1024)
@@ -92,13 +98,16 @@ def check_projection_resources(value, *, budget=None, kind="source") -> Resource
     stack, active = [], set()
     nodes = size = atom_count = 0
     current, depth, context = value, 0, "root"
+    captured = destination = slot = None
     while True:
         _require(depth <= MAX_DEPTH, "resource_limit")
         nodes += 1
         _require(nodes <= MAX_NODES, "resource_limit")
         budget.reserve(128)
         native = type(current)
-        _require(native in (dict, list, str, int))
+        # Equality-based type membership can invoke an untrusted metaclass.
+        _require(any(native is allowed for allowed in (dict, list, str, int)))
+        copied = current if _capture else None
         if native is str:
             size += _string_size(current)
         elif native is int:
@@ -115,35 +124,62 @@ def check_projection_resources(value, *, budget=None, kind="source") -> Resource
             budget.reserve(256 + 32 * count)
             size += 2 + max(0, count - 1) + (count if native is dict else 0)
             active.add(id(current))
-            # Dict keys validated before they can participate in context lookup.
+            if _capture:
+                budget.reserve(256 + 32 * count)
+                copied = {} if native is dict else []
+            # In capture mode, validate/charge each key when actually consumed,
+            # not in a separate pass over a caller-mutable dictionary.
             if native is dict:
-                for key in current:
-                    _require(type(key) is str)
-                    nodes += 1
-                    _require(nodes <= MAX_NODES, "resource_limit")
-                    budget.reserve(128)
-                    size += _string_size(key)
+                if not _capture:
+                    for key in current:
+                        _require(type(key) is str)
+                        nodes += 1
+                        _require(nodes <= MAX_NODES, "resource_limit")
+                        budget.reserve(128)
+                        size += _string_size(key)
                 iterator = iter(current.items())
             else:
                 iterator = enumerate(current)
-            stack.append((current, iterator, depth, context))
+            stack.append((current, iterator, depth, context, copied, count))
         _require(size <= ceiling, "resource_limit")
+        if _capture:
+            if destination is None:
+                captured = copied
+            elif type(destination) is dict:
+                destination[slot] = copied
+            else:
+                destination.append(copied)
         while stack:
-            parent, iterator, parent_depth, parent_context = stack[-1]
+            parent, iterator, parent_depth, parent_context, parent_copy, count = stack[-1]
             item = next(iterator, None)
             if item is None:
+                if _capture:
+                    _require(len(parent_copy) == count, "resource_limit")
                 active.remove(id(parent))
                 stack.pop()
                 continue
             key, current = item
+            if _capture:
+                # Reject concurrent growth/shrink; never outgrow the copy's
+                # reserved capacity or iterate an unbounded growing list.
+                _require(len(parent_copy) < count, "resource_limit")
+                destination, slot = parent_copy, key
             if type(parent) is dict:
+                _require(type(key) is str)
+                if _capture:
+                    nodes += 1
+                    _require(nodes <= MAX_NODES, "resource_limit")
+                    budget.reserve(128)
+                    size += _string_size(key)
+                    _require(size <= ceiling, "resource_limit")
                 context = "constraint_residues" if key == "residues" and parent_context == "constraint" else key
             else:
                 context = {"conformer_constraints": "constraint", "allowed_assignments": "assignment"}.get(parent_context, "item")
             depth = parent_depth + 1
             break
         else:
-            return ResourceFacts(nodes, size)
+            facts = ResourceFacts(nodes, size)
+            return (facts, captured) if _capture else facts
 
 
 def _closed(value, keys):

@@ -476,10 +476,10 @@ close the P5–P7 integration and real-browser gates.
 
 **Files:** chat_preparation.py and test_chat_docking_preparation.py.
 
-- [ ] RED actual `run_preparation` calls for `projection_inspect`, `projection` and
+- [x] RED actual `run_preparation` calls for `projection_inspect`, `projection` and
   `projection_verify`, using a retained `PreparationOwner`, actual process start
   and the original absolute monotonic deadline. No mock result envelope.
-- [ ] Extend only the exact operation/argument map and producer dispatch:
+- [x] Extend only the exact operation/argument map and producer dispatch:
 
 ```python
 _INPUTS.update({
@@ -492,15 +492,33 @@ _INPUTS.update({
   Dispatch respectively to the three public functions defined above, imported
   lazily in the child. Run resource preflight before spawning/serializing this
   input family. Existing ligand/inspect/pocket/receptor dispatch stays unchanged.
-- [ ] RED/GREEN cancellation before/after physical spawn, late worker result,
+- [x] RED/GREEN cancellation before/after physical spawn, late worker result,
   double cancellation, blocked cleanup helper and expiry during settlement. A
   late success is not published, owner remains retained while any helper is active,
   and no ADFR/Meeko/Vina command or raw-input diagnostic can occur here.
-- [ ] Run `python -m pytest tests/test_chat_docking_preparation.py
+- [x] Run `python -m pytest tests/test_chat_docking_preparation.py
   tests/test_docking_pocket_evidence.py tests/test_receptor_projection.py
   tests/test_receptor_projection_source.py tests/test_receptor_projection_pdb.py -q`.
   Add existing process-isolation and command-cancellation suites for final review.
   Independent spec/quality review, then explicit scoped commit.
+
+P5 execution evidence (2026-10-16): actual owned-child tests cover the three
+operations and original-deadline/physical-cleanup behavior. Review found that a
+validated caller tree could change before the background spawn serialized it;
+24 failing regressions preceded same-walk exact-native container capture charged
+to the existing aggregate ledger. No deepcopy, caller hook, parent PDB parser or
+pickle probe was introduced. A subsequent independent SPEC found an outer-map
+thread replacement race; three failing tests preceded bounded exact-key capture
+before any lookups. Final SPEC passed 67 focused tests, three thread regressions
+and 15 concurrent probes with no parent hook invocation.
+
+Final independent QUALITY APPROVED: 1,101 passed, six POSIX-only skipped and 37
+adversarial probes. Parent combined P1–P5/D1, draft, text-consent/protocol and
+source-download/security/cache run: **1,780 passed in 87.83 seconds**. Compilation
+and `git diff --check` passed. The cancelled-wait regression now synchronizes on
+actual helper entry (including a delayed-start variant); a cancelled future is
+still never treated as physical completion. These are offline worker boundaries,
+not authenticated source preparation, a selected scientific input or S10 evidence.
 
 ## P6 — D2–D6 authority, preview and invalidation integration gate
 
@@ -554,21 +572,21 @@ candidate = fetch_rcsb_source_pair(server_selected_pdb_id, deadline=root_deadlin
 assert set(candidate) == {"pdb_id", "pdb_bytes", "cif_bytes", "pdb_sha256", "cif_sha256"}
 ```
 
-- [ ] RED: exact uppercase four-character PDB identifier and finite native deadline
+- [x] RED: exact uppercase four-character PDB identifier and finite native deadline
   are required before DNS; reject URLs, paths, subclasses and extra arguments.
-- [ ] Build only `https://files.rcsb.org/download/{pdb_id}.pdb` and `.cif`, reuse
+- [x] Build only `https://files.rcsb.org/download/{pdb_id}.pdb` and `.cif`, reuse
   existing trusted-host request guards, reject redirects and non-200 responses,
   and close each acquired response on all exits. No retry, decompression,
   alternate candidate, fallback conversion, cache/DB write or response diagnostic.
-- [ ] Stream bytes with 16 MiB per file and 32 MiB aggregate caps; cap the
+- [x] Stream bytes with 16 MiB per file and 32 MiB aggregate caps; cap the
   Content-Length decimal before parsing, reject malformed/contradictory lengths,
   non-byte chunks, non-identity Content-Encoding, empty or truncated bodies.
   Do not use response.content/text or preallocate from an untrusted length.
-- [ ] Use the same absolute deadline before/after request, each chunk and close;
+- [x] Use the same absolute deadline before/after request, each chunk and close;
   give each request only remaining time, capped at the existing 30 seconds.
   Check before publication too. Deadline checks do not terminate a blocked socket;
   only the subsequent retained process integration can guarantee cancellation.
-- [ ] GREEN: exact byte preservation, digests, second-file failure without partial
+- [x] GREEN: exact byte preservation, digests, second-file failure without partial
   publication, malformed lengths/encodings, overflow, timeout and all response
   closures. Run this new test module plus existing downloader negatives; obtain
   independent spec/quality review before commit.
@@ -594,6 +612,32 @@ The returned candidate is not authenticated: matching IDs/hashes/download times
 cannot establish same revision or ownership. P6 must still verify exact same-entry
 revision/complete inventory/chemistry, bind live S03 evidence and require explicit
 scientific choices before any projection or READY state.
+
+### P6 component transport and retained source worker follow-up
+
+- [ ] Extend only the same downloader and transport test module with
+  `fetch_rcsb_component_files(component_ids, *, deadline) -> dict[str, bytes]`.
+  Accept an exact immutable tuple of 1–64 unique uppercase ASCII alphanumeric
+  component IDs (1–5 characters); the PDB-compatible compiler may support a
+  narrower subset. Construct only canonical
+  `https://files.rcsb.org/ligands/download/{id}.cif` URLs. Enforce 1 MiB per file,
+  16 MiB aggregate, and the same response-hook/deadline/close/error rules as the
+  paired fetch. No retries, cache, DB writes or partial publication. Obtain
+  independent SPEC then QUALITY review after actual RED/GREEN regressions.
+- [ ] Keep network source preparation separate from the offline operation map.
+  Reuse the existing retained process lifecycle, without another scheduler or
+  detached network thread. Input contains only server-selected PDB/target facts,
+  never URLs, paths, source dictionaries or caller callbacks. Perform pair fetch,
+  bounded component discovery, canonical CCD fetch and final independent
+  comparison inside that same child and original deadline (60-second child cap,
+  180-second upstream root cap). No proxy credentials added to child environment.
+- [ ] Charge download buffers, discovery parsing, final compilation and returned
+  bytes/evidence/IPC on one conservative 512 MiB logical allocation ledger.
+  Separately bounded helpers do not establish an aggregate budget. Preserve the
+  fixed safe errors and physical-settlement publication rule.
+- [ ] Bind the child result only in the trusted Web owner after rechecking current
+  S03 evidence/session/root/runtime generation. Pure compiler output, a hash or
+  arbitrary source-shaped dictionary is not authenticity or execution permission.
 
 ### P6 official evidence compiler boundary
 

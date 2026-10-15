@@ -3,7 +3,8 @@
 No Web/authentication, file paths, docking adapters or scientific executables.
 The synchronous builders belong in an owned child, not on an HTTP event loop.
 ``run_preparation(operation, inputs=..., deadline=..., owner=...)`` accepts only
-ligand/inspect/pocket/receptor and the exact corresponding pure-function inputs.
+ligand/inspect/pocket/receptor and projection_inspect/projection/projection_verify
+with the exact corresponding pure-function inputs.
 ``deadline`` is the coordinator's ORIGINAL absolute time.monotonic deadline
 (upstream total budget 180s); this module caps each call at 60s including start,
 never renews that upstream budget, and does not implement the coordinator.
@@ -32,7 +33,11 @@ _INPUTS = {
     "inspect": {"pdb_bytes", "source"},
     "pocket": {"pdb_bytes", "source", "residue"},
     "receptor": {"pdb_bytes", "source", "protein_selection", "reference_residue", "retained_hetero_residues"},
+    "projection_inspect": {"pdb_bytes", "source"},
+    "projection": {"pdb_bytes", "source", "selection"},
+    "projection_verify": {"pdb_bytes", "source", "selection", "derived_bytes", "projection"},
 }
+_PROJECTIONS = frozenset({"projection_inspect", "projection", "projection_verify"})
 _MESSAGES = {
     "LIGAND_INPUT_INVALID": "Ligand input is invalid or unsupported.",
     "LIGAND_PREPARATION_FAILED": "Modeled ligand input could not be prepared.",
@@ -144,9 +149,68 @@ def build_ligand_sdf(smiles: str) -> dict:
 def _produce(operation, inputs):
     if operation == "ligand":
         return build_ligand_sdf(**inputs)
+    if operation in _PROJECTIONS:
+        from .receptor_projection import (
+            inspect_receptor_projection, project_receptor_bytes, verify_receptor_projection,
+        )
+        return {"projection_inspect": inspect_receptor_projection,
+                "projection": project_receptor_bytes,
+                "projection_verify": verify_receptor_projection}[operation](**inputs)
     from .pocket_evidence import inspect_pocket_candidates, prepare_receptor_bytes, propose_pocket
     return {"inspect": inspect_pocket_candidates, "pocket": propose_pocket,
             "receptor": prepare_receptor_bytes}[operation](**inputs)
+
+
+def _check_projection_inputs(operation, inputs):
+    """Parent-only bounded native capture BEFORE construction or async handoff.
+
+    One aggregate logical capacity ledger, not an OS RSS guarantee. This neither
+    parses PDB nor authenticates sources/chooses conformers. Child P1-P4 checks
+    still own scientific validation and their own bounded working allocations.
+    The same resource walkers validate and detach mutable containers in one
+    pass; only immutable exact-native scalars/bytes may retain caller identity.
+    No hashing, encoding, pickle probe, deepcopy, or arbitrary object hooks.
+    """
+    from . import receptor_projection_pdb as pdb, receptor_projection_source as contracts
+    from . import receptor_projection as projection
+
+    budget = pdb.AllocationBudget(min(contracts.MAX_LOGICAL_BYTES, 512 * 1024 * 1024))
+    budget.reserve(65536)  # Fixed operation/envelope/IPC framing capacity.
+    captured = {}
+    for key in (("pdb_bytes", "derived_bytes") if operation == "projection_verify" else ("pdb_bytes",)):
+        value = inputs[key]
+        if type(value) is not bytes or not 0 < len(value) <= min(pdb.MAX_PDB_BYTES, 16 * 1024 * 1024):
+            raise pdb.ProjectionInvalid("raw_invalid")
+        # Original, serialization buffer, transport buffer, child reconstruction.
+        budget.reserve(4 * len(value))
+        captured[key] = value
+    for kind in (("source",) if operation == "projection_inspect" else ("source", "selection")):
+        value = inputs[kind]
+        if type(value) is not dict:
+            raise pdb.ProjectionInvalid("source_invalid")
+        before = budget.used
+        facts, captured[kind] = contracts.check_projection_resources(
+            value, budget=budget, kind=kind, _capture=True)
+        # Walker already charges original nodes and detached containers. Reserve
+        # another native tree plus memo references and escaped serialization/
+        # transport capacity, on the SAME ledger (aliases count each occurrence).
+        budget.reserve(budget.used - before + 128 * facts.nodes + 12 * facts.json_bytes)
+    if operation == "projection_verify":
+        value = inputs["projection"]
+        if type(value) is not dict:
+            raise pdb.ProjectionInvalid("selection_invalid")
+        before = budget.used
+        # Same-package P4 INTERNAL contract: exact natives, <=128-codepoint
+        # strings, <=int64, null, depth/node/cycle caps; >=128 bytes per node
+        # plus 256/container and 32/child. Keep this coupling explicit: the
+        # walker does not return JSON size. Its delta bounds escaped UTF-8 JSON
+        # by <8x (string <=6*128+2 bytes, int <=20, container punctuation charged).
+        # Three such capacities (24x delta) cover serialization/transport and
+        # native reconstruction, in addition to the walker's original charge.
+        # This is proportional, never an unconditional 12*64 MiB reservation.
+        captured["projection"] = projection._descriptor_resources(value, budget, _capture=True)
+        budget.reserve(24 * (budget.used - before))
+    return captured
 
 
 def _observe(task):
@@ -277,13 +341,40 @@ async def run_preparation(operation: str, *, inputs: dict, deadline: float, owne
     Late cleanup can settle the owner, but never restore a timed-out result.
     """
     if (type(owner) is not PreparationOwner or owner._claimed or type(operation) is not str
-            or operation not in _INPUTS or type(inputs) is not dict or inputs.keys() != _INPUTS[operation]
-            or type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            or operation not in _INPUTS or type(inputs) is not dict
+            or len(inputs) != len(_INPUTS[operation])
+            or not any(type(deadline) is allowed for allowed in (int, float)) or not math.isfinite(deadline)):
         return _failure("PREPARATION_INPUT_INVALID")
+    # Capture the at-most-five outer entries without looking up caller-owned
+    # keys. Another thread can replace a previously checked key with a subclass;
+    # a subsequent lookup on that dictionary would run its equality hook.
+    # Exact native keys are checked BEFORE hashing/comparison/insertion here.
+    # This fixed envelope is covered by the projection's 64 KiB base reserve.
+    outer = {}
+    expected = _INPUTS[operation]
+    try:
+        for key, value in inputs.items():
+            if type(key) is not str or len(outer) >= len(expected) or key not in expected:
+                return _failure("PREPARATION_INPUT_INVALID")
+            outer[key] = value
+        if len(outer) != len(expected):
+            return _failure("PREPARATION_INPUT_INVALID")
+    except RuntimeError:
+        return _failure("PREPARATION_INPUT_INVALID")  # Concurrent dictionary mutation.
+    inputs = outer
     owner._claimed = True
     work_deadline = min(deadline, time.monotonic() + CHILD_MAX_SECONDS)
     if work_deadline <= time.monotonic():
         return {**_failure("PREPARATION_TIMEOUT"), "lifecycle": owner.snapshot()}
+    if operation in _PROJECTIONS:
+        try:
+            # Never hand caller-owned mutable containers to background pickle.
+            inputs = _check_projection_inputs(operation, inputs)
+        except Exception:
+            # No arbitrary input/exception diagnostics cross this boundary.
+            return _failure("PREPARATION_INPUT_INVALID")
+        if work_deadline <= time.monotonic():
+            return {**_failure("PREPARATION_TIMEOUT"), "lifecycle": owner.snapshot()}
     cancelled = False
     result = _failure("PREPARATION_FAILED")
     try:

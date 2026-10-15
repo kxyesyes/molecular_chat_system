@@ -34,12 +34,15 @@ def _canonical(value):
                       ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
-def _descriptor_resources(value, budget):
-    """No-copy bounded native walk, including lineage's sole null field.
+def _descriptor_resources(value, budget, *, _capture=False):
+    """Bounded native walk, including lineage's sole null field.
 
     Schema/value closure is checked against the recomputed descriptor separately.
-    This walk never invokes user hooks or constructs a flattened index/copy.
+    Default mode constructs no copy. Private P5 _capture mode returns a detached
+    tree, charging each container before allocation on this same ledger. Neither
+    mode invokes user hooks or constructs a flattened index.
     """
+    _require(type(_capture) is bool)
     budget.reserve(65536)
     nodes = size = 0
     active = set()
@@ -51,7 +54,9 @@ def _descriptor_resources(value, budget):
         _require(nodes <= 4_000_000, "resource_limit")
         budget.reserve(128)
         native = type(item)
-        _require(native in (dict, list, str, int, type(None)))
+        # Equality-based type membership can invoke an untrusted metaclass.
+        _require(any(native is allowed for allowed in (dict, list, str, int, type(None))))
+        copied = item if _capture else None
         if native is str:
             size += contracts._string_size(item)
         elif native is int:
@@ -67,18 +72,32 @@ def _descriptor_resources(value, budget):
             budget.reserve(256 + 32 * count)
             size += 2 + max(0, count - 1) + (count if native is dict else 0)
             active.add(id(item))
+            if _capture:
+                budget.reserve(256 + 32 * count)
+                copied = {} if native is dict else []
             if native is dict:
                 for key, child in item.items():
                     _require(type(key) is str)
+                    if _capture:
+                        _require(len(copied) < count, "resource_limit")
                     walk(key, depth + 1)
-                    walk(child, depth + 1)
+                    child_copy = walk(child, depth + 1)
+                    if _capture:
+                        copied[key] = child_copy
             else:
                 for child in item:
-                    walk(child, depth + 1)
+                    if _capture:
+                        _require(len(copied) < count, "resource_limit")
+                    child_copy = walk(child, depth + 1)
+                    if _capture:
+                        copied.append(child_copy)
+            if _capture:
+                _require(len(copied) == count, "resource_limit")
             active.remove(id(item))
         _require(size <= min(MAX_PROJECTION_JSON_BYTES, 64 * 1024 * 1024), "resource_limit")
+        return copied
 
-    walk(value, 0)
+    return walk(value, 0)
 
 
 def _closed_equal(actual, expected):
