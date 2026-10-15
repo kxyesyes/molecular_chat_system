@@ -5,6 +5,7 @@ import json
 import asyncio
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from typing import List, Dict, Any
@@ -38,6 +39,7 @@ from src.web.prompt_budget import (
 from src.web import agent_result_presentation as result_presentation
 from src.web import chat_prompt_builder as prompt_builder
 from src.web import property_comparison
+from src.web.ranked_target_structures import rank_followup_kind, ranked_structure_followup
 from src.web.property_constraints import generation_constraint_report
 from src.agent import evidence_followup
 from src.web.agent_result_presentation import (
@@ -115,6 +117,25 @@ class ChatHandler:
         self.scientific_references = scientific_references
         self.decision_runtime = None
         self._allocation_tasks = set()
+
+    def _ranked_reverse_evidence(self):
+        """Use the current registered tool, never instantiate another producer."""
+        from .reverse_target_followup import RankedReverseEvidence
+        agent = self.agent_system
+        store = getattr(agent, 'state_store', None)
+        registry = getattr(agent, 'tool_registry', None)
+        tools = registry.as_mapping() if registry is not None else getattr(agent, 'tools', {})
+        tool = tools.get('reverse_target_predictor') if isinstance(tools, Mapping) else None
+        tool = getattr(tool, 'tool', tool)
+        if store is not None and callable(getattr(tool, 'validate_current_observation', None)):
+            return RankedReverseEvidence(store, tool)
+        return None
+
+    @staticmethod
+    def _reverse_display_count(message):
+        counts = re.findall(r'前\s*([0-9一二三四五六七八九十百]+)|\btop\s*(five|[0-9]+)\b', message, re.I)
+        negated = re.search(r'不要|不是|而是|不只|不仅|\b(?:not|instead)\b', message, re.I)
+        return 5 if not negated and len(counts) == 1 and ''.join(counts[0]).casefold() in {'5', '五', 'five'} else 10
 
     async def _with_allocation(self, websocket, operation, *, cancel_event=None,
                                timeout_result=None, handoff_timeout=False,
@@ -386,10 +407,17 @@ class ChatHandler:
                               conversation_history: List[Dict[str, Any]] | None = None,
                               session_id: str | None = None,
                               reference=None, selection=None):
+        # Consume the prior turn's continuation pointer at admission, before
+        # allocation/model-gate/input-validation early returns. Only a successful
+        # current turn may publish a new one; historical receipts stay unchanged.
+        reverse_context = None
+        if type(conversation_history) is list and conversation_history and type(conversation_history[-1]) is dict:
+            reverse_context = conversation_history[-1].pop('reverse_target_evidence', None)
         async def process(sender):
             return await self._process_message_body(
                 sender, message, enable_rag, enable_tools, rag_count, temperature,
-                mol_count, conversation_history, session_id, reference, selection)
+                mol_count, conversation_history, session_id, reference, selection,
+                reverse_context=reverse_context)
         if enable_tools and self.agent_system is not None:
             return await self._with_allocation(websocket, process,
                 handoff_timeout=isinstance(getattr(self, 'model_request_gate', None), ModelRequestGate))
@@ -402,7 +430,7 @@ class ChatHandler:
                               mol_count: int | None = None,
                               conversation_history: List[Dict[str, Any]] | None = None,
                               session_id: str | None = None,
-                              reference=None, selection=None):
+                              reference=None, selection=None, *, reverse_context=None):
         """处理用户消息 - 性能优化版"""
         # Hold one client for generation, retries and completion metadata.
         request_model = self.model
@@ -450,8 +478,23 @@ class ChatHandler:
         property_evidence = None
         property_answer = None
         activity_evidence = None
+        reverse_target_evidence = None
+        reverse_answer = None
         comparison_answer = None
         execution_message = property_comparison.corrected_property_query(message, scientific_history)
+
+        if rank_followup_kind(message) is not None:
+            ranked_followup = await owned_allocation_call(ranked_structure_followup,
+                message, ([{'reverse_target_evidence': reverse_context}]
+                          if scientific_context_enabled and reverse_context is not None else []),
+                session_id=session_id, enable_tools=enable_tools,
+                boundary=self._ranked_reverse_evidence())
+            await websocket.send_text(json.dumps({'type': 'complete',
+                'content': ranked_followup['content'], 'status': ranked_followup['status']}, ensure_ascii=False))
+            self._append_history(history, {'user': message, 'assistant': ranked_followup['content'],
+                'agent_used': False, 'rag_enabled': False, 'molecules_retrieved': 0,
+                **({'reverse_target_evidence': ranked_followup['context']} if ranked_followup['context'] is not None else {})})
+            return
 
         # Evidence reuse is socket-local, before molecular-input admission. No
         # shared handler history, persistence lookup or tool/model execution.
@@ -646,6 +689,28 @@ class ChatHandler:
                 if not live_agent_events:
                     await self._send_agent_events(websocket, agent_result)
                 presentation_status = self._agent_presentation_status(agent_result)
+                sequence = agent_result.get('tool_result_sequence')
+                reverse_observations = [item for item in sequence if type(item) is dict
+                    and item.get('tool_name') == 'reverse_target_predictor'] if type(sequence) is list else []
+                # Only a single-tool reverse workflow has a pure ranked presentation.
+                # Mixed workflows retain their other tool results and final status.
+                if (scientific_context_enabled and reverse_observations
+                        and presentation_status in {'partial', 'completed'}):
+                    boundary = self._ranked_reverse_evidence()
+                    if boundary is not None:
+                        reverse_target_evidence = await owned_allocation_call(
+                            boundary.capture, agent_result, session_id=session_id)
+                    if len(sequence) == 1:
+                        count = self._reverse_display_count(message)
+                        if reverse_target_evidence is not None:
+                            reverse_answer = await owned_allocation_call(boundary.render_prefix,
+                                reverse_target_evidence, session_id=session_id, count=count)
+                        if reverse_answer is None:
+                            reverse_target_evidence = None
+                            reverse_answer = '排名证据不可用：无法确认同会话、已接受且仍有效的来源；请重新运行反向寻靶。'
+                            agent_result = {**agent_result, 'success': False, 'status': 'partial', 'partial': True}
+                            presentation_status = 'partial'
+                        agent_result = {**agent_result, 'final_answer': reverse_answer}
                 if presentation_status in {"partial", "completed"}:
                     if scientific_context_enabled:
                         activity_evidence = evidence_followup.accepted_activity_evidence(
@@ -705,6 +770,7 @@ class ChatHandler:
                         **({"property_evidence": property_evidence}
                            if scientific_context_enabled and property_evidence is not None else {}),
                         **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
+                        **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
                     })
                     return
                 if presentation_status == "completed":
@@ -843,7 +909,7 @@ class ChatHandler:
             agent_used
             and agent_response
             and is_workflow_result
-            and (not summarize_workflow or property_answer is not None or comparison_answer is not None)
+            and (not summarize_workflow or property_answer is not None or comparison_answer is not None or reverse_answer is not None)
         ):
             full_response = agent_response
             await websocket.send_text(json.dumps({
@@ -861,6 +927,7 @@ class ChatHandler:
                 **({"property_evidence": property_evidence}
                    if scientific_context_enabled and property_evidence is not None else {}),
                 **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
+                **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
             })
             return
 
@@ -973,6 +1040,7 @@ class ChatHandler:
             **({"property_evidence": property_evidence}
                if scientific_context_enabled and property_evidence is not None else {}),
             **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
+            **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
         })
 
     @staticmethod

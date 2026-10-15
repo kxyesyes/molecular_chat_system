@@ -210,18 +210,18 @@ report unresolved while retaining ownership. A closed worker never restarts itse
 **Files:** new reverse_target_followup.py, chat_handler.py, scientific_references.py and existing
 persistence seam as necessary; new test_reverse_target_rank_followup.py.
 
-- [ ] RED accepts only a validated accepted reverse ToolResult from this owner/conversation and
+- [x] RED accepts only a validated accepted reverse ToolResult from this owner/conversation and
   current producer projection. A raw message saying a target is first is not accepted evidence.
-- [ ] Represent follow-up context by detached evidence digest, source generation/configuration,
+- [x] Represent follow-up context by detached evidence digest, source generation/configuration,
   trace, result order and exact target/species. Never rewrite the prior receipt or rank.
-- [ ] RED unique identity mapping: a `name-sha256` key cannot be used as accession. Resolve via
+- [x] RED unique identity mapping: a `name-sha256` key cannot be used as accession. Resolve via
   actual target provider/database aliases plus species; zero/multiple/inconsistent identities
   require clarification. Caller-selected identity must exist in the returned candidates.
-- [ ] Implement and bind the resolved request to existing target search; validate returned target,
+- [x] Implement and bind the resolved request to existing target search; validate returned target,
   species and structures. The phrase asking whether docking is possible must not launch docking.
-- [ ] Display an explicit five-row prefix for S08 only if supported by the request; keep the full
+- [x] Display an explicit five-row prefix for S08 only if supported by the request; keep the full
   ten-row proof and actual count. Test escaping, small result sets and unchanged order/precision.
-- [ ] GREEN cross-owner, stale generation, corrupt proof, false success, missing rank, same-name
+- [x] GREEN cross-owner, stale generation, corrupt proof, false success, missing rank, same-name
   species, model-generated identity and ambiguous follow-up regressions; review and commit.
 
 ## R5 — Complete-corpus and real browser gate
@@ -435,3 +435,53 @@ R4 increment without increasing deadlines; allocation-first tests then gave
 **68 passed / 7 warnings**. Broader reverse/receipt/runtime/Web/registry tests:
 **983 passed / 7 warnings**. These results include in-progress R4 files and are
 not a final complete-repository or browser acceptance claim.
+
+### R4c/d reviewed chat and structure continuation (2026-10-16)
+
+The chat path now captures a socket-local current ranked pointer, renders a fixed
+five-row prefix only for an explicit supported request, and retains the original
+ten-row checkpoint. A closed rank-one continuation uses the existing exact-name,
+UniProt, RCSB and AlphaFold clients under one bounded operation; it does not
+download coordinates, prepare molecules, stage consent or start docking.
+
+Independent SPEC review initially found three defects despite passing tests:
+an early clarification left an older pointer usable, a fresh reverse-ranking
+request was mistaken for a continuation, and an unmapped complex partner caused
+valid target structures to be rejected. Three new regressions failed before
+correction. The pointer is now consumed at admission, fresh reverse requests
+retain ordinary input/routing checks, and matching target entities retain strict
+species checks without treating unrelated unmapped partners as targets.
+Focused helper/provider/chat regression: **106 passed**. Independent SPEC then
+passed those 106 tests, 37 router/chat regressions, one cold-start test, 20
+additional assertions and 12 handoff tests.
+
+The combined 16-module chat/router/allocation run first gave **605 passed / one
+failed**. Its unmodified rerun gave **606 passed**. Investigation reproduced the
+same owner-count assertion with a controlled 80 ms empty-owner settlement delay:
+**one failed / one passed**. The test had assumed cleanup completed within a
+20 ms sleep after timeout delivery, although timeout delivery explicitly does not
+mean physical settlement. It now joins the actual queued tasks separately from
+the still-blocked provider, retaining all original capacity/deadline assertions.
+The delayed and normal variants plus allocation suites gave **41 passed**.
+No production timeout, ownership rule or resource budget changed for this fix.
+The subsequent current-code 16-module run gave **607 passed / 7 existing warnings**.
+
+Fresh QUALITY found that an owned HTTP client's cleanup exception escaped the
+sanitizer into the legacy socket/log handler. An actual handler regression with
+the real bounded client and synthetic provider payloads reproduced **one failed /
+one normal-close control passed**. Cleanup exceptions now replace any pending
+success with a fixed unavailable result; the next follow-up must find no retained
+rank pointer. Quality re-review APPROVED with the two new WebSocket tests and a
+nine-scenario/24-assertion cleanup matrix, in addition to the initial 49 adverse
+assertions and two timing controls. No actual user secret was used in the
+reproduction. The first current-service prewarm was stopped before browser work
+so that the corrected code can be loaded and verified instead.
+
+Final current-code helper/provider/chat tests: **108 passed**. The combined
+16-module chat, router, evidence and allocation command: **609 passed / 7 existing
+warnings in 70.38s**. Compileall and whitespace checks passed after the last fix.
+R4's code/test/review gate is complete; R5 full-source and browser gates are not.
+
+Current compilation and strict health **23/23** passed (two existing activity
+registry warnings). These are intermediate checks, not R5 browser evidence or
+final acceptance. S08/S09 remain unverified on the current running service.

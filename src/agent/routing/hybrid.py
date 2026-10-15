@@ -103,6 +103,12 @@ class HybridSkillRouter:
         target_lookup = bool(re.search(
             r"查找|搜索|检索|找一下|列出|\b(?:find|search|list|look\s+up)\b", lower
         ) and re.search(r"靶点|结构|资料|蛋白|uniprot|pdb|structures?|protein", lower))
+        if (self._contains(lower, "反向寻靶", "反向预测靶点", "reverse target")
+                and not re.search(r"排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个)|previous|ranked|top\s*1\b", lower)
+                and not re.search(r"结构|蛋白|uniprot|pdb|structures?|protein", lower)):
+            # Listing a fresh molecular ranking is not looking up an earlier
+            # target. Keep normal molecular/negation checks below intact.
+            target_lookup = False
         if target_lookup and not has_target and re.search(r"排名|上述|那个|第[一二三]|previous|ranked|top", lower):
             return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
                 requires_confirmation=True, reasons=["target_reference_required"])

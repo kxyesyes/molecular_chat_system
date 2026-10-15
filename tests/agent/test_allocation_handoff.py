@@ -25,9 +25,21 @@ async def drain(gate):
 
 
 @pytest.mark.anyio
-async def test_native_reload_queue_is_inside_allocation_deadline_and_capacity(actual_app, monkeypatch):
+@pytest.mark.parametrize('cleanup_delay', [0, .08])
+async def test_native_reload_queue_is_inside_allocation_deadline_and_capacity(actual_app, monkeypatch, cleanup_delay):
     import time
     from src.agent.runtime.allocation import current_allocation
+    from src.agent.runtime.worker_ownership import WorkerOwner
+
+    original_settle = WorkerOwner.settle
+
+    async def settle(owner):
+        # Empty queued-turn cleanup may be scheduled after timeout delivery.
+        if cleanup_delay and not owner.pending_roots:
+            await asyncio.sleep(cleanup_delay)
+        await original_settle(owner)
+
+    monkeypatch.setattr(WorkerOwner, 'settle', settle)
 
     monkeypatch.setattr('src.web.chat_handler.MAX_RETAINED_ALLOCATIONS', 2)
     release = asyncio.Event()
@@ -61,6 +73,8 @@ async def test_native_reload_queue_is_inside_allocation_deadline_and_capacity(ac
                 first = await sockets[0].turn({'message': '计算性质；SMILES: CCO'})
                 assert result_of(first)['status'] == 'timeout'
                 assert len(calls) == 1 and app.model_request_gate._readers == 1
+                assert len(app.decision_runtime.active_owners) == 1
+                retained_task = next(iter(app.decision_runtime.active_owners)).task
                 transition = asyncio.create_task(app._replace_llm_config({}))
                 for _ in range(100):
                     if app.model_request_gate._writers:
@@ -78,14 +92,25 @@ async def test_native_reload_queue_is_inside_allocation_deadline_and_capacity(ac
                            for item in results)
                 timed_out = next(task.result() for task in requests if result_of(task.result())['status'] == 'timeout')
                 assert any(frame.get('stage') == 'allocation' for frame in timed_out)
-                await asyncio.sleep(.02)
+                # Timeout is delivery, not physical settlement. Join only the
+                # queued/rejected turns; the original provider remains blocked.
+                queued_tasks = set(app.decision_runtime.tasks) - {retained_task}
+                if queued_tasks:
+                    _, pending = await asyncio.wait(queued_tasks, timeout=1)
+                    assert not pending, 'queued turn cleanup did not settle'
+                    assert all(not task.cancelled() and task.exception() is None for task in queued_tasks)
+                assert not retained_task.done()
                 assert len(calls) == 1 and retired == []
                 assert len(app.chat_handler._allocation_tasks) == 1
                 assert len(app.decision_runtime.active_owners) == 1
                 assert len(app.decision_runtime.tasks) == 1
                 release.set()
                 await asyncio.wait_for(transition, 3)
-                await asyncio.sleep(.02)
+                remaining = set(app.decision_runtime.tasks)
+                if remaining:
+                    _, pending = await asyncio.wait(remaining, timeout=1)
+                    assert not pending, 'released turn cleanup did not settle'
+                    assert all(not task.cancelled() and task.exception() is None for task in remaining)
                 assert retired == [True] and len(calls) == 1
                 assert not app.chat_handler._allocation_tasks
                 assert not app.decision_runtime.active_owners
@@ -93,6 +118,7 @@ async def test_native_reload_queue_is_inside_allocation_deadline_and_capacity(ac
             finally:
                 release.set()
                 await asyncio.gather(*(item for item in [transition, *requests] if item), return_exceptions=True)
+                await asyncio.gather(*tuple(app.decision_runtime.tasks), return_exceptions=True)
 
 
 @pytest.mark.anyio
