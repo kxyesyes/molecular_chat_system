@@ -1,3 +1,9 @@
+# Covers both main.py and direct uvicorn src.web.app:app startup, before any
+# application dependency can start background work. Late embedding fails closed.
+from src.system.rdkit_logging import initialize_rdkit_logging
+
+initialize_rdkit_logging()
+
 import asyncio
 from contextlib import AsyncExitStack, nullcontext
 import inspect
@@ -954,23 +960,19 @@ class MolecularChatApp:
         if self.config.get("rag", {}).get("enabled", True):
             await self.rag_system.initialize()
         
-        # 预加载反向寻靶数据库（在后台线程中执行，避免阻塞启动）
+        # Prewarm the registered chat tool's owned strict source, not the legacy
+        # page singleton. The non-daemon worker remains attached through shutdown.
         try:
-            import threading
-            def preload_reverse_target():
-                try:
-                    from src.reverse_target.predictor import get_predictor
-                    logger.info("🔄 预加载反向寻靶数据库...")
-                    predictor = get_predictor()
-                    logger.info(f"✅ 反向寻靶数据库预加载完成")
-                except Exception as e:
-                    logger.warning(f"⚠️ 反向寻靶数据库预加载失败: {e}")
-            
-            # 在后台线程中预加载，不阻塞应用启动
-            preload_thread = threading.Thread(target=preload_reverse_target, daemon=True)
-            preload_thread.start()
-        except Exception as e:
-            logger.warning(f"⚠️ 无法启动反向寻靶预加载: {e}")
+            registry = getattr(self, 'agent_tool_registry', None)
+            if registry is not None and getattr(self, '_reverse_preload_tool', None) is None:
+                adapter = registry.as_mapping().get('reverse_target_predictor')
+                tool = getattr(adapter, 'tool', None)
+                if callable(getattr(tool, 'start_preload', None)):
+                    self._reverse_preload_tool = tool
+                    if tool.start_preload():
+                        logger.info('Reverse-target full-source validation started')
+        except Exception:
+            logger.warning('Reverse-target prewarm unavailable; private diagnostics omitted')
         
         logger.info("Molecular Chat System initialized successfully")
 
@@ -987,6 +989,12 @@ class MolecularChatApp:
         runtime = getattr(self, 'decision_runtime', None)
         if runtime is not None:
             await runtime.shutdown()
+        preload_tool = getattr(self, '_reverse_preload_tool', None)
+        if preload_tool is not None:
+            # Joining an in-flight native validation must not block the loop.
+            # Retain both this reference and the registry until the join returns.
+            await finish_on_cancel(asyncio.to_thread(preload_tool.close))
+            self._reverse_preload_tool = None
         if self._llm_watch_task is not None:
             self._llm_watch_task.cancel()
             try:
@@ -1019,6 +1027,7 @@ class MolecularChatApp:
             # and registry.close stops at its first error.
             tools, self._ordinary_owned_tools = self._ordinary_owned_tools, ()
             seen = {id(getattr(self, name, None)) for name in ('model', 'molecular_generator_model')}
+            seen.add(id(preload_tool))
             for owner in (*tools, self.rag_system):
                 if id(owner) not in seen:
                     seen.add(id(owner))
@@ -1032,9 +1041,14 @@ class MolecularChatApp:
                 for adapter in registry.as_mapping().values()
                 if (tool := getattr(adapter, "tool", None)) is not None
             }
-            registry.close()
+            for _, adapter in sorted(registry.as_mapping().items()):
+                if preload_tool is not None and getattr(adapter, 'tool', None) is preload_tool:
+                    continue
+                close = getattr(adapter, 'close', None)
+                if callable(close):
+                    close()
         for tool in agent_tools:
-            if id(tool) in registry_tool_ids:
+            if id(tool) in registry_tool_ids or tool is preload_tool:
                 continue
             close = getattr(tool, "close", None)
             if callable(close):

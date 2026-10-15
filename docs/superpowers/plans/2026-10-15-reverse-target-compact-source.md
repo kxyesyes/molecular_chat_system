@@ -170,7 +170,7 @@ compact active queries without changing unrestricted legacy producer behavior.
 **Files:** new source_runtime.py; reverse_target_tool.py, config.py, app.py;
 new test_reverse_target_source_runtime.py; targeted Web lifecycle regressions.
 
-- [ ] RED a real barrier-controlled loader: one start, immediate safe loading view, no result until
+- [x] RED a real barrier-controlled loader: one start, immediate safe loading view, no result until
   the loader returns; cancellation/close revokes publication while the native worker stays owned.
 
 ```python
@@ -191,18 +191,18 @@ state, phase, verified/total rows, elapsed seconds, fixed reason and cleanup_pen
 `close` does not declare completion before actual thread exit; a bounded observation method can
 report unresolved while retaining ownership. A closed worker never restarts itself.
 
-- [ ] Implement the runtime and sanitized progress snapshots, failure cleanup, load-once races,
+- [x] Implement the runtime and sanitized progress snapshots, failure cleanup, load-once races,
   readiness binding and explicit shutdown. No secrets/paths/data in status. No automatic retries.
-- [ ] RED/GREEN `ReverseTargetTool.start_preload` only for its application-owned uninjected source;
+- [x] RED/GREEN `ReverseTargetTool.start_preload` only for its application-owned uninjected source;
   `_get_predictor` returns current READY producer or safe unavailable promptly. Validate-current
   keeps producer identity; injected borrowed instances retain old ownership/close semantics.
-- [ ] RED/GREEN app initialization starts the actual registered reverse tool's runtime once and
+- [x] RED/GREEN app initialization starts the actual registered reverse tool's runtime once and
   removes the old unrelated daemon singleton preload. Shutdown closes the tool/runtime exactly
   once and retains unresolved owners. No model reader lease spans prewarm or human waiting.
-- [ ] Add a session-authenticated read-only status route and fixed-label UI message only if needed
+- [x] Add a session-authenticated read-only status route and fixed-label UI message only if needed
   to make the existing unavailable result actionable. It cannot launch/abort shared work, alter
   budget or replay requests. Validate strict configuration and default full-corpus profile.
-- [ ] GREEN lifecycle, registry, source diagnostic tests; compileall and focused Node tests.
+- [x] GREEN lifecycle, registry, source diagnostic tests; compileall and focused Node tests.
   Commit after independent spec and quality review.
 
 ## R4 — Current ranked evidence to exact structure identity
@@ -304,10 +304,10 @@ tests/test_reverse_target_invocation_receipts.py tests/test_reverse_target_popco
 **930 passed, 2 subtests passed, 3 third-party SWIG deprecation warnings in 72.16s**.
 This does not establish application prewarm, S08/S09 browser success or D1 review completion.
 
-### R3 local work in progress — not published or approved (2026-10-16)
+### R3 implementation and independent review (2026-10-16)
 
-The application-owned prewarm/runtime and lifecycle changes are implemented only
-in the local worktree; they are **not part of the committed PR increment** yet.
+The application-owned prewarm/runtime and lifecycle increment completed both
+independent review stages after the corrections recorded below.
 Spec review identified interrupted Thread.start bootstrap ownership before ident;
 real-thread RED tests reproduced early closure and the local fix passed re-review.
 Quality review identified overlapping process-global RDKit BlockLogs exposure and
@@ -322,17 +322,42 @@ health **23/23** also passed. These results do not supersede the failed review b
 
 Latest independent quality re-review: **126 passed, 1 failed** in its combined
 gate, plus **763 passed** in source/diagnostic/input regressions. The remaining P2
-is first-time `LogToPythonLogger()` initialization resetting native enable flags
+was first-time `LogToPythonLogger()` initialization resetting native enable flags
 while another thread is inside BlockLogs. Its raw synthetic SMILES diagnostic
 became visible; a warmed logger does not reproduce it. The standalone flags test
-also fails. This is **unresolved**, not an approved limitation or passing gate.
+also failed. These failures were retained and fixed, not waived as limitations.
 
-R3 stays uncommitted and its completion checkboxes remain unchecked. The existing
-agent-owned server was not restarted with these edits. Further correction and
-independent re-review are required before publication/application validation.
-The maintainer's newer request to review the separate receptor preprocessing
-design is being handed off now, without treating that design as implementation
-approval or treating partial R3 tests as S08/S09 browser acceptance.
+The next local correction moved routing to explicit single-threaded bootstrap,
+restored native flags only there, and rejected late first-time installation.
+Cold-process/native-block interleaving tests passed; parent combined regression
+was **1139 passed, 7 warnings in 243.01s**. Independent SPEC review ran **179
+passed** but found two additional reproducible gaps: Uvicorn's multi-worker child
+starts its heartbeat before app import, causing bootstrap refusal; and cold
+RDKit import overwrites an already configured Python logger. These findings were
+not covered by the passing combined suite and required new RED regressions.
+
+Cold-import and actual Windows spawn/Uvicorn regressions: **3 failed / 3 passed**
+before the next correction, then **6 passed**. Each `main.py` spawn child now
+initializes during `__mp_main__` replay, before Uvicorn's heartbeat. Cold RDKit
+import preserves existing logger configuration without removing unconfigured
+RDKit defaults. Direct single-worker ASGI remains supported; direct Uvicorn
+multi-worker startup is explicitly unsupported/fail-closed and must use the
+documented `main.py` multi-worker path. Linux ordering was inspected, not executed.
+
+Final independent SPEC PASS: **187 passed, 7 existing deprecation warnings** for
+privacy/startup/compact/runtime. Fresh independent QUALITY APPROVED: **63 passed**
+(one harness import-rewrite warning), plus 16 overlapping privacy guards, 75
+start/two-close schedules and eight simultaneous closers retaining a live worker.
+Parent final startup/privacy/runtime/Web lifecycle/registry/adapters/deployment
+gate: **95 passed, 7 warnings in 21.38s**. `compileall -q src scripts main.py`,
+strict health (without loading an env file) **23/23**, four relevant Node scripts
+and `git diff --check` passed. Health retained two pre-existing registry warnings.
+
+No new status endpoint was necessary: the existing unavailable result carries a
+fixed loading message; internal snapshots do not grant control or auto-replay.
+R3 is ready for its scoped commit, but the agent-owned application has not yet
+revalidated the full corpus on this code. R4/R5 and S08/S09 remain incomplete;
+these offline tests are not browser or full-current-repository acceptance.
 
 ### R4a bounded exact-name provider helper (2026-10-16)
 

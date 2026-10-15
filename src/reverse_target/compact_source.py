@@ -21,6 +21,8 @@ import uuid
 import numpy as np
 from rdkit import rdBase
 
+from src.system.rdkit_logging import initialize_rdkit_logging, suppress_rdkit_diagnostics
+
 from .owned_source import (
     INPUT_ERROR, REVISION, SOURCE_ERROR, _OwnedSource, _StrictInputError, _array_hash,
     _read_npy_header, canonical_json, clear_failure_frames, json_sha256,
@@ -294,7 +296,14 @@ def _logical_hasher(shape):
 
 
 def load_compact_source(paths, policy, check, fingerprint_fn, *, progress=None):
-    """Validate the complete corpus and return an exclusively owned snapshot."""
+    """Validate the complete corpus and return an exclusively owned snapshot.
+
+    Threaded embedders must call initialize_rdkit_logging() on the main thread
+    before starting workers. Single-threaded direct calls still initialize on
+    demand. Unsafe late initialization raises RuntimeError before source access,
+    not a misleading source-validation error or an unprotected fallback.
+    """
+    initialize_rdkit_logging()
     try:
         policy.validate()
         budget = _Budget(policy)
@@ -338,7 +347,10 @@ def load_compact_source(paths, policy, check, fingerprint_fn, *, progress=None):
                          for kind in ("morgan", "maccs")}
                 for index in range(start, stop):
                     check()
-                    expected = fingerprint_fn(frame.iloc[index]["canonical_smiles"])
+                    # BlockLogs is process-global and overlapping callers can
+                    # restore it early. Protect only this synchronous source call.
+                    with suppress_rdkit_diagnostics():
+                        expected = fingerprint_fn(frame.iloc[index]["canonical_smiles"])
                     check()
                     if type(expected) not in (tuple, list) or len(expected) != 2:
                         raise ValueError(SOURCE_ERROR)
