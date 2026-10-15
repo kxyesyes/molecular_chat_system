@@ -144,6 +144,11 @@ the complete implementation and verification gates, not before them.
 **Files:** new `src/web/docking_request.py`; narrow changes to scientific references,
 TaskStore draft operations, runtime generation binding; new tests in
 `tests/agent/test_web_docking_consent.py` and existing consent store tests.
+The bounded model-call owner is separated into `src/web/docking_proposal.py`
+with `tests/agent/test_web_docking_proposal.py`: it reuses the existing C proposal
+transport/journal and model reader gate, and carries the same durable draft
+budget. It does not decide whole-request admission, authenticate scientific
+sources or expose another execution/HTTP pathway.
 
 - [ ] RED against real temporary SQLite: original request reserves one future task ID; refinement
   retains it, owner/query digest/admission/source identity, fixed expiry and spent model budget.
@@ -180,6 +185,27 @@ regressions: 277 passed. Independent SPEC passed 53 tests plus 27 adverse probes
 fresh QUALITY approved with 53 tests, 55 real-SQLite probes and two compilation
 checks. This is only the evidence-reference foundation: full D2 source
 authentication, draft coordination, producers and model admission remain open.
+
+### D2 durable draft/store foundation (partial, 2026-10-16)
+
+The additive `draft_json` contract preserves one owner/root/task, original query
+and source-snapshot digests, waiting expiry and spent proposal budget. The six
+explicit pending/fixed slots are updated only by current revision/version CAS;
+fixed-field changes revoke the old request. Pending inputs cannot enter C1
+staging. A descriptor hash is still not source authentication or bearer authority.
+
+Measured TDD batches were 62 missing-feature failures, then 4 privacy failures,
+then 2 closed-keyword failures; the final draft suite passed 88 tests. Independent
+SPEC passed 88 new tests, 48 selected C1/C2 tests and 41 real-SQLite probe
+assertions. Fresh QUALITY APPROVED passed 111 combined selected tests (142
+deselected), 305 existing TaskStore tests (1 skipped), and 84 additional
+real-SQLite assertions. Parent combined draft/proposal/protocol/owned-reference
+regression passed 641 tests in 29.47 seconds. The proposal files in that combined
+run are separately under quality review, not approved by the D2a reviews.
+
+The full legacy C1 suite is not claimed passed: earlier temporary-path failures
+and a stalled run were not passing evidence. This is a store foundation, not
+complete D2 admission, authenticated inputs, preparation or a browser result.
 
 ## D3 — HTTP and C runtime bridge
 

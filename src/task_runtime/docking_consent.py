@@ -10,6 +10,8 @@ from pathlib import PurePosixPath
 import re
 from typing import Any
 
+from src.system.redaction import contains_secret_material
+
 from .staging import (
     MAX_DOCKING_INPUT_BYTES,
     ManifestError,
@@ -31,6 +33,7 @@ _REASONS = frozenset({
     "consent_proof_mismatch", "consent_binding_mismatch", "consent_generation_mismatch",
     "consent_execution_busy", "consent_execution_unknown", "consent_persistence_unavailable",
     "consent_cancelled", "consent_execution_timeout", "consent_execution_failed",
+    "consent_draft_incomplete", "consent_budget_exhausted", "consent_new_root_required",
 })
 
 
@@ -180,6 +183,132 @@ def validate_clocks(now_ms: int, monotonic_now: float) -> None:
         valid = False
     if not valid:
         raise DockingConsentError("consent_invalid_input")
+
+
+DRAFT_SLOT_NAMES = frozenset({
+    "receptor_ref", "ligand_ref", "center", "size", "exhaustiveness", "num_modes",
+})
+_DRAFT_ID_FIELDS = frozenset({
+    "preparation_id", "task_id", "owner_session_id", "trace_id", "origin_turn_id",
+    "query_digest", "refinement_revision", "admission_revision",
+})
+
+
+def _draft_label(value):
+    if (type(value) is not str
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value) is None
+            or contains_secret_material(value)):
+        raise DockingConsentError("consent_invalid_input")
+
+
+def validate_draft_identity(identity):
+    """Metadata identity only; deliberately not an executable C1 identity."""
+    if type(identity) is not dict or set(identity) != _DRAFT_ID_FIELDS:
+        raise DockingConsentError("consent_invalid_input")
+    for key in _DRAFT_ID_FIELDS - {"query_digest", "refinement_revision"}:
+        _draft_label(identity[key])
+    if (type(identity["query_digest"]) is not str
+            or re.fullmatch(r"[a-f0-9]{64}", identity["query_digest"]) is None
+            or type(identity["refinement_revision"]) is not int
+            or not 0 <= identity["refinement_revision"] < 2**63 - 1):
+        raise DockingConsentError("consent_invalid_input")
+    try:
+        _validate_task_id(identity["task_id"])
+    except ManifestError:
+        raise DockingConsentError("consent_invalid_input") from None
+    return json.loads(canonical_json(identity))
+
+
+def validate_draft_patch(patch):
+    """Native, bounded values; descriptor hashes are NOT publisher authentication."""
+    if type(patch) is not dict or not set(patch) <= DRAFT_SLOT_NAMES:
+        raise DockingConsentError("consent_invalid_input")
+    for key, value in patch.items():
+        valid = False
+        if key in {"receptor_ref", "ligand_ref"}:
+            valid = type(value) is str and re.fullmatch(r"sha256:[a-f0-9]{64}", value) is not None
+        elif key in {"center", "size"}:
+            if type(value) is list and len(value) == 3:
+                try:
+                    valid = all(type(v) in (int, float) and math.isfinite(v) for v in value)
+                    if key == "size":
+                        valid = valid and all(0 < v <= 100 for v in value)
+                except OverflowError:
+                    valid = False
+        else:
+            valid = type(value) is int and 1 <= value <= (64 if key == "exhaustiveness" else 50)
+        if not valid:
+            raise DockingConsentError("consent_invalid_input")
+    return json.loads(canonical_json(patch))
+
+
+def validate_chat_draft(draft):
+    fields = {"schema", "model_generation", "capability_generation",
+              "source_snapshot_digest", "slots", "budget"}
+    if (type(draft) is not dict or set(draft) != fields
+            or type(draft["schema"]) is not str or draft["schema"] != "DockingDraft@1"):
+        raise DockingConsentError("consent_invalid_input")
+    for key in ("model_generation", "capability_generation"):
+        _draft_label(draft[key])
+    if (type(draft["source_snapshot_digest"]) is not str
+            or re.fullmatch(r"[a-f0-9]{64}", draft["source_snapshot_digest"]) is None):
+        raise DockingConsentError("consent_invalid_input")
+    slots, budget = draft["slots"], draft["budget"]
+    if type(slots) is not dict or set(slots) != DRAFT_SLOT_NAMES:
+        raise DockingConsentError("consent_invalid_input")
+    for key, slot in slots.items():
+        if type(slot) is not dict:
+            raise DockingConsentError("consent_invalid_input")
+        if slot == {"state": "pending"}:
+            continue
+        if set(slot) != {"state", "value"} or slot["state"] != "fixed":
+            raise DockingConsentError("consent_invalid_input")
+        validate_draft_patch({key: slot["value"]})
+    if (type(budget) is not dict or set(budget) != {"limit_ms", "spent_ms", "proposal_slots_spent"}
+            or any(type(v) is not int for v in budget.values())
+            or not 0 < budget["limit_ms"] <= 180000
+            or not 0 <= budget["spent_ms"] <= budget["limit_ms"]
+            or not 0 <= budget["proposal_slots_spent"] <= 4):
+        raise DockingConsentError("consent_invalid_input")
+    encoded = canonical_json(draft)
+    if len(encoded) > 8192:
+        raise DockingConsentError("consent_invalid_input")
+    return json.loads(encoded)
+
+
+def materialize_draft_identity(identity, draft):
+    """Only a fully fixed draft can acquire the unchanged C1 source_refs shape."""
+    base = validate_draft_identity({k: v for k, v in identity.items() if k != "source_refs"})
+    if all(slot["state"] == "fixed" for slot in draft["slots"].values()):
+        return validate_identity({**base, "source_refs": {
+            key: draft["slots"][key]["value"] for key in ("receptor_ref", "ligand_ref")
+        }})
+    return base
+
+
+def validate_draft_context(policy, model_generation, capability_generation, current_context):
+    """Call under the DB write lock. The callback must read live trusted context."""
+    if type(policy) is not DockingConsentPolicy:
+        raise DockingConsentError("consent_policy_unavailable")
+    for value in (policy.adapter_contract_version, policy.runtime_generation, policy.policy_generation):
+        _draft_label(value)
+    _draft_label(model_generation)
+    _draft_label(capability_generation)
+    try:
+        current = current_context()
+    except Exception:
+        raise DockingConsentError("consent_policy_unavailable") from None
+    if (type(current) is not dict
+            or set(current) != {"policy", "model_generation", "capability_generation"}
+            or type(current["policy"]) is not DockingConsentPolicy):
+        raise DockingConsentError("consent_policy_unavailable")
+    if (current["policy"].runtime_generation != policy.runtime_generation
+            or current["policy"].policy_generation != policy.policy_generation
+            or current["model_generation"] != model_generation
+            or current["capability_generation"] != capability_generation):
+        raise DockingConsentError("consent_generation_mismatch")
+    if current["policy"] != policy:
+        raise DockingConsentError("consent_policy_unavailable")
 
 
 def validate_inputs(receptor_name, receptor_bytes, ligand_name, ligand_bytes,

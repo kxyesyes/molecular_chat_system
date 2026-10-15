@@ -178,6 +178,7 @@ def _initialize_once(path: Path) -> None:
         # Additive migration: C1 identities, proofs and preparation receipts survive.
         consent_columns = {row["name"] for row in conn.execute("PRAGMA table_info(docking_consents)")}
         for name, declaration in (
+            ("draft_json", "TEXT"),
             ("execution_token", "TEXT"),
             ("execution_occupied", "INTEGER NOT NULL DEFAULT 0"),
             ("dispatch_state", "TEXT NOT NULL DEFAULT 'not_reserved'"),
