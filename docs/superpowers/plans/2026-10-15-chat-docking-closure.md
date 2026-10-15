@@ -130,7 +130,12 @@ Further inspection of 1P0I found zero-occupancy protein atoms, missing-atom/resi
 annotations and a BUA–SER198 LINK; clearing altloc alone is not a safe closure.
 The user requested a preprocessing design for review before any implementation:
 `docs/superpowers/specs/2026-10-16-receptor-conformer-projection-design.md`.
-That new scope is pending approval; S10 remains BLOCKED.
+The maintainer subsequently confirmed option A. Its bounded implementation plan is
+`docs/superpowers/plans/2026-10-16-receptor-conformer-projection.md`; P1–P5 produce
+the independently tested input family, and P6 adds explicit requirements to the
+D2–D6 authority/preview/consent gates below. No new browser evidence exists yet;
+S10 remains BLOCKED. Later authorization permits submission/push/merge only after
+the complete implementation and verification gates, not before them.
 
 **Files:** new `src/web/docking_request.py`; narrow changes to scientific references,
 TaskStore draft operations, runtime generation binding; new tests in
