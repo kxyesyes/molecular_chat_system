@@ -273,6 +273,37 @@ failure in the preparation-owner thread-entry synchronization test; that run
 is not claimed green and its failure remains tracked in P5. This slice does
 not authenticate sources or complete D2 admission, coordinator or routes.
 
+### D2 single-use proposal owner (partial, 2026-10-16)
+
+`docking_proposal.py` now owns one bounded native/JSON model call under the
+existing model reader and transport journal. A committed permanent text-segment
+claim plus initial journal and a separately committed draft-budget receipt are
+both required before HTTP dispatch. Ambiguous/failed commits do not recover
+authority through readback, recreate the journal or refund the spent budget.
+Four accepted text opportunities are independent of structured draft revisions;
+revision 4 or 5 does not itself consume a text opportunity.
+
+The trusted root context owns one bounded `TextSegmentIssuer`. Exact recapture
+returns the same capability; its invocation is consumed before the first await,
+including cancellation and SQL failure. It binds root, owner, preparation,
+original turn/snapshot and runtime generation. An uncommitted SQL failure burns
+this local invocation, **not a durable cross-process claim**. There is no global
+unbounded failed-root registry. Closing the issuer invalidates its capabilities
+but never detaches already-running model/SQL work; physical work and reader
+settlement remain required before return/publication.
+
+Measured evidence: the final issuer/revision repair added 19 tests to the prior
+91, after reproducing the retry/revision failures. Worker: 110 passed in 37.30s;
+fresh independent SPEC: 110 passed in 24.51s; QUALITY APPROVED: 110 passed in
+29.00s and eight additional probes. Parent proposal/draft/whole-text/protocol
+joint run: **799 passed in 38.86s**. Compilation and diff checks passed.
+
+Required integration gate: the actual coordinator must construct exactly one
+issuer per live root, never reconstruct/retry an accepted turn, and invalidate
+root contexts across runtime generation changes/restarts. Test these at the
+coordinator boundary before activating either C chat route. The module does not
+establish text admission, source authenticity, prepared inputs or full D2.
+
 ## D3 — HTTP and C runtime bridge
 
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
