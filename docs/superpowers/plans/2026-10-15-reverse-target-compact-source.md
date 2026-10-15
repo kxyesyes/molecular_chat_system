@@ -301,6 +301,36 @@ tests/test_reverse_target_invocation_receipts.py tests/test_reverse_target_popco
 **930 passed, 2 subtests passed, 3 third-party SWIG deprecation warnings in 72.16s**.
 This does not establish application prewarm, S08/S09 browser success or D1 review completion.
 
+### R3 local work in progress — not published or approved (2026-10-16)
+
+The application-owned prewarm/runtime and lifecycle changes are implemented only
+in the local worktree; they are **not part of the committed PR increment** yet.
+Spec review identified interrupted Thread.start bootstrap ownership before ident;
+real-thread RED tests reproduced early closure and the local fix passed re-review.
+Quality review identified overlapping process-global RDKit BlockLogs exposure and
+optional adapter close compatibility. The local thread-filter replacement and
+adapter fixes have additional real diagnostic/shutdown regression coverage.
+
+Parent combined source/receipt/current-source/diagnostic/lifecycle/registry/adapter/
+allocation regression: **1120 passed, 7 existing warnings in 229.40s**. This run
+preceded the last no-prewarm standalone-adapter correction; its focused follow-up
+was **61 passed, 7 warnings in 4.17s**. Compilation, four Node scripts and strict
+health **23/23** also passed. These results do not supersede the failed review below.
+
+Latest independent quality re-review: **126 passed, 1 failed** in its combined
+gate, plus **763 passed** in source/diagnostic/input regressions. The remaining P2
+is first-time `LogToPythonLogger()` initialization resetting native enable flags
+while another thread is inside BlockLogs. Its raw synthetic SMILES diagnostic
+became visible; a warmed logger does not reproduce it. The standalone flags test
+also fails. This is **unresolved**, not an approved limitation or passing gate.
+
+R3 stays uncommitted and its completion checkboxes remain unchecked. The existing
+agent-owned server was not restarted with these edits. Further correction and
+independent re-review are required before publication/application validation.
+The maintainer's newer request to review the separate receptor preprocessing
+design is being handed off now, without treating that design as implementation
+approval or treating partial R3 tests as S08/S09 browser acceptance.
+
 ### R4a bounded exact-name provider helper (2026-10-16)
 
 Added `src/target_search/exact_name.py` and `tests/test_target_exact_name.py` as a
