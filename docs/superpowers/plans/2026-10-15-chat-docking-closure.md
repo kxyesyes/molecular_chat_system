@@ -121,6 +121,17 @@ eligible, explicitly selected source evidence or retain BLOCKED and request dire
 
 Primary entry context: [RCSB 1P0I](https://www.rcsb.org/structure/1P0I).
 
+Expanded read-only check (2026-10-16, user-authorized): all 113 current P06276
+RCSB entries were identity-checked. Of their PDB coordinate reads, 91 failed the
+existing supported subset, 21 returned HTTP 404, and only the already-ineligible
+2PM8 passed coordinate parsing. No structure was modified or chosen on the user's
+behalf. PDB 404 is not a claim that mmCIF or the whole entry is absent.
+Further inspection of 1P0I found zero-occupancy protein atoms, missing-atom/residue
+annotations and a BUA–SER198 LINK; clearing altloc alone is not a safe closure.
+The user requested a preprocessing design for review before any implementation:
+`docs/superpowers/specs/2026-10-16-receptor-conformer-projection-design.md`.
+That new scope is pending approval; S10 remains BLOCKED.
+
 **Files:** new `src/web/docking_request.py`; narrow changes to scientific references,
 TaskStore draft operations, runtime generation binding; new tests in
 `tests/agent/test_web_docking_consent.py` and existing consent store tests.
