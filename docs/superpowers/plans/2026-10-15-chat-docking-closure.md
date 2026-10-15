@@ -163,6 +163,55 @@ The initial integration slice wires actual draft reservation and the existing
 proposal owner/whole-text checker; pending scientific slots remain pending and
 no route is enabled until source binding and the subsequent D3–D6 gates pass.
 
+The next source-integration slice stays in that same coordinator, covered by
+`tests/agent/test_web_docking_sources.py`. Its optional server-only S03 context
+is captured once before the first await, retained privately and digest-bound in
+the committed root claim. It is not added to the model's authority or accepted
+from an HTTP body. Only the exact PDB ID in a consistent whole-text request may
+resolve against that current owner-bound observation. Resolve the accepted
+target's organism through the existing supported-taxonomy mapping, then call
+the fixed canonical source worker; callers provide no URLs, bytes or callbacks.
+Recheck the live run, draft, model/policy/runtime generations and accepted source
+before dispatch, after physical settlement, and on every published refresh.
+The original root deadline covers both canonical acquisition and the separate
+retained `projection_inspect` child. An unresolved missing-input proposal may
+prepare source facts, but never makes inputs READY or approves execution.
+
+Retain original bytes, independent source evidence and inspection in the live
+root, never in model output or logs. Only a detached bounded source/choice
+preview is public; no default protein, reference, hetero, conformer or limitation
+choice is filled. The control preview contains source identity and complete
+option counts, not the complete atom inventory. The same coordinator exposes
+owner-bound read-only pages of the immutable inspection (fixed section names,
+native offset/limit, at most 32 records and 48 KiB per page, explicit next offset).
+Every page revalidates the live bindings; pagination never selects or hides a
+default. The later D3/D6 UI must render all requested pages before claiming that
+the user reviewed a complete choice set. Duplicate begin/status must not fetch again. Cancellation,
+stale evidence or an expired budget removes publication eligibility permanently;
+all actual `PreparationOwner` instances remain attached until their snapshots
+prove settlement. A finished async wrapper alone must not release root context
+or allow app shutdown to claim cleanup success. This slice supplies no new
+execution endpoint; selection/materialization/C1 readback verification and D3–D6
+remain mandatory before activation.
+
+Initial-coordinator review ledger (in progress): the original 66-test slice
+passed SPEC, then QUALITY reproduced receipt-identity and stale-draft refresh
+defects. Its 24 targeted RED cases became GREEN; the expanded coordinator suite
+passed 99 tests and the joint run passed 454. QUALITY rereview confirmed those
+fixes but found six publication/refresh races: root authority could change while
+the later draft read was pending. Six actual RED regressions were repaired by
+rechecking the root after the draft read in the same retained SQL helper.
+The final worker suite passed **105 focused / 513 joint tests**. Independent
+QUALITY rereview APPROVED the frozen INITIAL slice: **105 passed in 25.04
+seconds**, all six exact races and 22 previous P2 reproductions rejected, and
+four additional lifetime/reader/writer/deadline probes passed. This approval
+does not complete D2, revoke waiting drafts on close or enable any route.
+The subsequent source-integration tests are also intentionally RED while that
+baseline is repaired: 24 missing-integration cases, one missing-page API case
+and one missing-integration ownership precondition. An earlier fixture setup
+collision and an ownership-test cleanup assertion masking the absent API were
+test errors, corrected before recording these missing-feature results.
+
 The D2-to-C1 bridge uses narrow changes in `src/task_runtime/store.py` and
 `runtime.py`, covered by
 `tests/task_runtime/test_chat_docking_staging.py`. Before file staging the
@@ -390,6 +439,15 @@ most one, including commit-then-raise, lost-response and cancel-before-submit un
 
 **Files:** docking_consent.py, decision_runtime.py narrow shared sender interface,
 runtime/store projection and completion access; new test_docking_consent_artifacts.py.
+
+Transport review ledger (in progress): the C-only sender/physical-operation slice
+had 22 initial RED cases and one subsequent mixed-close RED, then 32 passing C
+tests. Independent SPEC passed those 32 and 374 existing A2/runtime tests, but
+its additional mixed-path control reproduced a P1: after using C on a socket,
+the A2 close entry no longer requested cancellation at its original timeout.
+The original A2 timeout-then-drain behavior must be restored without adding a
+second C feedback budget. This slice is not approved or activated; publication,
+grants, wire/UI integration and the remaining D4 work are still outstanding.
 
 - [ ] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
   logical gate becomes undeliverable without waiting for it; owner/lock remains registered and no
