@@ -97,14 +97,14 @@ PASS 要求意图、输入、约束、工具结果及最终回答一致；FAIL �
 - 最终集中回归：本次新增/修改的 **19 个 Python 测试文件，1221 passed（51.96 秒）**。实际运行显式列出这 19 个文件，并使用独立临时目录、`-p no:cacheprovider --tb=short`。提交后可用以下等价命令选取相同文件：
 
   ```powershell
-  $tests = git diff --name-only 5168da5f HEAD -- tests | Where-Object { $_ -like '*.py' }
+  $tests = git diff --name-only 5168da5f cc06a050 -- tests | Where-Object { $_ -like '*.py' }
   python -m pytest $tests -q -p no:cacheprovider --tb=short
   ```
 
 - 全仓命令：`python -m pytest tests -q -m "not real_external" --tb=short -o faulthandler_timeout=60`，使用具备 RDKit / PyTorch 的 MedChat Conda 环境。第二轮运行到约 69% 时挂起，已中断；此前进度中未出现失败标记，但没有最终汇总，不能记作全仓通过。
-- 挂起证据：60 秒 faulthandler 指向 `tests/task_runtime/test_docking_consent.py::test_c4a_pending_command_retains_real_lease_and_capacity` 的 `asyncio.run` / executor shutdown，以及 `src/task_runtime/docking_execution.py::_CommandLeaseGate._retain` 的条件等待。这些源文件和测试本次均未改动；触发保留状态的根因尚未完成隔离，不能仅凭未改动就断言与本次集成无关。未更改安全门禁或隐藏该阻塞。
+- 初次交付时的挂起证据：60 秒 faulthandler 指向 `tests/task_runtime/test_docking_consent.py::test_c4a_pending_command_retains_real_lease_and_capacity` 的 `asyncio.run` / executor shutdown，以及 `src/task_runtime/docking_execution.py::_CommandLeaseGate._retain` 的条件等待。当时未完成根因隔离，未更改安全门禁或隐藏该阻塞；后续定位与修复见下节。
 - 后续覆盖补跑：`python -m pytest tests --ignore=tests/agent --ignore=tests/task_runtime -q -m "not real_external" --tb=short -o faulthandler_timeout=60`。明确排除已执行的 Agent 目录和发生挂起的 task_runtime 目录，结果为 **1 failed、7653 passed、242 skipped、1 deselected、173 subtests passed（1513.24 秒）**；这不是完整全仓通过。
-- 补跑唯一失败为 `tests/test_activity_route_budget.py::test_cancel_terminates_child_and_releases_capacity`：预期 `asyncio.CancelledError`，实际为 HTTP 504 `ACTIVITY_REQUEST_TIMEOUT`。单独执行 `python -m pytest tests/test_activity_route_budget.py -q -p no:cacheprovider --tb=short -o faulthandler_timeout=30` 仍为 **1 failed、10 passed（10.56 秒）**。相关测试、`src/web/routes/activity_prediction_routes.py` 和 `src/web/process_isolation.py` 本次未改动；稳定复现的取消/超时边界问题仍待根因隔离，不能以“原有文件”或一次重跑掩盖。没有改阈值、放宽断言或绕过子进程清理。
+- 初次交付补跑唯一失败为 `tests/test_activity_route_budget.py::test_cancel_terminates_child_and_releases_capacity`：预期 `asyncio.CancelledError`，实际为 HTTP 504 `ACTIVITY_REQUEST_TIMEOUT`。单独执行 `python -m pytest tests/test_activity_route_budget.py -q -p no:cacheprovider --tb=short -o faulthandler_timeout=30` 仍为 **1 failed、10 passed（10.56 秒）**。当时没有改阈值、放宽断言或绕过子进程清理；后续确定性复现与修复见下节。
 - 首次全仓运行在长空白输入的生成数量正则上发生高 CPU 停滞，已中断，不能记作通过。用独立子进程 8 秒上限建立失败回归后消除正则回溯；相关 98 项通过，再启动上述完整一轮。
 - 聚焦回归包含 760 项活性/生成集成、180 项聊天事件/部分完成、141 项历史兼容/比较边界、104 项约束/优化/序号、263 项靶点输入，以及 ADMET / 运行时相关 771 项，分别通过；这些计数有交集，不相加作为独立总数。
 - `python -m compileall -q src scripts`：通过。
@@ -112,6 +112,41 @@ PASS 要求意图、输入、约束、工具结果及最终回答一致；FAIL �
 - `node tests/home_comparison_table_test.js`、`node tests/frontend_safe_render_test.js`、`node tests/home_agent_task_panel_test.js`、`node tests/reverse_target_broad_recall_test.js`、`node tests/reverse_target_pagination_test.js`：全部通过。
 - `git diff --check`：通过。未更改部署/数据，未把健康检查或 fixture 测试当作真实科学验收替代。
 - 各修复分组的需求符合性与独立质量审查均已完成，最终 ADMET / 对齐摘要集成审查未发现重要问题。最后两位审查者的结论为静态审查：需求审查的独立测试因沙箱临时目录权限在 setup 阶段失败，质量审查未运行测试；它们不替代主执行者的回归结果和真实浏览器证据，也不是合并批准。
+
+## PR #209 后续：租约挂起与活性取消修复
+
+维护者在初次交付后明确授权继续定位、修复这两个回归问题并更新同一 PR，暂不合并。运行环境为 Windows / Python 3.10.20；临时目录权限导致的沙箱 setup 错误不计作产品失败，实际回归在获得许可的本机环境执行。未调用真实模型或外部科学服务，未改动既有运行服务。
+
+追加文件仅七个：生产代码 `src/web/process_isolation.py`、`src/web/routes/activity_prediction_routes.py`；测试 `tests/task_runtime/test_docking_consent.py`、`tests/test_activity_route_budget.py`、`tests/test_process_isolation.py`；本报告及 `docs/superpowers/plans/2026-10-15-runtime-regression-followup.md`。未修改其他业务、预算、模型、数据或部署配置。
+
+### 对接：测试夹具漏隔离分析受体命令
+
+原 `normal` 用例单独运行也挂起。有限时诊断在 `CommandAdapter` 的进程创建边界捕获 `spawn_outcome_uncertain`：测试夹具仅允许九参数的 Python 文件写入命令，但生产服务在受体准备前还会调用分析受体的 `reduce`。该调用仍指向宿主机工具，六参数 argv 被测试白名单拒绝，随后运行时按设计保留不确定的物理所有权、租约和容量；最终测试清理等待这个永久保留的线程。因此根因是夹具未覆盖新增调用边界，不是租约保护应提前释放。
+
+- 新增 `test_c4a_runtime_analysis_command_is_controlled`：先检查夹具工具配置，再实际执行受控子进程，验证 scope、资源关闭与 `copy_unavailable`，不产生伪造加氢/科学结论。修复前 **1 failed（2.28 秒）**，在启动子进程前明确发现 `reduce_cmd` 未绑定测试解释器。
+- 夹具显式配置 `reduce_cmd`，只把精确分析命令转换为无输出的隔离 Python 子进程；继续保留命令白名单、真实 Job/线程/句柄观察和生产所有权判定。对取消/截止时间用例，等待非故意挂起的分析线程结束，仍只保留受体 spawner 的原有限屏障。
+- C4a 回归：`python -m pytest tests/task_runtime/test_docking_consent.py -k c4a -q`，**14 passed、151 deselected（11.13 秒）**，覆盖正常、取消、截止时间、重复取消/关闭及各失败/验证/完成路径。
+- 对接生产代码（包括 `_CommandLeaseGate`）没有修改，没有将不确定所有权降级为可释放状态。
+
+### 活性：启动/结果完成与请求取消发生竞态
+
+在支持的 Python 3.10 环境，`asyncio.wait_for(asyncio.shield(task), timeout)` 在内部任务完成与调用方取消同一轮发生时可能返回任务结果，吞掉取消。启动边界丢失取消后，慢子进程继续等待至请求预算，返回 HTTP 504；结果边界也可能错误返回成功。
+
+- 新增三个确定性回归：真实线程工作完成后，在唤醒调用方前安排取消，覆盖共享进程启动、活性启动和活性结果等待；不靠增加 sleep 或超时来改变时序。修复前 **3 failed、25 deselected**，分别显示取消丢失。
+- 两个请求路径改为 `asyncio.wait` 保留调用方取消并继续拥有内部任务，完成后显式取 `task.result()`；实际超时、错误传递和既有终止/关闭流程保持不变。
+- 测试验证清理期间并发容量仍被占用、清理后才释放、真实子进程停止且慢任务未写入结果。`python -m pytest tests/test_activity_route_budget.py tests/test_process_isolation.py -q`：**28 passed（10.31 秒）**；新增三个竞态回归另重复五轮，每轮 **3 passed**。
+
+### 组合验证与共享调用方检查
+
+- 组合命令：`python -m pytest tests/task_runtime tests/test_docking_command_cancellation.py tests/test_activity_route_budget.py tests/test_process_isolation.py tests/test_task_runtime.py tests/test_task_runtime_binding.py -q -m "not real_external" -p no:cacheprovider --tb=short -o faulthandler_timeout=60`，**1893 passed、31 skipped（487.16 秒）**。涵盖整个 task_runtime，以及真实 OS 命令所有权、取消、清理和共享进程隔离模块。
+- 共享启动函数的扩展检查：`python -m pytest tests/test_pharm3d_resource_budget.py tests/test_reverse_target_result_status.py tests/test_admet_routes.py -q -m "not real_external"`。与上述组合回归并行的首轮为 **50 passed、2 failed（20.52 秒）**；两处都在 Pharm3D 的“4 秒内出现子进程启动标记”前置断言失败，尚未执行取消/超时断言。单独选择两个用例仍曾失败，不能删去这一记录。
+- 对该波动进行只读 A/B：同一临时诊断入口分别加载 `cc06a050` 的原启动函数与当前函数，两者均为 **2 passed**；无请求预算包装的真实测试目标观测中，进程创建返回为 0.157 秒，目标入口为 2.922 秒，随后已终止且未完成计算。正常 pytest 入口最后复跑整个 Pharm3D 模块为 **12 passed（8.45 秒）**。这些结果指向启动前置条件的时序波动，但不证明所有负载下都稳定；没有提高预算、修改该模块或仅凭重跑宣布问题不存在。
+- 两位独立审查者先后完成需求符合性、代码质量静态审查，均未发现重要新增问题。审查未独立复跑测试；质量审查时仍明确保留上述扩展检查失败，不能将静态 PASS 写成全套验证通过。
+- 最终单独执行完整离线回归：`python -m pytest tests -q -m "not real_external" -p no:cacheprovider --tb=short -o faulthandler_timeout=60`，使用独立 `--basetemp`。结果为 **23526 passed、270 skipped、1 deselected、13 warnings、173 subtests passed（3750.14 秒 / 1:02:30）**，退出码 0；没有失败或挂起。包含原对接租约、活性取消及上述 Pharm3D 用例，不再以排除故障目录的补跑代替完整结果。跳过/未选中的测试和真实外部服务仍不在本轮通过结论内。
+- 13 条警告涉及既有 SWIG、FastAPI lifespan 弃用、PyG 弃用、张量构造性能和 Pandas 拼接行为提示；未作为本次修复范围处理。完整运行通过不抹去之前的启动时序波动记录，也不等于任何负载下均无竞态。
+- `python -m compileall -q src scripts` 与 `git diff --check` 通过。
+
+原浏览器结论仍为 **11 PASS / 3 BLOCKED**，这些运行时 fixture 结果不构成真实 Vina 科学验收。PR 仍保持草稿，未合并。
 
 ## 局限与实际能力判断
 
@@ -121,6 +156,6 @@ PASS 要求意图、输入、约束、工具结果及最终回答一致；FAIL �
 4. 活性模型为家族级、混合物种或混合 PDE 亚型；预测不是人源单一亚型实验事实。一致性通过也不等于模型校准、外推可靠性或实验有效性验证。
 5. ADMET 原始回归有负半衰期、负分布容积等非物理输出，报告保留而不篡改。这些端点仍需独立适用域/物理合理性审查；当前风险汇总只是分类端点启发式，不构成安全结论。
 6. 长原始结果仍较冗长，宽表需要横向滚动；当前候选卡片并非总能显示优化后的独立属性，权威属性以有来源的验证表为准。
-7. 完整回归门禁未通过：对接租约测试挂起，以及活性请求取消测试稳定返回超时而非取消。两者没有在本次浏览器场景中被证实修复，应保留为后续独立定位范围；本次交付只适合草稿审查，不满足合并门禁。
+7. 初次交付时的两个回归阻塞已修复，本机完整离线 Python 回归现已通过；共享调用方早期启动时序波动及 270 个跳过、1 个未选中测试仍如实保留。远端 CI、必需审查规则和维护者合并授权并未由本机通过替代；PR 按要求保持草稿，不执行合并。
 
 修复后，基础性质/ADMET、明确靶点查询、有限约束生成、候选优化追问、活性批量预测及证据排序已能完成本次代表任务，并对未改善、缺信息和失败给出诚实边界。适合作为有人监督的研究辅助；反向寻靶与真实对接尚不能宣称闭环可用。

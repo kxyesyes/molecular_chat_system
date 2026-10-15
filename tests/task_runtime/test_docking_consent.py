@@ -2990,9 +2990,12 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
     rig.releases.append(p.release)
     script = ("import pathlib,sys; pathlib.Path(sys.argv[1]).write_text(sys.argv[2],"
               "encoding='utf-8'); sys.exit(int(sys.argv[3]))")
+    analysis_command = [sys.executable, "-I", "-S", "-B", "-c", "raise SystemExit(0)"]
 
     def allowed_popen(args, *a, **kw):
-        # Only this literal harmless file-writer argv may cross the native boundary.
+        # Only literal harmless fixture commands may cross the native boundary.
+        if args == analysis_command:
+            return real_popen(args, *a, **kw)
         assert type(args) is list and len(args) == 9
         assert args[:6] == [sys.executable, "-I", "-S", "-B", "-c", script]
         return real_popen(args, *a, **kw)
@@ -3038,7 +3041,8 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
         assert ownership.get("command_scope") is p.scope and p.scope is not None
         assert Path(ownership["allowed_output_root"]) == rig.output
         configured = dict(config or {}, vina_exe=sys.executable,
-                          prepare_receptor_cmd=sys.executable, prepare_ligand_cmd=sys.executable)
+                          prepare_receptor_cmd=sys.executable, prepare_ligand_cmd=sys.executable,
+                          reduce_cmd=sys.executable)
         original_init(service, configured, **ownership)
         p.services.append(service)
         if fault == "constructor-error":
@@ -3067,6 +3071,19 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
         return argv(adapter, "vina", values["out"])
 
     monkeypatch.setattr(VinaAdapter, "build_run_command", vina_argv)
+    original_wrap = base.CommandAdapter.wrap_command
+
+    def analysis_argv(adapter, *args):
+        if type(adapter) is base.CommandAdapter and args[:4] == ("-NOFLIP", "-Quiet", "-DB", "dict"):
+            assert adapter._ownership_scope is p.scope and p.scope is not None
+            p.phase = "analysis"
+            p.phases.append(p.phase)
+            # Exercise the owned subprocess, with empty synthetic stdout so no
+            # explicit-H preparation or scientific analysis success is invented.
+            return list(analysis_command)
+        return original_wrap(adapter, *args)
+
+    monkeypatch.setattr(base.CommandAdapter, "wrap_command", analysis_argv)
     thread_phases = {}
     p.resources.start_before = lambda thread: thread_phases.setdefault(thread, p.phase)
 
@@ -3080,8 +3097,9 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
     original_run = base.CommandAdapter.run
 
     def command_run(adapter, *args, **kwargs):
+        phase = p.phase
         result = original_run(adapter, *args, **kwargs)
-        if not hold:
+        if not (hold and phase == "receptor"):
             _c4a_wait(lambda: _c4a_finished_threads(p.resources))
         return result  # No test proof/settle/receipt mutation.
 
@@ -3367,6 +3385,34 @@ async def _c4a_runtime_finish(rig):
     # Registered pytest finalizer independently rescues OS resources even on error.
 
 
+def test_c4a_runtime_analysis_command_is_controlled(tmp_path, monkeypatch, request):
+    """Qualify the fixture's optional command before entering a retained lease."""
+    import sys
+    from src.docking.adapters.base import CommandOwnershipScope
+    from src.docking.molecular_docking_service import MolecularDockingService
+
+    rig = _c4a_runtime_rig(tmp_path, monkeypatch, request)
+    scope = CommandOwnershipScope(task_id="c-task-1", output_root=rig.output)
+    rig.physical.scope = scope
+    service = MolecularDockingService(command_scope=scope, allowed_output_root=rig.output)
+    assert Path(service.reduce_cmd) == Path(sys.executable), "analysis command escaped fixture configuration"
+    source = tmp_path / "receptor.pdb"
+    source.write_bytes(RECEPTOR)
+    output = tmp_path / "analysis_receptor.pdb"
+    trace = {}
+    assert service.prepare_analysis_receptor(str(source), str(output), trace=trace)
+    scope.seal()
+    assert scope.settle()
+    assert rig.physical.phases == ["analysis"]
+    assert scope.snapshot()["command_count"] == 1
+    assert scope.snapshot()["error_codes"] == []
+    assert len(rig.physical.resources.processes) == 1
+    assert output.read_bytes() == RECEPTOR
+    assert trace["analysis_receptor_method"] == "copy_unavailable"
+    assert trace["analysis_receptor_hydrogens"] == "unavailable"
+    rig.physical.resources.assert_physically_stopped()
+
+
 @pytest.mark.parametrize("interrupt", ["normal", "cancel", "deadline"])
 def test_c4a_pending_command_retains_real_lease_and_capacity(tmp_path, monkeypatch, request, interrupt):
     rig = _c4a_runtime_rig(tmp_path, monkeypatch, request, hold=interrupt != "normal")
@@ -3391,6 +3437,9 @@ def test_c4a_pending_command_retains_real_lease_and_capacity(tmp_path, monkeypat
                 rig.physical.release.set()
             status = {"normal": "SUCCEEDED", "cancel": "CANCELLED", "deadline": "TIMED_OUT"}[interrupt]
             final = await _c2_terminal(rig, status)
+            if interrupt == "normal":
+                assert rig.physical.phases == ["analysis", "receptor", "ligand", "vina"]
+                assert rig.physical.scope.snapshot()["command_count"] == 4
             if interrupt != "normal":
                 assert final["reason_code"] == ("consent_cancelled" if interrupt == "cancel"
                                                 else "consent_execution_timeout")

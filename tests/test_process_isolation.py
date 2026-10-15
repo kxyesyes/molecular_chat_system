@@ -153,6 +153,53 @@ def test_async_start_waits_for_start_and_terminates_on_cancellation():
     assert process.terminated
 
 
+def test_async_start_cancellation_wins_when_start_completes(monkeypatch):
+    class StartedProcess:
+        started = False
+        terminated = False
+        closed = False
+
+        def start(self):
+            self.started = True
+
+        def terminate(self):
+            self.terminated = True
+
+        def close(self):
+            self.closed = True
+
+    process = StartedProcess()
+    real_to_thread = asyncio.to_thread
+    cancellation_accepted = []
+
+    def cancel_on_start_completion(function, *args, **kwargs):
+        owner = asyncio.current_task()
+
+        async def run():
+            result = await real_to_thread(function, *args, **kwargs)
+            if function == process.start:
+                # Queue cancellation before the completed task wakes its owner.
+                # Keep the real asyncio wait/shield implementation under test.
+                asyncio.get_running_loop().call_soon(
+                    lambda: cancellation_accepted.append(owner.cancel())
+                )
+            return result
+
+        return run()
+
+    monkeypatch.setattr(asyncio, "to_thread", cancel_on_start_completion)
+
+    async def exercise():
+        with pytest.raises(asyncio.CancelledError):
+            await start_isolated_process(process, timeout=5.0)
+
+    asyncio.run(exercise())
+    assert cancellation_accepted == [True]
+    assert process.started
+    assert process.terminated
+    assert process.closed
+
+
 def test_async_start_timeout_does_not_wait_for_a_hung_start():
     class HungProcess:
         def __init__(self):
