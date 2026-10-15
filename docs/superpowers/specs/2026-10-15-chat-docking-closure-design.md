@@ -1,7 +1,9 @@
 # 聊天到真实 Vina 的审批闭环设计补充
 
 日期：2026-10-15。基线：`7ab815de891aa3d3c7dda1f784f021b91babedbd`。
-分支：`codex/browser-agent-real-acceptance`；PR #209 保持 Draft，不合并。
+分支：`codex/browser-agent-real-acceptance`；PR #209。
+2026-10-16 授权更新：维护者要求完成剩余任务后自行提交、推送、合并；在全部门禁
+通过前仍保持 Draft。此更新不替代绑定当前输入与预览的一次性运行时审批。
 
 ## 1. 授权与设计关系
 
@@ -246,7 +248,8 @@ Web 生命周期、legacy protocol、科学 references 及 Node 首页测试。
 
 实施结果追加到 `docs/superpowers/validation/2026-10-15-browser-agent-real-acceptance.md`，
 保留首次失败和历史 BLOCKED。PR 描述写清文件、命令、结果、剩余门禁、commit，
-保持 Draft、不合并。S08/S09/S10 各自有独立证据，不能以一个通过代替另外两个。
+全部门禁通过前保持 Draft；之后按 2026-10-16 的更新授权合并。
+S08/S09/S10 各自有独立证据，不能以一个通过代替另外两个。
 
 ## 9. 设计审阅记录
 

@@ -1,7 +1,9 @@
 # 反向寻靶全量紧凑来源与浏览器闭环设计（方案 A）
 
 日期：2026-10-15。基线：`7ab815de891aa3d3c7dda1f784f021b91babedbd`。
-分支：`codex/browser-agent-real-acceptance`；交付到 PR #209，保持 Draft，不合并。
+分支：`codex/browser-agent-real-acceptance`；交付到 PR #209。
+2026-10-16 授权更新：维护者要求完成剩余任务后自行提交、推送、合并；在科学验收、
+独立审查及远端检查全部通过前仍保持 Draft，不得将该授权视为放宽质量门禁。
 
 ## 1. 授权、状态与范围
 

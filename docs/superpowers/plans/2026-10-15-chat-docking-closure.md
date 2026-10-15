@@ -14,7 +14,9 @@
 
 Approved spec: `docs/superpowers/specs/2026-10-15-chat-docking-closure-design.md` plus the
 unchanged security/lifecycle provisions of `2026-09-27-docking-consent-integration-design.md`.
-Baseline `a59492ab`; same branch/PR #209 as reverse-target work; no merge.
+Baseline `a59492ab`; same branch/PR #209 as reverse-target work. The initial
+no-merge instruction was superseded on 2026-10-16 by maintainer authorization to
+finish, commit, push and merge after all completion/review gates pass.
 The user confirmed this written design and current-chat TDD implementation. No further design
 approval is required within these boundaries. A new scientific dependency or scope change still
 requires explicit direction. The **runtime Vina card must be clicked by the user**, not the agent.
@@ -280,7 +282,9 @@ new tests/home_docking_consent_test.js plus Python actual route tests.
   actual current-code results. Independent final review is required; prior baseline tests are not
   current implementation evidence. Mark each S08/S09/S10 individually from actual browser results.
 - [ ] Update existing validation report and PR #209 with exact source/test files, commands, results,
-  commit/review scope and unresolved gates; stage explicit files, push same branch; keep Draft/no merge.
+  commit/review scope and unresolved gates; stage explicit files and push the same
+  branch. Keep Draft while any gate is incomplete; the later authorized merge
+  requires all completion gates and remote checks/reviews to pass.
 
 ## Progress and review ledger
 

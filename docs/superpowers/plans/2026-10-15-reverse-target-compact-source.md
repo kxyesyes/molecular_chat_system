@@ -14,7 +14,9 @@
 
 Approved spec: `docs/superpowers/specs/2026-10-15-reverse-target-compact-source-design.md`.
 Baseline `a59492ab`; branch `codex/browser-agent-real-acceptance`; existing draft PR #209.
-The user explicitly selected execution in this chat, including implementation, with no merge.
+The user initially selected execution in this chat without merge. On 2026-10-16,
+the maintainer additionally authorized finishing the remaining work, committing,
+pushing and merging after all scientific, review and release gates pass.
 Reuse this isolated task branch; do not disturb unrelated untracked user files or create another PR.
 
 Use the MedChat environment, unique `--basetemp`, `-p no:cacheprovider --tb=short`.
@@ -243,7 +245,8 @@ persistence seam as necessary; new test_reverse_target_rank_followup.py.
 - [ ] Run `python scripts/health_check.py --strict`, compileall, focused suites, Node tests and the
   final complete offline suite after the docking increment integrates. Keep every failure/skip.
 - [ ] Update PR #209 with exact files, commands, results, review scope, commit and remaining gates;
-  explicitly stage task files, push the same branch; never merge.
+  explicitly stage task files, push the same branch; merge only after the later
+  authorized completion and remote review/check gates are satisfied.
 
 ## Progress and review ledger
 
