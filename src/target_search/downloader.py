@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import gzip
+import hashlib
 import ipaddress
 import logging
+import math
 import os
 import re
 import socket
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -51,6 +54,109 @@ ALPHAFOLD_FORMAT_EXTENSIONS = {
 
 class StructureDownloadError(RuntimeError):
     """Raised when a structure file cannot be prepared."""
+
+
+def _reject_source_pair_response(response, **kwargs):
+    # Requests can consume redirect bodies to prepare Response.next even when
+    # allow_redirects=False. A response hook runs BEFORE that preprocessing.
+    # Install only for this bounded producer; legacy download semantics stay put.
+    if response.status_code != 200:
+        response.close()
+        raise StructureDownloadError("RCSB source download failed")
+    return response
+
+
+def fetch_rcsb_source_pair(pdb_id, *, deadline) -> dict:
+    """Fetch an unauthenticated source candidate, without cache or filesystem I/O.
+
+    ``deadline`` is an absolute monotonic time. Checks and socket timeouts are
+    cooperative, not a wall-clock hard cancellation of blocked DNS/socket I/O.
+    This synchronous helper belongs inside the future retained preparation
+    worker, never on the event loop. Bytes/hashes do not authenticate revision,
+    entry ownership, chemistry, or readiness.
+    """
+    failure = "RCSB source download failed"
+    file_cap = 16 * 1024 * 1024
+    pair_cap = 32 * 1024 * 1024
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise StructureDownloadError(failure)
+        return min(30, seconds)
+
+    try:
+        # Identity checks avoid subclass/metaclass coercion and equality hooks.
+        if type(pdb_id) is not str or re.fullmatch(r"[0-9][A-Z0-9]{3}", pdb_id) is None:
+            raise StructureDownloadError(failure)
+        if (type(deadline) is not int and type(deadline) is not float) or not math.isfinite(deadline):
+            raise StructureDownloadError(failure)
+        remaining()  # Reject expired budgets before even the first DNS lookup.
+        candidate = {"pdb_id": pdb_id}
+        aggregate = 0
+        for extension in ("pdb", "cif"):
+            response = _request_structure(
+                f"https://files.rcsb.org/download/{pdb_id}.{extension}",
+                {"files.rcsb.org"},
+                deadline=deadline,
+                timeout=remaining(),
+                allow_redirects=False,
+                stream=True,
+                headers={"Accept-Encoding": "identity"},
+                hooks={"response": _reject_source_pair_response},
+            )
+            try:
+                remaining()
+                if response.status_code != 200:
+                    raise StructureDownloadError(failure)
+                encoding = response.headers.get("Content-Encoding", "identity")
+                if type(encoding) is not str or encoding.lower() != "identity":
+                    raise StructureDownloadError(failure)
+                expected = None
+                if "Content-Length" in response.headers:
+                    length = response.headers["Content-Length"]
+                    # Bound decimal work before int(); never allocate from it.
+                    if (
+                        type(length) is not str
+                        or not 1 <= len(length) <= 8
+                        or re.fullmatch(r"[0-9]+", length) is None
+                    ):
+                        raise StructureDownloadError(failure)
+                    expected = int(length)
+                    if expected > file_cap or aggregate + expected > pair_cap:
+                        raise StructureDownloadError(failure)
+                body = bytearray()
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    remaining()  # Empty keepalive chunks also consume budget.
+                    if type(chunk) is not bytes:
+                        raise StructureDownloadError(failure)
+                    if not chunk:
+                        continue
+                    size = len(body) + len(chunk)
+                    aggregate += len(chunk)
+                    if (
+                        size > file_cap
+                        or aggregate > pair_cap
+                        or (expected is not None and size > expected)
+                    ):
+                        raise StructureDownloadError(failure)
+                    body.extend(chunk)
+                if not body or (expected is not None and len(body) != expected):
+                    raise StructureDownloadError(failure)
+                remaining()
+            finally:
+                response.close()
+            remaining()
+            exact_bytes = bytes(body)
+            candidate[f"{extension}_bytes"] = exact_bytes
+            candidate[f"{extension}_sha256"] = hashlib.sha256(exact_bytes).hexdigest()
+            remaining()
+        remaining()  # Publication is all-or-nothing, after close and hashing.
+        return candidate
+    except Exception:
+        pass
+    # Raise outside the handler: no raw exception retained as cause or context.
+    raise StructureDownloadError(failure)
 
 
 class StructureDownloader:
@@ -485,9 +591,19 @@ def _validate_structure_download_url(
     return url
 
 
-def _request_structure(url: str, allowed_hosts: set[str], **kwargs):
+def _request_structure(url: str, allowed_hosts: set[str], *, deadline=None, **kwargs):
     """Fetch a trusted structure URL while checking DNS before and after I/O."""
 
+    def remaining():
+        if (type(deadline) is not int and type(deadline) is not float) or not math.isfinite(deadline):
+            raise StructureDownloadError("Structure download deadline invalid")
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise StructureDownloadError("Structure download deadline exceeded")
+        return min(30, seconds)
+
+    if deadline is not None:
+        remaining()
     _validate_structure_download_url(url, allowed_hosts, resolve_host=False)
     parsed = urlsplit(url)
     before = _resolve_structure_host((parsed.hostname or "").lower().rstrip("."), parsed.port or 443)
@@ -497,13 +613,24 @@ def _request_structure(url: str, allowed_hosts: set[str], **kwargs):
         "allow_redirects": False,
     }
     request_kwargs.update(kwargs)
+    if deadline is not None:
+        # DNS is blocking too: never dispatch with the budget from before it.
+        request_kwargs["timeout"] = remaining()
     response = requests.get(url, **request_kwargs)
-    after = _resolve_structure_host((parsed.hostname or "").lower().rstrip("."), parsed.port or 443)
-    if before != after:
+    try:
+        if deadline is not None:
+            remaining()
+        after = _resolve_structure_host((parsed.hostname or "").lower().rstrip("."), parsed.port or 443)
+        if deadline is not None:
+            remaining()
+        if before != after:
+            raise StructureDownloadError("Structure download DNS resolution changed during request")
+    except BaseException:
+        # Ownership has not reached the caller if post-request validation fails.
         close = getattr(response, "close", None)
         if callable(close):
             close()
-        raise StructureDownloadError("Structure download DNS resolution changed during request")
+        raise
     return response
 
 

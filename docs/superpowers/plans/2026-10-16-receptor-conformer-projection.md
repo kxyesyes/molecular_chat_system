@@ -539,6 +539,128 @@ Do not create a parallel coordinator, extra receiver or generic execution API.
   approval, lost response, cancellation, cross-owner reads and alternate-path
   isolation. Only then allow the parent feature's activation gate to pass.
 
+### P6 transport implementation slice
+
+The existing downloader's path-returning cache operation is not paired revision
+evidence. Add only `fetch_rcsb_source_pair(pdb_id, *, deadline)` to
+`src/target_search/downloader.py`, with focused tests in
+`tests/test_docking_source_download.py`. This synchronous internal producer will
+later run inside the retained source-preparation worker, never on the event loop
+or in a detached cancellation-only thread. It does not create a second execution
+API or change legacy downloader/cache behavior.
+
+```python
+candidate = fetch_rcsb_source_pair(server_selected_pdb_id, deadline=root_deadline)
+assert set(candidate) == {"pdb_id", "pdb_bytes", "cif_bytes", "pdb_sha256", "cif_sha256"}
+```
+
+- [ ] RED: exact uppercase four-character PDB identifier and finite native deadline
+  are required before DNS; reject URLs, paths, subclasses and extra arguments.
+- [ ] Build only `https://files.rcsb.org/download/{pdb_id}.pdb` and `.cif`, reuse
+  existing trusted-host request guards, reject redirects and non-200 responses,
+  and close each acquired response on all exits. No retry, decompression,
+  alternate candidate, fallback conversion, cache/DB write or response diagnostic.
+- [ ] Stream bytes with 16 MiB per file and 32 MiB aggregate caps; cap the
+  Content-Length decimal before parsing, reject malformed/contradictory lengths,
+  non-byte chunks, non-identity Content-Encoding, empty or truncated bodies.
+  Do not use response.content/text or preallocate from an untrusted length.
+- [ ] Use the same absolute deadline before/after request, each chunk and close;
+  give each request only remaining time, capped at the existing 30 seconds.
+  Check before publication too. Deadline checks do not terminate a blocked socket;
+  only the subsequent retained process integration can guarantee cancellation.
+- [ ] GREEN: exact byte preservation, digests, second-file failure without partial
+  publication, malformed lengths/encodings, overflow, timeout and all response
+  closures. Run this new test module plus existing downloader negatives; obtain
+  independent spec/quality review before commit.
+
+Transport evidence (2026-10-16): missing-helper/response-leak RED had 96
+failures. Independent SPEC then found three DNS/HTTP deadline gaps; parent
+reproduced all three before moving deadline checks to the actual request
+boundary. Fresh QUALITY found Requests redirect preprocessing could buffer
+the body even with `allow_redirects=False`; four real-Session/fake-adapter
+regressions consumed 17,827,840 bytes before the new-path-only response hook
+was added. All four now reject and close before any body read.
+
+Final parent source/security/cache regression: 118 passed in 1.59 seconds.
+Independent SPEC passed 118 tests and 11 deadline probes before the response-hook
+fix; final QUALITY APPROVED passed 122 tests (including four legacy cases) plus
+23 real-Session probes. Legacy requests receive no new hook; an omitted/None
+deadline retains their prior behavior. A separate parent joint run passed 1,773
+tests in 82.54 seconds, but predates the hook and subsequent P5 outer-map fix;
+it is not the final combined-head verification. This closes only the synchronous
+transport slice, not the retained source worker or authentication.
+
+The returned candidate is not authenticated: matching IDs/hashes/download times
+cannot establish same revision or ownership. P6 must still verify exact same-entry
+revision/complete inventory/chemistry, bind live S03 evidence and require explicit
+scientific choices before any projection or READY state.
+
+### P6 official evidence compiler boundary
+
+Keep the source-format/chemistry comparison separate from Web ownership in
+`src/docking/rcsb_source.py` and `tests/test_rcsb_source.py`. The compiler is
+pure and never authenticates caller-provided bytes by itself. Only the retained
+server source owner may bind its output to actual canonical official downloads
+and revalidated current S03 evidence. No browser/model payload supplies this
+compiler's bytes, component records, target identity or authority token.
+
+```python
+candidate = compile_rcsb_source(
+    pdb_bytes, cif_bytes, component_files,
+    pdb_id=server_selected_pdb_id,
+    target={"uniprot_id": verified_accession, "taxonomy_id": verified_taxonomy},
+)
+```
+
+- [ ] Add missing-callable RED, then strict native immutable-byte admission and
+  bounded Gemmi 0.7.5 CIF parsing in the owned child. Pin `gemmi==0.7.5` in both
+  root CPU and deployment GPU requirements; no model/repair/transformation API.
+  Reject duplicate tags/rows, unsupported frames/multiple blocks, malformed
+  references, unknown required chemistry, and nonfinite/overprecision numbers.
+- [ ] Match the PDB ID, all first REVDAT lines and their revision dates to the
+  complete mmCIF Structure-model revision history. Use exact current original
+  bytes. Compare the complete independent atom-site inventory one-to-one with
+  P1, including all models, waters, alternates, occupancies, coordinates, B
+  factors, elements and charges. PDB serials are mapped only after exact atom
+  identity equality; mmCIF atom IDs are not assumed equal to PDB serials.
+- [ ] Verify entity/label/auth chain and sequence mappings, deposited polypeptide
+  type, UniProt mapping and biological-source taxonomy (not expression host).
+  Carry missing-residue, sequence-variant and independently evidenced construct
+  limitations. Do not infer absent full-protein sequence outside proved ranges.
+- [ ] Require every embedded component's official CCD bytes. Bound component
+  count and aggregate bytes before parsing; require released component identity,
+  explicit modification date no later than the entry revision, and exact
+  same-entry atom name/element/aromatic/stereo plus bond endpoint/order/aromatic/
+  stereo equality. Record each exact CCD digest/version separately. Post-revision
+  or conflicting definitions are unavailable, not silently normalized.
+- [ ] Derive required heavy atoms from those component definitions and explicit
+  deposited bond context. Standard linear peptide OXT displacement requires the
+  complete polymer sequence/scheme and actual linking-component definitions;
+  terminal OXT remains required. Glycan displacement requires explicit branch
+  leaving-atom fields or matching deposited modification/connection evidence
+  plus uniquely identified CCD leaving atoms. An absent coordinate is never
+  evidence that an atom was a leaving group. Unsupported context fails closed.
+- [ ] Classify protein and water from independent entity/component facts;
+  `deposited_ligand` requires exact same-entry SUBJECT OF INVESTIGATION feature
+  and compatible nonpolymer identity. Glycan needs deposited branch/modification
+  evidence. Other roles remain unproven unless independently supported. No
+  arbitrary HETATM or primary component name is promoted to pocket reference.
+- [ ] Resolve every PDB LINK/SSBOND/CONECT edge using independent struct_conn or
+  matching intracomponent CCD bonds, including symmetry and multiplicity; also
+  require every applicable deposited inter-residue connection to be accounted
+  for. Do not infer covalency from distance or PDB record type. Unresolved
+  cross-residue alternate coupling is unsupported, not an empty constraint list.
+- [ ] Return the complete `receptor-source-v1` candidate plus bounded evidence
+  identities/digests and explicit limitations. Reserve input, native parser,
+  indexes, output and IPC capacity on one conservative logical ledger before
+  allocation; native parser overhead is a reservation, not an OS RSS guarantee.
+  Run P1/P2 on the completed candidate without altering either strict contract.
+- [ ] Actual malformed-version, hidden-atom, role, taxonomy, component, terminal,
+  glycan, link and alternate negative tests must fail before repair. Independently
+  authored synthetic fixtures prove contracts only. A read-only official-source
+  comparison may inform feasibility, never replace the eventual current-owner
+  browser source selection or count as S10. Obtain spec then quality review.
+
 ## P7 — Real source selection, browser S10 and release evidence
 
 **Files:** existing browser acceptance validation report and this plan's ledger.
@@ -649,3 +771,35 @@ Gemmi 0.7.5 in memory only, not a production source-authentication implementatio
 a selected S03 input, a prepared receptor or a passed S10. No files were converted.
 Source format references: [official atom-site field relationships](https://mmcif.rcsb.org/docs/tutorials/content/atomic-description.html)
 and [RCSB file download services](https://www.rcsb.org/docs/programmatic-access/file-download-services).
+
+A further memory-only inventory comparison on the same official mmCIF digest
+found 631 heavy-atom-bearing residues and 27 embedded component definitions.
+Before applying any deposited bond/terminal context, the only absent heavy-atom
+names were OXT in standard amino-acid components and O1 in nine NAG/four FUC
+residues. The final polymer scheme residue is VAL529. Partial-occupancy heavy
+atoms occur in HIS and SER alternate conformers. This is evidence for the next
+authentication design, not permission to remove those requirements: peptide
+terminal context and each glycan leaving atom must still be justified from the
+same deposited chemistry, never inferred merely from an absent coordinate.
+No conformer or hetero choice was made, no descriptor was authenticated, and no
+input was projected or executed by this diagnostic.
+
+Subsequent same-digest checks established that terminal VAL529 actually contains
+OXT; the earlier aggregate missing-OXT summary must not be applied to that
+terminus. The three alternate residues are HIS214, HIS372 and SER466. The
+same mmCIF has a `pdbx_entity_instance_feature` SUBJECT OF INVESTIGATION record
+for L3H, so its role need not be guessed from a component name. Twenty-seven
+official CCD records were read in memory: their complete atom name/element/
+aromatic/stereo tables and bond endpoint/order/aromatic/stereo tables matched
+the same-entry embedded tables. All reported CCD modification dates were no
+later than the entry revision date. NAG/FUC CCD leaving flags explicitly include
+O1; the actual residue-specific linkage must still justify its displacement.
+These observations guide the verifier, not a special-case acceptance of 6SAM.
+
+The standard-format parser integration will use Gemmi 0.7.5 under the later
+finish/default-authorization instruction. This introduces no repair, coordinate
+conversion, model or scoring behavior. Both dependency profiles must declare
+the parser when its production adapter is implemented; missing/other versions
+must not silently select a permissive alternate parser. The exact version's
+[LICENSE.txt](https://github.com/project-gemmi/gemmi/blob/v0.7.5/LICENSE.txt)
+is MPL-2.0; do not copy the different license label from a generic docs index.
