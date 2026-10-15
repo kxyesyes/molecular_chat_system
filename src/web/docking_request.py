@@ -8,6 +8,7 @@ These pointers are private server bookkeeping, never client bearer capabilities.
 from contextlib import closing
 from copy import deepcopy
 from datetime import datetime
+import hashlib
 import json
 import math
 import re
@@ -18,6 +19,166 @@ from src.agent.evidence.ledger import EvidenceLedger
 from src.agent.harness.decision_bounds import validate_json
 from src.agent.persistence.scientific_references import _source
 from src.target_search.remote_clients import _validate_uniprot_accession
+
+
+_DOCKING_TEXT_REVISION = 'docking-whole-text-v1'
+_DOCKING_FIELDS = ('receptor_ref', 'ligand_ref', 'center', 'size', 'exhaustiveness', 'num_modes')
+_SPACE = r'[ \t\r\n]*'
+_ACTION = r'(?:(?:做(?:一次)?|进行(?:一次)?)' + _SPACE + r')?'
+_DOCK = r'(?:真实)?(?:分子对接|对接|(?:AutoDock[ \t]+Vina[ \t]+)?docking)'
+_NATURAL_DOCKING = re.compile(
+    r'(?:请)?' + _SPACE + r'(?:用|使用)' + _SPACE
+    # A fixed label is syntax, not a chemical name resolver. Arbitrary text in
+    # the label position must not conceal another requested operation.
+    + r'(?:(?:阿司匹林|配体|分子)' + _SPACE + r')?'
+    + r'(?P<smiles>[A-Za-z0-9@+\-\[\]()=#\\/%.:]{1,8192})' + _SPACE
+    + r'(?:与|和)' + _SPACE + r'(?:上述' + _SPACE + r')?(?:PDB[ \t]+)?'
+    + r'(?P<pdb_id>[1-9][A-Z0-9]{3})' + _SPACE + _ACTION + _DOCK
+)
+_BARE_DOCKING = re.compile(
+    r'(?:(?:请)' + _SPACE + _ACTION + _DOCK
+    + r'|(?:Please[ \t]+)?(?:run|perform)[ \t]+(?:real[ \t]+)?'
+    + r'(?:AutoDock[ \t]+Vina[ \t]+)?docking)', re.IGNORECASE | re.ASCII
+)
+_POCKET_CLAUSE = '使用共晶配体定义口袋'
+_NO_GUESS_CLAUSE = '缺少该信息先说明，不要猜坐标'
+_TEXT_REF = re.compile(r'[A-Za-z0-9_-]{1,128}\Z', re.ASCII)
+_SMILES_TOKENS = re.compile(
+    r'(?:Cl|Br|[BCNOPSFIbcnops*]|[0-9@+\-()=#\\/%:.]|\[[A-Za-z0-9@+\-:*]+\])+',
+    re.ASCII,
+)
+_JSON_NUMBER = r'-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?'
+_VECTOR_TEXT = re.compile(r'\[' + _SPACE + _JSON_NUMBER +
+    (r'[ \t\r\n]*,[ \t\r\n]*' + _JSON_NUMBER) * 2 + _SPACE + r'\]', re.ASCII)
+
+
+def _text_rejection():
+    return dict(assessed=False, reason_code='docking_request_clarification_required',
+                input_ready=False, execution_authorized=False)
+
+
+def _numeric_text_field(name, text):
+    # Numeric fields have no nested JSON language. Bound and recognize the
+    # scalar/triple before invoking the decoder, including on invalid inputs.
+    grammar = _VECTOR_TEXT if name in {'center', 'size'} else re.compile(r'[0-9]+', re.ASCII)
+    if len(text) > 256 or not grammar.fullmatch(text):
+        raise ValueError('invalid_numeric_field')
+    value = json.loads(text)
+    if name in {'center', 'size'}:
+        if (type(value) is not list or len(value) != 3
+                or any(type(v) not in (int, float) or not math.isfinite(v) for v in value)
+                or (name == 'size' and any(not 0 < v <= 100 for v in value))):
+            raise ValueError('invalid_numeric_field')
+    elif (type(value) is not int or not 1 <= value <= (64 if name == 'exhaustiveness' else 50)):
+        raise ValueError('invalid_numeric_field')
+    return value
+
+
+def assess_docking_request_text(query, *, enabled, enable_tools):
+    """Consume a closed whole-request language before considering C preparation.
+
+    This is neither a keyword classifier nor general natural-language support.
+    Unrecognized prose, questions, multiple actions and unknown fields require
+    clarification. Nothing is stripped from the original text/digest. Supported
+    forms are an explicit single docking imperative with six named input fields,
+    or one explicit SMILES/PDB pair and an optional co-crystal pocket request.
+
+    The result is private lexical evidence only. References still need ownership,
+    chemistry still needs D1/P6, the C proposal still needs span/value validation,
+    and missing inputs still need explicit confirmation. Even all six textual
+    fields never make input_ready true. This function performs no I/O, molecular
+    parsing, source lookup, staging, model call or execution.
+    """
+    if (enabled is not True or enable_tools is not True or type(query) is not str
+            or not 0 < len(query) <= 16384):
+        return _text_rejection()
+    try:
+        encoded = query.encode('utf-8')
+        if len(encoded) > 32768 or any(ord(c) < 32 and c not in '\t\r\n' for c in query):
+            return _text_rejection()
+        # Only explicit whitespace is padding; no Unicode normalization or
+        # invisible-character deletion can turn a different request into this one.
+        leading = re.match(_SPACE, query).end()
+        match = _NATURAL_DOCKING.match(query, leading) or _BARE_DOCKING.match(query, leading)
+        if match is None:
+            return _text_rejection()
+        inputs = {k: v for k, v in match.groupdict().items() if v is not None}
+        if inputs:
+            candidate = inputs['smiles']
+            # Recognize chemical tokens without attempting chemical validity.
+            # Slash/backslash stereobonds remain literal SMILES characters;
+            # explicit URL, absolute/relative-file and drive syntax is not a
+            # substitute for an owned attachment and is never interpreted as I/O.
+            if (candidate.startswith(('.', '/', '\\')) or '://' in candidate
+                    or re.match(r'[A-Za-z]:[\\/]', candidate, re.ASCII)
+                    or not _SMILES_TOKENS.fullmatch(candidate)):
+                return _text_rejection()
+        position = match.end()
+        fields, spans = {}, {}
+        pocket = no_guess = False
+        clauses = 0
+        while position < len(query):
+            whitespace = re.match(_SPACE, query[position:])
+            position += whitespace.end()
+            if position == len(query):
+                break
+            # A final full stop is permitted, but not an unfinished field separator.
+            separator = query[position]
+            if separator not in '。.;；':
+                return _text_rejection()
+            position += 1
+            position += re.match(_SPACE, query[position:]).end()
+            if position == len(query):
+                if separator not in '。.':
+                    return _text_rejection()
+                break
+            clauses += 1
+            if clauses > 8:
+                return _text_rejection()
+            # Numbers may contain decimal dots; fields end only at semicolons,
+            # Chinese full stops, or a final English full stop.
+            end = re.search(r'[；;。]', query[position:])
+            stop = position + end.start() if end else len(query)
+            token = query[position:stop].rstrip(' \t\r\n')
+            if end is None and token.endswith('.'):
+                token = token[:-1].rstrip(' \t\r\n')
+            if token == _POCKET_CLAUSE:
+                if pocket:
+                    return _text_rejection()
+                pocket = True
+            elif token == _NO_GUESS_CLAUSE:
+                if not pocket or no_guess:
+                    return _text_rejection()
+                no_guess = True
+            else:
+                name_text, equals, raw_text = token.partition('=')
+                name, text = name_text.rstrip(' \t'), raw_text.lstrip(' \t')
+                if not equals or not re.fullmatch(r'[a-z_]+', name, re.ASCII) or not text:
+                    return _text_rejection()
+                if name not in _DOCKING_FIELDS or name in fields:
+                    return _text_rejection()
+                if name.endswith('_ref'):
+                    from src.agent.persistence.redaction import contains_sensitive_text
+                    if not _TEXT_REF.fullmatch(text) or contains_sensitive_text(text):
+                        return _text_rejection()
+                    value = text
+                else:
+                    value = _numeric_text_field(name, text)
+                fields[name] = value
+                value_start = len(name_text) + 1 + len(raw_text) - len(text)
+                spans[name] = [position + value_start, position + len(token)]
+            position = stop
+        if pocket and any(name in fields for name in ('center', 'size')):
+            return _text_rejection()  # Two conflicting pocket origins are not merged.
+        if inputs and any(name in fields for name in ('receptor_ref', 'ligand_ref')):
+            return _text_rejection()  # No silent replacement of the explicit pair.
+        return dict(assessed=True, assessment_revision=_DOCKING_TEXT_REVISION,
+            query_digest=hashlib.sha256(encoded).hexdigest(), inputs=inputs, fields=fields,
+            field_spans=spans, pocket_rule_requested='co_crystal_reference' if pocket else None,
+            missing_fields=[name for name in _DOCKING_FIELDS if name not in fields],
+            input_ready=False, execution_authorized=False)
+    except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
+        return _text_rejection()
 
 
 _TARGET_TOOL = 'target_database_search'

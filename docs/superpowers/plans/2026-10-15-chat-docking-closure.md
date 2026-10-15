@@ -150,6 +150,18 @@ transport/journal and model reader gate, and carries the same durable draft
 budget. It does not decide whole-request admission, authenticate scientific
 sources or expose another execution/HTTP pathway.
 
+The request module also owns a bounded, conservative whole-text assessment
+(`assess_docking_request_text`). It consumes one explicit docking imperative,
+the six closed numeric/reference fields, or a single explicit SMILES/PDB pair
+with the declared co-crystal pocket instruction. Unknown/negative/question/mixed
+prose and conflicting or duplicate fields require clarification; no recognized
+subset is extracted. This is private lexical evidence, not general NLP support,
+source authentication, validated chemistry, a proposal substitute or READY.
+Original text/digest and exact field spans remain available for subsequent C
+proposal/ownership checks. Generic ligand labels are syntax only; scientific
+input identity must still be independently verified and displayed by the
+coordinator. No old route is enabled by this helper.
+
 - [ ] RED against real temporary SQLite: original request reserves one future task ID; refinement
   retains it, owner/query digest/admission/source identity, fixed expiry and spent model budget.
   Pending source slots are not eligible artifacts. Ready/claimed input changes cannot refine.
@@ -206,6 +218,37 @@ run are separately under quality review, not approved by the D2a reviews.
 The full legacy C1 suite is not claimed passed: earlier temporary-path failures
 and a stalled run were not passing evidence. This is a store foundation, not
 complete D2 admission, authenticated inputs, preparation or a browser result.
+
+Follow-up parent verification at `2db29091`: the entire existing
+`tests/task_runtime/test_docking_consent.py` module completed with **165 passed
+in 263.74 seconds**, using `-v -x -p no:cacheprovider --tb=short
+-o faulthandler_timeout=60` and a fresh short TEMP basetemp. This includes the
+C1/C2/C4a controlled-execution tests; no real Vina was invoked. The earlier
+interrupted/temporary-path runs remain failures to obtain evidence, not passing
+runs, but this later full-module result supersedes the unresolved coverage gap.
+It is still not the final full-repository test run or browser scientific gate.
+
+### D2 whole-text assessment evidence (partial, 2026-10-16)
+
+Initial missing-helper RED had 52 failures. Independent SPEC then reproduced
+deep numeric JSON recursion and overlapping-whitespace backtracking: seven
+new regressions failed before bounded scalar/triple decoding and non-overlapping
+token patterns were applied. A second two-case RED isolated field-assignment
+backtracking; linear assignment splitting retained original-codepoint spans.
+SPEC rereview passed 114 tests plus 1,144 original probes, 217 exact-span cases
+and 60 assignment negatives. Fresh QUALITY then found recognizable paths/URLs
+accepted in the SMILES operand position: ten new negatives failed while four
+chemical controls passed. Lexical chemical-token/explicit-path checks repaired
+that gap without interpreting any operand as file access.
+
+Final parent module: **128 passed in 5.37 seconds**. QUALITY APPROVED reproduced
+128 tests and 6,683 additional checks, including 210 path/URL negatives, 66
+chemical-token controls and 1,200 exact-span cases. The slowest independent
+four-call performance batch was 9.686 ms; this is a regression measurement,
+not an application latency guarantee. `CCC/CCC` remains literal chemical text,
+not a mounted file. Existing owned-evidence behavior is unchanged. This helper
+still does not validate C proposal spans, chemistry, source authenticity or
+complete admission, and enables no HTTP/chat execution path.
 
 ## D3 — HTTP and C runtime bridge
 

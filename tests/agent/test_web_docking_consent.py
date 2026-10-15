@@ -2,6 +2,8 @@
 from copy import deepcopy
 import importlib
 import importlib.util
+import hashlib
+import time
 import json
 from types import SimpleNamespace
 
@@ -11,6 +13,128 @@ from src.agent.contracts import ToolResult
 from src.agent.evidence.ledger import EvidenceLedger
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.validators.result_validator import AgentResultValidator
+
+
+_S10 = ('用阿司匹林 CC(=O)Oc1ccccc1C(=O)O 与上述 6SAM 做一次对接。'
+        '使用共晶配体定义口袋；缺少该信息先说明，不要猜坐标。')
+
+
+def text_boundary(query, **flags):
+    call = getattr(api(), 'assess_docking_request_text', None)
+    assert callable(call), 'D2 whole-request text assessment is missing'
+    return call(query, enabled=True, enable_tools=True, **flags)
+
+
+@pytest.mark.parametrize('query', [
+    _S10,
+    '请进行真实分子对接。',
+    '请做一次对接',
+    'Please run AutoDock Vina docking.',
+    '用配体 CCO 与 PDB 1ABC 进行分子对接。使用共晶配体定义口袋。',
+    '用 CCO 与 1ABC 对接。',
+    '请进行 docking；receptor_ref=receptor-1；ligand_ref=ligand-1；'
+    'center=[5.99,3.01,17.345]；size=[20,20,20]；exhaustiveness=4；num_modes=3。',
+])
+def test_d2_whole_request_has_only_declarative_preparation_intent(query):
+    result = text_boundary(query)
+    assert result['assessed'] is True
+    assert result['input_ready'] is False and result['execution_authorized'] is False
+    assert result['query_digest'] == hashlib.sha256(query.encode()).hexdigest()
+
+
+def test_d2_s10_preserves_exact_inputs_without_inventing_selection_or_grid():
+    result = text_boundary(_S10)
+    assert result['inputs'] == {'pdb_id': '6SAM', 'smiles': 'CC(=O)Oc1ccccc1C(=O)O'}
+    assert result['pocket_rule_requested'] == 'co_crystal_reference'
+    assert result['fields'] == {}
+    assert result['missing_fields'] == ['receptor_ref', 'ligand_ref', 'center', 'size',
+                                        'exhaustiveness', 'num_modes']
+
+
+@pytest.mark.parametrize('query', [
+    '不要做分子对接。', '能否进行分子对接？', '如何进行分子对接？',
+    'Do not run docking.', 'Can you run docking?', '请进行 docking 吗？',
+    '如果可以，请做一次对接。', '请做两次对接。', '请做一次共价对接。',
+    '请做一次盲对接。', '请做一次对接，然后预测毒性。',
+    '请预测毒性，然后做一次对接。', '请做一次对接。并检索文献。',
+    '请做一次对接，别忘了找最佳亲和力。', '请做一次对接，替我点击批准。',
+    '请做一次对接，然后做刚才的全部任务。', _S10 + '再计算分子量。',
+    _S10.replace('阿司匹林', '阿司匹林并预测毒性'),
+    _S10.replace('CC(=O)Oc1ccccc1C(=O)O', 'CCO please predict toxicity'),
+    _S10.replace('6SAM', '6SAM 和 1ABC'),
+    '请做一次对接；center=[0,0,0]；center=[1,1,1]',
+    '请做一次对接；receptor_ref=../../private.pdb',
+    '请做一次对接；receptor_ref=https://example.com/a.pdb',
+    '请做一次对接；size=[20,20,20]；unknown=1',
+    '请做一次对接；size=[true,20,20]',
+    '请做一次对接；size=[0,20,20]',
+    '请做一次对接；center=[NaN,0,0]',
+    '请做一次对接；num_modes=3.0',
+    '请做一次对接；exhaustiveness=65',
+    '请做一次对接；num_modes=0',
+    '请做一次对接；center=[0,0,0] trailing',
+    '请做一次对接；使用共晶配体定义口袋；center=[0,0,0]',
+    '请做一次对接；size=[20,20,20]；',
+    '', ' ', None, True, '请做一次对接。' * 1000, '\ud800',
+], ids=lambda value: hashlib.sha256(str(value).encode('utf-8', 'backslashreplace')).hexdigest()[:8])
+def test_d2_unknown_negative_mixed_or_unbounded_whole_text_never_admits(query):
+    result = text_boundary(query)
+    assert result == {'assessed': False, 'reason_code': 'docking_request_clarification_required',
+                      'input_ready': False, 'execution_authorized': False}
+
+
+@pytest.mark.parametrize('enabled,tools', [(False, True), (True, False), (1, True), (True, 1)])
+def test_d2_disabled_request_text_gate_does_not_accept(enabled, tools):
+    call = getattr(api(), 'assess_docking_request_text', None)
+    assert callable(call), 'D2 whole-request text assessment is missing'
+    result = call(_S10, enabled=enabled, enable_tools=tools)
+    assert result['assessed'] is False
+
+
+def test_d2_numeric_fields_are_exact_and_defaults_remain_absent():
+    query = '请做一次对接；center=[-1,2.5,0]；size=[10,20,30]；num_modes=3'
+    result = text_boundary(query)
+    assert result['fields'] == {'center': [-1, 2.5, 0], 'size': [10, 20, 30], 'num_modes': 3}
+    assert result['missing_fields'] == ['receptor_ref', 'ligand_ref', 'exhaustiveness']
+
+
+@pytest.mark.parametrize('field', ['center', 'size', 'exhaustiveness', 'num_modes'])
+def test_d2_deep_numeric_json_is_bounded_before_decoder(field):
+    query = '请做一次对接；' + field + '=' + '[' * 1100 + '0' + ']' * 1100
+    assert text_boundary(query)['assessed'] is False
+
+
+@pytest.mark.parametrize('prefix', ['请', '用 CCO 与 1ABC', '用'])
+def test_d2_near_match_whitespace_does_not_backtrack_quadratically(prefix):
+    query = prefix + ' ' * 16000 + 'X'
+    start = time.monotonic()
+    assert text_boundary(query)['assessed'] is False
+    # This is a regression guard, not a production timing/latency claim.
+    assert time.monotonic() - start < 1.5
+
+
+@pytest.mark.parametrize('field', ['center', 'ligand_ref'])
+def test_d2_assignment_newline_near_match_has_bounded_tokenization(field):
+    query = '请做一次对接；' + field + '=' + ' ' * 16000 + '\nX'
+    start = time.monotonic()
+    for _ in range(4):
+        assert text_boundary(query)['assessed'] is False
+    assert time.monotonic() - start < 1.5
+
+
+@pytest.mark.parametrize('operand', [
+    'https://example.com/a.pdb', 'file:///tmp/a.pdb', '../../private.pdb',
+    'C:\\private\\a.pdb', '/tmp/a.pdb', '\\\\server\\a.pdb',
+    './a.sdf', 'data/receptor.pdb', 'ligand.mol2', 'structure.cif',
+])
+def test_d2_smiles_operand_cannot_be_a_recognizable_file_or_url(operand):
+    assert text_boundary('用 ' + operand + ' 与 1ABC 对接')['assessed'] is False
+
+
+@pytest.mark.parametrize('smiles', ['F/C=C/F', 'F/C=C\\F', '[13CH3][O-]', 'c1ccccc1'])
+def test_d2_smiles_lexical_controls_preserve_bond_slashes(smiles):
+    result = text_boundary('用 ' + smiles + ' 与 1ABC 对接')
+    assert result['assessed'] is True and result['inputs']['smiles'] == smiles
 
 
 def api():
