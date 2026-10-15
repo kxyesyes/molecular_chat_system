@@ -407,3 +407,31 @@ floating-point display values intact. Source/version retirement, wrong ownership
 changed proof or pointer, and ambiguous checkpoints fail closed. `name-sha256`
 remains a local identity key. No runtime provider, full-corpus or browser claim
 is established by these synthetic tests. R4c/d and R5 remain required.
+
+### R3 test-host bootstrap follow-up (2026-10-16)
+
+An allocation-first/late-application-import test selection initially gave
+**391 passed / 10 setup errors**: test-owned executor threads preceded the first
+application import, correctly triggering the production late-bootstrap guard.
+Pytest now initializes RDKit privacy in `pytest_configure` when RDKit is installed.
+Three cold-install tests now use fresh child interpreters instead of resetting
+the global installed flag in a running threaded test host. Their assertions are
+unchanged; no production privacy guard or timeout was weakened.
+
+New bootstrap RED: **1 failed / 1 passed**. After fixing host ordering, the three
+in-process cold tests reproduced failures; isolated children resolved them.
+An additional quality finding exposed a dependency-light test importing the
+RDKit-dependent test module: its new regression reproduced child collection exit
+2, then the subprocess helper was decoupled and only the real-RDKit test marked
+optional. Final focused command `python -m pytest tests/test_pytest_rdkit_bootstrap.py
+tests/test_rdkit_logging.py -q`: **29 passed**; independent QUALITY also obtained
+**29 passed** and, with RDKit blocked in host and child, **2 passed / 1 skipped**.
+Independent SPEC PASS and QUALITY APPROVED cover these three test files.
+
+Parent integrated chat/allocation/logging selection: **429 passed / 7 existing
+warnings** before the last dependency-light collection test. A separate cold
+router regression found an R4 request-time import cost, fixed in the still-local
+R4 increment without increasing deadlines; allocation-first tests then gave
+**68 passed / 7 warnings**. Broader reverse/receipt/runtime/Web/registry tests:
+**983 passed / 7 warnings**. These results include in-progress R4 files and are
+not a final complete-repository or browser acceptance claim.

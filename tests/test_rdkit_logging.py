@@ -199,21 +199,25 @@ def test_nondefault_logger_configuration_keeps_other_threads_visible():
     ''')
 
 
-def test_router_partial_failure_restores_flags_and_does_not_enter(monkeypatch):
-    route = rdBase.LogToPythonLogger
-    rdBase.DisableLog('rdApp.debug')
-    flags = rdBase.LogStatus()
-    def broken():
-        route()
-        raise RuntimeError('synthetic-partial-router-failure')
-    monkeypatch.setattr(rdkit_logging, '_installed', False)
-    monkeypatch.setattr(rdBase, 'LogToPythonLogger', broken)
-    with pytest.raises(RuntimeError, match='synthetic-partial-router-failure'):
-        with rdkit_logging.suppress_rdkit_diagnostics():
-            pytest.fail('private work executed after partial routing failure')
-    assert rdBase.LogStatus() == flags
-    assert not rdkit_logging._installed
-    assert not getattr(rdkit_logging._local, 'depth', 0)
+def test_router_partial_failure_restores_flags_and_does_not_enter():
+    fresh_python('''
+        import pytest
+        from rdkit import rdBase
+        from src.system import rdkit_logging
+        route = rdBase.LogToPythonLogger
+        rdBase.DisableLog('rdApp.debug')
+        flags = rdBase.LogStatus()
+        def broken():
+            route()
+            raise RuntimeError('synthetic-partial-router-failure')
+        rdBase.LogToPythonLogger = broken
+        with pytest.raises(RuntimeError, match='synthetic-partial-router-failure'):
+            with rdkit_logging.suppress_rdkit_diagnostics():
+                pytest.fail('private work executed after partial routing failure')
+        assert rdBase.LogStatus() == flags
+        assert not rdkit_logging._installed
+        assert not getattr(rdkit_logging._local, 'depth', 0)
+    ''')
 
 
 def test_runtime_constructor_bootstraps_before_dispatch():
@@ -501,41 +505,45 @@ def test_other_thread_remains_visible_during_guard(warning_messages):
     assert "synthetic-public-other-restored" in warning_messages[1]
 
 
-def test_installation_preserves_logger_configuration_and_native_flags(monkeypatch):
-    logger = logging.getLogger("rdkit")
-    handlers, level, propagate, disabled = list(logger.handlers), logger.level, logger.propagate, logger.disabled
-    flags = rdBase.LogStatus()
-    route = rdBase.LogToPythonLogger
-    calls = []
-
-    def install():
-        calls.append(True)
-        route()
-
-    monkeypatch.setattr(rdkit_logging, "_installed", False)
-    monkeypatch.setattr(rdBase, "LogToPythonLogger", install)
-    with rdkit_logging.suppress_rdkit_diagnostics():
-        pass
-    with rdkit_logging.suppress_rdkit_diagnostics():
-        pass
-    assert calls == [True]
-    assert logger.handlers == handlers
-    assert (logger.level, logger.propagate, logger.disabled) == (level, propagate, disabled)
-    assert rdBase.LogStatus() == flags
-    assert logger.filters.count(rdkit_logging._filter) == 1
-
-
-def test_routing_failure_does_not_execute_unprotected_work(monkeypatch):
-    entered = []
-
-    def unavailable():
-        raise RuntimeError("synthetic-router-unavailable")
-
-    monkeypatch.setattr(rdkit_logging, "_installed", False)
-    monkeypatch.setattr(rdBase, "LogToPythonLogger", unavailable)
-    with pytest.raises(RuntimeError, match="synthetic-router-unavailable"):
+def test_installation_preserves_logger_configuration_and_native_flags():
+    fresh_python('''
+        import logging
+        from rdkit import rdBase
+        from src.system import rdkit_logging
+        logger = logging.getLogger("rdkit")
+        handlers, level, propagate, disabled = list(logger.handlers), logger.level, logger.propagate, logger.disabled
+        flags = rdBase.LogStatus()
+        route = rdBase.LogToPythonLogger
+        calls = []
+        def install():
+            calls.append(True)
+            route()
+        rdBase.LogToPythonLogger = install
         with rdkit_logging.suppress_rdkit_diagnostics():
-            entered.append(True)
-    assert not entered
-    assert not rdkit_logging._installed
-    assert not getattr(rdkit_logging._local, "depth", 0)
+            pass
+        with rdkit_logging.suppress_rdkit_diagnostics():
+            pass
+        assert calls == [True]
+        assert logger.handlers == handlers
+        assert (logger.level, logger.propagate, logger.disabled) == (level, propagate, disabled)
+        assert rdBase.LogStatus() == flags
+        assert logger.filters.count(rdkit_logging._filter) == 1
+    ''')
+
+
+def test_routing_failure_does_not_execute_unprotected_work():
+    fresh_python('''
+        import pytest
+        from rdkit import rdBase
+        from src.system import rdkit_logging
+        entered = []
+        def unavailable():
+            raise RuntimeError("synthetic-router-unavailable")
+        rdBase.LogToPythonLogger = unavailable
+        with pytest.raises(RuntimeError, match="synthetic-router-unavailable"):
+            with rdkit_logging.suppress_rdkit_diagnostics():
+                entered.append(True)
+        assert not entered
+        assert not rdkit_logging._installed
+        assert not getattr(rdkit_logging._local, "depth", 0)
+    ''')
