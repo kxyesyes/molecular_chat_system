@@ -924,6 +924,33 @@ class TaskStore:
             )
         return identity
 
+    @classmethod
+    def _validate_chat_staging_parameters(cls, row, parameters):
+        """Frozen chat metadata, not byte/source authentication or permission."""
+        if row["draft_json"] is None:
+            return None  # Preserve the original non-chat C1 contract.
+        record = cls._chat_draft_record(row)
+        draft, identity = record["draft"], record["identity"]
+        if any(slot["state"] != "fixed" for slot in draft["slots"].values()):
+            raise DockingConsentError("consent_draft_incomplete")
+        if materialize_draft_identity(identity, draft) != identity:
+            raise DockingConsentError("consent_binding_mismatch")
+        checked = validate_draft_patch(parameters)
+        names = {"center", "size", "exhaustiveness", "num_modes"}
+        if set(checked) != names or any(checked[key] != draft["slots"][key]["value"] for key in names):
+            raise DockingConsentError("consent_binding_mismatch")
+
+    def _validate_docking_preparation_parameters(self, preparation_id, token, *, parameters):
+        """Only the acquired physical writer may validate fixed staging values."""
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM docking_consents WHERE preparation_id=? AND operation_token=? AND state='PREPARING'",
+                (preparation_id, token),
+            ).fetchone()
+            if row is None:
+                raise DockingConsentError("consent_not_waiting")
+            self._validate_chat_staging_parameters(row, parameters)
+
     def _seal_docking_preparation(self, preparation_id, token, binding, digest,
                                   nonce_hash, *, now_ms, monotonic_now,
                                   still_current, wall_time_ms, monotonic) -> None:
@@ -935,6 +962,14 @@ class TaskStore:
                 raise DockingConsentError("consent_preparation_timeout")
             current_ms, current_mono = wall_time_ms(), monotonic()
             validate_clocks(current_ms, current_mono)
+            row = conn.execute(
+                "SELECT * FROM docking_consents WHERE preparation_id=? AND operation_token=? AND state='PREPARING'",
+                (preparation_id, token),
+            ).fetchone()
+            if row is None:
+                raise DockingConsentError("consent_expired")
+            self._validate_chat_staging_parameters(row, {
+                key: binding[key] for key in ("center", "size", "exhaustiveness", "num_modes")})
             if (current_ms >= binding["expires_at_ms"]
                     or current_mono >= monotonic_now + CONSENT_TTL_MS / 1000):
                 raise DockingConsentError("consent_expired")

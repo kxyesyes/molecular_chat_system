@@ -150,6 +150,31 @@ transport/journal and model reader gate, and carries the same durable draft
 budget. It does not decide whole-request admission, authenticate scientific
 sources or expose another execution/HTTP pathway.
 
+The live request coordinator is implemented in `src/web/docking_coordinator.py`
+with `tests/agent/test_web_docking_coordinator.py`. It owns the one live context,
+original snapshot, root/task/preparation identity, original 180-second deadline,
+one `TextSegmentIssuer`, retained asynchronous operations and publication gates.
+Root acceptance first makes a one-shot claim in the existing owner-bound agent
+run metadata; only a returned committed receipt permits constructing its issuer.
+An uncertain receipt is not recovered by reading metadata. A new coordinator
+cannot restore a claimed root, even within the same runtime generation. Local
+duplicate attempts do not reconstruct snapshots, issuers or proposal calls.
+The initial integration slice wires actual draft reservation and the existing
+proposal owner/whole-text checker; pending scientific slots remain pending and
+no route is enabled until source binding and the subsequent D3–D6 gates pass.
+
+The D2-to-C1 bridge uses narrow changes in `src/task_runtime/store.py` and
+`runtime.py`, covered by
+`tests/task_runtime/test_chat_docking_staging.py`. Before file staging the
+acquired writer must compare all four numeric parameters with the fixed chat
+draft. Sealing rechecks these parameters. The original waiting deadline must
+still be valid at sealing; the separate 15-minute execution-consent TTL starts
+at READY, as specified in section 3 of the approved September C design. Neither
+waiting refinement nor status refresh renews the waiting period. Both chat and
+legacy C1 retain this two-phase behavior. This bridge is not
+source authentication and cannot replace the coordinator's original 180-second
+upstream-work deadline, scientific selection or live-generation checks.
+
 The request module also owns a bounded, conservative whole-text assessment
 (`assess_docking_request_text`). It consumes one explicit docking imperative,
 the six closed numeric/reference fields, or a single explicit SMILES/PDB pair
@@ -233,6 +258,33 @@ C1/C2/C4a controlled-execution tests; no real Vina was invoked. The earlier
 interrupted/temporary-path runs remain failures to obtain evidence, not passing
 runs, but this later full-module result supersedes the unresolved coverage gap.
 It is still not the final full-repository test run or browser scientific gate.
+
+### D2-to-C1 fixed draft staging bridge (2026-10-16)
+
+Four actual failing regressions showed numeric staging parameters could diverge
+from already-fixed chat slots. The acquired writer now checks them before any
+file staging and again under the seal write lock. Cancellation of the new SQL
+read retains the actual thread/worker until settlement; no late card appears.
+
+An initial fifth asserted failure incorrectly conflated the waiting and READY
+TTLs. The parent caught this against the explicit two-phase approved design
+during integration and paused QUALITY. The erroneous expiry override was
+removed, without changing `docking_consent.py` or the legacy TTL contract.
+Two corrected contract tests failed before that removal, then the final 11-test
+bridge plus 88 draft tests passed **99 tests in 8.38 seconds**. Three initial
+test-code row-index errors were also corrected before assessing product behavior.
+
+Earlier parent 261-test and independent 266-test passing runs covered the
+superseded expiry implementation; they are retained as historical diagnostics,
+not approval of the corrected final diff. Corrected-contract independent SPEC
+then passed 99 bridge/draft tests, 21 selected legacy TTL/cancel/ownership tests
+and 12 additional probes, using the approved two-phase design as primary
+authority. Fresh QUALITY APPROVED passed 99 bridge/draft tests, 50 selected
+legacy regressions and 27 additional probes, with unchanged reviewed hashes,
+successful compilation and scoped diff checks. The parent latest fourteen-module
+source/preparation/draft/staging/proposal/reference run passed **1,731 tests in
+119.80 seconds**; it excludes the changing initial coordinator and C feedback
+slices. No synthetic bytes were treated as scientific inputs or real Vina results.
 
 ### D2 whole-text assessment evidence (partial, 2026-10-16)
 

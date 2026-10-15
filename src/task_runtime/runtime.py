@@ -776,6 +776,11 @@ class TaskRuntime:
         )
         operation.task_id = identity["task_id"]
         self._check_consent_preparation(operation, deadline)
+        await asyncio.to_thread(
+            self.store._validate_docking_preparation_parameters,
+            operation.preparation_id, operation.token, parameters=config,
+        )
+        self._check_consent_preparation(operation, deadline)
         operation.stage_started = True
         path = await asyncio.to_thread(
             self.stager.stage, operation.task_id, receptor_name, receptor_bytes,
