@@ -22,8 +22,9 @@ it does not supersede any scientific verification or application ownership gate.
 
 This supplements, not replaces, `2026-10-15-chat-docking-closure.md`. P1–P5 below
 are independently testable pure/worker components. P6 is an explicit integration
-gate within that plan's D2–D6. P7 closes the real S10 gate. R3's outstanding logging
-initialization issue and R4's ranked chat binding remain separate required work.
+gate within that plan's D2–D6. P7 closes the real S10 gate. R3's production logging
+initialization is reviewed and committed; its test-host follow-up and R4's ranked
+chat binding remain separate required work.
 No open review finding is accepted merely because another suite passes.
 
 General development/release authorization does not fabricate a runtime consent
@@ -187,7 +188,7 @@ Child cap stays 60 seconds and the original upstream deadline stays 180 seconds.
 
 **Files:** create receptor_projection_pdb.py and test_receptor_projection_pdb.py.
 
-- [ ] Add call-phase missing-module RED, then a fixed-width synthetic fixture using
+- [x] Add call-phase missing-module RED, then a fixed-width synthetic fixture using
   `atom_line` and `residue` from `tests/test_docking_pocket_evidence.py`. Use complete
   ALA heavy atoms N/CA/C/O plus CB alternatives A/B (occupancies 0.60/0.40), one
   three-heavy-atom synthetic reference and water with occupancy zero. State clearly
@@ -207,9 +208,9 @@ def test_raw_parser_preserves_all_alternatives_and_zero_water(raw_fixture):
     assert parsed.original_bytes == raw_fixture
 ```
 
-- [ ] Run `python -m pytest tests/test_receptor_projection_pdb.py -q`; verify a
+- [x] Run `python -m pytest tests/test_receptor_projection_pdb.py -q`; verify a
   missing callable/module assertion, not collection failure. Record the result.
-- [ ] Implement `parse_original_pdb(pdb_bytes) -> ParsedPdb` with immutable internal
+- [x] Implement `parse_original_pdb(pdb_bytes) -> ParsedPdb` with immutable internal
   parsed atoms/records. Reuse D1's supported field syntax and envelope rules, but
   independently parse altloc and occupancy into the new types. No call to old
   `_parse` after stripping columns. Do not mutate any input line.
@@ -235,17 +236,34 @@ if not 0 <= occupancy_hundredths <= 100:
 # Same-residue uniqueness is now (atom name, altloc), never name alone.
 ```
 
-- [ ] Add RED cases for non-ASCII/control/oversize/truncated records, duplicate
+- [x] Add RED cases for non-ASCII/control/oversize/truncated records, duplicate
   atom serials or name+altloc, conflicting resnames at one sequence position,
   malformed/NaN/infinite occupancy and coordinates, negative/>1 occupancy,
   unknown records, malformed TER/END/MODEL and mixed models. Include invalid
   unselected altloc, water and non-target chains: all must still fail inspection.
-- [ ] Parse LINK atom/altloc/residue endpoints and symmetry, SSBOND residue endpoints
+- [x] Parse LINK atom/altloc/residue endpoints and symmetry, SSBOND residue endpoints
   and symmetry, and ordered CONECT serial fields. After all atoms are read, resolve
   every endpoint or record ambiguity explicitly; dangling references reject.
   Nonidentity symmetry is unsupported—never synthesize crystal mates.
-- [ ] GREEN parser tests plus existing D1 strict tests; independent spec then quality
+- [x] GREEN parser tests plus existing D1 strict tests; independent spec then quality
   review. Commit only the two files and this task's measured progress.
+
+P1 measured record (2026-10-16): initial missing-module **82 failed**, connectivity
+**46 failed**, preallocation **7 failed**, and self-review boundary **3 failed**
+were followed by green batches, ending at **193 P1 + 58 D1 = 251 passed**.
+Independent SPEC found two P2 issues: common/alternate same-name ambiguity and
+self/incompatible-alternate connections. Added tests reproduced **2** and **10**
+failures; fixes produced **217 P1 + 58 D1 = 275 passed**. SPEC rereview passed,
+including rejection of all seven original independent negative probes.
+Fresh QUALITY APPROVED with **275 passed**, 7,999 synthetic byte/truncation probes,
+and actual atom/byte-limit checks. No old D1 acceptance rule changed. Logical
+preflight accounting is not an OS memory-isolation claim.
+
+Read-only official-file syntax checks also passed for 6SAM (4,521 atoms / 245
+connection records), 6T9S (4,438 / 196), 6XTA (4,480 / 213), and 7AMZ (4,637 / 288).
+3O9M rejected as `raw_invalid`. These checks downloaded bounded original bytes
+into memory only; they establish neither authenticated source inventory, complete
+chemistry, eligible pocket, prepared receptor nor real docking acceptance.
 
 ## P2 — Complete source inventory and bounded contracts
 
@@ -540,3 +558,27 @@ unsupported; do not infer chemistry solely from record presence or distance.
 
 This plan does not itself implement preprocessing, close R3/R4, produce scientific
 results or change the current browser result of 11 PASS / 3 BLOCKED.
+
+### Read-only source feasibility triage (2026-10-16)
+
+A public-coordinate diagnostic revisited the 113 P06276 search entries: 92 PDB
+reads succeeded and 21 returned HTTP 404. This was not the new parser, independent
+inventory authentication or a selected docking input. Screening complete raw
+files for zero-occupancy ATOM records, missing-atom annotations and observed
+nonpolymer coordinates identified further candidates for review; absence of an
+annotation or LINK record does not prove completeness or noncovalent chemistry.
+
+For example, unchanged 6SAM had 4,521 coordinate records, 46 alternate-location
+records, no zero-occupancy ATOM record and no parsed missing-atom annotation row.
+L3H at author chain A/residue 603 had 25 observed heavy atoms at occupancy 1.00
+and no raw LINK endpoint. The official [6SAM entry](https://www.rcsb.org/structure/6SAM)
+independently identifies L3H as a ligand of interest and its primary citation
+reports noncovalent inhibition. This makes it a candidate for the complete P2/P6
+checks, not a validated receptor, chosen structure, conformer choice or consent.
+Construct mutations, absent residues, chemical-component completeness and every
+retained glycan/connection still require authenticated evidence and explicit review.
+
+Conversely, [1XLU](https://www.rcsb.org/structure/1XLU) illustrates why a raw LINK
+screen alone cannot authorize ligand removal: its entry describes an aged
+organophosphate-inhibited enzyme, despite the diagnostic not finding an ISP LINK
+endpoint. No source was edited, no derivative was created and no Vina ran.
