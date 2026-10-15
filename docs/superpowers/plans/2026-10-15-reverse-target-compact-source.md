@@ -380,8 +380,30 @@ probes and 10 ownership/concurrency/independence/syntax checks. Parent command
 -q -p no:cacheprovider --tb=short --basetemp=<fresh-temp-root>`:
 **376 passed, 2 skipped in 30.20s**. No live provider or browser claim is made.
 
-The owner/session/trace/current-receipt binding, ranked chat context, explicit
-five-row display and real S09 structure follow-up remain unimplemented R4 work.
-R4 checkboxes and S08/S09 status therefore remain incomplete/BLOCKED.
+At the R4a checkpoint the owner/session/trace/current-receipt binding, ranked chat
+context, five-row display and real S09 structure follow-up remained unimplemented.
+The following increment records subsequent progress; S08/S09 are still BLOCKED.
 
 Checkboxes change only after corresponding code, test and review evidence exists.
+
+### R4b owned ranked-evidence helper (2026-10-16)
+
+Added `src/web/reverse_target_followup.py` and its focused test module. The helper
+checks the authenticated session, bounded consistent SQLite checkpoint snapshot,
+provenance and recomputed evidence ledger, complete raw/normalized receipt, and
+current attached producer. Its detached pointer binds source version, original
+trace/step/observation, evidence and result digest plus current source generation.
+It does not recover authority from prose or rerun scientific computation.
+
+Initial missing-module RED: **22 failed**. After the core and mutation tests,
+**57 passed**. Retirement during rank resolution/rendering reproduced **2 failed**;
+the final read revalidation brought the focused suite to **59 passed**.
+Independent SPEC PASS: **59 tests + 32 supplementary assertions**. Independent
+QUALITY APPROVED: **59 tests + 37 supplementary probes**. Both reviews are for
+the helper only, not the still-in-progress chat/provider integration.
+
+Five-row rendering leaves all ten receipt rows, original rank order and exact
+floating-point display values intact. Source/version retirement, wrong ownership,
+changed proof or pointer, and ambiguous checkpoints fail closed. `name-sha256`
+remains a local identity key. No runtime provider, full-corpus or browser claim
+is established by these synthetic tests. R4c/d and R5 remain required.
