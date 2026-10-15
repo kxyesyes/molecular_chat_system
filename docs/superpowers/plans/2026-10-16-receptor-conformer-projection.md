@@ -396,7 +396,7 @@ actual input/consent/browser docking gates remain unfinished.
 
 **Files:** receptor_projection.py / receptor_projection_pdb.py and their tests.
 
-- [ ] Add RED asserting byte stability, original immutability and retained
+- [x] Add RED asserting byte stability, original immutability and retained
   occupancy/xyz/B-factor/element/charge preservation. In the synthetic A choice,
   derive one complete ALA, remove B/reference/explicitly removed water, and never
   infer that the removed reference atoms are missing receptor atoms.
@@ -404,7 +404,9 @@ actual input/consent/browser docking gates remain unfinished.
 ```python
 def test_derivative_has_complete_original_atom_partition(full_fixture):
     from src.docking.receptor_projection import project_receptor_bytes
-    pdb, source, selection = full_fixture
+    from tests.test_receptor_projection import selection as make_selection
+    pdb, source = full_fixture
+    selection = make_selection()
     first = project_receptor_bytes(pdb, source=source, selection=selection)
     second = project_receptor_bytes(pdb, source=source, selection=selection)
     assert first["ok"] and first == second
@@ -416,7 +418,7 @@ def test_derivative_has_complete_original_atom_partition(full_fixture):
     assert b"  0.60" in first["pdb_bytes"]
 ```
 
-- [ ] Implement deterministic serial/TER assignment in original retained order.
+- [x] Implement deterministic serial/TER assignment in original retained order.
   Reserve counts/bytes before output; serial overflow rejects. The only coordinate
   line edits are a documented serial rewrite and clearing the chosen altloc:
 
@@ -426,13 +428,13 @@ def projected_atom_line(raw_line: bytes, serial: int) -> bytes:
     return line[:6] + f"{serial:5d}".encode("ascii") + line[11:16] + b" " + line[17:] + b"\n"
 ```
 
-- [ ] Preserve original chain/segment boundaries with valid TER records; emit a
+- [x] Preserve original chain/segment boundaries with valid TER records; emit a
   single model envelope and END. Reconstruct supported retained connectivity with
   exact endpoint mapping and cleared chosen altloc labels; never emit dangling
   LINK/SSBOND/CONECT. Drop original annotation records only under the fixed,
   declared metadata policy; keep their evidence in the immutable original source.
   No coordinate, atom-identity, charge, occupancy or B-factor field is rewritten.
-- [ ] Compute the pocket only from selected, fully occupied reference heavy atoms:
+- [x] Compute the pocket only from selected, fully occupied reference heavy atoms:
 
 ```python
 reference_heavy_xyz = [tuple(value / 1000.0 for value in atom.xyz_milli)
@@ -447,15 +449,28 @@ if any(value > 100.0 for value in size):
 
   Preserve D1's `heavy-aabb-margin4-min10-v1`, source atom identities and Å units;
   do not call the old strict source entry with a forged occupancy-1 descriptor.
-- [ ] Reparse the complete derivative with the new parser and compare every
+- [x] Reparse the complete derivative with the new parser and compare every
   retained field/connection to the selected original. Implement
   `verify_receptor_projection` by recomputing the deterministic result and comparing
   both bytes and the bounded closed descriptor. Equal hashes alone are insufficient.
-- [ ] RED/GREEN tampered coordinates/occupancy/lineage/removal reason, duplicate or
+- [x] RED/GREEN tampered coordinates/occupancy/lineage/removal reason, duplicate or
   missing lineage, CRLF input/LF output, shuffled choice ordering canonicalization,
   different selected conformer, large escaped source strings, serial/byte overflow,
   stale metadata, dangling links and false `receptor-projection-v1` labels.
-- [ ] GREEN all three new modules and D1 regression; two-stage review and commit.
+- [x] GREEN all three new modules and D1 regression; two-stage review and commit.
+
+### P4 execution evidence (2026-10-16)
+
+The worker observed missing-callable RED batches of 38 and 6 failures, followed
+by three hardening RED batches (3, 2 and 1). Final P1–P4 plus strict D1 regression
+passed 779 tests. Independent SPEC PASS reproduced 779 tests and 1,646 adverse
+probes; fresh QUALITY APPROVED reproduced 779 tests and 1,870 probes. Parent
+verification of the same four test modules passed 779 tests in 13.11 seconds.
+
+This implements deterministic derivative bytes, complete original-atom lineage,
+supported connectivity and exact pocket recomputation only. It does not
+authenticate a source, select a scientific input, grant consent, run docking or
+close the P5–P7 integration and real-browser gates.
 
 ## P5 — Owned preparation dispatch, without scientific execution
 

@@ -65,7 +65,7 @@ def test_inspection_is_complete_closed_and_never_ready(full_fixture):
     assert choices["residues"][-1]["atoms"][0]["occupancy_hundredths"] == 0
     source["residues"].clear()
     assert len(choices["residues"]) == 3
-    assert not hasattr(api(), "project_receptor_bytes")  # P4 is deliberately absent.
+    assert "pdb_bytes" not in result  # Inspection remains separate from P4.
 
 
 @pytest.mark.parametrize("label,retained,excluded", [("A", (1, 2, 3, 4, 5), 6), ("B", (1, 2, 3, 4, 6), 5)])
@@ -824,3 +824,524 @@ def test_contradictory_counterpart_cannot_authorize_cut_alt_edge(full_fixture, c
     for serials in [(2, 6, 6), (2, 5, 5), contradictory]:
         add_conect(source, lines, serials)
     rejected(repack(lines, source), source, selection(), "connection_invalid")
+
+
+# P4 fixtures remain synthetic format/schema tests, never real preparation evidence.
+def project(raw, source, choice=None):
+    call = getattr(api(), "project_receptor_bytes", None)
+    assert callable(call), "P4 projection callable missing"
+    return call(raw, source=source, selection=selection() if choice is None else choice)
+
+
+def verify(raw, source, result, choice=None):
+    call = getattr(api(), "verify_receptor_projection", None)
+    assert callable(call), "P4 verification callable missing"
+    return call(raw, source=source, selection=selection() if choice is None else choice,
+                derived_bytes=result["pdb_bytes"], projection=result["projection"])
+
+
+def assert_failure(result, reason=None):
+    assert result["ok"] is False
+    assert set(result) == {"ok", "code", "reason", "message"}
+    assert result["code"] == "RECEPTOR_PROJECTION_INVALID"
+    assert result["message"] == "Receptor projection input is invalid."
+    if reason: assert result["reason"] == reason
+
+
+def test_p4_public_callables_exist():
+    assert callable(getattr(api(), "project_receptor_bytes", None)), "P4 projection callable missing"
+    assert callable(getattr(api(), "verify_receptor_projection", None)), "P4 verification callable missing"
+
+
+@pytest.mark.parametrize("label", ["A", "B"])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_p4_deterministic_partition_fixed_fields_roundtrip(full_fixture, label, newline):
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    lines[1] = change(lines[1], 60, 66, " 12.34")[:78] + "1+"
+    source["residues"][0]["atoms"][0].update(bfactor_hundredths=1234, charge="1+")
+    raw = pack(lines, newline)
+    source["sha256"] = hashlib.sha256(raw).hexdigest()
+    choice = selection()
+    choice["conformer_choices"][0]["altloc"] = label
+    snapshot = copy.deepcopy((raw, source, choice))
+    result = project(raw, source, choice)
+    assert result["ok"] is True
+    assert set(result) == {"ok", "source_authentication", "pdb_bytes", "projection", "pocket"}
+    assert result["source_authentication"] == "caller_responsibility"
+    assert result == project(raw, source, choice)
+    assert (raw, source, choice) == snapshot
+    output = parse_original_pdb(result["pdb_bytes"])
+    original = parse_original_pdb(raw)
+    selected = select(raw, source, choice)
+    retained = [a for a in original.atoms if a.serial in selected.retained_serials]
+    assert len(output.atoms) == 5
+    for before, after in zip(retained, output.atoms):
+        assert after.altloc == ""
+        for field in ["name", "element", "identity", "record", "xyz_milli", "occupancy_hundredths", "bfactor_hundredths", "charge"]:
+            assert getattr(before, field) == getattr(after, field)
+        a, b = before.original_line.rstrip(b"\r\n"), after.original_line.rstrip(b"\n")
+        assert a[:6] == b[:6] and a[11:16] == b[11:16] and a[17:] == b[17:]
+    assert b"\r" not in result["pdb_bytes"]
+    assert b"MODEL        1\n" in result["pdb_bytes"]
+    assert result["pdb_bytes"].endswith(b"ENDMDL\nEND\n")
+    assert sum(r.record_type == "TER" for r in output.records) == 1
+    descriptor = result["projection"]
+    assert set(descriptor) == {"schema_version", "rule_version", "original_source", "selection", "derived_input", "lineage", "limitations"}
+    assert descriptor["schema_version"] == "receptor-projection-v1"
+    assert descriptor["rule_version"] == "explicit-residue-conformer-v1"
+    assert descriptor["original_source"]["sha256"] == hashlib.sha256(raw).hexdigest()
+    rows = descriptor["lineage"]
+    assert len(rows) == len(original.atoms)
+    assert [r["source_serial"] for r in rows] == [a.serial for a in original.atoms]
+    for row, atom, (_, reason) in zip(rows, original.atoms, selected.atom_reasons):
+        assert set(row) == {"source_serial", "derived_serial", "altloc", "occupancy_hundredths", "source_line_sha256", "disposition", "reason"}
+        assert row["reason"] == reason
+        assert row["source_line_sha256"] == hashlib.sha256(atom.original_line).hexdigest()
+        assert (row["derived_serial"] is None) == (row["disposition"] == "removed")
+        assert row["occupancy_hundredths"] == atom.occupancy_hundredths
+    checked = verify(raw, source, result, choice)
+    encoded = json.dumps(descriptor, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode()
+    assert checked == dict(ok=True, source_authentication="caller_responsibility", projection_sha256=hashlib.sha256(encoded).hexdigest())
+
+
+def test_p4_pocket_uses_only_selected_reference_heavy(full_fixture):
+    raw, source = full_fixture
+    result = project(raw, source)
+    pocket = result["pocket"]
+    assert pocket["center"] == [3.6, 2.3, 1.5]
+    assert pocket["size"] == [10.0, 10.0, 10.0]
+    assert pocket["margin"] == 4.0 and pocket["units"] == "angstrom"
+    assert pocket["rule_version"] == "heavy-aabb-margin4-min10-v1"
+    assert pocket["residue"] == identity("LIG", 20)
+    assert [a["serial"] for a in pocket["atom_ids"]] == [7, 8, 9]
+    assert pocket["atom_count"] == 3
+
+
+@pytest.mark.parametrize("x,ok", [(95.0, True), (95.001, False)])
+def test_p4_pocket_max_rejects_not_clamps(full_fixture, x, ok):
+    _, source = full_fixture
+    lines = fixture_lines()
+    lines[9] = change(lines[9], 30, 38, f"{x:8.3f}")
+    source["residues"][1]["atoms"][2]["xyz_milli"][0] = round(x * 1000)
+    result = project(repack(lines, source), source)
+    assert result["ok"] is ok
+    if ok: assert result["pocket"]["size"][0] == 100.0
+    else: assert_failure(result, "selection_invalid")
+
+
+@pytest.mark.parametrize("mutation", ["xyz", "occupancy", "bfactor", "charge", "extra_atom", "missing_atom", "lineage", "reason", "duplicate_lineage", "missing_lineage", "schema", "rule", "policy", "source", "selection", "extra_key", "bool", "float", "null", "cycle"])
+def test_p4_verify_rejects_tamper(full_fixture, mutation):
+    raw, source = full_fixture
+    result = project(raw, source)
+    assert result["ok"]
+    descriptor = result["projection"]
+    if mutation in {"xyz", "occupancy", "bfactor", "charge", "extra_atom", "missing_atom"}:
+        lines = result["pdb_bytes"].decode().splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("ATOM"))
+        if mutation == "extra_atom": lines.insert(index, lines[index])
+        elif mutation == "missing_atom": lines.pop(index)
+        else:
+            start, end, value = {"xyz": (30, 38, "   9.999"), "occupancy": (54, 60, "  0.99"), "bfactor": (60, 66, " 99.99"), "charge": (78, 80, "1+")}[mutation]
+            lines[index] = change(lines[index].ljust(80), start, end, value)
+        result["pdb_bytes"] = pack(lines)
+        # Even a matching claimed hash cannot authorize altered full bytes.
+        descriptor["derived_input"]["sha256"] = hashlib.sha256(result["pdb_bytes"]).hexdigest()
+    elif mutation == "lineage": descriptor["lineage"][0]["derived_serial"] = 2
+    elif mutation == "reason": descriptor["lineage"][0]["reason"] = "reference_removed"
+    elif mutation == "duplicate_lineage": descriptor["lineage"][1] = descriptor["lineage"][0]
+    elif mutation == "missing_lineage": descriptor["lineage"].pop()
+    elif mutation == "schema": descriptor["schema_version"] = "docking-source-v1"
+    elif mutation == "rule": descriptor["rule_version"] = "forged"
+    elif mutation == "policy": descriptor["derived_input"]["metadata_policy"] = "deposited-original"
+    elif mutation == "source": descriptor["original_source"]["provenance"]["version"] = "old"
+    elif mutation == "selection": descriptor["selection"]["sha256"] = "0" * 64
+    elif mutation == "extra_key": descriptor["input_ready"] = True
+    elif mutation == "bool": descriptor["lineage"][0]["source_serial"] = True
+    elif mutation == "float": descriptor["lineage"][0]["source_serial"] = 1.0
+    elif mutation == "null": descriptor["lineage"][0]["source_serial"] = None
+    else: descriptor["lineage"][0] = descriptor
+    assert_failure(verify(raw, source, result))
+
+
+def test_p4_choice_order_and_interleaved_atoms(full_fixture):
+    _, source = full_fixture
+    lines = fixture_lines()
+    add_glycan(source, lines)
+    add_limitations(source)
+    lines.insert(3, lines.pop(7))
+    choice = selection()
+    choice["hetero_choices"].append(dict(residue=identity("NAG", 30), action="retain"))
+    choice["conformer_choices"].append(dict(residue=identity("NAG", 30), altloc="Y"))
+    choice["reviewed_limitations"] = ["variant-z", "gap-a"]
+    raw = repack(lines, source)
+    first = project(raw, source, choice)
+    assert first["ok"]
+    for key in ["hetero_choices", "conformer_choices", "reviewed_limitations"]: choice[key].reverse()
+    assert first == project(raw, source, choice)
+    assert [r["source_serial"] for r in first["projection"]["lineage"]][:4] == [1, 2, 7, 3]
+
+
+@pytest.mark.parametrize("serials", [(1, 2), (2, 5, 5), (7, 8), (2, 6, 5)])
+def test_p4_connectivity_rebuilt_no_dangling(full_fixture, serials):
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    add_conect(source, lines, serials)
+    raw = repack(lines, source)
+    result = project(raw, source)
+    assert result["ok"]
+    connections = parse_original_pdb(result["pdb_bytes"]).connections
+    expected = [] if serials == (7, 8) else [(2, 5)] if serials == (2, 6, 5) else [serials]
+    assert [c.atom_serials for c in connections] == expected
+    assert verify(raw, source, result)["ok"]
+
+
+@pytest.mark.parametrize("field", ["pdb_bytes", "source", "selection", "derived_bytes", "projection"])
+def test_p4_exact_native_public_types(full_fixture, field):
+    raw, source = full_fixture
+    result = project(raw, source)
+    args = dict(pdb_bytes=raw, source=source, selection=selection(), derived_bytes=result["pdb_bytes"], projection=result["projection"])
+    class Bytes(bytes): pass
+    class Dict(dict): pass
+    args[field] = Bytes(args[field]) if type(args[field]) is bytes else Dict(args[field])
+    assert_failure(api().verify_receptor_projection(**args))
+
+
+def test_p4_output_gate_precedes_emission(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    module = api()
+    assert callable(getattr(module, "project_receptor_bytes", None)), "P4 projection callable missing"
+    selected = select(raw, source)
+    monkeypatch.setattr(module.contracts, "MAX_LOGICAL_BYTES", selected.logical_charge_bytes + 1)
+    def forbidden(*args): pytest.fail("output allocated before aggregate reservation")
+    monkeypatch.setattr(module, "_emit", forbidden)
+    assert_failure(project(raw, source), "resource_limit")
+
+
+@pytest.mark.parametrize("limit", ["MAX_PROJECTION_JSON_BYTES", "MAX_DERIVED_BYTES", "MAX_EMITTED_SERIAL"])
+def test_p4_output_size_serial_gates_before_emission(full_fixture, monkeypatch, limit):
+    raw, source = full_fixture
+    module = api()
+    assert callable(getattr(module, "project_receptor_bytes", None)), "P4 projection callable missing"
+    monkeypatch.setattr(module, limit, 4)
+    def forbidden(*args): pytest.fail("emission before size gate")
+    monkeypatch.setattr(module, "_emit", forbidden)
+    assert_failure(project(raw, source), "resource_limit")
+
+
+def test_p4_roundtrip_budget_precedes_second_parse(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    module = api()
+    assert callable(getattr(module, "project_receptor_bytes", None)), "P4 projection callable missing"
+    parse = module.pdb.parse_original_pdb
+    calls = []
+    def observed(value):
+        calls.append(value)
+        return parse(value)
+    reserve = module.pdb.AllocationBudget.reserve
+    # Five atoms, one TER, four envelope records; 81-byte upper bound/record.
+    amount = 810 + module.pdb.BASE_RESERVATION_BYTES + 10 * module.pdb.RECORD_RESERVATION_BYTES + 5 * module.pdb.ATOM_RESERVATION_BYTES + module.pdb.TER_RESERVATION_BYTES
+    denied = []
+    def deny(self, size):
+        if size == amount:
+            denied.append(size)
+            raise module.pdb.ProjectionInvalid("resource_limit")
+        return reserve(self, size)
+    monkeypatch.setattr(module.pdb, "parse_original_pdb", observed)
+    monkeypatch.setattr(module.pdb.AllocationBudget, "reserve", deny)
+    assert_failure(project(raw, source), "resource_limit")
+    assert calls == [raw]
+    assert denied == [amount]
+
+
+def test_p4_roundtrip_catches_corrupt_emitter(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    module = api()
+    assert callable(getattr(module, "project_receptor_bytes", None)), "P4 projection callable missing"
+    emit = module._emit
+    def corrupt(*args):
+        return emit(*args).replace(b"  0.60", b"  1.00")
+    monkeypatch.setattr(module, "_emit", corrupt)
+    assert_failure(project(raw, source))
+
+
+def test_p4_verification_input_and_selection_share_preallocation_budget(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    module = api()
+    result = project(raw, source)
+    selected = select(raw, source)
+    budget = module.pdb.AllocationBudget()
+    budget.reserve(len(result["pdb_bytes"]))
+    module._descriptor_resources(result["projection"], budget)
+    monkeypatch.setattr(module.contracts, "MAX_LOGICAL_BYTES", budget.used + selected.logical_charge_bytes - 1)
+    def forbidden(*args): pytest.fail("selection allocated before aggregate verification headroom check")
+    monkeypatch.setattr(module, "_selected", forbidden)
+    assert_failure(verify(raw, source, result), "resource_limit")
+
+
+@pytest.mark.parametrize("record", [b"REMARK   1 STALE ANNOTATION\n", b"TITLE     ORIGINAL DEPOSIT\n"])
+def test_p4_roundtrip_rejects_undeclared_metadata(full_fixture, monkeypatch, record):
+    raw, source = full_fixture
+    module = api()
+    emit = module._emit
+    def corrupt(*args): return emit(*args).replace(b"ENDMDL\n", record + b"ENDMDL\n")
+    monkeypatch.setattr(module, "_emit", corrupt)
+    assert_failure(project(raw, source))
+
+
+def test_p4_retained_atom_order_interleaves_chains_without_split_residues(full_fixture):
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    add_protein(source, lines)
+    lines.insert(3, lines.pop(-2))
+    choice = selection()
+    choice["protein_selection"]["chains"].append(dict(chain="B", entity_id="1"))
+    raw = repack(lines, source)
+    result = project(raw, source, choice)
+    assert result["ok"]
+    assert [a.identity[1] for a in parse_original_pdb(result["pdb_bytes"]).atoms] == ["A", "A", "B", "A", "A", "A"]
+    assert verify(raw, source, result, choice)["ok"]
+
+
+def test_p4_link_rebuild_clears_selected_endpoint_altlocs(full_fixture):
+    from tests.test_receptor_projection_pdb import link_line
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    add_glycan(source, lines)
+    link = link_line(alt1="A", alt2="Y")
+    link = change(change(link, 47, 50, "NAG"), 52, 56, "  30")
+    lines.insert(1, link)
+    source["connections"] = [dict(record_index=2, record_type="LINK", atom_serials=[5, 12], kind="covalent", symmetry=["identity", "identity"])]
+    choice = selection()
+    choice["hetero_choices"].append(dict(residue=identity("NAG", 30), action="retain"))
+    choice["conformer_choices"].append(dict(residue=identity("NAG", 30), altloc="Y"))
+    raw = repack(lines, source)
+    result = project(raw, source, choice)
+    assert result["ok"]
+    connection, = parse_original_pdb(result["pdb_bytes"]).connections
+    assert connection.record_type == "LINK" and connection.atom_serials == (5, 6)
+    assert all(e.altloc == "" for e in connection.endpoints)
+    assert connection.original_line[59:78] == link.encode()[59:78]
+    assert result["pdb_bytes"].index(b"LINK  ") < result["pdb_bytes"].index(b"MODEL ")
+    assert verify(raw, source, result, choice)["ok"]
+
+
+def test_p4_ssbond_rebuild_and_ter_serial_mapping(full_fixture):
+    from tests.test_receptor_projection_pdb import ssbond_line
+    from tests.test_docking_pocket_evidence import atom_line
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    lines.insert(1, ssbond_line())
+    source["proteins"].append(dict(model=1, chain="B", entity_id="4", uniprot_id="P06276", taxonomy_id=9606))
+    for serial, seq in [(11, 2), (12, 3)]:
+        key = identity("CYS", seq, "B")
+        lines.insert(-1, atom_line(serial, "SG", "S", (1, 2, 3), key, "ATOM"))
+        source["residues"].append(dict(identity=key, record="ATOM", entity_id="4", role="protein",
+            component=dict(record_id="synthetic-sulfur", version="v1", sha256="d" * 64),
+            required_heavy_atoms=[dict(name="SG", element="S")], atoms=[declared_atom(serial, "SG", "S", (1000, 2000, 3000))]))
+    source["connections"] = [dict(record_index=2, record_type="SSBOND", atom_serials=[11, 12], kind="disulfide", symmetry=["identity", "identity"])]
+    choice = selection()
+    choice["protein_selection"]["chains"].append(dict(chain="B", entity_id="4"))
+    raw = repack(lines, source)
+    result = project(raw, source, choice)
+    assert result["ok"]
+    output = parse_original_pdb(result["pdb_bytes"])
+    assert output.connections[0].atom_serials == (7, 8)
+    assert [r.atom_serials for r in output.records if r.record_type == "TER"] == [(6,), (9,)]
+    assert result["pdb_bytes"].index(b"SSBOND") < result["pdb_bytes"].index(b"MODEL ")
+    assert verify(raw, source, result, choice)["ok"]
+
+
+@pytest.mark.parametrize("cap,ok", [(5, False), (6, True)])
+def test_p4_serial_cap_counts_emitted_ter(full_fixture, monkeypatch, cap, ok):
+    raw, source = full_fixture
+    monkeypatch.setattr(api(), "MAX_EMITTED_SERIAL", cap)
+    result = project(raw, source)
+    assert result["ok"] is ok
+    if not ok: assert_failure(result, "resource_limit")
+
+
+@pytest.mark.parametrize("value,reason", [('"\\' * 64, "source_invalid"), ('"\\' * 65, "resource_limit")])
+def test_p4_escaped_source_strings_rejected_before_serialization(full_fixture, monkeypatch, value, reason):
+    raw, source = full_fixture
+    source["provenance"]["proof_id"] = value
+    def forbidden(*args): pytest.fail("invalid source reached serialization")
+    monkeypatch.setattr(api().contracts, "_descriptor_digest", forbidden)
+    assert_failure(project(raw, source), reason)
+
+
+@pytest.mark.parametrize("value", [True, float("nan"), b"bytes", (1,), {1}, "x" * 129, 2**64])
+def test_p4_bad_descriptor_scalars_precede_recomputation(full_fixture, monkeypatch, value):
+    raw, source = full_fixture
+    result = project(raw, source)
+    result["projection"]["lineage"][0]["source_serial"] = value
+    def forbidden(*args): pytest.fail("invalid verification input reached recomputation")
+    monkeypatch.setattr(api(), "_selected", forbidden)
+    assert_failure(verify(raw, source, result))
+
+
+@pytest.mark.parametrize("field", ["conformer_choices", "hetero_choices", "reviewed_limitations"])
+def test_p4_no_implicit_choices_or_acknowledgment(full_fixture, field):
+    raw, source = full_fixture
+    add_limitations(source)
+    choice = selection()
+    choice["reviewed_limitations"] = ["gap-a", "variant-z"]
+    choice[field] = []
+    assert_failure(project(raw, source, choice), "selection_incomplete")
+
+
+def test_p4_reference_hydrogen_excluded_from_aabb(full_fixture):
+    from tests.test_docking_pocket_evidence import atom_line
+    _, source = full_fixture
+    lines = fixture_lines()
+    lines.insert(-1, atom_line(11, "H1", "H", (500, 500, 500), identity("LIG", 20), occupancy=.5))
+    source["residues"][1]["atoms"].append(declared_atom(11, "H1", "H", (500000, 500000, 500000), occupancy=50))
+    raw = repack(lines, source)
+    result = project(raw, source)
+    assert result["ok"]
+    assert result["pocket"]["center"] == [3.6, 2.3, 1.5]
+    assert result["projection"]["lineage"][-1]["reason"] == "reference_removed"
+    assert verify(raw, source, result)["ok"]
+
+
+def test_p4_nonunit_retained_hetero_original_ter_and_metadata(full_fixture):
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    lines[10] = change(lines[10], 54, 60, "  0.01")
+    source["residues"][2]["atoms"][0]["occupancy_hundredths"] = 1
+    lines.insert(7, "TER      50      ALA A   1 ")
+    lines.insert(1, "TITLE     SYNTHETIC STALE ORIGINAL ONLY")
+    choice = selection()
+    choice["hetero_choices"][0]["action"] = "retain"
+    raw = repack(lines, source)
+    result = project(raw, source, choice)
+    assert result["ok"]
+    output = parse_original_pdb(result["pdb_bytes"])
+    assert [a.serial for a in output.atoms] == [1, 2, 3, 4, 5, 7]
+    assert [a.segment for a in output.atoms] == [0, 0, 0, 0, 0, 1]
+    assert output.atoms[-1].occupancy_hundredths == 1
+    assert b"TITLE" not in result["pdb_bytes"] and b"TITLE" in raw
+    assert verify(raw, source, result, choice)["ok"]
+
+
+def test_p4_explicit_model_identity_is_not_rewritten(full_fixture):
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    lines.insert(1, "MODEL        9")
+    lines.insert(-1, "ENDMDL")
+    for row in source["proteins"]: row["model"] = 9
+    for row in source["residues"]: row["identity"]["model"] = 9
+    choice = selection()
+    choice["protein_selection"]["model"] = 9
+    choice["reference_residue"]["model"] = 9
+    for row in choice["conformer_choices"] + choice["hetero_choices"]: row["residue"]["model"] = 9
+    raw = repack(lines, source)
+    result = project(raw, source, choice)
+    assert result["ok"] and parse_original_pdb(result["pdb_bytes"]).model == 9
+    assert verify(raw, source, result, choice)["ok"]
+
+
+@pytest.mark.parametrize("seed", range(16))
+def test_p4_arbitrary_original_atom_order_preserves_exact_partition(full_fixture, seed):
+    import random
+    from src.docking.receptor_projection_pdb import parse_original_pdb
+    _, source = full_fixture
+    lines = fixture_lines()
+    atoms = lines[1:-1]
+    random.Random(seed).shuffle(atoms)
+    raw = repack([lines[0], *atoms, lines[-1]], source)
+    result = project(raw, source)
+    assert result["ok"]
+    original = parse_original_pdb(raw)
+    retained = [a for a in original.atoms if a.serial in {1, 2, 3, 4, 5}]
+    derived = parse_original_pdb(result["pdb_bytes"])
+    assert [a.name for a in derived.atoms] == [a.name for a in retained]
+    assert [r["source_serial"] for r in result["projection"]["lineage"]] == [a.serial for a in original.atoms]
+    assert verify(raw, source, result)["ok"]
+
+
+@pytest.mark.parametrize("mutation", ["source_version", "source_proof", "source_component", "conformer", "extra_source", "dangling_original"])
+def test_p4_current_source_and_selection_required_for_verification(full_fixture, mutation):
+    raw, source = full_fixture
+    result = project(raw, source)
+    choice = selection()
+    if mutation == "source_version": source["provenance"]["version"] = "2026-10-16"
+    elif mutation == "source_proof": source["provenance"]["proof_id"] = "proof-2"
+    elif mutation == "source_component": source["residues"][0]["component"]["version"] = "v2"
+    elif mutation == "conformer": choice["conformer_choices"][0]["altloc"] = "B"
+    elif mutation == "extra_source": source["ready"] = True
+    else:
+        lines = fixture_lines()
+        add_conect(source, lines, (1, 99))
+        raw = repack(lines, source)
+    assert_failure(verify(raw, source, result, choice))
+
+
+def test_p4_layout_indices_precharged(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    module = api()
+    selected = select(raw, source)
+    bound = 8192 + 1024 * 10 + len(selected.canonical_json)
+    monkeypatch.setattr(module.contracts, "MAX_LOGICAL_BYTES", selected.logical_charge_bytes + 12 * bound + 2048 * 10 + 1)
+    def forbidden(*args): pytest.fail("layout index before reservation")
+    monkeypatch.setattr(module, "set", forbidden, raising=False)
+    assert_failure(project(raw, source), "resource_limit")
+
+
+def test_p4_descriptor_reservation_precedes_selection_copy(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    module = api()
+    selected = select(raw, source)
+    monkeypatch.setattr(module.contracts, "MAX_LOGICAL_BYTES", selected.logical_charge_bytes + 1)
+    def forbidden(*args): pytest.fail("descriptor copied before reservation")
+    monkeypatch.setattr(module.json, "loads", forbidden)
+    assert_failure(project(raw, source), "resource_limit")
+
+
+def test_p4_supplied_bytes_bounded_before_descriptor_walk(full_fixture, monkeypatch):
+    raw, source = full_fixture
+    result = project(raw, source)
+    monkeypatch.setattr(api(), "MAX_DERIVED_BYTES", len(result["pdb_bytes"]) - 1)
+    def forbidden(*args): pytest.fail("descriptor walk before derived size gate")
+    monkeypatch.setattr(api(), "_descriptor_resources", forbidden)
+    assert_failure(verify(raw, source, result), "resource_limit")
+
+
+def test_p4_verification_headroom_bounds_connection_dense_selection(full_fixture):
+    raw, source = full_fixture
+    lines = fixture_lines()
+    for _ in range(1500): add_conect(source, lines, (1, 2))
+    raw = repack(lines, source)
+    selected = select(raw, source)
+    module = api()
+    budget = module.pdb.AllocationBudget()
+    bound = module._reserve_verification_selection(raw, source, selection(), budget)
+    assert selected.logical_charge_bytes <= bound < budget.used <= 512 * 1024 * 1024
+    result = project(raw, source)
+    assert result["ok"]
+    assert verify(raw, source, result)["ok"]
+
+
+def test_p4_cannot_silently_merge_original_segments_after_removed_terminator(full_fixture):
+    _, source = full_fixture
+    lines = fixture_lines()
+    add_glycan(source, lines)
+    add_protein(source, lines, serial=13, chain="B")
+    lines.insert(-1, "TER      50      ALA B   1 ")
+    add_protein(source, lines, serial=14, chain="C")
+    choice = selection()
+    choice["protein_selection"]["chains"].append(dict(chain="C", entity_id="1"))
+    choice["hetero_choices"].append(dict(residue=identity("NAG", 30), action="retain"))
+    choice["conformer_choices"].append(dict(residue=identity("NAG", 30), altloc="Y"))
+    raw = repack(lines, source)
+    assert select(raw, source, choice).retained_serials == (1, 2, 3, 4, 5, 12, 14)
+    # P1 only permits TER after ATOM. Moving TER before the glycan would change
+    # its original segment; after it is invalid. Do not reorder/change records.
+    assert_failure(project(raw, source, choice), "selection_invalid")
