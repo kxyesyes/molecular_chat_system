@@ -17,11 +17,11 @@ from src.reverse_target.owned_source import _array_hash, operation_check
 from src.reverse_target.predictor import ReverseTargetPredictor
 
 
-def write_source(directory, *, cached=True, fortran=False):
+def write_source(directory, *, cached=True, fortran=False, columns=None, rows=None):
     directory.mkdir(parents=True, exist_ok=True)
-    columns = ["molecule_chembl_id", "canonical_smiles", "target_name",
+    columns = columns or ["molecule_chembl_id", "canonical_smiles", "target_name",
                "standard_type", "standard_value", "organism", "target_chembl_id"]
-    rows = [
+    rows = rows if rows is not None else [
         ["CHEMBL1", "CCO", "Synthetic A", "IC50", "1", "Human", "CHEMBL101"],
         ["CHEMBL2", "CCC", "Synthetic A", "Ki", "2", "Mouse", "CHEMBL102"],
         ["CHEMBL3", "CCO", "Synthetic B", "IC50", "3", "Human", "CHEMBL103"],
@@ -404,3 +404,326 @@ def test_final_identity_check_follows_hash_callbacks(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "_array_hash", drift)
     with pytest.raises(ValueError, match="Invalid reverse-target owned source"):
         load(producer)
+
+
+def strict_pair(tmp_path, *, columns=None, rows=None, policy=None):
+    old, _ = write_source(tmp_path / "source", columns=columns, rows=rows)
+    compact = ReverseTargetPredictor(old.data_dir)
+    assert callable(getattr(compact, "initialize_compact_strict", None)), (
+        "compact initialization is not implemented")
+    with rdBase.BlockLogs():
+        old.initialize_strict()
+        compact.initialize_compact_strict(policy=policy)
+    return old, compact
+
+
+@pytest.mark.parametrize("combine", [False, True])
+@pytest.mark.parametrize("threshold", [0.0, 0.6, 1.0])
+def test_compact_strict_ranking_and_receipt_parity(tmp_path, combine, threshold):
+    old, compact = strict_pair(tmp_path)
+    controls = dict(threshold=threshold, top_k=10,
+                    combine_by_target=combine, organism_filter="")
+    with rdBase.BlockLogs():
+        a = old.predict_with_receipt("CCO", **controls)
+        b = compact.predict_with_receipt("CCO", **controls)
+    assert b["records"] == a["records"]
+    assert b["receipt"]["score_dtype"] == a["receipt"]["score_dtype"]
+    for key in ("tsv", "morgan", "maccs", "morgan_popcounts", "maccs_popcounts"):
+        assert b["receipt"]["source"][key + "_sha256"] == a["receipt"]["source"][key + "_sha256"]
+    assert b["receipt"]["source"]["generation_id"] != a["receipt"]["source"]["generation_id"]
+    snapshot = compact.capture_prediction_source()
+    assert compact.validate_prediction_source(b, smiles="CCO", expected=snapshot, **controls) == b
+
+
+@pytest.mark.parametrize("combine", [False, True])
+@pytest.mark.parametrize("smiles", ["CCO", "[He]", "N#N"])
+@pytest.mark.parametrize("weight", [None, "0", "1", "1.25", "-0.25", "bad"])
+def test_exact_scoring_parity_across_blocks_and_identity(tmp_path, monkeypatch, combine, smiles, weight):
+    if weight is None:
+        monkeypatch.delenv("REVERSE_TARGET_MORGAN_WEIGHT", raising=False)
+    else:
+        monkeypatch.setenv("REVERSE_TARGET_MORGAN_WEIGHT", weight)
+    columns = ["molecule_chembl_id", "canonical_smiles", "target_name", "standard_type",
+               "standard_value", "organism", "target_chembl_id", "taxon_id", "assay_id", "target_id"]
+    rows = [
+        ["001", "CCC", "A", "Ki", "1", "Human", "CHEMBL101", "9606", "0001", "raw1"],
+        ["002", "CCO", "A", "Ki", "2", "Mouse", "CHEMBL101", "10090", "0002", "raw2"],
+        ["003", "CCO", "B", "Ki", "3", "Homo sapiens", "CHEMBL102", "9606", "0003", "raw3"],
+        ["004", "CCO", "A", "Ki", "4", "Human", "CHEMBL101", "9606", "0004", "raw4"],
+        ["005", "CCO", "B", "Ki", "5", "Homo sapiens", "CHEMBL102", "9606", "0005", "raw5"],
+        ["006", "[He]", "C", "Ki", "6", "", "CHEMBL103", "", "0006", "raw6"],
+        ["007", "N#N", "D", "Ki", "7", "mouse strain", "", "", "0007", "raw7"],
+    ]
+    policy = replace(compact_module().CompactSourcePolicy(), chunk_rows=2)
+    old, compact = strict_pair(tmp_path, columns=columns, rows=rows, policy=policy)
+    with rdBase.BlockLogs():
+        for organism in ("", " Human ", "homo sapiens", "Mouse", "strain", "missing"):
+            for threshold in (0.0, 0.6, 1.0, float(np.nextafter(np.float32(.6), np.float32(1)))):
+                controls = dict(threshold=threshold, top_k=3, combine_by_target=combine, organism_filter=organism)
+                a = old.predict_with_receipt(smiles, **controls)
+                b = compact.predict_with_receipt(smiles, **controls)
+                assert b["records"] == a["records"]
+                assert b["receipt"]["score_dtype"] == a["receipt"]["score_dtype"]
+                assert b["receipt"]["weights"] == a["receipt"]["weights"]
+                assert b["receipt"]["weight_resolution"] == a["receipt"]["weight_resolution"]
+
+
+def test_only_two_compact_queries_can_own_scratch(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from src.reverse_target.owned_source import ReverseSourceUnavailable
+    _, compact = strict_pair(tmp_path)
+    original = compact._predict_core
+    entered, release, lock = threading.Barrier(3), threading.Event(), threading.Lock()
+    calls = 0
+    def blocked(*args, **kwargs):
+        nonlocal calls
+        with lock:
+            calls += 1
+            number = calls
+        if number <= 2:
+            entered.wait(timeout=10)
+            assert release.wait(timeout=10)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(compact, "_predict_core", blocked)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(compact.predict_with_receipt, "CCO") for _ in range(2)]
+        try:
+            entered.wait(timeout=10)
+            with pytest.raises(ReverseSourceUnavailable):
+                compact.predict_with_receipt("CCO")
+            assert compact._strict_active == 2
+            with pytest.raises(ReverseSourceUnavailable):
+                compact.initialize_compact_strict()
+        finally:
+            release.set()
+        results = [future.result(timeout=10) for future in futures]
+    assert results[0]["receipt"]["invocation_id"] != results[1]["receipt"]["invocation_id"]
+    assert compact._strict_active == 0
+
+
+def test_compact_query_budget_rejects_before_unpack(tmp_path, monkeypatch):
+    module = compact_module()
+    _, compact = strict_pair(tmp_path, policy=replace(module.CompactSourcePolicy(), max_query_bytes=1))
+    monkeypatch.setattr(module.PackedFingerprints, "block", lambda *a: pytest.fail("unbudgeted unpack"))
+    with pytest.raises(ValueError, match="Invalid reverse-target owned source"):
+        compact.predict_with_receipt("CCO")
+    assert compact._strict_active == 0
+
+
+def test_records_are_built_only_for_top_k(tmp_path, monkeypatch):
+    _, compact = strict_pair(tmp_path)
+    original = compact._similarity_record
+    constructed = []
+    def record(frame, index, *scores):
+        constructed.append(index)
+        return original(frame, index, *scores)
+    monkeypatch.setattr(compact, "_similarity_record", record)
+    result = compact.predict_with_receipt("CCO", threshold=0, top_k=1)
+    assert constructed == [0]
+    assert len(result["records"]) == 1
+
+
+@pytest.mark.parametrize("timeout", [True, 0, 119, 3601, float("nan"), float("inf")])
+def test_compact_public_prewarm_clock_does_not_accept_request_budgets(tmp_path, timeout):
+    producer, _ = write_source(tmp_path / "source")
+    with pytest.raises(ValueError, match="Invalid reverse-target strict input"):
+        producer.initialize_compact_strict(timeout_seconds=timeout)
+    assert not producer._strict_loading
+
+
+def test_old_strict_clock_still_rejects_extended_budget(tmp_path):
+    producer, _ = write_source(tmp_path / "source")
+    with pytest.raises(ValueError, match="Invalid reverse-target strict input"):
+        producer.initialize_strict(timeout_seconds=1800)
+
+
+@pytest.mark.parametrize("action", ["close", "path_drift"])
+def test_compact_late_acquisition_cannot_publish(tmp_path, action):
+    from src.reverse_target.owned_source import ReverseSourceUnavailable
+    producer, _ = write_source(tmp_path / "source")
+    def progress(stage, done, total):
+        if action == "close":
+            producer.close_strict()
+        else:
+            producer.training_data_path = tmp_path / "other.tsv"
+    with pytest.raises(ReverseSourceUnavailable), rdBase.BlockLogs():
+        producer.initialize_compact_strict(progress=progress)
+    assert producer._strict_source is None and not producer._strict_loading
+
+
+@pytest.mark.parametrize("unicode_keys", [False, True])
+def test_query_aggregation_reservations_cover_actual_python_objects(tmp_path, monkeypatch, unicode_keys):
+    import sys
+    module = compact_module()
+    rows = [[f"CHEMBL{index}", "CCO", f"Target {index}", "Ki", "1", "Human", f"CHEMBLT{index}"]
+            for index in range(500)]
+    if unicode_keys:
+        for index, row in enumerate(rows):
+            row[2], row[5], row[6] = chr(0x4e00 + index), chr(0x6000 + index), ""
+    producer, _ = write_source(tmp_path / "source", rows=rows)
+    with rdBase.BlockLogs():
+        producer.initialize_compact_strict()
+    original = module.heapq.nlargest
+    measured = []
+    def deep_size(value, seen):
+        if id(value) in seen:
+            return 0
+        seen.add(id(value))
+        result = sys.getsizeof(value)
+        if type(value) is dict:
+            result += sum(deep_size(k, seen) + deep_size(v, seen) for k, v in value.items())
+        elif type(value) in (list, tuple):
+            result += sum(deep_size(v, seen) for v in value)
+        return result
+    def checked(*args, **kwargs):
+        state = sys._getframe(1).f_locals
+        base = state["block_size"] * 2214 * 3 + 2 * 1024**2 + state["top_k"] * 256 * 1024
+        measured.append((state["reserved"] - base, deep_size(state["groups"], set())))
+        del state
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module.heapq, "nlargest", checked)
+    with rdBase.BlockLogs():
+        producer.predict_with_receipt("CCO", top_k=1)
+    assert measured and measured[0][0] >= measured[0][1]
+
+
+def test_cancelled_scoring_clears_private_source_from_retained_traceback(tmp_path, monkeypatch):
+    import asyncio
+    _, compact = strict_pair(tmp_path)
+    source_ref = weakref.ref(compact._strict_source)
+    original = compact.batch_tanimoto_similarity
+    cancelled = False
+    def cancel_after_block(*args, **kwargs):
+        nonlocal cancelled
+        result = original(*args, **kwargs)
+        compact.close_strict()
+        cancelled = True
+        return result
+    monkeypatch.setattr(compact, "batch_tanimoto_similarity", cancel_after_block)
+    with pytest.raises(asyncio.CancelledError) as retained:
+        compact.predict_with_receipt("CCO", cancelled=lambda: cancelled)
+    gc.collect()
+    assert retained.value is not None
+    assert source_ref() is None
+    assert compact._strict_active == 0
+
+
+def test_compact_snapshot_ignores_later_disk_and_legacy_public_arrays(tmp_path):
+    _, compact = strict_pair(tmp_path)
+    expected = compact.predict_with_receipt("CCO")
+    compact.df = None
+    compact.morgan_fps = np.zeros((3, 2048), dtype=np.uint8)
+    compact.maccs_fps = np.zeros((3, 166), dtype=np.uint8)
+    np.save(compact.morgan_fp_path, compact.morgan_fps)
+    np.save(compact.maccs_fp_path, compact.maccs_fps)
+    actual = compact.predict_with_receipt("CCO")
+    assert actual["records"] == expected["records"]
+    assert actual["receipt"]["source_sha256"] == expected["receipt"]["source_sha256"]
+
+
+def test_compact_path_drift_and_new_generation_reject_old_proofs(tmp_path):
+    from src.reverse_target.owned_source import ReverseSourceUnavailable
+    _, compact = strict_pair(tmp_path)
+    snapshot = compact.capture_prediction_source()
+    result = compact.predict_with_receipt("CCO")
+    compact.initialize_compact_strict()
+    with pytest.raises(ReverseSourceUnavailable):
+        compact.validate_prediction_source(result, smiles="CCO", expected=snapshot)
+    compact.training_data_path = tmp_path / "changed.tsv"
+    with pytest.raises(ReverseSourceUnavailable):
+        compact.capture_prediction_source()
+    assert compact._strict_source is None
+
+
+def test_compact_close_during_physical_load_keeps_owner_until_exit(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from src.reverse_target.owned_source import ReverseSourceUnavailable
+    module = compact_module()
+    producer, _ = write_source(tmp_path / "source")
+    original = module.load_compact_source
+    entered, release = threading.Event(), threading.Event()
+    def held(*args, **kwargs):
+        entered.set()
+        assert release.wait(10)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(module, "load_compact_source", held)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(producer.initialize_compact_strict)
+        try:
+            assert entered.wait(10)
+            producer.close_strict()
+            assert producer._strict_loading
+            with pytest.raises(ReverseSourceUnavailable):
+                producer.initialize_compact_strict()
+            with pytest.raises(ReverseSourceUnavailable):
+                producer.initialize_strict()
+        finally:
+            release.set()
+        with pytest.raises(ReverseSourceUnavailable):
+            future.result(timeout=10)
+    assert producer._strict_source is None and not producer._strict_loading
+
+
+def test_compact_prewarm_clock_has_its_own_deadline_and_strict_cancel_type(monkeypatch):
+    import asyncio
+    module = compact_module()
+    now = [0.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    check = module.acquisition_check(1800, None)
+    now[0] = 1799
+    check()
+    now[0] = 1800
+    with pytest.raises(TimeoutError):
+        check()
+    with pytest.raises(ValueError, match="Invalid reverse-target strict input"):
+        module.acquisition_check(1800, lambda: 1)
+    with pytest.raises(asyncio.CancelledError):
+        module.acquisition_check(1800, lambda: True)
+
+
+@pytest.mark.parametrize("count,limit,rejected", [
+    (10, 5 * 1024**2, True), (100, 128 * 1024**2, True), (10, 128 * 1024**2, False),
+])
+def test_query_reserves_escaped_json_copies_before_serialization(tmp_path, monkeypatch, count, limit, rejected):
+    import tracemalloc
+    from src.reverse_target import predictor as predictor_module
+    module = compact_module()
+    columns = ["molecule_chembl_id", "canonical_smiles", "target_name", "standard_type",
+               "standard_value", "organism", "target_chembl_id", "assay_id",
+               "document_chembl_id", "publication_id", "standard_relation", "standard_units",
+               "assay_confidence_score", "data_validity_comment"]
+    # JSON expands each control character sixfold; one astral character also
+    # makes a CPython JSON string use four-byte Unicode storage throughout.
+    long_value = "\U0001f600" + "\x01" * 7999
+    rows = [[long_value, "CCO", f"Target {i}", long_value, "1", "Human",
+             f"CHEMBLT{i}"] + [long_value] * 7 for i in range(count)]
+    producer, _ = write_source(tmp_path / "source", columns=columns, rows=rows)
+    policy = replace(module.CompactSourcePolicy(), chunk_rows=1, max_query_bytes=limit)
+    with rdBase.BlockLogs():
+        producer.initialize_compact_strict(policy=policy)
+    original = predictor_module.json_sha256
+    serialized_records = []
+    def tracked(value):
+        if type(value) is list:
+            serialized_records.append(True)
+        return original(value)
+    monkeypatch.setattr(predictor_module, "json_sha256", tracked)
+    tracemalloc.start()
+    try:
+        with rdBase.BlockLogs():
+            if rejected:
+                with pytest.raises(ValueError, match="Invalid reverse-target owned source"):
+                    producer.predict_with_receipt("CCO", top_k=count, combine_by_target=False)
+            else:
+                result = producer.predict_with_receipt("CCO", top_k=count, combine_by_target=False)
+                assert len(result["records"]) == count
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert serialized_records == ([] if rejected else [True])
+    assert peak < limit
+    if not rejected:
+        assert peak < module._serialization_reservation(result)
+    assert producer._strict_active == 0

@@ -133,6 +133,54 @@ class ReverseTargetPredictor:
             self._strict_epoch += 1
             self._strict_source = None
 
+    def initialize_compact_strict(self, *, policy=None, timeout_seconds=1800,
+                                  cancelled=None, progress=None):
+        """Acquire a complete compact generation under a separate prewarm clock."""
+        from .compact_source import CompactSourcePolicy, acquisition_check, load_compact_source
+        policy = CompactSourcePolicy() if policy is None else policy
+        if type(policy) is not CompactSourcePolicy or (progress is not None and not callable(progress)):
+            raise ValueError(INPUT_ERROR)
+        policy.validate()
+        check = acquisition_check(timeout_seconds, cancelled)
+        with self._strict_lock:
+            if self._strict_loading or self._strict_active:
+                raise ReverseSourceUnavailable()
+            self._strict_epoch += 1
+            epoch = self._strict_epoch
+            self._strict_source = None
+            self._strict_loading = True
+        try:
+            check()
+            try:
+                paths = self._resolved_source_paths()
+            except Exception:
+                raise ReverseSourceUnavailable() from None
+            check()
+            candidate = load_compact_source(paths, policy, check,
+                self.compute_query_fingerprints, progress=progress)
+            with self._strict_lock:
+                check()
+                try:
+                    current_paths = self._resolved_source_paths()
+                except Exception:
+                    raise ReverseSourceUnavailable() from None
+                check()
+                try:
+                    final_paths = self._resolved_source_paths()
+                except Exception:
+                    raise ReverseSourceUnavailable() from None
+                check.deadline()
+                if self._strict_epoch != epoch or current_paths != paths or final_paths != paths:
+                    raise ReverseSourceUnavailable()
+                self._strict_source = candidate
+        except BaseException as error:
+            clear_failure_frames(error)
+            raise
+        finally:
+            candidate = check = cancelled = progress = None
+            with self._strict_lock:
+                self._strict_loading = False
+
     def _eligible_source(self):
         """Called with strict lock held; only actual path drift revokes current."""
         source = self._strict_source
@@ -181,6 +229,9 @@ class ReverseTargetPredictor:
             # invocation owns a slot. Its traceback needs the same cleanup.
             with self._strict_lock:
                 source = self._eligible_source()
+                from .compact_source import CompactTable
+                if type(source.frame) is CompactTable and self._strict_active >= 2:
+                    raise ReverseSourceUnavailable()
                 weights, resolution = self._resolved_weights()
                 snapshot = self._source_snapshot(source, weights, resolution)
                 self._strict_active += 1
@@ -498,6 +549,14 @@ class ReverseTargetPredictor:
         if check:
             check()
         # 批量计算相似度 (传入预计算的 popcounts)
+        from .compact_source import CompactTable, predict_compact
+        if type(frame) is CompactTable:
+            return predict_compact(frame=frame, morgan_fps=morgan_fps, maccs_fps=maccs_fps,
+                morgan_popcounts=morgan_popcounts, maccs_popcounts=maccs_popcounts,
+                query_morgan=query_morgan, query_maccs=query_maccs, weights=weights,
+                threshold=threshold, top_k=top_k, combine_by_target=combine_by_target,
+                organism_filter=organism_filter, similarity=self.batch_tanimoto_similarity,
+                record=self._similarity_record, identity_key=_target_aggregation_key, check=check)
         hooks = {"check": check} if check else {}
         morgan_sims = self.batch_tanimoto_similarity(query_morgan, morgan_fps, morgan_popcounts, **hooks)
         maccs_sims = self.batch_tanimoto_similarity(query_maccs, maccs_fps, maccs_popcounts, **hooks)

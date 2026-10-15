@@ -9,10 +9,12 @@ from contextlib import ExitStack
 import csv
 from dataclasses import dataclass
 import hashlib
+import heapq
 import math
 import os
 from pathlib import Path
 import stat
+import time
 from types import MappingProxyType
 import uuid
 
@@ -20,7 +22,7 @@ import numpy as np
 from rdkit import rdBase
 
 from .owned_source import (
-    REVISION, SOURCE_ERROR, _OwnedSource, _StrictInputError, _array_hash,
+    INPUT_ERROR, REVISION, SOURCE_ERROR, _OwnedSource, _StrictInputError, _array_hash,
     _read_npy_header, canonical_json, clear_failure_frames, json_sha256,
 )
 
@@ -379,6 +381,7 @@ def load_compact_source(paths, policy, check, fingerprint_fn, *, progress=None):
                 "snapshot_reserved_bytes": budget.ready,
                 "acquisition_peak_reserved_bytes": budget.peak,
             })
+            frame._query_policy = policy
             # Nothing invokes a caller callback after the final file checks.
             # The ExitStack retains every fd through hashing and closes all
             # mappings/handles before this return reaches the publication owner.
@@ -402,3 +405,138 @@ def load_compact_source(paths, policy, check, fingerprint_fn, *, progress=None):
     finally:
         frame = mapped = packed = counts = block = array = original = expected = actual = None
         computed = view = pinned = stream = fp_stream = pc_stream = None
+
+
+def acquisition_check(timeout_seconds, cancelled):
+    """Separate server prewarm clock; never widens the request operation clock."""
+    if (type(timeout_seconds) not in (int, float)
+            or not 120 <= timeout_seconds <= 3600 or not math.isfinite(timeout_seconds)
+            or (cancelled is not None and not callable(cancelled))):
+        raise ValueError(INPUT_ERROR)
+    deadline = time.monotonic() + timeout_seconds
+
+    def deadline_check():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Reverse-target acquisition timed out.")
+
+    def check():
+        if cancelled is not None:
+            result = cancelled()
+            if type(result) is not bool:
+                raise _StrictInputError()
+            if result:
+                raise asyncio.CancelledError()
+        deadline_check()
+    check.deadline = deadline_check
+    check()
+    return check
+
+
+def _serialization_reservation(value, depth=0):
+    """Reserve JSON conversion peak without first encoding or copying strings.
+
+    Each input character can become six JSON escape characters, each stored in
+    a four-byte Unicode string. Four such equivalents cover encoder fragments,
+    joined text, UTF-8 bytes, decoder text and the detached output together.
+    Aliased strings count at every occurrence, as they do in JSON; container and
+    scalar reservations additionally cover copied Python objects and tables.
+    """
+    if depth > 8:
+        raise ValueError(SOURCE_ERROR)
+    kind = type(value)
+    if kind is str:
+        return 512 + 96 * len(value)
+    if kind is dict:
+        return 1024 + sum(_serialization_reservation(key, depth + 1)
+                          + _serialization_reservation(child, depth + 1)
+                          for key, child in value.items())
+    if kind is list:
+        return 512 + sum(_serialization_reservation(child, depth + 1) for child in value)
+    if kind in (int, float, bool, type(None)):
+        return 256
+    raise ValueError(SOURCE_ERROR)
+
+
+def predict_compact(*, frame, morgan_fps, maccs_fps, morgan_popcounts, maccs_popcounts,
+                    query_morgan, query_maccs, weights, threshold, top_k,
+                    combine_by_target, organism_filter, similarity, record, identity_key, check):
+    """Exact old arithmetic/ranking with block-local arrays and bounded records."""
+    try:
+        policy = frame._query_policy
+        block_size = policy.chunk_rows
+        # Covers both unpackings, advanced-index copies, score/mask vectors,
+        # transient row/key strings and creation of bounded final record dicts.
+        # JSON conversion/detachment is separately reserved from actual content.
+        reserved = block_size * 2214 * 3 + 2 * 1024**2 + top_k * 256 * 1024
+        if reserved > policy.max_query_bytes:
+            raise ValueError(SOURCE_ERROR)
+        groups, heap = {}, []
+        filter_value = organism_filter.strip().lower()
+        score_dtype = "float32"
+        for start in range(0, max(1, len(frame)), block_size):
+            check()
+            stop = min(start + block_size, len(frame))
+            morgan = similarity(query_morgan, morgan_fps.block(start, stop),
+                                morgan_popcounts[start:stop], check=check)
+            maccs = similarity(query_maccs, maccs_fps.block(start, stop),
+                               maccs_popcounts[start:stop], check=check)
+            scores = (morgan * weights["morgan"]) + (maccs * weights["maccs"])
+            score_dtype = scores.dtype.name
+            for relative in np.flatnonzero(scores >= threshold):
+                check()
+                index = start + int(relative)
+                row = frame.iloc[index]
+                species = row.get("organism", "").lower()
+                if filter_value and not (
+                    species in {"human", "homo sapiens"}
+                    if filter_value in {"human", "homo sapiens"} else filter_value in species
+                ):
+                    continue
+                # Negative row index makes the earliest original row win ties.
+                item = (float(scores[relative]), -index, float(morgan[relative]),
+                        float(maccs[relative]))
+                if combine_by_target:
+                    # The old record builder emits these identity fields only;
+                    # optional raw target_id columns never alter legacy ranking.
+                    key = identity_key({name: row[name] for name in (
+                        "target_chembl_id", "target_uniprot_id", "target_name",
+                        "taxon_id", "organism") if name in row})
+                    previous = groups.get(key)
+                    if previous is None:
+                        cost = 512 + sum(4 * len(value) for value in key)
+                        if reserved + cost > policy.max_query_bytes:
+                            raise ValueError(SOURCE_ERROR)
+                        reserved += cost
+                        groups[key] = [item, 1]
+                    else:
+                        previous[1] += 1
+                        if item[:2] > previous[0][:2]:
+                            previous[0] = item
+                elif len(heap) < top_k:
+                    heapq.heappush(heap, item)
+                elif item[:2] > heap[0][:2]:
+                    heapq.heapreplace(heap, item)
+            check()
+        if combine_by_target:
+            selected = heapq.nlargest(top_k, groups.values(), key=lambda entry: entry[0][:2])
+        else:
+            selected = [(item, 1) for item in sorted(heap, reverse=True)]
+        results = []
+        for item, count in selected:
+            check()
+            score, negative_index, morgan_score, maccs_score = item
+            result = record(frame, -negative_index, morgan_score, maccs_score, score)
+            result["similar_count"] = count
+            reserved += _serialization_reservation(result)
+            if reserved > policy.max_query_bytes:
+                raise ValueError(SOURCE_ERROR)
+            results.append(result)
+        check()
+        return results, score_dtype
+    except BaseException as error:
+        clear_failure_frames(error)
+        raise
+    finally:
+        frame = morgan_fps = maccs_fps = morgan_popcounts = maccs_popcounts = None
+        groups = heap = selected = results = row = morgan = maccs = scores = result = None
+        check = record = similarity = query_morgan = query_maccs = previous = None

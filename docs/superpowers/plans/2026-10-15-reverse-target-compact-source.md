@@ -121,18 +121,18 @@ and canonical hash prefix remain exact. Every error clears failed large locals/t
 
 **Files:** compact_source.py, predictor.py, test_reverse_target_compact_source.py.
 
-- [ ] RED: `assert callable(getattr(p, 'initialize_compact_strict', None))`, then initialize a compact
+- [x] RED: `assert callable(getattr(p, 'initialize_compact_strict', None))`, then initialize a compact
   and old-strict producer over identical fixtures. Compare `records`, `score_dtype`, all five logical
   source hashes and input/configuration semantics; generation IDs are deliberately different.
-- [ ] Introduce `initialize_compact_strict(*, policy=None, timeout_seconds=1800,
+- [x] Introduce `initialize_compact_strict(*, policy=None, timeout_seconds=1800,
   cancelled=None, progress=None)`. Its acquisition clock permits 120–3600 seconds for application
   use; short deterministic test clocks are injected below the public policy boundary, not by
   changing the normal request's existing 300-second operation check. The old initialize method
   keeps original defaults and rejection behavior.
-- [ ] Reuse existing epoch/loading/active locks and capture/validate/final-check ownership. No load
+- [x] Reuse existing epoch/loading/active locks and capture/validate/final-check ownership. No load
   may replace a source during an active invocation; cancelled/non-owner/closed work cannot publish.
   No callbacks run under a lock order that can deadlock the tool lock.
-- [ ] RED/GREEN bounded scorer through the real producer, not a fake result envelope:
+- [x] RED/GREEN bounded scorer through the real producer, not a fake result envelope:
 
 ```python
 @pytest.mark.parametrize('combine', [False, True])
@@ -155,13 +155,13 @@ Construct result dicts only for selected final rows via the existing record buil
 aggregation entry and temporary array to the query budget, reject on overflow. Keep two maximum
 compact active queries without changing unrestricted legacy producer behavior.
 
-- [ ] Expand parity: empty/zero-bit, duplicate target names across species, exact ties, top-k bounds,
+- [x] Expand parity: empty/zero-bit, duplicate target names across species, exact ties, top-k bounds,
   current weight default/clamp/native type, numeric-looking strings, optional assay identity fields,
   threshold-edge float32 behavior, organism aliases, no-hit and result count.
-- [ ] Add lifecycle tests: path drift, close during loading/scoring, cancellation at all blocks,
+- [x] Add lifecycle tests: path drift, close during loading/scoring, cancellation at all blocks,
   late callback mutation, concurrent invocations with independent receipts, retained exception
   frames, source disk mutation after publication, stale proof not authenticated by content alone.
-- [ ] GREEN all reverse receipt/diagnostic/consumer focused suites; two-stage review then commit.
+- [x] GREEN all reverse receipt/diagnostic/consumer focused suites; two-stage review then commit.
 
 ## R3 — Owned prewarm and Web lifecycle
 
@@ -266,5 +266,39 @@ Final focused test-only adjustment: **60 passed in 2.09s**. Independent spec re-
 independent quality re-review APPROVED (60 passed independently; budget mutation correctly fails).
 R1 adds only the compact-source module and its tests; no legacy strict-loader behavior changed.
 The ongoing full-corpus measurement and R2–R5 are not completion evidence yet. S08/S09 remain BLOCKED.
+
+### Preliminary full-corpus acquisition measurement (2026-10-16)
+
+A read-only local diagnostic, started before the two final R1 review fixes, completed all
+**831,120 rows in 1,340.14 seconds**. Every Morgan/MACCS row and original popcount cache was
+validated; no source row, fingerprint or metadata was modified. Raw TSV SHA-256:
+`f62c6f3fdf8cad701ffd77ac020d0b413db4e43be6632430cee26aa90544f6bb`.
+
+That diagnostic version reserved 538,069,928 snapshot bytes and peaked at 788,076,712 logical
+acquisition bytes. Sampled process RSS reached 2,328,936,448 bytes, including resident file
+mappings; this is not an OS/RSS-limit guarantee. The small header accounting correction is not
+included in those preliminary counters. These measurements establish full-corpus feasibility,
+not current application readiness or browser acceptance. R3/R5 must revalidate current code
+through the actual application-owned producer before S08/S09 can pass.
+
+### R2 execution evidence (2026-10-16)
+
+Missing-initializer RED: 6 failed; first parity implementation: 66 passed. Expanded real-RDKit
+parity tests preserve stable ties, organism/identity distinctions, zero-bit score dtype and weight
+resolution. The two-active-query regression failed before admission was limited. Lifecycle tests
+cover closing a still-running loader, path/generation drift and retained exception ownership.
+
+Spec review found that a fixed per-record reservation missed escaped JSON conversion copies.
+Both long-field probes were reproduced as RED and fixed with content-based reservations before
+the first result hash. Independent re-review measured rejection peaks of 30,177 and 217,381 bytes
+for 10-row/5 MiB and 100-row/128 MiB cases; the 10-row default-budget case still succeeded.
+
+Independent SPEC PASS and QUALITY APPROVED. Core command:
+`python -m pytest tests/test_reverse_target_compact_source.py
+tests/test_reverse_target_invocation_receipts.py tests/test_reverse_target_popcounts.py -q
+-p no:cacheprovider --tb=short --basetemp=<fresh-temp-root>`: **475 passed**, independently in
+36.00s and 28.57s. Parent combined reverse diagnostics/current-source/D1 regression:
+**930 passed, 2 subtests passed, 3 third-party SWIG deprecation warnings in 72.16s**.
+This does not establish application prewarm, S08/S09 browser success or D1 review completion.
 
 Checkboxes change only after corresponding code, test and review evidence exists.
