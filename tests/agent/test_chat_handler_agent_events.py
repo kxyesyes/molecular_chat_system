@@ -16,6 +16,7 @@ from src.agent.contracts import (
 from src.agent.orchestrators import WorkflowStep
 from src.agent.planning import WorkflowPlan
 from src.agent.router import SkillRouter
+from src.agent.runtime.allocation import begin_tool_dispatch, current_allocation
 from src.agent.supervisor import SupervisorAgent
 from src.web.chat_handler import ChatHandler
 
@@ -556,6 +557,10 @@ def build_rag_supervisor():
 
 
 class LiveEventAgentSystem(FakeAgentSystem):
+    def __init__(self, *, dispatch_tool=False):
+        self.dispatch_tool = dispatch_tool
+        self.phase_during_events = None
+
     def execute(
         self,
         message,
@@ -565,6 +570,12 @@ class LiveEventAgentSystem(FakeAgentSystem):
         event_callback=None,
     ):
         assert event_callback is not None
+        scope = current_allocation()
+        assert scope is not None and scope.phase == "allocating"
+        if self.dispatch_tool:
+            # A tool_started frame alone must not grant dispatch authority.
+            assert begin_tool_dispatch()
+        self.phase_during_events = scope.phase
         for event in (
             "task_started",
             "planning_started",
@@ -598,6 +609,10 @@ class LiveEventAgentSystem(FakeAgentSystem):
 
 
 class SensitiveLiveEventAgentSystem(FakeAgentSystem):
+    def __init__(self, *, dispatch_tool=False):
+        self.dispatch_tool = dispatch_tool
+        self.phase_during_events = None
+
     def execute(
         self,
         message,
@@ -607,6 +622,11 @@ class SensitiveLiveEventAgentSystem(FakeAgentSystem):
         event_callback=None,
     ):
         assert event_callback is not None
+        scope = current_allocation()
+        assert scope is not None and scope.phase == "allocating"
+        if self.dispatch_tool:
+            assert begin_tool_dispatch()
+        self.phase_during_events = scope.phase
         event_callback({
             "type": "agent_event",
             "event": "tool_failed",
@@ -1671,11 +1691,13 @@ def test_agent_failure_content_and_warnings_are_length_bounded():
     assert history[-1]["assistant"] == completion["content"]
 
 
-def test_live_failure_agent_events_are_recursively_sanitized():
+@pytest.mark.parametrize("dispatched", [False, True], ids=["before-dispatch", "after-dispatch"])
+def test_live_failure_agent_events_are_recursively_sanitized(dispatched):
+    agent_system = SensitiveLiveEventAgentSystem(dispatch_tool=dispatched)
     handler = ChatHandler(
         model=FakeModel(),
         rag_service=FakeRagService(),
-        agent_system=SensitiveLiveEventAgentSystem(),
+        agent_system=agent_system,
         config={"inference": {"stream": False}},
     )
     websocket = FakeWebSocket()
@@ -1694,11 +1716,13 @@ def test_live_failure_agent_events_are_recursively_sanitized():
         for item in websocket.messages
         if item["type"] == "agent_event"
     ]
-    assert [event["event"] for event in events] == [
-        "tool_failed",
-        "task_failed",
-        "tool_completed",
-    ]
+    assert agent_system.phase_during_events == ("executing" if dispatched else "allocating")
+    assert [event["event"] for event in events] == (
+        ["tool_failed", "task_failed", "tool_completed"] if dispatched else
+        ["tool_failed", "tool_completed", "task_failed"]
+    )
+    task_failure = next(event for event in events if event["event"] == "task_failed")
+    tool_completion = next(event for event in events if event["event"] == "tool_completed")
     assert events[0]["message"] == (
         "科学计算未成功完成，请检查输入或工具状态后重试。"
     )
@@ -1707,10 +1731,10 @@ def test_live_failure_agent_events_are_recursively_sanitized():
     assert events[0]["progress"] == 0.5
     assert events[0]["payload"]["normal_key"] == "keep-live-normal-value"
     assert "normal_key\x00" not in events[0]["payload"]
-    assert events[1]["message"] == (
+    assert task_failure["message"] == (
         "科学计算未成功完成，请检查输入或工具状态后重试。"
     )
-    assert events[2] == {
+    assert tool_completion == {
         "type": "agent_event",
         "event": "tool_completed",
         "message": "property calculation completed normally",
@@ -1719,6 +1743,20 @@ def test_live_failure_agent_events_are_recursively_sanitized():
         "progress": 1.0,
         "payload": {"status": "succeeded", "count": 1},
     }
+    result_index = next(
+        index for index, item in enumerate(websocket.messages)
+        if item["type"] == "agent_result"
+    )
+    assert all(
+        index < result_index for index, item in enumerate(websocket.messages)
+        if item["type"] == "agent_event"
+    )
+    if not dispatched:
+        # Pre-dispatch terminal delivery waits for the chosen result, not for
+        # arbitrary event frames claiming that a tool has run.
+        assert websocket.messages[result_index - 1]["event"] == task_failure
+    assert sum(item["type"] == "agent_result" for item in websocket.messages) == 1
+    assert sum(item["type"] == "complete" for item in websocket.messages) == 1
     serialized = json.dumps(websocket.messages, ensure_ascii=False)
     for forbidden in (
         "live-event-key-123",
@@ -1805,11 +1843,13 @@ def test_buffered_failure_agent_events_are_recursively_sanitized():
         assert forbidden not in serialized
 
 
-def test_chat_handler_forwards_events_while_agent_is_running():
+@pytest.mark.parametrize("dispatched", [False, True], ids=["before-dispatch", "after-dispatch"])
+def test_chat_handler_forwards_events_while_agent_is_running(dispatched):
+    agent_system = LiveEventAgentSystem(dispatch_tool=dispatched)
     handler = ChatHandler(
         model=FakeModel(),
         rag_service=FakeRagService(),
-        agent_system=LiveEventAgentSystem(),
+        agent_system=agent_system,
         config={"inference": {"stream": False}},
     )
     websocket = FakeWebSocket()
@@ -1828,6 +1868,7 @@ def test_chat_handler_forwards_events_while_agent_is_running():
         for item in websocket.messages
         if item["type"] == "agent_event"
     ]
+    assert agent_system.phase_during_events == ("executing" if dispatched else "allocating")
     assert live_events == [
         "task_started",
         "planning_started",
@@ -1835,9 +1876,7 @@ def test_chat_handler_forwards_events_while_agent_is_running():
         "tool_started",
         "tool_completed",
         "tool_failed",
-        "task_completed",
-        "task_failed",
-    ]
+    ] + (["task_completed", "task_failed"] if dispatched else ["task_failed"])
     result_index = next(
         index
         for index, item in enumerate(websocket.messages)
@@ -1848,6 +1887,10 @@ def test_chat_handler_forwards_events_while_agent_is_running():
         for index, item in enumerate(websocket.messages)
         if item["type"] == "agent_event"
     )
+    if not dispatched:
+        assert websocket.messages[result_index - 1]["event"]["event"] == "task_failed"
+    assert sum(item["type"] == "agent_result" for item in websocket.messages) == 1
+    assert sum(item["type"] == "complete" for item in websocket.messages) == 1
 
 
 def test_non_workflow_agent_result_can_still_use_model_interpretation():

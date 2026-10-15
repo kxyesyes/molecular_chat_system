@@ -164,11 +164,48 @@ Replay acceptance requires a real recorded report. No contract fixture was relab
 real replay evidence. Real/all acceptance and model recalibration were not performed.
 No deployment/data-asset change is included; a deployment health check is not claimed.
 
+### CI live-event fixture follow-up
+
+The first complete CI run on `68b1ab42` exposed two additional live-event fixture
+expectations after the final terminal-buffer repair: the Agent partition had
+**13,293 passed, 2 failed, 2 skipped**. The other seven checks passed, including the
+Linux task-runtime partition; `offline-quality` correctly failed with the Agent job.
+This does not erase the separately documented local Windows C4a limitation.
+
+Both failures were reproduced locally before changes. Their synthetic agents emitted
+`tool_started`/terminal event frames without calling the actual dispatch latch, so
+they correctly remained in allocation. One old expectation required a terminal before
+a later nonterminal event; the other required two provisional terminals to survive.
+
+Only `tests/agent/test_chat_handler_agent_events.py` is adjusted for this follow-up.
+Both tests now run before and after explicit synthetic tool dispatch, asserting the
+actual allocation phase. Post-dispatch cases retain the original exact event order.
+Pre-dispatch cases assert terminal deferral and latest-terminal selection. Existing
+recursive redaction, normal-value preservation and complete tool-event payload checks
+remain, with exact result/completion counts added. Production behavior, scientific
+values, thresholds and validation checks are unchanged.
+
+- Original two cases: **2 failed** before adaptation.
+- Expanded before/after-dispatch cases: **4 passed**.
+- Combined event/allocation/reference/transport regression: **194 passed**, with
+  seven existing dependency/lifecycle deprecation warnings.
+- `python -m compileall -q src scripts` and `git diff --check`: passed.
+- Independent scoped review: passed; the reviewer reran all four phase cases and
+  confirmed that original post-dispatch order and redaction assertions remain.
+
+```powershell
+python -m pytest tests/agent/test_chat_handler_agent_events.py::test_live_failure_agent_events_are_recursively_sanitized tests/agent/test_chat_handler_agent_events.py::test_chat_handler_forwards_events_while_agent_is_running -q -p no:cacheprovider --tb=short
+python -m pytest tests/agent/test_chat_handler_agent_events.py tests/agent/test_allocation_deadline.py tests/agent/test_allocation_handoff.py tests/agent/test_web_decision_runtime_references.py tests/agent/test_scientific_reference_resilience.py tests/agent/test_decision_chat_transport.py -q -p no:cacheprovider --tb=short
+```
+
 ## Delivery
 
 Branch: `codex/fix-complex-workflow-status`. No tracked changes were made in the primary
-`main` checkout; unrelated assets were not staged or removed. Only named task files are staged. Delivery is one
-draft PR against `main`; no merge is authorized or performed.
+`main` checkout; unrelated assets were not staged or removed. Only named task files are staged.
+Initial delivery was one draft PR against `main`, without merge authorization.
+The maintainer subsequently authorized this CI-test follow-up and Squash merge of
+PR #208 only after every quality gate passes. The failed CI run was not bypassed;
+merge remains conditional on the final commit's checks.
 
 Implementation commit: `6c90df58`. Draft PR:
 [kxyesyes/molecular_chat_system#208](https://github.com/kxyesyes/molecular_chat_system/pull/208).
