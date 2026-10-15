@@ -301,4 +301,29 @@ tests/test_reverse_target_invocation_receipts.py tests/test_reverse_target_popco
 **930 passed, 2 subtests passed, 3 third-party SWIG deprecation warnings in 72.16s**.
 This does not establish application prewarm, S08/S09 browser success or D1 review completion.
 
+### R4a bounded exact-name provider helper (2026-10-16)
+
+Added `src/target_search/exact_name.py` and `tests/test_target_exact_name.py` as a
+separate prerequisite, not the completed R4 chat integration. The resolver only
+matches literal provider protein names with the requested supported species;
+missing/ambiguous/inconsistent identities or real provider versions fail closed.
+Its bounded response digest is provenance data, never execution authority.
+
+Missing-module RED: **110 failed**; first GREEN: **110 passed**. Independent spec
+review found that Unicode case expansion could turn an invalid accession into
+an apparently valid ASCII identity. The additional invalid cases were reproduced
+as **12 failed / 3 valid controls passed**, then fixed by validating the original
+ASCII alphabet before normalization. Final exact-name suite: **125 passed**.
+
+Independent SPEC PASS and QUALITY APPROVED. Quality independently ran the 125
+tests, 80 selected UniProt/transport tests, 543 malformed-response/bounds/query
+probes and 10 ownership/concurrency/independence/syntax checks. Parent command
+`python -m pytest tests/test_target_exact_name.py tests/test_target_search_fallback.py
+-q -p no:cacheprovider --tb=short --basetemp=<fresh-temp-root>`:
+**376 passed, 2 skipped in 30.20s**. No live provider or browser claim is made.
+
+The owner/session/trace/current-receipt binding, ranked chat context, explicit
+five-row display and real S09 structure follow-up remain unimplemented R4 work.
+R4 checkboxes and S08/S09 status therefore remain incomplete/BLOCKED.
+
 Checkboxes change only after corresponding code, test and review evidence exists.
