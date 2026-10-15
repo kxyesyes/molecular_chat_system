@@ -619,7 +619,7 @@ def _event_integrity(events, trace, status):
     if not events or status not in ('completed', 'partial', 'failed', 'rejected'):
         return False
     names = [event.get('event') for event in events]
-    tool_end = 'tool_completed' if status == 'completed' else 'tool_failed'
+    tool_end = 'tool_completed' if status in ('completed', 'partial') else 'tool_failed'
     core = ['task_started', 'planning_started', 'planning_completed']
     if trace:
         core += ['tool_started', tool_end, 'planning_started', 'planning_completed']

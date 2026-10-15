@@ -37,6 +37,23 @@ def test_real_rdkit_static_checkpoint_numbers_and_actual_ranker(tmp_path):
     assert all(s["output_digest_origin"] == "checkpoint_snapshot" for s in value["sources"])
 
 
+def test_ranking_diagnostics_do_not_expand_legacy_report_schema(tmp_path):
+    from src.agent.presentation.evidence_report import build_evidence_report
+    store, execution, events = execute(tmp_path, partial=True)
+    ranked = next(row for row in execution["tool_result_sequence"]
+                  if row["tool_name"] == "candidate_ranker")["data"]["top_candidates"][0]
+    evidence = deepcopy(ranked["ranking_evidence"])
+    assert evidence["activity"]["exclusion_reason"] == "missing_activity_evidence"
+    value = build_evidence_report(snapshot(store, execution, events), execution, events)
+    assert value is not None
+    projected = value["ranking"]["top_candidates"][0]["ranking_evidence"]
+    assert set(projected) == {
+        "property_score", "admet_score", "activity_score", "weights_used", "missing_evidence",
+    }
+    assert all(projected[key] == evidence[key] for key in projected)
+    assert ranked["ranking_evidence"] == evidence
+
+
 @pytest.mark.parametrize("number", [True, "46.07", float("nan"), float("inf"), -1])
 def test_contract_rejects_bad_numbers(tmp_path, number):
     from src.agent.contracts.scientific_report import validate_report
@@ -186,9 +203,12 @@ def test_ranker_order_exact_and_projection_detached(tmp_path):
     snap = snapshot(store, execution, events)
     value = build_evidence_report(snap, execution, events)
     original = execution["tool_result_sequence"][-1]["data"]
-    assert value["ranking"]["top_candidates"] == [{k: r[k] for k in
+    expected = [{k: deepcopy(r[k]) for k in
         ("candidate_id", "canonical_smiles", "score", "missing_evidence", "ranking_evidence")}
         for r in original["top_candidates"]]
+    for row in expected:
+        row["ranking_evidence"].pop("activity")  # Added diagnostics are outside ScientificReport@1.
+    assert value["ranking"]["top_candidates"] == expected
     value["ranking"]["top_candidates"][0]["ranking_evidence"]["weights_used"]["properties"] = 0
     assert original["top_candidates"][0]["ranking_evidence"]["weights_used"]["properties"] == 0.5
     cp = snap["latest"]["ranking"]

@@ -1005,7 +1005,8 @@ def test_new_session_attempt_can_replace_failed_checkpoint_and_then_be_reused(
     assert third_result.metadata["reused_steps"] == ["properties"]
     final_event_names = [event["event"] for event in store.get_events(trace_id)]
     assert final_event_names.count("task_started") == 3
-    assert final_event_names.count("tool_started") == 3
+    # The third session reused a checkpoint, not another physical dispatch.
+    assert final_event_names.count("tool_started") == 2
     assert final_event_names.count("tool_failed") == 1
     assert final_event_names.count("task_failed") == 1
     assert final_event_names.count("tool_completed") == 2

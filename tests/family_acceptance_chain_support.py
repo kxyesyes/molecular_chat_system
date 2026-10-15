@@ -283,7 +283,11 @@ def check_event_sequence(session, result, frames=None):
     internal = [event.to_dict() for event in session.bus.events]
     envelope = result.to_legacy_dict()
     terminal = "task_" + result.outcome.value
-    tool_terminal = ("tool_completed" if result.tool_results[0].success else "tool_failed") if result.tool_results else None
+    tool_terminal = None
+    if result.tool_results:
+        observation = result.tool_results[0]
+        settled = observation.success or (observation.status.value == "partial" and observation.error is None)
+        tool_terminal = "tool_completed" if settled else "tool_failed"
     expected = ["task_started"]
     require(len(result.tool_results) == len(session.inputs) <= 1)
     require(len(session.model.messages) == (2 if result.tool_results else 1))
@@ -394,11 +398,8 @@ def check_decision(session, result, expected, snapshot, target, frames=None):
     require(tool["evidence"] == [{"prediction": row} for row in tool["data"]])
     require(tool["quality"]["model_provenance"] == [row["provenance"] for row in tool["data"]])
     expected_warnings = list(session.outputs[0].warnings)
-    if review:
-        first_plan = next(event for event in session.bus.events if event.event.value == "planning_started")
-        expected_warnings.append(
-            f"Optional step {first_plan.payload['decision_id']} (activity_predictor) failed: "
-            f"{session.outputs[0].message}")
+    # A settled review observation preserves scientific warnings, not a false
+    # execution-failed warning from the containing optional workflow step.
     require(observed["warnings"] == tool["warnings"] == expected_warnings and tool["error"] is None)
     # Scientific answer is the real observation JSON, not scripted prose or rounded fabrication.
     answer = json.loads(result.final_answer.removeprefix("```json\n").removesuffix("\n```"))

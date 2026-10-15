@@ -21,12 +21,33 @@ import numpy as np
 import pandas as pd
 from rdkit import rdBase
 
+from src.system.scientific_diagnostics import (
+    REVERSE_PROOF_DIAGNOSTICS as _PROOF_DIAGNOSTICS,
+    sanitize_reverse_target_diagnostics,
+)
+
 
 REVISION = "reverse-owned-v1"
 WEIGHT_REVISION = "reverse-weights-v1"
 INPUT_ERROR = "Invalid reverse-target strict input."
 SOURCE_ERROR = "Invalid reverse-target owned source."
 PROOF_ERROR = "Invalid reverse-target prediction proof."
+
+
+class ReverseProofError(ValueError):
+    """Compatibility ValueError with bounded public codes, never rejected values."""
+
+    def __init__(self, diagnostic="proof", field=None):
+        super().__init__(PROOF_ERROR)
+        self._diagnostic = diagnostic
+        self._field = field
+
+    @property
+    def details(self):
+        # Recheck on export: caller-supplied diagnostics/fields are not trusted.
+        key = self._diagnostic if type(self._diagnostic) is str else "proof"
+        stage, reason = _PROOF_DIAGNOSTICS.get(key, _PROOF_DIAGNOSTICS["proof"])
+        return sanitize_reverse_target_diagnostics(dict(stage=stage, reason=reason, field=self._field))
 
 
 def _target_identity_key(record):
@@ -403,9 +424,9 @@ def load_owned_source(paths, max_snapshot_bytes, check, fingerprint_fn):
         expected_morgan = expected_maccs = raw = buffer = chunk = columns = None
 
 
-def _closed(value, keys):
+def _closed(value, keys, *, field):
     if type(value) is not dict or set(value) != set(keys.split()):
-        raise ValueError(PROOF_ERROR)
+        raise ReverseProofError("receipt_schema", field)
 
 
 def _hex(value, length):
@@ -462,103 +483,134 @@ def validate_snapshot(expected):
 
 def validate_envelope(envelope, *, smiles, controls, expected):
     """Pure structural/content checks, NOT authentication or scientific rescoring."""
+    diagnostic, field = "snapshot", "snapshot"
     try:
         validate_snapshot(expected)
+        diagnostic, field = "envelope", "envelope"
         _native_bounded(envelope)
-        _closed(envelope, "records receipt")
+        diagnostic, field = "proof", None
+        _closed(envelope, "records receipt", field="envelope")
         r = envelope["receipt"]
-        _closed(r, "schema_version validation_revision invocation_id source source_sha256 input_sha256 configuration_sha256 controls weights weight_resolution_revision weight_resolution score_dtype result_sha256 status record_count")
-        if r["schema_version"] != "1" or r["validation_revision"] != REVISION or not _hex(r["invocation_id"], 32):
-            raise ValueError(PROOF_ERROR)
+        _closed(r, "schema_version validation_revision invocation_id source source_sha256 input_sha256 configuration_sha256 controls weights weight_resolution_revision weight_resolution score_dtype result_sha256 status record_count", field="receipt")
+        for key, value in (("schema_version", "1"), ("validation_revision", REVISION)):
+            if r[key] != value:
+                raise ReverseProofError("receipt_field", key)
+        if not _hex(r["invocation_id"], 32):
+            raise ReverseProofError("receipt_field", "invocation_id")
         source = r["source"]
-        _closed(source, "revision generation_id source_name tsv_sha256 row_count morgan_sha256 maccs_sha256 morgan_popcounts_sha256 maccs_popcounts_sha256 morgan_bits maccs_bits morgan_radius rdkit_version numpy_version array_codec row_alignment_verified cache_origins")
-        if source["revision"] != REVISION or not _hex(source["generation_id"], 32):
-            raise ValueError(PROOF_ERROR)
+        _closed(source, "revision generation_id source_name tsv_sha256 row_count morgan_sha256 maccs_sha256 morgan_popcounts_sha256 maccs_popcounts_sha256 morgan_bits maccs_bits morgan_radius rdkit_version numpy_version array_codec row_alignment_verified cache_origins", field="source")
+        if source["revision"] != REVISION:
+            raise ReverseProofError("receipt_field", "source.revision")
+        if not _hex(source["generation_id"], 32):
+            raise ReverseProofError("receipt_field", "source.generation_id")
         for key in ("tsv", "morgan", "maccs", "morgan_popcounts", "maccs_popcounts"):
             if not _hex(source[key + "_sha256"], 64):
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("receipt_field", "source." + key + "_sha256")
         for key, value in (("morgan_bits", 2048), ("maccs_bits", 166), ("morgan_radius", 2)):
             if type(source[key]) is not int or source[key] != value:
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("receipt_field", "source." + key)
         for key in ("source_name", "rdkit_version", "numpy_version"):
             if type(source[key]) is not str or not source[key].strip() or len(source[key]) > 8192:
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("receipt_field", "source." + key)
         if any(c in source["source_name"] for c in ("/", "\\", ":")) or source["source_name"] in (".", ".."):
-            raise ValueError(PROOF_ERROR)
+            raise ReverseProofError("receipt_field", "source.source_name")
         rows = source["row_count"]
-        if type(rows) is not int or rows < 0 or source["array_codec"] != "reverse-array-v1" or source["row_alignment_verified"] is not True:
-            raise ValueError(PROOF_ERROR)
-        _closed(source["cache_origins"], "morgan maccs")
+        if type(rows) is not int or rows < 0:
+            raise ReverseProofError("receipt_field", "source.row_count")
+        if source["array_codec"] != "reverse-array-v1":
+            raise ReverseProofError("receipt_field", "source.array_codec")
+        if source["row_alignment_verified"] is not True:
+            raise ReverseProofError("receipt_field", "source.row_alignment_verified")
+        _closed(source["cache_origins"], "morgan maccs", field="source.cache_origins")
         if any(v not in ("computed", "verified_cache") for v in source["cache_origins"].values()):
-            raise ValueError(PROOF_ERROR)
-        _closed(r["controls"], "threshold top_k combine_by_target organism_filter")
-        actual_controls = validate_controls(smiles, **r["controls"])
+            raise ReverseProofError("receipt_field", "source.cache_origins")
+        _closed(r["controls"], "threshold top_k combine_by_target organism_filter", field="controls")
+        try:
+            actual_controls = validate_controls(smiles, **r["controls"])
+        except ValueError:
+            raise ReverseProofError("receipt_field", "controls") from None
         if canonical_json(actual_controls) != canonical_json(controls):
-            raise ValueError(PROOF_ERROR)
-        _closed(r["weights"], "morgan maccs")
+            raise ReverseProofError("controls", "controls")
+        _closed(r["weights"], "morgan maccs", field="weights")
         w = r["weights"]
         if not all(_number(v, 0, 1) for v in w.values()) or w["maccs"] != 1.0 - w["morgan"]:
-            raise ValueError(PROOF_ERROR)
-        _closed(r["weight_resolution"], "defaulted clamped")
+            raise ReverseProofError("receipt_field", "weights")
+        _closed(r["weight_resolution"], "defaulted clamped", field="weight_resolution")
         resolution = r["weight_resolution"]
-        if any(type(v) is not bool for v in resolution.values()) or r["weight_resolution_revision"] != WEIGHT_REVISION:
-            raise ValueError(PROOF_ERROR)
+        if r["weight_resolution_revision"] != WEIGHT_REVISION:
+            raise ReverseProofError("receipt_field", "weight_resolution_revision")
+        if any(type(v) is not bool for v in resolution.values()):
+            raise ReverseProofError("receipt_field", "weight_resolution")
         if resolution["defaulted"] and (w["morgan"] != .7 or resolution["clamped"]):
-            raise ValueError(PROOF_ERROR)
+            raise ReverseProofError("receipt_field", "weight_resolution")
         if resolution["clamped"] and w["morgan"] not in (0., 1.):
-            raise ValueError(PROOF_ERROR)
+            raise ReverseProofError("receipt_field", "weight_resolution")
         for key in ("source_sha256", "input_sha256", "configuration_sha256", "result_sha256"):
             if not _hex(r[key], 64):
-                raise ValueError(PROOF_ERROR)
-        if r["source_sha256"] != json_sha256(source) or r["input_sha256"] != json_sha256(dict(smiles=smiles, controls=r["controls"])):
-            raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("receipt_field", key)
+        if r["source_sha256"] != json_sha256(source):
+            raise ReverseProofError("digest", "source_sha256")
+        if r["input_sha256"] != json_sha256(dict(smiles=smiles, controls=r["controls"])):
+            raise ReverseProofError("digest", "input_sha256")
         records = envelope["records"]
-        if type(records) is not list or len(records) > controls["top_k"] or type(r["record_count"]) is not int or r["record_count"] != len(records):
-            raise ValueError(PROOF_ERROR)
-        if r["status"] != ("verified_hits" if records else "verified_empty") or r["score_dtype"] not in ("float32", "float64"):
-            raise ValueError(PROOF_ERROR)
+        if type(records) is not list:
+            raise ReverseProofError("record_type", "records")
+        if len(records) > controls["top_k"] or type(r["record_count"]) is not int or r["record_count"] != len(records):
+            raise ReverseProofError("count", "record_count")
+        if r["status"] != ("verified_hits" if records else "verified_empty"):
+            raise ReverseProofError("receipt_field", "status")
+        if r["score_dtype"] not in ("float32", "float64"):
+            raise ReverseProofError("receipt_field", "score_dtype")
         indices, targets, total, previous = set(), set(), 0, math.inf
         strings = "target_name organism canonical_smiles molecule_chembl_id standard_type chembl_search_url uniprot_search_url".split()
         required_record_keys = set(strings + "standard_value morgan_similarity maccs_similarity final_similarity row_index similar_count score_semantics similarity_metric evidence provenance".split())
         optional_record_keys = set("target_chembl_id target_uniprot_id taxon_id assay_id document_chembl_id publication_id standard_relation standard_units assay_confidence_score data_validity_comment".split())
         for record in records:
+            if type(record) is not dict:
+                raise ReverseProofError("record_type", "records")
             record_keys = set(record)
             if not required_record_keys.issubset(record_keys) or not record_keys.issubset(required_record_keys | optional_record_keys):
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("record_schema", "records")
             for key in strings:
                 v = record[key]
                 if type(v) is not str or len(v) > 8192 or (key != "organism" and not v.strip()):
-                    raise ValueError(PROOF_ERROR)
+                    raise ReverseProofError("record_field", key)
             if not _number(record["standard_value"], 0):
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("record_field", "standard_value")
             if record.get("score_semantics") != "2d_structure_similarity_rank_only":
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("record_field", "score_semantics")
             if record.get("similarity_metric") != "weighted_morgan_maccs_tanimoto":
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("record_field", "similarity_metric")
             evidence = record.get("evidence")
             provenance = record.get("provenance")
             if (not isinstance(evidence, dict) or evidence.get("type") != "similarity_neighbor"
-                    or evidence.get("source") != "ChEMBL"
-                    or not isinstance(provenance, dict)
+                    or evidence.get("source") != "ChEMBL"):
+                raise ReverseProofError("provenance", "evidence")
+            if (not isinstance(provenance, dict)
                     or not isinstance(provenance.get("data_version"), str)
                     or not isinstance(provenance.get("source_file"), str)):
-                raise ValueError(PROOF_ERROR)
-            if any(not _number(record[key], 0, 1) for key in ("morgan_similarity", "maccs_similarity", "final_similarity")):
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("provenance", "provenance")
+            for key in ("morgan_similarity", "maccs_similarity", "final_similarity"):
+                if not _number(record[key], 0, 1):
+                    raise ReverseProofError("record_field", key)
             idx, count, score = record["row_index"], record["similar_count"], record["final_similarity"]
-            if type(idx) is not int or not 0 <= idx < rows or idx in indices or type(count) is not int or not 1 <= count <= rows:
-                raise ValueError(PROOF_ERROR)
+            if type(idx) is not int or not 0 <= idx < rows or idx in indices:
+                raise ReverseProofError("record_field", "row_index")
+            if type(count) is not int or not 1 <= count <= rows:
+                raise ReverseProofError("record_field", "similar_count")
             target_key = _target_identity_key(record)
             if score > previous or (controls["combine_by_target"] and target_key in targets) or (not controls["combine_by_target"] and count != 1):
-                raise ValueError(PROOF_ERROR)
+                raise ReverseProofError("ordering", "records")
             indices.add(idx)
             targets.add(target_key)
             total += count
             previous = score
         if total > rows or not np.all(np.asarray([v["final_similarity"] for v in records], dtype=r["score_dtype"]) >= controls["threshold"]):
-            raise ValueError(PROOF_ERROR)
+            raise ReverseProofError("bounds", "records")
         if r["result_sha256"] != json_sha256(records):
-            raise ValueError(PROOF_ERROR)
+            raise ReverseProofError("digest", "result_sha256")
         return detached(envelope)
+    except ReverseProofError:
+        raise
     except Exception:
-        raise ValueError(PROOF_ERROR) from None
+        raise ReverseProofError(diagnostic, field) from None

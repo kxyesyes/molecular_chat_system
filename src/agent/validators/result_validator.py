@@ -14,6 +14,9 @@ from src.agent.contracts import (
 )
 
 from .domain_validators import DOMAIN_VALIDATORS
+from .partial_observations import (
+    partial_activity_error, format_activity_observations, is_partial_family_activity,
+)
 from .molecule_candidates import (
     CandidateValidationUnavailable,
     _extract_candidate_items,
@@ -75,6 +78,17 @@ class AgentResultValidator:
             result.status = ObservationStatus.FAILED
             result.formatted = ""
             result.warnings.append("Conflicting success flag and structured error")
+        if is_partial_family_activity(result) and result.error is None:
+            invalid = partial_activity_error(result)
+            if invalid:
+                return ToolResult.error_result(
+                    result.tool_name, AgentErrorCode.INVALID_OUTPUT, invalid,
+                    quality={"validated": False},
+                )
+            result.success = False
+            result.quality = {**result.quality, "validated": True}
+            result.formatted = format_activity_observations(result)
+            return result
         if result.tool_name == "llm_molecular_generator" and result.success:
             return self._validate_generator_result(
                 result,

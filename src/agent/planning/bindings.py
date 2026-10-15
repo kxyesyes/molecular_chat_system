@@ -14,6 +14,14 @@ class BindingResolutionError(ValueError):
     pass
 
 
+class MissingBoundOutputError(BindingResolutionError):
+    """A valid selector lacks its output, distinct from malformed bindings."""
+
+    def __init__(self, output_key: str):
+        self.output_key = output_key
+        super().__init__(f"Missing bound output: {output_key}")
+
+
 class BindingResolver:
     OUTPUT = re.compile(r"^\$\.outputs\.([A-Za-z0-9_-]+)$")
     REQUEST_QUERY = "$.request.query"
@@ -137,7 +145,7 @@ class BindingResolver:
         else:
             key = self.output_key(selector)
             if key not in outputs:
-                raise BindingResolutionError(f"Missing bound output: {key}")
+                raise MissingBoundOutputError(key)
             value = outputs[key]
 
         if transform == "identity":
@@ -184,6 +192,8 @@ class BindingResolver:
                 if key in optional:
                     selected[key] = []
                     continue
+                if label == "workflow outputs":
+                    raise MissingBoundOutputError(key)
                 raise BindingResolutionError(f"Missing bound output: {key}")
             selected[key] = value[key]
         return selected

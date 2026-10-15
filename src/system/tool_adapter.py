@@ -89,6 +89,18 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
         elapsed_ms = int((time.perf_counter() - start) * 1000)
 
         if isinstance(raw_result, ToolResult):
+            if tool_name == "reverse_target_predictor" and raw_result.error is not None:
+                from src.system.scientific_diagnostics import sanitize_reverse_target_diagnostics
+
+                details = raw_result.error.details
+                if isinstance(details, dict) and "raw_result" in details:
+                    if hasattr(raw_result.error, "_reverse_raw_result"):
+                        return ToolResult.error_result(tool_name, AgentErrorCode.INVALID_OUTPUT,
+                                                       "Conflicting reverse-target snapshots")
+                    # Proof validation needs the original observation in memory,
+                    # but errors/events must never serialize that private chain.
+                    raw_result.error._reverse_raw_result = details["raw_result"]
+                raw_result.error.details = sanitize_reverse_target_diagnostics(details)
             raw_result.elapsed_ms = (
                 raw_result.elapsed_ms
                 if raw_result.elapsed_ms is not None
@@ -190,6 +202,14 @@ def execute_tool_compat(tool: Any, query: Any, **kwargs: Any):
                 provenance=provenance,
                 status=status,
             )
+            if tool_name == "reverse_target_predictor":
+                from src.system.scientific_diagnostics import sanitize_reverse_target_diagnostics
+
+                if isinstance(error_details, dict) and "raw_result" in error_details:
+                    # Non-dataclass state is intentionally excluded from both
+                    # AgentExecutionError.to_dict and ToolResult serialization.
+                    result.error._reverse_raw_result = error_details["raw_result"]
+                result.error.details = sanitize_reverse_target_diagnostics(error_details)
             if status == ObservationStatus.PARTIAL:
                 result.data = raw_result.get("data")
                 result.formatted = raw_result.get("formatted", "")

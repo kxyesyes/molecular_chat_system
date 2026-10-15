@@ -412,7 +412,7 @@ class WorkflowOrchestrator:
             and quality.get("output_contract") == "CandidateSet@1"
         ):
             CandidateSet.from_dict(data)
-        return ToolResult.success_result(
+        result = ToolResult.success_result(
             tool_name=tool_name,
             data=data,
             message=output.get("message", "Reused compatible checkpoint"),
@@ -425,6 +425,14 @@ class WorkflowOrchestrator:
             status=status,
             provenance=provenance,
         )
+        # Family partial rows include review-only observations. Preserve their
+        # false success flag so replay cannot promote them or change ledger IDs.
+        from src.agent.validators.partial_observations import is_valid_canonical_activity_batch
+
+        if (tool_name == "activity_predictor" and status == ObservationStatus.PARTIAL
+                and output.get("success") is False and not is_valid_canonical_activity_batch(result)):
+            result.success = False
+        return result
 
     def _save_checkpoint(
         self,

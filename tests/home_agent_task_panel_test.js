@@ -321,4 +321,43 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
   assert.strictEqual(scrolls, 4);
 }
 
+for (const [status, label] of [["partial", "部分完成"], ["not_calculated", "未执行（依赖：reverse）"]]) {
+  const payload = {status, success: false, error: status === "partial" ? null : {
+    details: {reason: "dependency_blocked", blocked_by: ["reverse"], executed: false},
+  }};
+  const result = resolveAgentEventPresentation({event: "tool_completed", progress: 1, payload});
+  assert.strictEqual(result.terminal, false);
+  assert.strictEqual(result.itemClass, "is-warning", `${status} must not look fully successful`);
+  assert.strictEqual(result.progressText, label);
+  assert.strictEqual(getAgentEventLabel("tool_completed", "activity_predictor", payload), `活性预测 ${label}`);
+  assert.strictEqual(getAgentEventLabel(result.eventType, "activity_predictor", payload), `活性预测 ${label}`);
+}
+const genuineFailure = resolveAgentEventPresentation({event: "tool_failed", payload: {status: "failed"}});
+assert.strictEqual(genuineFailure.itemClass, "is-error");
+assert.strictEqual(getAgentEventLabel(genuineFailure.eventType, "activity_predictor"), "活性预测 失败");
+
+for (const [details, expected] of [
+  [{stage: "allocation", reason: "allocation_timeout"}, "任务分配超时"],
+  [{stage: "tool", reason: "timeout"}, "计算超时"],
+]) {
+  const payload = {status: "timeout", error: {details}};
+  const result = resolveAgentEventPresentation({event: "task_failed", payload});
+  assert.strictEqual(result.progressText, expected);
+  assert.strictEqual(getAgentEventLabel("task_failed", null, payload), expected);
+}
+
+for (const metadata of ["details", "quality"]) {
+  const cause = {reason: "dependency_blocked", executed: false,
+    blocked_by: ["reverse", "C:/private/source.tsv", "<script>alert(1)</script>", "Cookie: session=synthetic-only"]};
+  const payload = {status: "not_calculated", success: false};
+  if (metadata === "details") payload.error = {details: cause};
+  else payload.quality = cause;
+  const result = resolveAgentEventPresentation({event: "tool_completed", message: "Generic message", payload});
+  assert.strictEqual(result.progressText, "未执行（依赖：reverse）");
+  assert.strictEqual(getAgentEventLabel(result.eventType, "molecular_docking", payload), "分子对接 未执行（依赖：reverse）");
+  assert.strictEqual(getAgentEventLabel("tool_failed", "molecular_docking", payload), "分子对接 失败");
+}
+assert.strictEqual(getAgentEventLabel("tool_completed", "molecular_docking", {status: "not_calculated"}),
+  "分子对接 尚未计算");
+
 console.log("Homepage agent task panel static and lifecycle checks passed");

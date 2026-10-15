@@ -343,8 +343,9 @@ def test_current_source_expiry_stops_next_action_and_answer(loop_case, sources, 
 def test_adapter_guard_denial_latches_first_reason_after_normalization(loop_case, monkeypatch, phase):
     original = B1BindingResolver.guard_dispatch
     checks, sessions = [], []
-    # Session guard, adapter after-validation, reservation, submitted worker.
-    fail_at = {'validated': 2, 'reserved': 3, 'worker': 4}[phase]
+    # Session guard before/after the start callback, then adapter validation,
+    # reservation and submitted worker. Inject at the named adapter boundary.
+    fail_at = {'validated': 3, 'reserved': 4, 'worker': 5}[phase]
     def guard(self, step, input_data):
         original(self, step, input_data)
         sessions.append(self.session)

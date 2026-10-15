@@ -114,6 +114,7 @@ class _Turn:
     finishing: bool = False
     pending_complete: str | None = None
     terminal_sent: bool = False
+    allocation_timed_out: bool = False
     displayed_answer: str | None = None
     history_update: object = None
     waiting: _Waiting | None = None
@@ -189,6 +190,8 @@ class _TurnSender:
         self.scope = sender.scope
 
     async def send_text(self, text):
+        if self.turn.allocation_timed_out:
+            return  # A retained old owner has no further presentation authority.
         frame = json.loads(text)
         if frame['type'] in {'agent_event', 'agent_result', 'complete'}:
             frame['turn_id'] = self.turn.turn_id
@@ -201,6 +204,19 @@ class _TurnSender:
             frame['metadata']['rag_requested'] = flag if type(flag) is bool else None
         text = json.dumps(frame, ensure_ascii=False, allow_nan=False)
         if frame['type'] == 'complete':
+            if (frame.get('status') == 'timeout'
+                    and frame.get('error', {}).get('code') == 'allocation_timeout'):
+                # The allocation latch has barred tool dispatch. Publish now,
+                # while the existing turn task/owner/lease continue physical
+                # cleanup under runtime supervision. This is not settlement.
+                def timed_out():
+                    self.turn.allocation_timed_out = True
+                    self.turn.terminal_sent = True
+                    self.turn.finishing = True
+                    self.turn.pending_complete = None
+                    self.sender.waiting = None
+                await self.sender.send_text(text, on_sent=timed_out)
+                return
             # Release settled resources before announcing that a new turn can
             # begin. Strict candidate/report frames receive no extra fields.
             self.turn.pending_complete = text
@@ -506,6 +522,8 @@ class WebDecisionRuntime:
             raise DecisionAdmissionError('continuation_rejected') from None
 
     async def _terminal(self, handler, sender, turn, outcome, reason):
+        if turn.allocation_timed_out:
+            return
         if outcome in {RunOutcome.CANCELLED, RunOutcome.FAILED}:
             # End local continuation authority before attempting delivery,
             # including failures before reader acquisition. Keep the durable
@@ -554,7 +572,7 @@ class WebDecisionRuntime:
             except asyncio.CancelledError:
                 pass
 
-    async def _execute_segment(self, handler, sender, turn):
+    async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
         await self.application._refresh_llm_config_from_env()
@@ -604,7 +622,8 @@ class WebDecisionRuntime:
                 if self.semantic:
                     turn.admission_exchange = AdmissionExchange()
                 turn.dispatching = True
-                result = await handler.process_decision_message(_TurnSender(sender, turn),
+                result = await handler.process_decision_message(
+                    allocation_sender if allocation_sender is not None else _TurnSender(sender, turn),
                     context=context, decision_loop=loop, request_kind=prepared.request_kind,
                     allowed_tools=prepared.allowed_tools, required_tools=prepared.required_tools,
                     requirements=prepared.requirements, worker_owner=turn.worker_owner,
@@ -613,6 +632,8 @@ class WebDecisionRuntime:
                     cancel_event=turn.cancel_event,
                     **({'admission_carry': turn.admission_carry, 'admission_exchange': turn.admission_exchange}
                        if self.semantic else {}))
+                if turn.allocation_timed_out:
+                    return  # Never mutate a newer turn's history/waiting state.
                 bridge_returned_at = self._clock()
                 if (result.metadata.get('waiting_for_input') is True
                         and type(result.metadata.get('continuation_id')) is str):
@@ -686,8 +707,19 @@ class WebDecisionRuntime:
                 except asyncio.TimeoutError:
                     raise _SemanticFailure('task_deadline_exceeded') from None
             else:
-                await self._execute_segment(handler, sender, turn)
+                # Reserve and supervise before refresh/reader acquisition.
+                # The child retains its actual reader/owner until settlement;
+                # handler reuses this scope instead of opening a second timer.
+                async def allocate(scoped_sender):
+                    return await self._execute_segment(handler, sender, turn,
+                        allocation_sender=scoped_sender)
+                await handler._with_allocation(_TurnSender(sender, turn), allocate,
+                    cancel_event=turn.cancel_event,
+                    cancellation_delegated=lambda: turn.dispatching,
+                    timeout_result=handler._allocation_timeout_result(turn.trace_id))
         except _SemanticFailure as exc:
+            if turn.allocation_timed_out:
+                return
             sender.waiting = turn.next_waiting = None
             if sender.writable:
                 if turn.displayed_answer is not None:
@@ -695,16 +727,22 @@ class WebDecisionRuntime:
                 else:
                     await self._terminal(handler, sender, turn, RunOutcome.FAILED, str(exc))
         except DecisionAdmissionError as exc:
+            if turn.allocation_timed_out:
+                return
             self._check_retry_authority(sender, turn)
             if sender.writable:
                 await self._terminal(handler, sender, turn, RunOutcome.REJECTED, exc.code)
         except asyncio.CancelledError:
+            if turn.allocation_timed_out:
+                return
             if sender.writable:
                 if turn.displayed_answer is not None:
                     await sender.close_failed_delivery()
                 else:
                     await self._terminal(handler, sender, turn, RunOutcome.CANCELLED, 'cancelled')
         except (ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
+            if turn.allocation_timed_out:
+                return
             # Reference/store failures can share transport exception classes.
             # Actual send failure already marks the sender unwritable.
             if sender.writable and turn.displayed_answer is not None:
@@ -712,6 +750,8 @@ class WebDecisionRuntime:
             else:
                 sender.writable = False
         except Exception:
+            if turn.allocation_timed_out:
+                return
             if sender.writable:
                 if turn.displayed_answer is not None:
                     await self._projection_failed(sender, turn)

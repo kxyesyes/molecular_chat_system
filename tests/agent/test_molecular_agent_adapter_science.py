@@ -441,5 +441,9 @@ def test_binding_failure_observation_is_not_an_attempted_tool(rig):
     assert rig.tools["reverse_target_predictor"].calls
     assert rig.tools["target_database_search"].calls == []
     row = observation(output, "target_database_search")
-    assert row["error"]["code"] == "invalid_input"
+    assert row["status"] == "not_calculated"
+    assert row["error"]["code"] == "validation_error"
+    assert row["error"]["details"]["reason"] == "dependency_blocked"
+    assert row["error"]["details"]["executed"] is False
+    assert row["error"]["details"]["blocked_by"]
     assert "target_database_search" not in output["used_tools"]

@@ -5,6 +5,8 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from src.activity.family_contract import resolve_activity_family
+from src.agent.contracts import ToolResult
+from src.agent.validators.domain_validators import ActivityResultValidator
 
 
 class CandidateRanker:
@@ -73,7 +75,9 @@ class CandidateRanker:
                 continue
 
             admet_score = self._admet_score(admet.get(canonical_smiles))
-            activity_score = self._activity_score(activity.get(canonical_smiles))
+            activity_record = activity.get(canonical_smiles)
+            activity_reason = self._activity_exclusion_reason(activity_record)
+            activity_score = self._activity_score(activity_record)
             missing_evidence: list[str] = []
             if admet_score is None:
                 missing_evidence.append("admet")
@@ -119,6 +123,7 @@ class CandidateRanker:
                     "activity": 0.25 if activity_score is not None else None,
                 },
                 "missing_evidence": list(missing_evidence),
+                "activity": self._activity_diagnostics(activity_record, activity_reason),
             }
             ranked.append(
                 {
@@ -287,6 +292,15 @@ class CandidateRanker:
         if value is None:
             records: Any = []
         elif isinstance(value, Mapping) and isinstance(value.get("data"), list):
+            if evidence_name == "activity":
+                for source in (value, value.get("quality"), value.get("provenance")):
+                    if source is not None and (not isinstance(source, Mapping) or any(
+                        source.get(marker, False) is not False
+                        for marker in ("demo_mode", "fallback_used")
+                    )):
+                        raise _RankingInputError(
+                            "invalid_candidate_evidence", "Activity evidence is demo, fallback or untrusted",
+                        )
             records = value["data"]
         else:
             records = value
@@ -384,22 +398,92 @@ class CandidateRanker:
     def _activity_score(record: Mapping[str, Any] | None) -> float | None:
         if not isinstance(record, Mapping) or record.get("success") is not True:
             return None
-        provenance = record.get("model_provenance")
-        if not CandidateRanker._trusted_activity_provenance(provenance):
-            provenance = record.get("provenance")
-        if not CandidateRanker._trusted_activity_provenance(provenance):
+        if CandidateRanker._activity_exclusion_reason(record) is not None:
             return None
         value = record.get("normalized_activity")
         if value is None:
             value = record.get("probability")
         if value is None:
             value = record.get("activity_probability")
-        if not CandidateRanker._finite_number(value):
-            return None
-        value = float(value)
-        if not 0.0 <= value <= 1.0:
-            return None
-        return value
+        return float(value)
+
+    @classmethod
+    def _activity_exclusion_reason(cls, record: Mapping[str, Any] | None) -> str | None:
+        if not isinstance(record, Mapping):
+            return "missing_activity_evidence"
+        family = any(key in record for key in (
+            "family_id", "predicted_pIC50", "activity_probability", "activity_class",
+        ))
+        if family:
+            if "normalized_activity" in record:
+                return "invalid_activity_evidence"
+            try:
+                if resolve_activity_family(record.get("requested_target")) != record.get("family_id"):
+                    return "activity_scope_mismatch"
+            except ValueError:
+                return "activity_scope_mismatch"
+            # Retainable partial observations are not necessarily rankable.
+            # Reuse the domain contract, including fixed thresholds, stage
+            # status and request-bound provenance; never trust success alone.
+            invalid = ActivityResultValidator().validate(ToolResult(
+                tool_name="activity_predictor", success=record.get("success") is True,
+                message="", data=[dict(record)],
+            ))
+            if invalid:
+                return ("invalid_activity_provenance" if "provenance" in invalid
+                        or "identity" in invalid else "invalid_activity_evidence")
+        if (record.get("demo_mode", False) is not False
+                or record.get("fallback_used", False) is not False):
+            return "invalid_activity_provenance"
+        if record.get("success") is not True:
+            if family and record.get("classification_regression_consistent") is False:
+                return "classification_regression_conflict"
+            if record.get("status") == "partial" or record.get("execution_status") == "partial":
+                # Only family partials have certified observations above.
+                # Canonical failure rows do not certify their numeric fields.
+                return "activity_incomplete" if family else "invalid_activity_evidence"
+            return "activity_execution_failed"
+        if (record.get("review_status") == "needs_review"
+                or record.get("classification_regression_consistent") is False):
+            return "activity_requires_review"
+        provenance = record.get("model_provenance")
+        if not cls._trusted_activity_provenance(provenance):
+            provenance = record.get("provenance")
+        if not cls._trusted_activity_provenance(provenance):
+            return "invalid_activity_provenance"
+        value = record.get("normalized_activity")
+        if value is None:
+            value = record.get("probability")
+        if value is None:
+            value = record.get("activity_probability")
+        if not cls._finite_number(value) or not 0.0 <= float(value) <= 1.0:
+            return "invalid_activity_value"
+        return None
+
+    @classmethod
+    def _activity_diagnostics(cls, record: Mapping[str, Any] | None, reason: str | None) -> dict[str, Any]:
+        details = {"used": reason is None, "exclusion_reason": reason, "raw_values": {}}
+        if not isinstance(record, Mapping):
+            return details
+        for key in ("status", "execution_status"):
+            value = record.get(key)
+            if isinstance(value, str) and value in {"passed", "partial", "failed", "not_calculated"}:
+                details[key] = value
+        # Do not republish malformed/untrusted predictions as observed evidence.
+        if reason not in {None, "classification_regression_conflict", "activity_incomplete"}:
+            return details
+        details["raw_values"] = {
+            key: record[key] for key in (
+                "normalized_activity", "probability", "activity_probability", "predicted_pIC50",
+            ) if cls._finite_number(record.get(key))
+        }
+        if record.get("activity_class") in ("有活性", "无活性"):
+            details["raw_values"]["activity_class"] = record["activity_class"]
+        flag = record.get("classification_regression_consistent")
+        if flag is True or flag is False:
+            details["classification_regression_consistent"] = flag
+            details["review_status"] = "passed" if flag else "needs_review"
+        return details
 
     @classmethod
     def _validate_activity_scope(
@@ -545,15 +629,17 @@ class CandidateRanker:
         rows = [
             "## Candidate prioritization",
             "",
-            "| Rank | Candidate | Canonical SMILES | Score | Missing evidence |",
-            "|---:|---|---|---:|---|",
+            "| Rank | Candidate | Canonical SMILES | Score | Missing evidence | Activity use |",
+            "|---:|---|---|---:|---|---|",
         ]
         for candidate in data["top_candidates"]:
             missing = ", ".join(candidate["missing_evidence"]) or "None"
+            activity = candidate["ranking_evidence"]["activity"]
+            activity_use = "used" if activity["used"] else activity["exclusion_reason"]
             rows.append(
                 f"| {candidate['rank']} | {candidate['candidate_id']} | "
                 f"`{candidate['canonical_smiles']}` | {candidate['score']:.4f} | "
-                f"{missing} |"
+                f"{missing} | {activity_use} |"
             )
         rows.extend(
             [

@@ -37,17 +37,52 @@ window.HomeTaskStatus = (() => {
     molecular_docking: "分子对接",
   });
 
+  function displayEventType(type, payload) {
+    // Presentation-only variants: the transport still emits tool_completed.
+    // main.js selects styling using eventType, without access to the payload.
+    if (type === "tool_completed" && payload) {
+      if (payload.status === "partial") return "tool_partial";
+      if (payload.status === "not_calculated") return "tool_not_calculated";
+    }
+    return type;
+  }
+
+  function notCalculatedLabel(payload) {
+    if (payload && payload.status === "not_calculated") {
+      const details = payload.error && payload.error.details;
+      for (const source of [details, payload.quality]) {
+        if (!source || source.reason !== "dependency_blocked" || source.executed !== false) continue;
+        const ids = Array.isArray(source.blocked_by) ? source.blocked_by.slice(0, 20).filter(
+          id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id),
+        ) : [];
+        return `未执行（依赖：${ids.join("、") || "上游步骤"}）`;
+      }
+    }
+    return "尚未计算";
+  }
+
+  function outcomeLabel(payload) {
+    const details = payload && payload.error && payload.error.details;
+    if (payload && payload.status === "timeout" && details
+        && details.stage === "allocation" && details.reason === "allocation_timeout") {
+      return "任务分配超时";
+    }
+    return payload && typeof payload.status === "string" ? outcomeLabels[payload.status] : null;
+  }
+
   function resolve(event) {
-    const eventType = event && (event.event || event.type) || "agent_event";
+    const eventType = displayEventType(
+      event && (event.event || event.type) || "agent_event", event && event.payload,
+    );
     const percent = event && typeof event.progress === "number"
       ? Math.round(Math.max(0, Math.min(1, event.progress)) * 100)
       : null;
-    const outcome = event && event.payload && typeof event.payload.status === "string"
-      ? outcomeLabels[event.payload.status]
-      : null;
+    const outcome = outcomeLabel(event && event.payload);
     return {
       eventType,
-      progressText: outcome && eventType === "task_failed"
+      progressText: eventType === "tool_partial" ? "部分完成"
+        : eventType === "tool_not_calculated" ? notCalculatedLabel(event && event.payload)
+        : outcome && eventType === "task_failed"
         ? outcome
         : Object.prototype.hasOwnProperty.call(terminalLabels, eventType)
         ? terminalLabels[eventType]
@@ -61,11 +96,14 @@ window.HomeTaskStatus = (() => {
   }
 
   function label(type, toolName, payload) {
+    type = displayEventType(type, payload);
     const toolText = toolName ? formatToolName(toolName) : "";
-    if (type === "task_failed" && payload && outcomeLabels[payload.status]) {
-      return outcomeLabels[payload.status];
+    if (type === "task_failed" && outcomeLabel(payload)) {
+      return outcomeLabel(payload);
     }
     if (type === "tool_started") return toolText ? `调用 ${toolText}` : "工具调用";
+    if (type === "tool_partial") return toolText ? `${toolText} 部分完成` : "工具部分完成";
+    if (type === "tool_not_calculated") return `${toolText || "工具"} ${notCalculatedLabel(payload)}`;
     if (type === "tool_completed") return toolText ? `${toolText} 完成` : "工具完成";
     if (type === "tool_failed") return toolText ? `${toolText} 失败` : "工具失败";
     return labels[type] || "Agent 事件";
@@ -76,6 +114,7 @@ window.HomeTaskStatus = (() => {
     if (type === "task_rejected") return "is-error";
     if (type === "validation_warning" || type === "task_partial") return "is-warning";
     if (type === "task_cancelled") return "is-warning";
+    if (type === "tool_partial" || type === "tool_not_calculated") return "is-warning";
     if (type && type.includes("completed")) return "is-complete";
     return "is-running";
   }

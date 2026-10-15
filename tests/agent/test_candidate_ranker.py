@@ -1,9 +1,11 @@
 import json
+import copy
 
 import pytest
 
 from src.agent.tools.candidate_ranker import CandidateRanker
 from src.agent.tooling import build_tool_registry
+from tests.agent.test_family_activity_tool import family_row
 
 
 def _payload(*, top_n=2):
@@ -269,31 +271,7 @@ def test_candidate_ranker_marks_missing_required_evidence_as_not_satisfied():
 def test_candidate_ranker_uses_trusted_family_activity_probability():
     payload = _payload(top_n=1)
     payload["outputs"]["activity"] = [
-        {
-            "smiles": "CCO",
-            "success": True,
-            "activity_probability": 0.91,
-            "predicted_pIC50": 7.1,
-            "requested_target": "PDE5A",
-            "family_id": "pde",
-            "provenance": {
-                "bundle_id": "pde-family-v1",
-                "models": {
-                    "classification": {
-                        "model_id": "pde-classifier",
-                        "weights_sha256": "a" * 64,
-                        "demo_mode": False,
-                        "fallback_used": False,
-                    },
-                    "regression": {
-                        "model_id": "pde-regressor",
-                        "weights_sha256": "b" * 64,
-                        "demo_mode": False,
-                        "fallback_used": False,
-                    },
-                },
-            },
-        }
+        family_row(activity_probability=0.91, activity_class="有活性", predicted_pIC50=7.1)
     ]
 
     result = CandidateRanker().execute(payload)
@@ -462,3 +440,190 @@ def test_candidate_ranker_is_owned_by_molecular_design_specialist():
     registry = build_tool_registry([CandidateRanker()])
 
     assert registry.resolve("candidate_ranker", agent_name="molecular_design")
+
+
+def test_mixed_activity_ranking_preserves_conflicts_without_scoring_them():
+    payload = _payload(top_n=3)
+    payload["metadata"]["required_evidence"] = ["activity"]
+    rows = [
+        family_row(smiles="CCO", activity_probability=0.8, activity_class="有活性",
+                   predicted_pIC50=6.2, execution_status="passed"),
+        family_row(smiles="CCN", activity_probability=0.1, predicted_pIC50=6.2,
+                   success=False, status="partial", execution_status="passed",
+                   classification_regression_consistent=False),
+        family_row(smiles="CCC", activity_probability=0.9, activity_class="有活性",
+                   predicted_pIC50=4.2, success=False, status="partial",
+                   execution_status="passed", classification_regression_consistent=False),
+    ]
+    payload["outputs"]["activity"] = {"status": "partial", "success": False, "data": rows}
+    before = copy.deepcopy(payload)
+    result = CandidateRanker().execute(payload)
+    assert result["success"] is True
+    ranked = {row["canonical_smiles"]: row for row in result["data"]["ranked_candidates"]}
+    accepted = ranked["CCO"]["ranking_evidence"]
+    assert accepted["activity_score"] == 0.8
+    assert accepted["activity"]["used"] is True
+    assert accepted["activity"]["exclusion_reason"] is None
+    assert accepted["weights_used"] == {"properties": 0.5, "admet": None, "activity": 0.25}
+    for raw in rows[1:]:
+        candidate = ranked[raw["smiles"]]
+        evidence = candidate["ranking_evidence"]
+        activity = evidence["activity"]
+        assert evidence["activity_score"] is None
+        assert evidence["weights_used"] == {"properties": 0.5, "admet": None, "activity": None}
+        assert candidate["score"] == pytest.approx(evidence["property_score"] * 0.5)
+        assert activity["used"] is False
+        assert activity["exclusion_reason"] == "classification_regression_conflict"
+        assert activity["raw_values"]["activity_probability"] == raw["activity_probability"]
+        assert activity["raw_values"]["predicted_pIC50"] == raw["predicted_pIC50"]
+        assert activity["execution_status"] == "passed"
+        assert activity["review_status"] == "needs_review"
+        assert candidate["missing_required_evidence"] == ["activity"]
+        assert candidate["docking_ready_for_preparation"] is False
+    assert payload == before
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("missing", "missing_activity_evidence"),
+    ("failed", "activity_execution_failed"),
+    ("provenance", "invalid_activity_provenance"),
+    ("demo", "invalid_activity_provenance"),
+    ("fallback", "invalid_activity_provenance"),
+    ("forged_flag", "invalid_activity_evidence"),
+    ("forged_success", "invalid_activity_evidence"),
+    ("forged_normalized", "invalid_activity_evidence"),
+    ("forged_identity", "invalid_activity_provenance"),
+])
+def test_activity_exclusion_diagnostics_do_not_trust_forged_rows(case, reason):
+    payload = _payload(top_n=3)
+    row = family_row(execution_status="passed")
+    if case == "failed":
+        row.update(success=False, status="failed", execution_status="failed",
+                   activity_probability=None, activity_class=None, predicted_pIC50=None,
+                   classification_regression_consistent=None, errors={"classification": "failed"})
+    elif case == "provenance":
+        row["provenance"] = {}
+    elif case in {"demo", "fallback"}:
+        row["provenance"]["models"]["classification"][case + ("_mode" if case == "demo" else "_used")] = True
+    elif case == "forged_flag":
+        row["classification_regression_consistent"] = False
+    elif case == "forged_success":
+        row["predicted_pIC50"] = 7.0
+    elif case == "forged_normalized":
+        row["normalized_activity"] = 0.99
+    elif case == "forged_identity":
+        row["provenance"]["request"]["identity"] = "0" * 64
+    payload["outputs"]["activity"] = [] if case == "missing" else [row]
+    result = CandidateRanker().execute(payload)
+    assert result["success"] is True
+    candidate = next(item for item in result["data"]["ranked_candidates"] if item["canonical_smiles"] == "CCO")
+    evidence = candidate["ranking_evidence"]
+    assert evidence["activity_score"] is None
+    assert evidence["activity"]["used"] is False
+    assert evidence["activity"]["exclusion_reason"] == reason
+    if case not in {"missing", "failed"}:
+        assert evidence["activity"]["raw_values"] == {}
+
+
+def test_activity_classification_only_is_retained_but_not_ranked():
+    payload = _payload()
+    payload["outputs"]["activity"] = [family_row(
+        success=False, status="partial", execution_status="partial", predicted_pIC50=None,
+        classification_regression_consistent=None, errors={"regression": "unavailable"},
+    )]
+    result = CandidateRanker().execute(payload)
+    candidate = next(item for item in result["data"]["ranked_candidates"] if item["canonical_smiles"] == "CCO")
+    assert candidate["ranking_evidence"]["activity_score"] is None
+    details = candidate["ranking_evidence"]["activity"]
+    assert details["exclusion_reason"] == "activity_incomplete"
+    assert details["raw_values"]["activity_probability"] == 0.0
+    assert "predicted_pIC50" not in details["raw_values"]
+
+
+@pytest.mark.parametrize("marker", ["demo_mode", "fallback_used"])
+@pytest.mark.parametrize("container", [None, "quality", "provenance"])
+def test_ranker_rejects_demo_or_fallback_activity_envelope(marker, container):
+    payload = _payload()
+    payload["metadata"]["required_evidence"] = ["activity"]
+    payload["outputs"]["activity"] = {
+        "status": "partial", "success": False,
+        "data": [family_row()],
+    }
+    evidence = payload["outputs"]["activity"]
+    if container is None:
+        evidence[marker] = True
+    else:
+        evidence[container] = {marker: True}
+    result = CandidateRanker().execute(payload)
+    assert result["success"] is False
+    assert result["error_code"] == "invalid_candidate_evidence"
+
+
+def test_relabelled_family_activity_does_not_satisfy_requested_target_evidence():
+    payload = _payload()
+    payload["metadata"].update(target="BuChE", required_evidence=["activity"])
+    payload["outputs"]["activity"] = [family_row(
+        requested_target="BuChE", activity_probability=0.8, activity_class="有活性",
+        predicted_pIC50=6.2, execution_status="passed",
+    )]
+    result = CandidateRanker().execute(payload)
+    assert result["success"] is True
+    candidate = next(item for item in result["data"]["ranked_candidates"] if item["canonical_smiles"] == "CCO")
+    assert candidate["ranking_evidence"]["activity_score"] is None
+    assert candidate["ranking_evidence"]["activity"]["exclusion_reason"] == "activity_scope_mismatch"
+    assert candidate["ranking_evidence"]["activity"]["raw_values"] == {}
+    assert candidate["missing_required_evidence"] == ["activity"]
+    assert candidate["docking_ready_for_preparation"] is False
+
+
+@pytest.mark.parametrize("status_field", ["status", "execution_status"])
+@pytest.mark.parametrize("prediction", [
+    {"probability": 5.0, "model_provenance": {"demo_mode": True}},
+    {"probability": 0.8},
+    {"normalized_activity": 5.0, "model_provenance": {
+        "model_id": "synthetic-model", "demo_mode": False, "fallback_used": False}},
+    # Canonical failure rows may carry errors, but do not certify predictions.
+    {"task_type": "classification", "endpoint": "activity", "units": "probability",
+     "probability": 0.8, "error": "synthetic stage failure", "model_provenance": {
+         "model_id": "synthetic-model", "weights_sha256": "a" * 64,
+         "task_type": "classification", "endpoint": "activity", "units": "probability",
+         "demo_mode": False, "fallback_used": False}},
+])
+def test_unvalidated_nonfamily_partial_does_not_republish_raw_activity(status_field, prediction):
+    payload = _payload()
+    payload["outputs"]["activity"] = [
+        {"smiles": "CCO", "success": False, status_field: "partial", **prediction},
+    ]
+    before = copy.deepcopy(payload)
+
+    result = CandidateRanker().execute(payload)
+
+    assert result["success"] is True
+    candidate = next(item for item in result["data"]["ranked_candidates"] if item["canonical_smiles"] == "CCO")
+    evidence = candidate["ranking_evidence"]
+    assert evidence["activity_score"] is None
+    assert evidence["activity"]["used"] is False
+    assert evidence["activity"]["raw_values"] == {}
+    assert evidence["activity"]["exclusion_reason"] == "invalid_activity_evidence"
+    assert payload == before
+
+
+def test_successful_canonical_classification_remains_usable_and_visible():
+    payload = _payload()
+    payload["outputs"]["activity"] = [{
+        "smiles": "CCO", "success": True, "task_type": "classification",
+        "endpoint": "activity", "units": "probability", "probability": 0.8,
+        "model_provenance": {
+            "model_id": "synthetic-model", "weights_sha256": "a" * 64,
+            "task_type": "classification", "endpoint": "activity", "units": "probability",
+            "demo_mode": False, "fallback_used": False,
+        },
+    }]
+
+    result = CandidateRanker().execute(payload)
+
+    candidate = next(item for item in result["data"]["ranked_candidates"] if item["canonical_smiles"] == "CCO")
+    evidence = candidate["ranking_evidence"]
+    assert evidence["activity_score"] == 0.8
+    assert evidence["activity"]["used"] is True
+    assert evidence["activity"]["raw_values"] == {"probability": 0.8}

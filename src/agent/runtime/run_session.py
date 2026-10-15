@@ -23,12 +23,17 @@ from src.agent.contracts import (
     ToolResult,
 )
 from src.agent.contracts.generation_request import preserve_target_quality
+from src.agent.contracts.result import is_dependency_blocked
 from src.agent.evidence import EvidenceLedger
 from src.agent.persistence.redaction import redact_sensitive
 from src.agent.persistence.base import RunOwnershipConflict
-from src.agent.planning.bindings import BindingResolutionError
+from src.agent.planning.bindings import BindingResolutionError, MissingBoundOutputError
+from src.agent.runtime.allocation import (
+    allocation_cancelled, allocation_timed_out, begin_tool_dispatch,
+)
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.validators import align_candidate_results
+from src.agent.validators.partial_observations import has_usable_observation
 
 if TYPE_CHECKING:
     from src.agent.orchestrators.base import WorkflowStep
@@ -106,6 +111,7 @@ class _StepJournal:
     checkpoint_warning_entry: dict[str, str] | None = None
     running_checkpoint_saved: bool = False
     tool_attempted: bool = False
+    dependency_blocked: bool = False
     result: ToolResult | None = None
     prepared: bool = False
     binding_proof: dict[str, Any] | None = None
@@ -470,14 +476,14 @@ class WorkflowRunSession:
                     raise SessionLifecycleError("restored evidence identity changed")
                 step_ids.add(step_id)
                 output_key = result.quality["output_key"]
-                if result.success and output_key:
+                if has_usable_observation(result) and output_key:
                     output = result.data
                     if output_key == "target":
                         output = preserve_target_quality(output, result.quality)
                     state.outputs[output_key] = output
                 state.warnings.extend(result.warnings)
                 state.artifacts.extend(artifact.to_dict() for artifact in result.artifacts)
-                if not result.success:
+                if not has_usable_observation(result):
                     state.errors.append({
                         "step": step_id, "tool": result.tool_name,
                         "error": result.error.to_dict() if result.error else None,
@@ -592,6 +598,14 @@ class WorkflowRunSession:
             result = journal.result
             assert result is not None
         if not journal.prepared:
+            if journal.tool_attempted:
+                # The callable ran. Its own diagnostics cannot certify that the
+                # runtime blocked dispatch, or hide the error in public output.
+                if result.error is not None and isinstance(result.error.details, dict):
+                    if result.error.details.get("reason") == "dependency_blocked":
+                        result.error.details = {**result.error.details, "executed": True}
+                if result.quality.get("reason") == "dependency_blocked":
+                    result.quality = {**result.quality, "executed": True}
             if self.dynamic:
                 if result.tool_name != step.tool_name:
                     result = ToolResult.error_result(
@@ -614,10 +628,17 @@ class WorkflowRunSession:
             assert self.ledger is not None
             self.ledger.prepare_provenance(journal.input_hash, result)
             prior_outcome = (result.success, result.status, deepcopy(result.error))
-            result = self.orchestrator.validator.validate_tool_result(
-                result,
-                trusted_checkpoint=journal.checkpoint_reused,
-            )
+            # This observation was made by the resolver before dispatch, not
+            # by a scientific tool. Domain failure scrubbers must not erase its
+            # dependency cause (and no provider result can take this branch).
+            if not self._is_dependency_blocked(result):
+                result = self.orchestrator.validator.validate_tool_result(
+                    result,
+                    trusted_checkpoint=journal.checkpoint_reused,
+                )
+            # Validation may replace/scrub the observation. These identifiers
+            # belong to the runtime, never to the returned provider payload.
+            result.quality = {**result.quality, "step_id": step.name, "output_key": step.output_key}
             # The registry may change between checkpoint preflight and tool
             # execution. Persist the identity observed in the accepted result
             # so a later resume cannot treat a v2 result as a v1 checkpoint.
@@ -628,7 +649,7 @@ class WorkflowRunSession:
             if isinstance(observed_model_version, str) and observed_model_version:
                 journal.model_version = observed_model_version
             candidate_source = step.metadata.get("candidate_source")
-            if candidate_source and result.success:
+            if candidate_source and has_usable_observation(result):
                 result = align_candidate_results(
                     self.outputs.get(str(candidate_source)),
                     result,
@@ -704,7 +725,8 @@ class WorkflowRunSession:
                 **result.quality,
                 "evidence_id": evidence_id,
             }
-            if not result.success and not step.required:
+            if (not has_usable_observation(result) and not self._is_dependency_blocked(result)
+                    and not step.required):
                 optional_warning = (
                     f"Optional step {step.name} ({step.tool_name}) failed: "
                     f"{result.message}"
@@ -743,7 +765,7 @@ class WorkflowRunSession:
         if not journal.checkpoint_reused or journal.reused_result_changed:
             self._persist_step_result(step, journal, result)
         if not journal.output_applied:
-            if result.success and step.output_key:
+            if has_usable_observation(result) and step.output_key:
                 output = result.data
                 if step.output_key == "target":
                     output = preserve_target_quality(output, result.quality)
@@ -758,7 +780,7 @@ class WorkflowRunSession:
             )
             journal.artifacts_applied = True
         if not journal.error_applied:
-            if not result.success:
+            if not has_usable_observation(result) and not self._is_dependency_blocked(result):
                 self.state.errors.append(
                     {
                         "step": step.name,
@@ -783,7 +805,7 @@ class WorkflowRunSession:
             journal.result_recorded = True
         event_type = (
             TaskEventType.TOOL_COMPLETED
-            if result.success
+            if has_usable_observation(result) or self._is_dependency_blocked(result)
             else TaskEventType.TOOL_FAILED
         )
         self._emit_once(
@@ -798,7 +820,7 @@ class WorkflowRunSession:
 
         terminal = not self.dynamic and index == len(self.steps) - 1
         reason = "last_step" if terminal else None
-        if not result.success and not step.continue_after_failure():
+        if not has_usable_observation(result) and not step.continue_after_failure():
             terminal = True
             reason = (
                 "required_step_failed" if step.required else "step_failed"
@@ -829,6 +851,20 @@ class WorkflowRunSession:
             provenance, tool_version=journal.tool_version,
             output_digest=EvidenceLedger.output_digest(result.data),
         )
+
+    def _is_dependency_blocked(self, result: ToolResult) -> bool:
+        return is_dependency_blocked(result) and any(
+            journal.dependency_blocked and not journal.tool_attempted and journal.result is result
+            for journal in self._step_journals.values()
+        )
+
+    def _failed_binding_sources(self, index: int, output_key: str) -> list[str]:
+        """The resolver proves missing input; the runtime identifies its cause."""
+        producers = {prior.output_key: prior.name for prior in self.steps[:index] if prior.output_key}
+        failed = {result.quality.get("step_id") for result in self.results
+                  if not has_usable_observation(result)}
+        producer = producers.get(output_key)
+        return [producer] if output_key not in self.outputs and producer in failed else []
 
     def _prepare_step_result(
         self,
@@ -875,6 +911,18 @@ class WorkflowRunSession:
                         "reason": str(exc),
                     },
                 )
+                blocked_by = (self._failed_binding_sources(index, exc.output_key)
+                              if isinstance(exc, MissingBoundOutputError) else [])
+                if blocked_by:
+                    journal.dependency_blocked = True
+                    details = {"reason": "dependency_blocked", "blocked_by": blocked_by,
+                               "executed": False}
+                    journal.result = ToolResult.error_result(
+                        step.tool_name, AgentErrorCode.VALIDATION_ERROR,
+                        "未执行：上游步骤未提供可用输入。",
+                        details=details, quality=dict(details),
+                        status=ObservationStatus.NOT_CALCULATED,
+                    )
                 return
 
         if not journal.semantic_checked:
@@ -921,14 +969,6 @@ class WorkflowRunSession:
                 }
             journal.semantic_checked = True
 
-        self._emit_once(
-            f"step:{index}:started",
-            self.context,
-            TaskEventType.TOOL_STARTED,
-            f"Running {step.name}",
-            tool=step.tool_name,
-            progress=None if self.dynamic else index / self.total_steps,
-        )
         if self._cancel_requested():
             self._prepare_cancelled_step(step, tool, journal)
             return
@@ -1115,6 +1155,26 @@ class WorkflowRunSession:
         if self._cancel_requested():
             self._prepare_cancelled_step(step, tool, journal)
             return
+        if not begin_tool_dispatch():
+            self._prepare_cancelled_step(step, tool, journal)
+            return
+        # Preparation/checkpoint reuse is not a tool start. Announce only once
+        # persistence and validation have completed and dispatch won expiry.
+        self._emit_once(
+            f"step:{index}:started",
+            self.context,
+            TaskEventType.TOOL_STARTED,
+            f"Running {step.name}",
+            tool=step.tool_name,
+            progress=None if self.dynamic else index / self.total_steps,
+        )
+        # Keep the established callback veto: publication may revoke a source
+        # or cancel this session, even after dispatch has won the time budget.
+        if self._reject_unavailable_reference(step, journal):
+            return
+        if self._cancel_requested():
+            self._prepare_cancelled_step(step, tool, journal)
+            return
         self._tool_attempt_count += 1
         journal.tool_attempted = True
         if self.cancel_event is None or not self._call_accepts_cancel_event(
@@ -1132,7 +1192,9 @@ class WorkflowRunSession:
             )
 
     def _cancel_requested(self) -> bool:
-        return bool(self.cancel_event is not None and self.cancel_event.is_set())
+        return allocation_cancelled() or bool(
+            self.cancel_event is not None and self.cancel_event.is_set()
+        )
 
     @staticmethod
     def _call_accepts_cancel_event(callable_obj) -> bool:
@@ -1344,6 +1406,30 @@ class WorkflowRunSession:
         agent_result = self._final_result
         assert self._final_message is not None
 
+        # Allocation expiry is not user cancellation. Persist the same reason
+        # that the transport publishes, including a model cancelled before any
+        # action exists. Never relabel a running scientific tool as allocation.
+        if (not self._terminal_event_emitted and self.tool_attempt_count == 0
+                and allocation_timed_out()):
+            message = "任务分配超时，尚未启动科学工具；请稍后重试或拆分请求。"
+            agent_result.outcome = RunOutcome.TIMEOUT
+            agent_result.success = agent_result.partial = False
+            agent_result.message = agent_result.final_answer = message
+            agent_result.error = AgentExecutionError(
+                AgentErrorCode.TOOL_TIMEOUT, message,
+                details={"stage": "allocation", "reason": "allocation_timeout"},
+            )
+            allocation_metadata = {
+                "allocation": {"status": "timeout", "reason": "allocation_timeout"},
+                "stop_reason": "allocation_timeout",
+            }
+            agent_result.metadata.update(allocation_metadata)
+            self._final_message = message
+            if self.orchestrator.state_store:
+                self.orchestrator.state_store.update_run_metadata(
+                    self.context.trace_id, allocation_metadata,
+                )
+
         completion_event = {
             RunOutcome.COMPLETED: TaskEventType.TASK_COMPLETED,
             RunOutcome.PARTIAL: TaskEventType.TASK_PARTIAL,
@@ -1545,9 +1631,10 @@ class WorkflowRunSession:
         final_answer = "\n\n".join(
             item.formatted
             for item in self.results
-            if item.success and item.formatted
+            if has_usable_observation(item) and item.formatted
         )
-        message = self.orchestrator._build_message(self.results)
+        message = self.orchestrator._build_message(
+            [item for item in self.results if not self._is_dependency_blocked(item)] or self.results)
         assert self.ledger is not None
         agent_result = AgentResult.from_tool_results(
             trace_id=self.context.trace_id,
@@ -1555,6 +1642,7 @@ class WorkflowRunSession:
             tool_results=self.results,
             message=message,
             final_answer=final_answer,
+            dependency_blocked_results=tuple(result for result in self.results if self._is_dependency_blocked(result)),
             metadata={
                 "step_count": (len(self._restored_step_ids) + len(self.steps)
                                if self.dynamic else len(self.steps)),
@@ -1576,7 +1664,7 @@ class WorkflowRunSession:
         if dispatch is not None:
             dispatch.decorate_result(agent_result, self.context, self.reused_steps)
         if self.skipped_steps:
-            has_success = any(item.success for item in self.results)
+            has_success = any(has_usable_observation(item) for item in self.results)
             agent_result.success = False
             agent_result.partial = has_success
             if has_success:
@@ -1600,7 +1688,7 @@ class WorkflowRunSession:
             for item in self.results
         ):
             agent_result.success = False
-            agent_result.partial = any(item.success for item in self.results)
+            agent_result.partial = any(has_usable_observation(item) for item in self.results)
             agent_result.outcome = RunOutcome.REJECTED
             agent_result.message = "Workflow requires manual review of an uncertain prior execution"
         if self._runtime_error is not None:

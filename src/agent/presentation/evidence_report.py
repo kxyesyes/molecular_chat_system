@@ -163,6 +163,12 @@ def _ranking(accepted, outputs, generators, run, displayed):
         _check(all((oid, r["candidate_id"]) in displayed for r in raw["top_candidates"] + raw["unrankable_candidates"]))
         top = [{k: r[k] for k in ("candidate_id", "canonical_smiles", "score", "missing_evidence", "ranking_evidence")}
                for r in raw["top_candidates"][:32]]
+        # Keep ScientificReport@1's closed schema. Richer per-candidate activity
+        # diagnostics remain in the authoritative observation and final answer.
+        for row in top:
+            row["ranking_evidence"] = {key: row["ranking_evidence"][key] for key in (
+                "property_score", "admet_score", "activity_score", "weights_used", "missing_evidence",
+            )}
         return dict(state="partial" if rank["raw"]["status"] == "partial" or any(r["missing_evidence"] for r in top) else "available",
             reason_code="partial_source" if rank["raw"]["status"] == "partial" or any(r["missing_evidence"] for r in top) else "none",
             source_observation_id=rank["checkpoint"]["id"], generator_observation_id=oid,

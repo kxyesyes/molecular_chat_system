@@ -16,6 +16,18 @@ from src.system.scientific_status import (
 from .errors import AgentErrorCode, AgentExecutionError
 
 
+def is_dependency_blocked(result: ToolResult) -> bool:
+    """Check diagnostic shape only; callers must also establish runtime authority."""
+    details = result.error.details if result.error is not None else None
+    return (
+        result.status == ObservationStatus.NOT_CALCULATED and result.success is False
+        and isinstance(details, dict) and details.get("reason") == "dependency_blocked"
+        and details.get("executed") is False
+        and isinstance(details.get("blocked_by"), list) and bool(details["blocked_by"])
+        and all(isinstance(step, str) and step for step in details["blocked_by"])
+    )
+
+
 @dataclass
 class AgentResult:
     trace_id: str
@@ -41,14 +53,14 @@ class AgentResult:
         message: str = "",
         final_answer: str = "",
         metadata: dict[str, Any] | None = None,
+        dependency_blocked_results: tuple[ToolResult, ...] = (),
     ) -> "AgentResult":
+        from src.agent.validators.partial_observations import has_usable_observation
+
         successful_observations = [
             item
             for item in tool_results
-            if item.success
-            and item.error is None
-            and item.status
-            in {ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL}
+            if has_usable_observation(item)
         ]
         all_succeeded = bool(tool_results) and all(
             item.success and item.error is None and item.status == ObservationStatus.SUCCEEDED
@@ -57,8 +69,13 @@ class AgentResult:
         any_succeeded = bool(successful_observations)
         success = all_succeeded
         partial = any_succeeded and not all_succeeded
+        # A non-executed dependent is a consequence, not the run's root cause.
+        # Only the runtime's journal can certify non-execution. Provider-supplied
+        # diagnostic fields alone must never remove an error from aggregation.
+        blocked_ids = {id(item) for item in dependency_blocked_results if is_dependency_blocked(item)}
+        causal_results = [item for item in tool_results if id(item) not in blocked_ids] or tool_results
         outcome = aggregate_run_outcome(
-            (item.status for item in tool_results),
+            (item.status for item in causal_results),
             all_succeeded=all_succeeded,
             any_usable=any_succeeded,
         )
@@ -74,14 +91,14 @@ class AgentResult:
             first_error = next(
                 (
                     item.error
-                    for item in tool_results
+                    for item in causal_results
                     if item.error and item.status == preferred_error_status
                 ),
                 None,
             )
         if first_error is None:
             first_error = next(
-                (item.error for item in tool_results if item.error),
+                (item.error for item in causal_results if item.error),
                 None,
             )
         warnings = [warning for item in tool_results for warning in item.warnings]

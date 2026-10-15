@@ -174,9 +174,11 @@ class ReverseTargetTool(BaseMolecularTool):
             raise ValueError('current_source_unavailable') from None
 
     @staticmethod
-    def _failure(result, code, message):
+    def _failure(result, code, message, *, details=None):
         result.update(success=False, data=None, formatted='', message=message,
                       error={'code': code, 'message': message}, quality={'retryable': False})
+        if details is not None:
+            result['error']['details'] = details
         return result
 
     def execute(self, query: str) -> Dict[str, Any]:
@@ -194,6 +196,7 @@ class ReverseTargetTool(BaseMolecularTool):
         # Request-local callback: never persisted with a source or observation.
         cancelled = lambda: self._is_closed()
         phase = 'source'
+        proof_error_type = None
         try:
             remaining()
             if not self._check_rdkit(result):
@@ -206,7 +209,10 @@ class ReverseTargetTool(BaseMolecularTool):
                 return self._failure(result, 'validation_error', 'SMILES 无效或缺失；请提供完整结构，未提取有效片段替代。')
 
             predictor = self._get_predictor(timeout_seconds=remaining(), cancelled=cancelled)
-            from src.reverse_target.owned_source import ReverseSourceUnavailable, validate_envelope
+            from src.reverse_target.owned_source import (
+                ReverseProofError, ReverseSourceUnavailable, validate_envelope,
+            )
+            proof_error_type = ReverseProofError
             capture = getattr(predictor, 'capture_prediction_source', None)
             predict = getattr(predictor, 'predict_with_receipt', None)
             postflight = getattr(predictor, 'validate_prediction_source', None)
@@ -222,8 +228,11 @@ class ReverseTargetTool(BaseMolecularTool):
                          record_count=len(envelope['records']), records=envelope['records'],
                          prediction_receipt=envelope['receipt'])
             remaining()
+            phase = 'runtime_observation'
             targets = [self._normalize_target_record(row) for row in entry['records']]
-            validate_prediction_observation(targets, [entry], smiles=smiles)
+            if validate_prediction_observation(targets, [entry], smiles=smiles) is None:
+                raise ValueError('Reverse-target observation unavailable.')
+            phase = 'formatting'
             if targets:
                 lines = ['## 🎯 反向寻靶预测结果', '', f'**查询分子**: `{smiles}`',
                          f'**匹配靶点数**: {len(targets)}', '**默认相似度阈值**: 0.6', '',
@@ -239,6 +248,7 @@ class ReverseTargetTool(BaseMolecularTool):
                 formatted = f'## 🎯 反向寻靶结果\n\n查询分子: `{smiles}`\n\n未找到相似度 ≥ 0.6 的已知靶点匹配。可尝试降低相似度阈值。'
                 message = '未找到满足阈值的靶点匹配'
             remaining()
+            phase = 'postflight'
             try:
                 postflight(envelope, smiles=smiles, expected=expected, **CONTROLS)
             except ReverseSourceUnavailable:
@@ -253,11 +263,19 @@ class ReverseTargetTool(BaseMolecularTool):
                                   'tool_name': self.name, 'prediction_status': envelope['receipt']['status']})
             return result
         except TimeoutError:
-            return self._failure(result, 'tool_timeout', '反向寻靶超时，未返回预测结果。')
+            return self._failure(result, 'tool_timeout', '反向寻靶超时，未返回预测结果。',
+                                 details={'stage': phase, 'reason': 'timeout'})
         except _Unavailable:
-            return self._failure(result, 'tool_unavailable', '反向寻靶暂不可用，未返回预测结果。')
-        except ValueError:
-            code = 'invalid_output' if phase == 'proof' else 'tool_unavailable'
-            return self._failure(result, code, '反向寻靶验证失败，未返回预测结果。')
+            return self._failure(result, 'tool_unavailable', '反向寻靶暂不可用，未返回预测结果。',
+                                 details={'stage': phase, 'reason': 'source_unavailable'})
+        except ValueError as error:
+            code = 'tool_unavailable' if phase == 'source' else 'invalid_output'
+            details = {'stage': phase, 'reason': 'validation_failed'}
+            # Only our exact bounded exception is a public diagnostic source.
+            # Arbitrary provider exceptions (including their .details) are private.
+            if proof_error_type is not None and type(error) is proof_error_type:
+                details = error.details
+            return self._failure(result, code, '反向寻靶验证失败，未返回预测结果。', details=details)
         except Exception:
-            return self._failure(result, 'tool_unavailable', '反向寻靶暂不可用，未返回预测结果。')
+            return self._failure(result, 'tool_unavailable', '反向寻靶暂不可用，未返回预测结果。',
+                                 details={'stage': phase, 'reason': 'execution_failed'})

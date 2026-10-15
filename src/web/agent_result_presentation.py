@@ -1,10 +1,12 @@
 """Stateless Web projections for Agent results; transport and diagnostics stay caller-owned."""
 
 from collections.abc import Callable, Mapping
+from itertools import islice
 from typing import Any, Dict
 import re
 
 from src.agent.contracts import AgentResult
+from src.system.scientific_diagnostics import sanitize_reverse_target_diagnostics
 from src.agent.harness.ordinary_chat_policy import scan_claim_risks
 from src.agent.persistence.redaction import (
     contains_secret_material,
@@ -109,6 +111,28 @@ def presentation_status(agent_result: Mapping[str, Any]) -> str:
     return "completed" if agent_result.get("success") is True else "failed"
 
 
+def _reverse_failure_diagnostic(observation: Any, tool_name: Any = "") -> Dict[str, str]:
+    if not isinstance(observation, Mapping):
+        return {}
+    if observation.get("tool_name", tool_name) != "reverse_target_predictor":
+        return {}
+    if observation.get("success") is True or (
+        observation.get("success") is not False
+        and observation.get("status") not in ("failed", "rejected", "timeout", "unavailable")
+    ):
+        return {}
+    error = observation.get("error")
+    if not isinstance(error, Mapping):
+        return {}
+    # Direct, bounded producer codes only. Never inspect raw_result or infer
+    # diagnostics from provider messages, paths, or another tool's metadata.
+    return sanitize_reverse_target_diagnostics(error.get("details"))
+
+
+def _reverse_diagnostic_text(diagnostic: Mapping[str, str]) -> str:
+    return "反向寻靶诊断：" + "；".join(f"{key}={value}" for key, value in diagnostic.items())
+
+
 def partial_projection(
     agent_result: Mapping[str, Any], *,
     sanitize_text: Callable = sanitize_failure_text,
@@ -139,6 +163,61 @@ def partial_projection(
 
     failed_steps = []
 
+    def identifier(value: Any) -> str:
+        # Only public IDs, never paths, arbitrary prose or credentials.
+        if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value) is None:
+            return ""
+        return text(value)
+
+    def step_details(raw: Mapping[str, Any], tool_name: Any) -> Dict[str, Any]:
+        nonlocal truncated
+        safe: Dict[str, Any] = {}
+        diagnostic = _reverse_failure_diagnostic(raw, tool_name)
+        if diagnostic:
+            safe["diagnostic"] = diagnostic
+        error = raw.get("error")
+        details = error.get("details") if isinstance(error, Mapping) else None
+        quality = raw.get("quality")
+        for source in (details, quality):
+            if not isinstance(source, Mapping) or source.get("reason") != "dependency_blocked":
+                continue
+            safe["reason"] = "dependency_blocked"
+            if source.get("executed") is False:
+                safe["executed"] = False
+            blocked_by = source.get("blocked_by")
+            if isinstance(blocked_by, list):
+                truncated |= len(blocked_by) > _AGENT_FAILURE_WARNING_LIMIT
+                safe["blocked_by"] = [
+                    value for item in blocked_by[:_AGENT_FAILURE_WARNING_LIMIT]
+                    if (value := identifier(item))
+                ]
+            break
+        rows = raw.get("data")
+        if isinstance(rows, list):
+            truncated |= len(rows) > _AGENT_FAILURE_WARNING_LIMIT
+            states = []
+            for row in rows[:_AGENT_FAILURE_WARNING_LIMIT]:
+                if not isinstance(row, Mapping):
+                    continue
+                state = {}
+                for key in ("status", "execution_status"):
+                    value = row.get(key)
+                    if isinstance(value, str) and value in {"passed", "partial", "failed", "not_calculated"}:
+                        state[key] = value
+                if not state:
+                    continue
+                candidate_id = identifier(row.get("candidate_id"))
+                if candidate_id:
+                    state["candidate_id"] = candidate_id
+                consistent = row.get("classification_regression_consistent")
+                if consistent is True or consistent is False:
+                    state["classification_regression_consistent"] = consistent
+                    state["review_status"] = "passed" if consistent else "needs_review"
+                states.append(state)
+            if states:
+                safe["row_states"] = states
+        return safe
+
     def add_step(raw: Any, *, tool_name: Any = "", skipped: bool = False) -> None:
         nonlocal truncated
         if not isinstance(raw, Mapping):
@@ -152,7 +231,7 @@ def partial_projection(
                 on_malformed_step()
             return
         status = raw.get("status")
-        allowed = {"failed", "rejected", "cancelled", "partial", "skipped", "skipped_precondition"}
+        allowed = {"failed", "rejected", "cancelled", "partial", "not_calculated", "skipped", "skipped_precondition"}
         if not isinstance(status, str) or status not in allowed:
             if skipped:
                 status = "skipped"
@@ -176,6 +255,7 @@ def partial_projection(
             "status": status,
             "message": step_message,
             "error_code": error.get("code", ""),
+            **step_details(raw, tool_name),
         })
 
     sequence = agent_result.get("tool_result_sequence")
@@ -232,6 +312,12 @@ def partial_projection(
             if step["tool_name"]:
                 label += f" ({step['tool_name']})"
             parts.append(f"- {label} [{step['status']}]：{step['message']}")
+            if step.get("diagnostic"):
+                parts.append("  " + _reverse_diagnostic_text(step["diagnostic"]))
+            if (step["status"] == "not_calculated" and step.get("executed") is False
+                    and step.get("reason") == "dependency_blocked"):
+                causes = "、".join(step.get("blocked_by", [])) or "上游步骤"
+                parts.append(f"  未执行（依赖：{causes}）")
     elif warnings or (error and any(error.values())):
         parts.append("未提供未完成步骤明细。")
     else:
@@ -259,6 +345,28 @@ def failure_content(
 ) -> str:
     """Select a safe, authoritative message for a failed Agent run."""
 
+    def finish(message: str) -> str:
+        diagnostics = []
+
+        def add(observation: Any, tool_name: Any = "") -> None:
+            diagnostic = _reverse_failure_diagnostic(observation, tool_name)
+            if diagnostic:
+                line = _reverse_diagnostic_text(diagnostic)
+                if line not in diagnostics:
+                    diagnostics.append(line)
+
+        add(agent_result)
+        sequence = agent_result.get("tool_result_sequence")
+        if isinstance(sequence, list):
+            for observation in sequence[:_AGENT_FAILURE_WARNING_LIMIT]:
+                add(observation)
+        else:
+            results = agent_result.get("tool_results")
+            if isinstance(results, Mapping):
+                for tool_name, observation in islice(results.items(), _AGENT_FAILURE_WARNING_LIMIT):
+                    add(observation, tool_name)
+        return message + ("\n\n" + "\n".join(diagnostics) if diagnostics else "")
+
     def safe_content(value: Any) -> tuple[str, bool]:
         return sanitize_text(
             value,
@@ -277,7 +385,7 @@ def failure_content(
     raw_final_answer = agent_result.get("final_answer")
     final_answer, sensitive = safe_content(raw_final_answer)
     if sensitive:
-        return _AGENT_FAILURE_FALLBACK
+        return finish(_AGENT_FAILURE_FALLBACK)
     terminal = (
         agent_result.get("status") in {"failed", "rejected", "cancelled"}
         or agent_result.get("success") is False
@@ -290,16 +398,16 @@ def failure_content(
     if final_answer and final_answer.casefold() not in {
         "workflow failed", "no workflow steps were executed"
     }:
-        return final_answer
+        return finish(final_answer)
 
     error = agent_result.get("error")
     if isinstance(error, Mapping):
         raw_error_message = error.get("message")
         error_message, sensitive = safe_content(raw_error_message)
         if sensitive:
-            return _AGENT_FAILURE_FALLBACK
+            return finish(_AGENT_FAILURE_FALLBACK)
         if error_message and (not terminal or not claim_risk(raw_error_message)):
-            return error_message
+            return finish(error_message)
 
     sequence = agent_result.get("tool_result_sequence")
     if isinstance(sequence, list):
@@ -314,8 +422,8 @@ def failure_content(
             raw_result_message = result.get("message")
             result_message, sensitive = safe_content(raw_result_message)
             if sensitive:
-                return _AGENT_FAILURE_FALLBACK
+                return finish(_AGENT_FAILURE_FALLBACK)
             if result_message and (not terminal or not claim_risk(raw_result_message)):
-                return result_message
+                return finish(result_message)
 
-    return _AGENT_FAILURE_FALLBACK
+    return finish(_AGENT_FAILURE_FALLBACK)
