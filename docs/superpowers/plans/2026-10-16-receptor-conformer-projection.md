@@ -615,7 +615,7 @@ scientific choices before any projection or READY state.
 
 ### P6 component transport and retained source worker follow-up
 
-- [ ] Extend only the same downloader and transport test module with
+- [x] Extend only the same downloader and transport test module with
   `fetch_rcsb_component_files(component_ids, *, deadline) -> dict[str, bytes]`.
   Accept an exact immutable tuple of 1–64 unique uppercase ASCII alphanumeric
   component IDs (1–5 characters); the PDB-compatible compiler may support a
@@ -624,6 +624,15 @@ scientific choices before any projection or READY state.
   16 MiB aggregate, and the same response-hook/deadline/close/error rules as the
   paired fetch. No retries, cache, DB writes or partial publication. Obtain
   independent SPEC then QUALITY review after actual RED/GREEN regressions.
+
+  CCD transport evidence (2026-10-16): 133 missing-helper RED failures preceded
+  255 green source-download/security/cache/legacy tests. Independent SPEC passed
+  255 tests and 511 probes, including real Requests non-200 status handling with
+  zero body reads; fresh QUALITY APPROVED passed 239 focused tests and 509
+  real Requests/urllib3 probes. Compilation and scoped diff checks passed;
+  existing paired-fetch/legacy code is unchanged outside the additions. This
+  closes the byte transport only, not chemistry authentication or hard cancellation.
+
 - [ ] Keep network source preparation separate from the offline operation map.
   Reuse the existing retained process lifecycle, without another scheduler or
   detached network thread. Input contains only server-selected PDB/target facts,

@@ -159,6 +159,119 @@ def fetch_rcsb_source_pair(pdb_id, *, deadline) -> dict:
     raise StructureDownloadError(failure)
 
 
+def _reject_component_response(response, **kwargs):
+    # Reject before Requests prepares redirects, which can otherwise read bodies
+    # even with allow_redirects=False. Ownership has not reached our caller yet.
+    if response.status_code != 200:
+        response.close()
+        raise StructureDownloadError("RCSB component download failed")
+    return response
+
+
+def fetch_rcsb_component_files(component_ids, *, deadline) -> dict[str, bytes]:
+    """Fetch bounded canonical CCD byte candidates, without persistence or retries.
+
+    Accept only an exact tuple of exact strings: no caller-owned mutable list or
+    subclass hooks cross this boundary. The absolute monotonic deadline is
+    cooperative, not hard cancellation of blocked DNS/socket I/O. Run inside the
+    future retained worker, never on the event loop. Bytes (including local
+    hashing) do not authenticate source revision, chemistry, or readiness.
+    """
+    failure = "RCSB component download failed"
+    file_cap = 1024 * 1024
+    aggregate_cap = 16 * 1024 * 1024
+
+    def remaining():
+        seconds = deadline - time.monotonic()
+        if seconds <= 0:
+            raise StructureDownloadError(failure)
+        return min(30, seconds)
+
+    try:
+        if type(component_ids) is not tuple or not 1 <= len(component_ids) <= 64:
+            raise StructureDownloadError(failure)
+        seen = set()
+        for component_id in component_ids:
+            if (
+                type(component_id) is not str
+                or re.fullmatch(r"[A-Z0-9]{1,5}", component_id) is None
+                or component_id in seen
+            ):
+                raise StructureDownloadError(failure)
+            seen.add(component_id)
+        if (type(deadline) is not int and type(deadline) is not float) or not math.isfinite(deadline):
+            raise StructureDownloadError(failure)
+        remaining()
+        candidate = {}
+        aggregate = 0
+        for component_id in component_ids:
+            response = _request_structure(
+                f"https://files.rcsb.org/ligands/download/{component_id}.cif",
+                {"files.rcsb.org"},
+                deadline=deadline,
+                timeout=remaining(),
+                allow_redirects=False,
+                stream=True,
+                headers={"Accept-Encoding": "identity"},
+                hooks={"response": _reject_component_response},
+            )
+            try:
+                remaining()
+                if response.status_code != 200:
+                    raise StructureDownloadError(failure)
+                encoding = response.headers.get("Content-Encoding", "identity")
+                if type(encoding) is not str or encoding.lower() != "identity":
+                    raise StructureDownloadError(failure)
+                expected = None
+                if "Content-Length" in response.headers:
+                    length = response.headers["Content-Length"]
+                    if (
+                        type(length) is not str
+                        or not 1 <= len(length) <= 8
+                        or re.fullmatch(r"[0-9]+", length) is None
+                    ):
+                        raise StructureDownloadError(failure)
+                    expected = int(length)
+                    if expected > file_cap or aggregate + expected > aggregate_cap:
+                        raise StructureDownloadError(failure)
+                body = bytearray()
+                remaining()
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    remaining()
+                    if type(chunk) is not bytes:
+                        raise StructureDownloadError(failure)
+                    if not chunk:
+                        continue
+                    size = len(body) + len(chunk)
+                    aggregate += len(chunk)
+                    if (
+                        size > file_cap
+                        or aggregate > aggregate_cap
+                        or (expected is not None and size > expected)
+                    ):
+                        raise StructureDownloadError(failure)
+                    body.extend(chunk)
+                if not body or (expected is not None and len(body) != expected):
+                    raise StructureDownloadError(failure)
+                remaining()
+            finally:
+                response.close()
+            remaining()
+            exact_bytes = bytes(body)
+            remaining()
+            # Keep hashing within the same budget; no digest/authentication claim
+            # is published by this byte-only transport contract.
+            hashlib.sha256(exact_bytes).digest()
+            remaining()
+            candidate[component_id] = exact_bytes
+        remaining()  # All-or-nothing publication, after every response is closed.
+        return candidate
+    except Exception:
+        pass
+    # Outside the handler: no raw diagnostic retained as cause or context.
+    raise StructureDownloadError(failure)
+
+
 class StructureDownloader:
     def __init__(
         self,
