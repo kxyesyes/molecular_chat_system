@@ -100,7 +100,7 @@ hetero/water selection. Missing residue repair, blind docking and implicit chain
 - [x] GREEN producer and existing docking preparation/command cancellation regressions; then
   spec and quality review; commit only D1 files.
 
-## D2 — Same-root chat draft and owned source binding
+### D1 execution evidence and remaining source dependency
 
 D1 review evidence (2026-10-16): initial missing-producer RED, then 95 focused tests passed.
 Independent spec review reproduced two lifecycle defects: untracked physical helper cleanup and
@@ -139,6 +139,8 @@ D2–D6 authority/preview/consent gates below. No new browser evidence exists ye
 S10 remains BLOCKED. Later authorization permits submission/push/merge only after
 the complete implementation and verification gates, not before them.
 
+## D2 — Same-root chat draft and owned source binding
+
 **Files:** new `src/web/docking_request.py`; narrow changes to scientific references,
 TaskStore draft operations, runtime generation binding; new tests in
 `tests/agent/test_web_docking_consent.py` and existing consent store tests.
@@ -162,6 +164,22 @@ TaskStore draft operations, runtime generation binding; new tests in
   holds that lease; time spent and lost-response dispatch count remain spent across refinements.
 - [ ] GREEN negative docking, capability questions, false history, cross-session, expiry/revision,
   malformed proposal, duplicate fields, stale model generation and concurrency tests; review/commit.
+
+### D2 owned-reference foundation (partial, 2026-10-16)
+
+`OwnedDockingStructureEvidence` captures only the exact accepted live S03 result
+matched to the current owner-bound SQLite checkpoint and recomputed evidence
+ledger. Resolution requires one explicitly named, actually offered experimental
+PDB ID with matching target/species and fresh evidence, rechecked at publication.
+It returns identities only, never stored paths or download instructions, and
+explicitly leaves `input_ready=False` and source authentication outstanding.
+
+Measured TDD: initial missing-module RED; later publication-expiry RED (1 failed,
+52 passed), then 53 focused tests passed. Parent combined target/owned-reference
+regressions: 277 passed. Independent SPEC passed 53 tests plus 27 adverse probes;
+fresh QUALITY approved with 53 tests, 55 real-SQLite probes and two compilation
+checks. This is only the evidence-reference foundation: full D2 source
+authentication, draft coordination, producers and model admission remain open.
 
 ## D3 — HTTP and C runtime bridge
 
