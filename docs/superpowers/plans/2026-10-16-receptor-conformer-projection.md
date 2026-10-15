@@ -633,17 +633,99 @@ scientific choices before any projection or READY state.
   existing paired-fetch/legacy code is unchanged outside the additions. This
   closes the byte transport only, not chemistry authentication or hard cancellation.
 
-- [ ] Keep network source preparation separate from the offline operation map.
+- [x] Keep network source preparation separate from the offline operation map.
   Reuse the existing retained process lifecycle, without another scheduler or
   detached network thread. Input contains only server-selected PDB/target facts,
   never URLs, paths, source dictionaries or caller callbacks. Perform pair fetch,
   bounded component discovery, canonical CCD fetch and final independent
   comparison inside that same child and original deadline (60-second child cap,
   180-second upstream root cap). No proxy credentials added to child environment.
-- [ ] Charge download buffers, discovery parsing, final compilation and returned
+- [x] Charge download buffers, discovery parsing, final compilation and returned
   bytes/evidence/IPC on one conservative 512 MiB logical allocation ledger.
   Separately bounded helpers do not establish an aggregate budget. Preserve the
   fixed safe errors and physical-settlement publication rule.
+
+  Retained-worker evidence (2026-10-16): missing-module RED had 24 failures;
+  subsequent lifecycle/resource/error regressions were run RED before repair.
+  The final source module has 43 tests. Independent SPEC passed its 43 tests
+  and 16 delayed-start/cleanup-crossing cases; fresh QUALITY APPROVED passed
+  both worker modules, 245 tests in 55.58 seconds. The parent six-module
+  projection/source/worker/pocket run passed 1,024 tests in 60.04 seconds.
+  These synthetic/controlled-child tests do not authenticate an actual chat
+  source, approve the separately reviewed compiler, or close S10.
+
+  The original sleep-based cleanup-boundary regression failed under loaded
+  process startup (one failed, 2,135 passed in that joint run). It now waits
+  for actual child success and a close-entry barrier before advancing the
+  monotonic clock across the unchanged original deadline. All 16 combinations
+  pass, including deliberately delayed startup; no production budget was
+  extended and no late success is published. Two native huge-integer deadline
+  regressions and two malformed-CIF/date regressions also failed before the
+  fixed safe rejection/error mapping was applied.
+
+  After the compiler's four SPEC fixes were frozen, the parent ten-module
+  compiler/source/preparation/projection/pocket/download/cache/security run
+  passed **1,358 tests in 70.24 seconds**. The first invocation named a nonexistent
+  cache test file and ran no tests; the corrected command used
+  `tests/test_structure_cache_integrity.py`. The strict health check passed
+  **23/23** and the active scientific environment reports Gemmi **0.7.5**.
+  Compiler SPEC rereview/QUALITY remain separate gates; these passing runs do
+  not mark that review or source ownership complete.
+
+  A read-only invocation of the actual retained canonical source worker then
+  downloaded/compared unchanged official 6SAM plus all 27 CCD files in
+  **35.828 seconds**, within its original 60-second child cap. It returned 631
+  residues, revision 2.2, the previously recorded PDB/mmCIF hashes, and actual
+  settled start/wait/cleanup ownership. An earlier stdin invocation could not
+  start Windows spawn and returned `PREPARATION_FAILED`; the corrected `-c`
+  entry is the successful diagnostic. Neither invocation selected a receptor,
+  authenticated a live S03 owner, created a projection or executed Vina. A later
+  SPEC finding about explicitly displaced H/D atoms remains to be repaired and
+  reviewed; the real-source success does not override that defect.
+
+  Subsequent compiler repair: explicit leaving-group H/D coordinates now
+  reject just as heavy leaving atoms do; only the required-heavy inventory
+  update remains heavy-only. Actual H/D RED was 2 failed/88 passed, followed
+  by 90 focused and 869 joint passes. Final independent SPEC passed those same
+  90/869 suites and rechecked all five reported defects. Its fresh unchanged
+  6SAM comparison, including a full-return default-JSON IPC reservation, used
+  **471,622,773 / 536,870,912 logical bytes**. This conservative accounting is
+  not an OS RSS guarantee. Fresh compiler QUALITY is still required.
+
+  Parent latest fourteen-module joint regression after the H/D fix and corrected
+  chat-staging parameter bridge: **1,731 passed in 119.80 seconds**. This includes
+  compiler/source/preparation/projection/pocket/transport, draft/staging and Web
+  proposal/reference tests, but excludes the concurrently implemented initial
+  coordinator and C control-feedback work. It is not the final full suite.
+
+  Fresh compiler QUALITY reproduced two further defects despite 912 passing
+  focused/joint tests: distinct textual sequence keys such as `01` and `1`
+  could collide after integer normalization, and unmatched alignment chains
+  could skip entry/accession/range validation. QUALITY is **not approved**;
+  both fixes require their own RED/GREEN and independent rereview before this
+  compiler or its dependent source integration is committed.
+
+  Those two QUALITY findings are now repaired. Actual normalized-key/alignment
+  RED had **19 failed / 98 passed**, followed by **120 focused / 899 joint
+  passes**. Fresh independent QUALITY rereview APPROVED the frozen compiler:
+  **120 focused / 942 joint passes**, exact previous reproductions rejected,
+  numeric aliases rejected before insertion (including atom IDs), invalid
+  alignment references rejected, valid multi-chain controls retained, and a
+  one-byte-short ledger rejected before indexing. The worker's unchanged 6SAM
+  comparison used **471,395,133 / 536,870,912 logical bytes**; the rereviewer did
+  not rerun that external diagnostic. Source authentication to a live chat
+  owner, explicit receptor choices and S10 remain outstanding.
+
+  Parent pre-commit fourteen-module regression on the final compiler/source
+  worker passed **1,761 tests in 117.69 seconds**. The first invocation used a
+  nonexistent draft-test filename and ran no tests; the corrected invocation
+  used `tests/task_runtime/test_docking_consent_draft.py`. This final scoped run
+  includes draft/staging/proposal/reference contracts but still excludes the
+  changing initial coordinator and the separately reviewed C-feedback slice.
+  Scoped in-memory compilation passed for all six Python files in this commit;
+  the strict health check again passed **23/23** and `git diff --check` passed.
+  Health emitted two existing unregistered activity-record warnings; these do
+  not supply scientific execution evidence and were not modified here.
 - [ ] Bind the child result only in the trusted Web owner after rechecking current
   S03 evidence/session/root/runtime generation. Pure compiler output, a hash or
   arbitrary source-shaped dictionary is not authenticity or execution permission.
@@ -665,50 +747,50 @@ candidate = compile_rcsb_source(
 )
 ```
 
-- [ ] Add missing-callable RED, then strict native immutable-byte admission and
+- [x] Add missing-callable RED, then strict native immutable-byte admission and
   bounded Gemmi 0.7.5 CIF parsing in the owned child. Pin `gemmi==0.7.5` in both
   root CPU and deployment GPU requirements; no model/repair/transformation API.
   Reject duplicate tags/rows, unsupported frames/multiple blocks, malformed
   references, unknown required chemistry, and nonfinite/overprecision numbers.
-- [ ] Match the PDB ID, all first REVDAT lines and their revision dates to the
+- [x] Match the PDB ID, all first REVDAT lines and their revision dates to the
   complete mmCIF Structure-model revision history. Use exact current original
   bytes. Compare the complete independent atom-site inventory one-to-one with
   P1, including all models, waters, alternates, occupancies, coordinates, B
   factors, elements and charges. PDB serials are mapped only after exact atom
   identity equality; mmCIF atom IDs are not assumed equal to PDB serials.
-- [ ] Verify entity/label/auth chain and sequence mappings, deposited polypeptide
+- [x] Verify entity/label/auth chain and sequence mappings, deposited polypeptide
   type, UniProt mapping and biological-source taxonomy (not expression host).
   Carry missing-residue, sequence-variant and independently evidenced construct
   limitations. Do not infer absent full-protein sequence outside proved ranges.
-- [ ] Require every embedded component's official CCD bytes. Bound component
+- [x] Require every embedded component's official CCD bytes. Bound component
   count and aggregate bytes before parsing; require released component identity,
   explicit modification date no later than the entry revision, and exact
   same-entry atom name/element/aromatic/stereo plus bond endpoint/order/aromatic/
   stereo equality. Record each exact CCD digest/version separately. Post-revision
   or conflicting definitions are unavailable, not silently normalized.
-- [ ] Derive required heavy atoms from those component definitions and explicit
+- [x] Derive required heavy atoms from those component definitions and explicit
   deposited bond context. Standard linear peptide OXT displacement requires the
   complete polymer sequence/scheme and actual linking-component definitions;
   terminal OXT remains required. Glycan displacement requires explicit branch
   leaving-atom fields or matching deposited modification/connection evidence
   plus uniquely identified CCD leaving atoms. An absent coordinate is never
   evidence that an atom was a leaving group. Unsupported context fails closed.
-- [ ] Classify protein and water from independent entity/component facts;
+- [x] Classify protein and water from independent entity/component facts;
   `deposited_ligand` requires exact same-entry SUBJECT OF INVESTIGATION feature
   and compatible nonpolymer identity. Glycan needs deposited branch/modification
   evidence. Other roles remain unproven unless independently supported. No
   arbitrary HETATM or primary component name is promoted to pocket reference.
-- [ ] Resolve every PDB LINK/SSBOND/CONECT edge using independent struct_conn or
+- [x] Resolve every PDB LINK/SSBOND/CONECT edge using independent struct_conn or
   matching intracomponent CCD bonds, including symmetry and multiplicity; also
   require every applicable deposited inter-residue connection to be accounted
   for. Do not infer covalency from distance or PDB record type. Unresolved
   cross-residue alternate coupling is unsupported, not an empty constraint list.
-- [ ] Return the complete `receptor-source-v1` candidate plus bounded evidence
+- [x] Return the complete `receptor-source-v1` candidate plus bounded evidence
   identities/digests and explicit limitations. Reserve input, native parser,
   indexes, output and IPC capacity on one conservative logical ledger before
   allocation; native parser overhead is a reservation, not an OS RSS guarantee.
   Run P1/P2 on the completed candidate without altering either strict contract.
-- [ ] Actual malformed-version, hidden-atom, role, taxonomy, component, terminal,
+- [x] Actual malformed-version, hidden-atom, role, taxonomy, component, terminal,
   glycan, link and alternate negative tests must fail before repair. Independently
   authored synthetic fixtures prove contracts only. A read-only official-source
   comparison may inform feasibility, never replace the eventual current-owner

@@ -502,12 +502,23 @@ def test_double_cancel_keeps_start_helper_physical_cleanup_owned(monkeypatch, bl
 
 @pytest.mark.parametrize("operation", ("ligand",) + PROJECTIONS)
 @pytest.mark.parametrize("limiting_budget", ["root", "child"])
-def test_cleanup_crossing_original_deadline_never_publishes_success(monkeypatch, limiting_budget, operation, full_fixture):
+@pytest.mark.parametrize("startup_delay", [0, 1.4])
+def test_cleanup_crossing_original_deadline_never_publishes_success(monkeypatch, limiting_budget, operation, full_fixture, startup_delay):
     module = api()
     actual = module.IsolatedProcess
     entered, release, finished, produced = (threading.Event() for _ in range(4))
+    real_monotonic, offset = time.monotonic, [0.0]
+    # Make the budget transition only after real result/cleanup handshakes.
+    # Advancing the event-loop clock also wakes its already-scheduled deadline;
+    # no production timeout is renewed and no scheduling-speed assumption remains.
+    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+    loop = close_entered = None
 
     class HeldClose(actual):
+        def start(self):
+            time.sleep(startup_delay)
+            super().start()
+
         def wait(self, timeout=None):
             value = super().wait(timeout=timeout)
             assert value["ok"]  # Real producer child, not a fake success.
@@ -517,6 +528,7 @@ def test_cleanup_crossing_original_deadline_never_publishes_success(monkeypatch,
         def close(self):
             super().close()
             entered.set()
+            loop.call_soon_threadsafe(close_entered.set)
             try:
                 release.wait(8)
             finally:
@@ -524,20 +536,21 @@ def test_cleanup_crossing_original_deadline_never_publishes_success(monkeypatch,
 
     monkeypatch.setattr(module, "IsolatedProcess", HeldClose)
     if limiting_budget == "child":
-        monkeypatch.setattr(module, "CHILD_MAX_SECONDS", 1.5)
+        monkeypatch.setattr(module, "CHILD_MAX_SECONDS", 10)
 
     async def run():
+        nonlocal loop, close_entered
+        loop, close_entered = asyncio.get_running_loop(), asyncio.Event()
         owner = module.PreparationOwner()
         begin = time.monotonic()
-        deadline = begin + (1.5 if limiting_budget == "root" else 180)
+        deadline = begin + (10 if limiting_budget == "root" else 180)
         task = asyncio.create_task(module.run_preparation(operation, inputs=preparation_inputs(operation, full_fixture),
             deadline=deadline, owner=owner))
         try:
-            for _ in range(250):
-                if entered.is_set(): break
-                await asyncio.sleep(0.005)
+            await asyncio.wait_for(close_entered.wait(), timeout=8)
             assert produced.is_set() and entered.is_set()
-            done, _ = await asyncio.wait({task}, timeout=max(0.0, begin+1.75-time.monotonic()))
+            offset[0] = 11.0  # Cross whichever ORIGINAL budget was the limiter.
+            done, _ = await asyncio.wait({task}, timeout=0.5)
             returned_while_cleanup_blocked = bool(done)
             assert not finished.is_set() and not owner.snapshot()["settled"]
         finally:

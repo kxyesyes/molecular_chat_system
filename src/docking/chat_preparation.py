@@ -52,6 +52,15 @@ def _failure(code):
     return dict(ok=False, code=code, message=_MESSAGES[code])
 
 
+def _valid_deadline(value):
+    if type(value) is not int and type(value) is not float:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _equivalent(reference, actual, Chem):
     """Same explicit graph/charges/isotopes plus all input-defined stereo.
 
@@ -343,7 +352,7 @@ async def run_preparation(operation: str, *, inputs: dict, deadline: float, owne
     if (type(owner) is not PreparationOwner or owner._claimed or type(operation) is not str
             or operation not in _INPUTS or type(inputs) is not dict
             or len(inputs) != len(_INPUTS[operation])
-            or not any(type(deadline) is allowed for allowed in (int, float)) or not math.isfinite(deadline)):
+            or not _valid_deadline(deadline)):
         return _failure("PREPARATION_INPUT_INVALID")
     # Capture the at-most-five outer entries without looking up caller-owned
     # keys. Another thread can replace a previously checked key with a subclass;
@@ -375,10 +384,20 @@ async def run_preparation(operation: str, *, inputs: dict, deadline: float, owne
             return _failure("PREPARATION_INPUT_INVALID")
         if work_deadline <= time.monotonic():
             return {**_failure("PREPARATION_TIMEOUT"), "lifecycle": owner.snapshot()}
+    return await _run_owned_producer(_produce, (operation, inputs), work_deadline=work_deadline, owner=owner)
+
+
+async def _run_owned_producer(producer, args, *, work_deadline, owner):
+    """Private shared lifecycle, after a fixed entry point claims/validates owner.
+
+    The offline and canonical-source entry points provide fixed server callables.
+    This is not a client callback interface. The caller has already captured
+    bounded immutable arguments and fixed the original/capped absolute deadline.
+    """
     cancelled = False
     result = _failure("PREPARATION_FAILED")
     try:
-        owner.process = IsolatedProcess(_produce, args=(operation, inputs))
+        owner.process = IsolatedProcess(producer, args=args)
         remaining = work_deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError()
