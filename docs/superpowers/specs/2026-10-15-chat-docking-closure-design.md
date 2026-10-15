@@ -121,8 +121,10 @@ sequence、insertion code、altloc、occupancy 及重原子坐标。坐标必须
 算法版本、margin、center 和 size；明确小参考配体可能不能覆盖完整结合位点。
 
 算法建议、exhaustiveness=8、num_modes=9 只作为可见待确认值，不是用户已输入
-或已批准。卡片要求用户确认该口袋及全部参数；修改导致新 revision，旧预览/
-nonce 失效。模型不能写入任意中心；从服务端固定证据描述符产生的数字必须
+或已批准。卡片要求用户确认该口袋及全部参数；确认尚未固定的建议推进 draft
+revision，此时还没有审批 nonce。任何已固定输入的变更必须撤销旧请求及其
+已有 nonce，再另起明确新请求，不能在 READY 卡片上就地改值后继续审批。
+模型不能写入任意中心；从服务端固定证据描述符产生的数字必须
 逐项验证，不能仅凭 proposal 的 source_spans 通过。
 
 ## 5. 冻结输入、显式审批与一次执行
