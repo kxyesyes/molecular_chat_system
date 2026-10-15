@@ -91,7 +91,7 @@ Files: `src/agent/tools/candidate_ranker.py`, `src/web/agent_result_presentation
 - [x] Run focused suites together, `python -m pytest tests/agent -q`, relevant full-suite tests, `python -m compileall -q src scripts`, three Node tests and repository JavaScript syntax checks. Broad-run failures and their passing targeted reruns, plus the baseline C4a hang, are recorded in the verification document.
 - [x] Run contract/replay acceptance if available without external credentials; report any environmental limitations honestly. Contract passed 34/34; real replay input was unavailable. No real-model recalibration is part of this change.
 - [x] Review spec compliance first, then code quality, and fix actionable findings with regression tests.
-- [ ] Explicitly stage only task files; commit Conventional Commit changes on `codex/fix-complex-workflow-status`. Push and create one draft PR targeting main with scope, commands/results, risks and review focus. Attach the PR. Do not merge.
+- [x] Explicitly stage only task files; commit Conventional Commit changes on `codex/fix-complex-workflow-status`. Push and create one draft PR targeting main with scope, commands/results, risks and review focus. Attach the PR. Delivered as draft PR #208; not merged.
 
 ## Execution boundaries
 
