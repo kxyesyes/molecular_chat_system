@@ -48,10 +48,10 @@ do not manufacture a defect. Parent runs verification, then separate spec/qualit
 **Files:** compact_source.py; test_reverse_target_compact_source.py. The predictor initialization
 seam is introduced in R2; R1 tests can call the pure loader with explicit source paths/check/fingerprint.
 
-- [ ] Write a real fixture writer using CSV and `np.save`, with molecules `CCO`, `CCC`, `CCO`,
+- [x] Write a real fixture writer using CSV and `np.save`, with molecules `CCO`, `CCC`, `CCO`,
   distinct targets/species and optional identity columns. Compute fixture fingerprints using RDKit;
   no canned array may stand in for the fingerprint equality being tested.
-- [ ] Add first RED with a missing callable assertion before invoking the new loader:
+- [x] Add first RED with a missing callable assertion before invoking the new loader:
 
 ```python
 def test_compact_source_matches_logical_arrays(source_files):
@@ -72,8 +72,8 @@ def test_compact_source_matches_logical_arrays(source_files):
         assert owned.descriptor[name + '_sha256'] == _array_hash(original, check)
 ```
 
-- [ ] Run `python -m pytest tests/test_reverse_target_compact_source.py -q` and record RED.
-- [ ] Implement the frozen policy and pure loader with these exact public-internal shapes:
+- [x] Run `python -m pytest tests/test_reverse_target_compact_source.py -q` and record RED.
+- [x] Implement the frozen policy and pure loader with these exact public-internal shapes:
 
 ```python
 @dataclass(frozen=True)
@@ -105,16 +105,16 @@ bits; stream original logical-array hashes; close all mappings/fds; enforce read
 allocation budgets; final check and return. The existing `_OwnedSource` receipt descriptor keys
 and canonical hash prefix remain exact. Every error clears failed large locals/traceback frames.
 
-- [ ] Add REDs for each rejection: swapped rows, non-binary bit, mismatched fingerprint, cached
+- [x] Add rejection regressions (new behavior RED; correct donor guards already GREEN): swapped rows, non-binary bit, mismatched fingerprint, cached
   count negative/overflow/float/misalignment, NPY version/header/shape/object corruption, F-order
   compatibility, missing optional count computation, quoted TSV/BOM/CRLF/final-line parity,
   duplicate/empty headers, NUL, multiline/wide/short records, overlong cells and pass-two mutation.
   Run each RED selection before the implementing change.
-- [ ] Add bounded-allocation tests that instrument actual allocations/reads: reject before a large
+- [x] Add bounded-allocation tests that instrument actual allocations/reads: reject before a large
   allocate, never read >1 MiB, never retain an mmap alias, max 4096-row unpack, reject rather than
   truncate on budget/row/column limits. Account dictionary/string capacity and conversion scratch,
   not only final array `nbytes`. Final full-corpus measurement must validate practical headroom.
-- [ ] GREEN: new module tests plus `tests/test_reverse_target_invocation_receipts.py` and
+- [x] GREEN: new module tests plus `tests/test_reverse_target_invocation_receipts.py` and
   `tests/test_reverse_target_popcounts.py`. Review and commit only these task files.
 
 ## R2 — Producer lifecycle and bounded exact scoring
@@ -251,5 +251,20 @@ persistence seam as necessary; new test_reverse_target_rank_followup.py.
 - [x] Plan self-check: all spec sections map to R1–R5; budgets/codec and identity are explicit.
 - [ ] R1–R5 implementation/verification/reviews completed (record measured results here as executed).
 
-No implementation or test success is claimed by this plan. Checkboxes change only after the
-corresponding code, test command and review evidence exist.
+### R1 execution evidence (2026-10-16)
+
+Initial missing-module RED: 7 failed; first implementation: 7 passed. Expanded tests exposed
+missing allocation metrics and incomplete fingerprint pairs. Independent spec review then
+identified uncounted retained headers and source mutation during final count hashing; both were
+reproduced as RED and fixed. Quality review identified a swallowed test assertion; the corrected
+test now fails a deliberate mutation disabling `_Budget.reserve`.
+
+Current gate: `python -m pytest tests/test_reverse_target_compact_source.py
+tests/test_reverse_target_invocation_receipts.py tests/test_reverse_target_popcounts.py -q
+-p no:cacheprovider --tb=short --basetemp=<fresh-temp-root>`: **411 passed in 14.40s**.
+Final focused test-only adjustment: **60 passed in 2.09s**. Independent spec re-review PASS;
+independent quality re-review APPROVED (60 passed independently; budget mutation correctly fails).
+R1 adds only the compact-source module and its tests; no legacy strict-loader behavior changed.
+The ongoing full-corpus measurement and R2–R5 are not completion evidence yet. S08/S09 remain BLOCKED.
+
+Checkboxes change only after corresponding code, test and review evidence exists.
