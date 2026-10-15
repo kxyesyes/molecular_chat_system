@@ -118,6 +118,15 @@ _ANALYSIS_JOIN = re.compile(
     r'[ \t]*(?:和|及|与|并|、|[,，]|(?<![A-Za-z0-9_-])and(?![A-Za-z0-9_-]))[ \t]*',
     re.I,
 )
+_DESIGN_PROPERTY_CONSTRAINT = re.compile(
+    r'(?:要求|限制|满足)?[ \t]*'
+    r'(?:分子量|MW|molecular[ \t]+weight|logP|TPSA|QED|HBA|HBD)'
+    r'[ \t]*(?:不超过|不低于|小于|大于|低于|高于|<=|>=|<|>|≤|≥)'
+    r'[ \t]*[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)'
+    r'(?![A-Za-z0-9_.])[ \t]*(?:(?:Da|g/mol)(?![A-Za-z0-9_/-]))?', re.I,
+)
+_DESIGN_OUTPUT = re.compile(r'(?:返回|输出|给出)[ \t]*(?:SMILES|分子结构)(?![A-Za-z0-9_])', re.I)
+_DESIGN_CONSTRAINT_CHECK = re.compile(r'(?:逐项)?(?:检查|验证)(?:上述|所有)?(?:约束|条件)')
 
 
 def _analysis_item(query: str, position: int, end: int) -> tuple[int, str] | None:
@@ -195,7 +204,15 @@ def _role_tail(query: str, start: int, end: int) -> tuple[list[str], list[tuple[
         elif separator is None:
             break
         clause_start = position
-        if head := _ANALYSIS_HEAD.match(query, position, end):
+        # Consume bounded non-target instructions in full, preserving the
+        # original query for generation and verification. Any unknown suffix
+        # still reaches the conservative clarification path below.
+        constraint = _DESIGN_PROPERTY_CONSTRAINT.match(query, position, end)
+        output = _DESIGN_OUTPUT.match(query, position, end)
+        check = _DESIGN_CONSTRAINT_CHECK.match(query, position, end)
+        if constraint or output or check:
+            position = (constraint or output or check).end()
+        elif head := _ANALYSIS_HEAD.match(query, position, end):
             item = _analysis_item(query, head.end(), end)
             if item is None:
                 break

@@ -37,6 +37,9 @@ from src.web.prompt_budget import (
 )
 from src.web import agent_result_presentation as result_presentation
 from src.web import chat_prompt_builder as prompt_builder
+from src.web import property_comparison
+from src.web.property_constraints import generation_constraint_report
+from src.agent import evidence_followup
 from src.web.agent_result_presentation import (
     _AGENT_FAILURE_FALLBACK,
     _AGENT_FAILURE_CONTENT_MAX_CHARS,
@@ -417,6 +420,13 @@ class ChatHandler:
             if conversation_history is not None
             else self.conversation_history
         )
+        # Legacy conversational history is not a socket-bound scientific source.
+        # Both fields are supplied by the standard WebSocket entry point.
+        scientific_context_enabled = (
+            isinstance(conversation_history, list)
+            and isinstance(session_id, str) and bool(session_id.strip())
+        )
+        scientific_history = history if scientific_context_enabled else []
         try:
             validate_question(message, self._input_limit())
             for section in ("history", "rag", "tool"):
@@ -437,6 +447,22 @@ class ChatHandler:
         agent_task = None
         agent_event_queue = None
         live_agent_events = 0
+        property_evidence = None
+        property_answer = None
+        activity_evidence = None
+        comparison_answer = None
+        execution_message = property_comparison.corrected_property_query(message, scientific_history)
+
+        # Evidence reuse is socket-local, before molecular-input admission. No
+        # shared handler history, persistence lookup or tool/model execution.
+        followup = evidence_followup.followup_answer(message,
+            scientific_history, session_id)
+        if followup is not None:
+            await websocket.send_text(json.dumps({"type": "complete",
+                "content": followup["final_answer"], "status": followup["status"]}, ensure_ascii=False))
+            self._append_history(history, {"user": message, "assistant": followup["final_answer"],
+                "agent_used": False, "rag_enabled": False, "molecules_retrieved": 0})
+            return
 
         try:
             validated_mol_count = preflight_generation_request(
@@ -469,18 +495,21 @@ class ChatHandler:
         matched_skill = None
         route_decision = None
         resolved_molecule = None
-        routing_message = message
+        routing_message = execution_message
         if self.scientific_references is not None:
             try:
                 resolved_molecule = await owned_allocation_call(
                     self.scientific_references.resolve, message, reference, selection,
                     session_id=session_id, enable_tools=enable_tools)
+                if resolved_molecule is not None:
+                    execution_message = await owned_allocation_call(
+                        self.scientific_references.continuation_query, execution_message,
+                        resolved_molecule, session_id=session_id)
+                    routing_message = resolved_molecule.routing_query(execution_message)
             except ValueError:
                 from .scientific_references import REFERENCE_CLARIFICATION
                 await websocket.send_text(json.dumps({"type": "complete", "content": REFERENCE_CLARIFICATION}, ensure_ascii=False))
                 return
-            if resolved_molecule is not None:
-                routing_message = resolved_molecule.routing_query(message)
         molecular_input = InputValidator().analyze_molecular_input(routing_message)
         clarification = self._molecular_input_clarification(molecular_input)
         skill_router = getattr(self.agent_system, "skill_router", None)
@@ -574,7 +603,7 @@ class ChatHandler:
 
             agent_task = asyncio.create_task(
                 self._execute_agent(
-                    message,
+                    execution_message,
                     temperature,
                     mol_count,
                     matched_skill,
@@ -618,6 +647,35 @@ class ChatHandler:
                     await self._send_agent_events(websocket, agent_result)
                 presentation_status = self._agent_presentation_status(agent_result)
                 if presentation_status in {"partial", "completed"}:
+                    if scientific_context_enabled:
+                        activity_evidence = evidence_followup.accepted_activity_evidence(
+                            agent_result, message, session_id)
+                    comparison_answer = evidence_followup.comparison_answer(message, agent_result, session_id)
+                    if comparison_answer is not None:
+                        # A presentation can demote incomplete coverage, never
+                        # promote an existing partial run to completed.
+                        if presentation_status == "partial":
+                            comparison_answer.update(success=False, status="partial", partial=True)
+                        agent_result = {**agent_result, **comparison_answer}
+                        presentation_status = self._agent_presentation_status(agent_result)
+                if presentation_status in {"partial", "completed"}:
+                    constraint_report = generation_constraint_report(agent_result, execution_message)
+                    if constraint_report:
+                        agent_result = {**agent_result, "final_answer": constraint_report + "\n\n"
+                                        + agent_result.get("final_answer", "")}
+                    property_evidence = property_comparison.accepted_property_evidence(
+                        agent_result, message, session_id)
+                if presentation_status == "completed":
+                    property_result = property_comparison.descriptor_result(
+                        message, property_evidence, scientific_history, session_id)
+                    if property_result is not None:
+                        property_answer = property_result["final_answer"]
+                        existing_warnings = agent_result.get("warnings")
+                        agent_result = {**agent_result, **property_result,
+                            "warnings": (existing_warnings if isinstance(existing_warnings, list) else [])
+                                        + property_result["warnings"]}
+                        presentation_status = self._agent_presentation_status(agent_result)
+                if presentation_status in {"partial", "completed"}:
                     retrieved_molecules, rag_warnings = await self._send_agent_rag_results(
                         websocket, agent_result, rag_count,
                     )
@@ -644,6 +702,9 @@ class ChatHandler:
                         "rag_enabled": enable_rag,
                         "molecules_retrieved": len(retrieved_molecules),
                         "assistant": agent_response,
+                        **({"property_evidence": property_evidence}
+                           if scientific_context_enabled and property_evidence is not None else {}),
+                        **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
                     })
                     return
                 if presentation_status == "completed":
@@ -782,7 +843,7 @@ class ChatHandler:
             agent_used
             and agent_response
             and is_workflow_result
-            and not summarize_workflow
+            and (not summarize_workflow or property_answer is not None or comparison_answer is not None)
         ):
             full_response = agent_response
             await websocket.send_text(json.dumps({
@@ -797,6 +858,9 @@ class ChatHandler:
                 "rag_enabled": enable_rag,
                 "molecules_retrieved": len(retrieved_molecules),
                 "assistant": full_response,
+                **({"property_evidence": property_evidence}
+                   if scientific_context_enabled and property_evidence is not None else {}),
+                **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
             })
             return
 
@@ -905,7 +969,10 @@ class ChatHandler:
             "agent_response": agent_response if agent_used else None,
             "rag_enabled": enable_rag,
             "molecules_retrieved": len(retrieved_molecules),
-            "assistant": full_response
+            "assistant": full_response,
+            **({"property_evidence": property_evidence}
+               if scientific_context_enabled and property_evidence is not None else {}),
+            **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
         })
 
     @staticmethod
@@ -1504,6 +1571,10 @@ class ChatHandler:
             from src.agent.contracts.target_request import TARGET_CLARIFICATION
 
             return TARGET_CLARIFICATION
+        if "target_reference_required" in route_decision.reasons:
+            return "请提供已确认的靶点名称或 UniProt 标识；当前没有可绑定的排名靶点，不能猜测或运行对接。"
+        if "target_subtype_clarification_required" in route_decision.reasons:
+            return "请明确要查询的具体靶点亚型或 UniProt 标识；不同亚型的结构不能混用。本次未生成分子或运行对接。"
         if "invalid SMILES" in reasons:
             return (
                 "你提供的 SMILES 无效，请检查并更正结构后重试。"
@@ -1520,6 +1591,8 @@ class ChatHandler:
                 "SMILES。收到结构后，系统会调用 RDKit 计算，而不会由语言模型"
                 "猜测数值。"
             )
+        if route_decision.selected_skill == "docking_simulation":
+            return "请提供明确的配体 SMILES/文件、受体结构及对接口袋参数（center/size）；输入不足，本次未运行对接。"
         return ""
 
     @staticmethod

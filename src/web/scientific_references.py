@@ -10,8 +10,11 @@ import re
 
 from src.agent.contracts.scientific_references import reference_json
 from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
+from src.agent.contracts.generation_request import has_generation_intent
+from src.agent.contracts.target_request import analyze_target_request
 from src.agent.utils.validators import InputValidator
 from src.agent.routing.hybrid import HybridSkillRouter
+from src.target_identifiers import canonical_target_identifier
 
 
 REFERENCE_CLARIFICATION = "请重新选择一个已确认的候选集合及其中一个分子（序号 1–32）。"
@@ -20,6 +23,10 @@ REFERENCE_CLARIFICATION = "请重新选择一个已确认的候选集合及其�
 def scientific_intent(query):
     if re.search(r"什么是|是什么|是什么意思|解释|介绍|\b(?:explain|what\s+(?:is|are)|define)\b", query, re.I):
         return False
+    # Generation can use a prior molecule. Resolve distinguishes source
+    # references from output counts, independently of endpoint/router scores.
+    if has_generation_intent(query):
+        return True
     # Reuse the existing local routing policy, without an LLM or memory. A
     # docking-readiness search is not a request to calculate the selected ligand.
     if HybridSkillRouter().decide(query).selected_skill in {
@@ -33,8 +40,14 @@ def scientific_intent(query):
 def explicit_ordinal(query):
     # Only small, explicit singular ordinals; never guess a range or a list.
     noun = r"(?:candidates?|molecules?)"
-    word = r"(?:first|second|third)"
-    number = rf"(?:#?\s*\d{{1,3}}|{word})"
+    word = (
+        r"(?:(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[ -]+)?"
+        r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|"
+        r"eleventh|twelfth|thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|"
+        r"eighteenth|nineteenth|twentieth|thirtieth|fortieth|fiftieth|sixtieth|"
+        r"seventieth|eightieth|ninetieth|hundredth|thousandth)"
+    )
+    number = rf"(?:#?\s*\d+|{word})"
     separator = r"(?:[-–—,，/&]|\band\b|\bor\b|\bto\b|\bthrough\b)"
     if re.search(rf"\b(?:{noun}\s*{number}|{word}(?:\s+{noun})?)\s*"
                  rf"{separator}\s*(?:{noun}\s*)?{number}\b", query, re.I):
@@ -50,15 +63,58 @@ def explicit_ordinal(query):
             if i % 10:
                 name += next(k for k, v in chinese.items() if v == i % 10)
         numbers[name] = i
-    matches = re.findall(r"第([^\s，。]{1,16}?)个", query)
-    english = re.findall(r"\b(?:candidate|molecule)\s*#?\s*(\d{1,3})\b", query, re.I)
-    words = re.findall(r"\b(first|second|third)\s+(?:candidate|molecule)\b", query, re.I)
-    matches += english + [str({"first": 1, "second": 2, "third": 3}[w.lower()]) for w in words]
+    # Detect the complete ordinal phrase before parsing it. A spaced list or
+    # unsupported form is an invalid reference, not an absent reference.
+    phrases = re.findall(r"第([^，。；;\r\n]*?)(个|候选|分子)", query)
+    if any(suffix != "个" for _, suffix in phrases):
+        raise ValueError(REFERENCE_CLARIFICATION)
+    matches = [value.strip() for value, _ in phrases]
+    english_tokens = re.findall(
+        r"\b(?:candidate|molecule)\s*(?:#\s*([\w.+-]*)|([+-]?\d[\w.+-]*))",
+        query, re.I)
+    # Keep complete tokens: candidate 1.5 / -1 / #unknown must not select #1
+    # or become an absent ordinal. Only sentence-final periods are punctuation.
+    english = [(marked or plain).rstrip(".") for marked, plain in english_tokens]
+    words = re.findall(rf"\b({word})\s+{noun}\b", query, re.I)
+    if (re.search(rf"\b\d+(?:st|nd|rd|th)\s+{noun}\b", query, re.I)
+            or re.search(rf"\b{word}\s+(?:candidates|molecules)\b", query, re.I)
+            or re.search(r"\b(?:candidates|molecules)\s*#?\s*\d", query, re.I)):
+        raise ValueError(REFERENCE_CLARIFICATION)
+    matches += english + [str({"first": 1, "second": 2, "third": 3}.get(w.lower())) for w in words]
     if not matches:
         return None
     if len(matches) != 1 or matches[0] not in numbers:
         raise ValueError(REFERENCE_CLARIFICATION)
     return numbers[matches[0]]
+
+
+def prior_molecule_reference(query):
+    # Source relations are references even without a known demonstrative: e.g.
+    # "based on the previously optimized candidate". Do not cross a generation
+    # verb into its output noun, or confuse a target source with a molecule.
+    chinese_source = (
+        r"(?:基于|根据|参照|参考|使用|利用|沿用|以|从)"
+        r"(?:(?!(?:生成|创建|设计|制作|构建|合成))[^，。；;\r\n]){0,64}?"
+        r"(?:候选|分子(?!量))"
+    )
+    english_source = (
+        r"\b(?:from|using|like|based\s+on)\s+"
+        r"(?:(?!(?:and|then|targets?|generate|design|create|produce|make|build|synthesize)\b)"
+        r"[a-z][a-z'’-]*\s+){0,8}(?:candidates?|molecules?)\b"
+    )
+    # Standalone source pronouns still need selection/ACK; determiners before
+    # a target noun ("from these targets") must remain fresh generation.
+    english_pronoun_source = (
+        r"\b(?:from|using|like|based\s+on)\s+(?:these|those)"
+        r"(?=\s*(?:[.,;!?]|$|\b(?:and|then|with)\b))"
+    )
+    return bool(re.search(
+        r"刚才|之前|上一个|前一个|(?:这|那)(?:个|些)(?:候选|分子)|"
+        r"(?:上面|前面|上文|上次|上述|该|选中|已确认)的?\s*(?:候选|分子)|"
+        r"\b(?:previous|earlier|it|"
+        r"(?:above|selected|confirmed|last|former|latter|this|that|these|those)\s+"
+        r"(?:candidates?|molecules?))\b|"
+        + chinese_source + "|" + english_source + "|" + english_pronoun_source, query, re.I))
 
 
 def valid_pointer(value, *, manifest=False):
@@ -277,6 +333,46 @@ class ScientificReferenceService:
         except Exception:
             return None
 
+    def continuation_query(self, query, resolved_molecule=None, *, session_id):
+        """Carry a confirmed source target into an otherwise target-free optimization.
+
+        Call with the original current query, before routing_query adds SMILES.
+        This is a server-only boundary, not browser metadata or history recovery.
+        """
+        if resolved_molecule is None:
+            return query
+        if type(query) is not str or type(resolved_molecule) is not ResolvedScientificMolecule:
+            raise ValueError(REFERENCE_CLARIFICATION)
+        pointer = resolved_molecule.pointer()
+        view = self.get(pointer, session_id=session_id)
+        if not view or not any(
+                row["observation_id"] == resolved_molecule.observation_id
+                and row["candidate"]["candidate_id"] == resolved_molecule.candidate_id
+                and row["candidate"]["canonical_smiles"] == resolved_molecule.canonical_smiles
+                for row in view["ordered_candidates"]):
+            raise ValueError(REFERENCE_CLARIFICATION)
+        optimization = r"优化|\b(?:optimi[sz](?:e|ation|ing)|hit-to-lead)\b"
+        if (not re.search(optimization, query, re.I)
+                or re.search(r"(?:不(?:要|需要)?|无需|别|勿|停止)\s*(?:再)?\s*优化|"
+                             r"\b(?:not|never|don't)\s+(?:\w+\s+){0,3}optimi[sz]|"
+                             r"解释|介绍|什么是|\b(?:explain|define|what\s+(?:is|are))\b",
+                             query, re.I)
+                or InputValidator().analyze_molecular_input(query).potential_smiles):
+            return query
+        request = analyze_target_request(query)
+        # Even an unknown or incomplete current target instruction wins over
+        # inheritance. Let the existing target boundary clarify it normally.
+        if (request.targets or request.unknown or request.explicit or request.qualified
+                or re.search(r"靶点|针对|\b(?:targets?|targeting|against)\b", query, re.I)):
+            return query
+        target = canonical_target_identifier(view["target"])
+        if target is None:
+            return query
+        # Reject a revocation/source change during the read/analysis window.
+        if self.get(pointer, session_id=session_id) != view:
+            raise ValueError(REFERENCE_CLARIFICATION)
+        return query + "\n靶点: " + target
+
     def resolve(self, query, pointer=None, selection=None, *, session_id, enable_tools):
         if not enable_tools or not scientific_intent(query):
             return None
@@ -285,7 +381,13 @@ class ScientificReferenceService:
         if InputValidator().analyze_molecular_input(query).potential_smiles:
             return None
         ordinal = explicit_ordinal(query)
-        refers = bool(re.search(r"刚才|上一个|这个分子|该分子|候选|\b(?:previous|candidate|molecule)\b", query, re.I))
+        prior = prior_molecule_reference(query)
+        # "Generate three candidates" names outputs, not candidate #3. A stale
+        # browser card must not turn a new generation request into a reference.
+        # Explicit ordinals/deictic references still require the confirmed view.
+        if has_generation_intent(query) and ordinal is None and not prior:
+            return None
+        refers = prior or bool(re.search(r"候选|\b(?:candidate|molecule)\b", query, re.I))
         if pointer is None and selection is None and ordinal is None and not refers:
             return None
         view = self.get(pointer, session_id=session_id)

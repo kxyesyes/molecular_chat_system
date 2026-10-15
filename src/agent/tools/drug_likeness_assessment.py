@@ -318,7 +318,7 @@ SMILES: `{smiles}`
 
 🔬 **Veber规则评估:**
 • 整体符合: {'是' if veber['overall_compliance'] else '否'}
-• TPSA: {props['tpsa']} Ų {'✓' if veber['details']['tpsa']['pass'] else '✗'}
+• TPSA: {props['tpsa']} Å² {'✓' if veber['details']['tpsa']['pass'] else '✗'}
 • 可旋转键: {props['rotatable_bonds']} {'✓' if veber['details']['rotatable_bonds']['pass'] else '✗'}
 
 📊 **分子特征:**

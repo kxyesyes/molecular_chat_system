@@ -191,6 +191,8 @@ def _rule_details_text(value):
 class ADMETPredictor(BaseMolecularTool):
     """ADMET-AI 1.4.0 predictor with explicit non-fabricating failure states."""
 
+    version = "2"
+
     def __init__(self, *, backend=None, timeout_seconds: float = 180.0):
         super().__init__(
             name="admet_predictor",

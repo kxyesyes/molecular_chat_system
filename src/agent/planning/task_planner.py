@@ -14,6 +14,8 @@ from src.agent.contracts.generation_request import (
     generation_request_error_details,
 )
 from src.agent.orchestrators.base import WorkflowStep
+from src.agent.evidence_followup import MAX_CANDIDATES, comparison_tools
+from src.agent.utils.validators import InputValidator
 
 from . import request_parsing, step_templates, workflow_selection
 
@@ -156,13 +158,32 @@ class TaskPlanner:
         )
 
     def _admet_plan(self, query: str) -> WorkflowPlan:
+        steps = step_templates.admet_steps(query, include_admet=self._wants_admet(query))
+        if request_parsing.restricted_properties(query):
+            steps = [step for step in steps if step.tool_name == "property_calculator"]
         return WorkflowPlan(
             workflow_name="admet_assessment",
-            steps=step_templates.admet_steps(query, include_admet=self._wants_admet(query)),
+            steps=steps,
             metadata={"input_type": "molecule"},
         )
 
     def _comprehensive_plan(self, query: str) -> WorkflowPlan:
+        requested_tools = comparison_tools(query)
+        if requested_tools:
+            identity = InputValidator().analyze_molecular_input(query)
+            if identity.blocks_execution or not identity.valid_smiles or len(identity.valid_smiles) > MAX_CANDIDATES:
+                return WorkflowPlan("comprehensive_evaluation", [],
+                    {"reason": "comparison_input_required", "message": "请提供不超过 16 个明确有效的候选 SMILES。"})
+            # Every independent endpoint gets exactly the same explicit batch.
+            # Failure of one endpoint must not suppress the other requested work.
+            batch = "\n".join(identity.valid_smiles)
+            steps = [replace(step, required=False, continue_on_error=True,
+                input_data=({"smiles": list(identity.valid_smiles), "query": query}
+                            if step.tool_name == "activity_predictor" else batch))
+                for step in step_templates.comprehensive_steps(query) if step.tool_name in requested_tools]
+            return WorkflowPlan("comprehensive_evaluation", steps,
+                {"input_type": "explicit_comparison", "requested_tools": list(requested_tools),
+                 "ranking_criterion": "consistent_valid_pIC50_descending"})
         return WorkflowPlan(
             workflow_name="comprehensive_evaluation",
             steps=step_templates.comprehensive_steps(query),

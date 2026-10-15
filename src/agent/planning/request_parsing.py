@@ -123,22 +123,52 @@ def extract_top_n(query: str, default: int) -> int:
     return max(1, min(100, int(match.group(1))))
 
 
+_CLAUSE_END = r"[,，;；。.!！?？\n]|但是|而是|\bbut\b|\band\s+then\b"
+# 别 is imperative except inside compounds such as 分别/特别/识别/类别.
+_NEGATION = r"(?:不要|无需|不需要|不做|不运行|不预测|禁止|跳过|避免|勿|(?<![分特区识鉴辨类级差个])别|\bwithout\b|\bdo\s+not\b|\bdon't\b|\bskip\b|\bexclude\b)"
+
+
+def positive_intent_text(query: str) -> str:
+    """Remove negated operation spans, not unrelated positive clauses.
+
+    This is shared by routing and deterministic planning. In particular the
+    mere occurrence of a tool/endpoint in a prohibition is not authorization.
+    """
+    text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
+    # Keep punctuation intact: it can be part of a receptor path, a decimal
+    # docking-box coordinate, or the canonical generation grammar.
+    clauses = re.split(f"({_CLAUSE_END})", text, flags=re.I)
+    output = []
+    for clause in clauses:
+        # Also cover the ordinary object-before-prohibition order.
+        clause = re.sub(
+            r"(?:admet|adme|毒性|活性|对接|docking|类药性)\s*" + _NEGATION + r".*$",
+            "", clause, flags=re.I,
+        )
+        output.append(re.split(_NEGATION, clause, maxsplit=1, flags=re.I)[0])
+    return "".join(output)
+
+
 def wants_admet(query: str) -> bool:
-    lowered = query.lower()
-    return any(token in lowered for token in (
-        "admet", "adme", "吸收", "分布", "代谢", "排泄", "毒性", "风险",
-    ))
+    return bool(re.search(r"(?<![A-Za-z0-9_])admet?(?![A-Za-z0-9_])|吸收|分布|代谢|排泄|毒性|风险",
+                          positive_intent_text(query), re.I))
 
 
 def wants_activity(query: str) -> bool:
     """Return true only for a positive activity request, not a negation."""
     if not isinstance(query, str):
         return False
-    lowered = query.casefold()
-    if not any(token in lowered for token in ("活性", "potency", "activity", "inhibition")):
-        return False
-    return not bool(re.search(
-        r"(?:不要|无需|不需要|不做|禁止|without|without\s+.*(?:activity|potency)|"
-        r"do\s+not|don't)\s*(?:预测|评估|计算|输出|做|activity|potency|活性)?",
-        lowered,
-    ))
+    return bool(re.search(r"活性|\b(?:potency|activity|inhibition)\b",
+                          positive_intent_text(query), re.I))
+
+
+def restricted_properties(query: str) -> bool:
+    """An explicit 'only' limits the default assessment bundle to descriptors."""
+    positive = positive_intent_text(query)
+    return bool(
+        re.search(r"只|仅|\bonly\b", positive, re.I)
+        and re.search(r"分子量|logp|molecular\s+weight|性质|properties", positive, re.I)
+        and not re.search(r"类药性|成药性|lipinski|drug.likeness", positive, re.I)
+        and not wants_admet(query)
+        and not wants_activity(query)
+    )

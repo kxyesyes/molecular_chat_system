@@ -11,9 +11,11 @@ from typing import Any
 from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
+from src.agent.planning.request_parsing import positive_intent_text
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
 from src.agent.tools.activity_input import activity_intent_requested
+from src.agent.evidence_followup import comparison_tools
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.runtime.allocation import (
     AllocationStopped, await_routing_model, routing_model_call,
@@ -80,7 +82,7 @@ class HybridSkillRouter:
         llm: Any = None,
     ) -> RouteDecision:
         text = query.strip()
-        lower = text.lower()
+        lower = positive_intent_text(text).lower()
         if self._is_general_chat(lower):
             return RouteDecision(
                 selected_skill=None,
@@ -98,10 +100,28 @@ class HybridSkillRouter:
 
         target_request = analyze_target_request(text)
         has_target = bool(target_request.targets)
+        target_lookup = bool(re.search(
+            r"查找|搜索|检索|找一下|列出|\b(?:find|search|list|look\s+up)\b", lower
+        ) and re.search(r"靶点|结构|资料|蛋白|uniprot|pdb|structures?|protein", lower))
+        if target_lookup and not has_target and re.search(r"排名|上述|那个|第[一二三]|previous|ranked|top", lower):
+            return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
+                requires_confirmation=True, reasons=["target_reference_required"])
+        if (target_lookup and re.search(r"亚型|subtype|isoform", lower)
+                and re.search(r"澄清|clarif", lower)):
+            return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
+                requires_confirmation=True, reasons=["target_subtype_clarification_required"])
         input_validator = InputValidator()
         molecular_input = input_validator.analyze_molecular_input(text)
         has_smiles = bool(molecular_input.valid_smiles)
-        generation = self._has_generation_intent(lower)
+        requested_tools = comparison_tools(text)
+        if requested_tools:
+            # Explicit endpoint coverage must not lose activity to ADMET scoring,
+            # memory feedback, tool availability discounts or LLM arbitration.
+            confirmation = self._confirmation_reasons("comprehensive_evaluation", lower, molecular_input)
+            return RouteDecision(selected_skill="comprehensive_evaluation", confidence=1.0,
+                source="rule", reasons=["explicit bounded endpoint comparison", *confirmation],
+                requires_confirmation=bool(confirmation), allowed_tools=list(requested_tools))
+        generation = self._has_generation_intent(text)
         if (
             generation
             and (has_target or target_request.explicit)
@@ -142,9 +162,9 @@ class HybridSkillRouter:
             add("rag_search", 1.0, "local knowledge or sourced explanation intent")
         if self._contains(lower, "完整工作流", "完整流程", "全流程", "full workflow"):
             add("comprehensive_evaluation", 1.0, "explicit full workflow intent")
-        if self._contains(lower, "pdb", "蛋白结构", "可用于 docking 的", "查 ", "搜索"):
+        if (target_lookup and not generation) or self._contains(lower, "pdb", "蛋白结构", "可用于 docking 的", "查 ", "搜索"):
             add("target_database_search", 0.92, "target structure search intent")
-        if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "reverse target"):
+        if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "反向寻靶", "反向预测靶点", "reverse target"):
             add("reverse_target_prediction", 0.95, "reverse target intent")
         if activity_intent_requested(text):
             add("activity_prediction", 0.9, "activity endpoint requested")
@@ -158,15 +178,25 @@ class HybridSkillRouter:
             "lipinski",
             "基础性质",
             "分子性质",
+            "的性质",
             "理化性质",
             "性质计算",
             "性质评估",
             "属性",
         ):
             add("admet_assessment", 0.88, "property or ADMET endpoint requested")
-        if self._contains(lower, "docking", "对接", "结合能", "binding affinity"):
+        docking_action = re.sub(
+            r"(?:可?用于|适合|能否(?:继续)?|是否(?:可以)?)(?:\s*(?:分子)?对接|\s*docking)|"
+            r"(?:suitable\s+for|for\s+use\s+in)\s+docking", "", lower,
+        )
+        if self._contains(docking_action, "docking", "对接", "结合能", "binding affinity"):
             add("docking_simulation", 0.82, "docking intent")
-        if self._contains(lower, ".pdb", ".pdbqt") and self._contains(
+        # Files may survive in a later clause after an explicitly negated
+        # docking operation. They must not restore that removed authorization.
+        docking_terms = r"对接|结合能|\bdocking\b|\bbinding\s+affinity\b"
+        negated_docking = (len(re.findall(docking_terms, text, re.I))
+                           > len(re.findall(docking_terms, lower, re.I)))
+        if not negated_docking and self._contains(lower, ".pdb", ".pdbqt") and self._contains(
             lower,
             ".sdf",
             ".mol2",

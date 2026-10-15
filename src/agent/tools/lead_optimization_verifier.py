@@ -5,6 +5,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from src.agent.property_constraints import requested_property_bounds, check_property_bounds
+
 
 class LeadOptimizationVerifier:
     """Compare a lead and generated candidates on the same requested metrics.
@@ -45,10 +47,19 @@ class LeadOptimizationVerifier:
 
         objectives = self._objectives(query)
         unverifiable_constraints = self._unverifiable_constraints(query)
+        bounds, unknown_bounds = requested_property_bounds(query)
+        unverifiable_constraints.extend(unknown_bounds)
         baseline = self._first_by_smiles(baseline_rows)
         baseline_admet = self._first_by_smiles(self._rows(outputs.get("baseline_admet")))
         baseline_activity = self._first_by_smiles(self._rows(outputs.get("baseline_activity")))
         baseline_properties_row = next(iter(baseline.values()), None)
+        if baseline_properties_row is not None and (
+            baseline_properties_row.get("success", True) is not True
+            or baseline_properties_row.get("status", "succeeded") != "succeeded"
+            or baseline_properties_row.get("error") is not None
+            or baseline_properties_row.get("error_code")
+        ):
+            baseline_properties_row = None
         baseline_admet_row = next(iter(baseline_admet.values()), None)
         baseline_activity_row = next(iter(baseline_activity.values()), None)
         candidate_properties = self._by_smiles(self._rows(outputs.get("candidate_properties")))
@@ -61,6 +72,15 @@ class LeadOptimizationVerifier:
             key = self._smiles_key(smiles)
             comparisons: list[dict[str, Any]] = []
             missing: list[str] = []
+            property_row = candidate_properties.get(key)
+            if property_row is not None and (
+                property_row.get("success", True) is not True
+                or property_row.get("status", "succeeded") != "succeeded"
+                or property_row.get("error") is not None or property_row.get("error_code")
+                or ("candidate_id" in property_row
+                    and property_row["candidate_id"] != candidate.get("candidate_id"))
+            ):
+                property_row = None
             for metric, direction in objectives:
                 baseline_value = self._metric_value(
                     metric,
@@ -70,7 +90,7 @@ class LeadOptimizationVerifier:
                 )
                 candidate_value = self._metric_value(
                     metric,
-                    candidate_properties.get(key),
+                    property_row,
                     candidate_admet.get(key),
                     candidate_activity.get(key),
                 )
@@ -92,9 +112,11 @@ class LeadOptimizationVerifier:
                     "satisfied": satisfied,
                 })
 
+            constraint_checks = check_property_bounds(bounds, (property_row or {}).get("properties"))
+            missing.extend(check["metric"] for check in constraint_checks if check["satisfied"] is None)
             if not objectives or missing or unverifiable_constraints:
                 status = "unverified"
-            elif all(item["satisfied"] for item in comparisons):
+            elif all(item["satisfied"] for item in comparisons + constraint_checks):
                 status = "supported"
             else:
                 status = "evaluated_not_improved"
@@ -104,6 +126,7 @@ class LeadOptimizationVerifier:
                 "status": status,
                 "goal_supported": status == "supported",
                 "comparisons": comparisons,
+                "constraint_checks": constraint_checks,
                 "missing_evidence": missing,
                 "unverified_constraints": list(unverifiable_constraints),
             })
@@ -324,6 +347,21 @@ class LeadOptimizationVerifier:
                 f"| {candidate['candidate_id']} | {candidate['status']} | "
                 f"{', '.join(candidate['missing_evidence']) or 'None'} |"
             )
+        lines += ["", "| Candidate | Metric | Baseline | Candidate value | Delta | Goal met |",
+                  "|---|---|---|---|---|---|"]
+        for candidate in data["candidates"]:
+            for item in candidate["comparisons"]:
+                lines.append(f"| {candidate['candidate_id']} | {item['metric']} | {item['baseline_value']} | "
+                             f"{item['candidate_value']} | {item['delta']} | {item['satisfied']} |")
+        checks = [(candidate, check) for candidate in data["candidates"]
+                  for check in candidate.get("constraint_checks", [])]
+        if checks:
+            lines += ["", "| Candidate | Constraint | Calculated value | Result |",
+                      "|---|---|---|---|"]
+            for candidate, check in checks:
+                state = "未验证" if check["satisfied"] is None else "满足" if check["satisfied"] else "不满足"
+                lines.append(f"| {candidate['candidate_id']} | {check['metric']} {check['operator']} "
+                             f"{check['threshold']} {check['unit']} | {check['value']} | {state} |")
         return "\n".join(lines)
 
     @staticmethod

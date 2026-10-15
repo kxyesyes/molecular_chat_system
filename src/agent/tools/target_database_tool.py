@@ -4,12 +4,33 @@
 
 from typing import Any, Dict
 import logging
+import re
 import threading
 from src.target_identifiers import canonical_target_identifier
 
 from .base_tool import BaseMolecularTool
 
 logger = logging.getLogger(__name__)
+
+# Only explicitly labelled accessions (or a complete short lookup command)
+# are separated from prose. Never truncate an unknown identifier to a valid
+# prefix, or treat arbitrary words in a protein name as a target identifier.
+_ACCESSION = r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})"
+_ACCESSION_END = r"(?=$|[\s、，,;；。)）\]}]|\.(?:\s|$))"
+_LABELLED_ACCESSION = re.compile(
+    rf"(?<![A-Za-z0-9_-])UniProt(?:\s+(?:ID|accession))?\s*[:：=]?\s*"
+    rf"({_ACCESSION}){_ACCESSION_END}", re.I,
+)
+_ACCESSION_LABEL = re.compile(r"(?<![A-Za-z0-9_-])UniProt(?![A-Za-z0-9_-])", re.I)
+_QUALIFIED_LOOKUP = re.compile(
+    r"不(?:要|是|查)|勿|别|而非|而是|排除|改(?:为|用)|换成|\b(?:not|except|exclude|instead|without)\b", re.I,
+)
+_ACCESSION_JOIN = re.compile(r"\s*(?:和|及|与|、|[,，]|\band\b|\bor\b)\s*", re.I)
+_NEXT_ACCESSION = re.compile(rf"({_ACCESSION}){_ACCESSION_END}", re.I)
+_ACCESSION_LOOKUP = re.compile(
+    rf"(?:请\s*)?(?:搜索|查找|查询|search|find|lookup)\s*[:：]?\s*"
+    rf"({_ACCESSION})[。.!！]?", re.I,
+)
 
 
 class TargetDatabaseTool(BaseMolecularTool):
@@ -299,6 +320,12 @@ class TargetDatabaseTool(BaseMolecularTool):
                         lines.append(
                             f"  - {structure_id} ({source}; {recommendation})"
                         )
+                        ligands = structure.get("ligand_ids")
+                        if isinstance(ligands, list) and all(isinstance(value, str) for value in ligands):
+                            ligand_text = ", ".join(ligands) if ligands else "none recorded"
+                        else:
+                            ligand_text = "unavailable"
+                        lines.append(f"    Ligand IDs: {ligand_text}; pocket role not verified.")
                 elif structures_unavailable:
                     lines.append("- Recommended structures: unavailable")
                 else:
@@ -429,6 +456,49 @@ class TargetDatabaseTool(BaseMolecularTool):
 
         def collect(value: Any) -> None:
             if isinstance(value, str):
+                labelled = list(_LABELLED_ACCESSION.finditer(value))
+                if (len(labelled) != len(_ACCESSION_LABEL.findall(value))
+                        or _QUALIFIED_LOOKUP.search(value)
+                        or (labelled and re.search(
+                            r"(?:和|及|与|、|/|\band\b|\bor\b)\s*$",
+                            value[:labelled[0].start()], re.I))):
+                    add(value)
+                    return
+                accessions = []
+                accession_spans = set()
+                for match in labelled:
+                    accessions.append(match[1])
+                    accession_spans.add(match.span(1))
+                    position = match.end()
+                    while join := _ACCESSION_JOIN.match(value, position):
+                        position = join.end()
+                        if _ACCESSION_LABEL.match(value, position):
+                            break  # The outer loop handles the next label.
+                        following = _NEXT_ACCESSION.match(value, position)
+                        if following:
+                            accessions.append(following[1])
+                            accession_spans.add(following.span(1))
+                            position = following.end()
+                        else:
+                            # Unknown list members (including Chinese names)
+                            # and dangling joins must not silently disappear.
+                            add(value)
+                            return
+                short_lookup = _ACCESSION_LOOKUP.fullmatch(value.strip())
+                if short_lookup:
+                    add(short_lookup[1].upper())
+                    return
+                if accessions:
+                    # Check occurrences, not only valid token values: an
+                    # accession embedded in a malformed token must also be
+                    # accounted for, even if it repeats an extracted value.
+                    all_mentions = {match.span() for match in re.finditer(_ACCESSION, value, re.I)}
+                    if all_mentions != accession_spans:
+                        add(value)
+                        return
+                    for accession in accessions:
+                        add(accession.upper())
+                    return
                 add(value)
                 return
             if isinstance(value, dict):
