@@ -42,10 +42,10 @@ treated as permission to expose execution. Avoid a second scheduler, queue or We
 new `tests/test_docking_pocket_evidence.py`, `tests/test_chat_docking_preparation.py`.
 Read unchanged source tools and process isolation; do not edit legacy preparation algorithms.
 
-- [ ] Write RED tests against a real small PDB byte fixture with fixed-width coordinates, distinct
+- [x] Write RED tests against a real small PDB byte fixture with fixed-width coordinates, distinct
   protein/reference/glycan records and deposition metadata supplied as a validated owned source.
   Assert the new module/callable exists at call phase, not a broken collection import.
-- [ ] Use these pure input/output interfaces, closed native dictionaries with bounded fields:
+- [x] Use these pure input/output interfaces, closed native dictionaries with bounded fields:
 
 ```python
 def inspect_pocket_candidates(pdb_bytes: bytes, *, source: dict) -> dict:
@@ -69,11 +69,11 @@ identity/completeness evidence. The pure functions recheck shape/hash/type and c
 Web producer must separately establish authenticity/ownership before calling them. A forged
 self-consistent dictionary is never claimed to be source authentication.
 
-- [ ] RED/GREEN strict parser rejects malformed/truncated/nonfinite atom fields, mixed models,
+- [x] RED/GREEN strict parser rejects malformed/truncated/nonfinite atom fields, mixed models,
   unselected altloc, partial/mismatched atoms, wrong source digest, wrong chain/entity, no eligible
   residue and unproven ligand role. Glycans, metals, solvent and buffer do not become pocket proof.
   Selection must identify the actual model/chain/resname/resseq/icode and cannot bypass checks.
-- [ ] For selected heavy atoms compute exactly:
+- [x] For selected heavy atoms compute exactly:
 
 ```python
 center = [(low + high) / 2.0 for low, high in zip(minimum, maximum)]
@@ -85,20 +85,41 @@ reject runtime dimension overflow, never clamp. Keep the original receptor intac
 separate protein input that excludes the reference residue and records every retained/removed
 hetero/water selection. Missing residue repair, blind docking and implicit chain choice are absent.
 
-- [ ] RED/GREEN ligand uses strict full SMILES, one connected component and <=512 atoms; preserve
+- [x] RED/GREEN ligand uses strict full SMILES, one connected component and <=512 atoms; preserve
   canonical topology/formal charges/defined stereochemistry before and after SDF serialization.
   `AddHs`, ETKDGv3 seed 20261015 once, complete MMFF parameters, maxIters=200 and return code 0.
   Failure returns fixed safe error; no ETKDGv2/UFF or silent protonation/fragment change.
-- [ ] Test real aspirin SDF output with RDKit read-back and finite nondegenerate 3D coordinates;
+- [x] Test real aspirin SDF output with RDKit read-back and finite nondegenerate 3D coordinates;
   missing MMFF, failed embed/nonconvergence and altered structure reject. Instrument only the
   low-level scientific failure seams, not the validating wrapper.
-- [ ] Build async owned wrapper using existing `IsolatedProcess` / `start_isolated_process`:
+- [x] Build async owned wrapper using existing `IsolatedProcess` / `start_isolated_process`:
   total child work <=60 seconds, cleanup on cancel/timeout, no child result before actual stop.
   Integration upstream root budget is 180 seconds. Tests prove no ADFR/Meeko/Vina call here.
-- [ ] GREEN producer and existing docking preparation/command cancellation regressions; then
+- [x] GREEN producer and existing docking preparation/command cancellation regressions; then
   spec and quality review; commit only D1 files.
 
 ## D2 — Same-root chat draft and owned source binding
+
+D1 review evidence (2026-10-16): initial missing-producer RED, then 95 focused tests passed.
+Independent spec review reproduced two lifecycle defects: untracked physical helper cleanup and
+success published after cleanup crossed the original deadline. Five new regressions failed RED,
+then passed after the owner tracked actual helper calls and the original deadline covered
+settlement/publication. Independent SPEC PASS (100 tests plus six actual process probes), then
+QUALITY APPROVED (100 tests plus 12 additional checks). Parent joint reverse/D1 regression:
+930 passed, 2 subtests passed, three third-party SWIG warnings. Worker docking/process/protocol
+regression: 705 passed, 6 POSIX-only skipped. No Vina, ADFR or Meeko executed in D1.
+
+Known real-input limit, not browser acceptance: a read-only RCSB coordinate check found 1P0I
+has 66 altloc atoms and 222 non-unit occupancies; SHA-256
+`851e194bf21de0ff56be206c239237e2d042c7b9498ca30faacc98749bcc5470`.
+The initial strict supported PDB subset rejects this unchanged input. The first ten RCSB
+BuChE candidates also do not establish an eligible pocket under that subset: 2PM8 has no
+altloc/non-unit occupancy but only GOL/water/NAG/SO4 hetero compounds; the other nine have
+altloc and/or non-unit occupancy. No coordinates were edited, no ligand role was inferred from
+an ID alone, and no scientific failure was reclassified as PASS. D2/D7 must find genuinely
+eligible, explicitly selected source evidence or retain BLOCKED and request direction.
+
+Primary entry context: [RCSB 1P0I](https://www.rcsb.org/structure/1P0I).
 
 **Files:** new `src/web/docking_request.py`; narrow changes to scientific references,
 TaskStore draft operations, runtime generation binding; new tests in
