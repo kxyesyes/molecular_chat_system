@@ -518,3 +518,274 @@ def validate_projection_source(parsed: pdb.ParsedPdb, source: dict) -> Validated
                            Provenance(**origin), Target(**target),
                            tuple(proteins[key] for key in chain_order), ordered,
                            connections, constraints, limitations, budget.used)
+
+
+# P3 selection facts are internal, immutable and detached. They are neither a
+# materialized receptor nor authentication. canonical_json contains only the
+# closed native choice contract, normalized to original source order.
+@dataclass(frozen=True, slots=True)
+class SelectedConnectionEdge:
+    record_index: int
+    atom_serials: tuple[int, int]
+    kind: str
+    symmetry: tuple[str, ...]
+    action: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class ValidatedSelection:
+    source: ValidatedSource
+    canonical_json: bytes
+    selection_sha256: str
+    proteins: tuple[Protein, ...]
+    reference_residue: pdb.Identity
+    hetero_choices: tuple[tuple[pdb.Identity, str], ...]
+    conformer_choices: tuple[tuple[pdb.Identity, str], ...]
+    reviewed_limitations: tuple[str, ...]
+    retained_serials: tuple[int, ...]
+    reference_serials: tuple[int, ...]
+    atom_reasons: tuple[tuple[int, str], ...]
+    connection_edges: tuple[SelectedConnectionEdge, ...]
+    logical_charge_bytes: int
+
+
+def identity_dict(identity):
+    """Native detached representation of an internal residue identity."""
+    return dict(zip(("model", "chain", "resname", "resseq", "icode"), identity))
+
+
+def protein_matches_target(protein, source):
+    return (protein.uniprot_id == source.target.uniprot_id
+            and protein.taxonomy_id == source.target.taxonomy_id)
+
+
+def reference_eligible(residue, proteins, source):
+    protein = proteins.get(residue.identity[:2])
+    return (residue.role == "deposited_ligand" and bool(residue.required_heavy_atoms)
+            and protein is not None and protein_matches_target(protein, source))
+
+
+def _selection_contract(source, selection, budget):
+    _closed(selection, {"protein_selection", "reference_residue", "hetero_choices",
+                        "conformer_choices", "reviewed_limitations"})
+    protein_selection = selection["protein_selection"]
+    _closed(protein_selection, {"model", "chains"})
+    _integer(protein_selection["model"], 1, 9999)
+    _require(protein_selection["model"] == source.parsed.model)
+    _list(protein_selection["chains"], 62, nonempty=True)
+    _list(selection["hetero_choices"], 99999)
+    _list(selection["conformer_choices"], 99999)
+    _list(selection["reviewed_limitations"], 99999)
+    budget.reserve(2048 * len(source.residues) + 1024 * len(source.parsed.atoms)
+                   + 1024 * len(source.proteins) + 1024 * len(source.limitations))
+    proteins = {(p.model, p.chain): p for p in source.proteins}
+    selected = set()
+    for row in protein_selection["chains"]:
+        _closed(row, {"chain", "entity_id"})
+        _text(row["chain"], r"[A-Za-z0-9]?")
+        _token(row["entity_id"])
+        key = protein_selection["model"], row["chain"]
+        protein = proteins.get(key)
+        _require(key not in selected and protein is not None
+                 and protein.entity_id == row["entity_id"] and protein_matches_target(protein, source))
+        selected.add(key)
+    residues = {r.identity: r for r in source.residues}
+    reference = _identity(selection["reference_residue"])
+    _require(reference in residues)
+    _require(reference[:2] in selected and reference_eligible(residues[reference], proteins, source),
+             "reference_invalid")
+    hetero = {}
+    for row in selection["hetero_choices"]:
+        _closed(row, {"residue", "action"})
+        key = _identity(row["residue"])
+        _text(row["action"], r"retain|remove")
+        _require(key in residues and key != reference and key not in hetero and residues[key].role != "protein")
+        hetero[key] = row["action"]
+    _require(len(hetero) == sum(r.role != "protein" and r.identity != reference for r in source.residues),
+             "selection_incomplete")
+    active = {r.identity for r in source.residues if
+              (r.role == "protein" and r.identity[:2] in selected)
+              or r.identity == reference or hetero.get(r.identity) == "retain"}
+    conformers = {}
+    for row in selection["conformer_choices"]:
+        _closed(row, {"residue", "altloc"})
+        key = _identity(row["residue"])
+        _text(row["altloc"], r"[A-Za-z0-9]")
+        _require(key in active and key not in conformers and row["altloc"] in residues[key].altlocs)
+        conformers[key] = row["altloc"]
+    _require(len(conformers) == sum(bool(residues[key].altlocs) for key in active), "selection_incomplete")
+    return selected, reference, hetero, active, conformers
+
+
+def _selected_chemistry(source, active, conformers, reference):
+    for residue in source.residues:
+        if residue.identity not in active:
+            continue
+        label = conformers.get(residue.identity, "")
+        chosen = [a for a in residue.atoms if a.altloc in ("", label)]
+        _require(len({a.name for a in chosen}) == len(chosen), "selection_invalid")
+        heavy = {(a.name, a.element) for a in chosen if a.element not in {"H", "D"}}
+        required = {(a.name, a.element) for a in residue.required_heavy_atoms}
+        _require(heavy == required, "incomplete_heavy_atoms")
+        _require(all(a.occupancy_hundredths > 0 for a in chosen), "occupancy_invalid")
+        if residue.identity == reference:
+            _require(all(a.occupancy_hundredths == 100 for a in chosen if a.element not in {"H", "D"}),
+                     "reference_invalid")
+
+
+def _selected_constraints(source, active, conformers):
+    for group in source.conformer_constraints:
+        if not any(key in active for key in group.residues):
+            continue
+        # Do not guess a label for a removed partner, nor existentially complete
+        # the group by exploring combinations. That recorded dependency remains
+        # unresolved until all its participants have explicit applicable choices.
+        _require(all(key in active for key in group.residues), "selection_incomplete")
+        assignment = tuple(conformers.get(key, "") for key in group.residues)
+        _require(assignment in group.allowed_assignments, "constraint_invalid")
+
+
+def _reviewed_limitations(source, selected, rows):
+    applicable = {x.id for x in source.limitations if any(k[:2] in selected for k in x.residues)}
+    reviewed = set()
+    for value in rows:
+        _token(value)
+        _require(value not in reviewed and value in applicable)
+        reviewed.add(value)
+    _require(reviewed == applicable, "selection_incomplete")
+    return tuple(sorted(reviewed))
+
+
+def _edge_key(left, right, kind, symmetry, multiplicity):
+    # Relations are undirected; endpoint-associated symmetry follows reversal.
+    if left > right:
+        left, right, symmetry = right, left, symmetry[::-1]
+    return left, right, kind, symmetry, multiplicity
+
+
+def _selected_connections(source, atom_reasons, budget):
+    # At most four star edges per P1 record. This covers edge facts, signatures,
+    # multiplicity counters, index resizing and concurrent list/tuple output.
+    budget.reserve(8192 * len(source.connections) + 1024 * len(source.parsed.atoms))
+    atoms = {a.serial: a for a in source.parsed.atoms}
+    reasons = dict(atom_reasons)
+    chosen = {}
+    for atom in source.parsed.atoms:
+        if reasons[atom.serial] == "retained":
+            key = atom.identity, atom.name, atom.element
+            _require(key not in chosen, "connection_invalid")
+            chosen[key] = atom.serial
+    edges, verified, relation_kinds, conect_multiplicities = [], set(), {}, {}
+    for connection in source.connections:
+        record, kind = connection.parsed, connection.kind
+        _require(kind in {"covalent", "disulfide", "coordination"}, "connection_invalid")
+        _require(record.record_type != "SSBOND" or kind == "disulfide", "connection_invalid")
+        _require(all(op == "identity" for op in record.symmetry), "connection_invalid")
+        left = record.atom_serials[0]
+        counts = {}
+        for right in record.atom_serials[1:]:
+            counts[right] = counts.get(right, 0) + 1
+        for right in record.atom_serials[1:]:
+            pair = (left, right) if left < right else (right, left)
+            _require(pair not in relation_kinds or relation_kinds[pair] == kind, "connection_invalid")
+            relation_kinds[pair] = kind
+            if kind == "disulfide":
+                _require(atoms[left].element == atoms[right].element == "S", "connection_invalid")
+            multiplicity = counts[right]
+            _require(kind == "covalent" or multiplicity == 1, "connection_invalid")
+            if record.record_type == "CONECT":
+                # Repeated and reciprocal declarations describe the same
+                # unordered relation, not alternative bond multiplicities.
+                # Reject conflicts before they can supply a verified counterpart.
+                _require(pair not in conect_multiplicities
+                         or conect_multiplicities[pair] == multiplicity, "connection_invalid")
+                conect_multiplicities[pair] = multiplicity
+            edges.append((record, kind, left, right, multiplicity))
+            verified.add(_edge_key(left, right, kind, record.symmetry, multiplicity))
+    result = []
+    for record, kind, left, right, multiplicity in edges:
+        left_kept, right_kept = reasons[left] == "retained", reasons[right] == "retained"
+        if left_kept and right_kept:
+            action, reason = "emit", "both_retained"
+        elif not left_kept and not right_kept:
+            action, reason = "exclude", "both_removed"
+        else:
+            removed, kept = (right, left) if left_kept else (left, right)
+            _require(reasons[removed] == "unselected_conformer", "connection_invalid")
+            atom = atoms[removed]
+            counterpart = chosen.get((atom.identity, atom.name, atom.element))
+            _require(counterpart is not None, "connection_invalid")
+            new_left, new_right = (kept, counterpart) if left_kept else (counterpart, kept)
+            _require(_edge_key(new_left, new_right, kind, record.symmetry, multiplicity) in verified,
+                     "connection_invalid")
+            action, reason = "exclude", "unselected_conformer"
+        result.append(SelectedConnectionEdge(record.record_index, (left, right), kind,
+                                             record.symmetry, action, reason))
+    return tuple(result)
+
+
+def validate_projection_selection(parsed: pdb.ParsedPdb, validated_source: ValidatedSource,
+                                  selection: dict) -> ValidatedSelection:
+    """Validate explicit scientific choices, without creating an executable input.
+
+    Internal P1/P2 objects must belong to the same parse. Carry the complete P2
+    peak (already including P1) into traversal, selection indexes and canonical
+    serialization; no stage resets or refunds the aggregate logical ledger.
+    """
+    _require(type(validated_source) is ValidatedSource and type(parsed) is pdb.ParsedPdb
+             and validated_source.parsed is parsed)
+    source = validated_source
+    budget = pdb.AllocationBudget(MAX_LOGICAL_BYTES)
+    budget.reserve(source.logical_charge_bytes)
+    try:
+        resources = check_projection_resources(selection, budget=budget, kind="selection")
+        selected, reference, hetero, active, conformers = _selection_contract(source, selection, budget)
+        budget.reserve(12 * resources.json_bytes + 64 * resources.nodes)
+        # Required definitions can be much larger than the observed inventory.
+        # Charge their comparison sets independently of the per-observed-atom
+        # reservation, and bound the explicit constraint-assignment tuples too.
+        budget.reserve(256 * sum(len(r.required_heavy_atoms) for r in source.residues)
+                       + 128 * sum(len(c.residues) for c in source.conformer_constraints))
+        reviewed = _reviewed_limitations(source, selected, selection["reviewed_limitations"])
+        _selected_chemistry(source, active, conformers, reference)
+        _selected_constraints(source, active, conformers)
+        reasons_by_serial = {}
+        for residue in source.residues:
+            key = residue.identity
+            for atom in residue.atoms:
+                if key not in active:
+                    reason = "unselected_protein" if residue.role == "protein" else "explicit_hetero_removal"
+                elif atom.altloc and atom.altloc != conformers[key]:
+                    reason = "unselected_conformer"
+                elif key == reference:
+                    reason = "reference_removed"
+                else:
+                    reason = "retained"
+                reasons_by_serial[atom.serial] = reason
+        reasons = [(a.serial, reasons_by_serial[a.serial]) for a in parsed.atoms]
+        retained = [serial for serial, reason in reasons if reason == "retained"]
+        reference_atoms = [serial for serial, reason in reasons if reason == "reference_removed"]
+        edges = _selected_connections(source, reasons, budget)
+        canonical = dict(
+            protein_selection=dict(model=parsed.model, chains=[dict(chain=p.chain, entity_id=p.entity_id)
+                for p in source.proteins if (p.model, p.chain) in selected]),
+            reference_residue=identity_dict(reference),
+            hetero_choices=[dict(residue=identity_dict(r.identity), action=hetero[r.identity])
+                for r in source.residues if r.identity in hetero],
+            conformer_choices=[dict(residue=identity_dict(r.identity), altloc=conformers[r.identity])
+                for r in source.residues if r.identity in conformers],
+            reviewed_limitations=list(reviewed))
+        text = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        encoded = text.encode("utf-8")
+        return ValidatedSelection(source, encoded, hashlib.sha256(encoded).hexdigest(),
+            tuple(p for p in source.proteins if (p.model, p.chain) in selected), reference,
+            tuple((r.identity, hetero[r.identity]) for r in source.residues if r.identity in hetero),
+            tuple((r.identity, conformers[r.identity]) for r in source.residues if r.identity in conformers),
+            tuple(canonical["reviewed_limitations"]), tuple(retained), tuple(reference_atoms), tuple(reasons), edges, budget.used)
+    except ProjectionInvalid as error:
+        # Shared exact-native/schema helpers use source_invalid by default.
+        # Only that fixed code is translated; never expose input or exceptions.
+        if error.args == ("source_invalid",):
+            raise ProjectionInvalid("selection_invalid") from None
+        raise

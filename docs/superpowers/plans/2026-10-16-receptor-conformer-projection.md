@@ -322,23 +322,25 @@ docking result is established by this pure validator. P3–P7 remain required.
 **Files:** create receptor_projection.py and test_receptor_projection.py;
 extend source validation for the exact selection contract.
 
-- [ ] Write RED inspection returning complete source-bound choices and no bytes;
-  a missing conformer or hetero choice cannot yield a successful projection.
+- [x] Write RED inspection returning complete source-bound choices and no bytes;
+  a missing conformer or hetero choice cannot pass selection validation.
 
 ```python
 def test_no_implicit_altloc_choice(full_fixture):
-    import copy
-    from src.docking.receptor_projection import project_receptor_bytes
-    pdb, source, selection = full_fixture
-    selection = copy.deepcopy(selection)
+    import pytest
+    from src.docking.receptor_projection_pdb import parse_original_pdb, ProjectionInvalid
+    from src.docking.receptor_projection_source import validate_projection_source, validate_projection_selection
+    from tests.test_receptor_projection import selection as make_selection
+    pdb_bytes, source = full_fixture
+    selection = make_selection()
     selection["conformer_choices"] = []
-    result = project_receptor_bytes(pdb, source=source, selection=selection)
-    assert not result["ok"]
-    assert result["reason"] == "selection_incomplete"
-    assert "pdb_bytes" not in result
+    parsed = parse_original_pdb(pdb_bytes)
+    validated = validate_projection_source(parsed, source)
+    with pytest.raises(ProjectionInvalid, match="selection_incomplete"):
+        validate_projection_selection(parsed, validated, selection)
 ```
 
-- [ ] Implement `inspect_receptor_projection` and
+- [x] Implement `inspect_receptor_projection` and
   `validate_projection_selection(parsed, validated_source, selection)`.
   Selection traverses residues in original order. For each retained/reference
   residue, use only common blank atoms plus one explicitly chosen actual label:
@@ -353,16 +355,16 @@ if heavy != required_heavy_atoms:
     raise ProjectionInvalid("incomplete_heavy_atoms")
 ```
 
-- [ ] Add one RED/GREEN batch per rule: missing/extra/duplicate choices; choosing
+- [x] Add one RED/GREEN batch per rule: missing/extra/duplicate choices; choosing
   highest occupancy per atom; shared/alternate same-name collision; incomplete
   selected conformer; wrong target/chain/entity; missing required heavy atoms;
   retained protein or other retained atom at occupancy zero; complete reference
   heavy atoms not all 100; unverified/glycan/metal/buffer reference; mutated input
   after validation; missing/extra limitation acknowledgments. No override booleans.
-- [ ] Validate every applicable cross-residue constraint against its supplied
+- [x] Validate every applicable cross-residue constraint against its supplied
   allowed assignments. Do not assume identical letters across residues prove a
   global conformer. An unresolved recorded constraint returns unavailable.
-- [ ] For all connections, selecting exactly one endpoint is invalid unless the
+- [x] For all connections, selecting exactly one endpoint is invalid unless the
   record represents a verified unselected alternative and the complete chosen
   alternative relation is preserved. A reference linked to retained protein or
   required component is unsupported; never detach it to fabricate a normal
@@ -373,7 +375,22 @@ if heavy != required_heavy_atoms:
   counterpart is unique, and an actual independently verified edge of identical
   kind/symmetry to the retained endpoint already exists. Never create a replacement
   bond based only on matching names or geometry. Other cut connections reject.
-- [ ] GREEN selection/source/parser/D1 tests; two-stage review and scoped commit.
+- [x] GREEN selection/source/parser/D1 tests; two-stage review and scoped commit.
+
+P3 measured record (2026-10-16): staged RED/GREEN batches produced 154 new tests;
+the parent updated P2's fixed reason-enum test to the newly allowed fixed codes,
+then the combined four modules passed 619 tests. SPEC PASS included 871 additional
+synthetic probes. QUALITY initially rejected conflicting reciprocal CONECT bond
+multiplicities, which could incorrectly authorize excluding an alternate edge.
+The repair's new batch ran 50 failed / 16 passed before the fix, then 66 passed.
+Final worker, parent and independent quality runs each obtained **685 passed**;
+QUALITY APPROVED included 320 extra combinations and a preallocation-budget probe.
+Compilation and diff checks passed. Errors remain fixed codes without caller text.
+
+P3 inspects and validates explicit choices only. Public inspection still says
+`input_ready=False` and `source_authentication=caller_responsibility`. P4's public
+projection/verification functions, P6's official source authentication and all
+actual input/consent/browser docking gates remain unfinished.
 
 ## P4 — Deterministic derivative, complete lineage and pocket verification
 
@@ -596,3 +613,24 @@ Conversely, [1XLU](https://www.rcsb.org/structure/1XLU) illustrates why a raw LI
 screen alone cannot authorize ligand removal: its entry describes an aged
 organophosphate-inhibited enzyme, despite the diagnostic not finding an ISP LINK
 endpoint. No source was edited, no derivative was created and no Vina ran.
+
+Further read-only feasibility check: unchanged official 6SAM PDB parses with P1
+(4,521 atoms, 245 connection records). Its complete ordered identity/record/name/
+element/altloc/occupancy/xyz/B-factor inventory agrees with the independently
+downloaded official mmCIF atom table. The PDB includes one atom-serial gap at TER;
+mmCIF atom IDs must not be assumed to equal PDB serials. Both files report the
+2024-11-20 revision (entry major/minor 2.2 in mmCIF). PDB SHA-256 is
+`471ee4ee714e13da6c07a895bcf2dd5cc29859623fe5942236c65499ced8e7f1`;
+mmCIF SHA-256 is `bb0e444acca25f86861aa5003a9353c6e73b3b044f0cc84adb6e23856e67c878`.
+
+The independent metadata reports 16 `struct_conn` records, 27 embedded chemical
+components, three unobserved residues and four engineered sequence variants.
+Its embedded `chem_comp_atom` table does not include leaving-atom flags; branch
+link metadata names specific leaving atoms. Full deposited chemical context,
+terminal atoms and protein–glycan connections still need explicit validation;
+neither a successful atom-table comparison nor a CCD component name proves that
+required heavy atoms are complete. This diagnostic used the already-installed
+Gemmi 0.7.5 in memory only, not a production source-authentication implementation,
+a selected S03 input, a prepared receptor or a passed S10. No files were converted.
+Source format references: [official atom-site field relationships](https://mmcif.rcsb.org/docs/tutorials/content/atomic-description.html)
+and [RCSB file download services](https://www.rcsb.org/docs/programmatic-access/file-download-services).

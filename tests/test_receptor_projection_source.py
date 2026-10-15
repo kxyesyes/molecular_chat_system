@@ -616,7 +616,9 @@ def test_raw_coordinate_change_cannot_be_hidden_by_rehash(full_fixture):
 
 def test_safe_reason_extension_only_and_no_new_execution_entrypoints():
     from src.docking.receptor_projection_pdb import ProjectionInvalid, _REASONS
-    assert _REASONS == {"raw_invalid", "connection_invalid", "resource_limit", "source_invalid"}
+    assert _REASONS == {"raw_invalid", "connection_invalid", "resource_limit", "source_invalid",
+                        "selection_invalid", "selection_incomplete", "incomplete_heavy_atoms",
+                        "occupancy_invalid", "reference_invalid", "constraint_invalid"}
     assert str(ProjectionInvalid("source_invalid")) == "source_invalid"
     for name in ["inspect_receptor_projection", "project_receptor_bytes", "verify_receptor_projection"]:
         assert not hasattr(api(), name)

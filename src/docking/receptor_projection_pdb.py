@@ -52,7 +52,9 @@ _METADATA = frozenset((
     "SEQADV SEQRES MODRES HET HETNAM HETSYN FORMUL HELIX SHEET CISPEP CRYST1 "
     "ORIGX1 ORIGX2 ORIGX3 SCALE1 SCALE2 SCALE3 MTRIX1 MTRIX2 MTRIX3 MASTER NUMMDL SPLIT OBSLTE SPRSDE"
 ).split())
-_REASONS = frozenset(("raw_invalid", "resource_limit", "connection_invalid", "source_invalid"))
+_REASONS = frozenset(("raw_invalid", "resource_limit", "connection_invalid", "source_invalid",
+                      "selection_invalid", "selection_incomplete", "incomplete_heavy_atoms",
+                      "occupancy_invalid", "reference_invalid", "constraint_invalid"))
 Identity = tuple[int, str, str, int, str]
 
 
