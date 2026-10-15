@@ -20,6 +20,17 @@ for (const value of [
   "https://www.rcsb.org.evil.example/", "https://www.rcsb.org:8443/",
   "http://www.rcsb.org/", "https://evil.example/", "javascript:alert(1)",
   "data:text/html,<script>alert(1)</script>", "//www.rcsb.org/",
+  "https://www.uniprot.org.evil.example/uniprotkb/Q6P988/entry",
+  "https://evil.uniprot.org/uniprotkb/Q6P988/entry",
+  "http://www.uniprot.org/uniprotkb/Q6P988/entry",
+  "https://www.uniprot.org:8443/uniprotkb/Q6P988/entry",
+  "https://user@www.uniprot.org/uniprotkb/Q6P988/entry",
+  "https://www.uniprot.org/redirect?url=https://evil.example",
+  "https://www.uniprot.org/uniprotkb/Q6P988/entry?redirect=https://evil.example",
+  "https://www.uniprot.org/uniprotkb/Q6P988/entry?",
+  "https://www.uniprot.org/uniprotkb/Q6P988/entry#",
+  "https://www.uniprot.org/uniprotkb/x/../Q6P988/entry",
+  "https://www.uniprot.org/uniprotkb/%2e/Q6P988/entry",
 ]) {
   test(`chat URL rejects ${JSON.stringify(value)}`, () => {
     assert.equal(loadPolicy().MedChatSafeRender.safeChatUrl(value), "#");
@@ -28,6 +39,8 @@ for (const value of [
 
 for (const value of ["/target-search", "./report", "../report", "#results",
   "https://medchat.example/report", "https://www.rcsb.org/structure/1ABC",
+  "https://www.uniprot.org/uniprotkb/Q6P988/entry",
+  "https://www.uniprot.org/uniprotkb/A0A024RBG1/entry",
   "https://pubmed.ncbi.nlm.nih.gov/123/", "https://doi.org/10.1234/example"]) {
   test(`chat URL preserves approved ${value}`, () => {
     assert.equal(loadPolicy().MedChatSafeRender.safeChatUrl(value), value);
@@ -41,4 +54,10 @@ test("production formatter rejects external destinations and retains safe label 
   assert.ok(html.includes('href="#"'));
   assert.ok(!html.includes('<img'));
   assert.ok(html.includes('&lt;img'));
+});
+
+test("ranked structure formatter preserves official UniProt entry links", () => {
+  const url = "https://www.uniprot.org/uniprotkb/Q6P988/entry";
+  const html = loadPolicy().HomeFormatters.formatContent(`[UniProt Q6P988](${url})`);
+  assert.ok(html.includes(`href="${url}"`));
 });

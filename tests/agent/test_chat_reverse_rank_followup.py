@@ -126,6 +126,8 @@ def test_first_rank_followup_uses_provider_and_cannot_invoke_docking(ranked, mon
     answer = result['content']
     assert all(text in answer for text in ['Synthetic A', 'Homo sapiens', 'P12345', '1ABC', '未启动', '口袋'])
     assert 'https://www.rcsb.org/structure/1ABC' in answer
+    assert '| RCSB PDB /' in answer
+    assert 'RCSB&#95;PDB' not in answer
     assert 'entry version' in answer and '17' in answer
     assert http.closed == 1
     assert history[-1].get('reverse_target_evidence')

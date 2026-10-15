@@ -187,7 +187,8 @@ def ranked_structure_followup(message, history, *, session_id, enable_tools, bou
         lines.extend(['| 结构 | 来源/类型 | 方法 | 分辨率 Å |', '|---|---|---|---|'])
         for structure in result['structures']:
             label = _text(structure['structure_id'])
-            lines.append(f"| [{label}]({structure['source_url']}) | {_text(structure['source'])} / {_text(structure['structure_type'])} | "
+            source_label = 'RCSB PDB' if structure['source'] == 'RCSB_PDB' else structure['source']
+            lines.append(f"| [{label}]({structure['source_url']}) | {_text(source_label)} / {_text(structure['structure_type'])} | "
                          f"{_text(structure.get('method') or '未提供')} | {_text(structure.get('resolution') if structure.get('resolution') is not None else '未提供')} |")
     else:
         lines.append('权威来源此次未返回可用结构；不能据此宣称已获得受体。')
