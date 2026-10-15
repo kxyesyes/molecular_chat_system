@@ -134,7 +134,7 @@ def _set_review_conflicts(report, probability=.8, pic50=4.):
             stage['tool_trace'][0]['status'] = 'partial'
             for event in stage['event_trace']:
                 if event['event'] == 'tool_completed':
-                    event.update(event='tool_failed', payload={'status': 'partial', 'success': False})
+                    event.update(payload={'status': 'partial', 'success': False})
                 if event['event'] == 'task_completed':
                     event.update(event='task_partial', payload={'status': 'partial', 'success': False, 'partial': True})
             stage['events'] = [event['event'] for event in stage['event_trace']]
@@ -144,6 +144,20 @@ def _set_review_conflicts(report, probability=.8, pic50=4.):
 def test_review_projection_accepts_consistent_evidence(projected_chain):
     from tests.family_real_acceptance_support import public_report
     assert public_report(projected_chain)['status'] == 'passed'
+
+
+@pytest.mark.parametrize('entry', ['decision', 'websocket'])
+def test_review_projection_requires_completed_event_for_observed_partial(projected_chain, entry):
+    from tests.family_real_acceptance_support import public_report
+
+    _set_review_conflicts(projected_chain)
+    assert public_report(projected_chain)['status'] == 'passed'
+    stage = projected_chain['stages'][entry]
+    for event in stage['event_trace']:
+        if event['event'] == 'tool_completed':
+            event['event'] = 'tool_failed'
+    stage['events'] = [event['event'] for event in stage['event_trace']]
+    assert public_report(projected_chain)['status'] == 'failed'
 
 
 @pytest.mark.parametrize('errors', [None, [], ['regression failed'], 'regression failed',

@@ -11,6 +11,9 @@ from src.agent.contracts import (
     ObservationStatus,
     ToolResult,
 )
+from .partial_observations import (
+    has_usable_observation, format_activity_observations, is_partial_family_activity,
+)
 
 
 def align_candidate_results(
@@ -25,7 +28,7 @@ def align_candidate_results(
     payload is the only downstream representation that may enter persistence,
     events, or the final answer.
     """
-    if not result.success:
+    if not has_usable_observation(result):
         return result
 
     if not isinstance(result.data, list):
@@ -117,7 +120,6 @@ def align_candidate_results(
         )
 
     result.data = aligned_records
-    result.formatted = _format_aligned_records(result.tool_name, aligned_records)
     if missing or discarded_count:
         result.status = ObservationStatus.PARTIAL
         warning = (
@@ -130,6 +132,13 @@ def align_candidate_results(
             f"Aligned {len(aligned_records)} of {len(candidate_by_smiles)} "
             f"generated candidates; discarded {discarded_count} records"
         )
+    if is_partial_family_activity(result):
+        # Align-before-ledger must use the same success flag as checkpoint
+        # recovery, including complete rows downgraded for missing candidates.
+        result.success = False
+        result.formatted = format_activity_observations(result)
+    else:
+        result.formatted = _format_aligned_records(result.tool_name, aligned_records)
     return result
 
 

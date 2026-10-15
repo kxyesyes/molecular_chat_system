@@ -15,7 +15,10 @@ from src.agent.persistence.redaction import (
     redact_sensitive,
     sanitize_bounded,
 )
-from src.agent.contracts import AgentResult, CandidateSet, ObservationStatus
+from src.agent.contracts import (
+    AgentResult, CandidateSet, ObservationStatus, RunOutcome,
+    AgentErrorCode, AgentExecutionError,
+)
 from src.agent.contracts.generation_request import (
     GenerationRequestError,
     generation_request_error_details,
@@ -23,6 +26,11 @@ from src.agent.contracts.generation_request import (
     preflight_generation_request,
 )
 from src.agent.routing.hybrid import SMILES_PATTERN
+from src.agent.runtime.allocation import (
+    AllocationScope, AllocationStopped,
+    DEFAULT_ALLOCATION_TIMEOUT_SECONDS, DEFAULT_ALLOCATION_PROGRESS_SECONDS,
+    current_allocation, finish_allocation, owned_allocation_call,
+)
 from src.agent.utils.validators import InputValidator
 from src.web.prompt_budget import (
     InputBudgetExceeded, character_limit, validate_question,
@@ -37,7 +45,7 @@ from src.web.agent_result_presentation import (
 )
 from src.web.models import generate_for_chat, stream_for_chat
 from src.system.ollama_model import OllamaGenerationError
-from src.web.model_lifecycle import model_request, finish_on_cancel
+from src.web.model_lifecycle import ModelRequestGate, model_request, finish_on_cancel
 from src.web.rag_presentation import format_rag_context, rag_info_molecule
 from src.web.legacy_websocket_protocol import LegacyFrameError, decode_legacy_frame
 
@@ -47,12 +55,47 @@ _AGENT_EVENT_TEXT_MAX_CHARS = 512
 _AGENT_EVENT_KEY_MAX_CHARS = 128
 _AGENT_EVENT_MAX_DEPTH = 6
 _AGENT_EVENT_MAX_ITEMS = 64
+MAX_RETAINED_ALLOCATIONS = 8
 _AGENT_FAILURE_EVENT_TYPES = frozenset({
     "tool_failed",
     "task_failed",
     "task_rejected",
     "task_cancelled",
 })
+
+
+class _AllocationSocket:
+    """Only this request may publish; late work cannot overwrite its terminal."""
+    def __init__(self, websocket, scope):
+        self.websocket, self.allocation = websocket, scope
+        self._pending_terminal_event = None
+
+    def __getattr__(self, name):
+        return getattr(self.websocket, name)
+
+    async def send_text(self, payload):
+        self.allocation.check()
+        frame = json.loads(payload)
+        terminal_event = (frame.get("type") == "agent_event"
+            and isinstance(frame.get("event"), dict)
+            and frame["event"].get("event") in {
+                "task_completed", "task_partial", "task_failed", "task_rejected", "task_cancelled"})
+        if frame.get("type") in {"agent_result", "complete"}:
+            # The first result/completion atomically wins completion or expiry.
+            # Parsing/checking earlier is not a grant to publish past deadline;
+            # subsequent frames cannot turn an accepted result into a timeout.
+            self.allocation.finish()
+        self.allocation.check()
+        if terminal_event and self.allocation.phase == "allocating":
+            # Session emits its terminal event before the final durable write.
+            # Retain only the latest correction; it cannot stop the timer yet.
+            self._pending_terminal_event = payload
+            return
+        if (frame.get("type") in {"agent_result", "complete"}
+                and self._pending_terminal_event is not None):
+            pending, self._pending_terminal_event = self._pending_terminal_event, None
+            await self.websocket.send_text(pending)
+        await self.websocket.send_text(payload)
 
 
 class ChatHandler:
@@ -68,6 +111,102 @@ class ChatHandler:
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
         self.decision_runtime = None
+        self._allocation_tasks = set()
+
+    async def _with_allocation(self, websocket, operation, *, cancel_event=None,
+                               timeout_result=None, handoff_timeout=False,
+                               cancellation_delegated=None):
+        settings = self.config.get("agent", {})
+
+        def positive_setting(name, default):
+            value = settings.get(name, default)
+            return value if type(value) in (int, float) and math.isfinite(value) and value > 0 else default
+
+        timeout = positive_setting("allocation_timeout_seconds", DEFAULT_ALLOCATION_TIMEOUT_SECONDS)
+        interval = positive_setting("allocation_progress_seconds", DEFAULT_ALLOCATION_PROGRESS_SECONDS)
+        scope = AllocationScope(timeout)
+        sender = _AllocationSocket(websocket, scope)
+        if len(self._allocation_tasks) >= MAX_RETAINED_ALLOCATIONS:
+            message = "任务分配资源正在清理，请稍后重试。"
+            result = None
+            if timeout_result is not None:
+                result = AgentResult(timeout_result.trace_id, False, message, final_answer=message,
+                    outcome=RunOutcome.REJECTED, metadata={"stop_reason": "allocation_busy"})
+                await websocket.send_text(json.dumps({**result.to_legacy_dict(),
+                    "type": "agent_result", "trace_id": result.trace_id,
+                    "final_answer": message}, ensure_ascii=False))
+            await websocket.send_text(json.dumps({
+                "type": "complete", "status": "rejected",
+                "content": message,
+                "error": {"code": "allocation_busy", "message": "任务分配资源已达到有界容量。"},
+            }, ensure_ascii=False))
+            return result
+        with scope.bind():
+            pending = operation(sender)
+            try:
+                task = asyncio.create_task(pending)
+            except BaseException:
+                pending.close()
+                raise
+        # Reserve before yielding: both legacy drains and native supervised
+        # turns count against the same bounded allocation capacity.
+        self._allocation_tasks.add(task)
+        task.add_done_callback(self._allocation_tasks.discard)
+        if handoff_timeout:
+            # _process_message_body's model_request decorator owns this lease.
+            self.model_request_gate.retain_task(task)
+        next_progress = time.monotonic() + interval
+        try:
+            while True:
+                if cancel_event is not None and cancel_event.is_set():
+                    if cancellation_delegated is not None and cancellation_delegated():
+                        # The native bridge owns post-dispatch cancellation,
+                        # cleanup and its terminal. Do not race that delivery
+                        # with a second cancellation from this admission timer.
+                        scope.finish()
+                    else:
+                        raise asyncio.CancelledError()
+                if scope.is_set():
+                    if scope.reason != "timeout":
+                        raise asyncio.CancelledError()
+                    if timeout_result is not None:
+                        await websocket.send_text(json.dumps({
+                            **timeout_result.to_legacy_dict(), "type": "agent_result",
+                            "trace_id": timeout_result.trace_id,
+                            "final_answer": timeout_result.final_answer,
+                        }, ensure_ascii=False))
+                    await websocket.send_text(json.dumps({
+                        "type": "complete", "status": "timeout",
+                        "content": "任务分配超时，尚未启动科学工具；请稍后重试或拆分请求。",
+                        "error": {"code": "allocation_timeout", "message": "工具执行前的任务分配超过时限。"},
+                        **({"trace_id": timeout_result.trace_id} if timeout_result is not None else {}),
+                    }, ensure_ascii=False))
+                    return timeout_result
+                if task.done():
+                    return task.result()
+                now = time.monotonic()
+                if scope.phase == "allocating" and now >= next_progress:
+                    try:
+                        await sender.send_text(json.dumps({
+                            "type": "agent_status", "stage": "allocation",
+                            "message": "正在分配任务，尚未启动科学工具…",
+                            "elapsed_seconds": round(now - scope.started_at, 1),
+                        }, ensure_ascii=False))
+                    except AllocationStopped:
+                        continue  # Expiry won between the loop check and send.
+                    next_progress = now + interval
+                delay = min(0.05, max(0, next_progress - now), max(0, scope.deadline - now)) if scope.phase == "allocating" else 0.05
+                await asyncio.wait({task}, timeout=delay)
+        except BaseException:
+            scope.cancel()
+            raise
+        finally:
+            if not task.done():
+                task.cancel()
+            # Only legacy consumers own their lease inside this retained task.
+            # Native callers still own an outer lease and must drain inline.
+            if not (handoff_timeout and scope.reason == "timeout"):
+                await finish_on_cancel(asyncio.gather(task, return_exceptions=True))
 
     @staticmethod
     def _validate_request_temperature(value: Any) -> float:
@@ -107,14 +246,37 @@ class ChatHandler:
                 and (admission_carry is None or admission_exchange is None)):
             from fastapi import HTTPException
             raise HTTPException(status_code=503, detail='ordinary_semantic_not_assembled')
-        return await process_decision_message(
-            self, websocket, context=context, decision_loop=decision_loop,
-            request_kind=request_kind, allowed_tools=allowed_tools, required_tools=required_tools,
-            requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
-            worker_owner=worker_owner,
-            cancel_event=cancel_event,
-            **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
-               if admission_carry is not None else {}),
+        async def process(sender):
+            return await process_decision_message(
+                self, sender, context=context, decision_loop=decision_loop,
+                request_kind=request_kind, allowed_tools=allowed_tools, required_tools=required_tools,
+                requirements=requirements, continuation_id=continuation_id, clarified_query=clarified_query,
+                worker_owner=worker_owner,
+                cancel_event=cancel_event,
+                **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
+                   if admission_carry is not None else {}),
+            )
+        if request_kind == "chat":
+            # Native admission already owns a scope while waiting for refresh
+            # and the model gate. Ordinary generation has its own deadlines.
+            finish_allocation()
+            return await process(websocket)
+        if current_allocation() is not None:
+            # Reuse the native turn's admission timer and capacity reservation.
+            return await process(websocket)
+        return await self._with_allocation(
+            websocket, process, cancel_event=cancel_event,
+            timeout_result=self._allocation_timeout_result(context.trace_id))
+
+    @staticmethod
+    def _allocation_timeout_result(trace_id):
+        message = "任务分配超时，尚未启动科学工具；请稍后重试或拆分请求。"
+        return AgentResult(
+            trace_id, False, message, final_answer=message,
+            outcome=RunOutcome.TIMEOUT,
+            error=AgentExecutionError(AgentErrorCode.TOOL_TIMEOUT, message,
+                                      details={"stage": "allocation", "reason": "allocation_timeout"}),
+            metadata={"stop_reason": "allocation_timeout"},
         )
     
     async def handle_websocket(self, websocket: WebSocket):
@@ -214,8 +376,24 @@ class ChatHandler:
                 except:
                     pass
     
-    @model_request
     async def _process_message(self, websocket: WebSocket, message: str,
+                              enable_rag: bool, enable_tools: bool,
+                              rag_count: int = 5, temperature: float = 0.7,
+                              mol_count: int | None = None,
+                              conversation_history: List[Dict[str, Any]] | None = None,
+                              session_id: str | None = None,
+                              reference=None, selection=None):
+        async def process(sender):
+            return await self._process_message_body(
+                sender, message, enable_rag, enable_tools, rag_count, temperature,
+                mol_count, conversation_history, session_id, reference, selection)
+        if enable_tools and self.agent_system is not None:
+            return await self._with_allocation(websocket, process,
+                handoff_timeout=isinstance(getattr(self, 'model_request_gate', None), ModelRequestGate))
+        return await process(websocket)
+
+    @model_request
+    async def _process_message_body(self, websocket: WebSocket, message: str,
                               enable_rag: bool, enable_tools: bool, 
                               rag_count: int = 5, temperature: float = 0.7,
                               mol_count: int | None = None,
@@ -294,7 +472,7 @@ class ChatHandler:
         routing_message = message
         if self.scientific_references is not None:
             try:
-                resolved_molecule = await asyncio.to_thread(
+                resolved_molecule = await owned_allocation_call(
                     self.scientific_references.resolve, message, reference, selection,
                     session_id=session_id, enable_tools=enable_tools)
             except ValueError:
@@ -312,10 +490,10 @@ class ChatHandler:
             and skill_router
             and hasattr(skill_router, "decide")
         ):
-            route_decision = await asyncio.to_thread(
+            route_decision = await owned_allocation_call(
                 skill_router.decide,
                 routing_message,
-                getattr(self.agent_system, "llm", None),
+                llm=getattr(self.agent_system, "llm", None),
             )
             clarification = self._route_clarification(route_decision)
         if clarification:
@@ -338,7 +516,7 @@ class ChatHandler:
         ) if route_decision is not None else bool(
             enable_tools
             and self.agent_system
-            and self.agent_system.should_use_tools(routing_message)
+            and await owned_allocation_call(self.agent_system.should_use_tools, routing_message)
         )
         if enable_tools and self.agent_system and should_use_agent:
             logger.info(f"检测到需要使用 Agent 工具 (temperature={temperature})")
@@ -350,7 +528,7 @@ class ChatHandler:
                         route_decision.selected_skill
                     )
                 else:
-                    matched_skill = skill_router.route(
+                    matched_skill = await owned_allocation_call(skill_router.route,
                         routing_message,
                         llm=self.agent_system.llm,
                     )
@@ -538,6 +716,9 @@ class ChatHandler:
                 # the model. Drain it before releasing the request lease.
                 if not agent_task.done():
                     await finish_on_cancel(agent_task)
+
+        # Ordinary chat/retrieval and post-tool summaries are not allocation.
+        finish_allocation()
 
         # 如果没有触发 Agent 技能但启用了 RAG 开关，则执行传统 RAG（保留向后兼容性）
         if (
@@ -845,12 +1026,11 @@ class ChatHandler:
                     "scientific_tools": bool(enable_tools),
                 }
             # 在线程池中执行同步的agent.execute，传递temperature和mol_count参数
-            loop = asyncio.get_event_loop()
-            result = await finish_on_cancel(loop.run_in_executor(
-                None, 
-                lambda: self.agent_system.execute(message, **execute_kwargs)
-            ))
+            result = await owned_allocation_call(
+                self.agent_system.execute, message, **execute_kwargs)
             return result
+        except AllocationStopped:
+            raise
         except GenerationRequestError as exc:
             return {
                 "success": False,

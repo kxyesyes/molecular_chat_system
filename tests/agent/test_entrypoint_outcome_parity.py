@@ -275,12 +275,15 @@ def test_actual_family_tool_partial_observation_is_preserved(tmp_path, monkeypat
     else:
         response = supervisor.execute("evaluate CCO", active_skill="comprehensive_evaluation")
         result = response["agent_result"].to_legacy_dict()
-    assert result["status"] == "failed"  # No wholly successful observation; original partial remains.
+    assert result["status"] == "partial"  # Valid observed classification survives unavailable regression.
+    assert result["success"] is False and result["partial"] is True
     raw = result["tool_result_sequence"][0]
     assert raw["success"] is False and raw["status"] == "partial"
     assert raw["data"] == [row]
     assert raw["evidence"][0]["prediction"] == row
     assert "部分完成" in raw["formatted"]
+    assert str(row["activity_probability"]) in result["final_answer"]
+    assert store.get_run(response["trace_id"])["status"] == "partial"
     assert store.get_tool_executions(response["trace_id"])[0]["output"]["data"] == [row]
 
 

@@ -296,6 +296,18 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
         return ToolResult.error_result(self.spec.name, AgentErrorCode.INVALID_OUTPUT,
                                        "Target output validation failed")
 
+    def _diagnostic_snapshot(self, error):
+        details = (error.details if isinstance(error, AgentExecutionError) else
+                   error.get("details") if isinstance(error, dict) else None)
+        public_snapshot = isinstance(details, dict) and "raw_result" in details
+        if (self.spec.name == "reverse_target_predictor"
+                and isinstance(error, AgentExecutionError)
+                and hasattr(error, "_reverse_raw_result")):
+            if public_snapshot:
+                raise ValueError("Conflicting reverse-target snapshots")
+            return True, error._reverse_raw_result
+        return (True, details["raw_result"]) if public_snapshot else (False, None)
+
     def _validate_observation(self, raw):
         seen = set()
         for _ in range(17):
@@ -309,11 +321,9 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
                 schema = TargetRawOutput if self.spec.name == "target_database_search" else ReverseRawOutput
                 schema.model_validate(_dict(raw))
                 error = raw.get("error")
-            details = (error.details if isinstance(error, AgentExecutionError) else
-                       error.get("details") if isinstance(error, dict) else None)
-            if not isinstance(details, dict) or "raw_result" not in details:
+            has_snapshot, raw = self._diagnostic_snapshot(error)
+            if not has_snapshot:
                 return
-            raw = details["raw_result"]
         raise ValueError("Target snapshot depth exceeded")
 
     def _reverse_proof_digests(self, raw, payload):
@@ -346,11 +356,9 @@ class TargetToolAdapter(LegacyPythonToolAdapter):
                     raise ValueError('Reverse proof changes under security normalization')
                 proofs.append(digest)
             error = fields.get('error')
-            details = (error.details if isinstance(error, AgentExecutionError) else
-                       error.get('details') if isinstance(error, dict) else None)
-            if not isinstance(details, dict) or 'raw_result' not in details:
+            has_snapshot, raw = self._diagnostic_snapshot(error)
+            if not has_snapshot:
                 return proofs
-            raw = details['raw_result']
         raise ValueError('Target snapshot depth exceeded')
 
     def _map_lookup(self, raw):

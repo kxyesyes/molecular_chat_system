@@ -15,6 +15,9 @@ from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
 from src.agent.tools.activity_input import activity_intent_requested
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
+from src.agent.runtime.allocation import (
+    AllocationStopped, await_routing_model, routing_model_call,
+)
 from src.agent.workflows import WorkflowCatalog
 
 from .models import RouteCandidate, RouteDecision
@@ -465,11 +468,17 @@ class HybridSkillRouter:
             },
             ensure_ascii=False,
         )
-        try:
+        def generate():
             response = llm.generate(prompt, temperature=0.0, max_tokens=200)
             if inspect.isawaitable(response):
-                response = asyncio.run(response)
+                response = asyncio.run(await_routing_model(response))
+            return response
+
+        try:
+            response = routing_model_call(generate)
             data = json.loads(str(response).strip().strip("`"))
             return data if isinstance(data, dict) else None
+        except AllocationStopped:
+            raise
         except Exception:
             return None

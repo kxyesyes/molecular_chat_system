@@ -556,6 +556,10 @@ def test_elapsed_preserves_legacy_producer_scope_and_object_semantics(
         if canonical:
             assert result is raw  # retain legacy ownership; do not copy the producer result
             before.elapsed_ms = result.elapsed_ms
+            if typed and name == REVERSE and before.error is not None:
+                # Reverse error details now have a public diagnostic allowlist;
+                # timing, identity and every other canonical field stay intact.
+                before.error.details = {}
         assert raw == before
         return result.elapsed_ms, checked_elapsed
 

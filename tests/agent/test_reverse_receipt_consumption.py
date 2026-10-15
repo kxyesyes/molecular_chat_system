@@ -723,10 +723,12 @@ def test_real_session_rejects_evidence_only_redaction_before_seal(
                 assert result.status is ObservationStatus.UNAVAILABLE
                 assert result.error.code is AgentErrorCode.TOOL_UNAVAILABLE
                 assert result.error.message == 'synthetic diagnostic'
-                assert result.error.details == emitted[-1]['error']['details']
+                assert result.error.details == {}
+                assert result.error._reverse_raw_result == emitted[-1]['error']['details']['raw_result']
             assert ledger['scientific_usable'] is False
             for snapshot in (sealed, persisted):
-                assert snapshot['error']['details'] == emitted[-1]['error']['details']
+                assert snapshot['error']['details'] == {}
+                assert 'raw_result' not in json.dumps(snapshot)
         else:
             assert observed.success and observed.status is ObservationStatus.SUCCEEDED
             assert ledger['scientific_usable'] is True
@@ -837,7 +839,8 @@ def test_adapter_retains_generic_evidence_and_nested_diagnostic(strict_source_fa
     result = adapter_result(nested)
     assert not result.success and result.error.code is AgentErrorCode.TOOL_UNAVAILABLE
     assert not result.evidence and result.data is None
-    assert result.error.details['raw_result']['evidence'] == expected['evidence']
+    assert not result.error.details
+    assert result.error._reverse_raw_result['evidence'] == expected['evidence']
 
 
 def test_initialization_uses_credit_after_parsing_and_constructor(strict_source_factory, monkeypatch):

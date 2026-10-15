@@ -630,7 +630,7 @@ def test_proof_rejects_malformed_without_mutation_or_chemistry(tmp_path, monkeyp
     monkeypatch.setattr(np, "load", forbidden)
     with pytest.raises(ValueError) as caught:
         p.validate_prediction_source(e, smiles="CCO", threshold=0, expected=snapshot)
-    assert type(caught.value) is ValueError
+    assert type(caught.value) is owned.ReverseProofError
     assert str(caught.value) == owned.PROOF_ERROR
     assert repr(e) == before
     assert p.capture_prediction_source() == snapshot
@@ -823,7 +823,7 @@ def test_exact_expected_snapshot_types(tmp_path, snapshot):
     e = p.predict_with_receipt("CCO")
     with pytest.raises(ValueError) as error:
         p.validate_prediction_source(e, smiles="CCO", expected=snapshot)
-    assert type(error.value) is ValueError and str(error.value) == owned.PROOF_ERROR
+    assert type(error.value) is owned.ReverseProofError and str(error.value) == owned.PROOF_ERROR
 
 
 @pytest.mark.parametrize("change", ["source", "weights", "configuration", "generation"])
@@ -846,7 +846,8 @@ def test_consistent_but_stale_proof_does_not_revoke_current(tmp_path, change):
     with pytest.raises(ValueError if change == "configuration" else owned.ReverseSourceUnavailable) as error:
         p.validate_prediction_source(e, smiles="CCO", expected=snapshot)
     if change == "configuration":
-        assert type(error.value) is ValueError and str(error.value) == owned.PROOF_ERROR
+        assert type(error.value) is owned.ReverseProofError and str(error.value) == owned.PROOF_ERROR
+        assert error.value.details == dict(stage="digest", reason="digest_mismatch", field="configuration_sha256")
     assert e == before and p.capture_prediction_source() == snapshot
 
 
@@ -961,12 +962,12 @@ def test_receipt_control_numeric_identity_tampering(tmp_path, original, replacem
     for caller_threshold in (original, replacement):
         with pytest.raises(ValueError) as error:
             p.validate_prediction_source(e, smiles="CCO", threshold=caller_threshold, expected=snapshot)
-        assert type(error.value) is ValueError and str(error.value) == owned.PROOF_ERROR
+        assert type(error.value) is owned.ReverseProofError and str(error.value) == owned.PROOF_ERROR
         # Matching the tampered controls still cannot repair the original hash.
         caller_controls = dict(controls, threshold=caller_threshold)
         with pytest.raises(ValueError) as error:
             owned.validate_envelope(e, smiles="CCO", controls=caller_controls, expected=snapshot)
-        assert type(error.value) is ValueError and str(error.value) == owned.PROOF_ERROR
+        assert type(error.value) is owned.ReverseProofError and str(error.value) == owned.PROOF_ERROR
     assert owned.canonical_json(e) == owned.canonical_json(before)
     assert p.capture_prediction_source() == snapshot
 
@@ -987,7 +988,8 @@ def test_receipt_weight_numeric_identity_tampering(tmp_path, monkeypatch, weight
     before = copy.deepcopy(e)
     with pytest.raises(ValueError) as error:
         p.validate_prediction_source(e, smiles="CCO", expected=snapshot)
-    assert type(error.value) is ValueError and str(error.value) == owned.PROOF_ERROR
+    assert type(error.value) is owned.ReverseProofError and str(error.value) == owned.PROOF_ERROR
+    assert error.value.details == dict(stage="digest", reason="digest_mismatch", field="configuration_sha256")
     assert owned.canonical_json(e) == owned.canonical_json(before)
     assert p.capture_prediction_source() == snapshot
 

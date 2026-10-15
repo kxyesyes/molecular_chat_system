@@ -33,6 +33,11 @@ class AgentErrorCode(str, Enum):
 
 @dataclass
 class AgentExecutionError:
+    # Internal reverse-target proof state is not a public dataclass field. Keep
+    # it out of vars()/asdict() as well as to_dict(), so strict transport shape
+    # validation and observation sealing see only the declared error contract.
+    __slots__ = ("_reverse_raw_result", "__dict__", "__weakref__")
+
     code: AgentErrorCode
     message: str
     details: dict | None = None

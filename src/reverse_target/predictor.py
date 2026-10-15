@@ -17,7 +17,7 @@ import uuid
 
 from src.reverse_target.config import get_reverse_target_data_dir
 from src.reverse_target.owned_source import (
-    INPUT_ERROR, PROOF_ERROR, REVISION, WEIGHT_REVISION, ReverseSourceSnapshot,
+    INPUT_ERROR, REVISION, WEIGHT_REVISION, ReverseProofError, ReverseSourceSnapshot,
     ReverseSourceUnavailable, clear_failure_frames, configuration_sha256, json_sha256,
     load_owned_source, operation_check, resolve_weights, validate_controls,
     validate_envelope, validate_popcount_rows,
@@ -243,7 +243,7 @@ class ReverseTargetPredictor:
                 receipt_configuration = configuration_sha256(
                     source.paths, receipt["weights"], receipt["weight_resolution"])
                 if receipt["configuration_sha256"] != receipt_configuration:
-                    raise ValueError(PROOF_ERROR)
+                    raise ReverseProofError("digest", "configuration_sha256")
                 if receipt_configuration != current.configuration_sha256:
                     raise ReverseSourceUnavailable()
             return result

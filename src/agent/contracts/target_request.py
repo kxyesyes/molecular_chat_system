@@ -13,10 +13,27 @@ _VALUE = (
     r'(丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*|'
     r'[\u4e00-\u9fff]+?(?=生成|设计|候选|[和及与、，,。\s]|$))'
 )
+_SWITCH = r'(?:改(?:为|用)|换成|转而\s*使用)'
 _LABEL = re.compile(
-    r'(?:针对|靶点(?:\s*[:：]|\s+|(?=[A-Za-z]))|改为|换成|'
+    r'(?:针对|靶点(?:\s*[:：]|\s+|(?=[A-Za-z]))|' + _SWITCH + r'|'
     r'\b(?:against|target(?:ing)?)\s*[:=]?)\s*' + _VALUE, re.I,
 )
+# Delimiters cannot occur in the body: failed starts never rescan another
+# "以" or backtrack across "为". Keep the whole body, including unknown prose.
+_TARGET_ROLE = re.compile(r'以([^以为。！？!?;；\r\n]+)为\s*(靶点)')
+_ROLE_DESIGN = re.compile(r'\s*(?:[,，]\s*)?(?:设计|生成)')
+_ROLE_DESIGN_BOUNDARY = re.compile(r'[,，.。;；!！?？\r\n]')
+_ROLE_DESIGN_OBJECT = re.compile(
+    r'(?:[0-9零〇一二两三四五六七八九十百千万]+个?)?'
+    r'(?:类药)?(?:候选)?(?:分子|化合物|结构)',
+)
+_ROLE_WRAPPERS = {'“': '”', '‘': '’', '"': '"', "'": "'", '（': '）', '(': ')'}
+_ROLE_TAIL_SEPARATOR = re.compile(r'[\s,，.。;；!！?？]+')
+_ROLE_TAIL_CONNECTOR = re.compile(
+    r'(?:并且|同时|然后|之后|接着|且|并|和|及|与|、|再|\band\b)\s*', re.I,
+)
+_ROLE_TARGET_ACTION = re.compile(r'(?:抑制|' + _SWITCH + r')\s*')
+_ROLE_TARGET_VALUE = re.compile(_VALUE, re.I)
 _FOLLOWING = re.compile(r'\s*(?:和|及|与|、|[,，/]|\band\b|\bor\b)\s*' + _VALUE, re.I)
 _CANDIDATE_SELECTION = re.compile(
     r'[ \t]*(?:[,，]|\band\b)[ \t]*select[ \t]+top[ \t]+'
@@ -30,7 +47,8 @@ _ACTION_WORDS = frozenset({
     'please', '生成', '设计', '筛选', '预测', '计算',
 })
 _QUALIFIED = re.compile(
-    r'不要针对|不针对|不考虑|并非|不是|排除|而非|改为|换成|选择性|'
+    r'不要针对|不针对|(?:不(?:要|能)?|别|勿)(?:\s*再)?\s*以|'
+    r'不考虑|并非|不是|排除|而非|选择性|' + _SWITCH + r'|'
     r'\b(?:except|exclude|instead|rather|selective|switch)\b|'
     r'\bnot\s+(?:target(?:ing)?\b|against\b|' + TARGET_PATTERN.pattern + r')', re.I,
 )
@@ -66,6 +84,16 @@ def _is_candidate_selection(query: str, following: re.Match[str]) -> bool:
         following[1].casefold() == 'select'
         and _CANDIDATE_SELECTION.fullmatch(query, following.start()) is not None
     )
+
+
+def _role_value(value: str) -> str:
+    """Unwrap only one balanced pair around a complete known identifier."""
+    value = value.strip()
+    if len(value) >= 2 and _ROLE_WRAPPERS.get(value[0]) == value[-1]:
+        inner = value[1:-1].strip()
+        if canonical_target_identifier(inner) is not None:
+            return inner
+    return value
 
 
 _ANALYSIS_BOUNDARY = re.compile(r'[;；\r\n]|\Z')
@@ -142,10 +170,91 @@ def _analysis_clause_intervals(query: str) -> tuple[tuple[int, int], ...]:
     return tuple(intervals)
 
 
+def _role_tail(query: str, start: int, end: int) -> tuple[list[str], list[tuple[int, int]], bool]:
+    """Consume every tail clause; unknown remainder can never earn an exemption.
+
+    Reuse analytical tokens without changing the standalone analysis grammar.
+    Target-bearing clauses keep their values; switching stays qualified even
+    when the new identifier is known or repeats the original target.
+    """
+    values = []
+    analysis_intervals = []
+    position = start
+    while position < end:
+        separator = _ROLE_TAIL_SEPARATOR.match(query, position, end)
+        if separator is not None:
+            position = separator.end()
+        if position == end:
+            return values, analysis_intervals, True
+        connector = _ROLE_TAIL_CONNECTOR.match(query, position, end)
+        if connector is not None:
+            position = connector.end()
+            if position == end:
+                position = connector.start()
+                break  # A conjunction requires a following action.
+        elif separator is None:
+            break
+        clause_start = position
+        if head := _ANALYSIS_HEAD.match(query, position, end):
+            item = _analysis_item(query, head.end(), end)
+            if item is None:
+                break
+            position = item[0]
+            while join := _ANALYSIS_JOIN.match(query, position, end):
+                item = _analysis_item(query, join.end(), end)
+                if item is None:
+                    break  # The join may introduce a new action, not an item.
+                position = item[0]
+            analysis_intervals.append((clause_start, position))
+        elif action := _ROLE_TARGET_ACTION.match(query, position, end):
+            target = _ROLE_TARGET_VALUE.match(query, action.end(), end)
+            if target is None:
+                break
+            values.append(target[1])
+            position = target.end()
+        else:
+            break
+    else:
+        return values, analysis_intervals, True
+    values.append(query[position:end].strip())
+    return values, analysis_intervals, False
+
+
 def analyze_target_request(query: str) -> TargetRequest:
     targets = target_mentions(query)
-    values = []
-    label_matches = list(_LABEL.finditer(query))
+    role_matches = list(_TARGET_ROLE.finditer(query))
+    values = [_role_value(match[1]) for match in role_matches]
+    role_labels = set()
+    role_analysis_intervals = []
+    for index, match in enumerate(role_matches):
+        # Each body ends before the next role, so scans never overlap.
+        limit = role_matches[index + 1].start() if index + 1 < len(role_matches) else len(query)
+        design = _ROLE_DESIGN.match(query, match.end(), limit)
+        if design is None:
+            # A repeated role may omit the design verb, but must not hide the
+            # remaining target-bearing clauses behind an earlier exemption.
+            tail_values, tail_intervals, _ = _role_tail(query, match.end(), limit)
+            values.extend(tail_values)
+            role_analysis_intervals.extend(tail_intervals)
+            continue
+        boundary = _ROLE_DESIGN_BOUNDARY.search(query, design.end(), limit)
+        end = boundary.start() if boundary else limit
+        body = query[design.end():end]
+        # Validate the whole object, not merely the action prefix. Numbers are
+        # only syntax here; the planner retains count validation and limits.
+        if _ROLE_DESIGN_OBJECT.fullmatch(''.join(body.split())) is not None:
+            tail_values, tail_intervals, complete = _role_tail(query, end, limit)
+            values.extend(tail_values)
+            role_analysis_intervals.extend(tail_intervals)
+            if complete:
+                role_labels.add(match.start(2))
+        else:
+            # Preserve unrecognized text even without whitespace after 靶点,
+            # where the forward-label scan cannot provide a fallback guard.
+            values.append(query[design.start():end].strip())
+    # Only a complete role, design clause and fully consumed tail are exempt;
+    # other labels (including "靶点: UNKNOWN") retain their original authority.
+    label_matches = [match for match in _LABEL.finditer(query) if match.start() not in role_labels]
     # "for" is also a purpose marker; require entity syntax, not "for testing".
     for_matches = [match for match in _FOR.finditer(query) if _identifier_like(match[1])]
     # Unlabelled lists may start with unknown identifiers, but need a known
@@ -153,6 +262,8 @@ def analyze_target_request(query: str) -> TargetRequest:
     list_matches = []
     list_end = 0
     analysis_intervals = _analysis_clause_intervals(query)
+    if role_analysis_intervals:
+        analysis_intervals = tuple(sorted((*analysis_intervals, *role_analysis_intervals)))
     interval_index = 0
     for match in _IDENTIFIER.finditer(query):
         while (interval_index < len(analysis_intervals)
@@ -186,5 +297,5 @@ def analyze_target_request(query: str) -> TargetRequest:
             values.append(following[1])
             consumed_end = following.end()
     unknown = tuple(dict.fromkeys(v for v in values if canonical_target_identifier(v) is None))
-    explicit = bool(label_matches or for_matches or list_matches)
+    explicit = bool(role_matches or label_matches or for_matches or list_matches)
     return TargetRequest(targets, unknown, explicit, bool(_QUALIFIED.search(query)))

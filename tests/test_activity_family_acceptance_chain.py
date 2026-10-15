@@ -520,6 +520,8 @@ def test_synthetic_conflict_forward_preserves_partial_across_full_chain(syntheti
             assert row['predicted_pIC50'] == (4. if synthetic_snapshot.family_id == 'pde-family' else 6.)
         if case['entry'] in ('decision', 'websocket'):
             assert case['events'][-1] == 'task_partial'
+            assert case['events'].count('tool_completed') == 1
+            assert 'tool_failed' not in case['events']
             assert case['event_trace'][-1]['payload'] == {'success': False, 'status': 'partial', 'partial': True}
             assert case['tool_trace'][0]['status'] == 'partial'
 

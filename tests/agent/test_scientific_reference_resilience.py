@@ -134,8 +134,11 @@ def test_new_chat_supervisor_and_store_replay_successful_step_without_renewal(
 
 @pytest.mark.parametrize("with_gate", [False, True], ids=["standalone", "request-gate"])
 def test_cancelled_chat_waiter_drains_worker_before_releasing_source_and_lease(
-    tmp_path, with_gate
+    tmp_path, with_gate, monkeypatch
 ):
+    from concurrent.futures import ThreadPoolExecutor
+    from src.agent.runtime import allocation
+
     store, svc, p = confirmed(tmp_path)
     source_run = _rows(store, "agent_runs", "trace")
     source_checkpoints = _rows(store, "agent_checkpoints", "trace")
@@ -194,13 +197,27 @@ def test_cancelled_chat_waiter_drains_worker_before_releasing_source_and_lease(
                 assert gate._readers == 0 and not gate._writing and not gate._background
             assert finished.is_set()
             assert not (asyncio.all_tasks() - baseline)
+            acquired = 0
+            try:
+                for _ in range(allocation.MAX_ALLOCATION_WORKERS):
+                    assert allocation._slots.acquire(blocking=False), "Physical allocation call still owns capacity"
+                    acquired += 1
+            finally:
+                for _ in range(acquired):
+                    allocation._slots.release()
         finally:
             release.set()
             await asyncio.wait_for(asyncio.gather(
                 *(task for task in (request, writer) if task is not None),
                 return_exceptions=True), 10)
 
-    asyncio.run(run())  # Also shuts down and joins this loop's executor threads.
+    # The application pool intentionally outlives one event loop. Give this test
+    # an identical, test-owned pool so physical join assertions stay meaningful
+    # without shutting down another request's production executor.
+    with monkeypatch.context() as patcher, ThreadPoolExecutor(max_workers=allocation.MAX_ALLOCATION_WORKERS) as workers:
+        patcher.setattr(allocation, "_workers", workers)
+        patcher.setattr(allocation, "_slots", threading.BoundedSemaphore(allocation.MAX_ALLOCATION_WORKERS))
+        asyncio.run(run())
     assert worker_threads and all(not thread.is_alive() for thread in worker_threads)
     assert tools["property_calculator"].calls == ["CCN"]
     assert _rows(store, "agent_runs", "trace") == source_run

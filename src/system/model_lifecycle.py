@@ -20,6 +20,21 @@ class ModelRequestGate:
         self.closed = False
         self._background = set()
 
+    def retain_task(self, task):
+        """Track a bounded caller-owned task which already retains its lease.
+
+        This does not acquire or transfer readers. The consumer's existing
+        model_request guard must remain active until physical cleanup finishes.
+        """
+        self._background.add(task)
+
+        def completed(done):
+            self._background.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning('Retained model consumer failed; exception details omitted')
+
+        task.add_done_callback(completed)
+
     async def submit_background(self, manager, **kwargs):
         """Transfer a request lease to the lifetime of an accepted task."""
         lease = self.request()

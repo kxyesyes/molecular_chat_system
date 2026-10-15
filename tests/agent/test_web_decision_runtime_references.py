@@ -50,7 +50,18 @@ def test_actual_projection_schedule_exit_has_one_truthful_terminal(actual_app, m
                 await socket.send({'message': 'Explain logP'})
                 await asyncio.wait_for(entered.wait(), 3)
                 assert len(parents) == 1
-                await asyncio.wait_for(asyncio.gather(*parents), 3)
+                owners = tuple(b.app.decision_runtime.tasks)
+                assert len(owners) == 1
+                # Admission now retains the segment as a child. Only the outer
+                # supervised turn owns error handling and completion delivery.
+                await asyncio.wait_for(asyncio.gather(*owners), 3)
+                assert parents[0].done()
+                if failure is asyncio.CancelledError:
+                    assert parents[0].cancelled()
+                else:
+                    assert not parents[0].cancelled()
+                    assert (parents[0].exception() is None if failure is None
+                            else isinstance(parents[0].exception(), failure))
                 assert len(unscheduled) == int(failure is not None)
                 assert all(inspect.getcoroutinestate(c) == inspect.CORO_CLOSED for c in unscheduled)
                 frames = []
@@ -136,7 +147,10 @@ def test_actual_projection_exception_closes_socket_without_rewriting_result(actu
                 monkeypatch.setattr(b.app.decision_runtime.references, 'project', fail_project)
                 await socket.send({'message': 'Explain logP'})
                 await asyncio.wait_for(entered.wait(), 3)
-                await asyncio.wait_for(asyncio.gather(*parents), 3)
+                owners = tuple(b.app.decision_runtime.tasks)
+                assert len(owners) == len(parents) == 1
+                await asyncio.wait_for(asyncio.gather(*owners), 3)
+                assert parents[0].done() and parents[0].cancelled()
                 events = []
                 while not socket.outgoing.empty():
                     events.append(socket.outgoing.get_nowait())
