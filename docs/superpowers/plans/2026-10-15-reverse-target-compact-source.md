@@ -226,20 +226,20 @@ persistence seam as necessary; new test_reverse_target_rank_followup.py.
 
 ## R5 — Complete-corpus and real browser gate
 
-- [ ] Start only the agent-owned local browser-safe service; preserve the user's other service.
+- [x] Start only the agent-owned local browser-safe service; preserve the user's other service.
   Record actual profile/settings and actual source row count, digest, elapsed validation and
   logical/RSS observations without committing datasets or local run artifacts.
 - [ ] If full validation fails, diagnose the precise stage and failing invariant. Never crop,
   regenerate, patch or accept bad rows to pass. If fixing actual data is necessary, seek the
   required asset/provenance scope and retain BLOCKED rather than forging publication.
-- [ ] Once READY, open the normal homepage and send original S08, then S09 in the same chat:
+- [x] Once READY, open the normal homepage and send original S08, then S09 in the same chat:
 
 ```text
 对咖啡因 CN1C(=O)N(C)c2ncn(C)c2C1=O 做反向寻靶，给出前 5 个候选靶点、依据和局限。
 查找排名第一的靶点结构，并说明能否继续对接。
 ```
 
-- [ ] Verify visible candidates/source/limitations against accepted raw evidence and original row
+- [x] Verify visible candidates/source/limitations against accepted raw evidence and original row
   identity. Confirm S09 exact target/species mapping and no docking execution. Record real trace
   IDs and truthful PASS/BLOCKED individually in the existing validation report.
 - [ ] Run `python scripts/health_check.py --strict`, compileall, focused suites, Node tests and the
@@ -249,6 +249,16 @@ persistence seam as necessary; new test_reverse_target_rank_followup.py.
   authorized completion and remote review/check gates are satisfied.
 
 ## Progress and review ledger
+
+R5 browser increment (2026-10-16 04:58–05:00): full 831,120-row application
+prewarm reached READY in 18m56.623s. Original S08 and same-chat S09 passed; trace
+`agent-9e84460c7f7f`, exact top-five original TSV row identity independently checked.
+The real-page retest exposed a stale script cache key after the URL-policy fix;
+one failing deployment test reproduced it, then 36 Node tests passed with a new
+homepage script version. Independent SPEC and fresh QUALITY approved. Actual
+new-page links/source labels are correct and docking remains explicitly unstarted.
+See the validation report for all digests, screenshots, memory samples and prior
+failures. R5's final complete regression/integration/release gates remain open.
 
 - [x] User confirmed the two written designs and execution in this chat.
 - [x] Plan self-check: all spec sections map to R1–R5; budgets/codec and identity are explicit.

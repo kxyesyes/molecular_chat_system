@@ -61,3 +61,11 @@ test("ranked structure formatter preserves official UniProt entry links", () => 
   const html = loadPolicy().HomeFormatters.formatContent(`[UniProt Q6P988](${url})`);
   assert.ok(html.includes(`href="${url}"`));
 });
+
+test("homepage invalidates the pre-UniProt cached URL policy before formatting", () => {
+  const html = fs.readFileSync(path.join(__dirname, "../src/web/templates/index.html"), "utf8");
+  const scripts = [...html.matchAll(/<script\s+src="([^"]+)"/g)].map(match => match[1]);
+  const policies = scripts.filter(src => src.startsWith("/static/js/shared/safe_render.js"));
+  assert.deepEqual(policies, ["/static/js/shared/safe_render.js?v=20261016-uniprot-entry-v1"]);
+  assert.ok(scripts.indexOf(policies[0]) < scripts.findIndex(src => src.startsWith("/static/js/home/formatters.js")));
+});
