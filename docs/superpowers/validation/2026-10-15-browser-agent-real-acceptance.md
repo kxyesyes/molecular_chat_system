@@ -919,3 +919,16 @@ warnings，14.79 秒**，冻结哈希一致。fresh QUALITY **APPROVED**，独�
 fresh QUALITY **APPROVED**：聚焦 **301 passed / 1 warning**，另 506 组合、
 128 初始对照、128 畸形 DTO 探针通过；内存编译与冻结哈希通过。
 协调器调用点和聊天接入另行审查，不以本段代表 D6 已完成。
+
+### 2026-10-16 D6 同 root 文本补充协调器（独立审查通过）
+
+SPEC 发现已验证口袋在原请求未写共晶条款时仍可被补充文本覆盖，以及模型
+返回 unresolved/inconsistent 时未再次验证实际来源。四项正式回归先 **4 failed**，
+修复后 **34 passed / 1 warning，65.07 秒**；SPEC 独立 **34 passed，66.04 秒**
+及十项口袋/中途失效探针通过。QUALITY 再发现 no-op 文本可返回失效预览、
+BUSY 时固定输入冲突未关闭 root。三项回归在隔离夹具修正后 **3 failed，
+13.95 秒**，改为 no-op 走已有 guarded status，固定值冲突先于 BUSY 合并检查。
+父级最终 **37 passed / 1 warning，68.74 秒**；QUALITY 复审 **APPROVED**，
+独立 **37 passed / 1 warning，70.89 秒**，冻结哈希一致。
+保留原 root/task/query/issuer/deadline/budget，不重建权限，不产生审批或执行。
+真正聊天 receiver/controller/app/UI 仍在后续集成，尚未启用 C。

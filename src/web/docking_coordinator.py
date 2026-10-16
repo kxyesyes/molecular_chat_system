@@ -240,6 +240,7 @@ class _Root:
     staging_started: bool = False
     ready_preview_json: str | None = None
     publication: object = None
+    text_refinements: list = field(default_factory=list)
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -539,6 +540,7 @@ class DockingRequestCoordinator:
         root.receptor_descriptor = root.ligand_descriptor = root.prepared_preview_json = None
         root.ready_preview_json = root.input_context = None
         root.preparation_owners.clear()
+        root.text_refinements.clear()
         root.close_task = None
         if root.durable and self._roots.get(root.root_id) is root:
             del self._roots[root.root_id]
@@ -728,22 +730,7 @@ class DockingRequestCoordinator:
                 await self._sql(self._read_draft, root=root, expected_version=root.draft["version"])
                 self._capture(root)
             # Do NOT nest readers: a waiting model writer must be able to enter.
-            bound_store = _BoundDraftStore(self._tasks,
-                lambda record: self._validate_draft_record(root, record),
-                lambda record, **kw: self._accept_proposal_budget(root, record, **kw))
-            owner = DockingProposalOwner(task_store=bound_store, state_store=self._state,
-                gate=self._gate, capture_current=lambda: self._capture(root),
-                wall_time_ms=self._wall, monotonic=self._mono)
-            budget = root.draft["draft"]["budget"]
-            call_slice_ms = min(30000, self._remaining_ms(root), budget["limit_ms"] - budget["spent_ms"])
-            if call_slice_ms <= 0:
-                raise _Unavailable("budget_exhausted")
-            result = await owner.propose(root_id=root.root_id, preparation_id=root.preparation_id,
-                owner_session_id=root.owner, expected_revision=0, expected_version=root.draft["version"],
-                snapshot=root.snapshot, policy=root.current["policy"],
-                model_generation=root.current["model_generation"],
-                capability_generation=root.current["capability_generation"], mode=root.mode,
-                segment=segment, call_slice_ms=call_slice_ms)
+            result = await self._propose_segment(root, segment)
             async with self._gate.request():
                 await self._sql(self._check_root, root=root)
                 self._capture(root)
@@ -776,6 +763,124 @@ class DockingRequestCoordinator:
             self._stop(root, str(exc))  # Only locally defined fixed reasons.
         except Exception:
             self._stop(root, "operation_unavailable")
+
+    async def _propose_segment(self, root, segment):
+        bound_store = _BoundDraftStore(self._tasks,
+            lambda record: self._validate_draft_record(root, record),
+            lambda record, **kw: self._accept_proposal_budget(root, record, **kw))
+        owner = DockingProposalOwner(task_store=bound_store, state_store=self._state,
+            gate=self._gate, capture_current=lambda: self._capture(root),
+            wall_time_ms=self._wall, monotonic=self._mono)
+        budget = root.draft["draft"]["budget"]
+        call_slice_ms = min(30000, self._remaining_ms(root), budget["limit_ms"] - budget["spent_ms"])
+        if call_slice_ms <= 0:
+            raise _Unavailable("budget_exhausted")
+        return await owner.propose(root_id=root.root_id, preparation_id=root.preparation_id,
+            owner_session_id=root.owner, expected_revision=root.accepted_revision,
+            expected_version=root.draft["version"], snapshot=root.snapshot, policy=root.current["policy"],
+            model_generation=root.current["model_generation"],
+            capability_generation=root.current["capability_generation"], mode=root.mode,
+            segment=segment, call_slice_ms=call_slice_ms)
+
+    async def refine_text(self, *, root_id, owner_session_id, expected_revision, text):
+        """Accept a bounded numeric supplement, never a new source or approval.
+
+        The original source pair remains immutable. Reference strings cannot
+        create producer descriptors: the explicit source-selection path owns
+        those slots. Every accepted text uses this root's same one-shot issuer.
+        """
+        from .docking_request import assess_docking_refinement_text
+        root = self._owned(root_id, owner_session_id)
+        if (root is None or root.closed
+                or root.input_context is not None and root.input_context._execution is not None
+                or root.phase not in {'AWAITING_INPUT', 'BUSY', 'READY'}
+                or root.proposal is None or type(expected_revision) is not int
+                or not 0 <= expected_revision <= 2**53 - 1 or type(text) is not str):
+            return _view(reason='refinement_unavailable')
+        # Exact retry of an accepted control never issues a new text capability.
+        if any(item['revision'] == expected_revision and item['text'] == text
+               for item in root.text_refinements):
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        if expected_revision != root.accepted_revision:
+            return _view(reason='refinement_unavailable')
+        assessed = assess_docking_refinement_text(text, enabled=self._enabled, enable_tools=True)
+        if not assessed['assessed'] or any(key.endswith('_ref') for key in assessed['fields']):
+            return _view(reason='clarification_required', phase='AWAITING_INPUT')
+        original = assess_docking_request_text(root.snapshot.query, enabled=self._enabled, enable_tools=True)
+        fixed = dict(original['fields'])
+        fixed.update({key: slot['value'] for key, slot in root.accepted_slots.items()
+                      if slot['state'] == 'fixed'})
+        if any(key in fixed and fixed[key] != value for key, value in assessed['fields'].items()):
+            self._interrupt(root, 'new_root_required')
+            await self._finish_closed(root)
+            return _view(root)
+        if root.task is not None and not root.task.done():
+            return _view(root)
+        if root.input_context is not None or root.phase == 'READY':
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        # A co-crystal request cannot silently become a user-selected grid.
+        if original['pocket_rule_requested'] and any(key in assessed['fields'] for key in ('center', 'size')):
+            return _view(reason='clarification_required', phase='AWAITING_INPUT')
+        if root.source_reference is not None:
+            # Actual source selection, not wording in the original request,
+            # owns the verified pocket geometry.
+            pocket = root.projected.get('pocket') if root.projected is not None else None
+            if any(key in assessed['fields'] and (
+                    pocket is None or assessed['fields'][key] != pocket[key])
+                    for key in ('center', 'size')):
+                return _view(reason='clarification_required', phase='AWAITING_INPUT')
+        patch = {key: value for key, value in assessed['fields'].items() if key not in fixed}
+        if not patch or len(root.text_refinements) >= 3:
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        try:
+            segment = capture_text_segment(issuer=root.issuer, original_snapshot=root.snapshot,
+                text_segment_index=len(root.text_refinements) + 1, server_turn_id=uuid4().hex,
+                current_text=text, preceding_refinements=[
+                    dict(server_turn_id=item['server_turn_id'], text=item['text'])
+                    for item in root.text_refinements])
+        except Exception:
+            return _view(reason='refinement_unavailable')
+        root.text_refinements.append(dict(server_turn_id=segment.server_turn_id,
+                                         text=text, revision=expected_revision))
+        root.phase, root.reason = 'BUSY', 'text_refinement_running'
+        root.task = asyncio.create_task(self._run_text_refinement(root, segment, patch))
+        self._gate.retain_task(root.task)
+        return await self._wait_root(root)
+
+    async def _run_text_refinement(self, root, segment, patch):
+        from .docking_request import validate_docking_refinement_proposal
+        try:
+            async with self._gate.request():
+                await self._sql(self._read_refinement_context, root=root, require_source=False)
+                self._capture(root)
+            result = await self._propose_segment(root, segment)
+            async with self._gate.request():
+                await self._sql(self._read_refinement_context, root=root, require_source=False)
+                self._capture(root)
+                if not result.available or result.reserved_version != root.draft['version']:
+                    raise _Unavailable('proposal_unavailable')
+                checked = validate_docking_refinement_proposal(segment.current_text, result.proposal,
+                    text_segment_index=segment.text_segment_index, enabled=self._enabled, enable_tools=True)
+            if checked['consistent'] and not checked['model_unresolved']:
+                await self._refine_slots(root, patch, require_source=False)
+                if root.prepared_preview_json is not None:
+                    preview = json.loads(root.prepared_preview_json)
+                    preview['parameters_suggestion'].update(patch)
+                    preview['refinement_revision'] = root.accepted_revision
+                    root.prepared_preview_json = _small_json(preview)
+                root.reason = ('parameters_confirmation_required' if root.prepared_preview_json is not None
+                               else 'scientific_selection_required' if root.source_preview_json is not None
+                               else 'source_preparation_required')
+            else:
+                root.reason = 'clarification_required'
+            root.phase = 'AWAITING_INPUT'
+        except asyncio.CancelledError:
+            self._stop(root, 'cancelled')
+            raise
+        except _Unavailable as exc:
+            self._stop(root, str(exc))
+        except Exception:
+            self._stop(root, 'refinement_unavailable')
 
     def _owned(self, root_id, owner_session_id):
         if not _label(root_id) or not _owner_label(owner_session_id):
@@ -1008,12 +1113,17 @@ class DockingRequestCoordinator:
             formal_charge=root.ligand["formal_charge"], provenance=root.ligand["provenance"])
         return receptor, ligand, dict(receptor_ref=_content_ref(receptor), ligand_ref=_content_ref(ligand))
 
-    async def _refine_slots(self, root, patch):
+    def _read_refinement_context(self, *, root, require_source):
+        if require_source or root.source_reference is not None:
+            return self._read_source_reference(root=root)
+        return self._read_waiting_draft(root=root, expected_version=root.draft['version'])
+
+    async def _refine_slots(self, root, patch, *, require_source=True):
         patch = validate_draft_patch(patch)
         # The store's existing CAS owns its write transaction. Never nest the
         # two-database read guard inside that TaskStore-first transaction.
         async with self._gate.request():
-            await self._sql(self._read_source_reference, root=root)
+            await self._sql(self._read_refinement_context, root=root, require_source=require_source)
             self._capture(root)
             slots = {key: dict(value) for key, value in root.accepted_slots.items()}
             for key, value in patch.items():
@@ -1033,7 +1143,7 @@ class DockingRequestCoordinator:
             if confirmed["draft"]["budget"] != root.draft["draft"]["budget"]:
                 raise _Unavailable("draft_binding_mismatch")
             root.accepted_revision, root.accepted_slots, root.draft = revision, slots, confirmed
-            await self._sql(self._read_source_reference, root=root)
+            await self._sql(self._read_refinement_context, root=root, require_source=require_source)
             self._capture(root)
             root.missing = tuple(key for key in sorted(DRAFT_SLOT_NAMES) if slots[key]["state"] == "pending")
 
@@ -1051,7 +1161,11 @@ class DockingRequestCoordinator:
             await self._check_source(root)
             explicit = {key: value for key, value in assessed["fields"].items()
                         if key in {"center", "size", "exhaustiveness", "num_modes"}}
-            await self._refine_slots(root, dict(refs, **explicit))
+            explicit.update({key: slot['value'] for key, slot in root.accepted_slots.items()
+                             if key in {'center', 'size', 'exhaustiveness', 'num_modes'}
+                             and slot['state'] == 'fixed'})
+            await self._refine_slots(root, {key: value for key, value in dict(refs, **explicit).items()
+                                           if root.accepted_slots[key]['state'] == 'pending'})
             root.receptor_descriptor, root.ligand_descriptor = receptor, ligand
             projected = root.projected["projection"]
             pocket = root.projected["pocket"]
