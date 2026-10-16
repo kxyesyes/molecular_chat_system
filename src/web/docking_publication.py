@@ -608,7 +608,7 @@ async def _observe_published(state):
         raise
 
 
-async def _confirmed_observation(state):
+async def _confirmed_observation(state, *, preserve_terminal_on_cancel=True):
     root, _, coordinator, _, _ = state._origin
     if state.access_disabled:
         _deny()
@@ -629,6 +629,8 @@ async def _confirmed_observation(state):
     except asyncio.CancelledError:
         # No second terminal and no cancelled wrapper detached from its reader.
         # This is the existing outcome, not a fresh grant/download authorization.
+        if not preserve_terminal_on_cancel:
+            raise
         if state.access_disabled:
             _deny()
         return state.outcome

@@ -731,3 +731,42 @@ SPEC 与 fresh QUALITY 各自独立 **154 passed**，各增加四个探针；三
 diff/hash 一致，均批准。实际合成 C2 证明成功及抑制记录在通用清理和显式
 staging 制品删除后保持不变，重复批准不再次执行、不重建文件。未调用真实
 Vina、LLM 或清理真实资产；D6/D7 仍未完成。
+
+### 2026-10-16 #619 完整结论及新 head
+
+`a9ef7b34` 的 #619 最终为 **failure**，最终 offline-quality 正确阻断。
+九个 Python 分组累计 **27129 passed / 1 failed / 130 skipped / 40247 warnings**，
+唯一失败为上段部署分组数断言；Agent core **13297 passed / 2 skipped，
+1056.39 秒**。实际 collection **15129 = 13299 + 225 + 1360 + 245**。
+修正 `6fda4a45` 与 D5 `d0440cc4` 已推送，当前 quality
+**38913736227 / #620 正在运行**，尚无新 head 全绿结论。PR 仍 Draft。
+
+### 2026-10-16 D4 只读科学结果投影（独立审查中）
+
+新 `src/web/docking_result_view.py` 与
+`tests/agent/test_docking_publication_projection.py`，以及既有
+`src/web/docking_publication.py` 的可选只读取消传播参数（默认终态观察行为
+不变）。只接受 coordinator/owned root identity，要求已确认成功且原 publication
+物理 owner 已完成，使用现有 observer 重新验证证据；不初次发布、不创建任务、
+不续期 grant、不恢复数据库成功、不写历史。只返回固定工具/摘要、原始
+`best_energy_kcal_mol`、`kcal/mol`、pose 数/字节数/hash 和同源授权下载路径。
+失败抛固定 unavailable，无评分/链接；该 data adapter 尚不是 wire 事件、
+UI、HTTP 或应用激活。
+
+初始 callable RED **19 failed，2.99 秒**。第一版 **17 passed / 2 failed，
+107.03 秒**定位到在 model reader 外调用 capture；修正为前置纯 identity
+检查、实际 observer、最后在非嵌套 reader 内捕获 model 并构造 DTO，随后
+**19 passed，93.22 秒**。另五项实际锁/替换/未完成 owner 测试先出现
+**1 failed / 4 passed，40.80 秒**：live latch 的原 publication task 未结束时
+不应被当成新的已验证观察；增加只读前置拒绝后，完整 **24 passed /
+1 warning，145.58 秒**。调用者取消立即传播，实际 observer 保留 reader 直到
+物理线程退出；首次成功的原终态不被改写。
+既有 receipt/artifact 两模块 `-k 'cancel or duplicate or observation or sqlite'`
+回归 **43 passed / 107 deselected / 2 warnings，197.00 秒**。三文件编译、
+diff/hash 通过；SPEC 独立通过 **24 passed / 1 warning，155.03 秒**，并通过
+额外并发取消探针（首次 Windows stdin 启动失败，改用 `python -c` 后通过）。
+三个文件哈希未变。fresh QUALITY **APPROVED**：独立 **24 passed，138.71 秒**，
+发布取消/合并观察回归 **3 passed，18.29 秒**，额外混合调用者取消、末段 gate
+取消及 model 替换探针 **3 passed，26.38 秒**。各次保留既有 Pydantic 警告；
+三文件内存编译、diff 和哈希复核通过。未复跑全部较早的 43 项回归；未测试
+D6、真实服务或资产。全部为合成 C2 契约夹具，没有真实 Vina 科学结果。
