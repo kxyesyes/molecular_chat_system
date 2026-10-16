@@ -16,6 +16,7 @@ from src.task_runtime.runtime import TaskRuntime
 from src.task_runtime.docking_consent import DockingConsentError, validate_approval, verify_approval
 from src.web.agent_session import _origin_allowed
 from src.web.docking_coordinator import DockingRequestCoordinator, _label
+from src.web.docking_http import DockingHTTPMiddleware, check_feedback, envelope_for, request_deadline
 
 
 _MAX_BODY = 4096
@@ -157,6 +158,7 @@ class _ControlTransport:
         # Admission belongs to THIS request, never the shared cleanup task.
         # No await separates these checks, retaining cleanup, and the exact
         # coordinator stop signal. Approval cannot enter between them.
+        check_feedback(request)
         if time.monotonic() >= deadline:
             raise HTTPException(408, 'Request deadline exceeded')
         if self.coordinator._owned(root.root_id, owner) is not root:
@@ -275,6 +277,12 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
     if enabled is not True:
         return
 
+    # Last-added middleware is outermost: include the existing session service
+    # even in isolated apps which installed it before registering these routes.
+    app.add_middleware(DockingHTTPMiddleware, transport=_ControlTransport(coordinator),
+        budget=lambda scope: (_PREPARE_SECONDS if scope.get('method') == 'POST'
+            and scope.get('path') == '/api/agent/docking/preparations' else _CONTROL_SECONDS + 0.1))
+
     def authenticate(request, *, mutation=True):
         owner = request.scope.get("agent_session_id")
         if type(owner) is not str or not owner:
@@ -288,7 +296,7 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
 
     @app.get('/api/agent/docking/tasks/{task_id}')
     async def status(task_id: str, request: Request):
-        deadline = time.monotonic() + _CONTROL_SECONDS
+        deadline = request_deadline(request, _CONTROL_SECONDS)
         owner = authenticate(request, mutation=False)
         if request.query_params:
             raise HTTPException(422, 'Invalid request')
@@ -300,21 +308,21 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
 
     @app.post('/api/agent/docking/preparations/{preparation_id}/revoke')
     async def revoke(preparation_id: str, request: Request):
-        deadline = time.monotonic() + _CONTROL_SECONDS
+        deadline = request_deadline(request, _CONTROL_SECONDS)
         owner = authenticate(request)
         return await _ControlTransport(coordinator).control(request, owner,
             'preparation_id', preparation_id, deadline, revoke=True)
 
     @app.post('/api/agent/docking/tasks/{task_id}/cancel')
     async def cancel(task_id: str, request: Request):
-        deadline = time.monotonic() + _CONTROL_SECONDS
+        deadline = request_deadline(request, _CONTROL_SECONDS)
         owner = authenticate(request)
         return await _ControlTransport(coordinator).control(request, owner,
             'task_id', task_id, deadline, revoke=False)
 
     @app.post("/api/agent/docking/preparations")
     async def prepare(request: Request):
-        deadline = time.monotonic() + _PREPARE_SECONDS
+        deadline = request_deadline(request, _PREPARE_SECONDS)
         owner = authenticate(request)
         transport = _ControlTransport(coordinator)
         body = transport.retain(object(), lambda: _prepare_body(request, deadline))
@@ -326,12 +334,14 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
                 or any(root.accepted_slots[key] != dict(state="fixed", value=value[key])
                        for key in ("receptor_ref", "ligand_ref"))):
             raise HTTPException(409, "Preparation changed")
+        check_feedback(request)
         if time.monotonic() >= deadline:
             raise HTTPException(408, 'Request deadline exceeded')
 
         result = asyncio.get_running_loop().create_future()
         feedback = asyncio.Event()
-        delivered = False
+        response_ready = False
+        envelope = envelope_for(request.scope)
         dispatched = initializes = cleanup_owned = False
         entry_task, entry_context = root.task, root.input_context
 
@@ -354,12 +364,32 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
                 and all(root.accepted_slots[key] == dict(state='fixed', value=value[key])
                         for key in ('receptor_ref', 'ligand_ref')))
 
+        def finish_feedback(delivered):
+            nonlocal cleanup_owned
+            if feedback.is_set():
+                return
+            # A repeat owns only its status wait, never another request's C1/C2.
+            cleanup_owned = (not delivered and not execution_owned()
+                and (initializes or (not dispatched and root.task is entry_task
+                    and root.input_context is entry_context and can_initialize())))
+            if cleanup_owned:
+                coordinator._interrupt(root, 'closed', 'CLOSED')
+                context = root.input_context
+                if context is not None and context._operation is not None:
+                    context._operation.aborted.set()
+            if result.done() and not result.cancelled():
+                result.exception()
+            else:
+                result.cancel()
+            feedback.set()
+
         async def preparation():
             nonlocal dispatched, initializes
             try:
                 # Never cancel this wrapper on HTTP exit: even if it has not
                 # started yet, its reserved slot must still run exact cleanup.
-                if feedback.is_set() or time.monotonic() >= deadline:
+                if (feedback.is_set() or envelope is not None and envelope.closed
+                        or time.monotonic() >= deadline):
                     raise HTTPException(408, 'Request deadline exceeded')
                 if coordinator._owned(root.root_id, owner) is not root:
                     raise HTTPException(409, 'Preparation changed')
@@ -383,6 +413,8 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
                     await coordinator._close_owned_root(root)
 
         transport.retain(object(), preparation)
+        if envelope is not None:
+            envelope.feedback = finish_feedback
         try:
             view = await transport.wait(result, deadline)
             if view['phase'] == 'READY':
@@ -399,31 +431,17 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             response = JSONResponse(view, status_code=status, headers={'Cache-Control': 'no-store'})
             if time.monotonic() >= deadline:
                 raise HTTPException(503, 'Preparation deadline exceeded')
-            delivered = True
+            response_ready = True
             return response
         finally:
-            # A repeat owns only its status wait, never another request's C1/C2.
-            # Before dispatch, cleanup is allowed only for the unchanged,
-            # still-unstarted root; a queued observer cannot acquire that right.
-            cleanup_owned = (not delivered and not execution_owned()
-                and (initializes or (not dispatched and root.task is entry_task
-                    and root.input_context is entry_context and can_initialize())))
-            if cleanup_owned:
-                # Local invalidation and the real C1 stop flag precede any
-                # await/SQL. The retained owner drains physical work, not HTTP.
-                coordinator._interrupt(root, 'closed', 'CLOSED')
-                context = root.input_context
-                if context is not None and context._operation is not None:
-                    context._operation.aborted.set()
-            if result.done() and not result.cancelled():
-                result.exception()
-            else:
-                result.cancel()
-            feedback.set()
+            # Direct route callers retain their historical response boundary.
+            # ASGI callers keep this same cleanup owner through physical send.
+            if envelope is None or not response_ready:
+                finish_feedback(response_ready)
 
     @app.post('/api/agent/docking/preparations/{preparation_id}/approve')
     async def approve(preparation_id: str, request: Request):
-        deadline = time.monotonic() + _CONTROL_SECONDS
+        deadline = request_deadline(request, _CONTROL_SECONDS)
         owner = authenticate(request)
         transport = _ControlTransport(coordinator)
         body = transport.retain(object(), lambda: _approval_body(request, deadline))
@@ -449,6 +467,7 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             verify_approval(context._ready_record, value['approval_nonce'], value['binding_digest'])
         except DockingConsentError:
             raise HTTPException(409, 'Preparation changed') from None
+        check_feedback(request)
         if time.monotonic() >= deadline:
             raise HTTPException(408, 'Request deadline exceeded')
 

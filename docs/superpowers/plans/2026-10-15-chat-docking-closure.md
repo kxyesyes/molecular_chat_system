@@ -944,6 +944,33 @@ while physically sending the initial preparation response did not return
 promptly. Its required postcondition is that an undelivered initiating preview
 cannot remain approvable; this is still pending, not covered by route-return
 success or the preparation-only review.
+The whole-ASGI test file now also checks one budget across a real delayed session
+lookup and request-body read, plus preservation of accepted C2 through HTTP
+caller loss. Before envelope implementation these produced **1 failed / 1 passed
+/ 5 deselected in 17.52 seconds**: authentication incorrectly allowed the route
+to start a fresh control budget; the accepted-approval compatibility case passed.
+Worker implementation reproduced **5 failures in 39.40 seconds**, then passed
+**234 tests / 2 skipped in 358.82 seconds** across the seven envelope cases and
+prepare/approval/control/session/browser-session regressions. Both skips are
+POSIX permission checks on Windows. An opt-in C ASGI envelope now carries one
+deadline through the existing session service and route, retains actual auth
+threads and physical transport operations, and extends the initiating prepare
+verdict through response delivery. In-memory disconnect, admission, fallback and
+session-issue probes also passed; these are not persisted regression cases.
+Parent `compileall -q src scripts`, diff checks and four frozen hashes passed.
+Independent SPEC **PASS**: **7 passed in 45.89 seconds**, plus six independent
+probes for actual disconnect during lookup/issuance, overdue final-body send,
+cancellation-resistant error fallback and capacity exhaustion at 31/32 slots.
+All four frozen hashes remained unchanged. Fresh independent QUALITY
+**APPROVED**: **7 passed in 45.94 seconds** and **190 passed / 2 POSIX skips in
+41.79 seconds**, plus three observer/initiator disconnect probes in **12.63
+seconds**. The probes first hit a Windows spawn limitation under stdin; the
+corrected launch passed unchanged assertions. Four-file syntax and scoped diff
+checks passed; all frozen hashes remained unchanged. This approval covers only
+the C HTTP envelope, not production activation or the remaining D4-D6 work.
+The bounded physical
+capacity can reject without a JSON response when no retained send slot exists;
+logical deadline handling does not guarantee physical completion or peer receipt.
 
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
