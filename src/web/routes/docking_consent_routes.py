@@ -50,6 +50,19 @@ def _empty_headers(request):
         raise HTTPException(422, 'Empty body required')
 
 
+def _artifact_origin_allowed(request):
+    # Browsers omit Origin on ordinary same-origin GETs. Fetch Metadata is a
+    # browser-controlled provenance check, never session or grant authority.
+    # Reject contradictory/duplicate metadata even with an otherwise valid
+    # Origin; legacy clients may still supply a single same-origin Origin.
+    sites = request.headers.getlist('sec-fetch-site')
+    if sites and sites != ['same-origin']:
+        return False
+    if request.headers.getlist('origin'):
+        return _origin_allowed(request.scope)
+    return sites == ['same-origin']
+
+
 async def _empty_body(request, deadline):
     # This retained task ONLY reads. Its late completion has no path to dispatch.
     # Read raw chunks: Request.stream hides empty more_body chunks from callers.
@@ -298,7 +311,9 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
     async def artifact(task_id: str, artifact_id: str, request: Request):
         from src.web.docking_artifacts import docking_artifact_response
         deadline = request_deadline(request, _CONTROL_SECONDS)
-        owner = authenticate(request)  # Downloads require the same origin too.
+        owner = authenticate(request, mutation=False)
+        if not _artifact_origin_allowed(request):
+            raise HTTPException(403, 'Origin not allowed')
         if request.scope.get('query_string'):
             raise HTTPException(422, 'Invalid request')
         _empty_headers(request)

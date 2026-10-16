@@ -36,6 +36,11 @@ jobs:
             command_timeout: 600
           - name: agent-docking
             pytest_target: "tests/agent/test_*docking*.py"
+            pytest_exclude: "tests/agent/test_docking_publication*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 1200
+          - name: agent-docking-publication
+            pytest_target: "tests/agent/test_docking_publication*.py"
             pytest_args: "-vv --durations=25"
             command_timeout: 1200
           - name: sandbox-api
@@ -136,7 +141,7 @@ jobs:
               selections = [('tests/agent', matrix['agent']['pytest_args'], '')]
               selections += [(matrix[name]['pytest_target'], matrix[name]['pytest_args'],
                               matrix[name].get('pytest_exclude', ''))
-                             for name in ('agent', 'agent-web-lifecycle', 'agent-docking')]
+                             for name in ('agent', 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')]
               def matched_files(pattern):
                   paths = [path for path in sorted(repo.glob(pattern)) if path.is_file()]
                   if not paths or any(not path.resolve().is_relative_to(repo) for path in paths):
@@ -182,7 +187,9 @@ jobs:
                           else:
                               args.append(str(repo / arg))
                       for pattern in shlex.split(exclusions):
-                          args.extend('--ignore=' + str(path) for path in matched_files(pattern))
+                          for path in matched_files(pattern):
+                              args.extend(('--ignore=' + str(path),
+                                           '--deselect=' + path.relative_to(repo).as_posix()))
                       remaining = deadline - time.monotonic()
                       if remaining <= 0:
                           raise TimeoutError('collection deadline')
@@ -201,12 +208,14 @@ jobs:
                               or len(ids) != len(set(ids))):
                           raise ValueError('invalid collection ids')
                       collected.append(set(ids))
-              original, core, web, docking = collected
-              if core & web or core & docking or web & docking or core | web | docking != original:
+              original, core, web, docking, publication = collected
+              partitions = collected[1:]
+              if (any(left & right for i, left in enumerate(partitions) for right in partitions[i + 1:])
+                      or set.union(*partitions) != original):
                   raise ValueError('partition differs from original collection')
               if time.monotonic() > deadline:
                   raise TimeoutError('collection deadline after cleanup')
-              print(f'AGENT_COLLECTION_OK baseline={len(original)} agent={len(core)} web={len(web)} docking={len(docking)}')
+              print(f'AGENT_COLLECTION_OK baseline={len(original)} agent={len(core)} web={len(web)} docking={len(docking)} publication={len(publication)}')
           try:
               verify()
           except Exception:
@@ -223,6 +232,8 @@ jobs:
           for excluded_test in $PYTEST_EXCLUDE; do
             if [ -f "$excluded_test" ]; then
               extra_args+=(--ignore "$excluded_test")
+              # Explicit glob-expanded file arguments bypass pytest --ignore.
+              extra_args+=(--deselect "$excluded_test")
             fi
           done
           if [ "${{ matrix.name }}" = "root" ]; then

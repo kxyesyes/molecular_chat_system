@@ -1307,6 +1307,43 @@ non-busy, first-deadline and release-failure controls passed in 34.27 seconds.
 Four-file compilation and repaired frozen hashes passed. The P2 is closed.
 This approves only grant/read integration, not public science UI or D5 retention.
 
+Before pushing the grant/read commit, split top-level
+`tests/agent/test_docking_publication*.py` into its own CI partition. The prior
+remote docking job already used 932.65 of 1200 seconds; the newly added 90
+artifact tests make another deadline failure plausible, not yet observed on
+this new head. Preserve all original execution/collection deadlines and the
+offline final gate. Extend the existing actual-node-ID verifier from three to
+four disjoint Agent partitions whose union equals the unchanged full Agent
+collection; use the same explicit top-level file exclusions as the Bash runner.
+Only `.github/workflows/quality.yml` and its existing contract tests change.
+Observe RED/GREEN and independent SPEC then QUALITY before commit/push; do not
+claim the new shard has completed CI until the actual remote result arrives.
+
+Grant/read was committed as `5087ce97`, not yet pushed. Parent full artifact
+regression passed 89 tests / 1 Windows symlink skip in 464.99 seconds before
+the following browser fix. An isolated real browser confirmed normal same-origin
+GET omits Origin. The artifact route incorrectly used mutation authentication:
+external actual-C2 regression failed 403 versus expected 200. Formal browser
+regression recorded 5 failures / 1 pass in 36.28 seconds, including conflicting
+Origin/Fetch-Metadata acceptance. The bounded fix accepts missing Origin only
+with one exact same-origin Fetch Metadata value, requires valid Origin whenever
+present, rejects conflicting/duplicate metadata, and leaves all mutation and
+session/grant checks intact. Independent review and GREEN remain pending.
+CI worker GREEN: 36 passed / 2 platform skips; actual full ID collection passed
+in 57.80 seconds (15123 baseline = 13299 core + 225 web + 1360 docking + 239
+publication), before new browser tests. Fresh SPEC passed the same 36 tests;
+QUALITY and actual new remote CI remain pending. Full details and initial REDs
+are in the validation ledger, not claims of live scientific acceptance.
+Browser GREEN subsequently passed 31 tests in 159.34 seconds, plus two groups
+of six existing artifact controls in 38.57/38.22 seconds. Fresh SPEC passed six
+tests and 182 independent header combinations; QUALITY is pending. CI fresh
+QUALITY approved the unchanged patch after independent collector/Bash and
+prefix-matching probes. These reviews do not cover future retention/UI edits.
+Browser fresh QUALITY APPROVED with six independent tests (36.18 seconds),
+12 header probes, AST comparison, compilation/diff and unchanged hashes.
+Both maintenance patches have passed SPEC then QUALITY and are ready to commit
+and push alongside the prior grant/read commit; remote CI remains unverified.
+
 ## D5 — Alternate path and cleanup closure
 
 The generic-task sidecar is frozen for independent SPEC then QUALITY review:

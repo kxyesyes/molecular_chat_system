@@ -638,3 +638,47 @@ GREEN **26 passed，92.07 秒**，已有有界控制 **31 passed，178.40 秒**�
 **20 passed，34.27 秒**覆盖分类、非 busy 负例、首次 publication 截止点和
 release failure。四文件编译、修复后冻结 hash 均通过，P2 已关闭。此批准仅
 覆盖 grant/read，不代表 D5 清理隔离、公开科学结果 UI 或 S10 已完成。
+
+上述 grant/read 已提交为 `5087ce97`（尚未推送）；父级完整 artifact 模块
+复验 **89 passed / 1 skipped / 2 warnings，464.99 秒**。跳过仍为 Windows
+symlink 权限限制。该次完整结果早于下述浏览器 GET 修复，不混作修复后证据。
+
+### 2026-10-16 浏览器 GET 兼容性与 CI 分区维护（进行中）
+
+实际隔离浏览器按钮触发的同源 GET 显示 `Origin` 缺失、
+`Sec-Fetch-Site: same-origin`、`Sec-Fetch-Mode: cors`；与
+[Fetch 的 Origin 规则](https://fetch.spec.whatwg.org/#origin-header)一致。
+探针不读取 Cookie、不启用 MedChat、不调用科学工具。用该请求头形态进入
+真实 session/C2/ASGI 夹具，原路由错误返回 403，外部回归 **1 failed**。
+正式 `test_docking_publication_browser_get.py` RED **5 failed / 1 passed /
+2 warnings，36.28 秒**，另发现有效 Origin 与跨站 Fetch Metadata 冲突时仍
+返回 200。最小修复仅限 artifact GET：缺 Origin 时要求唯一精确的
+`same-origin` Fetch Metadata；有 Origin 时沿用既有严格检查；任何冲突或重复
+Metadata 均拒绝。所有 mutation 仍必须带唯一有效 Origin，session/grant 和
+物理读取租约不变。GREEN 与独立 SPEC/QUALITY 尚待完成。
+
+CI 将顶层 `test_docking_publication*.py` 从 docking 分至独立分区，保留
+1200 秒执行预算和 180/60 秒收集预算。显式文件参数会绕过 pytest `--ignore`，
+因此同批精确路径同时传 `--deselect`，不是放宽集合检查。工作者 RED
+**11 failed / 25 passed / 2 skipped，22.08 秒**，补充 RED **2 failed /
+36 deselected，3.51 秒**；GREEN **36 passed / 2 skipped，40.28 秒**。
+实际全仓收集验证 **57.80 秒通过**：baseline 15123，core 13299，web 225，
+docking 1360，publication 239，四者不交且并集等于 baseline；这些是收集 ID，
+不是运行通过数量，也早于新 browser GET 用例。此前一次收集触及 60 秒上限，
+未提高预算。独立 SPEC **36 passed / 2 skipped，40.76 秒**，确认分区符合
+要求；跳过 Linux watchdog 和 Windows 不可用 `sendmsg`。QUALITY 及远端
+新分区结果仍待确认，PR 保持 Draft。
+
+浏览器修复 GREEN：新 6 项与三个既有 HTTP 模块合计 **31 passed /
+2 warnings，159.34 秒**；artifact 正常/foreign/no-grant 控制 **6 passed /
+84 deselected，38.57 秒**；既有错误 HTTP shape 控制 **6 passed /
+84 deselected，38.22 秒**。两文件编译、diff 与不输出内容的凭据扫描通过。
+独立 SPEC **6 passed，38.67 秒**，另有 182 个内存请求头组合通过，未改代码；
+fresh QUALITY 仍在进行。上述均是合成科学结果夹具，不是 S10 真实通过。
+CI fresh QUALITY APPROVED：独立合成 collector 与实际 Bash 分区 **5.48 秒
+通过**，另有 pytest 前缀匹配探针通过；两文件 hash 不变。`--deselect` 分离
+执行，不阻止被取消选择模块的 import，未发现新有害副作用；远端 CI 尚未运行。
+浏览器 GET fresh QUALITY 也已 APPROVED：独立 **6 passed，36.18 秒**及
+12 个补充请求头探针通过；AST 比对确认 mutation 与其余授权/读取处理未改。
+两文件编译/diff 与冻结 hash 一致。两项维护补丁审查已完成，待提交推送；
+不包含仍在实施的 retention，也不意味着 D6/D7 已完成。
