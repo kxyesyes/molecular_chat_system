@@ -1,7 +1,7 @@
 """Owned task projections; no browser access without durable ownership authority.
 
-Filter owners before paging, exclude cross-database ID collisions and refill
-bounded pages. Durable event reads authorize without triggering a refresh.
+Filter owners and consent tasks before paging, exclude cross-database consent
+membership/ID collisions and refill bounded pages. No C task control lives here.
 """
 
 from __future__ import annotations
@@ -40,22 +40,45 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
         if task_runtime is None:
             return None
         try:
-            return task_runtime() if callable(task_runtime) else task_runtime
+            runtime = task_runtime() if callable(task_runtime) else task_runtime
+            if runtime is None:
+                raise RuntimeError("Configured runtime unavailable")
+            return runtime
         except Exception as exc:
             raise HTTPException(
                 status_code=503,
                 detail="Task runtime unavailable",
             ) from exc
 
-    def manager_task_record(manager, task_id: str):
-        try:
-            record = manager.get(task_id)
-        except KeyError:
-            return None
-        return record
-
     def same_database(first, second):
         return first is second or first.db_path.samefile(second.db_path)
+
+    def classify(store, task_id):
+        try:
+            if not isinstance(store, TaskStore):
+                raise TypeError("Missing task store")
+            result = store.is_docking_consent_task(task_id)
+            if type(result) is not bool:
+                raise TypeError("Invalid task classifier")
+            return result
+        except Exception as exc:
+            raise HTTPException(503, "Task ownership storage unavailable") from exc
+
+    def task_sources(runtime, task_id):
+        try:
+            manager = get_task_manager()
+            # Evaluate both authorities, even when the first already says C.
+            # For list preflight the probe's membership result is discarded;
+            # this checks storage/classifier availability even for empty lists.
+            manager_c = classify(manager.store, task_id)
+            store = getattr(runtime, "store", None)
+            runtime_c = classify(store, task_id) if runtime is not None else False
+            separate = runtime is not None and not same_database(store, manager.store)
+            return manager, store, separate, manager_c or runtime_c
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(503, "Task ownership storage unavailable") from exc
 
     def owned_store_list(store, other_store, limit, status, task_type, session_id,
                          *, exclude_task_type=None):
@@ -66,15 +89,20 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
                 limit=_ADAPTER_PAGE_SIZE, offset=offset, status=status, task_type=task_type,
                 exclude_task_type=exclude_task_type,
                 require_owner=True, owner_session_id=session_id,
+                exclude_docking_consents=True,
             )
             for record in page:
                 if other_store is not None:
+                    if classify(other_store, record.task_id):
+                        continue
                     try:
                         other_store.get(record.task_id)
                     except KeyError:
                         pass
                     else:
                         continue
+                    if classify(other_store, record.task_id):
+                        continue  # Consent-only reservation during the collision read.
                 records.append(record)
             if len(records) >= limit or len(page) < _ADAPTER_PAGE_SIZE:
                 return records[:limit]
@@ -90,21 +118,24 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
         session_id = _session_id(request)
         limit = max(1, min(200, limit))
         task_type = task_type or None
-        manager = get_task_manager()
         runtime = current_task_runtime()
-        store = getattr(runtime, "store", None)
-        if runtime is not None and not isinstance(store, TaskStore):
-            raise HTTPException(503, "Task ownership storage unavailable")
-        separate = store is not None and not await asyncio.to_thread(same_database, store, manager.store)
-        records = await asyncio.to_thread(
-            owned_store_list, manager.store, store if separate else None,
-            limit, status, task_type, session_id,
+        manager, store, separate, _ = await asyncio.to_thread(
+            task_sources, runtime, "generic-list-storage-probe"
         )
-        if separate and task_type != "agent_workflow":
-            records.extend(await asyncio.to_thread(
-                owned_store_list, store, manager.store, limit, status, task_type, session_id,
-                exclude_task_type="agent_workflow",
-            ))
+        try:
+            records = await asyncio.to_thread(
+                owned_store_list, manager.store, store if separate else None,
+                limit, status, task_type, session_id,
+            )
+            if separate and task_type != "agent_workflow":
+                records.extend(await asyncio.to_thread(
+                    owned_store_list, store, manager.store, limit, status, task_type, session_id,
+                    exclude_task_type="agent_workflow",
+                ))
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(503, "Task ownership storage unavailable") from exc
         unique = {record.task_id: record for record in records}
         return sorted(
             unique.values(),
@@ -114,46 +145,52 @@ def setup_task_routes(app: FastAPI, task_runtime=None) -> None:
 
     async def runtime_get(request: Request, task_id: str, *, refresh: bool = True):
         session_id = _session_id(request)
-        manager = get_task_manager()
         runtime = current_task_runtime()
-        manager_record = await asyncio.to_thread(manager_task_record, manager, task_id)
-        if manager_record is not None:
-            runtime_store = getattr(runtime, "store", None)
-            if isinstance(runtime_store, TaskStore) and not await asyncio.to_thread(
-                same_database, runtime_store, manager.store
-            ):
+        manager, store, separate, is_consent = await asyncio.to_thread(
+            task_sources, runtime, task_id
+        )
+        if is_consent:
+            raise KeyError(task_id)
+        try:
+            try:
+                projection = await asyncio.to_thread(manager.store.get_owned, task_id, session_id)
+            except KeyError:
+                if runtime is None or not separate:
+                    raise
+                projection = await asyncio.to_thread(store.get_owned, task_id, session_id)
+                selected_runtime, other_store = runtime, manager.store
+            else:
+                selected_runtime, other_store = None, store if separate else None
+            if other_store is not None:
                 try:
-                    await asyncio.to_thread(runtime_store.get, task_id)
+                    await asyncio.to_thread(other_store.get, task_id)
                 except KeyError:
                     pass
                 else:
-                    # The ID exists in both stores. Never let a caller borrow
-                    # the source selected by a collision.
+                    # Metadata-only collision check after classification/owner.
                     raise KeyError(task_id)
-            agent_record = await asyncio.to_thread(
-                manager.store.get_owned, task_id, session_id
-            )
-            # Return the source together with the authorized record. Events and
-            # cancel must use that same source, not re-resolve by a colliding ID.
-            return agent_record, None, manager
-        if runtime is not None:
-            store = getattr(runtime, "store", None)
-            if isinstance(store, TaskStore):
-                projection = await asyncio.to_thread(store.get_owned, task_id, session_id)
-                if projection.task_type == "agent_workflow":
-                    # A Temporal get can refresh/mutate the projection. Reject
-                    # unknown Agent records before invoking any backend action.
-                    raise KeyError(task_id)
-                if not refresh:
-                    return projection, runtime, manager
-            else:
-                raise HTTPException(503, "Task ownership storage unavailable")
-            record = await runtime.get(task_id)
-        else:
-            record = await asyncio.to_thread(manager.store.get_owned, task_id, session_id)
-        if record.task_type == "agent_workflow":
+        except KeyError:
+            raise
+        except Exception as exc:
+            raise HTTPException(503, "Task ownership storage unavailable") from exc
+        def recheck_membership():
+            # Owned reads/collision checks can block while the opposite database
+            # accepts a consent-only reservation. It has no tasks row to collide
+            # with, but must still bar generic evidence/control before refresh.
+            manager_c = classify(manager.store, task_id)
+            runtime_c = classify(store, task_id) if runtime is not None else False
+            return manager_c or runtime_c
+        if await asyncio.to_thread(recheck_membership):
             raise KeyError(task_id)
-        return record, runtime, manager
+        if selected_runtime is not None and projection.task_type == "agent_workflow":
+            raise KeyError(task_id)
+        # Preserve the authorized source for events/cancel. Only an owned,
+        # non-C, non-colliding runtime task may trigger backend refresh.
+        if selected_runtime is not None and refresh:
+            projection = await selected_runtime.get(task_id)
+            if projection.task_type == "agent_workflow":
+                raise KeyError(task_id)
+        return projection, selected_runtime, manager
 
     @app.get("/api/tasks")
     async def list_tasks(

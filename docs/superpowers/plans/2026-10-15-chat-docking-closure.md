@@ -321,11 +321,19 @@ regressions, 20 preservation probes and 400 canonical-key comparisons passed;
 prior 11 cancellation/race/invalidation checks stand. Frozen hashes and two-file
 compilation/diff checks passed. No preparation/HTTP/real-science claim is made.
 
-`tests/agent/test_web_docking_close.py` is still intentionally RED: the original
-4 failures expanded to **7 failures in 18.22 seconds** for actual waiting-draft
-revocation, invalidation cleanup, retained SQL cancellation, duplicate close,
-uncertain initial/close receipts and physical source cleanup. These failures are
-not evidence of passing close integration.
+`tests/agent/test_web_docking_close.py` expanded the original four failures to
+**7 failures in 18.22 seconds**, then **7 passed in 9.56 seconds** after adding
+the retained close finalizer. It joins actual SQL, shares concurrent closes,
+retains uncertain initial/close receipts, and refuses durable owner release
+before physical source cleanup. Two further RED cases found pending claim SQL
+was not reported and normal model cancellation lost the already-acknowledged
+budget version. The coordinator now records only the actual budget CAS receipt
+(exact next version and budget increment) before model dispatch and reports
+pending root work even before draft reservation. Ordinary reads cannot adopt
+that receipt. All nine close cases passed in the next joint run; 26 original
+tests rejected the new optional `cleanup_pending` field in their strict view
+helper, now explicitly allowed only as native `True`. The five-file regression
+is running and independent SPEC review is pending; no full passing claim yet.
 Close must never free owner capacity while a physical preparation child remains
 unsettled; lack of a confirmed close receipt is not settled cleanup.
 
@@ -678,8 +686,16 @@ Parent ownership regression initially passed **103 tests / 3 skips**. SPEC then
 reproduced a real cross-database race: a normal consent-only reservation committed
 during the owned read bypassed the initial membership check. Twelve actual-route
 regressions failed with HTTP 200 instead of 404, then a post-read/collision
-membership recheck passed **115 tests / 3 skips in 73.38 seconds**. SPEC re-review
-and fresh QUALITY remain required, including list-read publication boundaries.
+membership recheck passed **115 tests / 3 skips in 73.38 seconds**. Four more
+actual RED cases reproduced consent reservation during the opposite-store list
+collision lookup. A post-lookup membership recheck retained bounded refill;
+the final parent run passed **119 tests / 3 skips in 61.96 seconds**. SPEC
+re-review PASS: 18 focused races/refill cases and four independent list probes.
+Fresh QUALITY APPROVED: **30 passed / 2 skipped / 90 deselected in 12.42
+seconds**, plus 12 independent fail-closed probes for nonboolean classifiers,
+damaged SQLite schema and classifier failure after ownership reads. The skips
+are no-runtime cases; all three frozen hashes remained unchanged. This approval
+is limited to generic-task isolation, not the remaining D5 paths.
 
 **Files:** src/task_runtime/routes.py; docking_routes.py; docking_report_routes.py;
 existing retention/ownership queries. Test in test_docking_consent_artifacts.py.

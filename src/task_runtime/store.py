@@ -1590,6 +1590,23 @@ class TaskStore:
             )
         return True
 
+    def is_docking_consent_task(self, task_id: str) -> bool:
+        """Classify exact durable membership, independent of task/state/owner.
+
+        Do not initialize, migrate, expire or create a missing database while
+        checking authority. Storage failures must propagate to the caller.
+        """
+        if type(task_id) is not str or not 1 <= len(task_id) <= 255:
+            raise ValueError("invalid task_id")
+        task_id = _validate_required_string(task_id, "task_id")
+        conn = sqlite3.connect(f"{self.db_path.as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            return conn.execute(
+                "SELECT 1 FROM docking_consents WHERE task_id = ? LIMIT 1", (task_id,)
+            ).fetchone() is not None
+        finally:
+            conn.close()
+
     def get(self, task_id: str) -> TaskRecord:
         with connection(self.db_path) as conn:
             row = conn.execute(
@@ -1641,6 +1658,7 @@ class TaskStore:
         exclude_task_type: str | None = None,
         owner_session_id: str | None = None,
         require_owner: bool = False,
+        exclude_docking_consents: bool = False,
     ) -> list[TaskRecord]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -1653,6 +1671,11 @@ class TaskStore:
         if exclude_task_type:
             clauses.append("task_type != ?")
             params.append(exclude_task_type)
+        if exclude_docking_consents:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM docking_consents "
+                "WHERE docking_consents.task_id = tasks.task_id)"
+            )
         if enforce_agent_ownership:
             clauses.append(
                 "(task_type != 'agent_workflow' OR "
