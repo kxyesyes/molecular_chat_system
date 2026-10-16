@@ -284,7 +284,11 @@ integration must retain its actual SQL and may not infer success from a finished
 wrapper. Worker evidence: one absent-method RED, **123 focused passed / 503
 joint passed with 2 platform skips**. Independent SPEC PASS: **123 focused /
 376 joint passed**, plus 18 real-lock, failed-COMMIT and boundary probes with
-unchanged hashes. Fresh QUALITY remains outstanding.
+unchanged hashes. Fresh QUALITY APPROVED: **123 focused / 674 adjacent passed
+with 3 platform skips**, plus 18 lock-race, failed-COMMIT, lost-acknowledgement,
+identity and integer-boundary probes. Reviewed file hashes remained unchanged.
+Parent joint verification with artifact readback: **194 passed / 4 skipped**.
+This approval excludes coordinator integration and physical-settlement handling.
 
 Next integration regressions are present but intentionally RED pending those
 reviews: `tests/agent/test_web_docking_parameters.py` has **14 missing-method

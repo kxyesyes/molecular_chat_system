@@ -28,7 +28,7 @@ from .docking_consent import (
     CONSENT_TTL_MS, MAX_PENDING_CONSENTS, DockingConsentError,
     DockingConsentPolicy, canonical_json, validate_clocks, validate_identity,
     materialize_draft_identity, validate_chat_draft, validate_draft_context,
-    validate_draft_identity, validate_draft_patch,
+    validate_draft_identity, validate_draft_patch, _draft_label,
 )
 from .models import (
     ResultProjectionPolicy,
@@ -727,6 +727,73 @@ class TaskStore:
         """Owner-bound detached metadata. A read never renews or reserves budget."""
         return self._chat_draft_record(self._owned_docking_consent(
             preparation_id=preparation_id, owner_session_id=owner_session_id))
+
+    def close_chat_docking_draft(
+        self, *, preparation_id, owner_session_id, expected_revision, expected_version,
+        task_id, trace_id, origin_turn_id,
+    ) -> bool:
+        """Revoke only the exact settled waiting chat draft, after confirmed commit.
+
+        This is not execution cancellation or cleanup. The caller must retain
+        in-flight SQL across wrapper cancellation until physical settlement; a
+        cancelled wrapper or uncertain commit is not a receipt. No read-back
+        recovery or stale retry can manufacture success. Closing an already
+        invalidated context needs neither live clocks nor generation callbacks.
+        """
+        expected_identity = dict(preparation_id=preparation_id, owner_session_id=owner_session_id,
+                                 task_id=task_id, trace_id=trace_id, origin_turn_id=origin_turn_id)
+        for value in expected_identity.values():
+            _draft_label(value)
+        if (type(expected_revision) is not int or not 0 <= expected_revision < 2**63 - 1
+                or type(expected_version) is not int or not 1 <= expected_version < 2**63 - 1):
+            raise DockingConsentError("consent_invalid_input")
+        try:
+            with connection(self.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM docking_consents WHERE preparation_id=? AND owner_session_id=?",
+                    (preparation_id, owner_session_id),
+                ).fetchone()
+                if row is None:
+                    raise DockingConsentError("consent_not_found")
+                if row["draft_json"] is None:
+                    raise DockingConsentError("consent_invalid_input")
+                try:
+                    identity = json.loads(row["identity_json"])
+                    if type(identity) is not dict:
+                        raise ValueError
+                    identity = validate_draft_identity({
+                        key: value for key, value in identity.items() if key != "source_refs"
+                    })
+                except (TypeError, ValueError):
+                    raise DockingConsentError("consent_invalid_input") from None
+                if (identity["refinement_revision"] != expected_revision
+                        or row["version"] != expected_version):
+                    raise DockingConsentError("consent_revision_conflict")
+                if (any(identity[key] != value for key, value in expected_identity.items())
+                        or row["task_id"] != task_id):
+                    raise DockingConsentError("consent_binding_mismatch")
+                if (row["state"] != "AWAITING_INPUT" or row["cleanup_state"] != "settled"
+                        or row["operation_token"] is not None
+                        or row["execution_token"] is not None or row["execution_occupied"] != 0
+                        or row["dispatch_state"] != "not_reserved"
+                        or conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone()):
+                    raise DockingConsentError("consent_not_waiting")
+                changed = conn.execute(
+                    """UPDATE docking_consents SET state='REVOKED',version=version+1,
+                    approval_nonce_hash=NULL,primary_reason='consent_cancelled'
+                    WHERE preparation_id=? AND owner_session_id=? AND task_id=?
+                    AND identity_json=? AND version=? AND draft_json IS NOT NULL
+                    AND state='AWAITING_INPUT' AND cleanup_state='settled' AND operation_token IS NULL
+                    AND execution_token IS NULL AND execution_occupied=0 AND dispatch_state='not_reserved'
+                    AND NOT EXISTS (SELECT 1 FROM tasks WHERE task_id=?)""",
+                    (preparation_id, owner_session_id, task_id, row["identity_json"], expected_version, task_id),
+                ).rowcount
+                if changed != 1:
+                    raise DockingConsentError("consent_revision_conflict")
+        except (sqlite3.Error, OSError):
+            raise DockingConsentError("consent_persistence_unavailable") from None
+        return True  # The connection context has committed successfully.
 
     @classmethod
     def _chat_draft_record(cls, row):
