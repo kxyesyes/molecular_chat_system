@@ -35,6 +35,9 @@ def app_for(case, tmp_path, *, enabled=True, middleware=True):
                    (case.root.owner, store._digest(token)))
     foreign, _ = store.issue()
     app = FastAPI()
+    # Expose the actual fixture-owned service through the same public state
+    # slot as production assembly, not version-specific Middleware internals.
+    app.state.agent_session_store = store
     if middleware:
         app.add_middleware(AgentSessionMiddleware, store=store)
     api()(app, coordinator=case.coordinator, task_runtime=case.runtime, enabled=enabled)

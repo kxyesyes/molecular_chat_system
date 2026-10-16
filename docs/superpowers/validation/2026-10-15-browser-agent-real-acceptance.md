@@ -336,3 +336,30 @@ python -B -m pytest tests/test_rdkit_startup.py tests/test_rdkit_logging.py test
 （0.43.0），无跳过，测试哈希未变；没有更改生产启动或隐私行为。
 这些均为 Windows 验证，修复后的 Linux CI 尚待确认。
 这不是新的浏览器或科学运行证据，S10 及最终全仓/远端门禁未被关闭。
+
+### 2026-10-16 固定 Web 依赖下的测试夹具兼容性
+
+进一步按固定 Web 依赖验证时，三个 HTTP-envelope 鉴权测试在读取
+`Middleware.kwargs` 时失败。固定 Starlette 0.27.0 使用 `options`，本机
+Starlette 1.0.0 才有这些测试依赖的内部字段。修复只让共享 `app_for` 夹具把
+实际传给中间件的 SQLite session store 放到 `app.state.agent_session_store`
+（与生产 assembly 同名），测试从该状态访问原对象；请求路径、真实鉴权调用、
+线程屏障、截止时间和后续无副作用断言均未改动。
+
+固定包仅安装到隔离临时目录，以测试进程 `PYTHONPATH` 引入：FastAPI 0.104.1、
+Starlette 0.27.0、httpx 0.25.2、anyio 3.7.1、Pydantic 2.5.0/core 2.14.1。
+没有升级、降级本机环境或修改仓库依赖。RED 为 **3 failed / 4 deselected，
+16.56 秒**。随后执行：
+
+```text
+python -B -m pytest tests/agent/test_web_docking_http_envelope.py tests/agent/test_web_docking_http.py -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short
+```
+
+固定 Web 组合 **17 passed / 2 warnings，89.93 秒**；本机新版 Web 组合
+**17 passed，86.89 秒**。两项固定栈警告为既有 multipart 导入弃用和 Pydantic
+`model_` 命名空间提示。独立 SPEC PASS，复跑三个受影响用例为 **3 passed /
+4 deselected / 2 warnings，25.79 秒**，两个文件哈希未变。独立 QUALITY
+APPROVED，三个受影响认证用例及两个禁用/无中间件负向用例在固定栈为
+**5 passed / 12 deselected / 2 warnings，34.67 秒**，新版栈为 **5 passed /
+12 deselected，34.28 秒**；哈希和 diff 检查通过。修复后的 Linux CI 尚待
+完成；以上本机结果均在 Windows 上运行。

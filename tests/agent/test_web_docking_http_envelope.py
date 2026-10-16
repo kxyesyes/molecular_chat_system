@@ -7,7 +7,7 @@ import time
 import httpx
 import pytest
 
-from src.web.agent_session import AgentSessionMiddleware, COOKIE_NAME
+from src.web.agent_session import COOKIE_NAME
 from tests.agent.test_web_docking_http import app_for, body, cookies, ORIGIN, PATH
 from tests.agent.test_web_docking_control_http import task_path
 from tests.agent.test_web_docking_approval_http import approval, approve_path
@@ -20,7 +20,7 @@ def test_control_auth_wait_is_bounded_owned_and_cannot_cancel_late(tmp_path, tar
     async def run():
         async with execution_case(tmp_path, target_case, monkeypatch) as case:
             app, token, _ = app_for(case, tmp_path)
-            store = next(m.kwargs['store'] for m in app.user_middleware if m.cls is AgentSessionMiddleware)
+            store = app.state.agent_session_store
             entered, release = threading.Event(), threading.Event()
             original = store.resolve_and_touch
             def held(value):
@@ -145,7 +145,7 @@ def test_auth_and_body_share_one_control_budget(tmp_path, target_case, monkeypat
     async def run():
         async with execution_case(tmp_path, target_case, monkeypatch) as case:
             app, token, _ = app_for(case, tmp_path)
-            store = next(m.kwargs['store'] for m in app.user_middleware if m.cls is AgentSessionMiddleware)
+            store = app.state.agent_session_store
             original = store.resolve_and_touch
             def delayed(value):
                 time.sleep(1.4)
