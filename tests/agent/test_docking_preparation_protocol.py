@@ -710,6 +710,9 @@ def test_c_actual_request_and_journal(mode):
     instruction = payload['messages'][0]['content']
     assert 'one full-current-text request span' in instruction
     assert 'PDB ID or SMILES is not a receptor_ref or ligand_ref' in instruction
+    assert 'Only syntactic NAME=VALUE assignments in the CURRENT text are fields' in instruction
+    assert 'fields must be {} and source_spans must contain only the full-current-text request span' in instruction
+    assert 'Never bind a field to the request span' in instruction
     if mode == "native":
         assert len(payload["tools"]) == 1 and payload["parallel_tool_calls"] is False
         assert payload["tool_choice"]["function"]["name"] == "docking_preparation"
@@ -717,7 +720,7 @@ def test_c_actual_request_and_journal(mode):
     else:
         assert "tools" not in payload and payload["response_format"] == {"type": "json_object"}
         instruction = payload["messages"][0]["content"]
-        assert json.loads(instruction[instruction.index("{"):]) == contract().docking_preparation_json_schema()
+        assert json.loads(instruction.split("without markdown: ", 1)[1]) == contract().docking_preparation_json_schema()
     snapshot = journal.snapshot()
     assert set(snapshot) == {"proposal_id", "trace_id", "turn_id", "query_digest", "refinement_revision",
         "model_generation", "capability_generation", "phase", "protocol_name", "protocol_version",

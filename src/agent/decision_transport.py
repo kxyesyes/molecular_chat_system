@@ -63,6 +63,12 @@ _DOCKING_COVERAGE_INSTRUCTION = (
     'A PDB ID or SMILES is not a receptor_ref or ligand_ref; those fields require explicit '
     'named references. Omit absent fields, never null or inferred defaults. Missing scientific '
     'inputs remain unresolved even when the docking intent is clear. '
+    'Only syntactic NAME=VALUE assignments in the CURRENT text are fields: receptor_ref=..., '
+    'ligand_ref=..., center=..., size=..., exhaustiveness=..., num_modes=.... Natural-language '
+    'PDB IDs and SMILES belong to the request, NOT these fields. If no such assignments appear, '
+    'fields must be {} and source_spans must contain only the full-current-text request span. '
+    'Never bind a field to the request span; each named assignment needs its own exact value '
+    'span with role field. '
 )
 _DOCKING_INSTRUCTION = (
     'The only callable function is docking_preparation. Propose preparation of the whole '
