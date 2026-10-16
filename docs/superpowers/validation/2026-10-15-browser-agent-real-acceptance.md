@@ -770,3 +770,69 @@ diff/hash 通过；SPEC 独立通过 **24 passed / 1 warning，155.03 秒**，�
 取消及 model 替换探针 **3 passed，26.38 秒**。各次保留既有 Pydantic 警告；
 三文件内存编译、diff 和哈希复核通过。未复跑全部较早的 43 项回归；未测试
 D6、真实服务或资产。全部为合成 C2 契约夹具，没有真实 Vina 科学结果。
+
+### 2026-10-16 CI #620 全绿及 D4 投影推送
+
+`d0440cc4` 的 quality #620 / run `38913736227` 最终 **success**；
+static-quality、九个 Python 分组及 offline-quality 全部通过。各组实际 pytest：
+Agent core **13297 passed / 2 skipped / 26836 warnings，1109.40 秒**；
+Agent Web **225 passed / 7311 warnings，194.66 秒**；
+Agent docking **1366 passed / 245 deselected / 9 warnings，545.68 秒**；
+publication **245 passed / 1 warning，557.13 秒**；
+task-runtime **2314 passed / 12 skipped / 1 warning，493.96 秒**；
+sandbox-core **1977 passed / 4 skipped / 1 warning，54.18 秒**；
+sandbox-api **153 passed，2.95 秒**；
+root-activity **1959 passed / 6 skipped / 6076 warnings，636.60 秒**；
+root **5746 passed / 106 skipped / 12 warnings，416.91 秒**。
+累计 **27282 passed / 130 skipped / 40247 warnings**，没有失败。
+这些结果属于 `d0440cc4`，不覆盖后续 D4/D6 改动。
+
+D4 只读投影已作为 `b663b2e7` 提交并推送（四个文件，346 additions /
+1 deletion）；未改默认启用状态，未合并。该 head 的新远端结果尚待确认。
+PR 继续 Draft，D6/D7 完成前不能视为真实 S10 验收完成。
+
+### 2026-10-16 D6 控制帧与 wire capture 增量（未提交）
+
+控制帧初版观察 RED **151 failed / 8 passed**，GREEN **159 passed**，
+四文件编译/diff 通过。SPEC 独立重跑 159 项后发现兼容性缺口：启用 C
+控制解码时，把 C 的 JSON depth=16 限制错误应用到普通聊天 reference/
+selection。原 legacy 可接受的 81 字节嵌套数组在 opt-in 下被拒绝。已交由
+原实现者建立两项 RED 并修复；尚未通过 SPEC/QUALITY，不启用调用点。
+
+`docking_view.py` 与其测试初始 callable RED **18 failed / 1 warning，
+2.44 秒**，首轮 GREEN **18 passed / 1 warning，23.45 秒**。追加预览标量
+嵌套及关闭后回执边界为 **3 failed / 1 passed，15.91 秒**：修正为字段层级
+投影，并只允许本次已捕获原 root 的非成功清理回执在自然释放后返回，不能
+恢复成功/预览或在下次读取重建 root。第一次完整回归 **20 passed / 2 failed，
+38.28 秒**定位到文件字节数 `size` 被误当参数向量，改为显式 schema 标记。
+真实运行中清理与最后 revision 变化两项为 **1 failed / 1 passed，13.80 秒**；
+将未结束 C2 execution 保持 cleanup pending 后 **24 passed，54.26 秒**。
+最后实际 candidate/suppression commit 后丢失确认的 RED **1 failed / 24
+deselected，8.84 秒**，补上 `unconfirmed` 的 persistence pending 投影。
+最终全量 **25 passed / 1 warning，64.92 秒**，两文件编译/diff 通过，SPEC
+已开始。控制帧兼容性修正另观察 **16 failed**，最终 **175 passed**；原 SPEC
+复核 **PASS**，独立 175 项、160 项普通聊天 differential probes（含深嵌套、
+Unicode、NaN/Infinity/surrogate 的既有兼容）与 33 项重复 type/畸形 C 探针通过。
+四文件哈希未变，fresh QUALITY 已开始。未接入任何 receiver/sender/UI，未执行
+真实科学计算；以上不可替代实际 route、DOM 或 D6/D7 验收。
+
+父级控制解码 + 既有 C 物理发送 + A2 生命周期四模块组合回归 **334 passed /
+3803 existing warnings，174.05 秒**，无跳过。wire SPEC 独立重跑 **25 passed，
+77.14 秒**并通过两项边界/保留取消探针，但另发现两种 persistence_pending
+遗漏：取消时 publication SQLite commit 仍阻塞，以及草稿 close 已提交但
+确认回执丢失。其独立真实 SQLite 探针 **2 failed，8.62 秒**；父级正式回归
+同样 **2 failed / 25 deselected，10.81 秒**。状态投影现包括未结束 publication
+任务及已关闭、尚无 confirmed/not_acquired 关闭回执的 draft；不增加重试、
+恢复或权限。最终 **27 passed / 1 warning，82.08 秒**；编译/diff/hash 通过。
+SPEC 复审中，wire 的 QUALITY 尚未开始。
+
+控制帧 fresh QUALITY **APPROVED**：独立 **175 passed / 1 existing warning**，
+另有 6933 次 Unicode/control 检查、644 组重复/转义键探针、1936 个帧的
+legacy default/opt-in differential 检查通过。冷解码未导入 app/coordinator/
+scientific service，四文件内存编译、diff 和哈希复核通过。
+wire SPEC 复审 **PASS**：独立 **8 passed / 19 deselected / 1 warning，39.82 秒**；
+fresh QUALITY **APPROVED**：独立 **27 passed / 1 warning，81.29 秒**，四项额外
+边界/取消探针和两文件内存编译通过，哈希未变。适配层审查已闭合，尚未启用
+真实 receiver/sender/UI。后续文本 refinement 另有未提交实现，不计入本次适配层
+验证或 D6 完成。`b663b2e7` quality #621 当次查询仍运行；static 与八个 Python
+分组 success，Agent core 尚未完成，不能提前宣称整个检查成功。

@@ -1494,6 +1494,20 @@ existing retention/ownership queries. Test in test_docking_consent_artifacts.py.
 
 ## D6 — Existing homepage entry and inline controls
 
+Next bounded adapters (not route activation): strict `docking_refine` /
+`docking_watch` decoding in `docking_consent.py`, opt-in at the existing legacy
+decoder with default behavior unchanged; then `docking_view.py` captures the
+closed `DockingView@1` payload from the actual owned coordinator. It refreshes
+only existing state and uses the D4 verified result reader for success, never
+publishes an initial result or reconstructs authority. Transport sequence and
+generation are server-supplied JS-safe integers; the future sender must bind
+them to its own attachment, not accept browser versions. Source/prepared/ready
+previews are field-projected, detached and bounded; no nonce, private path or
+caller-supplied score enters the event. Segment completion derives from actual
+root/preparation settlement. Stale/foreign/replaced roots fail closed. These
+adapters alone are not actual-route, DOM or D6 acceptance; receiver, sender,
+history, trusted policy assembly and both profiles remain separate gates.
+
 **Files:** app.py, chat_handler.py, decision_runtime.py, legacy_websocket_protocol.py,
 ordinary_capabilities.py; new home/docking_consent.js; main.js and index.html narrow hooks;
 new tests/home_docking_consent_test.js plus Python actual route tests.
