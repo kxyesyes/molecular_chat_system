@@ -25,6 +25,9 @@ from .backends.base import (
 from .backends.local import LocalTaskBackend, TaskIdempotencyConflictError
 from .config import PROJECT_ROOT, TaskRuntimeConfig
 from .docking_execution import DockingExecution, _manifest_input_hash, _input_hash
+from .docking_private_output import (
+    PrivateDockingOutput, private_output_root, require_local_output_construction,
+)
 from .docking_consent import (
     PREPARATION_SECONDS, DockingConsentError, DockingConsentPolicy,
     DockingConsentPreview, make_preview, seal_binding, validate_inputs,
@@ -139,10 +142,16 @@ class TaskRuntime:
         uuid_factory: Callable[[], Any] | None = None,
         docking_execution: DockingExecution | Any | None = None,
         docking_consent_policy: DockingConsentPolicy | None = None,
+        docking_consent_output_root: str | Path | None = None,
         consent_wall_time_ms: Callable[[], int] | None = None,
         consent_monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.config = config or TaskRuntimeConfig.from_env()
+        if docking_consent_output_root is not None:
+            require_local_output_construction()
+            docking_consent_output_root = private_output_root(
+                docking_consent_output_root, staging_root=self.config.staging_root,
+            )
         self.store = store or TaskStore()
         self.stager = stager or DockingInputStager(self.config.staging_root)
         self.selector = selector or TemporalDockingSelector(self.config.canary_percent)
@@ -202,6 +211,32 @@ class TaskRuntime:
         self._staging_cleanup_lock = threading.Lock()
         self._last_staging_cleanup = 0.0
         self._docking_consent_policy = docking_consent_policy
+        # C never borrows the mutable legacy handler dependency at dispatch.
+        # A concrete explicitly injected private executor remains supported for
+        # trusted assemblies/tests; the default legacy executor grants no C authority.
+        self._docking_consent_execution = None
+        self._docking_private_output = None
+        if docking_consent_output_root is not None:
+            excluded = (() if type(self.docking_execution) is not DockingExecution else
+                        (self.docking_execution._allowed_output_root,))
+            private_output_root(docking_consent_output_root,
+                staging_root=self.config.staging_root, excluded=excluded)
+            self._docking_consent_execution = DockingExecution(
+                self.config.staging_root, allowed_output_root=docking_consent_output_root,
+            )
+            self._docking_private_output = PrivateDockingOutput.bind(
+                self._docking_consent_execution, docking_consent_policy,
+                self.config.staging_root, excluded=excluded,
+            )
+        elif self._consent_local_handler and type(docking_execution) is DockingExecution:
+            try:
+                self._docking_private_output = PrivateDockingOutput.bind(
+                    docking_execution, docking_consent_policy, self.config.staging_root,
+                )
+            except DockingConsentError:
+                pass  # Preserve non-C injection and C1 preparation, but not C approval.
+            else:
+                self._docking_consent_execution = docking_execution
         self._consent_wall_time_ms = consent_wall_time_ms or (lambda: time.time_ns() // 1_000_000)
         self._consent_monotonic = consent_monotonic or time.monotonic
         # Ownership of real I/O, not a dispatch queue. Durable capacity lives in SQLite.
@@ -222,8 +257,11 @@ class TaskRuntime:
         if row["state"] != "READY":
             raise DockingConsentError("consent_not_waiting")
         if (self._closing or self._closed or not self._consent_local_handler
-                or type(self.docking_execution) is not DockingExecution):
+                or self._docking_private_output is None):
             raise DockingConsentError("consent_policy_unavailable")
+        validate_execution_binding(row, self._docking_consent_policy,
+            self._consent_wall_time_ms(), self._consent_monotonic())
+        self._require_consent_output()
         operation = self._consent_executions.get(row["task_id"])
         if operation is None:
             operation = _ConsentExecution(row, loop=asyncio.get_running_loop())
@@ -310,13 +348,21 @@ class TaskRuntime:
             "persistence_pending": pending,
         }
 
+    def _require_consent_output(self):
+        binding = self._docking_private_output
+        if not self._consent_local_handler or binding is None:
+            raise DockingConsentError("consent_policy_unavailable")
+        return binding.require(self._docking_consent_execution, self._docking_consent_policy)
+
     def _validate_consent_row(self, operation, row):
         if operation.signal.is_set():
             raise DockingConsentError(operation.reason or "consent_cancelled")
-        return validate_execution_binding(
+        binding = validate_execution_binding(
             row, self._docking_consent_policy, self._consent_wall_time_ms(),
             self._consent_monotonic(), expected=operation.row,
         )
+        self._require_consent_output()
+        return binding
 
     def _validate_consent_manifest(self, operation):
         binding = self._validate_consent_row(operation, operation.row)
@@ -485,6 +531,13 @@ class TaskRuntime:
 
     def _consent_execution_guard(self, operation, inputs, phase):
         try:
+            if operation.command_scope is not None:
+                try:
+                    CommandOwnershipScope._bound_output_root(
+                        operation.command_scope, self._docking_private_output.root,
+                    )
+                except (ValueError, TypeError, AttributeError):
+                    raise DockingConsentError("consent_policy_unavailable") from None
             if phase in {"result", "dispatch"}:
                 if operation.signal.is_set():
                     raise DockingConsentError(operation.reason or "consent_cancelled")
@@ -500,6 +553,8 @@ class TaskRuntime:
                     operation.raw_expires = (self._consent_monotonic()
                         + binding["vina_limit_seconds"])
                     operation.loop.call_soon_threadsafe(self._arm_consent_raw_deadline, operation)
+                else:
+                    self._require_consent_output()
                 return
 
             def validate(row):
@@ -542,12 +597,13 @@ class TaskRuntime:
                 cancel_event.set()
         if operation.signal.is_set():
             raise DockingConsentError(operation.reason or "consent_cancelled")
+        execution = self._require_consent_output()
         operation.command_scope = CommandOwnershipScope(
-            task_id=submission.task_id, output_root=self.docking_execution._allowed_output_root,
+            task_id=submission.task_id, output_root=execution._allowed_output_root,
             cancel_event=operation.signal,
         )
         operation.worker = asyncio.create_task(asyncio.to_thread(
-            self.docking_execution.run_verified, submission.task_id, submission.input_manifest_path,
+            execution.run_verified, submission.task_id, submission.input_manifest_path,
             cancel_event=operation.signal, progress_callback=progress_callback,
             lease_timeout_seconds=min(300.0, max(0.001,
                 operation.row["operation_monotonic_expires"] - self._consent_monotonic())),

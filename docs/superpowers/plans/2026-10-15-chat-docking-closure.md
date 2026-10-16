@@ -836,6 +836,25 @@ within this legacy-route isolation slice.
 This is not completed
 private-output-root or retention integration.
 
+The private-output-root slice is separately frozen for review. It binds a
+constructor-only private local executor, leaves the legacy dependency unchanged,
+and rejects overlap with project/cwd legacy output, static and staging trees.
+It does not exclude the entire project tree. Initial worker TDD observed 28
+failures / 1 pass, then 36 passes. The existing C4a fixture had replaced its
+executor after construction: one actual failure preceded the fixture-only
+construction change, then all 14 C4a tests passed without skips or weakened
+assertions; the C2/D5 selection passed 83 tests. Independent SPEC ran 201 tests
+in 266.22 seconds and found stager/completer object identities were not sealed:
+same-root replacement reached synthetic success. Worker regression reproduced
+8 failures / 2 passes, then all 46 focused tests passed after retaining and
+checking both original objects. Bounded SPEC re-review PASS: 10 tests, six
+replacement probes, two adversarial identity probes and a positive synthetic C2
+control. Fresh QUALITY APPROVED: 46 tests in 10.95 seconds, all 14 C4a tests in
+12.13 seconds without skips, and 11 independent private-root/dispatch/result
+probes; all four hashes stayed unchanged. These are synthetic boundary tests,
+not real Vina execution, retention,
+artifact-grant or UI acceptance evidence.
+
 **Files:** src/task_runtime/routes.py; docking_routes.py; docking_report_routes.py;
 existing retention/ownership queries. Test in test_docking_consent_artifacts.py.
 

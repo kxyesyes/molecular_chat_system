@@ -1653,7 +1653,7 @@ def _c2_row(rig, draft):
         conn.close()
 
 
-def _c2_rig(tmp_path, monkeypatch, *, hold_raw=False):
+def _c2_rig(tmp_path, monkeypatch, *, hold_raw=False, execution_factory=None):
     """Real runtime/backend/DB/lease; only lowest science boundary is synthetic."""
     test_c2_consent_execution_api_present()  # Body-phase feature prerequisite.
     from contextlib import contextmanager
@@ -1728,7 +1728,8 @@ def _c2_rig(tmp_path, monkeypatch, *, hold_raw=False):
 
     def new_runtime():
         store, stager = TaskStore(rig.db), DockingInputStager(rig.root)
-        execution = DockingExecution(rig.root, raw_executor=raw, allowed_output_root=rig.output)
+        execution = (execution_factory(rig.root, rig.output) if execution_factory is not None else
+                     DockingExecution(rig.root, raw_executor=raw, allowed_output_root=rig.output))
         config = TaskRuntimeConfig(backend="local", canary_percent=0, temporal_address="unused.invalid:7233",
                                    temporal_namespace="test", docking_queue="test", docking_concurrency=1,
                                    staging_root=rig.root)
@@ -1775,7 +1776,9 @@ def _c2_rig(tmp_path, monkeypatch, *, hold_raw=False):
         monkeypatch.setattr(stager, "discard_unprojected", discard)
         monkeypatch.setattr(backend, "submit", submit)
         monkeypatch.setattr(backend, "cancel", cancel)
-        monkeypatch.setattr(execution._stager, "task_execution", lease)
+        if execution_factory is None:
+            # C4a installs its own richer physical lease observer on its executor.
+            monkeypatch.setattr(execution._stager, "task_execution", lease)
         item = SimpleNamespace(runtime=runtime, store=store, stager=stager, execution=execution, backend=backend)
         rig.runtimes.append(item)
         return item
@@ -2960,7 +2963,8 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
     if hold and os.name != "nt":
         pytest.skip("genuine Windows post-return spawner hold; not POSIX early-return proof")
     real_popen = subprocess.Popen
-    rig = _c2_rig(tmp_path, monkeypatch)
+    rig = _c2_rig(tmp_path, monkeypatch,
+                  execution_factory=lambda root, output: Execution(root, allowed_output_root=output))
     monkeypatch.chdir(tmp_path)
     rig.physical = SimpleNamespace(
         scope=None, events=[], raw_calls=0, raw_result=None, worker_id=None,
@@ -3004,11 +3008,9 @@ def _c4a_runtime_rig(tmp_path, monkeypatch, request, *, hold=False, fault=None):
     patcher = pytest.MonkeyPatch()
     p.resources = _C4aPhysicalResources(base, patcher)
     request.addfinalizer(p.resources.cleanup)  # Also covers setup failure before return.
-    # Configure the existing handler's dependency BEFORE any task submission.
-    # This is a real default-local executor, not replacement of its raw callable.
-    execution = Execution(rig.root, allowed_output_root=rig.output)
-    rig.first.execution = execution
-    rig.first.runtime.docking_execution = execution
+    # The real default-local executor was bound at TaskRuntime construction.
+    # Observe that exact executor without replacing its dependency or raw callable.
+    execution = rig.first.execution
     original_verified = execution.run_verified
 
     def verified(*args, **kwargs):
