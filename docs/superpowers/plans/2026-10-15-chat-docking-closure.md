@@ -637,14 +637,48 @@ actual staging/final-SQL cancellation and lost revocation acknowledgement.
 The latter keeps its root/stage and does not retry or recover authority from a
 REVOKED readback. One test initially called a nonexistent stager path helper;
 that test-only error was corrected to inspect its actual retained manifest.
-The adjacent regression and independent SPEC review are pending.
+The adjacent regression passed **380 tests in 392.49 seconds**. Independent
+SPEC then reproduced a concurrent refresh window: while guarded status SQL was
+waiting, another status/prepare could expose cached READY after source/model
+invalidation. Two parent regressions with real SQLite write locks failed in
+10.96 seconds. READY projection now exposes a non-ready BUSY view while its
+retained validation task is pending. The full lifecycle rerun passed **24 tests
+in 114.67 seconds**; SPEC re-review PASS with unchanged frozen hashes. The
+original INITIAL coordinator plus these cases passed **129 tests in 127.49
+seconds**. QUALITY independently ran 24 tests and nine additional probes, then
+reproduced a first-caller handoff window: a pending concurrent READY refresh
+produced a BUSY view, but the initial prepare caller reattached its old nonce.
+Two parent real-SQLite reproductions failed in 11.07 seconds. Nonce disclosure
+now also requires unchanged task ownership and an already validated READY
+response. The 26-case rerun passed **26 tests in 116.92 seconds**; bounded
+QUALITY re-review PASS independently verified six focused cases and unchanged
+three-file hashes. The concurrent-refresh nonce finding is closed. This approval
+is limited to the internal Web/C1 lifecycle, not HTTP or C2 execution.
 
 The original strict multipart HTTP prepare contract asks for two uploaded files,
 while the integrated chat producer now owns and freezes those bytes server-side.
-A narrow user decision is pending on using a closed root/revision/receptor_ref/
-ligand_ref JSON prepare request instead. No transport contract has been changed
-or exposed while that question is open; the runtime's explicit human Vina
-approval remains mandatory under either option.
+The user explicitly approved on 2026-10-16 a closed root/revision/receptor_ref/
+ligand_ref JSON prepare request instead. This narrow amendment replaces file
+uploads only for this chat preparation route; browser bytes/paths/URLs cannot
+replace the already authenticated producer outputs. Runtime Vina approval still
+requires the user's explicit click on the current card. No executable HTTP
+route is activated yet.
+
+The prepare-only HTTP module has **10 tests passing in 40.68 seconds**, using
+actual FastAPI/session middleware, SQLite, the confirmed coordinator and C1.
+Four initial missing-module failures took 2.39 seconds. Two framing RED cases
+showed mismatched Content-Length and Content-Encoding reaching staging; both
+are now rejected. A query-field RED case (1 failed / 2 passed in 15.31 seconds)
+is also fixed. Cases loop through unknown/duplicate/non-native fields, wrong or
+absent/duplicate Origin, foreign/unknown roots, stale references, unavailable
+session storage, anonymous new sessions, disabled construction, and bounded
+chunked body consumption. Two test-fixture mistakes were corrected without
+changing production semantics: existing middleware emits `private, no-store`,
+and HTTPX seed cookies need the same host domain as the middleware's cookie.
+The joint session regression passed **189 tests / 2 skips in 45.42 seconds**;
+independent SPEC PASS reran **10 tests in 40.56 seconds** and 27 additional
+parser-boundary probes with unchanged two-file hashes. Fresh QUALITY is pending. No app
+wiring, approval/cancel/status/artifact HTTP or UI activation is claimed here.
 
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
@@ -653,8 +687,10 @@ TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
   anonymous, foreign, absent/multiple/wrong Origin request can stage, refresh, approve or cancel.
 - [ ] Register strict prepare/approve/revoke/status/cancel routes under
   `/api/agent/docking`; disabled constructor feature registers no executable pathway.
-  Multipart is bounded before full body allocation; only existing owner draft + revision and exact
-  files/parameters are accepted. Unknown/duplicate parameters, paths, URLs, owner/backend fields reject.
+  The 2026-10-16 approved chat prepare amendment accepts only bounded closed JSON
+  `{root, revision, receptor_ref, ligand_ref}` for the existing owned confirmed draft.
+  Duplicate/unknown fields, bytes/files, parameters, paths, URLs and owner/backend
+  overrides reject before staging. The server supplies its frozen exact files/parameters.
 - [ ] Bridge prepare-only to existing C1, with source descriptors verified before staging and hash
   comparison after staging. No scientific child/backend submit from prepare; nonce only in the
   owner response with no-store. Never recover it through GET/history.

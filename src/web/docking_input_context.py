@@ -14,7 +14,7 @@ import threading
 import time
 
 from src.docking import chat_preparation
-from src.task_runtime.docking_consent import DockingConsentError, canonical_json
+from src.task_runtime.docking_consent import CONSENT_TTL_MS, DockingConsentError, canonical_json
 
 
 _ISSUER = object()
@@ -53,11 +53,13 @@ async def capture_chat_input_context(coordinator, *, root_id, owner_session_id):
     if root.input_context is not None:
         return root.input_context
     async with coordinator._gate.request():
+        caller = asyncio.current_task()
         def capture():
             coordinator._read_source_reference(root=root)
             if (root.confirmation_key is None or root.missing
                     or root.reason != "inputs_confirmed_staging_required"
                     or root.task is not None and not root.task.done()
+                       and not (root.staging_started and root.task is caller)
                     or any(owner.snapshot()["settled"] is not True for owner in root.preparation_owners)):
                 _deny()
             return ChatDockingInputContext(_ISSUER, coordinator, root)
@@ -74,7 +76,7 @@ async def capture_chat_input_context(coordinator, *, root_id, owner_session_id):
 class ChatDockingInputContext:
     __slots__ = ("_coordinator", "_root", "_digest", "_draft_json", "_parameters",
                  "_receptor", "_ligand", "_lock", "_claimed", "_operation", "_runtime",
-                 "_begun", "_verified_manifest")
+                 "_begun", "_verified_manifest", "_ready_record")
 
     def __init__(self, issuer, coordinator, root):
         if issuer is not _ISSUER:
@@ -99,6 +101,7 @@ class ChatDockingInputContext:
         self._lock, self._claimed = threading.Lock(), False
         self._operation = self._runtime = self._verified_manifest = None
         self._begun = False
+        self._ready_record = None
 
     def __repr__(self):
         return "ChatDockingInputContext(<private>)"
@@ -249,3 +252,37 @@ class ChatDockingInputContext:
             kwargs["still_current"] = lambda: self._still_current(current)
             self._runtime.store._seal_docking_preparation(
                 expected_chat_draft=self._preparing_record(), **kwargs)
+            # Derive only from the acknowledged seal, never recover authority
+            # from a later READY read. Keep the original upstream draft immutable.
+            record = self._preparing_record()
+            record.update(state="READY", version=record["version"] + 1,
+                binding=json.loads(canonical_json(kwargs["binding"])),
+                binding_digest=kwargs["digest"], approval_nonce_hash=kwargs["nonce_hash"],
+                manifest_locator="input_manifest.json",
+                expires_at_ms=kwargs["binding"]["expires_at_ms"],
+                monotonic_expires=kwargs["monotonic_now"] + CONSENT_TTL_MS / 1000)
+            self._ready_record = record
+
+    def _ready_current(self):
+        if (self._ready_record is None or self._runtime.store is not self._coordinator._tasks
+                or self._runtime._closed or self._runtime._closing
+                or self._runtime._docking_consent_policy != self._root.current["policy"]):
+            _deny()
+        self._local_current()
+
+    def _check_ready_guarded(self):
+        coordinator, root = self._coordinator, self._root
+        self._ready_current()
+        # Same Agent-first read guard; READY uses its separately acknowledged
+        # consent TTL, never the exhausted upstream preparation budget.
+        with coordinator._state._lock, closing(coordinator._state._connect()) as guard, guard:
+            guard.execute("ATTACH DATABASE ? AS docking_ready_read", (str(coordinator._tasks.db_path),))
+            guard.execute("PRAGMA busy_timeout=" + str(min(5000, coordinator._remaining_ms(root))))
+            guard.execute("BEGIN IMMEDIATE")
+            coordinator._read_source_evidence_guarded(root=root)
+            record = self._runtime.store.get_chat_docking_draft(
+                preparation_id=root.preparation_id, owner_session_id=root.owner)
+            if record != self._ready_record or _fingerprint(root) != self._digest:
+                _deny()
+            self._ready_current()
+            coordinator._capture(root)

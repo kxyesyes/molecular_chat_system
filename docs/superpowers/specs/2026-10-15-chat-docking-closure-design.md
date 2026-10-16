@@ -162,6 +162,15 @@ config hash、request digest 及 consent binding digest 保持现有定义。
 
 ## 6. HTTP、反馈、取消和产物访问
 
+2026-10-16 维护者明确批准的准备接口修订：聊天侧
+`POST /api/agent/docking/preparations` 不再要求浏览器重新上传已由服务器生成的
+文件，改为有大小上限且拒绝重复/未知字段的闭合 JSON：
+`{root, revision, receptor_ref, ligand_ref}`。只解析当前 session 的既有、参数已
+确认的同一 root/draft；服务器按私有生产者上下文取得并重新校验已冻结字节和
+参数。客户端不能提供文件字节、路径、URL、参数替换或 owner/backend 配置。
+此修订只替代原准备路由的 multipart 上传契约，不改变 approve/revoke 等路径、
+审批 nonce 限制或必须由用户亲自点击当前卡片启动真实 Vina 的规定。
+
 继续使用原 C 设计的 `/api/agent/docking/preparations`、approve/revoke、
 task status/cancel/artifacts 路径以及 `docking_refine` / `docking_watch` 帧。
 HTTP 准备只能解析既有 chat draft；不能从独立表单建立无关科学任务。
@@ -169,7 +178,7 @@ HTTP 准备只能解析既有 chat draft；不能从独立表单建立无关科�
 本机验收启动参数中显式开启，不修改用户其他服务或应用默认 profile。
 
 所有 mutation 要求唯一有效同 Origin 和 session；身份核验在文件 I/O、状态
-refresh 或 cancel 之前。严格拒绝重复/未知 multipart 字段、畸形 JSON、超量
+refresh 或 cancel 之前。聊天准备使用上述闭合 JSON；严格拒绝重复/未知字段、畸形 JSON、超量
 body、任意路径/URL、client owner/backend/timeout 字段。缺身份存储时 fail closed。
 
 `DockingView@1` 卡片绑定原始消息、root/task/revision/send generation/sequence。

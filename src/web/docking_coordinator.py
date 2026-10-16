@@ -1,4 +1,4 @@
-"""Bounded live INITIAL C coordinator, shared by legacy/decision entry points.
+"""Bounded live C preparation coordinator, shared by legacy/decision entry points.
 
 Disabled by default. This is NOT an HTTP/approval issuer or scheduler. The
 trusted caller supplies a captured live S03 context and an existing owned
@@ -7,7 +7,8 @@ running AgentState run. Never recreate that run or restore a claimed root.
 Two independent deadlines: upstream work gets 180 seconds from before the first
 await, while TaskStore keeps its unchanged 900-second consent waiting expiry.
 Neither refresh nor human waiting renews either deadline. Fixed source and
-inspection children use that original deadline too; this slice never invokes C1.
+inspection children use that original deadline too. Confirmed producer bytes can
+enter C1 through the private one-use context; this module never approves Vina.
 
 One event-loop-owned instance must serve both chat paths. Live roots PLUS failed
 unconfirmed attempts occupy at most MAX_PENDING_CONSENTS entries. Failed local
@@ -227,6 +228,8 @@ class _Root:
     close_task: object = None
     close_state: str = "not_started"
     input_context: object = None
+    staging_started: bool = False
+    ready_preview_json: str | None = None
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -246,6 +249,12 @@ def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
             view["source_preview"] = json.loads(root.source_preview_json)
             if root.prepared_preview_json is not None:
                 view["prepared_preview"] = json.loads(root.prepared_preview_json)
+        if not root.closed and root.phase == "READY" and root.ready_preview_json is not None:
+            if root.task is not None and not root.task.done():
+                view.update(phase="BUSY", reason_code="context_validation_pending")
+            else:
+                view["input_ready"] = True
+                view["consent_preview"] = json.loads(root.ready_preview_json)
     return view
 
 
@@ -296,11 +305,19 @@ class DockingRequestCoordinator:
         validate_clocks(wall, mono)
         if root.closed or self._enabled is not True:
             raise _Unavailable("root_closed")
-        deadlines = [root.wall_deadline - wall, (root.mono_deadline - mono) * 1000]
-        if root.draft is not None:
+        ready_clock = root.ready_preview_json is not None
+        if ready_clock:
+            record = root.input_context._ready_record
+            if record is None:
+                raise _Unavailable("consent_unconfirmed")
+            deadlines = [record["expires_at_ms"] - wall,
+                         (record["monotonic_expires"] - mono) * 1000]
+        else:
+            deadlines = [root.wall_deadline - wall, (root.mono_deadline - mono) * 1000]
+        if root.draft is not None and not ready_clock:
             deadlines += [root.draft["expires_at_ms"] - wall,
                           (root.draft["monotonic_expires"] - mono) * 1000]
-        if root.physical_deadline is not None:
+        if root.physical_deadline is not None and not ready_clock:
             deadlines.append((root.physical_deadline - time.monotonic()) * 1000)
         left = min(deadlines)
         if not math.isfinite(left) or left < 1:
@@ -478,6 +495,7 @@ class DockingRequestCoordinator:
         root.inspection = root.source_preview_json = None
         root.selection = root.projected = root.ligand = None
         root.receptor_descriptor = root.ligand_descriptor = root.prepared_preview_json = None
+        root.ready_preview_json = root.input_context = None
         root.preparation_owners.clear()
         root.close_task = None
         if root.durable and self._roots.get(root.root_id) is root:
@@ -501,7 +519,9 @@ class DockingRequestCoordinator:
                 root.close_state = "unconfirmed"
             else:
                 root.close_state = "pending"
-                root.close_task = asyncio.create_task(self._close_waiting_draft(root))
+                closer = (self._close_staged_inputs if root.input_context is not None
+                          and root.input_context._operation is not None else self._close_waiting_draft)
+                root.close_task = asyncio.create_task(closer(root))
                 self._gate.retain_task(root.close_task)
         try:
             if root.close_task is not None and await _drain(root.close_task):
@@ -519,6 +539,24 @@ class DockingRequestCoordinator:
         except (Exception, asyncio.CancelledError):
             # No retry/readback: the accepted version may be older than an
             # uncertain refinement commit, or this close's acknowledgement lost.
+            root.close_state = "unconfirmed"
+
+    async def _close_staged_inputs(self, root):
+        context = root.input_context
+        operation, runtime = context._operation, context._runtime
+        try:
+            # READY is still owned by the exact C1 writer even after its worker
+            # left the runtime's pending set. Reattach before initiating cleanup.
+            runtime._consent_preparations.add(operation)
+            await runtime._abort_consent_preparation(operation)
+            await _drain(operation.settlement)
+            if operation.revocation_status == "confirmed" and operation.settled:
+                root.close_state = "confirmed"
+            elif not context._begun and operation.settled:
+                await self._close_waiting_draft(root)
+            else:
+                root.close_state = "unconfirmed"
+        except (Exception, asyncio.CancelledError):
             root.close_state = "unconfirmed"
 
     async def begin(self, *, root_id, owner_session_id, origin_turn_id, query,
@@ -686,6 +724,11 @@ class DockingRequestCoordinator:
         # refreshes coalesce; close/cancellation cannot drop its heavy context.
         try:
             async with self._gate.request():
+                if root.phase == "READY":
+                    await self._sql(root.input_context._check_ready_guarded)
+                    root.input_context._ready_current()
+                    self._capture(root)
+                    return
                 await self._sql(self._check_root, root=root)
                 current_draft = await self._sql(self._read_waiting_draft, root=root,
                                                expected_version=root.draft["version"])
@@ -1021,6 +1064,68 @@ class DockingRequestCoordinator:
             self._stop(root, str(exc))
         except Exception:
             self._stop(root, "confirmation_unavailable")
+
+    async def prepare_inputs(self, *, root_id, owner_session_id, expected_revision,
+                             receptor_ref, ligand_ref, runtime):
+        """Stage this exact confirmed root; only the initiating call gets a nonce.
+
+        ``runtime`` is trusted application assembly, never a transport field.
+        The public inputs are current references, not bytes, paths or authority.
+        """
+        from src.task_runtime.runtime import TaskRuntime
+        if type(runtime) is not TaskRuntime or runtime.store is not self._tasks:
+            return _view()
+        root = self._owned(root_id, owner_session_id)
+        if (root is None or root.closed or type(expected_revision) is not int
+                or expected_revision != root.accepted_revision
+                or any(type(value) is not str or root.accepted_slots[key] !=
+                       dict(state="fixed", value=value) for key, value in
+                       (("receptor_ref", receptor_ref), ("ligand_ref", ligand_ref)))):
+            return _view()
+        if root.staging_started:
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        if root.task is not None and not root.task.done():
+            return _view(root)
+        if root.reason != "inputs_confirmed_staging_required":
+            return _view(reason="inputs_unconfirmed")
+        root.staging_started = True
+        root.phase = "PREPARING"
+        root.task = task = asyncio.create_task(self._run_staging(root, runtime))
+        self._gate.retain_task(task)
+        result = await self._wait_root(root)
+        if (not root.closed and root.task is task and not task.cancelled()
+                and result["phase"] == "READY" and result["input_ready"] is True):
+            result["consent_preview"] = task.result()
+        # Do not retain the one-time nonce in a completed coordinator task.
+        if root.task is task and task.done():
+            root.task = None
+        return result
+
+    async def _run_staging(self, root, runtime):
+        from .docking_input_context import capture_chat_input_context
+        try:
+            context = await capture_chat_input_context(self,
+                root_id=root.root_id, owner_session_id=root.owner)
+            preview = (await runtime.prepare_docking_consent(
+                preparation_id=root.preparation_id, owner_session_id=root.owner,
+                revision=root.accepted_revision, receptor_name="receptor.pdb",
+                receptor_bytes=context._receptor, ligand_name="ligand.sdf",
+                ligand_bytes=context._ligand, parameters=context._parameters,
+                chat_input_context=context)).to_dict()
+            self._remaining_ms(root)
+            redacted = {key: value for key, value in preview.items() if key != "approval_nonce"}
+            root.ready_preview_json = _small_json(redacted)
+            async with self._gate.request():
+                await self._sql(context._check_ready_guarded)
+                context._ready_current()
+                self._capture(root)
+            root.phase, root.reason = "READY", "approval_required"
+            return preview
+        except asyncio.CancelledError:
+            self._stop(root, "cancelled")
+            raise
+        except Exception:
+            self._stop(root, "staging_unavailable")
 
     async def close_root(self, *, root_id, owner_session_id):
         root = self._owned(root_id, owner_session_id)
