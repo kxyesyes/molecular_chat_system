@@ -876,3 +876,17 @@ directory symlink 能力限制。SPEC 独立验证 **31 passed / 107 warnings，
 HEAD 确认 **2 failed，3.98 秒**。fresh QUALITY **APPROVED**，独立四模块
 **248 passed / 107 warnings，26.95 秒**；两源码内存编译与冻结哈希均通过。
 全量 CI 与最终浏览器验收仍需完成，不将这些局部结果记为整体通过。
+
+### 2026-10-16 D6 输入 HTTP 接口（独立审查通过，未激活）
+
+新增同源、同会话的 `source-page`、`selection` 和 `parameters` 三个 POST
+接口；只接受当前 root 的 revision、来源摘要或已有输入 refs。选择体上限为
+64 KiB，其余既有接口仍为 4096 字节。沿用全路径反馈期限与实际 I/O 保留，
+晚到 body 不派发；已接收的选择/参数工作可返回 202 等待，不因 HTTP 断开
+释放物理所有权。来源分页只读且返回前再检查原 root/revision。
+
+实现前 **12 failed / 3 passed**，实现后新 21 项与既有 4 项共 **25 passed**。
+SPEC 独立 **25 passed / 2 warnings，147.89 秒**；fresh QUALITY **APPROVED**，
+独立 **25 passed / 2 warnings，135.01 秒**，另 60 项畸形嵌套参数探针全部拒绝。
+两文件 `compileall`、diff 与冻结哈希通过。没有启用应用入口，没有 C1/审批/
+Vina；这些合成来源夹具不是实际科学验收。

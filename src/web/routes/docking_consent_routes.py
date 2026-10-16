@@ -15,7 +15,9 @@ from fastapi.responses import JSONResponse
 from src.task_runtime.runtime import TaskRuntime
 from src.task_runtime.docking_consent import DockingConsentError, validate_approval, verify_approval
 from src.web.agent_session import _origin_allowed
-from src.web.docking_coordinator import DockingRequestCoordinator, _label
+from src.web.docking_coordinator import (
+    DockingRequestCoordinator, _label, _SECTIONS, _capture_selection, _capture_parameters, _content_ref,
+)
 from src.web.docking_http import DockingHTTPMiddleware, check_feedback, envelope_for, request_deadline
 
 
@@ -230,7 +232,7 @@ async def _bounded_chunks(request, deadline):
     raise HTTPException(408, 'Request deadline exceeded')
 
 
-async def _json_body(request, *, deadline=None):
+async def _json_body(request, *, deadline=None, max_bytes=_MAX_BODY):
     if request.query_params:
         raise HTTPException(422, "Invalid request")
     if request.headers.getlist("content-encoding"):
@@ -244,12 +246,12 @@ async def _json_body(request, *, deadline=None):
         raise HTTPException(422, "Invalid request")
     if len(lengths) > 1 or lengths and not re.fullmatch(r"[0-9]{1,10}", lengths[0]):
         raise HTTPException(422, "Invalid request")
-    if lengths and int(lengths[0]) > _MAX_BODY:
+    if lengths and int(lengths[0]) > max_bytes:
         raise HTTPException(413, "Request too large")
     data = bytearray()
     chunks = request.stream() if deadline is None else _bounded_chunks(request, deadline)
     async for chunk in chunks:
-        if len(data) + len(chunk) > _MAX_BODY:
+        if len(data) + len(chunk) > max_bytes:
             raise HTTPException(413, "Request too large")
         data.extend(chunk)
     if lengths and len(data) != int(lengths[0]):
@@ -286,6 +288,64 @@ async def _approval_body(request, deadline):
     return value
 
 
+def _selection_shape(selection):
+    # Reuse the producer's scalar/identity contracts, without source resolution,
+    # scientific validation or child dispatch in the retained body reader.
+    from src.docking import receptor_projection_source as schema
+    protein = selection['protein_selection']
+    schema._closed(protein, {'model', 'chains'})
+    schema._integer(protein['model'], 1, 9999)
+    schema._list(protein['chains'], 62, nonempty=True)
+    for row in protein['chains']:
+        schema._closed(row, {'chain', 'entity_id'})
+        schema._text(row['chain'], r'[A-Za-z0-9]?')
+        schema._token(row['entity_id'])
+    schema._identity(selection['reference_residue'])
+    for name, field, pattern in (('hetero_choices', 'action', r'retain|remove'),
+                                 ('conformer_choices', 'altloc', r'[A-Za-z0-9]')):
+        for row in selection[name]:
+            schema._closed(row, {'residue', field})
+            schema._identity(row['residue'])
+            schema._text(row[field], pattern)
+    for value in selection['reviewed_limitations']:
+        schema._token(value)
+
+
+async def _input_body(request, deadline, control):
+    # This task only parses/captures; late completion can never start work.
+    value = await _json_body(request, deadline=deadline,
+                             max_bytes=65536 if control == 'selection' else _MAX_BODY)
+    fields = ({'revision', 'receptor_ref', 'ligand_ref', 'parameters'} if control == 'parameters'
+              else {'revision', 'source_sha256', *({'section', 'offset', 'limit'}
+                    if control == 'source-page' else {'selection'})})
+    if (set(value) != fields or type(value['revision']) is not int
+            or not 0 <= value['revision'] <= 2**53 - 1):
+        raise HTTPException(422, 'Invalid request')
+    key = None
+    try:
+        if control == 'parameters':
+            if any(type(value[name]) is not str or _REF.fullmatch(value[name]) is None
+                   for name in ('receptor_ref', 'ligand_ref')):
+                raise ValueError
+            value['parameters'] = _capture_parameters(value['parameters'])
+            key = _content_ref({name: value[name] for name in
+                                ('receptor_ref', 'ligand_ref', 'parameters')}, 2048)
+        else:
+            if (type(value['source_sha256']) is not str
+                    or re.fullmatch(r'[a-f0-9]{64}', value['source_sha256']) is None):
+                raise ValueError
+            if control == 'selection':
+                value['selection'], key = _capture_selection(value['selection'])
+                _selection_shape(value['selection'])
+            elif (type(value['section']) is not str or value['section'] not in _SECTIONS
+                    or type(value['offset']) is not int or not 0 <= value['offset'] <= 99999
+                    or type(value['limit']) is not int or not 1 <= value['limit'] <= 32):
+                raise ValueError
+    except (ValueError, TypeError, KeyError, OverflowError):
+        raise HTTPException(422, 'Invalid request') from None
+    return value, key
+
+
 def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=False):
     if enabled is not True:
         return
@@ -306,6 +366,107 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
                 or task_runtime.store is not coordinator._tasks):
             raise HTTPException(503, "Preparation unavailable")
         return owner
+
+    async def input_control(task_id, request, control):
+        deadline = request_deadline(request, _CONTROL_SECONDS)
+        owner = authenticate(request)
+        transport = _ControlTransport(coordinator)
+        root = transport.live(owner, 'task_id', task_id)
+        if root is None:
+            raise HTTPException(404, 'Docking receipt not found')
+        body = transport.retain(object(), lambda: _input_body(request, deadline, control))
+        value, key = await transport.wait(body, deadline, body=True)
+
+        def current(*, revision=True):
+            if (authenticate(request) != owner or coordinator._owned(root.root_id, owner) is not root
+                    or root.task_id != task_id or root.closed
+                    or revision and root.accepted_revision != value['revision']):
+                raise HTTPException(409, 'Input changed')
+
+        def dispatchable():
+            current()
+            check_feedback(request)
+            if time.monotonic() >= deadline:
+                raise HTTPException(408, 'Request deadline exceeded')
+            if control != 'parameters':
+                if (root.source_result is None or root.inspection is None
+                        or root.source_result['source']['sha256'] != value['source_sha256']):
+                    raise HTTPException(409, 'Input changed')
+            elif (root.prepared_preview_json is None
+                    or any(root.accepted_slots[name] != dict(state='fixed', value=value[name])
+                           for name in ('receptor_ref', 'ligand_ref'))):
+                raise HTTPException(409, 'Input changed')
+            if control != 'source-page' and (root.staging_started or root.input_context is not None
+                    or root.task is not None and not root.task.done()):
+                raise HTTPException(409, 'Input busy')
+
+        dispatchable()
+        # One retained slot for either mutation; never coalesce differing inputs
+        # into an earlier request. The coordinator remains the physical owner.
+        slot = object() if control == 'source-page' else ('input', id(root))
+        pending = transport.tasks.get(slot)
+        if pending is not None and not pending.done():
+            raise HTTPException(409, 'Input busy')
+        entry_task = root.task
+        entry_key = getattr(root, 'selection_key' if control == 'selection' else 'confirmation_key')
+        dispatched = False
+
+        async def operation():
+            nonlocal dispatched
+            # Queueing is not admission. Recheck captured identity, revision,
+            # session and feedback with NO await before coordinator entry.
+            dispatchable()
+            dispatched = True
+            args = dict(root_id=root.root_id, owner_session_id=owner)
+            if control == 'source-page':
+                return await coordinator.source_page(**args, **{name: value[name] for name in
+                    ('source_sha256', 'section', 'offset', 'limit')})
+            if control == 'selection':
+                return await coordinator.select_source(**args, source_sha256=value['source_sha256'],
+                                                       selection=value['selection'])
+            return await coordinator.confirm_parameters(**args, expected_revision=value['revision'],
+                receptor_ref=value['receptor_ref'], ligand_ref=value['ligand_ref'], parameters=value['parameters'])
+
+        task = transport.retain(slot, operation)
+        try:
+            view = await transport.wait(task, deadline)
+        except HTTPException as exc:
+            # Only THIS request's newly installed coordinator work can receive
+            # a pending receipt. A queued/rejected job or a duplicate status
+            # wait is not admission, even if some other operation is running.
+            marker = root.selection_key if control == 'selection' else root.confirmation_key
+            if (exc.status_code != 503 or control == 'source-page' or not dispatched
+                    or entry_key is not None or marker != key or root.task is entry_task):
+                raise
+            current(revision=False)
+            return JSONResponse(_receipt(task_id, root.preparation_id, root.phase, pending=True),
+                status_code=202, headers={'Cache-Control': 'private, no-store'})
+        current(revision=control == 'source-page')
+        check_feedback(request)
+        if control == 'source-page':
+            if view.get('ok') is not True:
+                raise HTTPException(409, 'Source unavailable')
+            return JSONResponse(view, headers={'Cache-Control': 'private, no-store'})
+        reason = view.get('reason_code')
+        if reason in {'selection_invalid', 'parameters_invalid'}:
+            raise HTTPException(422, 'Invalid input')
+        if reason not in {'parameters_confirmation_required', 'inputs_confirmed_staging_required'}:
+            raise HTTPException(409 if reason in {'new_root_required', 'parameters_unavailable'} else 503,
+                                'Input unavailable')
+        return JSONResponse(_receipt(task_id, root.preparation_id, root.phase),
+                            headers={'Cache-Control': 'private, no-store'})
+
+    @app.post('/api/agent/docking/tasks/{task_id}/source-page')
+    async def source_page(task_id: str, request: Request):
+        return await input_control(task_id, request, 'source-page')
+
+    @app.post('/api/agent/docking/tasks/{task_id}/selection')
+    async def selection(task_id: str, request: Request):
+        return await input_control(task_id, request, 'selection')
+
+    @app.post('/api/agent/docking/tasks/{task_id}/parameters')
+    async def parameters(task_id: str, request: Request):
+        return await input_control(task_id, request, 'parameters')
 
     @app.get('/api/agent/docking/tasks/{task_id}/artifacts/{artifact_id}')
     async def artifact(task_id: str, artifact_id: str, request: Request):
