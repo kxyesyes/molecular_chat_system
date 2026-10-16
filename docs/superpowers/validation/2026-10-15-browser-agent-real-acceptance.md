@@ -406,3 +406,44 @@ Web 栈为 **542 passed / 1 skipped / 2 warnings，58.66 秒**；六个源码/�
 最终固定栈回归及探针 **297 passed / 2 warnings**。六文件编译通过，冻结
 哈希未变；确认旧会话兼容、跨 owner 隔离、非 owner/凭据边界和关闭持久化。
 未以本机结果宣称远端 CI 或 D4–D7 完成。
+
+### 2026-10-16 Agent CI 对接分组
+
+同一远端运行 `38887968647` 的 Agent 分组收集了 14,630 项，日志持续推进至
+97%，最终在 1,200 秒命令截止点以 124 退出。最后一项刚开始约两秒，不能把
+它诊断为挂起或删除它绕过门禁。此前完成的 `web_docking` 等对接用例已占用
+至少约 247 秒，剩余对接集成及新增候选模块还需时间。
+
+保持既有 Agent 1,200 秒、Web 生命周期 600 秒、job 30 分钟及离线 collection
+总 180 秒/单子进程 60 秒限制。新增 `agent-docking` 分组（1,200 秒），选择
+顶层 `tests/agent/test_*docking*.py`；核心分组只排除同一 pattern 实际展开的
+文件，不使用会误伤嵌套目录的 broad ignore-glob。最终 `offline-quality`
+仍要求全部 Python 分组与静态检查成功，不降低其他测试门禁。
+
+实际 inline 收集校验扩为原全集与三个互斥分组；新合成收集覆盖普通未来文件、
+顶层 docking 文件、嵌套 docking 名称/目录，以及重叠、遗漏、空匹配、重复、
+错误、超时和最后清理超过原截止点。初次 RED **9 failed / 6 passed**，其中
+两项测试准备阶段因新行缺失触发 KeyError；改为明确缺失断言后 **11 failed，
+0.61 秒**。实现后两模块为 **38 passed / 2 skipped / 7 warnings，22.59 秒**；
+跳过为 Windows 不支持 Linux GNU timeout watchdog 与 native sendmsg。
+
+```text
+python -B -m pytest tests/test_quality_workflow_contract.py tests/test_deployment_assets.py -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short
+```
+
+在本地当前完整仓库执行 CI 文件里的原始 inline verifier，实际隔离收集得到：
+`AGENT_COLLECTION_OK baseline=14973 agent=13299 web=225 docking=1449`。
+这是用例集合证明，不是 14,973 项执行通过。测试文件编译和 diff 检查通过。
+独立 SPEC PASS：聚焦契约和部署门禁 **31 passed / 2 skipped，19.46 秒**；
+独立 Bash 实际参数展开探针得到核心 12、Web 6、对接 4，保留嵌套 docking
+文件，并确认缺失分组会失败关闭。原有 jobs、网络隔离和总截止时间未变；
+三个冻结文件哈希、编译和 diff 检查通过。独立 QUALITY APPROVED：同一聚焦
+选择 **31 passed / 2 skipped，18.28 秒**；独立 Bash 展开当前仓库的 23 个
+顶层对接文件，核心分组恰好排除同一 23 个，与 Python collector 一致，Web
+三个文件不变。Bash 语法、内存编译和 scoped diff 检查通过，哈希一致。
+未重复完整 collection/suite，拆分后的远端执行时长仍待实测。
+
+严格健康检查默认独立工作树得到 **21/23**：未携带反向数据目录和 RAG 索引。
+只给本次检查进程的 `REVERSE_TARGET_DATA_DIR`、`RAG_INDEX_PATH` 指定主工作区
+中已存在的对应资产后，**23/23**；均使用不存在的 `--env-file` 路径。
+没有复制数据、修改配置或启动真实 Vina，这也不证明新科学入口已经可用。

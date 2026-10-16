@@ -19,6 +19,7 @@ AGENT_WEB_TARGET = (
 AGENT_CORE_TARGET = "tests/agent " + " ".join(
     "--ignore=" + path for path in AGENT_WEB_TARGET.split()
 )
+AGENT_DOCKING_TARGET = "tests/agent/test_*docking*.py"
 
 
 def test_quality_workflow_uses_complete_cpu_profile() -> None:
@@ -89,11 +90,12 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         "${{ matrix.pytest_target }} -q -p no:cacheprovider "
         "${{ matrix.pytest_args }}"
     ) in workflow
-    assert workflow.count("command_timeout:") == 7
+    assert workflow.count("command_timeout:") == 8
     assert "command_timeout: 180" in workflow
     for target in (
         AGENT_CORE_TARGET,
         AGENT_WEB_TARGET,
+        AGENT_DOCKING_TARGET,
         "tests/sandbox_broker/test_api.py",
         "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py",
         "tests/task_runtime",
@@ -118,14 +120,19 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
               _quality_jobs()["python-tests"]["strategy"]["matrix"]["include"]}
     assert matrix["agent"] == {
         "name": "agent", "pytest_target": AGENT_CORE_TARGET,
+        "pytest_exclude": AGENT_DOCKING_TARGET,
         "pytest_args": "-vv --durations=25", "command_timeout": 1200,
     }
     assert matrix["agent-web-lifecycle"] == {
         "name": "agent-web-lifecycle", "pytest_target": AGENT_WEB_TARGET,
         "pytest_args": "-vv --durations=25", "command_timeout": 600,
     }
+    assert matrix["agent-docking"] == {
+        "name": "agent-docking", "pytest_target": AGENT_DOCKING_TARGET,
+        "pytest_args": "-vv --durations=25", "command_timeout": 1200,
+    }
     assert {name: row["pytest_args"] for name, row in matrix.items()
-            if name not in {"agent", "agent-web-lifecycle"}} == {
+            if name not in {"agent", "agent-web-lifecycle", "agent-docking"}} == {
         "sandbox-api": "--timeout=60", "sandbox-core": "--timeout=60",
         "task-runtime": "", "root": "", "root-activity": "",
     }
@@ -146,14 +153,14 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
     matrix = {row["name"]: row for row in python["strategy"]["matrix"]["include"]}
-    assert set(matrix) == {"agent", "agent-web-lifecycle", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"}
+    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"}
     assert python["strategy"]["fail-fast"] is False
     assert matrix["root"]["pytest_target"] == "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
     assert matrix["root"]["pytest_args"] == ""
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
     assert all(row["command_timeout"] == (
-                   1200 if name == "agent" else
+                   1200 if name in {"agent", "agent-docking"} else
                    900 if name == "root-activity" else
                    180 if name == "sandbox-api" else 600)
                for name, row in matrix.items())
@@ -169,6 +176,10 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     assert 'extra_args+=(--ignore "$activity_test")' in run["run"]
     assert '"${extra_args[@]}"' in run["run"]
     assert "--ignore-glob" not in run["run"]
+    assert run['env']['PYTEST_EXCLUDE'] == '${{ matrix.pytest_exclude }}'
+    assert 'for excluded_test in $PYTEST_EXCLUDE; do' in run['run']
+    assert 'if [ -f "$excluded_test" ]; then' in run['run']
+    assert 'extra_args+=(--ignore "$excluded_test")' in run['run']
 
 
 def test_root_partition_actual_pytest_collection_is_disjoint_and_exhaustive(tmp_path):
@@ -368,7 +379,7 @@ print('NETWORK_GUARD_OK')
     assert result.stdout.strip() == 'NETWORK_GUARD_OK'
 
 
-@pytest.mark.parametrize('fault', [None, 'overlap', 'omission', 'duplicate_rows',
+@pytest.mark.parametrize('fault', [None, 'overlap', 'omission', 'docking_overlap', 'docking_omission', 'docking_empty', 'duplicate_rows',
     'duplicate_ids', 'collection_error', 'timeout', 'final_cleanup_deadline'])
 def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, fault):
     # Execute the exact workflow program, not a separately reimplemented selector.
@@ -377,10 +388,15 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     rows = workflow['jobs']['python-tests']['strategy']['matrix']['include']
     matrix = {row['name']: row for row in rows}
     assert len(matrix) == len(rows)
+    assert 'agent-docking' in matrix, 'missing bounded docking partition'
     files = (*AGENT_WEB_TARGET.split(), 'tests/agent/test_future_agent.py',
              'tests/agent/test_ordinary_web_runtime_future.py',
              'tests/agent/future/test_nested.py',
-             'tests/agent/future/test_web_decision_runtime_lifecycle.py')
+             'tests/agent/future/test_web_decision_runtime_lifecycle.py',
+             'tests/agent/test_web_docking_future.py',
+             'tests/agent/test_docking_publication_future.py',
+             'tests/agent/future/test_web_docking_nested.py',
+             'tests/agent/test_docking_area/test_nested.py')
     for name in files:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +410,12 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
         matrix['agent']['pytest_target'] = 'tests/agent'
     elif fault == 'omission':
         matrix['agent']['pytest_target'] += ' --ignore=tests/agent/test_future_agent.py'
+    elif fault == 'docking_overlap':
+        matrix['agent']['pytest_exclude'] = ''
+    elif fault == 'docking_omission':
+        matrix['agent-docking']['pytest_target'] = 'tests/agent/test_web_docking_future.py'
+    elif fault == 'docking_empty':
+        matrix['agent-docking']['pytest_target'] = 'tests/agent/test_missing_docking_*.py'
     elif fault == 'duplicate_rows':
         rows.append(dict(matrix['agent']))
     elif fault == 'duplicate_ids':
@@ -419,7 +441,7 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
                 "        global _offset, _exits\n"
                 "        result = super().__exit__(*args)\n"
                 "        _exits += 1\n"
-                "        if _exits == 3:\n            _offset += 181\n"
+                "        if _exits == 4:\n            _offset += 181\n"
                 "        return result\n"
                 "tempfile.TemporaryDirectory = DelayedFinalCleanup\n" + code)
     configuration = tmp_path / '.github/workflows/quality.yml'
@@ -434,7 +456,7 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     assert completed.stderr == ''
     if fault is None:
         assert completed.returncode == 0, completed.stdout
-        assert completed.stdout.strip() == 'AGENT_COLLECTION_OK baseline=14 agent=8 web=6'
+        assert completed.stdout.strip() == 'AGENT_COLLECTION_OK baseline=22 agent=12 web=6 docking=4'
     else:
         assert completed.returncode != 0
         assert completed.stdout.strip() == 'AGENT_COLLECTION_FAILED'
