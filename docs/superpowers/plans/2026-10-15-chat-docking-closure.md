@@ -625,6 +625,27 @@ establish text admission, source authenticity, prepared inputs or full D2.
 
 ## D3 — HTTP and C runtime bridge
 
+The internal same-root preparation lifecycle (no HTTP/approval activation) now
+has **22 passing synthetic tests in 95.38 seconds**. The original three missing
+method failures became three passes in 15.16 seconds. Two additional RED cases
+prevented premature READY publication during final SQL validation and invocation
+of a non-concrete runtime; the 12-case run passed in 53.16 seconds. Three more
+RED cases detected closed/closing/replaced-policy runtime refresh, followed by
+15 passes in 65.57 seconds. Additional checks cover fresh context capture,
+nonce-free duplicate/status, independent READY expiry, wrong owner/revision/refs,
+actual staging/final-SQL cancellation and lost revocation acknowledgement.
+The latter keeps its root/stage and does not retry or recover authority from a
+REVOKED readback. One test initially called a nonexistent stager path helper;
+that test-only error was corrected to inspect its actual retained manifest.
+The adjacent regression and independent SPEC review are pending.
+
+The original strict multipart HTTP prepare contract asks for two uploaded files,
+while the integrated chat producer now owns and freezes those bytes server-side.
+A narrow user decision is pending on using a closed root/revision/receptor_ref/
+ligand_ref JSON prepare request instead. No transport contract has been changed
+or exposed while that question is open; the runtime's explicit human Vina
+approval remains mandatory under either option.
+
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
 
@@ -763,7 +784,16 @@ is not claimed otherwise. Fresh QUALITY found two further reproducible P1
 issues: a runtime binding swap after an owned read caused reclassification to
 miss the actual captured authority, and cross-owner duplicate history IDs could
 pass the owner-filtered snapshot and let clear delete foreign metadata. A focused
-fix worker is reproducing and addressing both; this slice remains unapproved.
+worker reproduced authority failures (12 failed / 12 passed, plus two binding
+failures) and history failures (14 failed / 5 passed), then fixed classification
+of the captured runtime and identity of the current binding. History duplicate
+checks now count only the bounded owned IDs across the same locked raw snapshot,
+before any delete. All 45 added cases passed; the joint regression passed
+**286 tests / 2 platform skips in 112.17 seconds**. Six-file compilation and
+diff checks passed. QUALITY re-review APPROVED: 10 independent probes and
+**76 focused tests in 19.04 seconds**, six-file memory compilation/diff checks,
+and unchanged frozen hashes. Both P1 findings are closed; no blocker remains
+within this legacy-route isolation slice.
 This is not completed
 private-output-root or retention integration.
 

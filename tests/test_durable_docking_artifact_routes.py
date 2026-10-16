@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 from src.docking.history_index import build_history_record, upsert_history_record
+from src.task_runtime.store import TaskStore
 
 try:
     from src.web.routes.docking_routes import setup_docking_routes
@@ -53,8 +54,12 @@ def _pdbqt_with_two_poses() -> bytes:
     ).encode("utf-8")
 
 
-class _OwnedStore:
+class _OwnedStore(TaskStore):
     def __init__(self, task_id: str, manifest_path: Path | None = None):
+        assert manifest_path is not None
+        # Keep the route's synthetic owned result, but exercise the real
+        # read-only consent membership classifier against an isolated database.
+        super().__init__(manifest_path.parent.parent / "owned-route-tasks.sqlite")
         self.task_id = task_id
         self.manifest_path = manifest_path
 
