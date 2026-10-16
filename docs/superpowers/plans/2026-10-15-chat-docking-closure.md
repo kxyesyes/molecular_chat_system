@@ -271,8 +271,15 @@ proposal budgets in a refinement receipt/same-version read. Their repair passed
 two-file in-memory compilation and scoped diff checks. Independent SPEC PASS:
 **164 tests in 180.23 seconds** plus 16 receipt, invalidation, actual child
 cancellation, order-invariance and descriptor-coverage probes. Frozen hashes
-were unchanged. Fresh QUALITY remains outstanding;
-synthetic modeling is not current S03 selection or a real scientific S10 result.
+were unchanged. Fresh QUALITY reproduced one cancellation-propagation defect:
+the changed-choice branch drained actual child cleanup but ignored cancellation
+of its caller. An actual projection/held-close regression failed at the caller's
+cancelled state, then passed after honoring the drain result and retaining
+release in `finally`. QUALITY re-review APPROVED: two regression/control tests
+passed, the independent three-way physical-close harness propagated cancellation
+and retained resources correctly, and the prior 164-test/probe evidence stands.
+Parent full joint rerun: **165 passed in 160.84 seconds**. Synthetic modeling is
+not current S03 selection or a real scientific S10 result.
 
 The separate waiting-draft cancellation seam is
 `TaskStore.close_chat_docking_draft`, tested in

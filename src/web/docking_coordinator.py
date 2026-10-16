@@ -39,7 +39,8 @@ from src.agent.persistence.redaction import contains_sensitive_text
 from src.system.model_lifecycle import finish_on_cancel
 from src.task_runtime.docking_consent import (
     DRAFT_SLOT_NAMES, MAX_PENDING_CONSENTS, DockingConsentPolicy,
-    validate_clocks, validate_draft_identity, validate_chat_draft,
+    validate_clocks, validate_draft_identity, validate_chat_draft, validate_identity,
+    validate_draft_patch, materialize_draft_identity,
 )
 from src.web.docking_proposal import (
     DockingProposalOwner, TextSegmentIssuer, capture_source_snapshot, capture_text_segment,
@@ -108,6 +109,43 @@ def _pending_preparation(root):
         return True
 
 
+def _content_ref(value, limit=64 * 1024 * 1024):
+    """Hash bounded private native facts without constructing a full JSON copy."""
+    digest, size = hashlib.sha256(), 0
+    for chunk in json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                                  allow_nan=False).iterencode(value):
+        raw = chunk.encode("utf-8")
+        size += len(raw)
+        if size > limit:
+            raise ValueError("descriptor_too_large")
+        digest.update(raw)
+    return "sha256:" + digest.hexdigest()
+
+
+def _capture_selection(value):
+    from src.docking.receptor_projection_pdb import AllocationBudget
+    from src.docking.receptor_projection_source import check_projection_resources
+    if type(value) is not dict:
+        raise ValueError("invalid_selection")
+    _, captured = check_projection_resources(value, budget=AllocationBudget(64 * 1024 * 1024),
+                                             kind="selection", _capture=True)
+    if set(captured) != {"protein_selection", "reference_residue", "hetero_choices",
+                         "conformer_choices", "reviewed_limitations"}:
+        raise ValueError("invalid_selection")
+    # These fields are sets of explicit choices. Their input ordering must not
+    # turn an identical choice into a request to replace fixed inputs. P3 still
+    # validates every identity/value and normalizes to original source order.
+    for name in ("hetero_choices", "conformer_choices", "reviewed_limitations"):
+        if type(captured[name]) is not list:
+            raise ValueError("invalid_selection")
+        captured[name].sort(key=lambda row: _small_json(row, 8 * 1024 * 1024))
+    protein = captured["protein_selection"]
+    if type(protein) is not dict or type(protein.get("chains")) is not list:
+        raise ValueError("invalid_selection")
+    protein["chains"].sort(key=lambda row: _small_json(row, 8 * 1024 * 1024))
+    return captured, _content_ref(captured, 8 * 1024 * 1024)
+
+
 class _Unavailable(Exception):
     pass
 
@@ -153,6 +191,15 @@ class _Root:
     inspection: dict | None = None
     source_preview_json: str | None = None
     preparation_owners: list = field(default_factory=list)
+    accepted_revision: int = 0
+    accepted_slots: dict = field(default_factory=lambda: {key: {"state": "pending"} for key in DRAFT_SLOT_NAMES})
+    selection_key: str | None = None
+    selection: dict | None = None
+    projected: dict | None = None
+    ligand: dict | None = None
+    receptor_descriptor: dict | None = None
+    ligand_descriptor: dict | None = None
+    prepared_preview_json: str | None = None
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -168,6 +215,8 @@ def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
         if (not root.closed and root.source_preview_json is not None
                 and (root.task is None or root.task.done())):
             view["source_preview"] = json.loads(root.source_preview_json)
+            if root.prepared_preview_json is not None:
+                view["prepared_preview"] = json.loads(root.prepared_preview_json)
     return view
 
 
@@ -308,20 +357,25 @@ class DockingRequestCoordinator:
             query_digest=root.snapshot.query_digest, refinement_revision=0,
             admission_revision="docking-initial-v1")
 
-    def _validate_draft_record(self, root, record, *, expected_version=None):
+    def _validate_draft_record(self, root, record, *, expected_version=None,
+                               accepted_revision=None, accepted_slots=None):
         """A receipt/read validates an existing root; it never creates authority.
 
-        INITIAL has no accepted refinements or prepared slots. Compare the whole
-        native identity, including task/preparation/admission, with the committed
-        root receipt instead of borrowing identity from a later store response.
+        Compare the immutable claim plus only locally confirmed refinement
+        receipts, never adopting a revision or fixed slot from later readback.
         """
         self._remaining_ms(root)
         if type(root.claim) is not _ClaimReceipt or type(record) is not dict:
             raise _Unavailable("draft_unavailable")
-        expected = json.loads(root.claim.binding_json)["identity"]
-        identity = validate_draft_identity(record["identity"])
+        original = json.loads(root.claim.binding_json)["identity"]
+        revision = root.accepted_revision if accepted_revision is None else accepted_revision
+        slots = root.accepted_slots if accepted_slots is None else accepted_slots
         draft = validate_chat_draft(record["draft"])
-        if (identity != expected or expected != self._identity(root)
+        expected = materialize_draft_identity(dict(original, refinement_revision=revision),
+                                             dict(draft, slots=slots))
+        identity = (validate_identity(record["identity"]) if "source_refs" in expected
+                    else validate_draft_identity(record["identity"]))
+        if (identity != expected or original != self._identity(root) or draft["slots"] != slots
                 or record["state"] != "AWAITING_INPUT" or record["cleanup_state"] != "settled"
                 or type(record["version"]) is not int or record["version"] < 1
                 or (expected_version is not None and record["version"] != expected_version)
@@ -342,7 +396,11 @@ class DockingRequestCoordinator:
             raise _Unavailable("draft_unconfirmed")  # Never recover a missing receipt by reading.
         record = self._tasks.get_chat_docking_draft(
             preparation_id=root.preparation_id, owner_session_id=root.owner)
-        return self._validate_draft_record(root, record, expected_version=expected_version)
+        record = self._validate_draft_record(root, record, expected_version=expected_version)
+        if (expected_version == root.draft["version"]
+                and record["draft"]["budget"] != root.draft["draft"]["budget"]):
+            raise _Unavailable("draft_binding_mismatch")
+        return record
 
     def _read_waiting_draft(self, *, root, expected_version):
         # The draft read may block after an earlier root check. Revalidate the
@@ -371,6 +429,8 @@ class DockingRequestCoordinator:
         root.snapshot = root.current = root.issuer = root.proposal = root.draft = root.claim = root.task = None
         root.structure_context_json = root.source_reference = root.source_result = None
         root.inspection = root.source_preview_json = None
+        root.selection = root.projected = root.ligand = None
+        root.receptor_descriptor = root.ligand_descriptor = root.prepared_preview_json = None
         root.preparation_owners.clear()
         if root.durable and self._roots.get(root.root_id) is root:
             del self._roots[root.root_id]
@@ -668,6 +728,135 @@ class DockingRequestCoordinator:
         return json.loads(_small_json(dict(ok=True, source_sha256=source_sha256, section=section,
             offset=offset, next_offset=next_offset if next_offset < len(records) else None,
             items=items, input_ready=False, execution_authorized=False)))
+
+    async def select_source(self, *, root_id, owner_session_id, source_sha256, selection):
+        """Explicit choices for this current preview; no C1 or execution grant.
+
+        Capture native input before the first await. Only the retained canonical
+        source feeds the fixed projection/ligand workers. Exact duplicates reuse
+        their bytes; any later change burns this root instead of regenerating.
+        """
+        root = self._owned(root_id, owner_session_id)
+        if (root is None or root.closed or root.source_result is None or root.inspection is None
+                or type(source_sha256) is not str
+                or source_sha256 != root.source_result["source"]["sha256"]):
+            return _view()
+        try:
+            choice, key = _capture_selection(selection)
+        except Exception:
+            return _view(reason="selection_invalid", phase="AWAITING_INPUT")
+        if root.selection_key is not None:
+            if key != root.selection_key:
+                self._interrupt(root, "new_root_required")
+                try:
+                    if root.task is not None and await _drain(root.task):
+                        raise asyncio.CancelledError
+                    return _view(root)
+                finally:
+                    self._release_closed(root)
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        if root.task is not None and not root.task.done():
+            return _view(root)
+        root.selection, root.selection_key = choice, key
+        root.phase, root.reason = "BUSY", "input_preparation_running"
+        root.task = asyncio.create_task(self._run_selection(root))
+        self._gate.retain_task(root.task)
+        return await self._wait_root(root)
+
+    async def _check_source(self, root):
+        async with self._gate.request():
+            await self._sql(self._read_source_reference, root=root)
+            self._capture(root)
+
+    async def _selected_child(self, root, name, inputs):
+        owner = chat_preparation.PreparationOwner()
+        root.preparation_owners.append(owner)
+        result = await chat_preparation.run_preparation(name, inputs=inputs,
+            deadline=self._child_deadline(root), owner=owner)
+        if (owner.snapshot()["settled"] is not True or type(result) is not dict
+                or result.get("ok") is not True):
+            raise _Unavailable("selected_input_unavailable")
+        await self._check_source(root)
+        return result
+
+    @staticmethod
+    def _input_descriptors(root):
+        receptor = dict(schema="chat-docking-receptor-v1", kind="explicit-residue-conformer-v1",
+            source_evidence=root.source_result["evidence"], projection=root.projected["projection"],
+            pocket=root.projected["pocket"])
+        ligand = dict(schema="chat-docking-ligand-v1", kind="modeled_input_not_experimental_pose",
+            query_digest=root.snapshot.query_digest, sha256=root.ligand["sha256"],
+            canonical_smiles=root.ligand["canonical_smiles"], atom_count=root.ligand["atom_count"],
+            formal_charge=root.ligand["formal_charge"], provenance=root.ligand["provenance"])
+        return receptor, ligand, dict(receptor_ref=_content_ref(receptor), ligand_ref=_content_ref(ligand))
+
+    async def _refine_slots(self, root, patch):
+        patch = validate_draft_patch(patch)
+        # The store's existing CAS owns its write transaction. Never nest the
+        # two-database read guard inside that TaskStore-first transaction.
+        async with self._gate.request():
+            await self._sql(self._read_source_reference, root=root)
+            self._capture(root)
+            slots = {key: dict(value) for key, value in root.accepted_slots.items()}
+            for key, value in patch.items():
+                if slots[key]["state"] != "pending":
+                    raise _Unavailable("new_root_required")
+                slots[key] = dict(state="fixed", value=value)
+            revision, version = root.accepted_revision + 1, root.draft["version"] + 1
+            result = await self._sql(self._tasks.refine_docking_consent_draft,
+                preparation_id=root.preparation_id, owner_session_id=root.owner,
+                expected_revision=root.accepted_revision, expected_version=root.draft["version"],
+                policy=root.current["policy"], model_generation=root.current["model_generation"],
+                capability_generation=root.current["capability_generation"],
+                wall_time_ms=self._wall, monotonic=self._mono,
+                current_context=lambda: self._context(root), patch=patch)
+            confirmed = self._validate_draft_record(root, result, expected_version=version,
+                                                   accepted_revision=revision, accepted_slots=slots)
+            if confirmed["draft"]["budget"] != root.draft["draft"]["budget"]:
+                raise _Unavailable("draft_binding_mismatch")
+            root.accepted_revision, root.accepted_slots, root.draft = revision, slots, confirmed
+            await self._sql(self._read_source_reference, root=root)
+            self._capture(root)
+            root.missing = tuple(key for key in sorted(DRAFT_SLOT_NAMES) if slots[key]["state"] == "pending")
+
+    async def _run_selection(self, root):
+        try:
+            await self._check_source(root)
+            assessed = assess_docking_request_text(root.snapshot.query, enabled=self._enabled, enable_tools=True)
+            if not assessed["inputs"].get("smiles"):
+                raise _Unavailable("ligand_input_missing")
+            root.projected = await self._selected_child(root, "projection", dict(
+                pdb_bytes=root.source_result["pdb_bytes"], source=root.source_result["source"],
+                selection=root.selection))
+            root.ligand = await self._selected_child(root, "ligand", dict(smiles=assessed["inputs"]["smiles"]))
+            receptor, ligand, refs = await self._sql(self._input_descriptors, root=root)
+            await self._check_source(root)
+            explicit = {key: value for key, value in assessed["fields"].items()
+                        if key in {"center", "size", "exhaustiveness", "num_modes"}}
+            await self._refine_slots(root, dict(refs, **explicit))
+            root.receptor_descriptor, root.ligand_descriptor = receptor, ligand
+            projected = root.projected["projection"]
+            pocket = root.projected["pocket"]
+            suggested = dict(center=pocket["center"], size=pocket["size"], exhaustiveness=8, num_modes=9)
+            suggested.update(explicit)  # Original explicit values are never overwritten.
+            preview_json = _small_json(dict(input_kind="explicit-residue-conformer-v1",
+                source_sha256=root.source_result["source"]["sha256"],
+                derived_sha256=projected["derived_input"]["sha256"], ligand_sha256=root.ligand["sha256"],
+                selection_sha256=projected["selection"]["sha256"], refinement_revision=root.accepted_revision,
+                parameters_suggestion=suggested, ligand_provenance=root.ligand["provenance"],
+                reference_residue=pocket["residue"], pocket_rule=pocket["rule_version"],
+                pocket_margin=pocket["margin"], pocket_atom_count=pocket["atom_count"],
+                input_ready=False, execution_authorized=False, **refs))
+            await self._check_source(root)
+            root.prepared_preview_json = preview_json
+            root.phase, root.reason = "AWAITING_INPUT", "parameters_confirmation_required"
+        except asyncio.CancelledError:
+            self._stop(root, "cancelled")
+            raise
+        except _Unavailable as exc:
+            self._stop(root, str(exc))
+        except Exception:
+            self._stop(root, "selection_unavailable")
 
     async def close_root(self, *, root_id, owner_session_id):
         root = self._owned(root_id, owner_session_id)
