@@ -159,7 +159,15 @@ def _docking_lineage(*, receptor_path: Path, ligand_input: str, input_type: str,
 class MolecularDocking(BaseMolecularTool):
     """Synchronous domain adapter around the real docking service."""
 
-    def __init__(self, *, command_scope=None, allowed_output_root=None):
+    def __init__(self, *, command_scope=None, allowed_output_root=None, chat_toolchain=None):
+        if chat_toolchain is not None:
+            from src.docking.chat_toolchain import ChatDockingToolchain
+            from src.task_runtime.docking_consent import DockingConsentError
+            if type(chat_toolchain) is not ChatDockingToolchain:
+                raise DockingConsentError("consent_policy_unavailable")
+            chat_toolchain.require_current()
+        self._chat_toolchain = chat_toolchain
+        self._chat_toolchain_at_construction = chat_toolchain
         self._command_scope = command_scope
         self._allowed_output_root = None
         if command_scope is not None or allowed_output_root is not None:
@@ -229,7 +237,24 @@ class MolecularDocking(BaseMolecularTool):
             ownership = {}
             if self._command_scope is not None:
                 ownership = {"command_scope": self._command_scope, "allowed_output_root": self._allowed_output_root}
-            service = MolecularDockingService(config=query.get("runtime_config"), **ownership)
+            toolchain = self._chat_toolchain_at_construction
+            if self._chat_toolchain is not toolchain:
+                from src.task_runtime.docking_consent import DockingConsentError
+                raise DockingConsentError("consent_policy_unavailable")
+            if toolchain is not None:
+                # A structured/browser payload is never toolchain authority.
+                # Recreate config from the trusted constructor binding only.
+                toolchain.require_current()
+                runtime_config = toolchain.runtime_config()
+            else:
+                runtime_config = query.get("runtime_config")
+            service = MolecularDockingService(config=runtime_config, **ownership)
+            if toolchain is not None:
+                # configure() can resolve optional tools from ambient state.
+                # Fence the ACTUAL instance, not just a preflight resolver,
+                # before environment probes or any scientific commands.
+                toolchain.assert_service(service)
+                toolchain.require_current()
             if not service.verify_environment():
                 result["status"] = "unavailable"
                 result["message"] = "AutoDock Vina docking environment is unavailable. No binding energy was calculated."

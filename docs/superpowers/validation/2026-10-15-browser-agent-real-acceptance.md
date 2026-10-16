@@ -932,3 +932,50 @@ BUSY 时固定输入冲突未关闭 root。三项回归在隔离夹具修正后 
 独立 **37 passed / 1 warning，70.89 秒**，冻结哈希一致。
 保留原 root/task/query/issuer/deadline/budget，不重建权限，不产生审批或执行。
 真正聊天 receiver/controller/app/UI 仍在后续集成，尚未启用 C。
+
+### 2026-10-17 已推送 head CI 与 D6 集成中状态
+
+当前已推送 `0ade5c12` 的 quality **38927463509 / #627** 已完成且 **success**：
+static-quality、九个 Python 分组与最终 offline-quality 全部通过。
+这只覆盖已推送代码；后续未提交的 controller/receiver/app/toolchain/UI 不在
+该次 CI 中，不能据此宣称当前完整工作树通过。先前 #621 failure 仍保留。
+
+未提交集成的实际进度：共享 controller 已覆盖原消息/root、严格 watch/refine、
+来源接受和实际结果交付后的私有历史；审查发现已清理 publication 失败会阻止
+新请求，正补含真实提交回执丢失和无 worker 同步拒绝的合成回归。两种 receiver
+初版 47 项通过，SPEC 另发现 A2 普通忙碌判断早于 C 控制帧；实际 mounted ASGI
+两项先 RED，调整后 **49 passed**，C5/严格帧相关 **167 passed**，复审中。
+
+可信工具链的实际 service 二次解析绕过已按 **7 failed / 41 passed / 1 skip**
+修复为环境探测前检查实际构造实例；最终 **48 passed / 1 platform skip**，
+相关 **251 passed / 3 skips / 1 deselected**；独立 SPEC 同样 48 passed，QUALITY
+进行中。此绑定不声称覆盖传递 DLL/package 或提供操作系统级文件原子锁。
+
+原生内联 UI 已有初版：测试先因模块缺失失败，两种首页实际消息入口先 **2 failed**，
+接线后首页 **47 passed**。旧对接刷新错误释放新普通请求的回归先失败后修复；
+暂存期间 busy 与完整确认预览绑定另各观察一次 RED 后通过。实际 coordinator
+捕获的来源分页、READY 和已验证合成结果进入两 DOM 模块，**1 passed / 1 warning，
+10.71 秒**。所有科学执行均为明确合成夹具，不是 S10。来源选择 UI 初版 **39/39**，
+SPEC 发现容器键分配先于预算检查，并指出普通蛋白规模的保守预算不可用；正在
+独立修复。应用装配仍在处理同步启动失败后的资源回收审查问题。
+
+上述集成尚未审查闭合或启用，未启动真实服务、未审批或运行真实 Vina。
+D7 用户亲自点击当前 READY、实际输出/下载比对、最终完整回归及最终审查仍待完成。
+
+### 2026-10-17 D6 实际工具链绑定（独立审查通过，尚未启用）
+
+五文件限定范围为 `chat_toolchain.py`、`molecular_docking_adapter.py`、
+`docking_execution.py`、`docking_private_output.py` 和对应工具链测试。
+绑定实际配置的 Vina/受体准备/配体准备/Python 命令身份与字节摘要，检查链接、
+reparse/hardlink、大小和当前配置；单文件 256 MiB、合计 512 MiB。
+实际 scoped/unscoped adapter 在任何环境探测前验证二次构造的真实 service，
+忽略 payload 中的覆盖配置；普通默认 raw executor 和注入签名保持兼容。
+
+SPEC **PASS**，独立 **48 passed / 1 platform skip / 1 warning**。
+fresh QUALITY **APPROVED**：独立聚焦 **48 passed / 1 skip**，相关执行/私有输出
+**161 passed / 2 skips / 1 deselected**，另八个实际构造器/超时/硬链接/同字节替换/
+等价重新配置探针通过。QUALITY 初次临时父目录缺失导致 setup 失败，修正测试
+目录后运行上述结果；不把首次错误计为通过。三个 skip 为 Windows 符号链接
+权限，跨进程测试主动排除；五文件内存编译与冻结哈希一致。
+不保证传递 DLL/package 完整性，也不提供检查至执行间的操作系统原子文件锁。
+该绑定不启用 C，不构成真实 Vina 结果或当前应用 bootstrap 成功证据。

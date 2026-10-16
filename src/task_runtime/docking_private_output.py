@@ -49,6 +49,7 @@ class PrivateDockingOutput:
     raw_executor: object
     stager: object
     completions: object
+    chat_toolchain: object = None
 
     @classmethod
     def bind(cls, execution, policy, staging_root, *, excluded=()):
@@ -58,7 +59,7 @@ class PrivateDockingOutput:
             staging_root=staging_root, excluded=excluded)
         binding = cls(execution, root, Path(staging_root).resolve(), policy,
                       tuple(excluded), execution._raw_executor_injected, execution.raw_executor,
-                      execution._stager, execution._completions)
+                      execution._stager, execution._completions, execution._chat_toolchain)
         binding.require(execution, policy)
         return binding
 
@@ -69,10 +70,20 @@ class PrivateDockingOutput:
                 or execution.raw_executor is not self.raw_executor
                 or execution._stager is not self.stager
                 or execution._completions is not self.completions
+                or execution._chat_toolchain is not self.chat_toolchain
+                or execution._chat_toolchain_at_construction is not self.chat_toolchain
                 or execution._stager._root != self.staging_root
                 or execution._completions._root != self.staging_root
                 or execution._execution_backend != (None if self.injected else "local")):
             raise DockingConsentError("consent_policy_unavailable")
+        if self.chat_toolchain is not None:
+            from src.docking.chat_toolchain import ChatDockingToolchain
+            from src.docking.molecular_docking_adapter import MOLECULAR_DOCKING_ADAPTER_VERSION
+            if (type(self.chat_toolchain) is not ChatDockingToolchain
+                    or policy.tool_policy_digest != self.chat_toolchain.digest
+                    or policy.adapter_contract_version != MOLECULAR_DOCKING_ADAPTER_VERSION):
+                raise DockingConsentError("consent_policy_unavailable")
+            self.chat_toolchain.require_current()
         private_output_root(self.root, staging_root=self.staging_root, excluded=self.excluded)
         return execution
 
