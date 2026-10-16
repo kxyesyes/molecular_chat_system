@@ -13,7 +13,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
 from src.task_runtime.runtime import TaskRuntime
-from src.task_runtime.docking_consent import DockingConsentError, validate_approval
+from src.task_runtime.docking_consent import DockingConsentError, validate_approval, verify_approval
 from src.web.agent_session import _origin_allowed
 from src.web.docking_coordinator import DockingRequestCoordinator, _label
 
@@ -191,7 +191,23 @@ def _constant(_value):
     raise ValueError("invalid number")
 
 
-async def _json_body(request):
+async def _approval_chunks(request, deadline):
+    # Request.stream hides empty more_body chunks; inspect every physical read.
+    while time.monotonic() < deadline:
+        message = await request.receive()
+        if time.monotonic() >= deadline:
+            break
+        if message['type'] == 'http.disconnect':
+            raise HTTPException(408, 'Request disconnected')
+        if message['type'] != 'http.request':
+            raise HTTPException(422, 'Invalid request')
+        yield message.get('body', b'')
+        if not message.get('more_body', False):
+            return
+    raise HTTPException(408, 'Request deadline exceeded')
+
+
+async def _json_body(request, *, deadline=None):
     if request.query_params:
         raise HTTPException(422, "Invalid request")
     if request.headers.getlist("content-encoding"):
@@ -208,7 +224,8 @@ async def _json_body(request):
     if lengths and int(lengths[0]) > _MAX_BODY:
         raise HTTPException(413, "Request too large")
     data = bytearray()
-    async for chunk in request.stream():
+    chunks = request.stream() if deadline is None else _approval_chunks(request, deadline)
+    async for chunk in chunks:
         if len(data) + len(chunk) > _MAX_BODY:
             raise HTTPException(413, "Request too large")
         data.extend(chunk)
@@ -233,8 +250,9 @@ async def _prepare_body(request):
     return value
 
 
-async def _approval_body(request):
-    value = await _json_body(request)
+async def _approval_body(request, deadline):
+    # Parse only: a retained receive completing late must never dispatch work.
+    value = await _json_body(request, deadline=deadline)
     if set(value) != {'approval_nonce', 'binding_digest', 'confirm'}:
         raise HTTPException(422, "Invalid request")
     try:
@@ -311,8 +329,11 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
 
     @app.post('/api/agent/docking/preparations/{preparation_id}/approve')
     async def approve(preparation_id: str, request: Request):
+        deadline = time.monotonic() + _CONTROL_SECONDS
         owner = authenticate(request)
-        value = await _approval_body(request)
+        transport = _ControlTransport(coordinator)
+        body = transport.retain(object(), lambda: _approval_body(request, deadline))
+        value = await transport.wait(body, deadline, body=True)
         # Only bounded, live coordinator roots are eligible. A database receipt
         # or supplied preparation ID cannot reconstruct a missing source owner.
         root = next((root for root in coordinator._roots.values()
@@ -327,7 +348,29 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             raise HTTPException(409, 'Preparation changed')
         if context._runtime is not task_runtime:
             raise HTTPException(503, 'Preparation unavailable')
-        view = await coordinator.approve_inputs(root_id=root.root_id, owner_session_id=owner, **value)
+        # Each request must prove the live consent BEFORE it can join a shared
+        # pending approval. Backend claim/source/one-execution gates still run
+        # exclusively through approve_inputs and the existing runtime.
+        try:
+            verify_approval(context._ready_record, value['approval_nonce'], value['binding_digest'])
+        except DockingConsentError:
+            raise HTTPException(409, 'Preparation changed') from None
+        if time.monotonic() >= deadline:
+            raise HTTPException(408, 'Request deadline exceeded')
+
+        async def approval():
+            # A queued transport job must not resolve the locator to a new
+            # root/context. No await separates this check from coordinator entry.
+            if (coordinator._owned(root.root_id, owner) is not root
+                    or root.input_context is not context):
+                raise HTTPException(409, 'Preparation changed')
+            return await coordinator.approve_inputs(root_id=root.root_id, owner_session_id=owner, **value)
+
+        # This synchronous retain is admission. HTTP is not an attached WS:
+        # once accepted, its owned approval survives caller cancellation or
+        # timeout without interrupting/draining the physical execution.
+        task = transport.retain(('approve', id(root)), approval)
+        view = await transport.wait(task, deadline)
         if view['reason_code'] == 'approval_expired':
             status = 410
         elif view['reason_code'] in {'approval_unavailable', 'approval_changed'}:

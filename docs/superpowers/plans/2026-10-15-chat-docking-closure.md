@@ -863,13 +863,37 @@ evidence of an end-to-end ASGI response bound. Those retained-authentication /
 response-send boundaries must be closed before activation, alongside the
 separate prepare/approval request deadlines.
 
-The separate next approval-lifetime slice is still RED: **3 failed in 31.90
-seconds** in `tests/agent/test_web_docking_approval_deadlines.py`. A stalled JSON
-body currently outlives the request's feedback window, including after caller
-cancellation; a completed explicit approval currently couples HTTP disconnect
-to draining admission. The approved design distinguishes this HTTP lifetime
-from loss of an attached WebSocket subscription. These known-failing tests are
-excluded from the current control-route slice and require a separate fix/review.
+The separate approval-lifetime slice started with **3 failed in 31.90 seconds**
+in `tests/agent/test_web_docking_approval_deadlines.py`: an uncooperative JSON
+body outlived feedback/cancellation, and HTTP disconnect interrupted and drained
+an already accepted approval. The fix uses the existing bounded retained-task
+registry, one absolute route deadline and parse-only body ownership. Each
+request verifies its proof before joining an approval; the queued operation
+checks the captured root/context identity. Accepted HTTP approval is not an
+attached WebSocket subscription and survives loss of its HTTP waiter.
+
+Parent validation passed all **5 approval-lifetime tests** (the original three
+plus proof-isolation and shared physical-capacity regressions). Independent
+SPEC PASS ran **17 tests in 85.62 seconds** and four independent probes: queued
+root/context replacement, accepted approval timeout including a 1.25-second
+body delay, and repeated empty streamed chunks. The accepted timeout returned
+503 at 4.906 seconds while retaining exactly one synthetic execution; an
+identical concurrent proof observed 202. Empty chunks reached 408 at 4.891
+seconds without execution. Source/test hashes remained unchanged. Parent
+`compileall -q src scripts` and `git diff --check` passed. Independent QUALITY
+APPROVED: **146 passed in 216.26 seconds**, covering the five new tests, existing
+approval/prepare HTTP, coordinator, control HTTP and physical-control boundaries.
+Two further independent delayed-body/accepted-timeout and synchronous-empty-chunk
+probes passed in 18.88 seconds; both observed 4.906-second feedback. Scoped
+compilation/diff checks passed and both frozen hashes were unchanged. The probe
+harness reported one anyio assertion-rewrite warning. This is not whole-ASGI or
+real-science evidence; the remaining activation gates are unchanged.
+
+The next preparation-lifetime slice remains separate: its corrected real-time
+body timeout/disconnect tests failed **2 tests in 43.63 seconds**. The earlier
+controlled-clock attempt was replaced because advancing the route clock alone
+does not advance asyncio's physical timeout. These known-RED tests in
+`test_web_docking_prepare_deadlines.py` are excluded from the approval slice.
 
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
