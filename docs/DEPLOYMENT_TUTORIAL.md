@@ -1,11 +1,5 @@
 # MedChat 部署教程
 
-conda run -n medchat-admet-ai python -m pip install \
-  -r /home/user/XIAOKX/molecular_chat_system/requirements-admet-ai-140.txt
-
-conda run -n medchat-admet-ai python -c \
-  "import sys; print(sys.executable); print(sys.version)"
-
 本文档面向一台 Ubuntu 22.04/24.04 服务器，目标是完成一套可维护的单机部署：
 
 ~~~text
@@ -17,6 +11,8 @@ conda run -n medchat-admet-ai python -c \
 ~~~
 
 本文档不把“代码能启动”当作科学功能已经可用。没有真实模型、权重、数据库或外部科学工具时，服务应明确报告 unavailable/failed，不能用示例数据冒充真实预测。
+
+本页保留逐步操作；部署模板、资产要求、生产门禁和 Temporal worker 权限见 [部署环境说明](../deployment/README.md)。两者的服务账号和目录示例不同，不要混用。
 
 ## 0. 部署边界和约定
 
@@ -240,6 +236,10 @@ MOLECULAR_DOCKING_PREPARE_RECEPTOR=<tools-dir>/ADFRsuite/bin/prepare_receptor
 MOLECULAR_DOCKING_PREPARE_LIGAND=<meeko-path>
 ~~~
 
+### 4.3 ADMET-AI 独立环境
+
+ADMET-AI 的专用环境、依赖安装、解释器选择和验证命令见 [ADMET-AI 1.4.0 说明](admet_ai_140.md)，不要将其依赖直接混装到主环境。
+
 ## 5. 准备持久化目录和数据资产
 
 本机项目位于 user 的 home 目录，本教程让 systemd 也使用 user 运行。先创建项目运行目录：
@@ -255,7 +255,7 @@ mkdir -p "$PROJECT_DIR"/logs \
 chmod 750 "$PROJECT_DIR"/logs "$PROJECT_DIR"/scratch "$PROJECT_DIR"/temp_docking
 ~~~
 
-把代码、模型和数据分开管理。运行所需的大型资产不应提交 Git：
+把代码、模型和数据分开登记，并按所启用功能准备下列资产。提交限制及模型权重、运行时 registry、真实训练资产的例外统一遵守 [AGENTS 第 9 节](../AGENTS.md#9-禁止提交的内容)，此处不另设一律禁交规则：
 
 | 功能 | 需要准备的资产 | 推荐环境变量 |
 |---|---|---|
@@ -318,21 +318,9 @@ MEDCHAT_LOG_DIR=/home/user/XIAOKX/molecular_chat_system/logs
 MEDCHAT_TEMP_DOCKING_DIR=/home/user/XIAOKX/molecular_chat_system/temp_docking
 MEDCHAT_SCRATCH_DIR=/home/user/XIAOKX/molecular_chat_system/scratch
 
-# Main LLM: choose ollama, modelscope, or openai_compatible
-MEDCHAT_LLM_PROVIDER=ollama
-MEDCHAT_LLM_STREAM=true
+# Molecular generation only; main-chat settings are saved separately.
 OLLAMA_BASE_URL=http://127.0.0.1:11434
 OLLAMA_MODEL=gmm-llama:latest
-
-# ModelScope, only when MEDCHAT_LLM_PROVIDER=modelscope
-MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn/v1/chat/completions
-MODELSCOPE_MODEL=
-MODELSCOPE_API_KEY=
-
-# OpenAI-compatible provider, only when selected
-OPENAI_COMPATIBLE_BASE_URL=
-OPENAI_COMPATIBLE_MODEL=
-OPENAI_COMPATIBLE_API_KEY=
 
 # Persistent data assets; use real paths only when the assets exist
 TARGET_DB_PATH=/home/user/XIAOKX/molecular_chat_system/data/target_db/target_database.sqlite
@@ -352,6 +340,8 @@ MOLECULAR_DOCKING_PREPARE_LIGAND=<meeko-path>
 # Development/local task backend. Do not call this restart-durable production.
 MEDCHAT_TASK_BACKEND=local
 ~~~
+
+主聊天模型按 [README 的模型接入步骤](../README.md#主模型接入与一次保存) 在界面保存，配置归属于实际运行 Web 的系统账号；本教程为 `user`。需要自定义位置时设置 `MEDCHAT_USER_CONFIG_DIR` 为仓库外私有绝对目录。首页不从旧的主模型环境变量自动恢复接口或密钥，不能将上面的 Ollama 配置当成主聊天模型设置。
 
 环境文件写完后检查权限，但不要把内容打印到终端：
 
