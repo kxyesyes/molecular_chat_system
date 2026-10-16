@@ -55,7 +55,8 @@ class Rig:
                     wall_time_ms=lambda: self.wall, monotonic=lambda: self.mono,
                     current_context=lambda: self.context)
         args.update(changes)
-        return self.api("reserve_chat_docking_draft")(**args)
+        self.last_receipt = self.api("reserve_chat_docking_draft")(**args)
+        return self.last_receipt
 
     def read(self, **changes):
         args = dict(preparation_id="draft-1", owner_session_id="owner-1")
@@ -70,14 +71,17 @@ class Rig:
                     current_context=lambda: self.context)
         args.update(changes)
         if charge is not None:
-            return self.api("reserve_docking_draft_budget", store)(call_slice_ms=charge, **args)
-        return self.api("refine_docking_consent_draft", store)(patch=patch or {}, **args)
+            self.last_receipt = self.api("reserve_docking_draft_budget", store)(call_slice_ms=charge, **args)
+        else:
+            self.last_receipt = self.api("refine_docking_consent_draft", store)(patch=patch or {}, **args)
+        return self.last_receipt
 
     def begin(self, revision=0):
         return self.store._begin_docking_preparation(
             preparation_id="draft-1", owner_session_id="owner-1", revision=revision,
             policy=self.policy, now_ms=self.wall, monotonic_now=self.mono,
-            token="writer-1", still_current=lambda: True)
+            token="writer-1", still_current=lambda: True,
+            expected_chat_draft=getattr(self, "last_receipt", None))
 
 
 @pytest.fixture

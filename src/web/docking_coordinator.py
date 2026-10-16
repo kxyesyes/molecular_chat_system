@@ -226,6 +226,7 @@ class _Root:
     draft_attempted: bool = False
     close_task: object = None
     close_state: str = "not_started"
+    input_context: object = None
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -716,13 +717,18 @@ class DockingRequestCoordinator:
     def _read_source_reference_guarded(self, *, root):
         # Existing resolver/store methods still read their own connections;
         # the reservation above prevents either database from changing meanwhile.
+        self._read_waiting_draft(root=root, expected_version=root.draft["version"])
+        return self._read_source_evidence_guarded(root=root)
+
+    def _read_source_evidence_guarded(self, *, root):
+        # C1's concrete input context calls this under an Agent-DB-first guard;
+        # its exact PREPARING receipt is checked separately under TaskStore's lock.
         self._capture(root)
         if root.structure_context_json is None or root.claim is None:
             raise _Unavailable("source_unavailable")
         digest = hashlib.sha256(root.structure_context_json.encode("utf-8")).hexdigest()
         if json.loads(root.claim.binding_json).get("structure_context_digest") != digest:
             raise _Unavailable("source_unavailable")
-        self._read_waiting_draft(root=root, expected_version=root.draft["version"])
         assessment = assess_docking_request_text(root.snapshot.query, enabled=self._enabled, enable_tools=True)
         pdb_id = assessment["inputs"].get("pdb_id")
         evidence = OwnedDockingStructureEvidence(self._state, clock=lambda: self._wall() / 1000)

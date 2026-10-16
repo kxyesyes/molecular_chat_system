@@ -955,7 +955,7 @@ class TaskStore:
 
     def _begin_docking_preparation(self, *, preparation_id, owner_session_id,
                                    revision, policy, now_ms, monotonic_now, token,
-                                   still_current):
+                                   still_current, expected_chat_draft=None):
         self.expire_docking_consents(
             now_ms=now_ms, monotonic_now=monotonic_now,
             runtime_generation=policy.runtime_generation, policy_generation=policy.policy_generation,
@@ -984,12 +984,24 @@ class TaskStore:
                 if materialize_draft_identity(identity, draft) != identity:
                     raise DockingConsentError("consent_binding_mismatch")
                 validate_identity(identity)
+            self._require_chat_staging_receipt(row, expected_chat_draft)
             conn.execute(
                 """UPDATE docking_consents SET state='PREPARING',version=version+1,
                 operation_token=?,cleanup_state='pending' WHERE preparation_id=? AND version=?""",
                 (token, preparation_id, row["version"]),
             )
         return identity
+
+    @classmethod
+    def _require_chat_staging_receipt(cls, row, expected):
+        # This is a concurrency comparison, not source authentication. The
+        # runtime obtains this private snapshot only from its concrete live
+        # input context; ordinary runtime callers supply no such context.
+        if row["draft_json"] is None:
+            if expected is not None:
+                raise DockingConsentError("consent_proof_mismatch")
+        elif type(expected) is not dict or cls._chat_draft_record(row) != expected:
+            raise DockingConsentError("consent_proof_mismatch")
 
     @classmethod
     def _validate_chat_staging_parameters(cls, row, parameters):
@@ -1020,7 +1032,8 @@ class TaskStore:
 
     def _seal_docking_preparation(self, preparation_id, token, binding, digest,
                                   nonce_hash, *, now_ms, monotonic_now,
-                                  still_current, wall_time_ms, monotonic) -> None:
+                                  still_current, wall_time_ms, monotonic,
+                                  expected_chat_draft=None) -> None:
         validate_clocks(now_ms, monotonic_now)
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -1035,6 +1048,7 @@ class TaskStore:
             ).fetchone()
             if row is None:
                 raise DockingConsentError("consent_expired")
+            self._require_chat_staging_receipt(row, expected_chat_draft)
             self._validate_chat_staging_parameters(row, {
                 key: binding[key] for key in ("center", "size", "exhaustiveness", "num_modes")})
             if (current_ms >= binding["expires_at_ms"]

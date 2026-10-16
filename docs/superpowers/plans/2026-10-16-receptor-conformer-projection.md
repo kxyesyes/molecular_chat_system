@@ -931,10 +931,11 @@ later than the entry revision date. NAG/FUC CCD leaving flags explicitly include
 O1; the actual residue-specific linkage must still justify its displacement.
 These observations guide the verifier, not a special-case acceptance of 6SAM.
 
-The standard-format parser integration will use Gemmi 0.7.5 under the later
+The standard-format parser integration uses Gemmi 0.7.5. The user explicitly
+approved this bounded parser dependency on 2026-10-16, confirming the earlier
 finish/default-authorization instruction. This introduces no repair, coordinate
 conversion, model or scoring behavior. Both dependency profiles must declare
-the parser when its production adapter is implemented; missing/other versions
+the parser (both now pin `gemmi==0.7.5`); missing/other versions
 must not silently select a permissive alternate parser. The exact version's
 [LICENSE.txt](https://github.com/project-gemmi/gemmi/blob/v0.7.5/LICENSE.txt)
 is MPL-2.0; do not copy the different license label from a generic docs index.

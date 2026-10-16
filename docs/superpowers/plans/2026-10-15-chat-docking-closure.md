@@ -381,14 +381,53 @@ baseline **82 failed / 4 skipped** for the absent method, current readback/stagi
 remained unchanged. Platform skips are not passes. This remains only the byte
 readback helper; it is not the subsequent C1 projection-verification gate.
 
-The next integration gate has an observed negative baseline:
-`tests/task_runtime/test_chat_docking_projection_gate.py` currently has **one
-failure in 4.67 seconds** because self-consistent fixed chat metadata, without a
-live verified source owner, can still reach the lower C1 READY path. This is an
-unimplemented gate, not an approved source-authentication path. The application
-feature remains disabled. The runtime bridge must require the live coordinator's
-one-use input context and verify actual staged projection bytes before READY;
-the legacy non-chat C1 contract remains separate.
+The source integration gate began with **one failure in 4.67 seconds**:
+self-consistent fixed chat metadata without a live verified source owner could
+reach C1 READY. The new concrete server-only input context now binds the actual
+coordinator/root, accepted confirmation, private producer outputs and runtime.
+It is consumed once before asynchronous work; missing contexts deny chat drafts.
+Actual staged receptor/ligand bytes are read twice around the retained
+`projection_verify` child, and PREPARING snapshots are compared under the existing
+TaskStore write lock. Source validation holds Agent DB before TaskStore, without
+a model reader/database lock across child work. Unsettled child cleanup retains
+the stage and capacity; a later close may settle only after the physical owner.
+The application feature remains disabled: this is an internal preparation seam,
+not completed Web READY/close/approval lifecycle integration or execution authority.
+
+TDD: **19 failed in 3.79 seconds**, then 19 passed in 70.40 seconds. Eleven old
+metadata-only staging fixtures failed the intentional new gate; all eleven were
+adapted to actual confirmed synthetic source contexts, retaining TTL, parameter,
+clock-expiry, cancellation and seal-drift coverage. Metadata-CAS tests now supply
+their actually accepted local receipt, not a recovered source authority. Further
+RED probes found four changed-producer captures, two root-close/SQL windows,
+three expiry reason-code mismatches, one cancellation while revocation was held,
+and one native identifier hook. After minimal fixes, the four-file gate/staging/
+draft regression passed **130 tests in 173.24 seconds**. One additional close
+race during parameter validation failed in 6.08 seconds (staging still began
+after close); the existing runtime checkpoints now also check the concrete
+context's local liveness. The rerun passed **131 tests in 173.78 seconds**;
+the entire legacy C1/C2/C4a file passed **165 tests in 256.37 seconds**.
+Eight-file memory compilation and diff checks passed. Independent SPEC PASS
+reran 131 tests in 181.81 seconds plus 15 independent native-type, fake-context,
+snapshot, lost-acknowledgement, second-readback, digest, actual-lock-order and
+single-cancel probes in 62.88 seconds. All eight frozen hashes stayed unchanged.
+Fresh QUALITY reproduced one cancellation window after the final source SQL
+check completed but before its awaited return resumed. Parent reproduced it:
+**1 failed in 6.27 seconds**, including an actual projection process starting
+after cancellation. A synchronous local liveness check immediately before child
+dispatch passed that case and both readback-cancel controls: **3 passed in 13.42
+seconds**. The full parent rerun passed **132 tests in 194.53 seconds**.
+QUALITY re-review APPROVED the internal C1 gate: six tests in 28.01 seconds,
+including five independent adjacent return-window probes, unchanged eight-file
+hashes and a clean diff check. Cancellation/root close prevented further child
+dispatch and seal; physical cleanup settled. This is not approval of future D3.
+The five-file coordinator regression passed **196
+tests in 236.03 seconds**, verifying the narrow shared-source-check extraction.
+The separate next lifecycle tests in
+`tests/agent/test_web_docking_staging.py` are intentionally **3 failed in 2.27
+seconds** for missing Web prepare, one-time nonce disclosure/READY TTL and close
+coordination; no claim is made that this future integration has been implemented.
+None of these synthetic fixtures counts as real S10 evidence.
 
 Integration constraints for that remaining gate: use a concrete server-only,
 one-use context bound to the exact live root, locally accepted confirmation and
@@ -704,6 +743,29 @@ seconds**, plus 12 independent fail-closed probes for nonboolean classifiers,
 damaged SQLite schema and classifier failure after ownership reads. The skips
 are no-runtime cases; all three frozen hashes remained unchanged. This approval
 is limited to generic-task isolation, not the remaining D5 paths.
+
+The separate legacy-route slice is not yet approved. Worker TDD first observed
+64 failures / 4 passes, then 199 passes / 2 platform skips. Five old durable
+artifact fixtures lacked a real consent classifier; their owned-result stub now
+inherits an isolated TaskStore, preserving the synthetic artifact assertions;
+the six compatibility tests passed in 4.26 seconds. Independent SPEC reproduced
+non-C cross-database collisions bypassing the legacy-hit branch and a same-total
+history mutation yielding a mixed page view. The follow-up worker observed
+9 failures / 5 passes, plus 4 failures / 1 pass for strict snapshot checks, then
+**241 passed / 2 skipped in 80.96 seconds**. Legacy membership/collision checks
+now cover both databases before reads/deletes, and a narrow history helper reads
+one owner-only metadata snapshot under the existing thread/process locks. Its
+detached view is capped at 10,000 owned rows. SPEC re-review PASS independently
+verified the two fixes, with **46 passed / 100 deselected**, six-file compilation
+and unchanged hashes. Whole-JSON loading remains an inherited resource
+limitation of the existing index; there is no new byte/raw-row bound, and this
+is not claimed otherwise. Fresh QUALITY found two further reproducible P1
+issues: a runtime binding swap after an owned read caused reclassification to
+miss the actual captured authority, and cross-owner duplicate history IDs could
+pass the owner-filtered snapshot and let clear delete foreign metadata. A focused
+fix worker is reproducing and addressing both; this slice remains unapproved.
+This is not completed
+private-output-root or retention integration.
 
 **Files:** src/task_runtime/routes.py; docking_routes.py; docking_report_routes.py;
 existing retention/ownership queries. Test in test_docking_consent_artifacts.py.
