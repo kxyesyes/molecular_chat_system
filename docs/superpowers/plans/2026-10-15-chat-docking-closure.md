@@ -740,6 +740,31 @@ signal its actual C2 owner. That next slice is intentionally still RED; the
 existing C1 close path must not be used as C2 execution cancellation. This is a
 release gate, not a completed cancellation claim.
 
+The internal Web/C2 lifecycle subsequently observed **8 failures in 32.76
+seconds**, then **8 passes in 32.57 seconds** after owned explicit-proof
+approval, duplicate coalescing, safe execution progress and exact C2 close were
+added. Close signals the retained execution synchronously before draining its
+real owners; acquired/uncertain unresolved executions retain the heavy root and
+do not fall through to C1 revocation. A further source-refresh regression was
+**1 failed / 2 passed in 16.02 seconds**; active status now checks live source
+under its short model/SQL guard. Finished execution is only RESULT_PENDING,
+not scientific publication. Joint execution/staging verification passed
+**37 tests in 152.06 seconds**. One additional blocked physical status read test
+passed in 12.13 seconds: the five-second feedback observation returned while
+the read remained owned, and close could not release the root until that read
+actually completed. SPEC PASS independently verified pre-binding cancellation
+retains/drains its physical read, invalid proofs during pending approval cannot
+coalesce into authority, and completed progress does not renew execution budgets
+or claim new source/publication authority. Three probes passed (two within a
+14.40-second run and one corrected-harness rerun in 5.13 seconds); harness-only
+collection/spawn/monkeypatch failures are not behavioral evidence. Frozen hashes
+were unchanged. Fresh QUALITY APPROVED independently passed all 12 lifecycle
+tests in 56.53 seconds, verified unchanged two-file hashes, and found no
+actionable in-scope issues. Parent adjacent C2 live-context plus preparation
+HTTP regression passed **41 tests in 179.51 seconds**. HTTP controls, global C4b transport
+deadline, D4 publication and activation are
+still separate unfinished gates.
+
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
 

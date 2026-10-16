@@ -1,6 +1,6 @@
 """Bounded live C preparation coordinator, shared by legacy/decision entry points.
 
-Disabled by default. This is NOT an HTTP/approval issuer or scheduler. The
+Disabled by default. This is NOT an HTTP issuer or scheduler. The
 trusted caller supplies a captured live S03 context and an existing owned
 running AgentState run. Never recreate that run or restore a claimed root.
 
@@ -8,7 +8,8 @@ Two independent deadlines: upstream work gets 180 seconds from before the first
 await, while TaskStore keeps its unchanged 900-second consent waiting expiry.
 Neither refresh nor human waiting renews either deadline. Fixed source and
 inspection children use that original deadline too. Confirmed producer bytes can
-enter C1 through the private one-use context; this module never approves Vina.
+enter C1 through the private one-use context. C2 requires an explicit owned
+approval proof; preparation, status and text never supply that proof.
 
 One event-loop-owned instance must serve both chat paths. Live roots PLUS failed
 unconfirmed attempts occupy at most MAX_PENDING_CONSENTS entries. Failed local
@@ -42,6 +43,7 @@ from src.task_runtime.docking_consent import (
     DRAFT_SLOT_NAMES, MAX_PENDING_CONSENTS, DockingConsentPolicy,
     validate_clocks, validate_draft_identity, validate_chat_draft, validate_identity,
     validate_draft_patch, materialize_draft_identity,
+    DockingConsentError, validate_approval, verify_approval,
 )
 from src.web.docking_proposal import (
     DockingProposalOwner, TextSegmentIssuer, capture_source_snapshot, capture_text_segment,
@@ -240,6 +242,11 @@ def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
         missing_fields=list(root.missing) if root else [],
         input_ready=False, execution_authorized=False)
     if root is not None:
+        execution = root.input_context._execution if root.input_context is not None else None
+        if execution is not None:
+            view['execution_authorized'] = not root.closed and execution.acquired
+            if not execution.settled and execution.status != 'ACTIVE':
+                view['cleanup_pending'] = True
         if (_pending_preparation(root)
                 or (root.closed and root.task is not None and not root.task.done())
                 or (root.closed and root.draft_attempted and root.close_state != "confirmed")):
@@ -484,6 +491,12 @@ class DockingRequestCoordinator:
             root.closed, root.reason, root.phase = True, reason, phase
             if root.issuer is not None:
                 root.issuer.close()
+        context = root.input_context
+        if context is not None and context._execution is not None:
+            # Signal the actual C2 owner synchronously, before cancelling wrappers
+            # or waiting on SQL. C1 revocation cannot cancel a consumed consent.
+            context._runtime._request_consent_stop(context._execution,
+                'CANCELLED', 'consent_cancelled')
 
     def _interrupt(self, root, reason, phase="UNAVAILABLE"):
         self._stop(root, reason, phase)
@@ -526,8 +539,10 @@ class DockingRequestCoordinator:
                 root.close_state = "unconfirmed"
             else:
                 root.close_state = "pending"
-                closer = (self._close_staged_inputs if root.input_context is not None
-                          and root.input_context._operation is not None else self._close_waiting_draft)
+                context = root.input_context
+                closer = (self._close_execution if context is not None and context._execution is not None
+                          else self._close_staged_inputs if context is not None
+                          and context._operation is not None else self._close_waiting_draft)
                 root.close_task = asyncio.create_task(closer(root))
                 self._gate.retain_task(root.close_task)
         try:
@@ -565,6 +580,34 @@ class DockingRequestCoordinator:
                 root.close_state = "unconfirmed"
         except (Exception, asyncio.CancelledError):
             root.close_state = "unconfirmed"
+
+    async def _close_execution(self, root):
+        context = root.input_context
+        operation, runtime = context._execution, context._runtime
+        try:
+            runtime._request_consent_stop(operation, 'CANCELLED', 'consent_cancelled')
+            # Earlier owners can create later ones; read each after its predecessor
+            # actually drains. Never cancel a physical worker to infer cleanup.
+            for name in ('admission', 'submission', 'cancellation', 'backend_owner',
+                         'worker', 'final_guard', 'settlement'):
+                task = getattr(operation, name)
+                if task is not None:
+                    try:
+                        await runtime._await_consent_close_task(operation, task)
+                    except DockingConsentError as exc:
+                        if exc.reason_code == 'consent_cleanup_unresolved':
+                            raise
+                    except Exception:
+                        pass
+            if operation.settled:
+                root.close_state = 'confirmed'
+            elif (not operation.acquired and not operation.claim_uncertain
+                    and runtime._consent_executions.get(root.task_id) is not operation):
+                await self._close_staged_inputs(root)
+            else:
+                root.close_state = 'unconfirmed'
+        except (Exception, asyncio.CancelledError):
+            root.close_state = 'unconfirmed'
 
     async def begin(self, *, root_id, owner_session_id, origin_turn_id, query,
                     history, descriptors, enable_tools, mode, structure_context=None):
@@ -724,12 +767,17 @@ class DockingRequestCoordinator:
             return _view(root)
         root.task = asyncio.create_task(self._refresh(root))
         self._gate.retain_task(root.task)
+        if root.input_context is not None and root.input_context._execution is not None:
+            return await self._wait_execution_root(root)
         return await self._wait_root(root)
 
     async def _refresh(self, root):
         # Status SQL has the same physical ownership as initial work. Concurrent
         # refreshes coalesce; close/cancellation cannot drop its heavy context.
         try:
+            if root.input_context is not None and root.input_context._execution is not None:
+                await self._refresh_execution(root)
+                return
             async with self._gate.request():
                 if root.phase == "READY":
                     await self._sql(root.input_context._check_ready_guarded)
@@ -1133,6 +1181,101 @@ class DockingRequestCoordinator:
             raise
         except Exception:
             self._stop(root, "staging_unavailable")
+
+    async def approve_inputs(self, *, root_id, owner_session_id, approval_nonce,
+                             binding_digest, confirm):
+        """Internal owned proof bridge; never called by preparation or text."""
+        root = self._owned(root_id, owner_session_id)
+        if root is None or root.closed or root.input_context is None:
+            return _view()
+        context = root.input_context
+        try:
+            validate_approval(approval_nonce, binding_digest, confirm)
+            if context._ready_record is None:
+                raise DockingConsentError('consent_not_waiting')
+            verify_approval(context._ready_record, approval_nonce, binding_digest)
+        except DockingConsentError:
+            return _view(reason='approval_unavailable')
+        if root.task is not None and not root.task.done():
+            return _view(root)
+        if context._execution is not None:
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        if root.phase != 'READY':
+            return _view(reason='approval_unavailable')
+        root.phase, root.reason = 'APPROVING', 'approval_in_progress'
+        root.task = asyncio.create_task(self._run_approval(root, approval_nonce, binding_digest))
+        self._gate.retain_task(root.task)
+        return await self._wait_execution_root(root)
+
+    async def _wait_execution_root(self, root):
+        # Feedback waiting is not execution timing. A slow receipt stays owned;
+        # it does not renew a budget, detach SQL, or cancel real work on timeout.
+        task = root.task
+        try:
+            done, _ = await asyncio.wait({task}, timeout=5.0)
+            if done and not task.cancelled():
+                task.result()
+        except asyncio.CancelledError:
+            self._interrupt(root, 'cancelled')
+            await _drain(task)
+            raise
+        except Exception:
+            self._interrupt(root, 'execution_unavailable')
+        finally:
+            await self._finish_closed(root)
+        return _view(root)
+
+    async def _run_approval(self, root, nonce, digest):
+        context = root.input_context
+        try:
+            # Shield and drain the receipt's physical reads if this root closes.
+            await finish_on_cancel(context._runtime.approve_docking_consent(
+                preparation_id=root.preparation_id, owner_session_id=root.owner,
+                approval_nonce=nonce, binding_digest=digest, confirm=True,
+                chat_input_context=context))
+            if not root.closed:
+                await self._refresh_execution(root)
+        except asyncio.CancelledError:
+            self._stop(root, 'cancelled')
+            raise
+        except Exception:
+            self._stop(root, 'execution_unavailable')
+
+    async def _refresh_execution(self, root):
+        context = root.input_context
+        operation = context._execution
+        if operation is not None and not operation.settled:
+            async with self._gate.request():
+                await self._sql(self._check_execution_source, root=root)
+        receipt = await finish_on_cancel(context._runtime.get_docking_consent_view(
+            task_id=root.task_id, owner_session_id=root.owner))
+        if root.closed:
+            return
+        if (operation is None or receipt['task_id'] != root.task_id
+                or receipt['preparation_id'] != root.preparation_id
+                or receipt['trace_id'] != root.root_id):
+            raise _Unavailable('execution_unavailable')
+        # This is only a progress projection, never publication authority. D4
+        # must still validate and publish scientific results/artifact grants.
+        phases = {'ACTIVE': ('EXECUTING', 'execution_in_progress'),
+                  'SUCCEEDED': ('RESULT_PENDING', 'publication_required'),
+                  'FAILED': ('FAILED', 'execution_failed'),
+                  'CANCELLED': ('CANCELLED', 'execution_cancelled'),
+                  'TIMED_OUT': ('TIMED_OUT', 'execution_timed_out'),
+                  'UNKNOWN': ('UNKNOWN', 'execution_unknown')}
+        status = receipt['view_status']
+        if status != operation.status or status not in phases:
+            status = 'UNKNOWN'
+        root.phase, root.reason = phases[status]
+
+    def _check_execution_source(self, *, root):
+        context = root.input_context
+        if context._execution.settled:
+            return
+        # Active progress must still observe source/model invalidation. Finished
+        # executions use the separate publication gate, not a renewed run budget.
+        with context._source_guard():
+            pass
 
     async def close_root(self, *, root_id, owner_session_id):
         root = self._owned(root_id, owner_session_id)
