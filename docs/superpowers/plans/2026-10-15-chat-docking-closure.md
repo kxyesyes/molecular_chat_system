@@ -242,6 +242,59 @@ confirmed unchanged frozen hashes and successful scoped compilation/diff checks.
 Later C1 code must not nest this guard inside a reverse-order TaskStore write
 transaction. Approval covers source inspection only, not choices, C1 or activation.
 
+The following explicit-selection slice uses `select_source` on that same live
+coordinator, covered by `tests/agent/test_web_docking_selection.py`. Before its
+first await it captures a bounded native closed selection; all five selection
+fields are mandatory and set-like ordering does not replace a fixed choice.
+Only the retained canonical source feeds the fixed `projection` child. The
+original explicit SMILES feeds one `ligand` child, with every physical owner
+retained and live source/root/draft/generations rechecked after each return.
+Duplicates reuse outputs; changed choices require a new root, not a second
+projection or embedding. No model/caller source dictionary or derivative is used.
+
+Private receptor/ligand descriptors cover original evidence, projection kind,
+selection, derived bytes, pocket rule and ligand-modeling provenance. Their
+content-addressed IDs fill only the corresponding pending draft slots via the
+existing revision/version CAS; original explicit numeric values may also be
+fixed, never overwritten by suggestions. An accepted refinement must have the
+exact planned identity/slots, unchanged waiting expiry and unchanged spent budget;
+an uncertain receipt cannot be recovered by reading the row. A bounded detached
+preview shows hashes and visible parameter suggestions, but numeric suggestions
+remain pending and no C1, nonce or execution is exposed by this slice.
+
+Selection TDD in progress: **20 missing-method RED** cases became **20 passed in
+75.10 seconds** with actual retained children, actual projection/RDKit, and real
+SQLite on synthetic independently authored source files. Four additional actual
+RED cases then reproduced invalidation during final preview encoding and altered
+proposal budgets in a refinement receipt/same-version read. Their repair passed
+**164 joint tests in 165.23 seconds** (24 selection, 35 source, 105 initial), plus
+two-file in-memory compilation and scoped diff checks. Independent SPEC PASS:
+**164 tests in 180.23 seconds** plus 16 receipt, invalidation, actual child
+cancellation, order-invariance and descriptor-coverage probes. Frozen hashes
+were unchanged. Fresh QUALITY remains outstanding;
+synthetic modeling is not current S03 selection or a real scientific S10 result.
+
+The separate waiting-draft cancellation seam is
+`TaskStore.close_chat_docking_draft`, tested in
+`tests/task_runtime/test_docking_draft_close.py`. It CAS-matches owner, task,
+root, origin, revision and version, revokes only a settled AWAITING_INPUT chat
+draft, and returns a receipt only after commit. It cannot cancel PREPARING,
+READY or execution, alter expiry, or recover an uncertain receipt. Coordinator
+integration must retain its actual SQL and may not infer success from a finished
+wrapper. Worker evidence: one absent-method RED, **123 focused passed / 503
+joint passed with 2 platform skips**. Independent SPEC PASS: **123 focused /
+376 joint passed**, plus 18 real-lock, failed-COMMIT and boundary probes with
+unchanged hashes. Fresh QUALITY remains outstanding.
+
+Next integration regressions are present but intentionally RED pending those
+reviews: `tests/agent/test_web_docking_parameters.py` has **14 missing-method
+failures** for explicit numeric confirmation, bound references/revision and no
+expiry/budget reset; `tests/agent/test_web_docking_close.py` has **4 failures** for
+actual waiting-draft revocation, invalidation cleanup, retained SQL cancellation
+and uncertain receipts. These files are not evidence of passing integration.
+Close must never free owner capacity while a physical preparation child remains
+unsettled; lack of a confirmed close receipt is not settled cleanup.
+
 The D2-to-C1 bridge uses narrow changes in `src/task_runtime/store.py` and
 `runtime.py`, covered by
 `tests/task_runtime/test_chat_docking_staging.py`. Before file staging the
@@ -511,6 +564,27 @@ slice only. No C call site is activated; publication, grants, wire/UI integratio
 and the remaining D4 work are still outstanding.
 Parent pre-commit C/interop rerun: **38 passed in 10.54 seconds**, with those
 same seven dependency warnings and unchanged reviewed hashes.
+
+The D4 per-read byte foundation adds only
+`DockingCompletionStore.read_verified_artifact` in `src/task_runtime/completion.py`,
+covered by `tests/task_runtime/test_completion_artifact_readback.py`. Its fixed
+artifact IDs (`pose`, `extra-00` through `extra-07`) index the verified completion,
+never a caller path. Before and after the actual secure byte read it compares
+input/config identities and the expected canonical completion digest; final
+invalidation also rejects. The returned immutable bytes are themselves size/hash
+verified. The digest is SHA-256 of sorted, compact, ASCII-escaped canonical JSON
+of the parsed completion's `to_dict()`, with nonfinite JSON disallowed. The helper
+adds no grant, TTL, reader ownership or HTTP authority; those D4 integrations
+remain required. Worker TDD: **71 missing-method failures / 4 platform skips**,
+then **71 passed / 4 skipped**, and **191 joint passed / 6 skipped**. Symlink/
+reparse privilege skips are not passes; hardlink negatives passed. Independent
+SPEC PASS reran **191 passed / 6 skipped** plus 22 identity, order, size,
+late-invalidation and native-boundary probes. Fresh QUALITY APPROVED reran
+**191 passed / 6 skipped** plus 12 short-read, EOF, I/O error, inode-replacement,
+other-artifact corruption and removed-manifest probes. Both reviews verified
+unchanged hashes; existing producer/parser/schema behavior is unchanged.
+Parent verification with the separate draft-close tests: **194 passed / 4 skipped
+in 22.98 seconds**. This approval covers byte readback only, not D4 authorization.
 
 - [x] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
   logical gate becomes undeliverable without waiting for it; owner/lock remains registered and no
