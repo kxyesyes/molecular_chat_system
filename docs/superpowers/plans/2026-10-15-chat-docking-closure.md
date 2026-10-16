@@ -206,11 +206,24 @@ QUALITY rereview APPROVED the frozen INITIAL slice: **105 passed in 25.04
 seconds**, all six exact races and 22 previous P2 reproductions rejected, and
 four additional lifetime/reader/writer/deadline probes passed. This approval
 does not complete D2, revoke waiting drafts on close or enable any route.
-The subsequent source-integration tests are also intentionally RED while that
-baseline is repaired: 24 missing-integration cases, one missing-page API case
+The subsequent source-integration tests initially failed RED while that
+baseline was being repaired: 24 missing-integration cases, one missing-page API case
 and one missing-integration ownership precondition. An earlier fixture setup
 collision and an ownership-test cleanup assertion masking the absent API were
 test errors, corrected before recording these missing-feature results.
+
+The source slice has now been implemented for independent review. Two actual
+source-invalidation/draft-read races and two stale duplicate-preview cases were
+reproduced RED, then corrected without a second source fetch or model dispatch.
+An original-monotonic-deadline regression also caught a 30 ms reset before the
+child; both children now use the minimum including the original root deadline.
+The final parent source/initial-coordinator suite passed **135 tests in 70.05
+seconds** (30 source, 105 coordinator), plus two-file in-memory compilation and
+scoped diff checks. A preceding 488-test joint pass was before the last duplicate
+fix and is not approval of the final diff. Independent SPEC and QUALITY remain
+required. All source providers in these integration tests are synthetic, even
+when the actual child/compiler/inspection and SQLite lifecycle execute; they
+are not a current browser source selection or a real S10 result.
 
 The D2-to-C1 bridge uses narrow changes in `src/task_runtime/store.py` and
 `runtime.py`, covered by
@@ -223,6 +236,18 @@ waiting refinement nor status refresh renews the waiting period. Both chat and
 legacy C1 retain this two-phase behavior. This bridge is not
 source authentication and cannot replace the coordinator's original 180-second
 upstream-work deadline, scientific selection or live-generation checks.
+
+For the later projection readback gate, add the narrow
+`DockingInputStager.read_verified_input_bytes(task_id, manifest_locator)` method
+in `src/task_runtime/staging.py`, tested in
+`tests/task_runtime/test_staging_readback.py`. It returns the current verified
+manifest and immutable receptor/ligand bytes under the existing stager lock,
+using the existing descriptor-safe reads and rechecking their size/hash against
+that manifest. It creates no execution snapshot, lease, grant, path-based
+capability or scientific authority. No caller callback or arbitrary locator is
+accepted. C1 must subsequently run explicit projection verification on these
+actual readback bytes before READY while retaining all preparation ownership;
+the byte-read helper alone does not implement that gate.
 
 The request module also owns a bounded, conservative whole-text assessment
 (`assess_docking_request_text`). It consumes one explicit docking imperative,
@@ -445,17 +470,26 @@ had 22 initial RED cases and one subsequent mixed-close RED, then 32 passing C
 tests. Independent SPEC passed those 32 and 374 existing A2/runtime tests, but
 its additional mixed-path control reproduced a P1: after using C on a socket,
 the A2 close entry no longer requested cancellation at its original timeout.
-The original A2 timeout-then-drain behavior must be restored without adding a
-second C feedback budget. This slice is not approved or activated; publication,
-grants, wire/UI integration and the remaining D4 work are still outstanding.
+The original A2 timeout-then-drain behavior was restored after three mixed-path
+RED failures and three unchanged baseline passes, without adding a second C
+feedback budget. Independent SPEC rereview passed **412 tests** (38 C/interop
+and 374 A2/runtime) plus its independent timeout/cancel/late-close controls.
+Fresh QUALITY APPROVED passed **327 tests**, including all 38 C tests, and a
+12/12 concurrent cancellation/timeout/multiple-waiter/shutdown matrix. Each
+regression suite reported only seven existing dependency deprecation warnings;
+frozen hashes were unchanged throughout review. This approves the transport
+slice only. No C call site is activated; publication, grants, wire/UI integration
+and the remaining D4 work are still outstanding.
+Parent pre-commit C/interop rerun: **38 passed in 10.54 seconds**, with those
+same seven dependency warnings and unchanged reviewed hashes.
 
-- [ ] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
+- [x] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
   logical gate becomes undeliverable without waiting for it; owner/lock remains registered and no
   successful terminal/history/grant is published later. Release every test barrier in finally.
-- [ ] Implement a C-only send owner using the same socket lock/close-once owner, token, send
+- [x] Implement a C-only send owner using the same socket lock/close-once owner, token, send
   generation and monotonic deadline. Do not call A2's draining helper or append a close budget.
   Queued expiry performs no physical send. A late completion records cleanup only.
-- [ ] RED/GREEN separate blocked close begins only after physical send ends; close error or
+- [x] RED/GREEN separate blocked close begins only after physical send ends; close error or
   unresolved shutdown cannot remove its owner. A2 behavior remains drain-before-return.
 - [ ] RED cancellation versus confirmed completion/SQL commit races: confirmed existing success
   stays success; earlier cancellation/timeout/unknown stays non-success even on late completion.
