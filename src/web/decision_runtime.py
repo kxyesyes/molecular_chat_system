@@ -158,14 +158,62 @@ class _Sender:
         Caller cancellation returns a fixed undeliverable receipt; the runtime
         retains physical send/close. Standalone A2 senders fail closed here.
         """
+        return await self._send_docking_operation(text, identity=identity)
+
+    async def send_docking_view(self, coordinator, *, root_id):
+        """Capture and send only this socket owner's original live C root.
+
+        Sequence and generation come from the SAME physical operation. The
+        original feedback slice includes lock queueing, capture and sending;
+        a late capture cannot renew it or issue another send owner.
+        """
         deadline = _docking._now() + _docking.FEEDBACK_SECONDS
+        from .docking_coordinator import DockingRequestCoordinator, _label
+        from .docking_view import capture_docking_view
+        if (type(coordinator) is not DockingRequestCoordinator or not _label(root_id)
+                or type(self._docking_generation) is not int
+                or not 0 <= self._docking_generation < 2**53 - 1):
+            return _docking.DockingDelivery('undeliverable')
+        session = self.websocket.scope.get('agent_session_id')
+        root = coordinator._owned(root_id, session)
+        if root is None:
+            return _docking.DockingDelivery('undeliverable')
+        identity = dict(root_id=root_id, task_id=root.task_id, turn_id=root.origin,
+                        revision=root.accepted_revision, sequence=self._docking_generation + 1)
+        preparation = root.preparation_id
+
+        def current(*, released_failure=False):
+            captured = coordinator._owned(root_id, session)
+            released = (released_failure and captured is None and root.closed
+                and root_id not in coordinator._roots and root.close_state in {'confirmed', 'not_acquired'})
+            return (self.websocket.scope.get('agent_session_id') == session
+                and (captured is root or released)
+                and root.task_id == identity['task_id'] and root.origin == identity['turn_id']
+                and root.preparation_id == preparation and root.accepted_revision == identity['revision'])
+
+        async def capture(binding):
+            if not current():
+                raise ValueError('docking_view_unavailable')
+            event = await capture_docking_view(coordinator, root_id=root_id,
+                owner_session_id=session, origin_turn_id=identity['turn_id'],
+                sequence=binding.identity.sequence, send_generation=binding.send_generation)
+            if (not current(released_failure=event['terminal'] and event['view_status'] != 'SUCCEEDED')
+                    or event['revision'] != binding.identity.revision):
+                raise ValueError('docking_view_unavailable')
+            return json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+
+        return await self._send_docking_operation(None, identity=identity, capture=capture, deadline=deadline)
+
+    async def _send_docking_operation(self, text, *, identity, capture=None, deadline=None):
+        deadline = _docking._now() + _docking.FEEDBACK_SECONDS if deadline is None else deadline
         owner = self._runtime
         if (not isinstance(owner, WebDecisionRuntime) or self not in owner.sockets
-                or owner.closing or not self.receiver_attached or not self.writable):
+                or owner.closing or not self.receiver_attached or not self.writable
+                or _docking._now() >= deadline):
             return _docking.DockingDelivery('undeliverable')
         try:
             frozen = _docking.DockingIdentity.parse(identity)
-            if type(text) is not str or len(text.encode('utf-8')) > _docking.MAX_TEXT_BYTES:
+            if capture is None and (type(text) is not str or len(text.encode('utf-8')) > _docking.MAX_TEXT_BYTES):
                 raise ValueError('invalid transport text')
         except (ValueError, TypeError, UnicodeError):
             return _docking.DockingDelivery('undeliverable')
@@ -184,7 +232,13 @@ class _Sender:
                             or _docking._now() >= op.binding.deadline):
                         return
                     op.started = True
-                    await self.websocket.send_text(text)
+                    payload = text if capture is None else await capture(op.binding)
+                    if (not op.live or not self.writable or owner.closing
+                            or not self.receiver_attached or _docking._now() >= op.binding.deadline):
+                        return
+                    if type(payload) is not str or len(payload.encode('utf-8')) > _docking.MAX_TEXT_BYTES:
+                        return
+                    await self.websocket.send_text(payload)
                     op.succeeded = True  # Physical fact, NOT delivery authority.
             except (Exception, asyncio.CancelledError):
                 pass  # Never retain raw transport diagnostics.

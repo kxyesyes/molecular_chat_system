@@ -890,3 +890,19 @@ SPEC 独立 **25 passed / 2 warnings，147.89 秒**；fresh QUALITY **APPROVED**
 独立 **25 passed / 2 warnings，135.01 秒**，另 60 项畸形嵌套参数探针全部拒绝。
 两文件 `compileall`、diff 与冻结哈希通过。没有启用应用入口，没有 C1/审批/
 Vina；这些合成来源夹具不是实际科学验收。
+
+### 2026-10-16 D6 实际发送绑定（独立审查通过，未激活）
+
+`send_docking_view` 从实际 socket scope 获取 owner，绑定原 root/task/origin/
+preparation/revision；同一物理操作生成 sequence 和 generation。原反馈期限
+覆盖身份捕获、锁等待、view capture 和发送，沿用既有 C5 实际 send/close
+保留，不创建 receiver，不发布科学结果或历史，也不审批。
+
+初始十项测试由 RED 转为与旧反馈合计 **48 passed / 11 warnings，14.59 秒**。
+SPEC 发现缓存 scope 别名在整个 scope 被替换后仍被使用；新增两项正式回归
+**2 failed / 10 deselected，4.78 秒**，修复为每次读取实际 socket.scope。
+父级 **50 passed / 11 warnings，15.21 秒**，SPEC 独立 **50 passed / 11
+warnings，14.79 秒**，冻结哈希一致。fresh QUALITY **APPROVED**，独立
+**50 passed / 11 warnings，14.30 秒**；其首轮为 49 passed / 1 failed，失败
+在未修改的 A2 取消抵抗发送时序测试，原样重跑通过，保留该时序敏感性限制，
+不将首轮记作通过。未激活普通聊天入口或界面。
