@@ -182,6 +182,68 @@ def assess_docking_request_text(query, *, enabled, enable_tools):
         return _text_rejection()
 
 
+def assess_docking_refinement_text(text, *, enabled, enable_tools):
+    """Assess only explicit missing-slot candidates, never a new docking request.
+
+    Consume the entire unchanged segment as one or more named assignments.
+    Offsets are Unicode code points into that segment, not UTF-8 byte offsets.
+    References are lexical identifiers only: no ownership/source/chemistry is
+    authenticated and no I/O or execution is performed. The coordinator must
+    still bind owner/current revision and reject replacement of filled slots;
+    original request/source/root/task identity and budgets are not changed here.
+    """
+    if (enabled is not True or enable_tools is not True or type(text) is not str
+            or not 0 < len(text) <= 8192):
+        return _text_rejection()
+    try:
+        if (len(text.encode('utf-8')) > 32768
+                or any(ord(c) < 32 and c not in '\t\r\n' for c in text)):
+            return _text_rejection()
+        # Closed ASCII tokens plus the explicit Chinese separator reject all
+        # other Unicode whitespace/controls/invisibles without normalization.
+        tokens = re.split('[;；]', text)
+        if not 1 <= len(tokens) <= len(_DOCKING_FIELDS):
+            return _text_rejection()
+        fields, spans, position = {}, {}, 0
+        for token in tokens:
+            name_text, equals, raw = token.partition('=')
+            name = name_text.strip(' \t\r\n')
+            value_text = raw.strip(' \t\r\n')
+            if not equals or name not in _DOCKING_FIELDS or name in fields or not value_text:
+                return _text_rejection()
+            if name.endswith('_ref'):
+                from src.agent.persistence.redaction import contains_sensitive_text
+                if not _TEXT_REF.fullmatch(value_text) or contains_sensitive_text(value_text):
+                    return _text_rejection()
+                value = value_text
+            else:
+                value = _numeric_text_field(name, value_text)
+            start = position + len(name_text) + 1 + len(raw) - len(raw.lstrip(' \t\r\n'))
+            fields[name] = value
+            spans[name] = [start, start + len(value_text)]
+            position += len(token) + 1
+        return dict(assessed=True, assessment_revision='docking-refinement-text-v1',
+                    fields=fields, field_spans=spans,
+                    missing_fields=[name for name in _DOCKING_FIELDS if name not in fields],
+                    input_ready=False, execution_authorized=False)
+    except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
+        return _text_rejection()
+
+
+def validate_docking_refinement_proposal(text, proposal, *, text_segment_index, enabled, enable_tools):
+    """Require exact C coverage of this whole refinement, with no borrowed spans.
+
+    Agreement is not consent, ref authentication, or permission to replace slots.
+    Only the coordinator can bind this lexical result to an owned current draft.
+    """
+    if type(text_segment_index) is not int or not 1 <= text_segment_index <= 3:
+        return dict(consistent=False, reason_code='docking_proposal_clarification_required',
+                    input_ready=False, execution_authorized=False)
+    assessment = assess_docking_refinement_text(text, enabled=enabled, enable_tools=enable_tools)
+    return _validate_docking_text_proposal(text, proposal, assessment,
+        kind='docking_refinement', source_id=f'refinement-{text_segment_index}')
+
+
 def validate_docking_text_proposal(query, proposal, *, enabled, enable_tools):
     """Recompute whole-query facts and check a private C transport DTO against them.
 
@@ -192,16 +254,46 @@ def validate_docking_text_proposal(query, proposal, *, enabled, enable_tools):
     The coordinator still binds an available owned call, generations and source
     descriptors; even complete textual agreement grants no scientific authority.
     """
+    assessment = assess_docking_request_text(query, enabled=enabled, enable_tools=enable_tools)
+    return _validate_docking_text_proposal(query, proposal, assessment,
+                                          kind='docking_request', source_id='query')
+
+
+def _closed_docking_dto(value, expected_type):
+    """Check bounded native storage before reading any untrusted DTO members.
+
+    Frozen models still permit object.__setattr__ mutation. Never serialize or
+    revalidate their values: inspect only the known class's closed storage shape,
+    native keys/presence metadata, and the None sentinel for omitted inputs.
+    """
+    if type(value) is not expected_type:
+        return False
+    declared = expected_type.model_fields
+    storage = object.__getattribute__(value, '__dict__')
+    names = object.__getattribute__(value, '__pydantic_fields_set__')
+    if (type(storage) is not dict or len(storage) != len(declared)
+            or type(names) is not set or len(names) > len(declared)
+            or object.__getattribute__(value, '__pydantic_extra__') is not None
+            or object.__getattribute__(value, '__pydantic_private__') is not None
+            or any(type(name) is not str or name not in declared for name in storage)
+            or any(type(name) is not str or name not in declared for name in names)):
+        return False
+    return all(name in names or (not field.is_required() and storage[name] is None)
+               for name, field in declared.items())
+
+
+def _validate_docking_text_proposal(query, proposal, assessment, *, kind, source_id):
+    """Shared exact-native DTO checks; callers supply closed lexical evidence."""
     from src.agent.contracts.docking_preparation import DockingPreparationProposal
 
     rejected = dict(consistent=False, reason_code='docking_proposal_clarification_required',
                     input_ready=False, execution_authorized=False)
-    assessment = assess_docking_request_text(query, enabled=enabled, enable_tools=enable_tools)
     if not assessment['assessed'] or type(proposal) is not DockingPreparationProposal:
         return rejected
     try:
-        if (type(proposal.version) is not str or proposal.version != '1'
-                or type(proposal.kind) is not str or proposal.kind != 'docking_request'
+        if (not _closed_docking_dto(proposal, DockingPreparationProposal)
+                or type(proposal.version) is not str or proposal.version != '1'
+                or type(proposal.kind) is not str or proposal.kind != kind
                 or type(proposal.unresolved) is not bool):
             return rejected
         # Use the actual closed DTO's declared types, not duck typing, equality
@@ -209,7 +301,7 @@ def validate_docking_text_proposal(query, proposal, *, enabled, enable_tools):
         fields_type = DockingPreparationProposal.model_fields['fields'].annotation
         span_type = get_args(DockingPreparationProposal.model_fields['source_spans'].annotation)[0]
         fields, spans = proposal.fields, proposal.source_spans
-        if (type(fields) is not fields_type or type(spans) is not list
+        if (not _closed_docking_dto(fields, fields_type) or type(spans) is not list
                 or not 1 <= len(spans) <= 16):
             return rejected
         names = fields.model_fields_set
@@ -220,8 +312,8 @@ def validate_docking_text_proposal(query, proposal, *, enabled, enable_tools):
             return rejected
         requests = []
         for index, span in enumerate(spans):
-            if (type(span) is not span_type or type(span.source_id) is not str
-                    or span.source_id != 'query' or type(span.start) is not int
+            if (not _closed_docking_dto(span, span_type) or type(span.source_id) is not str
+                    or span.source_id != source_id or type(span.start) is not int
                     or type(span.end) is not int or not 0 <= span.start < span.end <= len(query)
                     or type(span.role) is not str or span.role not in {'request', 'field'}):
                 return rejected
@@ -234,7 +326,7 @@ def validate_docking_text_proposal(query, proposal, *, enabled, enable_tools):
         used = {requests[0]}
         for name in names:
             field = getattr(fields, name)
-            if type(field) is not fields_type.model_fields[name].annotation:
+            if not _closed_docking_dto(field, fields_type.model_fields[name].annotation):
                 return rejected
             indices = field.span_indices
             if (type(indices) is not list or len(indices) != 1 or type(indices[0]) is not int

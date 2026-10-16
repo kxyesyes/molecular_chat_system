@@ -906,3 +906,16 @@ warnings，14.79 秒**，冻结哈希一致。fresh QUALITY **APPROVED**，独�
 **50 passed / 11 warnings，14.30 秒**；其首轮为 49 passed / 1 failed，失败
 在未修改的 A2 取消抵抗发送时序测试，原样重跑通过，保留该时序敏感性限制，
 不将首轮记作通过。未激活普通聊天入口或界面。
+
+### 2026-10-16 D6 纯文本补充与 DTO 验证（独立审查通过）
+
+有界补充语法只允许六个既有字段；逐字匹配完整当前文本、字段值和原文跨度，
+最多三个补充段。纯文本引用不构成输入制品权限。初始 **209 failed** 后与
+既有初始请求验证合计 **812 passed**；SPEC 发现直接变更 DTO 存储可注入
+额外字段，补充原生、封闭存储检查覆盖初始/补充 proposal、span、input DTO，
+不调用 serializer/revalidation hook。该轮 **82 failed / 8 passed** 后最终
+**902 passed / 1 warning**。SPEC 独立同样 **902 passed**，十个原 mutation
+案例均拒绝，133 个初始 assessment 与 266 个 validation 对照 HEAD 一致。
+fresh QUALITY **APPROVED**：聚焦 **301 passed / 1 warning**，另 506 组合、
+128 初始对照、128 畸形 DTO 探针通过；内存编译与冻结哈希通过。
+协调器调用点和聊天接入另行审查，不以本段代表 D6 已完成。
