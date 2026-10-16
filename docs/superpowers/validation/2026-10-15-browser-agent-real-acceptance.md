@@ -447,3 +447,35 @@ python -B -m pytest tests/test_quality_workflow_contract.py tests/test_deploymen
 只给本次检查进程的 `REVERSE_TARGET_DATA_DIR`、`RAG_INDEX_PATH` 指定主工作区
 中已存在的对应资产后，**23/23**；均使用不存在的 `--env-file` 路径。
 没有复制数据、修改配置或启动真实 Vina，这也不证明新科学入口已经可用。
+
+### 2026-10-16 D4 私有结果候选验证
+
+新增 `src/web/docking_publication.py`，仅从原始 live coordinator/input context/
+C2 execution 捕获不可变私有结果；`docking_input_context.py` 留存原始身份。
+校验成功清理回执、当前源证据、完整 consent/token/binding、实际 staged 输入、
+completion 摘要和实际 pose 字节/能量/数量。TaskResult 分数不作为科学依据。
+使用原始整个操作截止时间，不续期，也不误用 raw 或未消费 consent 的截止点。
+该函数没有发布、下载 grant、HTTP 接入或真实科学执行权限。
+
+初始缺失 callable RED 和后续边界 RED 后，候选模块 **84 passed**。独立 SPEC
+发现浅拷贝 root/context 后重绑当前双向指针仍被接受，三个独立探针失败。
+补充构造时原始 root/context 身份校验，以及合法 URL-safe owner 首字符的
+两个查找边界测试：**5 failed / 84 deselected，17.17 秒**，修复后聚焦
+**14 passed，21.34 秒**。完整命令：
+
+```text
+python -B -m pytest tests/agent/test_docking_publication_candidate.py tests/task_runtime/test_chat_docking_input_context.py tests/task_runtime/test_chat_docking_execution_context.py -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short
+```
+
+最终 **152 passed，634.18 秒**。父侧 context、completion readback 和 private
+output 回归 **149 passed / 4 skipped，152.58 秒**；四项跳过为 Windows
+symlink 权限不可用，不计为通过。三个修改文件 compileall 通过。
+独立 SPEC 复审 PASS：原三个探针 **3 passed，23.60 秒**，新增边界与正例
+**6 passed，22.69 秒**。独立 QUALITY APPROVED：聚焦 **8 passed，40.19 秒**，
+另两个独立探针 **2 passed，10.13 秒**，确认匹配 hash 仍不能掩盖非有限 pose，
+read 中 completion 变化被拒绝，连续四次取消仍保留实际 reader/gate。
+三文件冻结哈希未变；独立审查未重复全部 152 项。
+
+所有分数和 pose 均为明确的合成测试夹具，不是 S10 或真实 Vina 验收。
+持久化 publication CAS、live terminal latch、grants、retention、UI 和浏览器
+整链仍未完成；当前切片通过不能替代这些门禁。

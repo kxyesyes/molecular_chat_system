@@ -1046,6 +1046,108 @@ unchanged hashes; existing producer/parser/schema behavior is unchanged.
 Parent verification with the separate draft-close tests: **194 passed / 4 skipped
 in 22.98 seconds**. This approval covers byte readback only, not D4 authorization.
 
+### D4 implementation order after the HTTP lifetime closure
+
+The next internal slice captures a verified result candidate without publishing
+success or creating a download grant. Create `src/web/docking_publication.py`
+and `tests/agent/test_docking_publication_candidate.py`; extend only the existing
+`ChatDockingInputContext` source guard where the final-operation clock differs
+from the raw-execution clock. The server-only entry is:
+
+```python
+async def capture_docking_publication_candidate(
+        coordinator, *, root_id, owner_session_id):
+    """Return an immutable private candidate, never publication authority."""
+```
+
+- [x] Establish RED at the callable boundary using the existing synthetic
+  `execution_case`, its actual C2 approval and acknowledged settlement. The
+  positive candidate must preserve the independently verified -7.2 kcal/mol,
+  one-pose fixture and actual pose digest; repeated capture performs no new raw
+  execution. These are explicitly synthetic contract results, not real Vina.
+- [x] Reject foreign/missing roots before file reads; reject missing, failed,
+  unsettled, cancelled or uncertain execution, changed live source/inputs,
+  runtime/policy/private-output replacement and damaged completion/pose bytes.
+  Test mutation during read and non-native/nonfinite score/count fields.
+- [x] Capture only the original live coordinator/context/runtime/execution and
+  acknowledged successful cleanup. Verify current source evidence, immutable
+  consent identities/token, actual staged manifest input/config hashes and the
+  sealed completion store. Use the canonical completion digest already defined
+  by `read_verified_artifact`. Returned projection omits paths, raw manifests,
+  nonce, stderr, arbitrary formatted text, URLs and all download authority.
+- [x] Apply the original whole-operation deadline to final verification, not a
+  renewed budget or the expired unused-consent/raw-call deadline. Preserve the
+  valid-dispatch-after-consent-expiry case. Retain actual off-loop reads through
+  the existing gate/SQL ownership and acquire source/model guards only for work.
+- [x] Run candidate and affected context/completion/private-output regressions,
+  compilation and independent SPEC then QUALITY review before committing this
+  internal foundation. Do not activate a public success path in this slice.
+
+After this candidate is verified, integrate the existing coordinator's live
+one-terminal latch with a durable candidate-publication CAS. An acknowledged
+write is necessary but never sufficient without the live latch; late commit,
+cancel, timeout and runtime-generation change suppress publication. Next bind
+24-hour non-sliding owner/task/completion/artifact/runtime grants and retained
+per-read verified snapshots. Only their integrated tests permit success payloads
+and artifact links in the existing HTTP/WS/UI surfaces.
+
+Candidate review ledger: the initial worker observed missing-call and hardening
+RED cases, then **84 passing tests**. Independent SPEC reproduced three original
+root/context replacement failures despite reciprocal current pointers agreeing.
+The repair retains the actual original root and context in the construction-time
+origin and checks both identities. Two owner-boundary tests also confirm legal
+URL-safe `-`/`_` session prefixes reach the real owned lookup; root labels remain
+strict. Repair RED: **5 failed / 84 deselected in 17.17 seconds**; focused GREEN:
+**14 passed in 21.34 seconds**; complete candidate and C1/C2 context regression:
+**152 passed in 634.18 seconds**. Independent bounded SPEC re-review PASS: the
+three original replacement probes **3 passed in 23.60 seconds**, and five added
+cases plus positive capture **6 passed in 22.69 seconds**. Three-file compilation
+and frozen hashes passed. Fresh QUALITY APPROVED: **8 targeted passes in 40.19
+seconds** and **2 independent probes in 10.13 seconds**, covering matching-hash
+nonfinite pose rejection, completion mutation during read, TaskResult exclusion
+and reader/gate retention through four cancellations. All three hashes remained
+unchanged. These fixtures are synthetic; none is real Vina, successful
+publication or a download authorization.
+
+The next publication-receipt slice remains internal and disabled at all public
+entry points. Its write set is `src/task_runtime/database.py`,
+`src/task_runtime/store.py`, `src/web/docking_coordinator.py`,
+`src/web/docking_publication.py`, and new
+`tests/agent/test_docking_publication_receipt.py`. Keep the scientific completion
+and existing execution receipt unchanged. Add an additive, separate private
+publication record in the existing TaskStore database, not a new store/runtime.
+Its CAS compares the candidate's complete expected consent snapshot and binds
+owner/root/task/preparation/runtime/token/completion/projection; duplicate or
+changed writes cannot overwrite it. A committed row is private reconciliation
+evidence, never a successful view by itself.
+
+- [ ] At the callable boundary establish RED for one successful publication,
+  duplicate publication without another raw call/write, and foreign/missing or
+  reconstructed candidate rejection. Reuse the actual synthetic `execution_case`
+  and verified pose; do not replace the capture wrapper with a fabricated DTO.
+- [ ] Add an owned asynchronous publication operation on the existing root and
+  retain it with the existing gate until its actual SQL/read work settles. Capture
+  fresh evidence internally; do not accept a caller-supplied candidate. Confirm
+  the durable write, revalidate original live evidence and operation deadline,
+  then win one event-loop terminal latch with no await in that final decision.
+- [ ] A cancel/timeout/closed root or changed runtime generation before that
+  decision seals non-success permanently. Delayed commit and commit-then-raise
+  cannot be recovered by rereading a row. Persist suppression/reconciliation
+  under the same retained owner without rewriting scientific completion.
+- [ ] Test real SQLite commit barriers before and after commit acknowledgement;
+  cancel, repeated cancellation, original-deadline equality, context mutation,
+  generation replacement and close during each barrier. Release every barrier
+  in `finally`. No root/context/physical operation may be dropped while pending.
+- [ ] Once success is confirmed, repeated status/cancel returns the same terminal
+  decision, not a newly rewritten failure. Source/runtime invalidation may remove
+  access but cannot invent a second outcome. A new coordinator/restart never
+  reconstructs success from the database. Keep HTTP/WS science and grants closed
+  until the following grant/reader/UI integrations are verified.
+- [ ] Run the new receipt suite, bounded candidate/context/coordinator/HTTP-close
+  regressions, database migration tests and compileall; record RED/GREEN and
+  independent SPEC then QUALITY before an explicit-file commit. No new pool,
+  scheduler, retry, scientific execution path or dependency is introduced.
+
 - [x] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
   logical gate becomes undeliverable without waiting for it; owner/lock remains registered and no
   successful terminal/history/grant is published later. Release every test barrier in finally.

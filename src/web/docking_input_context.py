@@ -78,7 +78,7 @@ class ChatDockingInputContext:
     __slots__ = ("_coordinator", "_root", "_digest", "_draft_json", "_parameters",
                  "_receptor", "_ligand", "_lock", "_claimed", "_operation", "_runtime",
                  "_begun", "_verified_manifest", "_ready_record", "_execution", "_execution_facts",
-                 "_execution_limits")
+                 "_execution_limits", "_publication_origin", "_publication_output")
 
     def __init__(self, issuer, coordinator, root):
         if issuer is not _ISSUER:
@@ -107,6 +107,15 @@ class ChatDockingInputContext:
         self._execution = None
         self._execution_facts = None
         self._execution_limits = None
+        # Original live identities for D4's read-only capture, not publication
+        # authority. Never recover these from a later TaskStore read.
+        self._publication_origin = (
+            root.root_id, root.owner, root.task_id, root.preparation_id, root.origin,
+            root.claim, root.snapshot, root.structure_context_json,
+            canonical_json(root.source_reference), coordinator._state, coordinator._tasks,
+            coordinator, root.current['model'], root.current['policy'],
+            root.current['model_generation'], root.current['capability_generation'], root, self)
+        self._publication_output = None
 
     def __repr__(self):
         return "ChatDockingInputContext(<private>)"
@@ -305,6 +314,10 @@ class ChatDockingInputContext:
                    'dispatch_state', 'view_status', 'primary_reason', 'cancel_requested',
                    'operation_deadline_ms', 'operation_monotonic_expires'}
         self._execution_facts = {key: value for key, value in operation.row.items() if key not in mutable}
+        output = runtime._docking_private_output
+        runtime._require_consent_output()
+        self._publication_output = (output, output.execution, output.stager,
+                                    output.completions, runtime.stager, runtime, operation)
         self._execution = operation
 
     def validate_execution_row(self, operation, row, *, phase=None):
