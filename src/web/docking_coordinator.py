@@ -1,13 +1,13 @@
 """Bounded live INITIAL C coordinator, shared by legacy/decision entry points.
 
-Disabled by default. This is NOT an HTTP/source authorizer, preparation worker,
-approval issuer or scheduler. The trusted caller supplies an existing owned
+Disabled by default. This is NOT an HTTP/approval issuer or scheduler. The
+trusted caller supplies a captured live S03 context and an existing owned
 running AgentState run. Never recreate that run or restore a claimed root.
 
 Two independent deadlines: upstream work gets 180 seconds from before the first
 await, while TaskStore keeps its unchanged 900-second consent waiting expiry.
-Neither refresh nor human waiting renews either deadline. Future source work
-must use the minimum of these clocks too; this slice never invokes source/C1.
+Neither refresh nor human waiting renews either deadline. Fixed source and
+inspection children use that original deadline too; this slice never invokes C1.
 
 One event-loop-owned instance must serve both chat paths. Live roots PLUS failed
 unconfirmed attempts occupy at most MAX_PENDING_CONSENTS entries. Failed local
@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import closing
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+import hashlib
 import json
 import math
 import re
@@ -44,12 +45,18 @@ from src.web.docking_proposal import (
     DockingProposalOwner, TextSegmentIssuer, capture_source_snapshot, capture_text_segment,
 )
 from src.web.docking_request import assess_docking_request_text, validate_docking_text_proposal
+from src.web.docking_request import OwnedDockingStructureEvidence, _STRUCTURE_POINTER
+from src.target_search.remote_clients import _resolve_organism
+from src.docking import source_preparation, chat_preparation
 
 
 # Intersection of proposal-issuer labels and durable draft identity labels.
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}\Z")
 _WORK_MS = 180000
 _CLAIM_KEY = "chat_docking_root"
+_PAGE_BYTES = 48 * 1024
+_SECTIONS = frozenset({"protein_selection", "reference_residue", "hetero_choices",
+    "conformer_choices", "residues", "conformer_constraints", "connections", "limitations"})
 
 
 def _wall_time_ms():
@@ -58,6 +65,47 @@ def _wall_time_ms():
 
 def _label(value):
     return type(value) is str and _LABEL.fullmatch(value) is not None and not contains_sensitive_text(value)
+
+
+def _small_json(value, limit=_PAGE_BYTES):
+    """Bound output while encoding, before joining/copying a whole inspection."""
+    parts, size = [], 0
+    for part in json.JSONEncoder(ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                                allow_nan=False).iterencode(value):
+        size += len(part.encode("utf-8"))
+        if size > limit:
+            raise ValueError("source_preview_too_large")
+        parts.append(part)
+    return "".join(parts)
+
+
+def _capture_structure_context(value):
+    # This is a bounded server capture, not authentication. The actual current
+    # owner/checkpoint/evidence ledger must still resolve on every use.
+    if value is None:
+        return None
+    if type(value) is not dict or len(value) != len(_STRUCTURE_POINTER):
+        raise ValueError("invalid_structure_context")
+    detached = {}
+    for key, item in value.items():
+        if type(key) is not str or key not in _STRUCTURE_POINTER:
+            raise ValueError("invalid_structure_context")
+        if key == "schema_version":
+            if type(item) is not int or item != 1:
+                raise ValueError("invalid_structure_context")
+        elif type(item) is not str or not 0 < len(item) <= 128:
+            raise ValueError("invalid_structure_context")
+        detached[key] = item
+    if set(detached) != _STRUCTURE_POINTER:
+        raise ValueError("invalid_structure_context")
+    return _small_json(detached, 4096)
+
+
+def _pending_preparation(root):
+    try:
+        return any(owner.snapshot()["settled"] is not True for owner in root.preparation_owners)
+    except Exception:
+        return True
 
 
 class _Unavailable(Exception):
@@ -98,15 +146,29 @@ class _Root:
     cancel_requested: bool = False
     phase: str = "BUSY"
     reason: str = "root_busy"
+    structure_context_json: str | None = None
+    physical_deadline: float | None = None
+    source_reference: dict | None = None
+    source_result: dict | None = None
+    inspection: dict | None = None
+    source_preview_json: str | None = None
+    preparation_owners: list = field(default_factory=list)
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
-    return dict(root_id=root.root_id if root else None,
+    view = dict(root_id=root.root_id if root else None,
         task_id=root.task_id if root else None,
         preparation_id=root.preparation_id if root else None,
         phase=root.phase if root else phase, reason_code=root.reason if root else reason,
         missing_fields=list(root.missing) if root else [],
         input_ready=False, execution_authorized=False)
+    if root is not None:
+        if _pending_preparation(root):
+            view["cleanup_pending"] = True
+        if (not root.closed and root.source_preview_json is not None
+                and (root.task is None or root.task.done())):
+            view["source_preview"] = json.loads(root.source_preview_json)
+    return view
 
 
 async def _drain(task):
@@ -158,6 +220,8 @@ class DockingRequestCoordinator:
         if root.draft is not None:
             deadlines += [root.draft["expires_at_ms"] - wall,
                           (root.draft["monotonic_expires"] - mono) * 1000]
+        if root.physical_deadline is not None:
+            deadlines.append((root.physical_deadline - time.monotonic()) * 1000)
         left = min(deadlines)
         if not math.isfinite(left) or left < 1:
             raise _Unavailable("work_deadline_exceeded")
@@ -206,6 +270,9 @@ class DockingRequestCoordinator:
                 capability_generation=root.current["capability_generation"],
                 policy=asdict(root.current["policy"]),
                 work_deadline_wall_ms=root.wall_deadline, work_deadline_mono=root.mono_deadline)
+            if root.structure_context_json is not None:
+                metadata[_CLAIM_KEY]["structure_context_digest"] = hashlib.sha256(
+                    root.structure_context_json.encode("utf-8")).hexdigest()
             changed = conn.execute(
                 "UPDATE agent_runs SET metadata_json=?,updated_at=? WHERE trace_id=? AND session_id=? AND status='running'",
                 (json.dumps(metadata, ensure_ascii=True, allow_nan=False), time.time(), root.root_id, root.owner),
@@ -298,18 +365,23 @@ class DockingRequestCoordinator:
             root.task.cancel()
 
     def _release_closed(self, root):
-        if not root.closed or (root.task is not None and not root.task.done()):
+        if (not root.closed or (root.task is not None and not root.task.done())
+                or _pending_preparation(root)):
             return
         root.snapshot = root.current = root.issuer = root.proposal = root.draft = root.claim = root.task = None
+        root.structure_context_json = root.source_reference = root.source_result = None
+        root.inspection = root.source_preview_json = None
+        root.preparation_owners.clear()
         if root.durable and self._roots.get(root.root_id) is root:
             del self._roots[root.root_id]
         # No confirmed durable claim: retain only a bounded non-retryable tombstone.
 
     async def begin(self, *, root_id, owner_session_id, origin_turn_id, query,
-                    history, descriptors, enable_tools, mode):
+                    history, descriptors, enable_tools, mode, structure_context=None):
         # Entire input capture/preflight, clocks and the local attempt burn precede
         # the first await; duplicate coroutines cannot race to create an issuer.
         try:
+            physical_begin = time.monotonic()
             wall, mono = self._wall(), self._mono()
             validate_clocks(wall, mono)
             if not math.isfinite(mono + 180) or mono + 180 <= mono:
@@ -323,15 +395,19 @@ class DockingRequestCoordinator:
             root = self._roots.get(root_id)
             if root is not None:
                 # A duplicate cannot replace or reconstruct the original inputs.
+                if root.owner == owner_session_id and root.source_preview_json is not None:
+                    return await self.status(root_id=root_id, owner_session_id=owner_session_id)
                 return _view(root) if root.owner == owner_session_id else _view()
             if len(self._roots) >= MAX_PENDING_CONSENTS:
                 return _view(reason="coordinator_capacity_full")
             snapshot = capture_source_snapshot(query=query, history=history, descriptors=descriptors)
+            structure_context_json = _capture_structure_context(structure_context)
         except Exception:
             return _view(reason="invalid_input")
         root = _Root(root_id, owner_session_id, origin_turn_id, str(uuid4()), str(uuid4()),
                      snapshot, mode, wall + _WORK_MS, mono + _WORK_MS / 1000,
-                     tuple(assessment["missing_fields"]))
+                     tuple(assessment["missing_fields"]), structure_context_json=structure_context_json,
+                     physical_deadline=physical_begin + _WORK_MS / 1000)
         self._roots[root_id] = root
         root.task = asyncio.create_task(self._run(root))
         self._gate.retain_task(root.task)
@@ -422,6 +498,11 @@ class DockingRequestCoordinator:
                 root.phase = "AWAITING_INPUT"
                 root.reason = ("source_preparation_required" if checked["consistent"]
                     and not checked["model_unresolved"] else "clarification_required")
+            # Missing scientific inputs are expected here. A consistent explicit
+            # source request may inspect facts without silently resolving them.
+            if (checked["consistent"] and root.structure_context_json is not None
+                    and checked["assessment"]["inputs"].get("pdb_id")):
+                await self._prepare_source(root)
         except _AlreadyClaimed:
             # Presence proves replay must reject, NOT a usable claim receipt.
             root.durable = True
@@ -444,7 +525,11 @@ class DockingRequestCoordinator:
         root = self._owned(root_id, owner_session_id)
         if root is None:
             return _view()
-        if root.closed or (root.task is not None and not root.task.done()):
+        if root.closed:
+            view = _view(root)
+            self._release_closed(root)
+            return view
+        if root.task is not None and not root.task.done():
             return _view(root)
         root.task = asyncio.create_task(self._refresh(root))
         self._gate.retain_task(root.task)
@@ -460,11 +545,129 @@ class DockingRequestCoordinator:
                                                expected_version=root.draft["version"])
                 self._capture(root)
                 root.draft = current_draft
+                if root.source_reference is not None:
+                    await self._sql(self._read_source_reference, root=root)
+                    self._capture(root)
         except asyncio.CancelledError:
             self._stop(root, "cancelled")
             raise
         except Exception:
             self._stop(root, "context_unavailable")
+
+    def _read_source_reference(self, *, root):
+        # A sequential pair of reads cannot close both invalidation races: a
+        # draft can change during source resolution, or vice versa. This short,
+        # read-only transaction excludes writers in BOTH existing databases.
+        # Agent DB is main, TaskStore is attached: one consistent lock order,
+        # no writes, no cross-database publication/commit protocol, no worker or
+        # human wait under these locks. An uncertain/contended read fails closed.
+        self._capture(root)
+        with self._state._lock, closing(self._state._connect()) as guard, guard:
+            guard.execute("ATTACH DATABASE ? AS docking_draft_read", (str(self._tasks.db_path),))
+            guard.execute("PRAGMA busy_timeout=" + str(min(5000, self._remaining_ms(root))))
+            guard.execute("BEGIN IMMEDIATE")
+            return self._read_source_reference_guarded(root=root)
+
+    def _read_source_reference_guarded(self, *, root):
+        # Existing resolver/store methods still read their own connections;
+        # the reservation above prevents either database from changing meanwhile.
+        self._capture(root)
+        if root.structure_context_json is None or root.claim is None:
+            raise _Unavailable("source_unavailable")
+        digest = hashlib.sha256(root.structure_context_json.encode("utf-8")).hexdigest()
+        if json.loads(root.claim.binding_json).get("structure_context_digest") != digest:
+            raise _Unavailable("source_unavailable")
+        self._read_waiting_draft(root=root, expected_version=root.draft["version"])
+        assessment = assess_docking_request_text(root.snapshot.query, enabled=self._enabled, enable_tools=True)
+        pdb_id = assessment["inputs"].get("pdb_id")
+        evidence = OwnedDockingStructureEvidence(self._state, clock=lambda: self._wall() / 1000)
+        resolved = evidence.resolve(json.loads(root.structure_context_json), session_id=root.owner, pdb_id=pdb_id)
+        if resolved is None:
+            raise _Unavailable("source_unavailable")
+        _, taxonomy = _resolve_organism(resolved["target"]["organism"])
+        reference = dict(context=resolved["context"], pdb_id=pdb_id,
+            target=dict(uniprot_id=resolved["target"]["uniprot_id"], taxonomy_id=taxonomy))
+        if root.source_reference is not None and root.source_reference != reference:
+            raise _Unavailable("source_unavailable")
+        self._check_root(root=root)
+        self._capture(root)
+        return reference
+
+    def _child_deadline(self, root):
+        return min(root.mono_deadline, root.physical_deadline,
+                   time.monotonic() + self._remaining_ms(root) / 1000)
+
+    async def _prepare_source(self, root):
+        async with self._gate.request():
+            reference = await self._sql(self._read_source_reference, root=root)
+            self._capture(root)
+        root.source_reference = reference
+        owner = chat_preparation.PreparationOwner()
+        root.preparation_owners.append(owner)  # Before physical dispatch.
+        result = await source_preparation.run_source_preparation(
+            pdb_id=reference["pdb_id"], target=reference["target"],
+            deadline=self._child_deadline(root), owner=owner)
+        if (owner.snapshot()["settled"] is not True or type(result) is not dict
+                or result.get("ok") is not True):
+            raise _Unavailable("source_preparation_unavailable")
+        async with self._gate.request():
+            await self._sql(self._read_source_reference, root=root)
+            self._capture(root)
+        # Only the fixed canonical worker supplies these bytes/metadata. Neither
+        # a model descriptor nor a caller hash can enter this path.
+        source = result["source"]
+        if (source["pdb_id"] != reference["pdb_id"] or source["target"] != reference["target"]
+                or hashlib.sha256(result["pdb_bytes"]).hexdigest() != source["sha256"]):
+            raise _Unavailable("source_preparation_unavailable")
+        root.source_result = result
+        inspection_owner = chat_preparation.PreparationOwner()
+        root.preparation_owners.append(inspection_owner)
+        inspection = await chat_preparation.run_preparation("projection_inspect",
+            inputs=dict(pdb_bytes=result["pdb_bytes"], source=source),
+            deadline=self._child_deadline(root), owner=inspection_owner)
+        if (inspection_owner.snapshot()["settled"] is not True or type(inspection) is not dict
+                or inspection.get("ok") is not True or inspection["source_sha256"] != source["sha256"]):
+            raise _Unavailable("source_inspection_unavailable")
+        async with self._gate.request():
+            await self._sql(self._read_source_reference, root=root)
+            self._capture(root)
+            root.inspection = inspection
+            counts = {section: len(inspection["limitations"] if section == "limitations"
+                                   else inspection["choices"][section]) for section in _SECTIONS}
+            root.source_preview_json = _small_json(dict(pdb_id=source["pdb_id"], target=source["target"],
+                source_sha256=source["sha256"], revision_version=result["evidence"]["revision_version"],
+                choice_counts=counts, input_ready=False, execution_authorized=False))
+            root.phase, root.reason = "AWAITING_INPUT", "scientific_selection_required"
+
+    async def source_page(self, *, root_id, owner_session_id, source_sha256, section, offset=0, limit=32):
+        denied = dict(ok=False, reason_code="source_unavailable", input_ready=False, execution_authorized=False)
+        if (type(source_sha256) is not str or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+                or type(section) is not str or section not in _SECTIONS
+                or type(offset) is not int or not 0 <= offset <= 99999
+                or type(limit) is not int or not 1 <= limit <= 32):
+            return denied
+        view = await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        root = self._owned(root_id, owner_session_id)
+        if (root is None or root.closed or root.inspection is None or "source_preview" not in view
+                or view["source_preview"]["source_sha256"] != source_sha256):
+            return denied
+        records = root.inspection["limitations"] if section == "limitations" else root.inspection["choices"][section]
+        if offset > len(records):
+            return denied
+        items = []
+        for record in records[offset:min(len(records), offset + limit)]:
+            try:
+                # Encode at most one bounded page before detaching its containers.
+                _small_json([*items, record], _PAGE_BYTES - 1024)
+            except (ValueError, TypeError, UnicodeError):
+                if not items:
+                    return denied
+                break
+            items.append(record)
+        next_offset = offset + len(items)
+        return json.loads(_small_json(dict(ok=True, source_sha256=source_sha256, section=section,
+            offset=offset, next_offset=next_offset if next_offset < len(records) else None,
+            items=items, input_ready=False, execution_authorized=False)))
 
     async def close_root(self, *, root_id, owner_session_id):
         root = self._owned(root_id, owner_session_id)

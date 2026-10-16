@@ -234,9 +234,13 @@ is not a cross-database publication transaction. Locks are released before any
 child or human wait; a contended/uncertain read remains unavailable. Tests cover
 both directions of invalidation, exclusion/release of both writers, and actual
 child dispatch outside the guard. The repaired parent suite passed **140 tests
-in 70.63 seconds** (35 source, 105 initial). SPEC rereview and fresh QUALITY are
-still required. Later C1 code must not nest this guard inside a reverse-order
-TaskStore write transaction.
+in 70.63 seconds** (35 source, 105 initial). Independent SPEC rereview PASS:
+**140 tests in 66.87 seconds** and 13 additional race/ownership probes. Fresh
+QUALITY APPROVED: **140 tests in 66.56 seconds** and 10 further lock, repeated
+cancellation, paging, invalidation and physical-settlement probes. Both reviewers
+confirmed unchanged frozen hashes and successful scoped compilation/diff checks.
+Later C1 code must not nest this guard inside a reverse-order TaskStore write
+transaction. Approval covers source inspection only, not choices, C1 or activation.
 
 The D2-to-C1 bridge uses narrow changes in `src/task_runtime/store.py` and
 `runtime.py`, covered by
