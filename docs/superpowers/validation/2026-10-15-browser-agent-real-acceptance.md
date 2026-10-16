@@ -479,3 +479,82 @@ read 中 completion 变化被拒绝，连续四次取消仍保留实际 reader/g
 所有分数和 pose 均为明确的合成测试夹具，不是 S10 或真实 Vina 验收。
 持久化 publication CAS、live terminal latch、grants、retention、UI 和浏览器
 整链仍未完成；当前切片通过不能替代这些门禁。
+
+### 2026-10-16 当前已推送版本远端 CI（7a8428ab）
+
+GitHub Actions `quality` **38892610439 / #617** 已完成且结论为 success；
+八个 Python 分组、static-quality 和最终 offline-quality 全部 success。
+日志中的实际结果如下，不包含其后未提交的 publication receipt 实现：
+
+| 分组 | passed | skipped | warnings | pytest 用时 |
+|---|---:|---:|---:|---:|
+| root | 5594 | 106 | 12 | 384.68 s |
+| root-activity | 1959 | 6 | 6076 | 655.61 s |
+| task-runtime | 2314 | 12 | 1 | 399.19 s |
+| sandbox-core | 1977 | 4 | 1 | 50.27 s |
+| sandbox-api | 153 | 0 | 0 | 2.67 s |
+| agent | 13297 | 2 | 26836 | 1017.66 s |
+| agent-web-lifecycle | 225 | 0 | 7311 | 222.74 s |
+| agent-docking | 1449 | 0 | 9 | 634.97 s |
+
+合计 **26968 passed / 130 skipped / 40246 warnings**，跳过和警告按原日志
+保留，不称为零警告或全部用例执行。远端 collector 实际输出与本地一致：
+`AGENT_COLLECTION_OK baseline=14973 agent=13299 web=225 docking=1449`。
+核心与对接分组分别在原 1200 秒限制内完成，没有放宽截止时间。
+static-quality 的 Python 编译、Node 契约和 tracked non-document 凭据扫描通过。
+此前 `3e1923cb` 运行因后续推送而被工作流取消，不能记作完整通过。
+此时 PR 仍为 Draft、未合并、GitHub reviews 为空；独立子代理审查不等于
+GitHub 必需审批。真实 S10、最终集成版本和后续改动仍须另行验收。
+同日只读查询 `main` 返回 `protected=false`、status-check enforcement 为 off，
+仓库 rulesets 列表为空；详细 branch-protection 端点因 integration 权限返回
+403，未尝试扩大权限。以上只记录可见配置，不豁免本项目约定的科学、审查和
+CI 门禁，也未修改任何保护规则。
+
+### 2026-10-16 D4 私有 publication receipt/latch
+
+修改 `database.py`、`store.py`、`docking_coordinator.py`、
+`docking_publication.py`，新增 `test_docking_publication_receipt.py`。
+沿用现有 TaskStore 增量创建候选/抑制回执表，完整 consent 快照 CAS 不改变
+科学 completion 或执行终态。确认写入回执并重新核验实际来源、文件、身份和
+原始截止点后，live coordinator 才能确认一次内部终态。迟到提交、提交后抛错、
+取消和截止点竞态不能靠数据库回读晋升为成功；未增加公开下载或 UI 接线。
+
+初始缺失 callable RED **30 failed，3.52 秒**。父级集成检查发现提前尝试发布
+会安装 latch，可能令未结束 C2 绕过正常关闭路径；实际 READY、阻塞 raw 和
+阻塞 claim reader 三例先 **3 failed / 55 deselected，15.07 秒**，然后将
+实际物理收尾验证移到状态安装前。三新例加两控制为 **5 passed / 53 deselected，
+25.58 秒**；未单独测量只有三例的 GREEN 用时。
+
+```text
+python -B -m pytest tests/agent/test_docking_publication_receipt.py -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short
+```
+
+最终 **58 passed，285.98 秒**。候选、C2 context、coordinator、execution、
+整个 close 模块及两项迁移测试定向组合 **30 passed，94.83 秒**。固定 Web
+依赖组合的整个 `test_web_docking_control_http.py` 与
+`test_whole_http_approval_loss_does_not_cancel_accepted_c2` 为 **4 passed /
+2 warnings，28.15 秒**；警告为已有 multipart 弃用和 Pydantic 命名空间提示。
+父级另跑整个 `test_task_store.py`、`test_docking_consent_draft.py` 和
+`test_docking_draft_close.py`：**516 passed / 1 skipped，17.27 秒**，跳过为
+Windows symlink 权限不可用。五文件编译/diff 和冻结哈希检查通过。
+独立 SPEC PASS：**45 项通过**（31 receipt/race、10 生命周期测试和 4 个独立
+探针），确认真实提交后不精确 ACK 仍为 UNKNOWN、迟到重复调用不续期、阻塞
+suppression SQL 在反复取消/close 后仍由原 owner 保留。原始 420 秒截止点和
+提前 publication 的正常 C2 清理均通过；五文件哈希、编译和 diff 未变。
+fresh QUALITY 尚待完成；上述夹具全部是合成执行，不是 S10。
+随后 QUALITY 独立复现 P2：发布任务登记后、首次执行前同轮 close 会取消任务，
+导致其 finally 未执行，实际无 I/O 残留却永久显示 cleanup_pending。该探针
+连续两次失败；caller-cancel 控制和另 13 项定向测试通过。正在补正式回归和
+仅针对确实从未启动任务的清理确认；当前未批准、未提交此切片。
+正式回归 **1 failed / 1 passed / 58 deselected，11.43 秒**。最小修复在首次
+await 前登记启动事实，完成回调只对原始、从未启动、已取消且无 I/O 的任务
+重新核实 C1/C2 收尾后确认 cleanup；已经启动的工作继续由原 finalizer 负责。
+聚焦 **2 passed，11.78 秒**；原独立 QUALITY 探针 **2 passed，19.04 秒**；
+迟到提交、反复取消、suppression close 与已确认成功控制 **16 passed /
+44 deselected，80.01 秒**。只改 publication 源码和测试，编译通过；完整
+58 项没有再次全跑。独立复审尚待完成。
+原 SPEC 定向复审 PASS：两个从未启动案例与一个实际 started-reader 控制
+**3 passed，15.81 秒**。原 QUALITY 复审 APPROVED：原始独立探针
+**2 passed，18.23 秒**，七项已启动 reader/commit/suppression/成功状态控制
+**7 passed，36.32 秒**。五文件修复后冻结哈希一致，编译和 diff 检查通过。
+P2 已关闭，本切片审查通过；没有以定向复审冒称新全仓或真实科学验收。

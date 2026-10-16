@@ -239,6 +239,7 @@ class _Root:
     input_context: object = None
     staging_started: bool = False
     ready_preview_json: str | None = None
+    publication: object = None
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -496,6 +497,12 @@ class DockingRequestCoordinator:
         return confirmed
 
     def _stop(self, root, reason, phase="UNAVAILABLE"):
+        if root.publication is not None:
+            # Publication owns a distinct one-terminal decision. A later cancel
+            # cannot rewrite confirmed science or stop its already settled C2.
+            if root.publication.suppress(reason).status == 'SUCCEEDED':
+                return
+            phase, reason = root.publication.outcome.status, root.publication.outcome.reason_code
         if not root.closed:
             root.closed, root.reason, root.phase = True, reason, phase
             if root.issuer is not None:
@@ -509,11 +516,17 @@ class DockingRequestCoordinator:
 
     def _interrupt(self, root, reason, phase="UNAVAILABLE"):
         self._stop(root, reason, phase)
+        if root.publication is not None and root.publication.outcome.status == 'SUCCEEDED':
+            return
         if root.task is not None and not root.task.done() and not root.cancel_requested:
             root.cancel_requested = True
             root.task.cancel()
 
     def _release_closed(self, root):
+        if root.publication is not None:
+            # Keep the original bounded root as a terminal tombstone. Never
+            # transfer its latch to a replacement or recover it from a DB row.
+            return
         if (not root.closed or (root.task is not None and not root.task.done())
                 or _pending_preparation(root)
                 or root.close_state not in {"confirmed", "not_acquired"}
@@ -538,6 +551,10 @@ class DockingRequestCoordinator:
         Later status/close can observe its settlement and start this finalizer;
         neither a deadline nor a finished wrapper proves physical cleanup.
         """
+        if root.publication is not None:
+            # Its retained operation also owns suppression SQL through physical
+            # completion. The scientific execution/consent is already settled.
+            return
         if (not root.closed or (root.task is not None and not root.task.done())
                 or _pending_preparation(root)):
             return
@@ -770,6 +787,8 @@ class DockingRequestCoordinator:
         root = self._owned(root_id, owner_session_id)
         if root is None:
             return _view()
+        if root.publication is not None:
+            return _view(root)  # No execution refresh can rewrite its terminal.
         if root.closed:
             await self._finish_closed(root)
             return _view(root)
@@ -1267,6 +1286,8 @@ class DockingRequestCoordinator:
             self._stop(root, 'execution_unavailable')
 
     async def _refresh_execution(self, root):
+        if root.publication is not None:
+            return
         context = root.input_context
         operation = context._execution
         if operation is not None and not operation.settled:
@@ -1274,7 +1295,7 @@ class DockingRequestCoordinator:
                 await self._sql(self._check_execution_source, root=root)
         receipt = await finish_on_cancel(context._runtime.get_docking_consent_view(
             task_id=root.task_id, owner_session_id=root.owner))
-        if root.closed:
+        if root.closed or root.publication is not None:
             return
         if (operation is None or receipt['task_id'] != root.task_id
                 or receipt['preparation_id'] != root.preparation_id
@@ -1315,7 +1336,8 @@ class DockingRequestCoordinator:
         _release_closed also checks object identity before removing a mapping.
         """
         self._interrupt(root, "closed", "CLOSED")
-        root.phase, root.reason = "CLOSED", "closed"
+        if root.publication is None:
+            root.phase, root.reason = "CLOSED", "closed"
         task = root.task
         try:
             if task is not None and await _drain(task):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -56,6 +57,15 @@ TERMINAL_STATUSES = frozenset(
 )
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SHA256_DIGEST = re.compile(r"[a-f0-9]{64}\Z")
+_PUBLICATION_LABELS = ('receipt_id', 'preparation_id', 'task_id', 'root_id',
+    'owner_session_id', 'runtime_generation', 'model_generation',
+    'capability_generation', 'execution_token')
+_PUBLICATION_DIGESTS = ('consent_digest', 'binding_digest', 'completion_digest',
+    'science_digest', 'context_fingerprint', 'projection_digest', 'source_digest',
+    'original_receptor_digest', 'ligand_identity_digest', 'input_hash', 'config_hash',
+    'tool_policy_digest')
+_PUBLICATION_FIELDS = (*_PUBLICATION_LABELS, *_PUBLICATION_DIGESTS,
+    'consent_version', 'operation_deadline_ms', 'operation_monotonic_expires')
 WORKER_FUTURE_SKEW_SECONDS = 5.0
 _ERROR_MESSAGES = {
     TaskErrorCode.TASK_INPUT_INVALID.value: "Task input invalid",
@@ -1133,6 +1143,93 @@ class TaskStore:
         if row is None:
             raise DockingConsentError("consent_not_found")
         return dict(row)
+
+    @staticmethod
+    def _publication_receipt(receipt):
+        """Bounded native facts, not a DTO, score input or success authority."""
+        if type(receipt) is not dict or set(receipt) != set(_PUBLICATION_FIELDS):
+            raise ValueError('docking_publication_unavailable')
+        value = dict(receipt)
+        for name in _PUBLICATION_LABELS:
+            if (type(value[name]) is not str
+                    or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value[name]) is None):
+                raise ValueError('docking_publication_unavailable')
+        for name in _PUBLICATION_DIGESTS:
+            if type(value[name]) is not str or _SHA256_DIGEST.fullmatch(value[name]) is None:
+                raise ValueError('docking_publication_unavailable')
+        for name in ('consent_version', 'operation_deadline_ms'):
+            if type(value[name]) is not int or not 0 < value[name] < 2**63:
+                raise ValueError('docking_publication_unavailable')
+        mono = value['operation_monotonic_expires']
+        if type(mono) is not float or not math.isfinite(mono) or mono <= 0:
+            raise ValueError('docking_publication_unavailable')
+        return value
+
+    @staticmethod
+    def _commit_docking_publication(conn):
+        """Physical commit/ack seam; a late or lost return conveys no authority."""
+        conn.commit()
+
+    def _record_docking_publication(self, *, expected_consent, receipt):
+        """Single insert with the COMPLETE canonical consent CAS in one writer.
+
+        Never call under the Agent-first attached read transaction. The caller
+        releases that guard, awaits this write, then freshly verifies evidence.
+        Even an acknowledged row is only private candidate evidence.
+        """
+        value = self._publication_receipt(receipt)
+        if (type(expected_consent) is not bytes or not 0 < len(expected_consent) <= 65536
+                or hashlib.sha256(expected_consent).hexdigest() != value['consent_digest']):
+            raise ValueError('docking_publication_unavailable')
+        try:
+            with connection(self.db_path) as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute('SELECT * FROM docking_consents WHERE preparation_id=? AND owner_session_id=?',
+                    (value['preparation_id'], value['owner_session_id'])).fetchone()
+                if row is None or canonical_json(dict(row)) != expected_consent:
+                    raise ValueError('docking_publication_unavailable')
+                binding = json.loads(row['binding_json'])
+                draft = json.loads(row['draft_json'])
+                if (row['state'] not in {'CLAIMED', 'DISPATCH_RESERVED'}
+                        or row['view_status'] != 'SUCCEEDED' or row['cleanup_state'] != 'settled'
+                        or row['execution_occupied'] != 0 or row['cancel_requested'] != 0
+                        or row['primary_reason'] is not None
+                        or row['version'] != value['consent_version']
+                        or any(draft[key] != value[key] for key in (
+                            'model_generation', 'capability_generation'))
+                        or binding['trace_id'] != value['root_id']
+                        or any(row[key] != value[key] for key in ('task_id', 'runtime_generation',
+                            'execution_token', 'binding_digest', 'operation_deadline_ms',
+                            'operation_monotonic_expires'))
+                        or any(binding[key] != value[key] for key in ('preparation_id', 'task_id',
+                            'owner_session_id', 'runtime_generation', 'input_hash', 'config_hash',
+                            'tool_policy_digest'))):
+                    raise ValueError('docking_publication_unavailable')
+                conn.execute('INSERT INTO docking_publications (' + ','.join(_PUBLICATION_FIELDS)
+                    + ') VALUES (' + ','.join('?' for _ in _PUBLICATION_FIELDS) + ')',
+                    tuple(value[key] for key in _PUBLICATION_FIELDS))
+                self._commit_docking_publication(conn)
+        except (sqlite3.IntegrityError, KeyError, TypeError):
+            raise ValueError('docking_publication_unavailable') from None
+        return value  # No readback or retry, and no persisted successful latch.
+
+    def _suppress_docking_publication(self, *, receipt, status):
+        """Append one conservative receipt even if the candidate commit is unknown.
+
+        No FK/readback of the candidate, and no changes to consent/science.
+        A missing acknowledgement remains unresolved to the live owner.
+        """
+        value = self._publication_receipt(receipt)
+        if type(status) is not str or status not in {'CANCELLED', 'TIMED_OUT', 'UNKNOWN'}:
+            raise ValueError('docking_publication_unavailable')
+        fields = ('receipt_id', 'preparation_id', 'task_id', 'root_id', 'owner_session_id',
+                  'runtime_generation', 'consent_digest', 'completion_digest')
+        with connection(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('INSERT INTO docking_publication_suppressions (' + ','.join(fields)
+                + ',status) VALUES (' + ','.join('?' for _ in range(len(fields) + 1)) + ')',
+                (*[value[key] for key in fields], status))
+        return True
 
     def _claim_docking_consent(self, expected, token, validate, wall_time_ms, monotonic):
         with connection(self.db_path) as conn:

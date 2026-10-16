@@ -1121,32 +1121,84 @@ owner/root/task/preparation/runtime/token/completion/projection; duplicate or
 changed writes cannot overwrite it. A committed row is private reconciliation
 evidence, never a successful view by itself.
 
-- [ ] At the callable boundary establish RED for one successful publication,
+- [x] At the callable boundary establish RED for one successful publication,
   duplicate publication without another raw call/write, and foreign/missing or
   reconstructed candidate rejection. Reuse the actual synthetic `execution_case`
   and verified pose; do not replace the capture wrapper with a fabricated DTO.
-- [ ] Add an owned asynchronous publication operation on the existing root and
+- [x] Add an owned asynchronous publication operation on the existing root and
   retain it with the existing gate until its actual SQL/read work settles. Capture
   fresh evidence internally; do not accept a caller-supplied candidate. Confirm
   the durable write, revalidate original live evidence and operation deadline,
   then win one event-loop terminal latch with no await in that final decision.
-- [ ] A cancel/timeout/closed root or changed runtime generation before that
+- [x] A cancel/timeout/closed root or changed runtime generation before that
   decision seals non-success permanently. Delayed commit and commit-then-raise
   cannot be recovered by rereading a row. Persist suppression/reconciliation
   under the same retained owner without rewriting scientific completion.
-- [ ] Test real SQLite commit barriers before and after commit acknowledgement;
+- [x] Test real SQLite commit barriers before and after commit acknowledgement;
   cancel, repeated cancellation, original-deadline equality, context mutation,
   generation replacement and close during each barrier. Release every barrier
   in `finally`. No root/context/physical operation may be dropped while pending.
-- [ ] Once success is confirmed, repeated status/cancel returns the same terminal
+- [x] Once success is confirmed, repeated status/cancel returns the same terminal
   decision, not a newly rewritten failure. Source/runtime invalidation may remove
   access but cannot invent a second outcome. A new coordinator/restart never
   reconstructs success from the database. Keep HTTP/WS science and grants closed
   until the following grant/reader/UI integrations are verified.
-- [ ] Run the new receipt suite, bounded candidate/context/coordinator/HTTP-close
+- [x] Run the new receipt suite, bounded candidate/context/coordinator/HTTP-close
   regressions, database migration tests and compileall; record RED/GREEN and
   independent SPEC then QUALITY before an explicit-file commit. No new pool,
   scheduler, retry, scientific execution path or dependency is introduced.
+
+Receipt/latch implementation is frozen for independent SPEC review. The initial
+callable-boundary run observed **30 failures in 3.52 seconds** (the earlier
+two-case RED overlaps and is not additive). The first live candidate write is
+stored separately from consent/science; fresh verified evidence and a live
+single-terminal decision are still required after acknowledgement. Cancellation
+and uncertain commits append private suppression evidence under the original
+store owner. Confirmed observations coalesce a retained reader; loss of access
+does not rewrite the original terminal outcome.
+
+Parent integration identified a premature-publication cleanup edge: installing
+the latch before C1/C2 physically settled could cause normal close to bypass its
+real cleanup. Three actual READY/held-raw/held-claim regressions failed with
+`DID NOT RAISE`, **3 failed / 55 deselected in 15.07 seconds**. Admission now
+requires the original physical owner to be settled before installing any latch.
+The new cases plus two positive/sticky controls passed **5 tests / 53 deselected
+in 25.58 seconds**. Final receipt suite: **58 passed in 285.98 seconds**;
+candidate/context/coordinator/execution/close/migration selection: **30 passed
+in 94.83 seconds**; fixed Web control/envelope selection: **4 passed / 2 existing
+dependency warnings in 28.15 seconds**. Parent whole TaskStore, draft and
+draft-close regression: **516 passed / 1 Windows symlink privilege skip in
+17.27 seconds**. Five-file compileall, diff check and frozen hashes passed.
+Independent review is still required; this is not grants, retention, UI or
+real Vina evidence.
+Independent SPEC PASS followed: **45 passing checks** (31 receipt/race tests,
+10 lifecycle tests and four independently authored probes). This verified exact
+ACK rejection after a physical commit, no feedback renewal by a delayed duplicate,
+held suppression SQL through repeated cancellation/close, original 420-second
+expiry and preserved real C2 cleanup after premature publication. All five hashes
+and compilation/diff checks remained unchanged. Fresh QUALITY is pending.
+QUALITY then reproduced one P2 twice: close in the same event-loop turn could
+cancel the registered publication task before its coroutine started, so its
+`finally` never set cleanup state. Repeated close/status remained pending despite
+settled C2, no readers and no publication row. The caller-cancel control and 13
+other focused tests passed. A minimal never-started-owner finalization repair is
+in progress; started physical I/O must remain retained. No approval is claimed
+until the regression and independent re-review pass.
+The formal reproduction observed **1 failed / 1 passed / 58 deselected in
+11.43 seconds**. A start flag is set before the worker's first await; its done
+callback confirms cleanup only for the exact original never-started, cancelled,
+no-I/O task after rechecking actual C1/C2 settlement. Started owners keep their
+existing drain/finalizer. Focused GREEN: **2 passed in 11.78 seconds**; unchanged
+external QUALITY probe: **2 passed in 19.04 seconds**; 16 late-commit, repeated
+cancel, suppression-close and confirmed-success controls passed in **80.01
+seconds**. Only publication source and its receipt test changed; database/store/
+coordinator hashes stayed frozen. Independent re-review remains pending.
+Original SPEC bounded recheck PASS: the two never-started cases and one actual
+started-reader control **3 passed in 15.81 seconds**. Original QUALITY re-review
+APPROVED: its unchanged independent probe **2 passed in 18.23 seconds**, plus
+seven started-reader/commit/suppression/success controls **7 passed in 36.32
+seconds**. Five repaired hashes, compilation and diff checks remained unchanged.
+The P2 is closed; no full-suite rerun is implied by this bounded re-review.
 
 - [x] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
   logical gate becomes undeliverable without waiting for it; owner/lock remains registered and no
@@ -1156,7 +1208,7 @@ evidence, never a successful view by itself.
   Queued expiry performs no physical send. A late completion records cleanup only.
 - [x] RED/GREEN separate blocked close begins only after physical send ends; close error or
   unresolved shutdown cannot remove its owner. A2 behavior remains drain-before-return.
-- [ ] RED cancellation versus confirmed completion/SQL commit races: confirmed existing success
+- [x] RED cancellation versus confirmed completion/SQL commit races: confirmed existing success
   stays success; earlier cancellation/timeout/unknown stays non-success even on late completion.
   Publication CAS must be confirmed before terminal success or artifact grant.
 - [ ] Implement deterministic completion projection from the verified real output, with original

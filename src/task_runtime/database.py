@@ -122,6 +122,45 @@ def _initialize_once(path: Path) -> None:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {declaration}")
 
         statements = (
+            # Private candidate evidence only. No task FK: consent ownership
+            # exists independently of scientific task-row reservation.
+            """CREATE TABLE IF NOT EXISTS docking_publications (
+                receipt_id TEXT PRIMARY KEY,
+                preparation_id TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL UNIQUE,
+                root_id TEXT NOT NULL UNIQUE,
+                owner_session_id TEXT NOT NULL,
+                runtime_generation TEXT NOT NULL,
+                model_generation TEXT NOT NULL,
+                capability_generation TEXT NOT NULL,
+                execution_token TEXT NOT NULL,
+                consent_version INTEGER NOT NULL,
+                consent_digest TEXT NOT NULL,
+                binding_digest TEXT NOT NULL,
+                completion_digest TEXT NOT NULL,
+                science_digest TEXT NOT NULL,
+                context_fingerprint TEXT NOT NULL,
+                projection_digest TEXT NOT NULL,
+                source_digest TEXT NOT NULL,
+                original_receptor_digest TEXT NOT NULL,
+                ligand_identity_digest TEXT NOT NULL,
+                input_hash TEXT NOT NULL,
+                config_hash TEXT NOT NULL,
+                tool_policy_digest TEXT NOT NULL,
+                operation_deadline_ms INTEGER NOT NULL,
+                operation_monotonic_expires REAL NOT NULL
+            )""",
+            """CREATE TABLE IF NOT EXISTS docking_publication_suppressions (
+                receipt_id TEXT PRIMARY KEY,
+                preparation_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                root_id TEXT NOT NULL,
+                owner_session_id TEXT NOT NULL,
+                runtime_generation TEXT NOT NULL,
+                consent_digest TEXT NOT NULL,
+                completion_digest TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('CANCELLED','TIMED_OUT','UNKNOWN'))
+            )""",
             """CREATE TABLE IF NOT EXISTS docking_consents (
                 preparation_id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL UNIQUE,
