@@ -1344,6 +1344,28 @@ Browser fresh QUALITY APPROVED with six independent tests (36.18 seconds),
 Both maintenance patches have passed SPEC then QUALITY and are ready to commit
 and push alongside the prior grant/read commit; remote CI remains unverified.
 
+Next bounded D4 projection slice: add `src/web/docking_result_view.py` and
+`tests/agent/test_docking_publication_projection.py`. The internal read-only
+entry accepts only the coordinator and owned root identity, requires an already
+confirmed original live publication, and reuses its existing verified observer
+and fixed grant clock. It must not start initial publication, staging, execution,
+grant renewal, database recovery or history writes. Return only the closed
+success fields specified in design section 6, including exact energy with
+`kcal/mol`, native pose count, fixed scientific limitation, source/input/config/
+tool digests and the owner-authenticated relative pose path. Recheck original
+identity after suspension; unavailable/failed/cancelled/foreign/pending access
+raises a fixed unavailable error and contains no score or link. No caller-supplied
+candidate/outcome/score/path is accepted. This is a data adapter only: wire
+`DockingView@1`, sender delivery, history and app activation remain in D6.
+RED/GREEN actual synthetic C2/session/SQLite fixtures must cover exact JSON,
+detached return values, no premature publication, foreign/clone/replacement,
+tamper, fixed expiry and transient contention; then SPEC and QUALITY review.
+The existing private `_confirmed_observation` gains an optional read-only
+cancellation mode: propagate caller cancellation while its existing retained
+observer continues to own physical I/O. Default terminal-observation behavior
+stays unchanged. Final model capture and projection construction belong inside
+the existing model reader, never outside it or nested around another reader.
+
 ## D5 — Alternate path and cleanup closure
 
 The generic-task sidecar is frozen for independent SPEC then QUALITY review:
@@ -1434,19 +1456,40 @@ do not introduce an automatic C purge or infer a new retention policy. Existing
 staging cleanup remains lease-aware; test actual consent tombstones and denied
 replay after separately authorized artifact removal in isolated fixtures.
 
+This retention gap is now closed in `src/task_runtime/retention.py`,
+`tests/test_task_retention.py` and new `tests/agent/test_docking_consent_retention.py`.
+All durable C members are skipped before path handling, including settled and
+future-state records; active reasons and non-C/default dry-run behavior remain.
+Apply holds `BEGIN IMMEDIATE` from classification through deletion/commit to
+exclude a concurrent membership writer, and never deletes consent rows. This
+manual operation may delay other SQLite writers; no automatic C cleanup or
+new retention policy was introduced. Initial fixture mistakes (direct CANCELED
+transition and reading a non-projected private field) were corrected before
+the production change: formal RED 94 failed / 60 passed in 50.09 seconds.
+Two additional ordering/concurrency REDs failed in 8.39 seconds. First GREEN
+had three incorrect expectations that artifact deletion would still allow a
+verified success read; only those expectations changed to deny while preserving
+the original terminal. Final focused GREEN: 154 passed in 48.26 seconds.
+Relevant TaskStore/staging/generic-route/C2/read-send-lease regressions:
+682 passed / 17 platform skips in 250.13 seconds. SPEC and fresh QUALITY each
+independently passed all 154 tests and four additional probes. Three-file
+compilation/diff and hashes stayed unchanged; both approved. Actual synthetic
+C2 publication/suppression records and no-replay tombstones survive explicit
+artifact cleanup. This is not real Vina or application activation evidence.
+
 **Files:** src/task_runtime/routes.py; docking_routes.py; docking_report_routes.py;
 existing retention/ownership queries. Test in test_docking_consent_artifacts.py.
 
-- [ ] RED C task IDs on generic list/get/events/cancel, legacy result/pose conversion/report/history
+- [x] RED C task IDs on generic list/get/events/cancel, legacy result/pose conversion/report/history
   delete and global history operations. Check ownership before refresh/read/delete/cancel side effects.
-- [ ] Add durable C ownership classification (not ID prefixes) and safe filtering before pagination;
+- [x] Add durable C ownership classification (not ID prefixes) and safe filtering before pagination;
   foreign C records are absent, authorized cancellation uses the C coordinator. Unavailable store
   is unavailable, never legacy fallback. Preserve non-C behavior and cross-database collision checks.
-- [ ] Enforce one sealed private C output root outside static/legacy roots across service,
+- [x] Enforce one sealed private C output root outside static/legacy roots across service,
   DockingExecution and artifact routes; never change process cwd or trust client runtime_config.
-- [ ] Protect waiting consent, staging writer, dispatch/persistence owner, process lease and reader
+- [x] Protect waiting consent, staging writer, dispatch/persistence owner, process lease and reader
   from cleanup. Retain execution tombstones after artifact removal; no nonce/task replay.
-- [ ] GREEN existing durable task/artifact, docking history/report, staging/retention regressions;
+- [x] GREEN existing durable task/artifact, docking history/report, staging/retention regressions;
   no unresolved authority issue may be deferred while enabling C. Review/commit.
 
 ## D6 — Existing homepage entry and inline controls

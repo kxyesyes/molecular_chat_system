@@ -700,3 +700,34 @@ publication target/exclude 必须存在的断言，并将精确分组数改为 9
 **44 passed / 2 platform skips / 10 existing warnings，43.31 秒**。
 SPEC 与 QUALITY 定向复审均通过，编译、diff 和凭据扫描通过。
 此修正尚待新提交的远端运行；不把较早的 failure 改写为 success。
+
+### 2026-10-16 D5 retention 保留与防重放闭合
+
+三文件：`src/task_runtime/retention.py`、`tests/test_task_retention.py`、
+新 `tests/agent/test_docking_consent_retention.py`。通用 preview/apply 在路径
+处理前识别 durable C membership，保留所有 consent/task/event/publication/
+suppression 和私有文件，包括 settled terminal；非 C 及默认 dry-run 不变。
+apply 用 `BEGIN IMMEDIATE` 保持分类到删除期间身份稳定，移除 consent DELETE。
+未引入 C 自动清理、API/schema 或新 retention 策略；整轮持写锁可能延迟其他
+SQLite 写入，明确为显式维护操作的已知风险。
+
+首轮夹具 RED **108 failed / 46 passed，50.66 秒**中，CANCELED fixture
+漏了真实 `request_cancel`，另有从公开投影读取私有字段的 KeyError；只修正
+夹具后，生产未改的正式 RED 为 **94 failed / 60 passed，50.09 秒**，另两项
+排序/并发 RED **2 failed，8.39 秒**。首次 GREEN **3 failed / 151 passed，
+51.11 秒**误期望删除制品后仍可返回经过验证的科学结果；改为应拒绝观察、保留
+原始终态与 tombstones，不修改生产观察行为。最终 **154 passed，48.26 秒**。
+
+回归 **682 passed / 17 skipped，250.13 秒**，具体选择：TaskStore、staging、
+staging_readback、generic consent routes、chat_docking_execution_context 五模块，
+加 artifact 的 `test_actual_send_lease_blocks_cleanup_until_physical_return` /
+`test_actual_read_keeps_lease_and_reader_under_repeated_cancellation`，receipt 的
+`test_one_confirmed_private_publication_and_duplicate` /
+`test_commit_then_raise_is_unknown_without_readback_retry`。
+统一 `python -B -m pytest <以上选择> -q -p no:cacheprovider --basetemp <新临时目录>/p --tb=short`。
+17 个跳过为 15 项 Windows symlink 限制、1 项打开文件替换 PermissionError、
+1 项 POSIX-only；既有 Pydantic/multipart 警告保留。
+SPEC 与 fresh QUALITY 各自独立 **154 passed**，各增加四个探针；三文件编译、
+diff/hash 一致，均批准。实际合成 C2 证明成功及抑制记录在通用清理和显式
+staging 制品删除后保持不变，重复批准不再次执行、不重建文件。未调用真实
+Vina、LLM 或清理真实资产；D6/D7 仍未完成。
