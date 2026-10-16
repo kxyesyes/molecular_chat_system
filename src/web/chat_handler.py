@@ -803,6 +803,10 @@ class ChatHandler:
                         history=history,
                     )
                     return
+            except AllocationStopped:
+                # Allocation owns the terminal. A late event/result is control
+                # flow, not a presentation failure to retry on the sealed socket.
+                return
             except Exception:
                 logger.error(
                     "Agent result processing failed; exception details omitted"
@@ -841,8 +845,16 @@ class ChatHandler:
             finally:
                 # Event delivery may fail while the executor thread still owns
                 # the model. Drain it before releasing the request lease.
-                if not agent_task.done():
-                    await finish_on_cancel(agent_task)
+                if agent_task.done():
+                    # An event send may lose the deadline race before the
+                    # settled worker was awaited. Retrieve its exception too.
+                    if not agent_task.cancelled():
+                        agent_task.exception()
+                else:
+                    try:
+                        await finish_on_cancel(agent_task)
+                    except AllocationStopped:
+                        pass  # Expected settlement after allocation expiry.
 
         # Ordinary chat/retrieval and post-tool summaries are not allocation.
         finish_allocation()

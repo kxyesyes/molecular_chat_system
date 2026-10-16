@@ -438,6 +438,102 @@ def test_tool_start_follows_checkpoint_and_dispatch_latch_without_replay_duplica
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("worker_settled", [False, True])
+async def test_expiry_at_workflow_event_drains_inner_consumer_without_failure_retry(monkeypatch, worker_settled):
+    from src.agent.runtime import allocation
+
+    now = [100.0]
+    monkeypatch.setattr(allocation, "monotonic", lambda: now[0])
+    supervisor, tool, started, release = supervisor_fixture()
+    handler, socket = handler_for(supervisor), Socket()
+    entered, resume_send, send_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    consumers, workers, retrieved_workers, failure_retries = [], [], [], []
+    send = handler._send_agent_event
+    fail = handler._finish_terminal_agent_failure
+    execute = supervisor.execute
+    execute_agent = handler._execute_agent
+
+    async def worker_boundary(*args, **kwargs):
+        task = asyncio.current_task()
+        workers.append(task)
+        exception = task.exception
+
+        def retrieve_exception():
+            retrieved_workers.append(task)
+            return exception()
+
+        monkeypatch.setattr(task, "exception", retrieve_exception)
+        return await execute_agent(*args, **kwargs)
+
+    def execute_at_event(query, *, event_callback=None, **kwargs):
+        def on_event(event):
+            event_callback(event)
+            if not started.is_set():
+                started.set()
+                assert release.wait(5), "event producer was not released"
+        return execute(query, event_callback=on_event, **kwargs)
+
+    async def event_boundary(sender, event):
+        consumers.append(asyncio.current_task())
+        entered.set()
+        await resume_send.wait()
+        try:
+            await send(sender, event)  # Real allocation socket rejects this late event.
+        finally:
+            send_finished.set()
+
+    async def failure_boundary(*args, **kwargs):
+        failure_retries.append(True)
+        return await fail(*args, **kwargs)
+
+    monkeypatch.setattr(handler, "_send_agent_event", event_boundary)
+    monkeypatch.setattr(handler, "_finish_terminal_agent_failure", failure_boundary)
+    monkeypatch.setattr(supervisor, "execute", execute_at_event)
+    monkeypatch.setattr(handler, "_execute_agent", worker_boundary)
+    request = asyncio.create_task(handler._process_message(socket, "计算 CCO 的分子性质", False, True))
+    retained = set()
+    try:
+        assert await asyncio.to_thread(started.wait, 2)
+        await asyncio.wait_for(entered.wait(), 2)
+        retained = set(handler._allocation_tasks)
+        assert retained == handler.model_request_gate._background
+        now[0] = 1000.0  # Expire only after both real worker and event consumer are blocked.
+        await asyncio.wait_for(request, 2)
+        assert [(f["type"], f.get("status")) for f in socket.frames
+                if f["type"] == "complete"] == [("complete", "timeout")]
+        before_release = list(socket.frames)
+        if worker_settled:
+            release.set()
+            _, pending = await asyncio.wait(workers, timeout=2)
+            assert not pending
+        resume_send.set()
+        await asyncio.wait_for(send_finished.wait(), 2)
+        if not worker_settled:
+            assert handler.model_request_gate._readers == 1
+            assert retained == handler._allocation_tasks
+            assert all(not task.done() for task in [*retained, *consumers])
+        assert tool.calls == 0
+        release.set()
+        # Join the shielded body itself, not just the already-returned request.
+        results = await asyncio.wait_for(asyncio.gather(*consumers, return_exceptions=True), 2)
+        await asyncio.wait_for(asyncio.gather(*retained, return_exceptions=True), 2)
+        await asyncio.wait_for(drain_allocations(handler), 2)
+        assert results == [None], "allocation control flow escaped the inner consumer"
+        assert all(task in retrieved_workers for task in workers), "worker exception was not drained"
+        assert failure_retries == [], "timeout must not be retried as presentation failure"
+        assert socket.frames == before_release
+        assert tool.calls == 0
+        assert handler.model_request_gate._readers == 0
+        assert not handler._allocation_tasks
+        assert not handler.model_request_gate._background
+    finally:
+        resume_send.set()
+        release.set()
+        await asyncio.gather(request, *consumers, *workers, *retained, return_exceptions=True)
+        await asyncio.wait_for(drain_allocations(handler), 2)
+
+
+@pytest.mark.anyio
 async def test_workflow_runtime_rejects_late_dispatch_after_slow_planning():
     supervisor, tool, started, release = supervisor_fixture(slow_planner=True)
     handler, socket = handler_for(supervisor), Socket()
@@ -449,11 +545,13 @@ async def test_workflow_runtime_rejects_late_dispatch_after_slow_planning():
         before_release = list(socket.frames)
         release.set()
         await asyncio.wait_for(request, 2)
+        await asyncio.wait_for(drain_allocations(handler), 2)
         assert tool.calls == 0
         assert socket.frames == before_release
     finally:
         release.set()
         await asyncio.gather(request, return_exceptions=True)
+        await asyncio.wait_for(drain_allocations(handler), 2)
 
 
 @pytest.mark.anyio

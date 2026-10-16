@@ -836,3 +836,43 @@ fresh QUALITY **APPROVED**：独立 **27 passed / 1 warning，81.29 秒**，四�
 真实 receiver/sender/UI。后续文本 refinement 另有未提交实现，不计入本次适配层
 验证或 D6 完成。`b663b2e7` quality #621 当次查询仍运行；static 与八个 Python
 分组 success，Agent core 尚未完成，不能提前宣称整个检查成功。
+
+### 2026-10-16 D6 适配层已推送与后续文本补充（未完成）
+
+八个适配层文件已作为 `5868a21a` 提交并推送；六个 Python 源码/测试的
+`compileall`（外部字节码目录）、显式暂存 diff 与冻结哈希复核通过。PR 仍 Draft。
+随后 `b663b2e7` quality #621 最终 **failure**：Agent core **1 failed /
+13296 passed / 2 skipped / 26836 warnings，996.54 秒**，其余八个 Python 分组和
+static success，最终 offline-quality 正确失败。失败用例
+`test_workflow_runtime_rejects_late_dispatch_after_slow_planning` 在晚到 agent event
+触发 `AllocationStopped(timeout)` 后，又尝试发送错误终态而再次抛出，异常在
+AnyIO runner 关闭时泄漏。不是 1200 秒预算超时；正在另建确定性回归修复，未以
+重跑替代。新 head 的全量结果尚待确认。
+
+文本补充协调器先观察 **15 failed / 1 warning，4.49 秒**（缺少入口）。
+初版扩展为 25 项后 **3 failed / 22 passed，33.68 秒**：两项是测试错误假定
+transport 系统消息数量，改为检查实际 user source 消息；另一项真实缺陷为
+先追加 num_modes=5 再选择输入时预览仍显示建议值 9，现沿用已固定参数且不重复 CAS。
+协调器/选择/确认/补充四模块 **177 passed / 1 warning，270.88 秒**。
+另补实际 late-model 取消、SQL CAS 丢失回执和 READY 固定输入变更测试；
+**1 failed / 4 passed / 25 deselected，16.73 秒** 后补上 READY 变更撤销边界。
+最终补充模块 **30 passed / 1 warning，52.57 秒**，编译/diff 通过，SPEC 审查中。
+这些文本只能补充数值；结构/配体 refs 仍由既有显式来源选择的服务器生产者固定，
+不能从文本建立制品权限。原 query/source/root/task/expiry/budget/issuer 不重建，
+不产生 nonce 或执行。纯文本/DTO helper 另行审查，未完成整体 D6。
+
+### 2026-10-16 Agent deadline 退出修复（独立审查通过）
+
+为 #621 的实际失败建立确定性 worker pending/settled 双时序回归，
+先观察 **1 failed / 3 warnings，3.53 秒**，失败为真实 `AllocationStopped`
+泄漏。修复仅在 agent result consumer 将该异常视为终态控制流，禁止重试
+错误帧；保留实际 worker drain 和模型 reader，已结束 worker 也收取异常。
+未延长 deadline，未改变公开 API 或放宽科学执行边界。
+
+实现者 allocation 回归 **43 passed / 395 warnings，26.57 秒**；聊天/A2
+相关回归 **565 passed / 1 skipped / 2699 warnings，130.03 秒**，跳过为本机
+directory symlink 能力限制。SPEC 独立验证 **31 passed / 107 warnings，
+12.59 秒**及 **217 passed / 10 warnings，18.91 秒**，并将两项新用例套用旧
+HEAD 确认 **2 failed，3.98 秒**。fresh QUALITY **APPROVED**，独立四模块
+**248 passed / 107 warnings，26.95 秒**；两源码内存编译与冻结哈希均通过。
+全量 CI 与最终浏览器验收仍需完成，不将这些局部结果记为整体通过。
