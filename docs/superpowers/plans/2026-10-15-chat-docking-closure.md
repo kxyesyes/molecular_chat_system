@@ -1536,7 +1536,7 @@ app 72 passed; homepage 71/71; all 44 Node files and Python compileall passed.
 Detailed RED/GREEN, review and environment limitations are in the existing validation ledger.
 These are engineering gates, not a real Vina/browser completion claim.
 
-- [ ] On the agent-owned local service only, enable C after D1–D6. Preserve other running services,
+- [x] On the agent-owned local service only, enable C after D1–D6. Preserve other running services,
   user input and unrelated assets. Confirm actual Vina and prep runtime policy/executable identity.
 - [ ] Use the normal homepage and original S03 in a new controlled conversation, then choose an
   actual returned structure and send S10 in that same conversation:

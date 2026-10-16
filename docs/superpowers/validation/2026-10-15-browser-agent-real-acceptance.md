@@ -1049,3 +1049,29 @@ Conda Python/OpenBabel 原文件有硬链接，使用字节一致、单链接的
 未放宽工具链身份规则或修改原环境。RAG 输入/index 的原字节复用副本位于
 忽略目录；没有提交运行数据或本机配置。此时没有启用服务或运行真实 Vina，
 D7 浏览器、用户亲自点击当前 READY、输出与下载核验及最终集成审查仍待完成。
+
+### D7 首次实际页面运行与 CI 静态契约补齐（2026-10-17）
+
+在 `f309c262` 启动独立、单 worker 的本机 6001 服务，启用 C，保留原生
+legacy/native/a1_closed profile 与已配置主模型。strict health **23/23**；
+工具链身份捕获通过；真实本地 RAG 索引只读加载通过。运行配置、DB 和缓存
+仍留在忽略目录/私有用户目录，没有提交密钥、会话原文或运行资产。
+
+正常首页 S03 返回人源 P06276 的 10 个真实实验结构，包括 1P0I；其结果明确
+标出 BUA/NAG 的口袋角色尚未验证。同一会话按测试用例选择实际返回的 1P0I
+发送 S10。此次准备在修订 0 结束为结果未确认：脱敏 journal 显示
+`created -> failed`、`outcome=timeout`、`request_attempts=0`、无 request ID，
+parser/completion 均 `not_started`。任务最终 `REVOKED`、cleanup `settled`、
+dispatch `not_reserved`，仅预扣一次 30000 ms proposal budget。没有 READY，
+没有点击审批、调用批准 API、执行 Vina 或生成可报告的对接结果。
+因此 **S10 仍未通过**。随后独立重提在页面出现断线，尚无新成功证据；
+反向寻靶后台预热仍在运行，超时/断线原因尚未确定，不能据此归因或扩大预算。
+
+当前 head CI run `38938453993` 的九个其它质量分片通过；root 分片
+**1 failed / 5785 passed / 106 skipped**，唯一失败是旧主页脚本顺序期望
+漏列 D6 已加入的两个模块。父代理本机原样复现该断言失败：**1 failed**，
+然后仅在 `tests/test_static_placeholder_cleanup.py` 的有序期望中补入
+`docking_source_selection.js`、`docking_consent.js`（均在 main.js 前）；
+不移除顺序、资源 URL、隔离/清理或网络封锁断言。该文件全量重跑
+**7 passed / 1 warning (21.55s)**。此项是测试清单同步，不改变生产行为；
+新的 CI、完整本机离线运行和独立集成审查尚待结束。
