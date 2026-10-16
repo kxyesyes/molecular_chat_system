@@ -558,3 +558,83 @@ await 前登记启动事实，完成回调只对原始、从未启动、已取�
 **2 passed，18.23 秒**，七项已启动 reader/commit/suppression/成功状态控制
 **7 passed，36.32 秒**。五文件修复后冻结哈希一致，编译和 diff 检查通过。
 P2 已关闭，本切片审查通过；没有以定向复审冒称新全仓或真实科学验收。
+
+### 2026-10-16 receipt/latch 已推送版本远端 CI（b5aca248）
+
+GitHub Actions `quality` **38900024699 / #618** 的八个 Python 分组、
+static-quality 与最终 offline-quality 全部 success。实际 job 日志结果：
+
+| 分组 | passed | skipped | warnings | pytest 用时 |
+|---|---:|---:|---:|---:|
+| root | 5594 | 106 | 12 | 382.81 s |
+| root-activity | 1959 | 6 | 6076 | 656.94 s |
+| task-runtime | 2314 | 12 | 1 | 497.92 s |
+| sandbox-core | 1977 | 4 | 1 | 37.63 s |
+| sandbox-api | 153 | 0 | 0 | 3.80 s |
+| agent | 13297 | 2 | 26836 | 995.31 s |
+| agent-web-lifecycle | 225 | 0 | 7311 | 146.32 s |
+| agent-docking | 1509 | 0 | 9 | 932.65 s |
+
+合计 **27028 passed / 130 skipped / 40246 warnings**，包含最终 receipt
+模块新增的 60 项；全部保留原截止点。跳过和警告不是通过用例，也没有称为
+零警告。静态 Python 编译、Node 契约和 tracked non-document 凭据扫描通过。
+这是 b5aca248 的远端离线证据，不覆盖随后进行中的 grant/read 代码，不代表
+S10、真实 Vina、公开成功卡片或完整 D1–D7 已通过。PR 仍保持 Draft，未合并。
+
+### 2026-10-16 D4 grant/read 冻结候选（独立审查中）
+
+四文件：`src/web/docking_publication.py`、新 `src/web/docking_artifacts.py`、
+`src/web/routes/docking_consent_routes.py`、新
+`tests/agent/test_docking_publication_artifacts.py`。只在原 live publication
+成功 latch 捕获固定双时钟，创建同 generation、最长 24 小时的私有 pose grant；
+初次 publication 仍受原始 420 秒限制。GET 不创建/续期 grant，不恢复数据库
+成功；实际来源、manifest、completion 与返回 bytes 每次核验。读取租约保留至
+实际 ASGI 发送和释放完成；慢发送不持有模型 reader，释放异常保留 unresolved。
+
+工作者 TDD 首轮 **3 failed**，另有 **14 个边界失败**先复现再修复，涉及克隆
+身份、原始截止点、取消/排队、租约竞争、畸形 query 与失效观察。最终结果：
+
+| 测试 | passed | skipped | 用时 |
+|---|---:|---:|---:|
+| `test_docking_publication_artifacts.py` | 63 | 1 | 361.70 s |
+| `test_docking_publication_receipt.py` | 60 | 0 | 363.15 s |
+| `test_docking_publication_candidate.py` | 89 | 0 | 441.80 s |
+| 既有 HTTP 与 readback 六文件 | 181 | 12 | 209.26 s |
+
+六文件为 `test_web_docking_http.py`、`test_web_docking_approval_http.py`、
+`test_web_docking_control_http.py`、`test_web_docking_http_envelope.py`、
+`test_completion_artifact_readback.py` 与 `test_staging_readback.py`。
+合计 **393 passed / 13 skipped**；跳过是 Windows symlink/reparse 权限限制，
+hardlink 负例通过。既有 Pydantic/multipart 警告保留。全部使用统一
+`python -B -m pytest <上述文件> -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short`。
+四文件 compileall、diff/空白和冻结 hash 检查通过。
+
+父级另外运行既有 `tests/task_runtime/test_docking_consent_generic_routes.py`、
+`tests/test_docking_consent_legacy_routes.py`、`tests/test_task_retention.py`：
+**285 passed / 1 skipped / 2 warnings，62.19 秒**。这证明现有隔离回归未坏，
+不证明尚未补测试的通用 retention 删除 consent 缺口已解决。所有本段科学结果
+均为合成 C2 夹具；未运行真实 Vina、浏览器、服务激活或自动清理。独立 SPEC
+与 QUALITY 尚待完成，冻结候选尚未提交。
+独立 SPEC 随后 PASS：19 项聚焦通过、1 项 symlink 跳过，加 4 个实际
+C2/SQLite/ASGI 独立案例。一个外部测试最初误期望 401，按既有中间件的新
+session/404 行为修正后单例通过；生产代码未因此修改。
+fresh QUALITY 的 12 项聚焦和发送失败控制通过，但连续两次复现 P2：真实
+SQLite 写事务未改任何数据，仅锁竞争超时，就被 blanket exception handler
+误记为 sticky evidence invalidation；回滚后原有效 GET 永久 404。两次 HTTP
+反馈约 5.016/5.000 秒，实际 lease/model reader 已释放，故并非所有权泄漏。
+正在补真实数据库锁回归与最小异常分类修复，当前尚未批准或提交。
+正式 RED：真实 Task/Agent DB × GET/重复观察 **4 failed / 4 passed，
+67.67 秒**；错误分类及即时锁异常 **18 failed，24.23 秒**。最小修复仅将
+SQLite BUSY/LOCKED 视为本次请求不可用（Python 3.10 使用精确标准错误文本，
+有原生错误码时校验 primary code）；其他数据库/证据异常继续 sticky。没有
+新增重试、预算或池，没有改变首次 publication 的 UNKNOWN/取消规则。
+GREEN **26 passed，92.07 秒**，已有有界控制 **31 passed，178.40 秒**，原
+外部 QUALITY 两个探针 **2 passed，29.55 秒**。编译/diff 检查通过，没有
+重跑全部 393 项。原 SPEC 定向复审 **23 passed，80.23 秒**，其中独立探针
+确认首次 publication 提交后 BUSY 仍 UNKNOWN、无 grant/重试/恢复。四文件
+修复后 hash 未变；原 QUALITY 复审待完成。
+原 QUALITY 复审 APPROVED：未修改的两个独立探针 **2 passed，27.44 秒**，
+实际锁超时 **5.000 秒**后 `access_disabled=False`，回滚后 GET 200；另有
+**20 passed，34.27 秒**覆盖分类、非 busy 负例、首次 publication 截止点和
+release failure。四文件编译、修复后冻结 hash 均通过，P2 已关闭。此批准仅
+覆盖 grant/read，不代表 D5 清理隔离、公开科学结果 UI 或 S10 已完成。

@@ -294,6 +294,26 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
             raise HTTPException(503, "Preparation unavailable")
         return owner
 
+    @app.get('/api/agent/docking/tasks/{task_id}/artifacts/{artifact_id}')
+    async def artifact(task_id: str, artifact_id: str, request: Request):
+        from src.web.docking_artifacts import docking_artifact_response
+        deadline = request_deadline(request, _CONTROL_SECONDS)
+        owner = authenticate(request)  # Downloads require the same origin too.
+        if request.scope.get('query_string'):
+            raise HTTPException(422, 'Invalid request')
+        _empty_headers(request)
+        if request.headers.getlist('range'):
+            raise HTTPException(416, 'Range not supported')
+        # Validate live identity/grant before any body or file read; constructing
+        # the response does not acquire physical ownership.
+        response = docking_artifact_response(coordinator, task_runtime=task_runtime,
+            task_id=task_id, artifact_id=artifact_id, owner_session_id=owner, scope=request.scope)
+        transport = _ControlTransport(coordinator)
+        body = transport.retain(object(), lambda: _empty_body(request, deadline))
+        await transport.wait(body, deadline, body=True)
+        check_feedback(request)
+        return response
+
     @app.get('/api/agent/docking/tasks/{task_id}')
     async def status(task_id: str, request: Request):
         deadline = request_deadline(request, _CONTROL_SECONDS)

@@ -1,4 +1,4 @@
-"""D4 private capture and live publication latch; no grants, routes or recovery.
+"""D4 private capture, live publication latch and same-generation pose grant.
 
 A candidate is a private observation of an original settled C2 operation. Even
 a genuine candidate is NOT success/download authority: future publication must
@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 import math
+import sqlite3
 from uuid import uuid4
 
 from src.task_runtime.completion import DockingCompletionStore
@@ -39,6 +40,22 @@ class DockingPublicationUnavailable(ValueError):
 
 def _deny():
     raise DockingPublicationUnavailable()
+
+
+def _sqlite_contention(exc):
+    """Only BUSY/LOCKED are request unavailability, never invalid evidence.
+
+    Python 3.10 lacks sqlite_errorcode; accept only SQLite's exact canonical
+    messages there. On newer Python prefer the primary byte of extended codes.
+    Do not infer contention from substrings, causes, or non-SQLite exceptions.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, 'sqlite_errorcode', None)
+    if code is not None:
+        return type(code) is int and code >= 0 and (code & 0xff) in (5, 6)
+    return len(exc.args) == 1 and exc.args[0] in (
+        'database is locked', 'database table is locked', 'database schema is locked')
 
 
 def _digest(value):
@@ -115,7 +132,7 @@ def _settled_owner(context):
             _deny()
 
 
-def _local(context, *, capture_model=False):
+def _local(context, *, capture_model=False, _grant=None):
     """Publication clock: original claim budget, NEVER raw/unused-consent TTL."""
     _settled_owner(context)
     coordinator, root = context._coordinator, context._root
@@ -161,13 +178,16 @@ def _local(context, *, capture_model=False):
     limits = context.claimed_execution_limits(operation)
     if any(operation.row[key] != value for key, value in limits.items()):
         _deny()
-    remaining = []
-    for wall, mono in ((coordinator._wall(), coordinator._mono()),
-                       (runtime._consent_wall_time_ms(), runtime._consent_monotonic())):
-        validate_clocks(wall, mono)
-        remaining.extend((limits['operation_deadline_ms'] - wall,
-                          (limits['operation_monotonic_expires'] - mono) * 1000))
-    left = min(remaining)
+    if _grant is not None:
+        left = _grant_remaining(context, _grant)
+    else:
+        remaining = []
+        for wall, mono in ((coordinator._wall(), coordinator._mono()),
+                           (runtime._consent_wall_time_ms(), runtime._consent_monotonic())):
+            validate_clocks(wall, mono)
+            remaining.extend((limits['operation_deadline_ms'] - wall,
+                              (limits['operation_monotonic_expires'] - mono) * 1000))
+        left = min(remaining)
     if not math.isfinite(left) or left < 1:
         _deny()
     if capture_model:
@@ -182,10 +202,10 @@ def _local(context, *, capture_model=False):
     return int(left)
 
 
-def _source(context):
+def _source(context, *, _grant=None):
     """Existing Agent-first source pattern, without the raw execution clock."""
     coordinator, root = context._coordinator, context._root
-    _local(context, capture_model=True)
+    _local(context, capture_model=True, _grant=_grant)
     digest = hashlib.sha256(root.structure_context_json.encode('utf-8')).hexdigest()
     if json.loads(root.claim.binding_json).get('structure_context_digest') != digest:
         _deny()
@@ -238,16 +258,16 @@ def _receipt(context):
     return row, binding
 
 
-def _capture_guarded(context):
+def _capture_guarded(context, *, _grant=None):
     coordinator, root, runtime = context._coordinator, context._root, context._runtime
-    remaining = _local(context, capture_model=True)
+    remaining = _local(context, capture_model=True, _grant=_grant)
     # Both databases are reserved Agent-first, as in the existing source guard.
     # No SQL mutation and no locks acquired in reverse order.
     with coordinator._state._lock, closing(coordinator._state._connect()) as guard, guard:
         guard.execute('ATTACH DATABASE ? AS docking_publication_read', (str(coordinator._tasks.db_path),))
         guard.execute('PRAGMA busy_timeout=' + str(min(5000, remaining)))
         guard.execute('BEGIN IMMEDIATE')
-        _source(context)
+        _source(context, _grant=_grant)
         row, binding = _receipt(context)
         runtime._require_consent_output()
         output = context._publication_output[0]
@@ -286,7 +306,7 @@ def _capture_guarded(context):
                 or _digest(output.completions.load_verified(root.task_id, **hashes).to_dict()) != completion_digest
                 or output.completions.has_invalidation_marker(root.task_id)):
             _deny()
-        _source(context)
+        _source(context, _grant=_grant)
         if _receipt(context)[0] != row:
             _deny()
         runtime._require_consent_output()
@@ -299,12 +319,17 @@ def _capture_guarded(context):
             original_receptor_digest=_digest(root.receptor_descriptor),
             ligand_identity_digest=_digest(root.ligand_descriptor),
             projection_digest=_digest(root.projected['projection']))
-        return DockingPublicationCandidate(projection, completion_digest, context._digest.hex(),
+        candidate = DockingPublicationCandidate(projection, completion_digest, context._digest.hex(),
             row['version'], row['binding_digest'], row['runtime_generation'],
             root.current['model_generation'], root.current['capability_generation'],
             row['operation_deadline_ms'], row['operation_monotonic_expires'],
             (coordinator, root, context, runtime, context._execution, *context._publication_output),
             canonical_json(row))
+        if _grant is not None:
+            if candidate != _grant._origin[2]:
+                _deny()
+            return pose['content']
+        return candidate
 
 
 async def capture_docking_publication_candidate(coordinator, *, root_id, owner_session_id):
@@ -360,6 +385,9 @@ class _Publication:
     reconciliation: str = 'not_needed'
     observation: object = None
     access_disabled: bool = False
+    grant: object = None
+    _latch: tuple | None = field(default=None, init=False, repr=False)
+    snapshots: set = field(default_factory=set, repr=False)
     _origin: tuple = field(init=False, repr=False)
 
     def __post_init__(self):
@@ -403,6 +431,53 @@ class _Publication:
             if root.issuer is not None:
                 root.issuer.close()
         return self.outcome
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class _PoseGrant:
+    """Private immutable latch witness, never serialized or recovered from SQL."""
+    owner: str
+    task_id: str
+    completion_digest: str
+    runtime_generation: str
+    clocks: tuple
+    _origin: tuple
+    artifact_id: str = field(default='pose', init=False)
+    _self: object = field(init=False, repr=False)
+
+    def __post_init__(self):
+        object.__setattr__(self, '_self', self)
+
+
+def _grant_remaining(context, grant):
+    state = context._root.publication
+    if (type(grant) is not _PoseGrant or grant._self is not grant
+            or type(state) is not _Publication or state.grant is not grant
+            or state.access_disabled or not state.acknowledged
+            or state.context is not context or state._origin[4] is not state
+            or any(a is not b for a, b in zip(state._origin[:3],
+                   (context._root, context, context._coordinator)))
+            or any(a is not b for a, b in zip(grant._origin,
+                   (state, state.outcome, state.candidate, context)))
+            or type(state._latch) is not tuple or len(state._latch) != 4
+            or any(a is not b for a, b in zip(state._latch,
+                   (state, state.outcome, state.candidate, grant)))
+            or state.outcome is None or state.outcome.status != 'SUCCEEDED'
+            or grant.owner != context._root.owner or grant.task_id != context._root.task_id
+            or grant.completion_digest != state.candidate.completion_digest
+            or grant.runtime_generation != context._runtime._docking_consent_policy.runtime_generation):
+        _deny()
+    coordinator, runtime = context._coordinator, context._runtime
+    remaining = []
+    for (wall, mono), (start_wall, start_mono) in zip(
+            ((coordinator._wall(), coordinator._mono()),
+             (runtime._consent_wall_time_ms(), runtime._consent_monotonic())), grant.clocks):
+        validate_clocks(wall, mono)
+        remaining.extend((start_wall + 86_400_000 - wall, (start_mono + 86_400 - mono) * 1000))
+    left = min(remaining)
+    if not math.isfinite(left) or left < 1:
+        _deny()
+    return left
 
 
 def _publication_record(state, candidate):
@@ -481,7 +556,21 @@ async def _run_publication(state):
             _publication_live(state)
             # No await from the final original-identity/clock check through the
             # one-terminal decision. Persisted science is never this latch.
-            state.outcome = DockingPublicationOutcome('SUCCEEDED', 'publication_confirmed', fresh.projection)
+            runtime = context._runtime
+            clocks = ((coordinator._wall(), coordinator._mono()),
+                      (runtime._consent_wall_time_ms(), runtime._consent_monotonic()))
+            for wall, mono in clocks:
+                validate_clocks(wall, mono)
+                if min(fresh.operation_deadline_ms - wall,
+                       (fresh.operation_monotonic_expires - mono) * 1000) < 1:
+                    _deny()
+            if asyncio.get_running_loop().time() >= state.feedback_deadline:
+                _deny()
+            outcome = DockingPublicationOutcome('SUCCEEDED', 'publication_confirmed', fresh.projection)
+            grant = _PoseGrant(root.owner, root.task_id, fresh.completion_digest,
+                fresh.runtime_generation, clocks, (state, outcome, candidate, context))
+            state.outcome, state.grant = outcome, grant
+            state._latch = (state, outcome, candidate, grant)
             root.phase, root.reason = state.outcome.status, state.outcome.reason_code
     except asyncio.CancelledError:
         state.suppress('cancelled')
@@ -509,14 +598,13 @@ async def _observe_published(state):
     """One retained reader per original root; invalidation never unseals success."""
     root, context, coordinator, _, _ = state._origin
     try:
-        fresh = await capture_docking_publication_candidate(coordinator,
-            root_id=root.root_id, owner_session_id=root.owner)
-        if (root.publication is not state or state.context is not context
-                or state.access_disabled or fresh != state.candidate):
-            _deny()
+        async with coordinator._gate.request():
+            await coordinator._sql(_capture_guarded, context=context, _grant=state.grant)
+            _local(context, capture_model=True, _grant=state.grant)
         return state.outcome
-    except (Exception, asyncio.CancelledError):
-        state.access_disabled = True
+    except (Exception, asyncio.CancelledError) as exc:
+        if not _sqlite_contention(exc):
+            state.access_disabled = True
         raise
 
 
@@ -524,6 +612,11 @@ async def _confirmed_observation(state):
     root, _, coordinator, _, _ = state._origin
     if state.access_disabled:
         _deny()
+    try:
+        _grant_remaining(state.context, state.grant)
+    except Exception:
+        state.access_disabled = True
+        raise
     if not state.task.done():
         # The initial owner has just won the synchronous latch and is exiting
         # its reader. Do not replace its task during physical lease release.

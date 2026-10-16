@@ -1200,6 +1200,43 @@ seven started-reader/commit/suppression/success controls **7 passed in 36.32
 seconds**. Five repaired hashes, compilation and diff checks remained unchanged.
 The P2 is closed; no full-suite rerun is implied by this bounded re-review.
 
+The next D4 grant/read integration changes `src/web/docking_publication.py`,
+creates `src/web/docking_artifacts.py`, extends the existing opt-in
+`src/web/routes/docking_consent_routes.py`, and adds
+`tests/agent/test_docking_publication_artifacts.py`. Production app activation
+and the final UI remain separate. Initially expose only the required verified
+`pose`; unsupported additional-artifact IDs remain unavailable.
+
+- [x] Capture publication wall/monotonic timestamps in the successful live latch
+  decision. Bind a private immutable pose grant to the original owner, task,
+  completion digest, artifact ID and runtime generation. Expire at 24 hours from
+  that decision, never from first/repeated access or a refreshed session. No
+  bearer download secret or reconstruction from persisted candidate rows.
+- [x] Preserve the original operation deadline for first publication/candidate
+  capture. Post-publication verification uses only the exact active grant's
+  clock, not a caller-supplied expired-clock bypass. Recheck original source,
+  input/config/completion/pose and live authority on each read; an observed
+  invalidation disables access without rewriting confirmed scientific terminal.
+- [x] Add an owner-authenticated opt-in GET
+  `/api/agent/docking/tasks/{task_id}/artifacts/{artifact_id}` under the existing
+  same-origin/session and whole-request HTTP envelope. Reject foreign/missing,
+  query/body/path/range deviations before reads. Do not start publication,
+  computation, grant refresh or recovery in GET. Return fixed attachment headers
+  and verified immutable bytes, never a path-based FileResponse or redirect.
+- [x] Retain a bounded snapshot owner and existing staging task lease from before
+  actual file verification through physical ASGI send/disconnect/finally. Acquire
+  lazily inside the owned response lifetime; repeated cancellation or logical
+  HTTP timeout cannot release a still-running reader/send. Close once, retaining
+  truthful unresolved state if release fails. Reuse existing runtime/gate/HTTP
+  ownership; no new executor pool, receiver or scheduler.
+- [x] RED/GREEN actual HTTP/session/SQLite synthetic-C2 integration: no grant
+  before confirmed publication; exact bytes/hash; wrong owner; restart/generation;
+  24-hour equality and non-sliding reads; access after 420 seconds but before
+  grant expiry; tampered completion/pose, link/reparse/hardlink; reader and send
+  barriers, queued cancellation and disconnect; existing cleanup cannot remove a
+  leased task. Keep platform skips explicit. Run affected receipt/candidate/HTTP
+  and byte-readback regressions, compilation and SPEC then QUALITY before commit.
+
 - [x] RED physical send catches CancelledError and remains behind a barrier: the single 5-second
   logical gate becomes undeliverable without waiting for it; owner/lock remains registered and no
   successful terminal/history/grant is published later. Release every test barrier in finally.
@@ -1219,6 +1256,56 @@ The P2 is closed; no full-suite rerun is implied by this bounded re-review.
   FileResponse. Readers remain owned through disconnect and retention coordination.
 - [ ] GREEN tampered/foreign/expired/replaced files, symlink/reparse/hardlink, forged completion,
   bool/NaN energy, reader disconnect, late send/grant and repeat terminal cases; review/commit.
+
+Grant/read implementation is now frozen for independent SPEC review. Worker
+TDD recorded three missing-entry/route failures and 14 additional boundary
+failures (clone/latch identity, queued cancellation, reader contention, original
+publication deadline, sticky invalidation and malformed query). The final new
+artifact suite passed **63 tests / 1 Windows symlink skip in 361.70 seconds**;
+receipt **60 passed in 363.15 seconds**; candidate **89 passed in 441.80
+seconds**. Four existing Web HTTP suites plus completion/staging readback passed
+**181 tests / 12 Windows link/reparse skips in 209.26 seconds**. Aggregate:
+**393 passed / 13 skipped**, with existing Pydantic/multipart warnings. Actual
+staging cleanup was blocked during retained read/send and became possible only
+after physical release. Four-file compilation/diff/frozen hashes passed. These
+are synthetic C2/SQLite/session tests, not live Vina or public UI activation.
+Independent SPEC PASS: **19 passed / 1 symlink skip / 44 deselected**, plus four
+distinct independent actual-C2/SQLite/ASGI cases covering session isolation,
+read-only GET, sticky SQL invalidation and cancellation-resistant body send with
+cleanup blocking and one release. One external probe initially expected 401
+instead of the existing middleware's new-session/404 response; only that probe
+was corrected and rerun successfully. No production defect was found. Four
+frozen hashes and compileall passed. Fresh QUALITY review remains required.
+Fresh QUALITY reproduced a P2 twice: a real SQLite `BEGIN IMMEDIATE` writer
+making no changes causes the five-second artifact read to raise `database is
+locked`; blanket exception handlers permanently revoke the otherwise unchanged
+grant. After rollback, the next GET returns 404. Physical ownership did drain
+correctly; 12 other focused controls and the send-failure probe passed. The
+bounded repair must distinguish actual SQLite BUSY/LOCKED from observed evidence
+invalidation across enclosing handlers, preserve all original budgets and first
+publication uncertainty rules, and pass original-reviewer rechecks. No approval
+or commit is claimed while this finding is open.
+Formal repair RED used actual Task/Agent SQLite writer locks: **4 failed /
+4 passed in 67.67 seconds**, plus **18 helper/immediate-contention failures in
+24.23 seconds**. The helper recognizes only SQLite BUSY/LOCKED (primary native
+code when available; exact canonical messages on supported Python 3.10).
+Transient read failure rejects that request without revoking the grant; actual
+evidence or other database failures remain sticky. Initial publication deadlines
+and uncertainty handling are unchanged. GREEN: **26 passed in 92.07 seconds**;
+31 existing cancellation/lease/sticky/deadline/duplicate controls passed in
+178.40 seconds; the unchanged external QUALITY probes **2 passed in 29.55
+seconds**. Four-file compilation/diff checks passed. These 59 checks are bounded
+repair evidence, not a rerun of all 393 prior tests. Independent re-review is
+still pending.
+Original SPEC bounded re-review PASS: **23 passed in 80.23 seconds**, including
+actual locks in both databases and an independent first-publication
+committed-then-BUSY control that remains UNKNOWN without a grant. Original
+QUALITY re-review APPROVED: its unchanged independent probes **2 passed in
+27.44 seconds**; the actual contention timeout was 5.000 seconds, access stayed
+enabled and the next GET returned 200 after rollback. Twenty classification,
+non-busy, first-deadline and release-failure controls passed in 34.27 seconds.
+Four-file compilation and repaired frozen hashes passed. The P2 is closed.
+This approves only grant/read integration, not public science UI or D5 retention.
 
 ## D5 — Alternate path and cleanup closure
 
@@ -1297,6 +1384,18 @@ control. Fresh QUALITY APPROVED: 46 tests in 10.95 seconds, all 14 C4a tests in
 probes; all four hashes stayed unchanged. These are synthetic boundary tests,
 not real Vina execution, retention,
 artifact-grant or UI acceptance evidence.
+
+Remaining retention inspection found an explicit generic purge still deletes
+settled `docking_consents` rows along with old terminal tasks, without the C
+reader lease. Its current path validation can incidentally block real absolute
+manifest paths, but that is not durable C isolation or a tombstone guarantee.
+After the grant/read review, close this bounded gap in
+`src/task_runtime/retention.py` and its tests: generic preview/apply must preserve
+all durably classified C tasks/consents/publication evidence and private files,
+including terminal settled C records. Keep non-C behavior and dry-run defaults;
+do not introduce an automatic C purge or infer a new retention policy. Existing
+staging cleanup remains lease-aware; test actual consent tombstones and denied
+replay after separately authorized artifact removal in isolated fixtures.
 
 **Files:** src/task_runtime/routes.py; docking_routes.py; docking_report_routes.py;
 existing retention/ownership queries. Test in test_docking_consent_artifacts.py.
