@@ -225,6 +225,19 @@ required. All source providers in these integration tests are synthetic, even
 when the actual child/compiler/inspection and SQLite lifecycle execute; they
 are not a current browser source selection or a real S10 result.
 
+Independent source SPEC then reproduced four draft-revocation races during the
+source read, despite 135 passing scoped tests. Four exact new regressions failed
+RED. The repair uses one short retained, read-only `BEGIN IMMEDIATE` guard with
+the agent database as main and TaskStore attached, excluding writers in both
+databases during the existing resolver/draft/root reads. It writes no rows and
+is not a cross-database publication transaction. Locks are released before any
+child or human wait; a contended/uncertain read remains unavailable. Tests cover
+both directions of invalidation, exclusion/release of both writers, and actual
+child dispatch outside the guard. The repaired parent suite passed **140 tests
+in 70.63 seconds** (35 source, 105 initial). SPEC rereview and fresh QUALITY are
+still required. Later C1 code must not nest this guard inside a reverse-order
+TaskStore write transaction.
+
 The D2-to-C1 bridge uses narrow changes in `src/task_runtime/store.py` and
 `runtime.py`, covered by
 `tests/task_runtime/test_chat_docking_staging.py`. Before file staging the
@@ -248,6 +261,18 @@ capability or scientific authority. No caller callback or arbitrary locator is
 accepted. C1 must subsequently run explicit projection verification on these
 actual readback bytes before READY while retaining all preparation ownership;
 the byte-read helper alone does not implement that gate.
+
+Readback helper implementation is frozen for review: 82 missing-method RED
+failures (four platform skips) became **78 passed / 8 skipped**. Independent
+SPEC repeated that baseline RED and current GREEN, passed **390 tests / 21
+platform skips** across readback and related staging/execution regressions, and
+118 additional tamper/boundary probes. Symlink privilege skips are not claimed
+passed. Existing resolver equality semantics were preserved; this helper does
+not add a strict-native-locator guarantee. Fresh independent QUALITY APPROVED:
+baseline **82 failed / 4 skipped** for the absent method, current readback/staging
+**253 passed / 16 skipped**, plus **42 independent probes**. Both frozen hashes
+remained unchanged. Platform skips are not passes. This remains only the byte
+readback helper; it is not the subsequent C1 projection-verification gate.
 
 The request module also owns a bounded, conservative whole-text assessment
 (`assess_docking_request_text`). It consumes one explicit docking imperative,
