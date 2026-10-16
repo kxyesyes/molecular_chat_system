@@ -677,7 +677,10 @@ changing production semantics: existing middleware emits `private, no-store`,
 and HTTPX seed cookies need the same host domain as the middleware's cookie.
 The joint session regression passed **189 tests / 2 skips in 45.42 seconds**;
 independent SPEC PASS reran **10 tests in 40.56 seconds** and 27 additional
-parser-boundary probes with unchanged two-file hashes. Fresh QUALITY is pending. No app
+parser-boundary probes with unchanged two-file hashes. Fresh QUALITY APPROVED:
+10 tests in 40.86 seconds, 58 parser/framing/stream checks and 25 additional
+authorization/dependency/status mapping checks (stub responses for mapping),
+with unchanged two-file hashes. No app
 wiring, approval/cancel/status/artifact HTTP or UI activation is claimed here.
 
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
