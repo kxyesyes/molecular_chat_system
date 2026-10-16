@@ -1194,3 +1194,11 @@ CI 单次失败 job 重跑仍失败：同一个 manifest 用例 0.38387 秒超�
 时同步加载 CA 是候选开销，但本机无网络插桩未复现，不能宣称原因已确定。
 既有 WSL 不可用，Windows Python 无 AF_UNIX；未安装环境或把 skip 当成功。
 下一次仅增强失败用例的分段耗时证据，保留时限与所有断言，不改生产逻辑。
+
+失败用例插桩限定在 `tests/sandbox_broker/test_worker_runner.py` 的 manifest
+参数：记录 monotonic、线程 CPU/ID、GC、transport/client/SSL、response/read
+与 cancel 边界；仅超出原 0.3 秒断言时输出一行固定前缀 JSON，不含 payload
+或异常原文。局部 monkeypatch 与 finally 移除 GC 回调，不替换真实时钟/I/O，
+不改阈值、断言或生产文件。实现者语法和三个隔离插桩检查通过；SPEC 和
+fresh QUALITY 均只读批准冻结文件，未重复运行通过模块。POSIX 行为仍待 CI，
+此提交是诊断证据增强，不是该失败的修复或通过声明。
