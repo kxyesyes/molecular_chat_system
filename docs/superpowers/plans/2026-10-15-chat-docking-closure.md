@@ -297,12 +297,35 @@ identity and integer-boundary probes. Reviewed file hashes remained unchanged.
 Parent joint verification with artifact readback: **194 passed / 4 skipped**.
 This approval excludes coordinator integration and physical-settlement handling.
 
-Next integration regressions are present but intentionally RED pending those
-reviews: `tests/agent/test_web_docking_parameters.py` has **14 missing-method
-failures** for explicit numeric confirmation, bound references/revision and no
-expiry/budget reset; `tests/agent/test_web_docking_close.py` has **4 failures** for
-actual waiting-draft revocation, invalidation cleanup, retained SQL cancellation
-and uncertain receipts. These files are not evidence of passing integration.
+Parameter confirmation integration is now under QUALITY review:
+`tests/agent/test_web_docking_parameters.py` expanded the original 14 cases to
+**18 missing-method failures in 6.05 seconds**, then **18 passed in 81.04 seconds**.
+`confirm_parameters` captures closed native numeric values before suspension,
+binds current references/revision, checks verified pocket or original explicit
+values, and fills only pending slots through the existing CAS. Duplicates reuse
+the accepted state; changed fixed parameters require a new request. It rechecks
+source authority after final preview encoding and never stages or issues a nonce.
+Parent joint regression passed **183 tests in 267.46 seconds**. SPEC reproduced
+two boundary defects: a stale changed confirmation could close the newer root,
+and signed zero produced a different duplicate key. Added two actual RED cases
+(after correcting an ambiguous test query), restricted the old-revision exception
+to identical retries and normalized signed zero. The revised **20 tests passed in
+127.22 seconds**. SPEC re-review PASS: four independent revision/all-fixed/duplicate
+probes plus native-capture checks; prior eight receipt/invalidation probes stand.
+QUALITY reproduced integer rounding above 2**53 in the float-based duplicate
+normalizer. Two actual-source/coordinator regressions failed in 11.02 seconds;
+normalization now preserves native integers and maps only exactly integral
+floats to integers (including signed zero). The revised **22 tests passed in
+114.93 seconds**. QUALITY re-review APPROVED: two independent SQLite numeric
+regressions, 20 preservation probes and 400 canonical-key comparisons passed;
+prior 11 cancellation/race/invalidation checks stand. Frozen hashes and two-file
+compilation/diff checks passed. No preparation/HTTP/real-science claim is made.
+
+`tests/agent/test_web_docking_close.py` is still intentionally RED: the original
+4 failures expanded to **7 failures in 18.22 seconds** for actual waiting-draft
+revocation, invalidation cleanup, retained SQL cancellation, duplicate close,
+uncertain initial/close receipts and physical source cleanup. These failures are
+not evidence of passing close integration.
 Close must never free owner capacity while a physical preparation child remains
 unsettled; lack of a confirmed close receipt is not settled cleanup.
 
@@ -341,6 +364,28 @@ baseline **82 failed / 4 skipped** for the absent method, current readback/stagi
 **253 passed / 16 skipped**, plus **42 independent probes**. Both frozen hashes
 remained unchanged. Platform skips are not passes. This remains only the byte
 readback helper; it is not the subsequent C1 projection-verification gate.
+
+The next integration gate has an observed negative baseline:
+`tests/task_runtime/test_chat_docking_projection_gate.py` currently has **one
+failure in 4.67 seconds** because self-consistent fixed chat metadata, without a
+live verified source owner, can still reach the lower C1 READY path. This is an
+unimplemented gate, not an approved source-authentication path. The application
+feature remains disabled. The runtime bridge must require the live coordinator's
+one-use input context and verify actual staged projection bytes before READY;
+the legacy non-chat C1 contract remains separate.
+
+Integration constraints for that remaining gate: use a concrete server-only,
+one-use context bound to the exact live root, locally accepted confirmation and
+private producer outputs, not a client dictionary/hash or a callback returning
+`True`. Validate actual staged receptor/ligand bytes; run the existing retained
+`projection_verify` child on the staged receptor and compare the exact modeled
+ligand bytes. Attach its physical owner before dispatch and keep it through
+uncertain/late cleanup. All work fits the smaller of C1's 30-second deadline and
+the root's remaining original budget. Final live-source/seal coordination must
+use Agent DB before TaskStore lock ordering, never call the two-database source
+read guard from inside a TaskStore write transaction, and never hold a database
+or model-reader lease across child work or human waiting. READY starts its own
+existing consent TTL; upstream work expiry must not shorten that approval period.
 
 The request module also owns a bounded, conservative whole-text assessment
 (`assess_docking_request_text`). It consumes one explicit docking imperative,
@@ -618,6 +663,23 @@ in 22.98 seconds**. This approval covers byte readback only, not D4 authorizatio
   bool/NaN energy, reader disconnect, late send/grant and repeat terminal cases; review/commit.
 
 ## D5 — Alternate path and cleanup closure
+
+The generic-task sidecar is frozen for independent SPEC then QUALITY review:
+`src/task_runtime/store.py` adds durable C membership and optional pre-pagination
+filtering; `src/task_runtime/routes.py` denies C list/get/events/cancel through
+either known database before generic control. No task-ID prefix, owner, state or
+task-row presence substitutes for consent membership. Missing/broken configured
+storage is unavailable, not legacy fallback. New actual-session/SQLite tests in
+`tests/task_runtime/test_docking_consent_generic_routes.py` observed **55 failed /
+3 passed** before implementation; the expanded suite plus ownership/store
+regressions passed **408 tests with 4 skips**. Worker compileall and diff checks
+passed. This does not close legacy docking/history/artifact or retention paths.
+Parent ownership regression initially passed **103 tests / 3 skips**. SPEC then
+reproduced a real cross-database race: a normal consent-only reservation committed
+during the owned read bypassed the initial membership check. Twelve actual-route
+regressions failed with HTTP 200 instead of 404, then a post-read/collision
+membership recheck passed **115 tests / 3 skips in 73.38 seconds**. SPEC re-review
+and fresh QUALITY remain required, including list-read publication boundaries.
 
 **Files:** src/task_runtime/routes.py; docking_routes.py; docking_report_routes.py;
 existing retention/ownership queries. Test in test_docking_consent_artifacts.py.

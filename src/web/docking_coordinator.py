@@ -146,6 +146,27 @@ def _capture_selection(value):
     return captured, _content_ref(captured, 8 * 1024 * 1024)
 
 
+def _capture_parameters(value):
+    names = {"center", "size", "exhaustiveness", "num_modes"}
+    if type(value) is not dict or len(value) != len(names):
+        raise ValueError("parameters_invalid")
+    captured = {}
+    for key, item in value.items():
+        if type(key) is not str or key not in names:
+            raise ValueError("parameters_invalid")
+        if key in {"center", "size"}:
+            if type(item) is not list or len(item) != 3:
+                raise ValueError("parameters_invalid")
+            item = list(item)
+        captured[key] = item
+    captured = validate_draft_patch(captured)
+    # Numerical equivalence is a duplicate, not a changed input (e.g. 10/10.0).
+    for key in ("center", "size"):
+        captured[key] = [int(item) if type(item) is float and item.is_integer() else item
+                         for item in captured[key]]
+    return captured
+
+
 class _Unavailable(Exception):
     pass
 
@@ -200,6 +221,8 @@ class _Root:
     receptor_descriptor: dict | None = None
     ligand_descriptor: dict | None = None
     prepared_preview_json: str | None = None
+    confirmation_key: str | None = None
+    confirmation_revision: int | None = None
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -857,6 +880,79 @@ class DockingRequestCoordinator:
             self._stop(root, str(exc))
         except Exception:
             self._stop(root, "selection_unavailable")
+
+    async def confirm_parameters(self, *, root_id, owner_session_id, expected_revision,
+                                 receptor_ref, ligand_ref, parameters):
+        """Confirm the displayed inputs, without staging, nonce or execution.
+
+        Native values are detached before suspension. The existing draft CAS
+        fills pending slots only; exact duplicates reuse the accepted receipt.
+        Original fixed values cannot be replaced by a new confirmation.
+        """
+        root = self._owned(root_id, owner_session_id)
+        if (root is None or root.closed or root.prepared_preview_json is None
+                or type(expected_revision) is not int
+                or expected_revision not in {root.accepted_revision, root.confirmation_revision}
+                or type(receptor_ref) is not str or type(ligand_ref) is not str
+                or receptor_ref != root.accepted_slots["receptor_ref"].get("value")
+                or ligand_ref != root.accepted_slots["ligand_ref"].get("value")):
+            return _view(reason="parameters_unavailable")
+        try:
+            captured = _capture_parameters(parameters)
+            key = _content_ref(dict(receptor_ref=receptor_ref, ligand_ref=ligand_ref,
+                                    parameters=captured), 2048)
+        except Exception:
+            return _view(reason="parameters_invalid", phase="AWAITING_INPUT")
+        if (expected_revision != root.accepted_revision
+                and (expected_revision != root.confirmation_revision or key != root.confirmation_key)):
+            # The old revision is an idempotent retry exception, not authority
+            # to change or revoke a more recently accepted input set.
+            return _view(reason="parameters_unavailable")
+        changed_fixed = any(slot["state"] == "fixed" and slot["value"] != captured[name]
+            for name, slot in root.accepted_slots.items() if name in captured)
+        if changed_fixed or (root.confirmation_key is not None and key != root.confirmation_key):
+            self._interrupt(root, "new_root_required")
+            try:
+                if root.task is not None and await _drain(root.task):
+                    raise asyncio.CancelledError
+                return _view(root)
+            finally:
+                self._release_closed(root)
+        if root.confirmation_key is not None:
+            return await self.status(root_id=root_id, owner_session_id=owner_session_id)
+        for name in ("center", "size"):
+            slot = root.accepted_slots[name]
+            expected = slot["value"] if slot["state"] == "fixed" else root.projected["pocket"][name]
+            if captured[name] != expected:
+                return _view(reason="parameters_invalid", phase="AWAITING_INPUT")
+        if root.task is not None and not root.task.done():
+            return _view(root)
+        root.confirmation_key, root.confirmation_revision = key, root.accepted_revision
+        root.phase, root.reason = "BUSY", "parameter_confirmation_running"
+        root.task = asyncio.create_task(self._run_confirmation(root, captured))
+        self._gate.retain_task(root.task)
+        return await self._wait_root(root)
+
+    async def _run_confirmation(self, root, parameters):
+        try:
+            await self._check_source(root)
+            patch = {key: value for key, value in parameters.items()
+                     if root.accepted_slots[key]["state"] == "pending"}
+            if patch:
+                await self._refine_slots(root, patch)
+            preview = json.loads(root.prepared_preview_json)
+            preview.update(confirmed_parameters=parameters, refinement_revision=root.accepted_revision)
+            preview_json = _small_json(preview)
+            await self._check_source(root)
+            root.prepared_preview_json = preview_json
+            root.phase, root.reason = "AWAITING_INPUT", "inputs_confirmed_staging_required"
+        except asyncio.CancelledError:
+            self._stop(root, "cancelled")
+            raise
+        except _Unavailable as exc:
+            self._stop(root, str(exc))
+        except Exception:
+            self._stop(root, "confirmation_unavailable")
 
     async def close_root(self, *, root_id, owner_session_id):
         root = self._owned(root_id, owner_session_id)
