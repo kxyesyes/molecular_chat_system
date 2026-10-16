@@ -223,6 +223,9 @@ class _Root:
     prepared_preview_json: str | None = None
     confirmation_key: str | None = None
     confirmation_revision: int | None = None
+    draft_attempted: bool = False
+    close_task: object = None
+    close_state: str = "not_started"
 
 
 def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
@@ -233,7 +236,9 @@ def _view(root=None, *, reason="root_unavailable", phase="UNAVAILABLE"):
         missing_fields=list(root.missing) if root else [],
         input_ready=False, execution_authorized=False)
     if root is not None:
-        if _pending_preparation(root):
+        if (_pending_preparation(root)
+                or (root.closed and root.task is not None and not root.task.done())
+                or (root.closed and root.draft_attempted and root.close_state != "confirmed")):
             view["cleanup_pending"] = True
         if (not root.closed and root.source_preview_json is not None
                 and (root.task is None or root.task.done())):
@@ -262,15 +267,17 @@ class _BoundDraftStore:
     These synchronous calls run inside that owner's retained, shielded SQL work;
     no new transport, transaction, retry or worker ownership is introduced.
     """
-    def __init__(self, store, validate):
+    def __init__(self, store, validate, reserve_validate):
         self._store, self._validate = store, validate
+        self._reserve_validate = reserve_validate
         self.db_path = store.db_path
 
     def get_chat_docking_draft(self, **kwargs):
         return self._validate(self._store.get_chat_docking_draft(**kwargs))
 
     def reserve_docking_draft_budget(self, **kwargs):
-        return self._validate(self._store.reserve_docking_draft_budget(**kwargs))
+        return self._reserve_validate(self._store.reserve_docking_draft_budget(**kwargs),
+                                      call_slice_ms=kwargs["call_slice_ms"])
 
 
 class DockingRequestCoordinator:
@@ -433,6 +440,20 @@ class DockingRequestCoordinator:
         self._check_root(root=root)
         return record
 
+    def _accept_proposal_budget(self, root, record, *, call_slice_ms):
+        # The actual CAS acknowledgement arrives before model dispatch. Preserve
+        # it for exact close even if the later model result is cancelled/lost;
+        # ordinary readback cannot enter this receipt-only path.
+        previous = root.draft
+        confirmed = self._validate_draft_record(root, record, expected_version=previous["version"] + 1)
+        expected = dict(previous["draft"]["budget"])
+        expected["spent_ms"] += call_slice_ms
+        expected["proposal_slots_spent"] += 1
+        if confirmed["draft"]["budget"] != expected:
+            raise _Unavailable("draft_binding_mismatch")
+        root.draft = confirmed
+        return confirmed
+
     def _stop(self, root, reason, phase="UNAVAILABLE"):
         if not root.closed:
             root.closed, root.reason, root.phase = True, reason, phase
@@ -447,7 +468,9 @@ class DockingRequestCoordinator:
 
     def _release_closed(self, root):
         if (not root.closed or (root.task is not None and not root.task.done())
-                or _pending_preparation(root)):
+                or _pending_preparation(root)
+                or root.close_state not in {"confirmed", "not_acquired"}
+                or (root.close_task is not None and not root.close_task.done())):
             return
         root.snapshot = root.current = root.issuer = root.proposal = root.draft = root.claim = root.task = None
         root.structure_context_json = root.source_reference = root.source_result = None
@@ -455,9 +478,47 @@ class DockingRequestCoordinator:
         root.selection = root.projected = root.ligand = None
         root.receptor_descriptor = root.ligand_descriptor = root.prepared_preview_json = None
         root.preparation_owners.clear()
+        root.close_task = None
         if root.durable and self._roots.get(root.root_id) is root:
             del self._roots[root.root_id]
         # No confirmed durable claim: retain only a bounded non-retryable tombstone.
+
+    async def _finish_closed(self, root):
+        """Join one exact waiting-draft close, never infer a lost SQL receipt.
+
+        A still-owned physical child prevents releasing the durable owner slot.
+        Later status/close can observe its settlement and start this finalizer;
+        neither a deadline nor a finished wrapper proves physical cleanup.
+        """
+        if (not root.closed or (root.task is not None and not root.task.done())
+                or _pending_preparation(root)):
+            return
+        if root.close_state == "not_started":
+            if not root.draft_attempted:
+                root.close_state = "not_acquired"
+            elif root.draft is None:
+                root.close_state = "unconfirmed"
+            else:
+                root.close_state = "pending"
+                root.close_task = asyncio.create_task(self._close_waiting_draft(root))
+                self._gate.retain_task(root.close_task)
+        try:
+            if root.close_task is not None and await _drain(root.close_task):
+                raise asyncio.CancelledError
+        finally:
+            self._release_closed(root)
+
+    async def _close_waiting_draft(self, root):
+        try:
+            receipt = await self._sql(self._tasks.close_chat_docking_draft,
+                preparation_id=root.preparation_id, owner_session_id=root.owner,
+                expected_revision=root.accepted_revision, expected_version=root.draft["version"],
+                task_id=root.task_id, trace_id=root.root_id, origin_turn_id=root.origin)
+            root.close_state = "confirmed" if receipt is True else "unconfirmed"
+        except (Exception, asyncio.CancelledError):
+            # No retry/readback: the accepted version may be older than an
+            # uncertain refinement commit, or this close's acknowledgement lost.
+            root.close_state = "unconfirmed"
 
     async def begin(self, *, root_id, owner_session_id, origin_turn_id, query,
                     history, descriptors, enable_tools, mode, structure_context=None):
@@ -506,7 +567,6 @@ class DockingRequestCoordinator:
                     raise asyncio.CancelledError
             elif not task.cancelled():
                 task.result()
-            return _view(root)
         except asyncio.CancelledError:
             self._interrupt(root, "cancelled")
             await _drain(task)
@@ -515,9 +575,9 @@ class DockingRequestCoordinator:
             self._interrupt(root, "operation_unavailable")
             if await _drain(task):
                 raise asyncio.CancelledError
-            return _view(root)
         finally:
-            self._release_closed(root)
+            await self._finish_closed(root)
+        return _view(root)
 
     async def _run(self, root):
         try:
@@ -538,6 +598,7 @@ class DockingRequestCoordinator:
                 segment = capture_text_segment(issuer=root.issuer, original_snapshot=root.snapshot,
                     text_segment_index=0, server_turn_id=root.origin,
                     current_text=root.snapshot.query, preceding_refinements=[])
+                root.draft_attempted = True  # Before dispatch, including uncertain receipts.
                 draft_receipt = await self._sql(self._tasks.reserve_chat_docking_draft,
                     identity=self._identity(root), draft=dict(schema="DockingDraft@1",
                         model_generation=root.current["model_generation"],
@@ -551,7 +612,9 @@ class DockingRequestCoordinator:
                 await self._sql(self._read_draft, root=root, expected_version=root.draft["version"])
                 self._capture(root)
             # Do NOT nest readers: a waiting model writer must be able to enter.
-            bound_store = _BoundDraftStore(self._tasks, lambda record: self._validate_draft_record(root, record))
+            bound_store = _BoundDraftStore(self._tasks,
+                lambda record: self._validate_draft_record(root, record),
+                lambda record, **kw: self._accept_proposal_budget(root, record, **kw))
             owner = DockingProposalOwner(task_store=bound_store, state_store=self._state,
                 gate=self._gate, capture_current=lambda: self._capture(root),
                 wall_time_ms=self._wall, monotonic=self._mono)
@@ -609,9 +672,8 @@ class DockingRequestCoordinator:
         if root is None:
             return _view()
         if root.closed:
-            view = _view(root)
-            self._release_closed(root)
-            return view
+            await self._finish_closed(root)
+            return _view(root)
         if root.task is not None and not root.task.done():
             return _view(root)
         root.task = asyncio.create_task(self._refresh(root))
@@ -774,9 +836,9 @@ class DockingRequestCoordinator:
                 try:
                     if root.task is not None and await _drain(root.task):
                         raise asyncio.CancelledError
-                    return _view(root)
                 finally:
-                    self._release_closed(root)
+                    await self._finish_closed(root)
+                return _view(root)
             return await self.status(root_id=root_id, owner_session_id=owner_session_id)
         if root.task is not None and not root.task.done():
             return _view(root)
@@ -915,9 +977,9 @@ class DockingRequestCoordinator:
             try:
                 if root.task is not None and await _drain(root.task):
                     raise asyncio.CancelledError
-                return _view(root)
             finally:
-                self._release_closed(root)
+                await self._finish_closed(root)
+            return _view(root)
         if root.confirmation_key is not None:
             return await self.status(root_id=root_id, owner_session_id=owner_session_id)
         for name in ("center", "size"):
@@ -964,9 +1026,9 @@ class DockingRequestCoordinator:
         try:
             if task is not None and await _drain(task):
                 raise asyncio.CancelledError
-            return _view(root)
         finally:
-            self._release_closed(root)
+            await self._finish_closed(root)
+        return _view(root)
 
 
 __all__ = ["DockingRequestCoordinator"]

@@ -333,7 +333,15 @@ pending root work even before draft reservation. Ordinary reads cannot adopt
 that receipt. All nine close cases passed in the next joint run; 26 original
 tests rejected the new optional `cleanup_pending` field in their strict view
 helper, now explicitly allowed only as native `True`. The five-file regression
-is running and independent SPEC review is pending; no full passing claim yet.
+passed **196 tests in 294.52 seconds**. Independent SPEC PASS reran 23 targeted
+tests in 48.89 seconds and 13 isolated budget, receipt and concurrent-close
+probes, with unchanged three-file hashes. Fresh QUALITY APPROVED found no
+reproducible ownership/receipt/cancellation defect, and 13 independent probes
+passed. Its five-file run had **195 passed / 1 failed in 875.05 seconds**: one
+reservation-identity test exited before attempting reservation. A separate
+coordinator rerun passed all 105 tests, and that case passed 20/20 additional
+runs. The initial failure's cause remains unresolved; this is not a claim of
+an entirely green independent full run. All three frozen hashes were unchanged.
 Close must never free owner capacity while a physical preparation child remains
 unsettled; lack of a confirmed close receipt is not settled cleanup.
 

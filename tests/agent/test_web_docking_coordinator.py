@@ -121,7 +121,9 @@ class Rig:
 def safe(view):
     assert view["input_ready"] is False and view["execution_authorized"] is False
     assert set(view) <= {"root_id", "task_id", "preparation_id", "phase", "reason_code",
-                         "missing_fields", "input_ready", "execution_authorized"}
+                         "missing_fields", "input_ready", "execution_authorized", "cleanup_pending"}
+    if "cleanup_pending" in view:
+        assert view["cleanup_pending"] is True
     serialized = json.dumps(view)
     for forbidden in (QUERY, "private-history-marker", "synthetic-only-key", "nonce"):
         assert forbidden not in serialized
