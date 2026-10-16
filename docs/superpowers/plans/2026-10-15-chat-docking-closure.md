@@ -889,11 +889,61 @@ compilation/diff checks passed and both frozen hashes were unchanged. The probe
 harness reported one anyio assertion-rewrite warning. This is not whole-ASGI or
 real-science evidence; the remaining activation gates are unchanged.
 
-The next preparation-lifetime slice remains separate: its corrected real-time
-body timeout/disconnect tests failed **2 tests in 43.63 seconds**. The earlier
-controlled-clock attempt was replaced because advancing the route clock alone
-does not advance asyncio's physical timeout. These known-RED tests in
-`test_web_docking_prepare_deadlines.py` are excluded from the approval slice.
+The next preparation-lifetime slice remains separate from the approval commit.
+Its corrected real-time body timeout/disconnect tests failed **2 tests in 43.63
+seconds**, and a real C1 readback-disconnect test failed in 7.16 seconds. The
+earlier controlled-clock attempt was replaced because advancing the route clock
+alone does not advance asyncio's physical timeout. The completed five-case
+test file additionally covers accepted preparation timeout and nonce isolation
+between concurrent calls. Worker RED was **4 failed / 1 passed in 87.62
+seconds**, followed by **46 passed in 281.50 seconds** with existing prepare,
+approval and control regressions. Seven independent worker probes covered
+scheduling rejection, queued disconnect cleanup and future exception handling.
+The patch retains a per-request preparation wrapper through the HTTP verdict,
+invalidates the original root/C1 owner before waiting for cleanup, and preserves
+the initiating caller's one-time nonce. Independent SPEC ran **15 tests in
+119.23 seconds**, but found a P1 regression: a repeat prepare whose body consumed
+29.6 seconds then timed out during status observation stopped an already
+consumed C2 execution. The reviewed patch returned 503 at 30.015 seconds with
+C2 cancelled, whereas the prior source returned 503 at 30.468 seconds without
+stopping C2, which subsequently succeeded. The initiating-C1 versus read-only
+observation cleanup authority must be separated before this slice can pass.
+Parent added a sixth durable regression using an actual synthetic C2 owner,
+held physical execution and status read. It failed in **37.48 seconds** because
+the repeat prepare set the independent execution's cancellation signal. This
+test does not invoke real Vina; it checks ownership through the existing runtime.
+The follow-up patch classifies the initializing call at actual coordinator
+entry and limits cleanup to that owner; a queued request must still match the
+unchanged, unstarted root. Read-only observers and independently consumed C2
+work are not stopped by preparation feedback loss. Worker validation passed
+all **6 current tests in 116.80 seconds**, **15 existing prepare/approval-lifetime
+tests in 66.78 seconds**, and seven scheduling/ownership probes. Independent
+SPEC re-review **PASS** closed P1: the sixth regression passed in **36.86
+seconds**, and four queued-owner/READY-to-APPROVING probes passed in **17.08
+seconds**. Frozen source/test hashes stayed unchanged. Parent full-source
+`compileall -q src scripts` and `git diff --check` passed. Fresh independent
+QUALITY **APPROVED** the frozen slice: **33 passed in 232.98 seconds** across
+the six new tests and existing prepare/approval regressions, plus five independent
+capacity/scheduling/queued-cancellation probes in **17.97 seconds**. Both hashes
+remained unchanged and scoped diff checks passed. This is not approval to enable
+C before the separate whole-ASGI and remaining integration gates are complete.
+
+A second concern about releasing an HTTP wrapper was withdrawn after source
+verification: pending projection cleanup still retains its actual preparation
+owner, runtime operation, coordinator root and durable capacity. The original
+specification does not require every upper-level HTTP wrapper to duplicate
+that occupancy. No additional lifetime mechanism is warranted for that finding.
+
+Whole-ASGI gaps now have separate actual RED evidence: **4 failed in 34.58
+seconds** in `test_web_docking_http_envelope.py`. Session authentication outlives
+the control deadline; disconnect loses tracking of its physical session read;
+and a cancellation-resistant response send blocks timeout/disconnect return.
+These tests remain outside the current preparation slice and block activation.
+A fifth whole-ASGI regression separately failed in **7.70 seconds**: cancellation
+while physically sending the initial preparation response did not return
+promptly. Its required postcondition is that an undelivered initiating preview
+cannot remain approvable; this is still pending, not covered by route-return
+success or the preparation-only review.
 
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.

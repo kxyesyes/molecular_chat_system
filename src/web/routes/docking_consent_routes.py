@@ -22,6 +22,7 @@ _MAX_BODY = 4096
 _REF = re.compile(r"sha256:[a-f0-9]{64}\Z")
 _FIELDS = frozenset({"root", "revision", "receptor_ref", "ligand_ref"})
 _CONTROL_SECONDS = 4.9  # Reserve response construction time within the 5s slice.
+_PREPARE_SECONDS = 30.0
 _MAX_CONTROL_TASKS = 32
 _PHASES = frozenset({'BUSY', 'PREPARING', 'AWAITING_INPUT', 'READY', 'APPROVING',
     'EXECUTING', 'RESULT_PENDING', 'FAILED', 'CANCELLED', 'TIMED_OUT', 'UNKNOWN',
@@ -74,7 +75,14 @@ class _ControlTransport:
             return task
         if len(self.tasks) >= _MAX_CONTROL_TASKS:
             raise HTTPException(503, 'Control capacity unavailable')
-        task = asyncio.create_task(operation())
+        pending = operation()
+        try:
+            task = asyncio.create_task(pending)
+        except (Exception, asyncio.CancelledError) as exc:
+            pending.close()
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            raise HTTPException(503, 'Control capacity unavailable') from None
         self.tasks[key] = task
         self.coordinator._gate.retain_task(task)
 
@@ -191,7 +199,7 @@ def _constant(_value):
     raise ValueError("invalid number")
 
 
-async def _approval_chunks(request, deadline):
+async def _bounded_chunks(request, deadline):
     # Request.stream hides empty more_body chunks; inspect every physical read.
     while time.monotonic() < deadline:
         message = await request.receive()
@@ -224,7 +232,7 @@ async def _json_body(request, *, deadline=None):
     if lengths and int(lengths[0]) > _MAX_BODY:
         raise HTTPException(413, "Request too large")
     data = bytearray()
-    chunks = request.stream() if deadline is None else _approval_chunks(request, deadline)
+    chunks = request.stream() if deadline is None else _bounded_chunks(request, deadline)
     async for chunk in chunks:
         if len(data) + len(chunk) > _MAX_BODY:
             raise HTTPException(413, "Request too large")
@@ -240,8 +248,9 @@ async def _json_body(request, *, deadline=None):
         raise HTTPException(422, "Invalid request") from None
 
 
-async def _prepare_body(request):
-    value = await _json_body(request)
+async def _prepare_body(request, deadline):
+    # Parsing is independent of dispatch, including cancellation-resistant reads.
+    value = await _json_body(request, deadline=deadline)
     if (set(value) != _FIELDS or not _label(value["root"])
             or type(value["revision"]) is not int or not 0 <= value["revision"] <= 2**63 - 1
             or any(type(value[key]) is not str or _REF.fullmatch(value[key]) is None
@@ -305,8 +314,11 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
 
     @app.post("/api/agent/docking/preparations")
     async def prepare(request: Request):
+        deadline = time.monotonic() + _PREPARE_SECONDS
         owner = authenticate(request)
-        value = await _prepare_body(request)
+        transport = _ControlTransport(coordinator)
+        body = transport.retain(object(), lambda: _prepare_body(request, deadline))
+        value = await transport.wait(body, deadline, body=True)
         root = coordinator._owned(value["root"], owner)
         if root is None:
             raise HTTPException(404, "Preparation not found")
@@ -314,18 +326,100 @@ def setup_docking_consent_routes(app, *, coordinator, task_runtime, enabled=Fals
                 or any(root.accepted_slots[key] != dict(state="fixed", value=value[key])
                        for key in ("receptor_ref", "ligand_ref"))):
             raise HTTPException(409, "Preparation changed")
-        view = await coordinator.prepare_inputs(root_id=value["root"], owner_session_id=owner,
-            expected_revision=value["revision"], receptor_ref=value["receptor_ref"],
-            ligand_ref=value["ligand_ref"], runtime=task_runtime)
-        if view["phase"] == "READY":
-            status = 201 if "approval_nonce" in view["consent_preview"] else 200
-        elif view["phase"] in {"BUSY", "PREPARING"}:
-            status = 202
-        elif view["reason_code"] == "inputs_unconfirmed":
-            status = 409
-        else:
-            status = 503
-        return JSONResponse(view, status_code=status, headers={"Cache-Control": "no-store"})
+        if time.monotonic() >= deadline:
+            raise HTTPException(408, 'Request deadline exceeded')
+
+        result = asyncio.get_running_loop().create_future()
+        feedback = asyncio.Event()
+        delivered = False
+        dispatched = initializes = cleanup_owned = False
+        entry_task, entry_context = root.task, root.input_context
+
+        def execution_owned():
+            context = root.input_context
+            return (root.phase == 'APPROVING'
+                    or context is not None and context._execution is not None)
+
+        def can_initialize():
+            # Mirror the coordinator's synchronous admission, not HTTP entry:
+            # queued requests may have become observers before they dispatch.
+            context = root.input_context
+            return (coordinator._owned(root.root_id, owner) is root
+                and not root.closed and not root.staging_started
+                and (root.task is None or root.task.done())
+                and root.reason == 'inputs_confirmed_staging_required'
+                and not execution_owned()
+                and (context is None or context._operation is None)
+                and root.accepted_revision == value['revision']
+                and all(root.accepted_slots[key] == dict(state='fixed', value=value[key])
+                        for key in ('receptor_ref', 'ligand_ref')))
+
+        async def preparation():
+            nonlocal dispatched, initializes
+            try:
+                # Never cancel this wrapper on HTTP exit: even if it has not
+                # started yet, its reserved slot must still run exact cleanup.
+                if feedback.is_set() or time.monotonic() >= deadline:
+                    raise HTTPException(408, 'Request deadline exceeded')
+                if coordinator._owned(root.root_id, owner) is not root:
+                    raise HTTPException(409, 'Preparation changed')
+                initializes = can_initialize()
+                dispatched = True
+                # No await separates this classification from coordinator entry.
+                view = await coordinator.prepare_inputs(root_id=root.root_id, owner_session_id=owner,
+                    expected_revision=value['revision'], receptor_ref=value['receptor_ref'],
+                    ligand_ref=value['ligand_ref'], runtime=task_runtime)
+                if not result.done():
+                    result.set_result(view)
+            except (Exception, asyncio.CancelledError) as exc:
+                if not result.done():
+                    result.set_exception(exc)
+            finally:
+                # Keep capacity through the HTTP verdict, including a result
+                # queued just as its deadline expires. Only cleanup is shared
+                # by the coordinator; nonce-bearing results are per request.
+                await feedback.wait()
+                if cleanup_owned and not execution_owned():
+                    await coordinator._close_owned_root(root)
+
+        transport.retain(object(), preparation)
+        try:
+            view = await transport.wait(result, deadline)
+            if view['phase'] == 'READY':
+                if (root.closed or execution_owned()
+                        or coordinator._owned(root.root_id, owner) is not root):
+                    raise HTTPException(409, 'Preparation changed')
+                status = 201 if 'approval_nonce' in view['consent_preview'] else 200
+            elif view['phase'] in {'BUSY', 'PREPARING'}:
+                status = 202
+            elif view['reason_code'] == 'inputs_unconfirmed':
+                status = 409
+            else:
+                status = 503
+            response = JSONResponse(view, status_code=status, headers={'Cache-Control': 'no-store'})
+            if time.monotonic() >= deadline:
+                raise HTTPException(503, 'Preparation deadline exceeded')
+            delivered = True
+            return response
+        finally:
+            # A repeat owns only its status wait, never another request's C1/C2.
+            # Before dispatch, cleanup is allowed only for the unchanged,
+            # still-unstarted root; a queued observer cannot acquire that right.
+            cleanup_owned = (not delivered and not execution_owned()
+                and (initializes or (not dispatched and root.task is entry_task
+                    and root.input_context is entry_context and can_initialize())))
+            if cleanup_owned:
+                # Local invalidation and the real C1 stop flag precede any
+                # await/SQL. The retained owner drains physical work, not HTTP.
+                coordinator._interrupt(root, 'closed', 'CLOSED')
+                context = root.input_context
+                if context is not None and context._operation is not None:
+                    context._operation.aborted.set()
+            if result.done() and not result.cancelled():
+                result.exception()
+            else:
+                result.cancel()
+            feedback.set()
 
     @app.post('/api/agent/docking/preparations/{preparation_id}/approve')
     async def approve(preparation_id: str, request: Request):
