@@ -116,6 +116,7 @@ class ChatHandler:
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
         self.decision_runtime = None
+        self.docking_controller = None
         self._allocation_tasks = set()
 
     def _ranked_reverse_evidence(self):
@@ -308,28 +309,47 @@ class ChatHandler:
         if self.decision_runtime is not None:
             await self.decision_runtime.handle_websocket(handler=self, websocket=websocket)
             return
+        controller = None
+        if self.docking_controller is not None:
+            from .decision_runtime import _Sender, _enabled_docking_controller, _docking_history
+            controller = _enabled_docking_controller(self)
+        if controller is not None and controller.runtime.closing:
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         conversation_history: List[Dict[str, Any]] = []
-        
-        # 连接建立后立即发送连接成功消息
-        try:
-            await websocket.send_text(json.dumps({
-                "type": "connection_ready",
-                "message": "连接成功",
-                "model_status": "ready",
-                "timestamp": time.time()
-            }))
-            logger.info("WebSocket连接已建立，发送就绪消息")
-        except Exception as e:
-            logger.error(f"发送连接就绪消息失败: {e}")
+        output = websocket
+        if controller is not None:
+            output = _Sender(websocket)
+            output._runtime = controller.runtime
+            output._chat_controller = controller
+            controller.runtime.sockets.add(output)
         
         try:
+            # Handshake delivery belongs to the same registered socket lifetime.
+            try:
+                await output.send_text(json.dumps({
+                    "type": "connection_ready",
+                    "message": "连接成功",
+                    "model_status": "ready",
+                    "timestamp": time.time(),
+                    **({"capabilities": {"chat_docking": {"preparation_available": True,
+                        "execution_authorized": False}}} if controller is not None else {}),
+                }))
+                logger.info("WebSocket连接已建立，发送就绪消息")
+            except Exception as e:
+                logger.error(f"发送连接就绪消息失败: {e}")
+                if controller is not None:
+                    return
+
             while True:
                 data = await websocket.receive_text()
+                if controller is not None and (controller.runtime.closing or not output.writable):
+                    break
                 try:
-                    message_data = decode_legacy_frame(data)
+                    message_data = decode_legacy_frame(data, allow_docking_controls=controller is not None)
                 except LegacyFrameError as exc:
-                    await websocket.send_text(json.dumps({
+                    await output.send_text(json.dumps({
                         "type": "error",
                         "message": "请求格式无效。",
                         "error": {"code": exc.code},
@@ -338,11 +358,20 @@ class ChatHandler:
 
                 # 处理 ping 消息
                 if message_data.get("type") == "ping":
-                    await websocket.send_text(json.dumps({
+                    await output.send_text(json.dumps({
                         "type": "pong",
                         "timestamp": message_data.get("timestamp", 0)
                     }))
                     continue
+
+                if controller is not None:
+                    if await controller.handle(output, message_data,
+                            history=_docking_history(conversation_history)):
+                        continue
+                    if controller.busy(output):
+                        await output.send({'type': 'error', 'code': 'docking_in_progress',
+                                           'docking_request_rejected': True})
+                        continue
 
                 message = message_data.get("message", "")
                 enable_rag = message_data.get("enable_rag", True)
@@ -359,7 +388,7 @@ class ChatHandler:
                     try:
                         await self.refresh_model_config()
                     except Exception:
-                        await websocket.send_text(json.dumps({
+                        await output.send_text(json.dumps({
                             "type": "error",
                             "message": "本机模型配置不可用；请检查配置文件与目录权限。",
                         }))
@@ -367,11 +396,11 @@ class ChatHandler:
                         return
 
                 # 发送确认
-                await self._send_status(websocket, "Processing your message...")
+                await self._send_status(output, "Processing your message...")
 
                 # 处理消息，传递高级配置
                 await self._process_message(
-                    websocket,
+                    output,
                     message,
                     enable_rag,
                     enable_tools,
@@ -393,12 +422,24 @@ class ChatHandler:
             else:
                 logger.error(f"WebSocket error: {e}")
                 try:
-                    await websocket.send_text(json.dumps({
+                    await output.send_text(json.dumps({
                         "type": "error",
                         "message": f"处理错误: {str(e)[:100]}..."
                     }))
                 except:
                     pass
+        finally:
+            if controller is not None:
+                output.writable = False
+                output.receiver_attached = False
+                output.memory = []
+                output.waiting = None
+                await controller.disconnect(output)
+                runtime = controller.runtime
+                if output._docking_used:
+                    runtime._stop_docking(output)
+                if not any(op.sender is output for op in runtime.docking_operations):
+                    runtime.sockets.discard(output)
     
     async def _process_message(self, websocket: WebSocket, message: str,
                               enable_rag: bool, enable_tools: bool,
@@ -419,9 +460,17 @@ class ChatHandler:
                 mol_count, conversation_history, session_id, reference, selection,
                 reverse_context=reverse_context)
         if enable_tools and self.agent_system is not None:
-            return await self._with_allocation(websocket, process,
+            result = await self._with_allocation(websocket, process,
                 handoff_timeout=isinstance(getattr(self, 'model_request_gate', None), ModelRequestGate))
-        return await process(websocket)
+        else:
+            result = await process(websocket)
+        if self.docking_controller is None:
+            return result
+        from .decision_runtime import _Sender, _enabled_docking_controller, _capture_docking_result
+        if type(websocket) is _Sender and type(result) is dict:
+            controller = _enabled_docking_controller(self, websocket._runtime)
+            if controller is not None:
+                await _capture_docking_result(controller, websocket, result)
 
     @model_request
     async def _process_message_body(self, websocket: WebSocket, message: str,
@@ -470,6 +519,7 @@ class ChatHandler:
         agent_used = False
         agent_response = ""
         agent_result = None
+        docking_result = None
         
         # 初始化 Agent 执行状态
         agent_task = None
@@ -689,6 +739,12 @@ class ChatHandler:
                 if not live_agent_events:
                     await self._send_agent_events(websocket, agent_result)
                 presentation_status = self._agent_presentation_status(agent_result)
+                if presentation_status == 'completed' and self.docking_controller is not None:
+                    from .decision_runtime import _enabled_docking_controller
+                    if _enabled_docking_controller(self) is not None:
+                        # Hold the actual execution result before presentation
+                        # rewrites; return it only after successful completion.
+                        docking_result = dict(agent_result)
                 sequence = agent_result.get('tool_result_sequence')
                 reverse_observations = [item for item in sequence if type(item) is dict
                     and item.get('tool_name') == 'reverse_target_predictor'] if type(sequence) is list else []
@@ -941,7 +997,7 @@ class ChatHandler:
                 **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
                 **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
             })
-            return
+            return docking_result
 
         if agent_used and agent_response:
             try:
@@ -1054,6 +1110,7 @@ class ChatHandler:
             **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
             **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
         })
+        return docking_result
 
     @staticmethod
     def _append_history(history, entry):

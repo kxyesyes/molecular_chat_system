@@ -1512,23 +1512,29 @@ history, trusted policy assembly and both profiles remain separate gates.
 ordinary_capabilities.py; new home/docking_consent.js; main.js and index.html narrow hooks;
 new tests/home_docking_consent_test.js plus Python actual route tests.
 
-- [ ] RED actual legacy and decision normal chat frames enter the same C coordinator only when
+- [x] RED actual legacy and decision normal chat frames enter the same C coordinator only when
   enabled and eligible, preserving the original message/root/task. Non-C behavior is unchanged.
   Add strict C refine/watch frames to the existing receiver, never another receiver or `/api/chat`.
-- [ ] Inject flag/policy/private root through trusted app assembly; default disabled. Capability
+- [x] Inject flag/policy/private root through trusted app assembly; default disabled. Capability
   facts distinguish preparation from ready/executed science; flag alone is not proof of readiness.
-- [ ] RED DOM consumes captured actual `DockingView@1` route payload, mounts original-message
+- [x] RED DOM consumes captured actual `DockingView@1` route payload, mounts original-message
   missing input/preview/consent/progress/result card and validates identity/revision/generation/sequence.
-- [ ] Implement fixed-label/textContent display: source/pocket/3D-input assumptions, exact files/
+- [x] Implement fixed-label/textContent display: source/pocket/3D-input assumptions, exact files/
   hashes/grid/options/expiry, explicit confirm and revoke/cancel. Confirm sends one approved-bound
   payload only from the actual click handler; disable duplicate clicks. No nonce persistence.
-- [ ] Release composer only on drained segment_complete; waiting approval is not success.
+- [x] Release composer only on drained segment_complete; waiting approval is not success.
   Sticky local cancel/timeout/disconnect rejects late success; reconnect is read-only and cannot
   resubmit. Expired/lost nonce requires explicit new preparation; no silent autoapproval.
-- [ ] GREEN DOM XSS/invalid event/cross-task/stale/race tests, all changed JS `node --check`, and
+- [x] GREEN DOM XSS/invalid event/cross-task/stale/race tests, all changed JS `node --check`, and
   existing homepage/task/completion Node and actual route Python suites; review/commit.
 
 ## D7 — Real browser and final gates
+
+D6 frozen integration has independent SPEC and QUALITY approval for controller/receiver,
+application lifecycle and UI. Current focused producer/receiver/DOM result: 85 passed;
+app 72 passed; homepage 71/71; all 44 Node files and Python compileall passed.
+Detailed RED/GREEN, review and environment limitations are in the existing validation ledger.
+These are engineering gates, not a real Vina/browser completion claim.
 
 - [ ] On the agent-owned local service only, enable C after D1–D6. Preserve other running services,
   user input and unrelated assets. Confirm actual Vina and prep runtime policy/executable identity.

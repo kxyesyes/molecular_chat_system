@@ -89,7 +89,7 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
       removeItem: key => {if (key === "medchat.decision.waiting.v1") storage.delete(key); else stored = null;},
     },
     HomeChatRenderer: renderer, WebSocket: Socket};
-  const context = vm.createContext({window, document, WebSocket: Socket, console: Object.fromEntries(
+  const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
     HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: s => String(s)},
     HomeAdvancedOptions: {getConfig: () => ({ragCount: 3, temperature: 0.7, molCount: 1})},
@@ -98,7 +98,7 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
       return {ok: true, json: async () => vm.runInContext("JSON.parse", context)(JSON.stringify({success: true,
         data: request ? await request(url, JSON.parse(options.body)) : {confirmed: true}}))};},
   });
-  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js"]) {
+  for (const file of ["config.js", "../shared/status.js", "molecule_candidates.js", "scientific_references.js", "evidence_report.js", "connection.js", "protocol.js", "task_state.js", "task_status.js", "task_panel.js", "docking_consent.js"]) {
     vm.runInContext(fs.readFileSync(path.join(home, file), "utf8"), context, {filename: file});
   }
   context.HomeConfig = window.HomeConfig;
@@ -113,8 +113,9 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   return {body, chat, input, logs, requests, timers, sockets, storage, socket: sockets[0], refs: window.testHome.scientificReferences,
     send: () => window.testHome.sendMessage(), reconnect: () => window.testHome.connectWebSocket(),
     button: name => body.querySelectorAll("button").find(b => b.textContent === name),
-    ready: mode => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
-      capabilities: {cancel: true, rag_retrieval: false, scientific_tools: ["property_calculator"]}}),
+    ready: (mode, docking = false) => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
+      capabilities: {cancel: true, rag_retrieval: false, scientific_tools: ["property_calculator"],
+        ...(docking ? {chat_docking: {preparation_available: true, execution_authorized: false}} : {})}}),
     flushTimers: () => {const pending = [...timers.values()]; timers.clear(); pending.forEach(t => t.fn());},
   };
 }
@@ -148,6 +149,165 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  for (const mode of ["legacy", "decision_a2"]) {
+    for (const status of ["FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"]) {
+      await test(`${mode} terminal ${status} keeps cleanup status refresh until drained`, () => {
+        const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send(); h.socket.emit(accepted());
+        const event = {type: "docking_event", schema: "DockingView@1", request_id: trace, root_trace_id: trace,
+          task_id: "test-task", preparation_id: "test-preparation", origin_turn_id: turn, revision: 0,
+          sequence: 1, send_generation: 1, phase: "terminal", segment_complete: false, terminal: true,
+          view_status: status, task_status: "unavailable", cleanup_status: "pending", reason_code: "status_" + status.toLowerCase(),
+          persistence_pending: false, missing_fields: [], preview: null, result: null};
+        h.socket.emit(event);
+        const sent = h.socket.sent.length;
+        h.input.value = "must wait for cleanup"; h.send();
+        assert.equal(h.socket.sent.length, sent);
+        const refresh = h.button("刷新状态");
+        assert(refresh && !refresh.disabled, "terminal pending cleanup needs a status-only recovery path");
+        refresh.click();
+        assert.deepEqual(h.socket.sent.at(-1), {type: "docking_watch", task_id: "test-task"});
+        assert.equal(h.requests.length, 0, "status refresh cannot authorize, cancel or rerun science");
+        h.socket.emit({...event, sequence: 2, send_generation: 2, cleanup_status: "settled", segment_complete: true});
+        assert(!h.button("刷新状态"));
+        const after = h.socket.sent.length;
+        h.input.value = "explicit next request"; h.send();
+        assert.equal(h.socket.sent.length, after + 1);
+      });
+    }
+  }
+  for (const mode of ["legacy", "decision_a2"]) {
+    for (const unconfirmed of [false, true]) await test(`${mode} failure before first view stays sticky (${unconfirmed})`, () => {
+      const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send(); h.socket.emit(accepted());
+      if (unconfirmed) h.socket.emit({type: "error", code: "docking_unavailable", trace_id: trace, turn_id: turn, docking_segment_complete: false});
+      const hash = "a".repeat(64), task = "test-task";
+      h.socket.emit({type: "docking_event", schema: "DockingView@1", request_id: trace, root_trace_id: trace,
+        task_id: task, preparation_id: "test-preparation", origin_turn_id: turn, revision: 0,
+        sequence: 1, send_generation: 1, phase: "terminal", segment_complete: true, terminal: true,
+        view_status: "SUCCEEDED", task_status: "unavailable", cleanup_status: "settled", reason_code: "status_succeeded",
+        persistence_pending: false, missing_fields: [], preview: null,
+        result: {tool_name: "molecular_docking", tool_version: "Vina synthetic test", execution_backend: "local",
+          input_hash: hash, config_hash: hash, tool_policy_digest: hash, source_digest: hash,
+          original_receptor_digest: hash, ligand_identity_digest: hash, projection_digest: hash,
+          score_kind: "vina_affinity", pose_count: 2, best_energy_kcal_mol: -7.2, energy_unit: "kcal/mol",
+          pose: {artifact_id: "pose", size_bytes: 100, sha256: hash,
+            download_path: `/api/agent/docking/tasks/${task}/artifacts/pose`}}});
+      assert.equal(h.chat.textContent.includes("下载已验证构象"), !unconfirmed);
+      assert.equal(h.chat.textContent.includes("-7.2"), !unconfirmed);
+      if (unconfirmed) assert(h.chat.textContent.includes("对接请求未完成"));
+      const sent = h.socket.sent.length;
+      h.input.value = "explicit next request after actual drain"; h.send();
+      assert.equal(h.socket.sent.length, sent + 1);
+    });
+  }
+  await test("marked C busy rejection releases pending abandon but preserves its waiting authority", () => {
+    const h = loadHome(); h.ready("decision_a2", true); start(h);
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    h.button("开始新请求").click();
+    const sent = h.socket.sent.length;
+    h.socket.emit({type: "error", code: "docking_in_progress"});
+    assert(h.button("开始新请求").disabled, "unmarked control error is not an abandon response");
+    h.socket.emit({type: "error", code: "docking_in_progress", docking_request_rejected: true});
+    assert(!h.button("开始新请求").disabled && !h.button("继续").disabled);
+    assert.equal(h.socket.sent.length, sent, "no automatic abandon or resume");
+    h.button("开始新请求").click();
+    assert.equal(h.socket.sent.length, sent + 1);
+    assert.equal(h.socket.sent.at(-1).type, "abandon");
+  });
+  for (const code of ["docking_unavailable", "docking_request_active", "docking_in_progress"]) {
+    await test(`C chat rejection ${code} requires an explicit admission marker`, () => {
+      const h = loadHome(); h.ready("decision_a2", true); h.input.value = "run docking"; h.send();
+      const sent = h.socket.sent.length;
+      h.socket.emit({type: "error", code});
+      h.input.value = "must not overlap"; h.send();
+      assert.equal(h.socket.sent.length, sent, "uncorrelated late watch/refine errors cannot release another request");
+      h.socket.emit({type: "error", code, docking_request_rejected: true});
+      assert(h.chat.textContent.includes("对接请求未完成"));
+      assert(!h.chat.querySelector(".typing-indicator-wrapper"));
+      assert.equal(h.socket.sent.length, sent, "no automatic replay");
+      h.input.value = "next explicit ordinary request"; h.send();
+      assert.equal(h.socket.sent.length, sent + 1);
+    });
+  }
+  for (const mode of ["legacy", "decision_a2"]) {
+    for (const withView of [false, true]) await test(`${mode} correlated C failure releases only its drained owner (${withView})`, () => {
+      const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send(); h.socket.emit(accepted());
+      if (withView) h.socket.emit({type: "docking_event", schema: "DockingView@1", request_id: trace, root_trace_id: trace,
+        task_id: "test-task", preparation_id: "test-preparation", origin_turn_id: turn, revision: 0,
+        sequence: 1, send_generation: 1, phase: "running", segment_complete: false, terminal: false,
+        view_status: "ACTIVE", task_status: "unavailable", cleanup_status: "pending", reason_code: "status_active",
+        persistence_pending: false, missing_fields: [], preview: null, result: null});
+      const failure = {type: "error", code: "docking_unavailable", trace_id: trace, turn_id: turn, docking_segment_complete: true};
+      const sent = h.socket.sent.length;
+      h.socket.emit({...failure, trace_id: "9".repeat(32)});
+      h.socket.emit({...failure, docking_segment_complete: false});
+      h.input.value = "must wait"; h.send();
+      assert.equal(h.socket.sent.length, sent);
+      h.socket.emit(failure);
+      assert(h.chat.textContent.includes("对接请求未完成"));
+      assert(!h.chat.querySelector(".typing-indicator-wrapper"));
+      assert.equal(h.socket.sent.length, sent);
+      h.input.value = "new explicit request"; h.send();
+      assert.equal(h.socket.sent.length, sent + 1);
+      h.socket.emit(failure); h.input.value = "old failure must not release new work"; h.send();
+      assert.equal(h.socket.sent.length, sent + 1);
+    });
+  }
+  for (const mode of ["legacy", "decision_a2"]) {
+    for (const stage of ["rejected", "accepted"]) await test(`${mode} scoped docking ${stage} failure releases only its pending request`, () => {
+      const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send();
+      if (stage === "accepted") h.socket.emit(accepted());
+      const count = () => h.socket.sent.filter(frame => frame.type === "chat").length;
+      const initial = count();
+      // An uncorrelated old watch error is not a completion receipt.
+      h.socket.emit({type: "error", code: "docking_unavailable", message: "old watch failed"});
+      h.input.value = "next message"; h.send();
+      assert.equal(count(), initial, "unscoped control error cannot release the current request");
+      if (stage === "accepted") {
+        h.socket.emit({type: "error", code: "docking_unavailable", docking_segment_complete: true,
+          turn_id: "9".repeat(32), trace_id: trace});
+        h.send(); assert.equal(count(), initial, "foreign completion cannot release the current request");
+      }
+      const failure = stage === "rejected"
+        ? {type: "error", code: "docking_request_active", docking_request_rejected: true}
+        : {type: "error", code: "docking_unavailable", docking_segment_complete: true, turn_id: turn, trace_id: trace};
+      h.socket.emit(failure);
+      assert(h.chat.textContent.includes("对接请求未完成"));
+      assert(!h.chat.querySelector(".typing-indicator-wrapper"));
+      h.send(); assert.equal(count(), initial + 1);
+      if (stage === "accepted") {
+        h.socket.emit(failure); h.input.value = "must remain pending"; h.send();
+        assert.equal(count(), initial + 1, "late old completion cannot release a new request");
+      }
+    });
+    await test(`${mode} routes docking views to original chat and releases only drained segment`, () => {
+      const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send();
+      h.socket.emit(accepted());
+      const event = {type: "docking_event", schema: "DockingView@1", request_id: trace, root_trace_id: trace,
+        task_id: "test-task", preparation_id: "test-preparation", origin_turn_id: turn, revision: 0,
+        sequence: 1, send_generation: 1, phase: "running", segment_complete: false, terminal: false,
+        view_status: "ACTIVE", task_status: "unavailable", cleanup_status: "pending", reason_code: "status_active",
+        persistence_pending: false, missing_fields: [], preview: null, result: null};
+      h.socket.emit(event);
+      assert(h.chat.textContent.includes("MOLECULAR DOCKING"), "normal homepage must mount its actual C event");
+      const count = h.socket.sent.filter(frame => frame.type === "chat").length;
+      h.input.value = "another message"; h.send();
+      assert.strictEqual(h.socket.sent.filter(frame => frame.type === "chat").length, count);
+      h.socket.emit({...event, sequence: 2, send_generation: 2, segment_complete: true,
+        cleanup_status: "settled", phase: "awaiting_input", view_status: "AWAITING_INPUT", reason_code: "clarification_required"});
+      assert(h.button("补充本次请求"));
+      assert(!h.button("确认并运行 Vina"));
+      h.send();
+      assert.strictEqual(h.socket.sent.filter(frame => frame.type === "chat").length, count + 1);
+      h.socket.emit({...event, sequence: 3, send_generation: 3, segment_complete: true,
+        cleanup_status: "settled", phase: "awaiting_input", view_status: "AWAITING_INPUT", reason_code: "clarification_required"});
+      h.input.value = "must not overlap the ordinary request"; h.send();
+      assert.strictEqual(h.socket.sent.filter(frame => frame.type === "chat").length, count + 1,
+        "old docking refresh cannot release the new ordinary chat");
+      h.socket.close(); h.reconnect(); h.sockets.at(-1).open(); h.ready(mode, true);
+      assert(h.button("刷新状态（只读）"));
+      assert(!h.sockets.at(-1).sent.some(frame => frame.type === "docking_watch" || frame.type === "chat"));
+    });
+  }
   await test("legacy announcement has no decision controls and sends a valid legacy payload", () => {
     const h = loadHome(); h.ready("legacy");
     assert(!h.button("停止") && !h.button("继续") && !h.button("开始新请求"));
@@ -427,7 +587,7 @@ async function run() {
   await test("active main script cache version points to Task8 implementation", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261015-durable-waiting-v3"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261017-docking-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");

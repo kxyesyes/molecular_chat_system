@@ -995,3 +995,57 @@ fresh QUALITY **APPROVED**：两文件 `node --check`、**48/48**、
 **67560** 个 JSON UTF-8 差分样本、精确字节/节点边界与九项生命周期/安全
 探针通过；前后冻结 SHA-256 一致。此组件尚未由首页模板加载，未启用 C，
 没有真实科学执行、自动审批或实际浏览器视觉验收。
+
+### 2026-10-17 D6 聊天、可信装配及首页集成验收
+
+共享 controller 通过既有 legacy/A2 receiver 接入，同一原消息/root/task 的
+watch/refine、实际结构结果接收、成功物理交付后的有限私有历史均有回归。
+不增加 receiver 或调度器，不以模型文字恢复来源或执行授权。预准入拒绝使用
+明确标记；已接受请求的错误只在精确 attachment 当前归属下携带结算状态。
+实际发送锁内重查 owner/attachment 和结算；acceptance 还必须有实际发送完成
+回执才能启动。scope/owner/attachment 排队变化先 **6 failed / 2 controls passed**，
+身份在抑制发送后恢复的两项另先 **2 failed**，均已修复。并发只读 watch 不再
+错误关闭正在等待发布的 root；失败 publication 只有清理确认后允许新请求。
+
+最终父级 controller/receiver/实际服务端 DOM payload：
+
+```powershell
+python -B -m pytest tests/agent/test_docking_chat_controller.py tests/agent/test_docking_chat_receivers.py tests/agent/test_docking_dom_contract.py -q -p no:cacheprovider --tb=short --basetemp <独立临时目录>
+```
+
+结果 **85 passed / 59 warnings，59.24 秒**。相邻旧协议、A2 runtime/lifecycle、
+C5 feedback/view delivery 五模块 **283 passed / 5099 warnings，165.42 秒**。
+后端五文件最终 SPEC **PASS**，独立排队回归 **10 passed**；QUALITY **APPROVED**，
+独立 **10 passed / 25 deselected**，原先两个失败探针 **2 passed**，身份恢复后
+acceptance/provider/root 均为零。此前 receiver 独立双轮审查结论保留。
+初次相邻命令误写 legacy 测试目录，未运行任何测试；修正为顶层真实路径后
+得到上述结果，不把路径错误计为通过。
+
+可信装配只在 `MEDCHAT_CHAT_DOCKING_ENABLED=1` 时启用，默认关闭。
+同步失败启动的资源从构造时登记；运行中宿主的一个原生清理 Task 直接持有
+exit stack，拒绝外部取消直至实际 closer 完成，不重试已进入的 closer。
+无 worker 的超时发布只有物理/持久清理完全确认才可关闭。进入前/后宿主取消
+及两模式的正式 RED 后，最终 app **72 passed**；独立 SPEC **72 passed /
+4 warnings，54.87 秒**，QUALITY **72 passed / 4 warnings，53.60 秒**，均通过。
+相关装配、runtime binding、model lifecycle、toolchain **150 passed / 1 skip**；
+skip 为 Windows symlink 权限，不是科学工具成功。
+
+首页内联卡仅显示闭合 DTO，nonce 只在本次内存确认单中，审批只能来自明确
+点击，等待审批不是成功。原消息失败、取消、超时和断连不接受迟到成功；
+旧卡不能释放新普通聊天。终态但清理未确认时保留手动只读刷新，不能自动审批、
+重跑或提前释放输入。该八项两模式回归先 **8 failed / 63 passed**，最终
+首页 **71/71**；显式 pre-first-view timeout helper 先 RED 后修复。
+此 helper 没有生产调用者，没有给普通聊天增加任意超时器；实际本地工作计时器
+仍在本次审批后创建。UI 独立 SPEC 与 fresh QUALITY（含复审）均通过；
+完整 **44 个 Node 契约文件**、额外 activity DOM **17/17**、**56 个 JS 语法文件**
+通过，最终 UI 修改后再次运行全部 44 文件通过。
+
+`compileall -q src scripts main.py` 通过。完整离线 pytest 已启动，但启动时
+尚未包含最后 acceptance 回执补丁；其最终结果与上述当前 85 项重跑须分别
+记录，不能把尚未结束的运行或旧 head CI 称为最终全量通过。
+
+本机 strict health **23/23**，实际工具链只读捕获通过、Vina timeout 为 300 秒。
+Conda Python/OpenBabel 原文件有硬链接，使用字节一致、单链接的临时副本，
+未放宽工具链身份规则或修改原环境。RAG 输入/index 的原字节复用副本位于
+忽略目录；没有提交运行数据或本机配置。此时没有启用服务或运行真实 Vina，
+D7 浏览器、用户亲自点击当前 READY、输出与下载核验及最终集成审查仍待完成。

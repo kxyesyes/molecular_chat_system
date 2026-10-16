@@ -114,17 +114,54 @@
     agentTaskPanel: null,
   };
 
+  const dockingUI = window.HomeDockingConsent?.create({
+    document,
+    send: (socket, payload) => {
+      if (socket !== ws || decisionAwaitingReady || !socket || socket.readyState !== WebSocket.OPEN || protocolDesyncedSocket === socket) return false;
+      try {socket.send(JSON.stringify(payload)); return true;}
+      catch (_) {closeProtocolSocket(socket, 1011, "request send failed"); return false;}
+    },
+    request: async (path, body) => {
+      const abort = new AbortController();
+      const deadline = setTimeout(() => abort.abort(), path === "/api/agent/docking/preparations" ? 32000 : 6000);
+      try {
+        const response = await fetch(path, {method: "POST", credentials: "same-origin", cache: "no-store", signal: abort.signal,
+          ...(body === undefined ? {} : {headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)})});
+        if (!response.ok) throw new Error("Docking request unavailable");
+        return await response.json();
+      } finally {clearTimeout(deadline);}
+    },
+    onView: event => {
+      if (decisionTurn?.socket === ws && decisionTurn.turnId === event.origin_turn_id && decisionTurn.traceId === event.request_id)
+        decisionTurn.docking = true;
+    },
+    onSegment: event => {
+      if (decisionTurn?.socket === ws && decisionTurn.turnId === event.origin_turn_id && decisionTurn.traceId === event.request_id)
+        decisionTurn.phase = "ended";
+      moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear(); removeTypingIndicator(); clearToolStatus();
+      updateDecisionControls();
+    },
+    onBusy: () => updateDecisionControls(),
+    onRejected: () => {
+      if (decisionTurn?.socket === ws && decisionTurn.phase === "pending") decisionTurn.phase = "ended";
+      moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear(); removeTypingIndicator(); clearToolStatus();
+      updateDecisionControls();
+    },
+    onError: message => HomeChatRenderer.showNotification(message, "warning"),
+  });
+
   function decisionActive() {
     return decisionTurn && decisionTurn.phase !== "ended";
   }
 
   function updateDecisionControls() {
     if (elements.sendBtn) elements.sendBtn.disabled = decisionAwaitingReady ||
+      (typeof dockingUI !== "undefined" && dockingUI?.blocked()) ||
       (decisionMode && Boolean(decisionActive() || decisionWaiting || decisionAbandonAwait));
     if (!decisionControls) return;
     decisionControls.box.hidden = !decisionMode;
     decisionControls.stop.disabled = !decisionMode || !decisionActive() || !decisionTurn.turnId ||
-      Boolean(decisionTurn.result) || decisionTurn.cancelSent;
+      Boolean(decisionTurn.result) || decisionTurn.cancelSent || decisionTurn.docking;
     decisionControls.resume.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
     decisionControls.fresh.disabled = !decisionMode || Boolean(decisionActive() || decisionAbandonAwait) || !decisionWaiting;
   }
@@ -144,6 +181,7 @@
   }
 
   function clearDecisionConnection() {
+    if (typeof dockingUI !== "undefined") dockingUI?.disconnect(ws);
     decisionAwaitingReady = true; // every new socket must announce its own mode
     if (decisionMode) {
       scientificReferences?.startRequest(); // invalidate pending ACKs/restores, never replay
@@ -164,6 +202,9 @@
 
   function configureDecisionMode(message) {
     decisionAwaitingReady = false;
+    if (typeof dockingUI !== "undefined") dockingUI?.configure(ws,
+      message.capabilities?.chat_docking?.preparation_available === true &&
+      message.capabilities.chat_docking.execution_authorized === false);
     decisionMode = message.normal_chat_mode === "decision_a2";
     if (decisionMode && !decisionWaiting) decisionWaiting = readStoredDecisionWaiting();
     if (decisionMode && !decisionControls && elements.input?.parentNode) {
@@ -201,6 +242,7 @@
   }
 
   function sendDecisionMessage(resume = false) {
+    if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     const message = elements.input.value;
     if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
     const config = HomeAdvancedOptions.getConfig();
@@ -236,7 +278,9 @@
       HomeChatRenderer.showNotification("请求控制未被接受，请检查当前状态后重试。", "warning");
       // Well-formed chat/resume/abandon cannot yield invalid_control. A late
       // cancel error has no request ID: notify, but retain pending authority.
-      if (!["invalid_frame", "turn_in_progress", "continuation_unavailable"].includes(message.code)) return true;
+      const dockingRejected = message.docking_request_rejected === true &&
+        ["docking_unavailable", "docking_request_active", "docking_in_progress"].includes(message.code);
+      if (!dockingRejected && !["invalid_frame", "turn_in_progress", "continuation_unavailable"].includes(message.code)) return true;
       // Control errors have no request ID. Do not admit another turn until the
       // outstanding abandon response is consumed; never queue or replay input.
       if (decisionAbandonAwait?.socket === socket) {
@@ -245,7 +289,7 @@
         updateDecisionControls();
         return true;
       }
-      const requestRejected = ["invalid_frame", "turn_in_progress"].includes(message.code) ||
+      const requestRejected = dockingRejected || ["invalid_frame", "turn_in_progress"].includes(message.code) ||
         (message.code === "continuation_unavailable" && Boolean(turn?.resume));
       if (turn?.phase === "pending" && requestRejected) {
         turn.phase = "ended";
@@ -603,6 +647,10 @@
 
       if (decisionAwaitingReady && !["connection_ready", "pong"].includes(message.type)) return;
       if (message.type === "connection_ready") configureDecisionMode(message);
+      if (typeof dockingUI !== "undefined") {
+        if (message.type === "request_accepted") dockingUI?.accepted(message, socket);
+        if (dockingUI?.handle(message, socket)) return;
+      }
       if (decisionMode && handleDecisionMessage(message, socket)) return;
       // 处理不同类型的消息
       switch (message.type) {
@@ -1400,6 +1448,7 @@
   // 修复后的消息发送函数
   function sendMessage() {
     if (decisionAwaitingReady) return; // no legacy fallback before the new server announcement
+    if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     if (decisionMode) {sendDecisionMessage(); return;}
     const message = elements.input.value.trim();
 
@@ -1656,6 +1705,7 @@
     currentMessages.push({ role: "user", content: content });
     HomeState.currentMessages = currentMessages.slice();
     updateToolbarControlStates();
+    if (typeof dockingUI !== "undefined") dockingUI?.begin(ws, messageWrapper);
   }
 
   // 添加助手消息 - 美化版

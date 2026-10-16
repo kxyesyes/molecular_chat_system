@@ -145,10 +145,22 @@ class TaskRuntime:
         docking_execution: DockingExecution | Any | None = None,
         docking_consent_policy: DockingConsentPolicy | None = None,
         docking_consent_output_root: str | Path | None = None,
+        docking_chat_toolchain=None,
         consent_wall_time_ms: Callable[[], int] | None = None,
         consent_monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.config = config or TaskRuntimeConfig.from_env()
+        if docking_chat_toolchain is not None:
+            from src.docking.chat_toolchain import ChatDockingToolchain
+            from src.docking.molecular_docking_adapter import MOLECULAR_DOCKING_ADAPTER_VERSION
+            if (type(docking_chat_toolchain) is not ChatDockingToolchain
+                    or type(docking_consent_policy) is not DockingConsentPolicy
+                    or docking_consent_output_root is None
+                    or self.config.backend != "local" or local_backend is not None
+                    or docking_consent_policy.tool_policy_digest != docking_chat_toolchain.digest
+                    or docking_consent_policy.adapter_contract_version != MOLECULAR_DOCKING_ADAPTER_VERSION):
+                raise DockingConsentError("consent_policy_unavailable")
+            docking_chat_toolchain.require_current()
         if docking_consent_output_root is not None:
             require_local_output_construction()
             docking_consent_output_root = private_output_root(
@@ -225,6 +237,7 @@ class TaskRuntime:
                 staging_root=self.config.staging_root, excluded=excluded)
             self._docking_consent_execution = DockingExecution(
                 self.config.staging_root, allowed_output_root=docking_consent_output_root,
+                chat_toolchain=docking_chat_toolchain,
             )
             self._docking_private_output = PrivateDockingOutput.bind(
                 self._docking_consent_execution, docking_consent_policy,

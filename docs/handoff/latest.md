@@ -1,5 +1,20 @@
 # Latest handoff
 
+## PR #209 普通聊天对接 D6 集成（2026-10-17）
+
+- 分支 `codex/browser-agent-real-acceptance`；继续同一 Draft PR，不直接修改 main。
+- 共享聊天 controller、两模式既有 receiver、可信默认关闭装配、内联来源/参数/
+  一次性确认/结果卡已通过独立规格与质量审查。未增加 receiver 或模型权限恢复。
+- 当前聚焦 controller/receiver/服务端 DOM 85 passed；app 72 passed；旧 transport/
+  lifecycle 283 passed；首页 71/71，全部 44 个 Node 文件与 Python 编译通过。
+- 完整离线 pytest 正在运行，尚不是最终通过证据；最后 acceptance 实际发送回执
+  补丁由当前 85 项重跑覆盖，须与先启动的完整运行分别记录。strict health 23/23。
+- C 默认仍关闭；真实服务、当前 S03/S10、用户亲自点击 READY、真实 pose/能量/
+  下载摘要核验、最终集成审查及当前 head CI 为剩余 D7 门禁。没有新 Vina 结果，
+  开发/提交/合并授权不替代运行时人工确认。
+- 完整命令、RED/GREEN、审查与平台限制见
+  `docs/superpowers/validation/2026-10-15-browser-agent-real-acceptance.md`。
+
 ## PR #183 恢复逻辑兼容审查（2026-10-15）
 
 - 以当前 `main` 的 `web_request`、owner-scoped continuation CAS 和独立进程恢复契约为准；

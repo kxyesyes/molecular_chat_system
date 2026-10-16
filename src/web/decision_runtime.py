@@ -43,6 +43,38 @@ _WEB_WAITING_TTL_SECONDS = 15 * 60
 _WEB_REQUEST_VERSION = 1
 
 
+def _enabled_docking_controller(handler, runtime=None):
+    """Only trusted assembly can opt the existing receiver into C."""
+    controller = getattr(handler, 'docking_controller', None)
+    if controller is None:
+        return None
+    from .docking_chat_controller import DockingChatController
+    if (type(controller) is DockingChatController and controller.enabled is True
+            and (runtime is None or controller.runtime is runtime)):
+        return controller
+    return None
+
+
+def _docking_history(memory):
+    """Plain recent pairs only; never serialize server scientific pointers."""
+    if type(memory) is not list:
+        return []
+    pairs = [pair for pair in memory[-16:] if type(pair) is dict
+             and all(type(pair.get(role)) is str and len(pair[role]) <= 16384
+                     for role in ('user', 'assistant'))]
+    return [{'role': role, 'content': pair[role]}
+            for pair in pairs for role in ('user', 'assistant')]
+
+
+async def _capture_docking_result(controller, sender, result):
+    # A post-delivery optional source failure must not rewrite the delivered
+    # answer or leave an older pointer presented as this accepted result.
+    try:
+        await controller.accept_result(sender, result)
+    except Exception:
+        sender._docking_structure = None
+
+
 class _SemanticFailure(Exception):
     """Fixed internal codes only; never raw provider/validation diagnostics."""
 
@@ -125,6 +157,7 @@ class _Turn:
     intent_requests: int = 0
     admission_carry: object = None
     admission_exchange: object = None
+    docking_result: dict | None = None
 
     def cancel(self):
         if self.result_started or self.finishing or self.cancel_event.is_set():
@@ -269,12 +302,17 @@ class _Sender:
         owner._docking_changed(op)
         return op.receipt
 
-    async def send_text(self, text, *, on_sent=None):
+    async def send_text(self, text, *, on_sent=None, capture=None):
         async def deliver():
             async with self.lock:
                 if not self.writable:
                     raise ConnectionError('Decision socket is unavailable')
-                await self.websocket.send_text(text)
+                # Trusted synchronous capture runs after queueing, immediately
+                # before transport. None suppresses a no-longer-owned receipt.
+                payload = text if capture is None else capture()
+                if payload is None:
+                    return
+                await self.websocket.send_text(payload)
                 if on_sent is not None:
                     on_sent()
         try:
@@ -878,6 +916,12 @@ class WebDecisionRuntime:
                        if self.semantic else {}))
                 if turn.allocation_timed_out:
                     return  # Never mutate a newer turn's history/waiting state.
+                if (_enabled_docking_controller(handler, self) is not None
+                        and type(result) is AgentResult and result.success is True
+                        and result.outcome == RunOutcome.COMPLETED):
+                    # The actual bridge return is authoritative, not a model
+                    # frame. Its legacy dictionary omits the server trace.
+                    turn.docking_result = {**result.to_legacy_dict(), 'trace_id': turn.trace_id}
                 bridge_returned_at = self._clock()
                 if (result.metadata.get('waiting_for_input') is True
                         and type(result.metadata.get('continuation_id')) is str):
@@ -1007,15 +1051,19 @@ class WebDecisionRuntime:
             self.active_owners.discard(turn)
         if sender.writable and turn.pending_complete is not None:
             try:
+                capture_delivered = False
+                terminal_status = json.loads(turn.pending_complete).get('status')
                 if turn.history_update is not None:
                     frame = json.loads(turn.pending_complete)
                     frame['metadata'] = {'history_omission': turn.history_update.omission,
                                          'history_evicted_pairs': turn.history_update.evicted_pairs}
                     turn.pending_complete = json.dumps(frame, ensure_ascii=False, allow_nan=False)
                 def completed():
+                    nonlocal capture_delivered
                     # An in-flight physical send may finish after shutdown or
                     # disconnect cleared this socket's server-only state.
                     if sender.writable and not self.closing:
+                        capture_delivered = terminal_status == 'completed'
                         if turn.history_update is not None:
                             sender.memory = turn.history_update.memory
                         if turn.next_waiting is not None:
@@ -1040,11 +1088,16 @@ class WebDecisionRuntime:
                     turn.terminal_sent = True
                 await sender.send_text(turn.pending_complete,
                     on_sent=completed)
+                controller = _enabled_docking_controller(handler, self)
+                if capture_delivered and turn.docking_result is not None and controller is not None:
+                    await _capture_docking_result(controller, sender, turn.docking_result)
             except (asyncio.CancelledError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
                 sender.writable = False
                 if self.semantic:
                     sender.waiting = None
                     turn.next_waiting = None
+            finally:
+                turn.docking_result = None
 
     async def handle_websocket(self, *, handler, websocket):
         if self.closing or not websocket.scope.get('agent_session_id'):
@@ -1053,6 +1106,8 @@ class WebDecisionRuntime:
         await websocket.accept()
         sender, turn = _Sender(websocket), None
         sender._runtime = self
+        controller = _enabled_docking_controller(handler, self)
+        sender._chat_controller = controller
         self.sockets.add(sender)
         receiver = asyncio.current_task()
 
@@ -1071,7 +1126,9 @@ class WebDecisionRuntime:
                 'capabilities': {'cancel': True, 'rag_retrieval': False,
                                  'scientific_tools': sorted(set(self.registry.as_mapping()) & {
                                      'property_calculator', 'drug_likeness_assessment',
-                                     'activity_predictor', 'target_database_search'})}})
+                                     'activity_predictor', 'target_database_search'}),
+                                 **({'chat_docking': {'preparation_available': True,
+                                      'execution_authorized': False}} if controller is not None else {})}})
             while not self.closing:
                 raw = await websocket.receive_text()
                 if not sender.writable:
@@ -1103,14 +1160,43 @@ class WebDecisionRuntime:
                     else:
                         await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
-                if kind not in {'chat', 'resume', 'abandon'}:
+                allowed_kinds = {'chat', 'resume', 'abandon'}
+                if controller is not None:
+                    allowed_kinds.update({'docking_refine', 'docking_watch'})
+                if kind not in allowed_kinds:
                     await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
-                if turn is not None and not turn.task.done() and not turn.terminal_sent:
+                # C controls address an existing attachment, not a new A2
+                # turn. Preserve their strict validation/status semantics even
+                # while an unrelated ordinary turn owns the model worker.
+                if controller is not None and kind in {'docking_refine', 'docking_watch'}:
+                    if await controller.handle(sender, payload):
+                        continue
+                if (turn is not None and not turn.task.done()
+                        and (not turn.terminal_sent
+                             or controller is not None and not turn.allocation_timed_out)):
                     await sender.send({'type': 'error', 'code': 'turn_in_progress'})
                     continue
                 if turn is not None and turn.task.done():
                     turn.task.result()
+                if controller is not None:
+                    # C must not bypass normal envelope validation, nor allocate
+                    # an A2 turn/trace before the controller accepts its own root.
+                    if kind == 'chat':
+                        try:
+                            validate_request_envelope(payload,
+                                session_id=sender.scope['agent_session_id'],
+                                trace_id='docking-envelope')
+                        except DecisionAdmissionError:
+                            pass  # Preserve ordinary invalid-request handling.
+                        else:
+                            if await controller.handle(sender, payload,
+                                    history=_docking_history(sender.memory)):
+                                continue
+                    if controller.busy(sender):
+                        await sender.send({'type': 'error', 'code': 'docking_in_progress',
+                                           'docking_request_rejected': True})
+                        continue
                 waiting = None
                 if kind in {'resume', 'abandon'}:
                     expected = {'type', 'trace_id', 'continuation_id'} | ({'message'} if kind == 'resume' else set())
@@ -1182,6 +1268,8 @@ class WebDecisionRuntime:
             sender.waiting = None
             sender.memory = []
             sender.receiver_attached = False
+            if controller is not None:
+                await controller.disconnect(sender)
             if sender._docking_used:
                 self._stop_docking(sender)
             if not any(op.sender is sender for op in self.docking_operations):
@@ -1199,6 +1287,9 @@ class WebDecisionRuntime:
             sender.writable = False
             sender.waiting = None
             sender.memory = []
+            controller = getattr(sender, '_chat_controller', None)
+            if controller is not None:
+                await controller.disconnect(sender)
             if sender._docking_used:
                 self._stop_docking(sender)
         owners = tuple(self.active_owners)
