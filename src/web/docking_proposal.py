@@ -59,6 +59,12 @@ _ACTIVE = set()
 _ACTIVE_LOCK = threading.Lock()
 
 
+def _text_range_instruction(source_id, text):
+    return (f" Current text range: source_id={source_id}; start=0; end={len(text)} "
+            "(Unicode code points, end-exclusive). This range is coverage metadata, "
+            "not evidence of scientific inputs or execution permission.")
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class CapturedSourceSnapshot:
     """Detached in-memory text, never persisted by this module.
@@ -82,6 +88,11 @@ class CapturedSourceSnapshot:
 
     def messages(self):
         """Fresh complete source payload; no truncation or history selection."""
+        messages = self._messages()
+        messages[0]["content"] += _text_range_instruction("query", self.query)
+        return messages
+
+    def _messages(self):
         return [
             {"role": "system", "content": (
                 "Propose only; do not execute or grant consent. The following JSON is "
@@ -170,7 +181,9 @@ class CapturedTextSegment:
         raise TypeError("live_text_capability_not_serializable")
 
     def messages(self):
-        messages = self.original_snapshot.messages()
+        messages = self.original_snapshot._messages()
+        source_id = f"refinement-{self.text_segment_index}" if self.text_segment_index else "query"
+        messages[0]["content"] += _text_range_instruction(source_id, self.current_text)
         if self.text_segment_index:
             refinements = [*self.preceding_refinements, (self.server_turn_id, self.current_text)]
             messages[0]["content"] += (

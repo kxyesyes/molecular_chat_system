@@ -1075,3 +1075,54 @@ dispatch `not_reserved`，仅预扣一次 30000 ms proposal budget。没有 READ
 不移除顺序、资源 URL、隔离/清理或网络封锁断言。该文件全量重跑
 **7 passed / 1 warning (21.55s)**。此项是测试清单同步，不改变生产行为；
 新的 CI、完整本机离线运行和独立集成审查尚待结束。
+
+### D7 预热后的真实复测与当前阻塞项（2026-10-17）
+
+`9108b025` 的 CI run `38940650689` 已完成：static-quality、九个 Python
+分片及汇总 offline-quality 全部 success。这只覆盖该提交，不覆盖后续修复。
+独立最终集成审查发现一个阻断问题：C 已投影并明确保留的 HOH 或非标准残基
+整链仍可能被旧 ADFR 默认 cleanup 删除，且旧服务只检查退出码。合成探针
+复现“输入保留 HOH、模拟准备输出删除 HOH、服务仍接受”；没有运行实际
+ADFR/Vina，模拟输出不能作为有效科学产物。此 P1 修复及复审仍待完成。
+
+实际服务全量反向寻靶预热完成（831120/831120 行）后，新会话 S03 再次返回
+人源 P06276 的 10 个实验结构。随后 S10 的真实主模型响应为 HTTP 200、
+一次 tool call、约 1.7 秒，但 parser 拒绝，页面终态为结果未确认。此次与
+预热中的零请求超时不同；无 READY、审批或 Vina 执行，**S10 仍未通过**。
+一次限定诊断确认非流式单调用包含 `index=0`，且输出跨度未满足现有精确
+覆盖约束。拟修复只接受可选原生整数 0，并向 C 私有模型消息明确原始当前
+文本的 Unicode 长度、完整覆盖及字段值精确跨度要求；不放宽服务器校验、
+科学权限、预算、重试或 fallback。修改后独立诊断仅证实 schema 接受，
+不代表完整来源一致性、实际浏览器或科学执行成功。
+
+同一已预热服务上的独立首页会话完成 S08/S09：
+
+- S08 咖啡因反向寻靶：实际返回前五项 NOTUM（人）、TRPA1（大鼠）、A1
+  受体（大鼠）、肌型糖原磷酸化酶（人）和肝型糖原磷酸化酶（大鼠）。
+  逐项只读比对真实 TSV 行 145870、158110、230699、330045、330046，
+  target_name、organism、molecule_chembl_id、canonical_smiles 均一致。
+  provenance 中 demo_mode=false、fallback_used=false；页面明确为二维
+  相似性候选，不是实验活性或结合能。当前样例 **PASS**。
+- S09 延续排名第一候选，页面检索到人源 NOTUM / UniProt Q6P988 的
+  10 个实验 X-ray 结构：4UYU、4UYW、4UYZ、4UZ1、4UZ5、4UZ6、4UZ7、
+  4UZ9、4UZA、4UZL；保留相同上游 evidence digest，明确“对接未启动”，
+  仍需链/构象/化学完整性、口袋、3D 配体和当前审批。当前样例 **PASS**。
+
+本机完整离线 pytest 仍运行，且启动早于后续修改；不能称为当前全量通过。
+PR 继续 Draft。用户亲自点击当前 READY、实际输出与下载一致性、P1 关闭及
+最终当前提交质量门仍未完成。
+
+### D7 主模型单调用兼容性与跨度说明修正
+
+四文件：`src/agent/decision_transport.py`、`src/web/docking_proposal.py`、
+`tests/agent/test_docking_preparation_protocol.py`、`tests/agent/test_web_docking_proposal.py`。
+单调用索引回归先 **1 failed / 13 passed**，跨度说明回归先 **5 failed**；
+最终两个协议/模型模块 **571 passed / 1 warning，27.95s**，相邻文本补充、
+协调器和 Web refinement **443 passed / 1 warning，78.08s**。此前一次命令
+使用不存在的测试文件名，未执行测试；不计作通过。
+
+SPEC **APPROVE**：独立 **571 passed，30.00s** 及 65 个内存边界探针。
+fresh QUALITY **APPROVE**：独立 **571 passed，27.99s** 及 71 个差分/边界
+探针。两轮均复核四文件冻结哈希；编译和限定 diff 检查通过。警告是已有
+Pydantic `model_provenance` protected namespace 提示。当前服务尚未重启加载
+该修复，实际 S10 复测及独立 P1 修复仍待完成；不据此宣称科学成功。

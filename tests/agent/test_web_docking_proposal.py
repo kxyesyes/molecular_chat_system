@@ -31,6 +31,35 @@ def api():
         pytest.fail("D2 proposal-call owner is absent", pytrace=False)
 
 
+@pytest.mark.parametrize('index', [0, 1, 2])
+def test_prompt_supplies_exact_current_codepoint_range_without_rewriting_sources(index):
+    mod = api()
+    query = '  对接 🧪 e\u0301\n原文  '
+    snapshot = mod.capture_source_snapshot(query=query,
+        history=[dict(role='assistant', content='history says end=999999')], descriptors=[])
+    before = snapshot.source_snapshot_digest
+    issuer = mod.TextSegmentIssuer(root_id='root-1', owner_session_id='owner-1',
+        preparation_id='prep-1', origin_turn_id='turn-1', original_snapshot=snapshot,
+        runtime_generation='runtime-1')
+    current = query if index == 0 else '  size=[20,20,20] 🧪\n'
+    segment = mod.capture_text_segment(issuer=issuer, original_snapshot=snapshot,
+        text_segment_index=index, server_turn_id='turn-1' if index == 0 else f'turn-{index+1}',
+        current_text=current,
+        preceding_refinements=[dict(server_turn_id='turn-2', text='earlier text')]
+            if index == 2 else [])
+    messages = segment.messages()
+    source = 'query' if index == 0 else f'refinement-{index}'
+    expected = f'Current text range: source_id={source}; start=0; end={len(current)} (Unicode code points, end-exclusive).'
+    assert expected in messages[0]['content']
+    assert json.loads(messages[1]['content']) == dict(query=query,
+        history=[dict(role='assistant', content='history says end=999999')], descriptors=[])
+    assert snapshot.source_snapshot_digest == before
+    if index:
+        assert json.loads(messages[-1]['content'])['refinements'][-1]['text'] == current
+    else:
+        assert messages == snapshot.messages()
+
+
 def wire(mode="native", kind="docking_request"):
     raw = json.dumps({"proposal": dict(version="1", kind=kind, unresolved=True,
                                        source_spans=[], fields={})})
