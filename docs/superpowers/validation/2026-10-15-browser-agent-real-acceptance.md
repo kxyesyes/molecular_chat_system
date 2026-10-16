@@ -303,3 +303,36 @@ fresh QUALITY 各自复跑 36 项、语法与 diff 检查通过。未再次放�
 `s09-final-structures-context-20261016.png`。截图不提交到 Git。
 本次将 S08/S09 单独记为 PASS；S10 仍 BLOCKED，D2–D7/P4–P7 和最终完整
 离线回归、集成审查/远端门禁仍待完成，PR 保持 Draft。
+
+### 2026-10-16 远端启动测试兼容性修正
+
+`3f321077` 的 GitHub Actions `quality` 运行 `38885210749` 中，root 分区
+得到 **3 failed / 5576 passed / 106 skipped / 12 warnings，276.66 秒**。
+三项失败均在 `tests/test_rdkit_startup.py` 导入 Uvicorn 内部 `Process` 时
+发生；尚未进入真实 spawn 或应用 bootstrap。CI 按仓库固定依赖使用 0.24.0，
+而先前本机验证环境是 0.43.0。
+
+[Uvicorn 0.24.0 官方 supervisor 源码](https://github.com/encode/uvicorn/blob/0.24.0/uvicorn/supervisors/multiprocess.py)
+直接使用 `get_subprocess`，没有较新版本的 `Process`/心跳线程。此次只修改
+启动测试夹具，使其走安装版本的实际 supervisor spawn 路径：新版仍核对真实
+心跳和多线程启动拒绝；旧版核对实际单线程子进程及应用 bootstrap。没有跳过
+失败测试、放宽隐私初始化保护或修改生产源码、依赖固定版本、部署支持策略。
+
+在临时目录下载已固定的 0.24.0 wheel，仅为测试子进程设置 `PYTHONPATH`，
+没有替换本机安装。修复前本机同样复现 **3 failed / 2 passed，1.40 秒**。
+修复后三模块命令：
+
+```text
+python -B -m pytest tests/test_rdkit_startup.py tests/test_rdkit_logging.py tests/test_pytest_rdkit_bootstrap.py -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short
+```
+
+初次固定 0.24.0 组合 **34 passed，16.03 秒**；本机 0.43.0 同组合 **34 passed，
+14.76 秒**。SPEC 发现 legacy 路径还应在 app prefix 执行前明确断言 main 的
+初始化已完成，避免 app 自身初始化掩盖 launcher 回归。补强后同组合分别为
+**34 passed，16.10 秒**（0.24.0）和 **34 passed，15.48 秒**（0.43.0）。
+独立 SPEC 复审通过，分别复跑启动五项为 **5 passed，4.83 秒**和 **5 passed，
+4.15 秒**；无跳过，冻结哈希和 diff 检查通过。独立 QUALITY APPROVED，
+复跑三模块为 **34 passed，16.62 秒**（0.24.0）和 **34 passed，15.85 秒**
+（0.43.0），无跳过，测试哈希未变；没有更改生产启动或隐私行为。
+这些均为 Windows 验证，修复后的 Linux CI 尚待确认。
+这不是新的浏览器或科学运行证据，S10 及最终全仓/远端门禁未被关闭。
