@@ -306,6 +306,8 @@ class DockingRequestCoordinator:
         self._mono = time.monotonic if monotonic is None else monotonic
         self._enabled = enabled
         self._roots = {}
+        # Shared across HTTP registrations; entries live until physical work ends.
+        self._http_control_tasks = {}
 
     def _remaining_ms(self, root):
         wall, mono = self._wall(), self._mono()
@@ -1296,6 +1298,14 @@ class DockingRequestCoordinator:
         root = self._owned(root_id, owner_session_id)
         if root is None:
             return _view()
+        return await self._close_owned_root(root)
+
+    async def _close_owned_root(self, root):
+        """Drain an already-owned object, never resolve a replacement by ID.
+
+        Deferred HTTP cleanup retains the exact root it admitted and stopped.
+        _release_closed also checks object identity before removing a mapping.
+        """
         self._interrupt(root, "closed", "CLOSED")
         root.phase, root.reason = "CLOSED", "closed"
         task = root.task

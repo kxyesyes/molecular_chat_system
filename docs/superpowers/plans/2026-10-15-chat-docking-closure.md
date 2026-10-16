@@ -805,6 +805,72 @@ exactly one claim, one submission and one synthetic raw call; closed-consumed
 retry performed no monitored coordinator/runtime I/O. All three hashes stayed
 unchanged. The known-failing next control-route tests remain excluded.
 
+The following status/revoke/cancel slice is being implemented in the isolated
+task worktree, without changing the concurrent documentation checkout. Its
+three actual-route missing-feature tests were revalidated as **3 failed in
+17.25 seconds**. Eight additional boundary cases initially failed in 42.83
+seconds; two used a missing-route lookup which raised StopIteration. That
+test helper was corrected to assert the absent route explicitly and those two
+tests failed as intended in **11.67 seconds**. The cases cover exact owner and
+Origin checks, empty-body framing, logical feedback versus cancellation-resistant
+body reads, no delayed mutation after timeout/disconnect, conservative durable
+observation without reconstructing a live owner, and retained slow SQL reads.
+A further concurrent-cancel control checks one physical cleanup owner across
+six HTTP callers. These are synthetic tests, not real docking evidence.
+The implementation now uses owner-bound live lookup or conservative read-only
+durable receipts, plus one bounded control registry on the existing coordinator.
+Body readers cannot dispatch on late completion; SQL and coalesced close tasks
+remain owned through physical settlement. Worker verification passed **43 tests**
+(34 HTTP cases and nine additional synthetic probes), and an earlier lifecycle
+selection passed **148 tests**. Parent full HTTP/coordinator-execution regression
+passed **46 tests in 232.81 seconds**, with four-file memory compilation and
+diff checks. Independent SPEC PASS: 34 current HTTP tests plus 12 adversarial
+probes, including replacement-root exclusion, shared capacity, immediate cancel
+and a measured 4.906-second default feedback deadline. All four frozen hashes
+stayed unchanged. Fresh QUALITY passed 12 control tests in 74.07 seconds but
+independently reproduced a P2 revoke/cancel/approval race twice: the shared close
+coroutine captured revoke-only admission and returned its 409 to a valid cancel,
+without setting the stop signal. A durable parent regression reproduced the
+same failure in **7.54 seconds**. Admission checks and the immediate stop signal
+are now one event-loop operation per request; only physical cleanup is shared.
+This also prevents an expired first caller's admission deadline from rejecting
+a later valid cancel. Worker deadline/admission probes first observed two failures.
+An adjacent queued-root replacement probe then failed: deferred close still
+looked up the original ID and could close a replacement object. The unchanged
+public `close_root` now delegates its already owned object to a private cleanup
+helper; deferred HTTP cleanup uses that exact captured object too. Worker
+verification passed **59 tests** (35 HTTP, 12 probes, 12 execution regressions),
+then the newly persisted identity regression and original external probe both
+passed. Bounded QUALITY re-review APPROVED the race repairs: 13 control tests
+passed, one fixture failed before its control assertions, the two race cases
+then passed in isolation in 11.76 seconds, and four independent deadline /
+disconnect / capacity / scheduling-error probes passed in 32.15 seconds.
+Four frozen hashes were unchanged. The fixture failure was a missing
+`source_preview` in upstream preparation, not a control assertion; its root
+cause is unconfirmed. A simultaneous parent full run likewise reported **47
+passed / 1 failed in 247.68 seconds**, with `selected_input_unavailable` during
+the oversized-body test's upstream fixture, before HTTP. Five isolated repeats
+with bounded source/preparation ownership diagnostics then passed in **21.45
+seconds**; each child reported successful, settled ownership. These repeats do
+not establish the earlier failure's cause. The complete subsequent serial rerun
+passed **48 tests in 243.13 seconds**, without any overlapping reviewer probes
+from this task. The earlier failures remain recorded rather than relabeled as
+environmental. None of these results completes application activation.
+
+This control-handler deadline starts on route entry. Existing session middleware
+authentication and physical HTTP response sending are unchanged, so it is not
+evidence of an end-to-end ASGI response bound. Those retained-authentication /
+response-send boundaries must be closed before activation, alongside the
+separate prepare/approval request deadlines.
+
+The separate next approval-lifetime slice is still RED: **3 failed in 31.90
+seconds** in `tests/agent/test_web_docking_approval_deadlines.py`. A stalled JSON
+body currently outlives the request's feedback window, including after caller
+cancellation; a completed explicit approval currently couples HTTP disconnect
+to draining admission. The approved design distinguishes this HTTP lifetime
+from loss of an attached WebSocket subscription. These known-failing tests are
+excluded from the current control-route slice and require a separate fix/review.
+
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
 
