@@ -765,6 +765,46 @@ HTTP regression passed **41 tests in 179.51 seconds**. HTTP controls, global C4b
 deadline, D4 publication and activation are
 still separate unfinished gates.
 
+Explicit approval HTTP is now under isolated implementation. The first route
+tests observed **3 failed / 1 passed in 19.22 seconds** (route absent; disabled
+registration control passed), followed by **3 expected error-mapping failures
+in 15.20 seconds**. Approval accepts exactly native
+`{approval_nonce, binding_digest, confirm:true}` through the shared bounded,
+duplicate-free JSON reader, checks session/same-origin/native runtime, and
+resolves only the existing live owner's root. It cannot reconstruct authority
+from a preparation ID. A further real regression found that an acquired UNKNOWN
+claim was mapped as a 409 unused-proof conflict; that case failed in 7.13
+seconds and now distinguishes consumed uncertainty as unavailable/503 with
+cleanup ownership retained. The first combined run had 16 passes and one
+test-cookie fixture failure: the foreign response updated the client's cookie,
+so the owner was explicitly restored before the owner-proof assertion. The
+30-test approval/prepare/coordinator regression passed in **128.88 seconds**;
+three-file compilation and diff checks passed. The slice is frozen for
+independent SPEC review. This does not finish
+the separate end-to-end C4b bounded HTTP/control feedback gate, revoke/status/
+cancel/artifact routes or application activation.
+
+SPEC independently passed four selected approval cases but found two P2 gaps:
+repeating an acquired/uncertain approval returned 409 without cleanup facts,
+and conflicting Transfer-Encoding/Content-Length could reach synthetic raw
+execution. Parent regressions observed **4 failures in 21.29 seconds**. Closed
+consumed roots now verify the original owner/proof and return only the existing
+non-success view without new I/O/claim; different proofs remain rejected.
+Shared JSON framing rejects length-plus-transfer, duplicate and unsupported
+Transfer-Encoding, preserving a single chunked body with no Content-Length.
+The focused full HTTP rerun passed **21 tests in 89.04 seconds**; subsequent
+standard/chunked positive controls passed **2 tests in 12.49 seconds**. SPEC
+re-review PASS: five targeted tests in 26.16 seconds and independent probes
+confirmed pre-body framing rejection and one total claim/zero raw calls across
+closed-consumed retries, with no monitored coordinator/runtime I/O on the
+repeat. Three frozen hashes were unchanged. Fresh QUALITY APPROVED: all
+12 approval tests in 54.15 seconds, three shared preparation regressions in
+13.88 seconds, 25 parser probes, and independent concurrent/uncertain-repeat
+integration probes in 9.56 seconds. Six concurrent requests plus repeat yielded
+exactly one claim, one submission and one synthetic raw call; closed-consumed
+retry performed no monitored coordinator/runtime I/O. All three hashes stayed
+unchanged. The known-failing next control-route tests remain excluded.
+
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
 

@@ -1186,7 +1186,7 @@ class DockingRequestCoordinator:
                              binding_digest, confirm):
         """Internal owned proof bridge; never called by preparation or text."""
         root = self._owned(root_id, owner_session_id)
-        if root is None or root.closed or root.input_context is None:
+        if root is None or root.input_context is None:
             return _view()
         context = root.input_context
         try:
@@ -1196,6 +1196,11 @@ class DockingRequestCoordinator:
             verify_approval(context._ready_record, approval_nonce, binding_digest)
         except DockingConsentError:
             return _view(reason='approval_unavailable')
+        if root.closed:
+            execution = context._execution
+            if execution is not None and (execution.acquired or execution.claim_uncertain):
+                return _view(root)  # Proof-checked observation only; no retry or I/O.
+            return _view(reason='approval_changed')
         if root.task is not None and not root.task.done():
             return _view(root)
         if context._execution is not None:
@@ -1238,6 +1243,16 @@ class DockingRequestCoordinator:
         except asyncio.CancelledError:
             self._stop(root, 'cancelled')
             raise
+        except DockingConsentError as exc:
+            execution = context._execution
+            consumed = execution is not None and (execution.acquired or execution.claim_uncertain)
+            reason = ('execution_unavailable' if consumed
+                      else 'approval_expired' if exc.reason_code == 'consent_expired'
+                      else 'approval_changed' if exc.reason_code in {
+                          'consent_not_waiting', 'consent_proof_mismatch',
+                          'consent_binding_mismatch', 'consent_generation_mismatch'}
+                      else 'execution_unavailable')
+            self._stop(root, reason)
         except Exception:
             self._stop(root, 'execution_unavailable')
 
