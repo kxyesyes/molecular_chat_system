@@ -246,6 +246,7 @@ class MolecularDocking(BaseMolecularTool):
                 # Recreate config from the trusted constructor binding only.
                 toolchain.require_current()
                 runtime_config = toolchain.runtime_config()
+                ownership["chat_toolchain"] = toolchain
             else:
                 runtime_config = query.get("runtime_config")
             service = MolecularDockingService(config=runtime_config, **ownership)

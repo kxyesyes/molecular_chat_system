@@ -18,6 +18,9 @@ from pathlib import Path
 import sys
 
 from .adapters import ADFRAdapter, MeekoAdapter, OpenBabelAdapter, VinaAdapter
+from .chat_receptor_validation import (
+    ReceptorPreservationError, approved_heavy_atoms, validate_prepared_receptor,
+)
 from .adapters.base import (
     CommandAdapter,
     CommandCancelledError,
@@ -94,7 +97,14 @@ class MolecularDockingService:
     """分子对接服务类"""
 
     def __init__(self, config: Optional[Dict[str, Any]] = None, *,
-                 command_scope=None, allowed_output_root=None):
+                 command_scope=None, allowed_output_root=None, chat_toolchain=None):
+        self._chat_toolchain = chat_toolchain
+        self._chat_toolchain_at_construction = chat_toolchain
+        self._chat_command_scope_at_construction = command_scope
+        if chat_toolchain is not None:
+            from .chat_toolchain import ChatDockingToolchain
+            if type(chat_toolchain) is not ChatDockingToolchain:
+                raise ValueError("consent_policy_unavailable")
         self._command_scope = command_scope
         self._allowed_output_root = CommandOwnershipScope._bound_output_root(
             command_scope, allowed_output_root,
@@ -130,6 +140,18 @@ class MolecularDockingService:
         self.configure(config)
 
         logger.info(f"分子对接服务初始化完成，工作目录: {self.work_dir}")
+
+    def _require_chat_toolchain(self):
+        toolchain = self._chat_toolchain_at_construction
+        if self._chat_toolchain is not toolchain:
+            raise ValueError("consent_policy_unavailable")
+        if toolchain is not None:
+            if self._command_scope is not self._chat_command_scope_at_construction:
+                raise CommandOwnershipUncertainError()
+            self._require_command_scope()
+            toolchain.require_current()
+            toolchain.assert_service(self)
+        return toolchain
 
     def _refresh_adapters(self) -> None:
         ownership = self._adapter_ownership()
@@ -686,6 +708,11 @@ class MolecularDockingService:
         try:
             self._raise_if_cancelled(cancel_event)
             self._require_finished_commands()
+            toolchain = self._require_chat_toolchain()
+            approved = approved_heavy_atoms(protein_path) if toolchain is not None else None
+            if approved is not None and os.path.lexists(output_path):
+                # A successful no-op must not reuse stale preparation evidence.
+                raise ReceptorPreservationError()
             # 如果传入的本身是PDBQT，直接复制
             if protein_path.lower().endswith('.pdbqt'):
                 self._copy_file_cooperatively(
@@ -709,14 +736,26 @@ class MolecularDockingService:
                 adapter_control = {}
                 if cancel_event is not None:
                     adapter_control["cancel_event"] = cancel_event
-                result = self.receptor_adapter.prepare_receptor(
-                    protein_path,
-                    output_path,
-                    self.work_dir,
-                    **adapter_control,
-                )
+                if toolchain is not None:
+                    # Never apply ADFR's default water/nonstandard-chain removal
+                    # to the explicitly approved C receptor. No heavy-atom repair.
+                    result = self.receptor_adapter.run(
+                        self.receptor_adapter.wrap_command(
+                            "-r", protein_path, "-o", output_path,
+                            "-A", "None", "-U", "nphs",
+                        ), cwd=self.work_dir, **adapter_control,
+                    )
+                else:
+                    result = self.receptor_adapter.prepare_receptor(
+                        protein_path, output_path, self.work_dir, **adapter_control,
+                    )
 
                 if result.returncode == 0:
+                    if approved is not None:
+                        self._require_finished_commands()
+                        if self._require_chat_toolchain() is not toolchain:
+                            raise ReceptorPreservationError()
+                        validate_prepared_receptor(output_path, approved)
                     logger.info("Receptor preparation succeeded")
                     if trace is not None:
                         trace["receptor_method"] = "adfrsuite_prepare_receptor"
@@ -1804,6 +1843,16 @@ class MolecularDockingService:
         try:
             history_written = False
             history_cleanup_warnings: List[str] = []
+            toolchain = self._require_chat_toolchain()
+            approved_receptor = None
+            if toolchain is not None:
+                try:
+                    approved_receptor = approved_heavy_atoms(receptor_file)
+                except ReceptorPreservationError:
+                    return self._failed_job_response(
+                        job_dir, "receptor_preparation_failed",
+                        "Approved receptor cannot be safely prepared", **cleanup_control,
+                    )
             receptor_pdbqt = os.path.join(job_dir, "receptor.pdbqt")
             ligand_pdbqt = os.path.join(job_dir, "ligand.pdbqt")
             output_pdbqt = os.path.join(job_dir, "result.pdbqt")
@@ -2003,6 +2052,19 @@ class MolecularDockingService:
             self._require_finished_commands()
 
             self._emit_phase(*_DOCKING_PHASES[2], progress_callback, cancel_event)
+            if self._require_chat_toolchain() is not toolchain:
+                raise ReceptorPreservationError()
+            if approved_receptor is not None:
+                try:
+                    # Recheck AFTER ligand preparation/callbacks, against the
+                    # pre-command snapshot (never a reread of a mutated source).
+                    validate_prepared_receptor(receptor_pdbqt, approved_receptor)
+                except ReceptorPreservationError:
+                    return self._failed_job_response(
+                        job_dir, "receptor_preparation_failed",
+                        "Prepared receptor does not preserve approved heavy atoms",
+                        **cleanup_control,
+                    )
             docking_succeeded = self.run_vina_docking(
                 receptor_pdbqt,
                 ligand_pdbqt,

@@ -1126,3 +1126,29 @@ fresh QUALITY **APPROVE**：独立 **571 passed，27.99s** 及 71 个差分/边�
 探针。两轮均复核四文件冻结哈希；编译和限定 diff 检查通过。警告是已有
 Pydantic `model_provenance` protected namespace 提示。当前服务尚未重启加载
 该修复，实际 S10 复测及独立 P1 修复仍待完成；不据此宣称科学成功。
+
+### D7 受体准备保留性 P1 修复（独立两阶段审查通过）
+
+限定 `molecular_docking_service.py`、`molecular_docking_adapter.py`，新增
+`chat_receptor_validation.py` 和 `test_chat_receptor_preparation_integrity.py`。
+C 的真实工具链由构造器绑定，query 不能启用或降级策略；实际 ADFR 参数为
+`-A None -U nphs`，不采用默认删除水/非标准残基整链或修补重原子的行为。
+在准备后以及 ligand preparation/callback 后、Vina 前，核验完整真实 PDBQT
+与准备前的原始重原子快照。缺失、额外、重复、移动、身份或元素改变、组分
+丢失、格式错误/截断、陈旧输出和 scope 降级均拒绝。允许氢变化与原子重编号。
+16 MiB / 99999 原子的限界不变为无界读取；不支持的保留元素/类型安全失败，
+不猜测金属替换、不自动修复。legacy 保留原准备调用，不受 C 参数影响。
+
+实现者先 **16 failed / 2 passed**，额外陈旧输出/降级回归先 **2 failed /
+36 passed**；最终九个新/相邻模块 **469 passed / 10 skipped**（含 41 个新
+测试）。七项 skip 为 POSIX-only，三项为 symlink 权限；两条既有依赖警告。
+父级独立新测试与工具链模块 **89 passed / 1 symlink skip / 1 warning，14.63s**。
+SPEC **APPROVE**：独立 41 passed 和 12 个已安装 writer 内存格式探针；
+初次沙箱临时目录错误经隔离重跑解决，不计作通过。fresh QUALITY **APPROVE**：
+独立 41 passed 和 63 个解析器边界探针。两轮四文件冻结 SHA256 均一致；
+编译/diff 通过。安装 writer 对部分四字符原子名的截断会被拒绝，不自动补全。
+
+本次冻结代码上的 `compileall -q src scripts main.py`、全部 **44 个 Node
+契约文件**、**56 个 JS 语法文件**以及实际本机 strict health **23/23** 通过。
+以上未运行真实 ADFR/Vina，保留性验证也不等于化学有效性。原最终审查者的
+P1 关闭复核、当前 head CI 和重新加载后的实际浏览器验收仍待完成。
