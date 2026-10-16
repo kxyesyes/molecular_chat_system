@@ -363,3 +363,46 @@ APPROVED，三个受影响认证用例及两个禁用/无中间件负向用例�
 **5 passed / 12 deselected / 2 warnings，34.67 秒**，新版栈为 **5 passed /
 12 deselected，34.28 秒**；哈希和 diff 检查通过。修复后的 Linux CI 尚待
 完成；以上本机结果均在 Windows 上运行。
+
+### 2026-10-16 URL-safe 会话 owner 首字符兼容性
+
+`830825ca` 的 `quality` 运行 `38887968647` 中，root 分区为 **1 failed /
+5578 passed / 106 skipped / 12 warnings，372.22 秒**。先前三个 Uvicorn
+启动失败已消失；本次失败为旧报告接口的真实预约竞态测试，期待 404 却得到
+500。`AgentSessionStore.issue()` 使用 `token_urlsafe(24)`，因此 owner ID
+可合法地以 `-` 或 `_` 开头；聊天对接的 draft/coordinator 校验却要求首字符
+为字母或数字。这不只是随机测试数据问题，也会拒绝相同形状的真实会话。
+
+先用仅作用于离线测试进程的合成会话 ID 稳定复现 **3 failed / 3 passed，
+3.50 秒**。新增真实 SessionStore、SQLite draft、coordinator/model transport
+正例及 owner/path 负例，并将既有 HTTP 竞态参数化为 `A`、`-`、`_` 首字符，
+得到 **10 failed / 38 passed，6.39 秒**。随后只为 owner 放行 URL-safe 首字符；
+会话生成器、现有会话库、身份精确比较、nonce/审批和密钥过滤均未改变，
+其他 task/root/preparation/origin/generation 标签和路径限制不放宽。
+
+首次组合回归发现旧 coordinator 负例将合法 `-owner` 当作坏输入：**1 failed /
+418 passed / 1 skipped，60.19 秒**。该负例改为真正含路径分隔符的 `-owner/`；
+合法首字符由新正例覆盖，没有跳过失败或放宽断言。最终命令：
+
+```text
+python -B -m pytest tests/agent/test_docking_session_identifiers.py tests/test_docking_consent_legacy_routes.py tests/task_runtime/test_docking_consent_draft.py tests/agent/test_web_docking_coordinator.py -q -p no:cacheprovider --basetemp <独立临时目录> --tb=short
+```
+
+固定 Web 依赖组合 **419 passed / 1 skipped / 2 warnings，58.58 秒**；跳过为
+Windows 目录 symlink 权限不可用，两项警告仍为既有 Pydantic/multipart 提示。
+本机新版 Web 栈聚焦新 owner、HTTP 竞态和无 I/O 拒绝负例 **64 passed /
+268 deselected，7.05 秒**。五个源码/测试文件编译和 diff 检查通过。
+独立 SPEC 初次验证 **107 passed，13.97 秒**，另以真实关闭探针发现
+`close_chat_docking_draft` 仍使用旧首字符规则：**2 failed / 1 passed**。
+父任务在正式回归补上持久化 `REVOKED` 和无 `cleanup_pending` 的断言，
+再次确认 **2 failed / 1 passed，2.59 秒**，再将关闭调用点改为 owner-only
+校验；关闭 SQL、版本 CAS、身份精确匹配和状态条件均未变化。
+
+最终在上述命令追加 `tests/task_runtime/test_docking_draft_close.py`，固定
+Web 栈为 **542 passed / 1 skipped / 2 warnings，58.66 秒**；六个源码/测试
+文件编译及 diff 检查通过。SPEC 复审 PASS：新模块、全部 draft-close 测试及
+独立三个前缀关闭探针 **155 passed / 1 warning，14.68 秒**，冻结哈希一致。
+独立 QUALITY APPROVED：本机聚焦 **62 passed**，独立探针 **22 passed**；
+最终固定栈回归及探针 **297 passed / 2 warnings**。六文件编译通过，冻结
+哈希未变；确认旧会话兼容、跨 owner 隔离、非 owner/凭据边界和关闭持久化。
+未以本机结果宣称远端 CI 或 D4–D7 完成。

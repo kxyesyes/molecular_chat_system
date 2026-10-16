@@ -742,8 +742,8 @@ class TaskStore:
         """
         expected_identity = dict(preparation_id=preparation_id, owner_session_id=owner_session_id,
                                  task_id=task_id, trace_id=trace_id, origin_turn_id=origin_turn_id)
-        for value in expected_identity.values():
-            _draft_label(value)
+        for key, value in expected_identity.items():
+            _draft_label(value, session_owner=key == "owner_session_id")
         if (type(expected_revision) is not int or not 0 <= expected_revision < 2**63 - 1
                 or type(expected_version) is not int or not 1 <= expected_version < 2**63 - 1):
             raise DockingConsentError("consent_invalid_input")

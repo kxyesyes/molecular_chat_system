@@ -194,9 +194,13 @@ _DRAFT_ID_FIELDS = frozenset({
 })
 
 
-def _draft_label(value):
+def _draft_label(value, *, session_owner=False):
+    # SessionStore issues URL-safe IDs: '-' and '_' are valid first bytes.
+    # This exception is owner-only; task/path and generation labels stay strict.
+    pattern = (r"[A-Za-z0-9_-][A-Za-z0-9_.:-]{0,127}" if session_owner
+               else r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}")
     if (type(value) is not str
-            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", value) is None
+            or re.fullmatch(pattern, value) is None
             or contains_secret_material(value)):
         raise DockingConsentError("consent_invalid_input")
 
@@ -206,7 +210,7 @@ def validate_draft_identity(identity):
     if type(identity) is not dict or set(identity) != _DRAFT_ID_FIELDS:
         raise DockingConsentError("consent_invalid_input")
     for key in _DRAFT_ID_FIELDS - {"query_digest", "refinement_revision"}:
-        _draft_label(identity[key])
+        _draft_label(identity[key], session_owner=key == "owner_session_id")
     if (type(identity["query_digest"]) is not str
             or re.fullmatch(r"[a-f0-9]{64}", identity["query_digest"]) is None
             or type(identity["refinement_revision"]) is not int

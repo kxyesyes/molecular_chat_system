@@ -71,6 +71,13 @@ def _label(value):
     return type(value) is str and _LABEL.fullmatch(value) is not None and not contains_sensitive_text(value)
 
 
+def _owner_label(value):
+    # Opaque SessionStore IDs may begin with either URL-safe punctuation byte.
+    # Never use this owner check for task/root/path identities.
+    return (type(value) is str and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value) is not None
+            and not contains_sensitive_text(value))
+
+
 def _small_json(value, limit=_PAGE_BYTES):
     """Bound output while encoding, before joining/copying a whole inspection."""
     parts, size = [], 0
@@ -621,7 +628,8 @@ class DockingRequestCoordinator:
             validate_clocks(wall, mono)
             if not math.isfinite(mono + 180) or mono + 180 <= mono:
                 raise ValueError
-            if (any(not _label(v) for v in (root_id, owner_session_id, origin_turn_id))
+            if (any(not _label(v) for v in (root_id, origin_turn_id))
+                    or not _owner_label(owner_session_id)
                     or type(mode) is not str or mode not in {"native", "json"}):
                 return _view(reason="invalid_input")
             assessment = assess_docking_request_text(query, enabled=self._enabled, enable_tools=enable_tools)
@@ -753,7 +761,7 @@ class DockingRequestCoordinator:
             self._stop(root, "operation_unavailable")
 
     def _owned(self, root_id, owner_session_id):
-        if not _label(root_id) or not _label(owner_session_id):
+        if not _label(root_id) or not _owner_label(owner_session_id):
             return None
         root = self._roots.get(root_id)
         return root if root is not None and root.owner == owner_session_id else None

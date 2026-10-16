@@ -170,7 +170,7 @@ def test_whole_request_real_transport_one_draft_no_scientific_authority(tmp_path
 @pytest.mark.parametrize("change", [dict(enable_tools=False), dict(enable_tools=1), dict(mode="other"),
     dict(query="What is docking?"), dict(query="do not run docking"),
     dict(query=QUERY + " predict ADMET"), dict(query="run docking; size=[-1,2,3]"),
-    dict(root_id=True), dict(root_id="_root"), dict(owner_session_id="-owner"),
+    dict(root_id=True), dict(root_id="_root"), dict(owner_session_id="-owner/"),
     dict(origin_turn_id="_turn"), dict(owner_session_id="../owner"), dict(origin_turn_id="x" * 129),
     dict(history=()), dict(descriptors=[dict(source_id="d", kind="ligand", ref="https://invalid")])])
 def test_bad_inputs_never_read_capture_claim_or_reserve(tmp_path, change, monkeypatch):

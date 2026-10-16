@@ -20,7 +20,15 @@ from tests.test_durable_docking_artifact_routes import _pdbqt_with_two_poses
 
 
 @pytest.fixture
-def api(tmp_path, monkeypatch):
+def api(tmp_path, monkeypatch, request):
+    prefix = getattr(request, 'param', None)
+    if prefix is not None:
+        import itertools
+        import secrets
+        original = secrets.token_urlsafe
+        sequence = itertools.count()
+        monkeypatch.setattr(secrets, 'token_urlsafe', lambda size:
+            prefix + str(next(sequence)).zfill(31) if size == 24 else original(size))
     manager = TaskManager(tmp_path / 'manager.sqlite')
     runtime = SimpleNamespace(store=TaskStore(tmp_path / 'runtime.sqlite'),
                               config=SimpleNamespace(staging_root=tmp_path / 'stage'))
@@ -489,6 +497,7 @@ def test_delete_rejects_directory_link_outside_workdir(api):
 
 @pytest.mark.parametrize('kind', ['legacy', 'chat'])
 @pytest.mark.parametrize('action', ['result', 'report', 'history'])
+@pytest.mark.parametrize('api', ['A', '-', '_'], indirect=True)
 def test_actual_reservation_during_owned_history_read(api, monkeypatch, kind, action):
     from src.task_runtime import docking_consent
     from tests.task_runtime.test_docking_consent import identity as legacy_identity, policy
