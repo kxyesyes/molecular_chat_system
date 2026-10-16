@@ -306,7 +306,14 @@ class DockingRequestCoordinator:
         if root.closed or self._enabled is not True:
             raise _Unavailable("root_closed")
         ready_clock = root.ready_preview_json is not None
-        if ready_clock:
+        execution = root.input_context._execution if root.input_context is not None else None
+        if execution is not None and execution.raw_expires is not None:
+            # Consent expiry prevents the first raw call; a valid dispatch then
+            # uses its already-fixed execution budgets, never a renewed consent.
+            deadlines = [execution.row['operation_deadline_ms'] - wall,
+                         (execution.row['operation_monotonic_expires'] - mono) * 1000,
+                         (execution.raw_expires - mono) * 1000]
+        elif ready_clock:
             record = root.input_context._ready_record
             if record is None:
                 raise _Unavailable("consent_unconfirmed")

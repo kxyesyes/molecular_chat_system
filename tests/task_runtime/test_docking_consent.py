@@ -1629,11 +1629,15 @@ def test_c2_consent_execution_api_present():
         method = getattr(TaskRuntime, name, None)
         assert inspect.iscoroutinefunction(method), "C2 missing async TaskRuntime." + name
         parameters = inspect.signature(method).parameters
-        assert tuple(parameters) == ("self", *arguments), "C2 unexpected parameters: " + name
+        optional = ('chat_input_context',) if name == 'approve_docking_consent' else ()
+        assert tuple(parameters) == ("self", *arguments, *optional), "C2 unexpected parameters: " + name
         for argument in arguments:
             parameter = parameters[argument]
             assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
             assert parameter.default is inspect.Parameter.empty
+        for argument in optional:
+            assert parameters[argument].kind is inspect.Parameter.KEYWORD_ONLY
+            assert parameters[argument].default is None
 
 
 _C2_RECEIPT_KEYS = {

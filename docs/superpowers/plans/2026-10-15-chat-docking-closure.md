@@ -683,6 +683,63 @@ authorization/dependency/status mapping checks (stub responses for mapping),
 with unchanged two-file hashes. No app
 wiring, approval/cancel/status/artifact HTTP or UI activation is claimed here.
 
+The internal live-source C2 bridge is now frozen for independent SPEC review.
+Its first isolated run observed four failures (nonce-only chat execution was
+accepted and the original-context seam was absent). The bridge now requires the
+exact C1 context/runtime and acknowledged READY record; claim and each execution
+guard own a short model reader and acquire Agent DB before TaskStore. A first
+integration failure exposed an unguarded model capture, followed by a conflicting
+SQL keyword; both were diagnosed and corrected before a 14-test passing run.
+The reader is released before the synthetic raw boundary. A separate real RED
+showed consumed-consent expiry incorrectly stopping a valid execution; the root
+now uses fixed execution budgets only after dispatch. Two real SQLite receipt
+tampering cases then failed and passed after exact version/cleanup checks.
+Initial focused run: **18 passed in 81.88 seconds**, including actual writer-lock
+cancellation and retention of an acknowledged-but-invalidated UNKNOWN claim.
+Independent SPEC repeated 18 passes but found three gaps: the final result SQL
+guard could be detached on backend-owner cancellation, an earlier CLAIMED
+snapshot could be restored at dispatch, and reduced receipt comparison omitted
+persisted policy/generation fields. Parent regressions reproduced all six cases
+as failures in 30.00 seconds. The final guard is now explicitly retained,
+shielded and drained by cancellation/settlement/shutdown; live rows use complete
+frozen facts plus phase-specific state/dispatch/capacity checks. The first broad
+adjacent run was **311 passed / 63 failed in 496.76 seconds**: the failures hit
+the old exact signature prerequisite, which did not include the new optional
+server-only context. The signature test now explicitly includes that keyword
+with default None; every original required keyword/default check remains.
+Focused review-fix/legacy controls passed **9 tests in 30.25 seconds**. The full
+source module passed **24 tests in 112.54 seconds**; existing C2/C4a passed
+**61 tests / 104 deselected in 31.38 seconds**, and private output passed all
+**46 tests in 11.89 seconds**. No C4a skips were reported.
+SPEC re-review PASS: nine focused/legacy controls in 32.55 seconds and six
+independent probes in 26.56 seconds; repeated cancellation/shutdown retained
+the blocked physical guard, capacity and model reader until release. All five
+hashes stayed unchanged. Fresh QUALITY repeated 24 source tests and 61 C2/C4a
+tests, then reproduced a P1: post-claim database readback could replace the
+original 420-second execution deadlines. Its synthetic probe started raw work
+at 700 seconds and returned success at 950 seconds after extending both columns.
+Six parent SQLite tampering regressions (each deadline at readback, dispatch,
+and result) failed in 30.42 seconds. An earlier fixture run used an unsupported
+repository-local staging directory and is not behavioral RED evidence. The
+context now retains the exact clock samples used by the actual claim UPDATE,
+derives fixed limits only after commit acknowledgement, and rejects later
+deadline differences before submission and at live execution guards. Lost
+acknowledgement does not recover authority through readback. Six regressions
+plus two valid controls passed in 37.83 seconds. The full source suite, including
+a late-ack clock control, passed **31 tests in 143.22 seconds**; legacy C2/C4a
+passed **61 tests / 104 deselected in 27.75 seconds**. QUALITY re-review APPROVED:
+five independent probes passed in 22.36 seconds. Both original extended-budget
+attacks now prevent submission/raw execution and retain acquired UNKNOWN
+ownership; lost ACK cannot mint budgets/replay and delayed ACK retains original
+deadlines. All five frozen file hashes were unchanged.
+No new execution transport or application activation is part of this slice.
+
+The next Web/C2 lifecycle tests separately observed **2 failures in 7.31 seconds**:
+the coordinator approval seam is absent, and closing a CLAIMED root does not yet
+signal its actual C2 owner. That next slice is intentionally still RED; the
+existing C1 close path must not be used as C2 execution cancellation. This is a
+release gate, not a completed cancellation claim.
+
 **Files:** new `src/web/routes/docking_consent_routes.py`, `src/web/docking_consent.py`;
 TaskRuntime/Store narrow seams; tests/agent/test_web_docking_consent.py.
 

@@ -1,6 +1,6 @@
-"""Server-only, one-use bridge from a live confirmed root to C1 staging.
+"""Server-only, one-use bridge from a live confirmed root to C1 and C2.
 
-This is not a wire DTO or an execution capability. It retains the actual source
+This is not a wire DTO or execution consent. It retains the actual source
 owner and producer outputs; dictionaries, hashes and caller callbacks cannot
 substitute for that owner. No HTTP route exposes this object.
 """
@@ -18,6 +18,7 @@ from src.task_runtime.docking_consent import CONSENT_TTL_MS, DockingConsentError
 
 
 _ISSUER = object()
+_EXECUTION_LIMITS = ('operation_deadline_ms', 'operation_monotonic_expires')
 
 
 def _deny():
@@ -76,7 +77,8 @@ async def capture_chat_input_context(coordinator, *, root_id, owner_session_id):
 class ChatDockingInputContext:
     __slots__ = ("_coordinator", "_root", "_digest", "_draft_json", "_parameters",
                  "_receptor", "_ligand", "_lock", "_claimed", "_operation", "_runtime",
-                 "_begun", "_verified_manifest", "_ready_record")
+                 "_begun", "_verified_manifest", "_ready_record", "_execution", "_execution_facts",
+                 "_execution_limits")
 
     def __init__(self, issuer, coordinator, root):
         if issuer is not _ISSUER:
@@ -102,6 +104,9 @@ class ChatDockingInputContext:
         self._operation = self._runtime = self._verified_manifest = None
         self._begun = False
         self._ready_record = None
+        self._execution = None
+        self._execution_facts = None
+        self._execution_limits = None
 
     def __repr__(self):
         return "ChatDockingInputContext(<private>)"
@@ -286,3 +291,120 @@ class ChatDockingInputContext:
                 _deny()
             self._ready_current()
             coordinator._capture(root)
+
+    def bind_execution(self, runtime, operation):
+        """Bind only the original C1 runtime/receipt, never a reconstructed context."""
+        from src.task_runtime.runtime import TaskRuntime
+        if (type(runtime) is not TaskRuntime or runtime is not self._runtime
+                or self._execution is not None and self._execution is not operation):
+            _deny()
+        self._ready_current()
+        if runtime.store._chat_draft_record(operation.row) != self._ready_record:
+            _deny()
+        mutable = {'state', 'version', 'cleanup_state', 'execution_token', 'execution_occupied',
+                   'dispatch_state', 'view_status', 'primary_reason', 'cancel_requested',
+                   'operation_deadline_ms', 'operation_monotonic_expires'}
+        self._execution_facts = {key: value for key, value in operation.row.items() if key not in mutable}
+        self._execution = operation
+
+    def validate_execution_row(self, operation, row, *, phase=None):
+        """Local-only under the TaskStore writer; Agent lock is already held."""
+        self._ready_current()
+        if (operation is not self._execution or operation.signal.is_set()
+                or self._runtime._consent_executions.get(row['task_id']) is not operation):
+            _deny()
+        self._coordinator._capture(self._root)
+        if any(row[key] != value for key, value in self._execution_facts.items()):
+            _deny()
+        limits = (None, None) if self._execution_limits is None else self._execution_limits
+        if tuple(row[key] for key in _EXECUTION_LIMITS) != limits:
+            _deny()
+        record = self._runtime.store._chat_draft_record(row)
+        expected = self._ready_record
+        if (any(record[key] != expected[key] for key in expected
+                if key not in {'state', 'version', 'cleanup_state'})
+                or _fingerprint(self._root) != self._digest):
+            _deny()
+        if row['state'] == 'READY':
+            if record != expected:
+                _deny()
+        elif (row['state'] not in {'CLAIMED', 'DISPATCH_RESERVED'}
+                or row['version'] != expected['version'] + (1 if row['state'] == 'CLAIMED' else 2)
+                or row['cleanup_state'] != 'pending'
+                or row['execution_token'] != operation.token
+                or row['view_status'] != 'ACTIVE' or row['cancel_requested']):
+            _deny()
+        if phase is not None:
+            reserved = phase == 'dispatch' or phase == 'result' and operation.raw_expires is not None
+            state = 'DISPATCH_RESERVED' if reserved else 'READY' if phase == 'claim' else 'CLAIMED'
+            if (row['state'] != state
+                    or row['dispatch_state'] != ('reserved' if reserved else 'not_reserved')
+                    or row['execution_occupied'] != (0 if phase == 'claim' else 1)):
+                _deny()
+
+    async def claim_execution(self, operation):
+        async with self._coordinator._gate.request():
+            return await self._coordinator._sql(self._claim_execution_guarded, execution=operation)
+
+    def _claim_execution_guarded(self, execution):
+        operation = execution
+        with self.execution_guard(operation, phase='claim'):
+            self._runtime._validate_consent_manifest(operation)
+            # Record the exact clock samples passed to the real SQL UPDATE,
+            # not fresh clocks or a mutable post-claim database read.
+            samples = [[], []]
+            def clock(index, source):
+                value = source()
+                samples[index].append(value)
+                return value
+            acquired = self._runtime.store._claim_docking_consent(
+                operation.row, operation.token,
+                lambda row: self._runtime._validate_consent_row(operation, row, phase='claim'),
+                lambda: clock(0, self._runtime._consent_wall_time_ms),
+                lambda: clock(1, self._runtime._consent_monotonic))
+            # Preserve the real commit acknowledgement before any post-guard check.
+            operation.acquired = acquired
+            if acquired:
+                if any(len(values) != 1 for values in samples):
+                    _deny()
+                limit = self._ready_record['binding']['operation_limit_seconds']
+                self._execution_limits = (samples[0][0] + limit * 1000, samples[1][0] + limit)
+            return acquired
+
+    def claimed_execution_limits(self, operation):
+        if (operation is not self._execution or not operation.acquired
+                or self._execution_limits is None):
+            _deny()
+        return dict(zip(_EXECUTION_LIMITS, self._execution_limits))
+
+    def execution_step(self, operation, inputs, phase):
+        # Called from the retained execution worker, never the event-loop thread.
+        # One gate owner retains its physical SQL work; cancellation cannot detach
+        # it. The reader ends before returning to the actual raw executor.
+        future = asyncio.run_coroutine_threadsafe(
+            self._execution_step(operation, inputs, phase), operation.loop)
+        return future.result()
+
+    async def _execution_step(self, operation, inputs, phase):
+        async with self._coordinator._gate.request():
+            return await self._coordinator._sql(self._execution_step_guarded,
+                execution=operation, inputs=inputs, phase=phase)
+
+    def _execution_step_guarded(self, execution, inputs, phase):
+        operation = execution
+        with self.execution_guard(operation, phase=phase):
+            return self._runtime._consent_execution_guard_owned(operation, inputs, phase)
+
+    @contextmanager
+    def execution_guard(self, operation, *, phase=None):
+        from .docking_coordinator import _Unavailable
+        if operation is not self._execution:
+            _deny()
+        try:
+            with self._source_guard():
+                row = self._runtime.store._owned_docking_consent(
+                    owner_session_id=self._root.owner, preparation_id=self._root.preparation_id)
+                self.validate_execution_row(operation, row, phase=phase)
+                yield
+        except _Unavailable:
+            _deny()
