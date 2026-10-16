@@ -682,3 +682,21 @@ CI fresh QUALITY APPROVED：独立合成 collector 与实际 Bash 分区 **5.48 
 12 个补充请求头探针通过；AST 比对确认 mutation 与其余授权/读取处理未改。
 两文件编译/diff 与冻结 hash 一致。两项维护补丁审查已完成，待提交推送；
 不包含仍在实施的 retention，也不意味着 D6/D7 已完成。
+
+### 2026-10-16 当前远端分区结果及部署契约遗漏修正
+
+`5087ce97` 与 `a9ef7b34` 已推送到原分支。quality **38910961874 / #619**
+的 publication **245 passed，622.63 秒**，原 docking **1360 passed /
+245 deselected，553.56 秒**，集合验证步骤通过；不再将这两个分组合并执行。
+root 分组实际 **1 failed / 5599 passed / 106 skipped / 12 warnings，
+404.72 秒**：`test_deployment_assets.py` 的旧断言仍要求 8 个
+`command_timeout`，新增分区后实际为 9。这是遗漏同步的第二份契约，不是
+超时或科学结果失败。其余已完成分组通过，Agent core/最终 gate 当时尚未完成；
+因此不能声称本次 CI 通过。
+
+本机单例复现 **1 failed / 7 deselected，14.27 秒**。仅在该测试补上
+publication target/exclude 必须存在的断言，并将精确分组数改为 9；没有
+修改 CI 工作流、预算、测试选择或删除原有断言。两个契约模块联合 GREEN
+**44 passed / 2 platform skips / 10 existing warnings，43.31 秒**。
+SPEC 与 QUALITY 定向复审均通过，编译、diff 和凭据扫描通过。
+此修正尚待新提交的远端运行；不把较早的 failure 改写为 success。
