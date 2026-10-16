@@ -1202,3 +1202,28 @@ CI 单次失败 job 重跑仍失败：同一个 manifest 用例 0.38387 秒超�
 不改阈值、断言或生产文件。实现者语法和三个隔离插桩检查通过；SPEC 和
 fresh QUALITY 均只读批准冻结文件，未重复运行通过模块。POSIX 行为仍待 CI，
 此提交是诊断证据增强，不是该失败的修复或通过声明。
+
+### D7 当前结构来源版本核验与 CI 夹具修正（2026-10-17）
+
+`885c9596` 的 CI run `38948333123` 中，sandbox-core **1977 passed /
+4 skipped / 1 warning，51.84s**；诊断没有触发，仅证明本次没有复现先前
+超时，不证明根因已确定。agent-docking 出现 **2 failed / 2065 passed /
+269 deselected，582.77s**：两个 JSON 并发夹具仍从指令的首个 `{` 开始
+解析 schema，新提示中的 `fields must be {}` 导致 `JSONDecodeError: Extra
+data`，进而等待 entry event 超时。两处改用已有的 `without markdown: `
+分隔符；仅这两个失败用例先 **2 failed，6.52s**，后 **2 passed，1.85s**。
+两处修改经独立 SPEC、fresh QUALITY 只读审查批准；未改断言、2 秒 watchdog
+或生产代码，也未重跑已通过模块。整体 CI 尚未通过。
+
+服务于 02:47:09 完成 831120 行预热。当前页面沿用 02:34 的人源 P06276
+真实 S03 来源，发送原 S10，任务 `ae1ead96-f746-4309-930c-455e9531e735`，
+root `f7c15dd7361f4c0b8dd12ecaa74e1511`。模型 HTTP 200、单次请求、
+1950ms、journal `parsed/proposed`，随后仍在修订 0 终止；没有 READY 或 Vina。
+来源专用诊断（不调用模型、不审批、不执行 Vina）复现
+`RCSB_SOURCE_INVALID / revision_mismatch`，21.66s，子进程生命周期已 settled。
+本次真实官方下载 PDB SHA256
+`851e194bf21de0ff56be206c239237e2d042c7b9498ca30faacc98749bcc5470`、
+mmCIF SHA256 `cf3d9b8b481dcbaca4cdefc3bcfd12063898a520604bd22815b06b28ff723a2f`。
+PDB 有 8 个 REVDAT 修改编号，mmCIF 有 6 条 Structure model 修订记录，
+最新日期均为 2023-08-16；现有编译器要求两份完整历史按同编号逐条同日，
+因此失败。跨格式版本核验尚待厘清，不能因此声称来源一致或 S10 通过。

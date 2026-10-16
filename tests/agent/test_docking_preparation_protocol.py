@@ -1073,7 +1073,7 @@ def test_c_three_profiles_share_transport_and_hold_actual_model_gate(mode):
                 name = payload["tools"][0]["function"]["name"]
             else:
                 instruction = payload["messages"][0]["content"]
-                properties = json.loads(instruction[instruction.index("{"):])["properties"]
+                properties = json.loads(instruction.split("without markdown: ", 1)[1])["properties"]
                 name = {"proposal": names[0], "intent": names[1], "decision": names[2]}[next(iter(properties))]
             assert name not in requests
             requests[name] = payload
@@ -1737,7 +1737,7 @@ def test_c_constructor_guard_three_profiles_keep_request_local_close_ownership(m
             if mode == "native":
                 return payload["tools"][0]["function"]["name"]
             instruction = payload["messages"][0]["content"]
-            key = next(iter(json.loads(instruction[instruction.index("{"):])["properties"]))
+            key = next(iter(json.loads(instruction.split("without markdown: ", 1)[1])["properties"]))
             return {"proposal": names[0], "intent": names[1], "decision": names[2]}[key]
 
         class Body(httpx.AsyncByteStream):
