@@ -1,288 +1,100 @@
 # MedChat Agent Working Guide
 
-本文档是仓库级协作入口，适用于开发者、自动化 Agent 与 Codex。更完整的工程规范见
-[`docs/PROJECT_STANDARDS.md`](docs/PROJECT_STANDARDS.md)。
+本文件是开发者与自动化 Agent 的协作入口。项目介绍和本机启动见 [README](README.md)，详细工程规范见 [PROJECT_STANDARDS](docs/PROJECT_STANDARDS.md)，专题入口见 [文档索引](docs/README.md)。
 
 ## 1. 项目简介
 
-MedChat（Molecular Chat System）是面向药物设计与计算药物化学场景的 Web 平台。当前仓库整合了：
+MedChat 是面向药物设计与计算药物化学的 Web 平台，整合聊天/RAG、分子生成、性质/ADMET/活性预测、靶点检索、反向寻靶、Vina 对接和后台任务。
 
-- 自然语言聊天、RAG 检索与 Agent 工作流；
-- 本地 Ollama 分子生成；
-- 分子性质、ADMET 与活性预测；
-- 靶点搜索、反向寻靶和结构缓存；
-- AutoDock Vina 分子对接；
-- 分子设计、任务持久化、长期记忆与评测。
-
-项目仍处于持续开发阶段。任何输出均应保留科学计算来源、模型状态和失败信息，禁止用模拟结果冒充真实预测。
+科学结果必须来自真实工具，并保留来源、模型状态和失败信息；不得伪造分数、结合能、pIC50、文献或实验结论，也不得将预测表述为已验证实验事实。
 
 ## 2. 技术栈概览
 
-| 层次 | 当前实际技术 |
-|---|---|
-| 后端 | Python 3.10+、FastAPI、Uvicorn、Pydantic 2 |
-| 前端 | Jinja2 模板、原生 JavaScript、CSS、Fetch API、WebSocket |
-| 科学计算 | RDKit、NumPy、Pandas、SciPy、scikit-learn |
-| 图神经网络 | PyTorch、PyTorch Geometric、RG-MPNN |
-| 检索 | FAISS、本地 CSV/索引 |
-| 数据持久化 | SQLite、CSV、本地文件缓存 |
-| 模型接口 | Ollama、ModelScope、OpenAI-compatible API |
-| 对接工具 | AutoDock Vina、ADFRsuite、Meeko |
-| 测试 | pytest、pytest-asyncio、Node.js 静态测试脚本 |
-| 部署 | systemd、nginx、Conda、Linux/Windows 本地开发 |
+保持 FastAPI + Jinja2 + 原生 JavaScript/CSS 的现有架构，未经明确批准不迁移。科学计算使用 RDKit、PyTorch/PyG 等本地依赖；推荐 Python 3.10，3.11 正式支持待确认。
 
-仓库没有 `package.json`、前端打包流程或已配置的 Ruff/Black/ESLint。不要假设这些工具已经存在。
+完整技术栈、依赖 profile 及目录职责见 [项目规范第 2–3 节](docs/PROJECT_STANDARDS.md#2-技术栈说明)。仓库没有前端打包流程或已配置的 Ruff/Black/ESLint；不得假定这些工具已启用，引入需独立 PR。
 
 ## 3. 重要目录说明
 
-```text
-.
-├── main.py                    # 推荐的本地启动入口
-├── config/                    # Ollama、ModelScope、部署配置
-├── data/                      # 轻量数据、样例及本地运行资产
-├── deployment/                # Linux 依赖、systemd、nginx、对接工具文档
-├── docs/                      # 项目、部署、设计和交接文档
-├── scripts/                   # 健康检查、Agent 验收、数据库校验脚本
-├── src/
-│   ├── web/                   # FastAPI 应用、路由、Jinja 模板、静态资源
-│   ├── agent/                 # 路由、规划、Supervisor、工具、持久化、评测
-│   ├── molecular_design/      # 分子设计服务
-│   ├── docking/               # 对接服务和外部工具适配
-│   ├── reverse_target/        # 反向寻靶
-│   ├── activity/              # RG-MPNN 活性预测与训练
-│   ├── target_search/         # 靶点 SQLite、结构缓存、下载和检索
-│   ├── task_runtime/          # SQLite 后台任务运行时
-│   └── system/                # 数据版本信息
-└── tests/                     # Python 测试与 3 个 Node.js 静态测试
-```
+优先阅读任务涉及的领域模块及测试：
 
-FAISS 索引、SQLite 运行库、结构缓存和计算输出通常是本地资产，不应因“项目能运行”就提交到 Git；模型权重、运行时 registry 和真实训练资产的提交边界见第 9 节。
+- Web：`src/web/routes/`、`src/web/templates/`、`src/web/static/`。
+- 科学领域：`src/activity/`、`src/docking/`、`src/reverse_target/`、`src/target_search/`、`src/molecular_design/`。
+- Agent 和后台任务：`src/agent/`、`src/task_runtime/`；维护入口见 [AGENT_MAINTENANCE](docs/AGENT_MAINTENANCE.md)。
+- 数据来源与部署清单：[data/REGISTRY.md](data/REGISTRY.md)；提交边界见第 9 节。
 
 ## 4. 本地启动命令
 
-### 4.1 安装通用开发依赖
-
-来源：`README.md`、`requirements.txt`。
+在具备科学依赖的环境中，从仓库根目录执行（来源：[requirements.txt](requirements.txt)、[main.py](main.py)）：
 
 ```powershell
 python -m pip install -r requirements.txt
+python main.py --port 6001
 ```
 
-RDKit、FAISS、PyTorch/PyG 在 Windows 或不同 Python 版本下可能需要 Conda。推荐 Python 3.10；Python 3.11 是否作为正式支持版本为“待确认”。
+本机浏览器访问 `http://127.0.0.1:6001`。省略 `--port` 时后端默认监听 `127.0.0.1:6000`；6000 是浏览器受限端口，生产使用 nginx HTTPS，不关闭浏览器保护。
 
-### 4.2 启动本地 Ollama
+需要分子生成时，先运行 `.\start_ollama.ps1` 或 `ollama serve`，并确认已有 `gmm-llama:latest`。主聊天模型配置不能覆盖分子生成工具模型。
 
-来源：`start_ollama.ps1`、`config/ollama_config.yaml`。
-
-```powershell
-.\start_ollama.ps1
-```
-
-或：
-
-```powershell
-ollama serve
-```
-
-分子生成所需模型为 `gmm-llama:latest`。不要让主聊天模型配置覆盖分子生成工具模型。
-
-### 4.3 推荐启动方式
-
-来源：`README.md`、`main.py`。
-
-```powershell
-python main.py
-```
-
-默认后端监听地址（生产环境经 nginx HTTPS 访问）：
-
-```text
-http://127.0.0.1:6000
-```
-
-浏览器会限制直接访问 6000（`ERR_UNSAFE_PORT`）。本机浏览器调试可显式使用
-`python main.py --port 6001`，再打开 `http://127.0.0.1:6001`；服务器后端仍使用默认 6000。
-
-常用变体：
-
-```powershell
-python main.py --reload
-python main.py --debug
-python main.py --host 127.0.0.1 --port 6000
-python main.py --no-reload
-python main.py --modelscope
-python main.py --config config/modelscope_config.yaml
-```
-
-### 4.4 直接 ASGI 启动
-
-来源：`main.py` 中的 Uvicorn 调用、`src/web/app.py` 导出的 `app`。
-
-```powershell
-python -m uvicorn src.web.app:app --host 127.0.0.1 --port 6000
-```
-
-这是可行的底层启动方式；日常开发优先使用 `python main.py`，因为它负责 `.env`、目录检查和配置选择。
-
-### 4.5 Linux 服务启动
-
-来源：`deployment/medchat.service`、`deployment/README.md`。
-
-```bash
-python main.py --no-reload
-```
-
-生产部署由 systemd 调用上述命令，并由 nginx 代理 HTTP 与 `/ws` WebSocket。
+启动选项见 `python main.py --help`；主模型设置见 [README](README.md#主模型接入与一次保存)。Linux、直接 ASGI 与多 worker 的适用边界见 [部署文档](deployment/README.md)。
 
 ## 5. 构建、测试、lint 命令
 
-### Python 测试
+完整可执行命令集中在 [项目规范第 11 节](docs/PROJECT_STANDARDS.md#11-测试规范)，不要在多份文档维护不同版本。
 
-来源：`tests/`、`requirements.txt`。
-
-```powershell
-python -m pytest tests -q
-python -m pytest tests/agent -q
-python -m pytest tests/test_target_search.py -q
-```
-
-涉及 RDKit/PyTorch 的测试必须在具备对应依赖的 Conda 环境运行。
-
-### 源码编译检查
-
-```powershell
-python -m compileall -q src scripts
-```
-
-### 健康检查
-
-来源：`scripts/health_check.py`、`deployment/README.md`。
-
-```powershell
-python scripts/health_check.py
-python scripts/health_check.py --strict
-```
-
-### Agent 验收
-
-来源：`scripts/run_agent_acceptance.py`。
-
-```powershell
-python scripts/run_agent_acceptance.py --mode contract
-python scripts/run_agent_acceptance.py --mode replay
-python scripts/run_agent_acceptance.py --mode real
-python scripts/run_agent_acceptance.py --mode all
-```
-
-`real`/`all` 会调用真实本地或外部服务，运行前确认凭据、模型和科学工具可用。测试允许使用真实外部 API key，但 key 只能来自运行时环境变量或本机密钥管理器，例如 `OPENAI_COMPATIBLE_API_KEY`；禁止输出、保存、提交、写入日志或报告。报告中只允许记录 `API key present: true` 或 `sk-***...***` 等脱敏状态。
-
-### 靶点数据库检查
-
-来源：`docs/target_search_local_db.md`、`scripts/target_db/validate_target_db.py`。
-
-```powershell
-python -m src.target_search.seed
-python scripts/target_db/validate_target_db.py --require-cache --strict
-```
-
-### JavaScript 检查
-
-仓库没有 npm 测试框架。现有测试是直接运行的 Node.js 脚本：
-
-```powershell
-node tests/home_agent_task_panel_test.js
-node tests/reverse_target_broad_recall_test.js
-node tests/reverse_target_pagination_test.js
-```
-
-修改 JavaScript 后至少运行语法检查：
-
-```powershell
-Get-ChildItem src/web/static/js -Recurse -Filter *.js -File |
-  Where-Object { $_.FullName -notmatch 'ketcher|backup' } |
-  ForEach-Object { node --check $_.FullName }
-```
-
-### lint 状态
-
-当前没有正式配置的 Python/JavaScript lint 或 formatter 命令。不要声称 `ruff`、`black`、`eslint` 已启用。引入统一工具链需单独 PR；工具选型为“待确认”。
+- 修改功能/Bug：先建立失败测试，再做最小修复；运行聚焦测试、受影响回归和 `compileall`。
+- 修改 JS：运行 `node --check` 和相关 Node 契约测试。
+- 修改部署/数据：运行 `scripts/health_check.py --strict`，或说明无法运行原因。
+- `real`/`all` 验收会调用真实服务，运行前确认凭据、模型和科学工具可用；密钥规则见第 9 节。
+- 未运行的检查和跳过项必须明确报告，不能宣称已通过。
 
 ## 6. 代码修改边界
 
-- 保持 FastAPI + Jinja2 + 原生 JavaScript 的现有结构，除非任务明确批准迁移。
-- 新增页面应沿用 `src/web/templates/`、`src/web/static/`、`src/web/routes/` 的模块化方式。
-- API 路由放在已有领域路由模块或独立的 `setup_*_routes()` 模块中。
-- 科学计算结果必须来自真实工具或明确标注为不可用；不得伪造分数、结合能、pIC50、文献或实验结论。
-- 大型结构、模型和索引文件保存在磁盘；SQLite 优先保存元数据与相对路径。
-- 不得无关重构，不得覆盖用户工作区中已有的未提交改动。
-- 修改公共事件格式、API 响应、数据库 schema 或 Agent 工具契约时必须补回归测试。
+- 页面、静态资源和路由沿用现有模块化目录；路由使用已有领域模块或 `setup_*_routes()`。
+- 大型结构、模型、索引保存在磁盘；SQLite 优先保存元数据和相对路径。
+- 不做无关重构，不覆盖或回退用户已有改动。
+- 公共事件、API 响应、数据库 schema、Agent 工具契约变更必须补回归测试，并说明兼容性。
+- 前后端、科学执行、错误处理和安全的详细规则见 [项目规范](docs/PROJECT_STANDARDS.md)。
 
 ## 7. AI/Codex 工作规则
 
-1. 开始任务前读取本文件、相关模块、测试和最近 Git 状态。
-2. `main` 只用于稳定基线；不得直接在 `main` 提交。
-3. 一个任务一个独立分支、一个 PR。
-4. 工作树混杂时必须显式暂存文件，禁止 `git add -A`。
-5. 范围不清楚、存在破坏性选择或会扩大任务边界时，先询问用户。
-6. 诊断任务只分析，不自动实施修复，除非用户明确要求修复。
-7. 修改功能或 Bug 时先建立可复现测试，再做最小修复。
-8. 测试允许使用真实外部 API key，但 key 只能来自运行时环境变量或本机密钥管理器；禁止输出、保存、提交、写入日志或报告。报告中只允许记录 `API key present: true` 或 `sk-***...***` 等脱敏状态。
-9. 不使用 `git reset --hard`、`git clean` 或覆盖式 checkout 回退用户改动。
-10. 完成时报告准确文件、命令、测试结果、分支、commit 和 PR。
+1. 开始前读取本文件、相关模块和测试，检查最近 Git 状态。
+2. 范围不清、涉及破坏性选择或扩大任务边界时，先询问用户。
+3. 诊断任务只分析；除非用户明确要求，不自动实施修复。
+4. 禁止 `git reset --hard`、`git clean` 或覆盖式 checkout 回退用户改动。
+5. 完成时报告准确文件、验证命令及结果、分支、commit 和 PR；未提交或未建 PR 也应说明。
 
 ## 8. Git 分支与 PR 规则
-- 默认不自动合并；维护者明确指定 PR、合并方式并授权，且所有质量门禁满足后，Codex 可以执行合并。
-- 禁止直接修改或提交到 `main`。
-- 分支命名建议：
 
-```text
-feat/<short-topic>
-fix/<short-topic>
-docs/<short-topic>
-chore/<short-topic>
-```
+- `main` 只作稳定基线，不直接修改或提交；一个任务一个独立分支、一个 PR。
+- 工作树混杂时显式暂存本任务文件，禁止 `git add -A`。
+- 分支建议 `feat/`、`fix/`、`docs/`、`chore/`；commit 使用简洁 Conventional Commit，如 `docs: clarify setup guide`。
+- 不混入无关格式化、依赖升级或其他主题；不擅自 amend/rebase 共享历史或强推。
+- PR 目标为 `main`，默认 draft；说明目标、文件范围、影响、验证、待确认事项、风险/兼容性/回滚和审查重点。
+- 科学算法变更附输入、输出和 provenance；数据变更附来源、版本与校验；UI 截图不得含隐私。
+- 默认不合并。只有维护者明确指定 PR、合并方式并授权，且质量门禁满足后，才可执行合并。
 
-- Commit 使用简洁的 Conventional Commit 风格：
-
-```text
-feat: add target workflow
-fix: reject fabricated docking scores
-docs: add project standards
-test: cover checkpoint recovery
-```
-
-- 每个 PR 只解决一个主题；不要混入格式化、依赖升级或无关重构。
-- PR 描述必须包含：修改目标、文件范围、验证命令、待确认事项、风险和审查重点。
-- 默认创建 draft PR；由维护者确认后再转为 ready。
-
-分支保护、必需审查人数和 CI 必需检查当前未在仓库文件中定义，属于“待确认”。
+分支保护、必需审查人数、CI 必需检查和 CODEOWNERS 尚待确认。
 
 ## 9. 禁止提交的内容
 
-- `.env`、API Key、token、密码、数据库连接凭据、写有真实密钥的临时脚本/报告/命令输出；
-- 用户输入、聊天原文、个人信息、未脱敏日志；
-- `outputs/`、`scratch/`、`temp_docking/`、`logs/`；
-- SQLite/DB 运行文件、FAISS 索引、训练缓存；
-- 大型视频、未经批准的图片或二进制文件；
-- 本地 IDE、虚拟环境、缓存和 `__pycache__`；
-- 真实生产结构缓存或许可不明的数据集；
-- 临时 probe 数据库、测试运行产物和绝对机器路径配置。
+- `.env`、API Key、token、密码、Cookie、证书私钥、数据库凭据及含真实密钥的脚本/报告/输出。
+- 用户输入、聊天原文、个人信息和未脱敏日志。
+- `outputs/`、`scratch/`、`temp_docking/`、`logs/`；SQLite/DB 运行文件、FAISS 索引和训练缓存。
+- 大型视频、未经批准的图片或二进制文件；本地 IDE、虚拟环境、缓存和 `__pycache__`。
+- 真实生产结构缓存、许可不明数据集、临时 probe 库、测试产物和绝对机器路径配置。
 
-模型权重、运行时 registry 和真实训练资产不再因其资产类型被一律禁止提交；上述运行文件、缓存、输出目录和二进制文件类别限制不应作为禁止这三类资产提交的依据。密钥、凭据、隐私、未脱敏日志和许可不明数据的禁止提交要求仍然适用。
+模型权重、运行时 registry 和真实训练资产不因其资产类型被一律禁止提交；上述运行文件、缓存、输出目录和二进制类别限制不作为禁止这三类资产提交的依据。密钥、凭据、隐私、未脱敏日志和许可不明数据的禁令仍适用。
 
-提交时核对 `.gitignore` 和 `data/REGISTRY.md`；若它们仍限制上述三类资产，应在明确提交范围后同步调整，而不是默认强制添加。发现敏感内容已进入历史时应立即停止发布并通知维护者。
+提交前核对 `.gitignore` 和 [data/REGISTRY.md](data/REGISTRY.md)；如仍限制上述三类资产，在明确提交范围后同步调整，不默认强制添加。发现敏感内容已进入历史时，立即停止发布并通知维护者。
+
+测试可使用真实外部 API key，但只能来自运行时环境变量或本机密钥管理器，例如 `OPENAI_COMPATIBLE_API_KEY`；禁止输出、保存、提交或写入日志/报告。报告仅记录 `API key present: true` 或 `sk-***...***` 等脱敏状态。
 
 ## 10. 完成任务前的自检清单
 
-- [ ] 当前分支不是 `main`。
-- [ ] `git status --short` 中只暂存本任务文件。
-- [ ] 未回退或覆盖用户已有改动。
-- [ ] 真实 API key 仅来自运行时环境变量或本机密钥管理器，未写入 `.env`、日志、报告、命令输出、token、隐私数据或机器专用凭据。
-- [ ] 新行为有对应测试；文档命令有真实文件依据。
-- [ ] Python 测试、相关聚焦测试和 `compileall` 已运行。
-- [ ] 修改 JavaScript 时已运行 `node --check` 和相关 Node 测试。
-- [ ] 修改部署/数据时已运行 `scripts/health_check.py --strict` 或说明无法运行原因。
-- [ ] API、事件、数据库和文件路径保持向后兼容，或已明确记录破坏性变更。
-- [ ] 文档中的不确定内容已标记“待确认”。
-- [ ] Commit 仅包含本任务范围。
-- [ ] PR 目标是 `main`，但未直接合并。
+- [ ] 不在 main；只暂存本任务文件，未覆盖用户已有改动。
+- [ ] 第 9 节的数据与密钥边界已检查。
+- [ ] 新行为有测试；聚焦/相关回归、compileall 及适用的 JS/部署检查已执行，未执行项已说明。
+- [ ] API、事件、schema、路径兼容，或已记录破坏性变更。
+- [ ] 文档命令有真实文件依据，不确定内容标记“待确认”。
+- [ ] Commit 范围单一；PR 指向 main，未经明确授权未合并。

@@ -1,24 +1,12 @@
 # MedChat 项目规范
 
-版本日期：2026-08-25
+整理日期：2026-10-16（去重与入口校准，不表示全部功能重新验收）
 适用仓库：`molecular_chat_system`
 规范状态：基于当前仓库结构整理；标记为“待确认”的内容尚未形成团队最终决策。
 
 ## 1. 项目定位
 
-MedChat 是面向药物设计与计算药物化学的 Web 平台，不是单一聊天 Demo。当前实际能力覆盖：
-
-- 分子聊天与 WebSocket 流式交互；
-- RAG 分子检索；
-- 本地 LLM 分子生成；
-- 分子性质、ADMET、RG-MPNN 活性预测；
-- 靶点搜索、PDB/AlphaFold 结构缓存；
-- 反向寻靶与药效团分析；
-- AutoDock Vina 分子对接；
-- Agent 路由、工作流、专家代理、持久化和评测；
-- 分子设计与后台任务运行。
-
-项目输出用于辅助研究。模型预测和计算结果不得表述为已验证实验事实。
+项目能力与使用方式见 [README](../README.md)。本文维护工程细则；协作、Git/PR、科学真实性和禁止提交边界以 [AGENTS.md](../AGENTS.md) 为准，不另维护一套重复规则。
 
 ## 2. 技术栈说明
 
@@ -95,7 +83,7 @@ MedChat 是面向药物设计与计算药物化学的 Web 平台，不是单一�
 | `tests/agent/` | Agent 单元/集成/恢复/评测测试 |
 | `tests/` | Web、领域、部署和 Node 静态测试 |
 | `archive/` | 归档代码，不得被运行时代码重新引用 |
-| `outputs/`、`scratch/`、`temp_docking/` | 本地运行产物，禁止提交 |
+| `outputs/`、`scratch/`、`temp_docking/` | 本地运行产物；提交限制及资产例外见 [AGENTS 第 9 节](../AGENTS.md#9-禁止提交的内容) |
 
 ## 4. 前端开发规范
 
@@ -211,7 +199,7 @@ src/web/static/js/<feature>/main.js
 - Schema 变更必须可重复执行并有测试；
 - 不把二进制模型、PDB/SDF 大文件直接塞入 SQLite；
 - 存储相对路径、SHA256、媒体类型和验证状态；
-- 运行库、journal、WAL 文件不得提交。
+- 运行库、journal、WAL 的提交限制及运行时 registry 例外见 [AGENTS 第 9 节](../AGENTS.md#9-禁止提交的内容)。
 
 当前数据库：
 
@@ -223,13 +211,13 @@ src/web/static/js/<feature>/main.js
 
 - 可重建数据需保留来源、版本、命令和校验方式；
 - 轻量种子 CSV 可以提交；
-- 模型权重、FAISS、指纹矩阵、结构缓存按 `data/REGISTRY.md` 外部部署；
+- 模型权重、FAISS、指纹矩阵和结构缓存按 [data/REGISTRY.md](../data/REGISTRY.md) 登记和部署；提交范围遵守 AGENTS 第 9 节，不再一律禁止模型权重、运行时 registry 和真实训练资产；
 - 新增数据资产必须同步更新 `data/REGISTRY.md`。
 
 ### 7.3 配置
 
 - 默认值放 YAML 或 `.env.example`；
-- 真实值放本地 `.env` 或部署环境变量；
+- 端口、科学资产等运行参数放本地 `.env` 或部署环境变量；主聊天模型的用户级保存与迁移规则见 [README](../README.md#主模型接入与一次保存)，不能用旧主模型环境变量配置替代；
 - 测试/验收允许使用真实外部 API key，但只能通过运行时环境变量或本机密钥管理器注入；
 - 环境变量优先于默认配置；
 - `.env.example` 只能包含空值或无敏感性的示例值；
@@ -306,21 +294,48 @@ src/web/static/js/<feature>/main.js
 
 ### 11.2 命令
 
+以下命令从仓库根目录执行；涉及 RDKit/PyTorch 的测试须使用具备相应依赖的环境。
+
 ```powershell
+# Python 全量、Agent 与靶点聚焦测试（来源：tests/）
 python -m pytest tests -q
 python -m pytest tests/agent -q
+python -m pytest tests/test_target_search.py -q
 python -m compileall -q src scripts
+
+# 环境检查（来源：scripts/health_check.py）
+python scripts/health_check.py
 python scripts/health_check.py --strict
+
+# Agent 验收（来源：scripts/run_agent_acceptance.py）
 python scripts/run_agent_acceptance.py --mode contract
+python scripts/run_agent_acceptance.py --mode replay
+python scripts/run_agent_acceptance.py --mode real
+python scripts/run_agent_acceptance.py --mode all
 ```
 
-前端：
+`real`/`all` 会调用真实服务，运行前确认凭据、模型和工具可用；测试密钥规则见 [AGENTS 第 9 节](../AGENTS.md#9-禁止提交的内容)。contract/replay 不能替代真实科学验收。
+
+靶点数据准备与检查（[详细说明](target_search_local_db.md)；seed 会写入数据，应确认目标目录）：
+
+```powershell
+python -m src.target_search.seed
+python scripts/target_db/validate_target_db.py --require-cache --strict
+```
+
+前端无 npm 测试框架，直接运行受影响的 `tests/*_test.js`。常用示例：
 
 ```powershell
 node tests/home_agent_task_panel_test.js
 node tests/reverse_target_broad_recall_test.js
 node tests/reverse_target_pagination_test.js
+
+Get-ChildItem src/web/static/js -Recurse -Filter *.js -File |
+  Where-Object { $_.FullName -notmatch 'ketcher|backup' } |
+  ForEach-Object { node --check $_.FullName }
 ```
+
+当前未配置统一 Python/JS formatter 或 lint；不要将 `node --check` 和 `compileall` 称为完整 lint。
 
 ### 11.3 要求
 
@@ -336,48 +351,11 @@ node tests/reverse_target_pagination_test.js
 
 ## 12. Git 提交规范
 
-- 永远不直接提交到 `main`；
-- 一个任务一个分支；
-- 工作树混杂时只用显式路径暂存；
-- Commit 保持单一目的；
-- 推荐 Conventional Commit：
-
-```text
-feat: ...
-fix: ...
-docs: ...
-test: ...
-refactor: ...
-chore: ...
-```
-
-- 不提交生成物、缓存、数据库或敏感信息；
-- 不通过 amend/rebase 改写共享分支历史，除非维护者明确要求；
-- 禁止 `git reset --hard` 和未经授权的强推。
+分支、显式暂存、commit、共享历史和强推规则统一见 [AGENTS 第 7–8 节](../AGENTS.md#8-git-分支与-pr-规则)；禁止提交内容及训练资产例外见 [第 9 节](../AGENTS.md#9-禁止提交的内容)。
 
 ## 13. Pull Request 规范
 
-每个 PR 必须包含：
-
-1. 背景和目标；
-2. 修改文件/模块；
-3. 用户或开发者影响；
-4. 验证命令和结果；
-5. 待确认事项；
-6. 风险、兼容性和回滚方法；
-7. 审查重点。
-
-规则：
-
-- PR base 为 `main`；
-- 默认 draft；
-- 不混入无关改动；
-- 科学算法变更附输入、输出和 provenance；
-- API/schema 变更附兼容性说明；
-- 数据变更附来源、版本和校验；
-- 截图仅用于 UI 变更，且不得包含用户隐私。
-
-GitHub 分支保护和必需审批人数为“待确认”。
+PR 目标、draft 默认值、描述字段、科学/数据变更证据和合并授权统一见 [AGENTS 第 8 节](../AGENTS.md#8-git-分支与-pr-规则)。不要在本文件另维护一套审批要求。
 
 ## 14. 安全与隐私规范
 
@@ -412,7 +390,7 @@ GitHub 分支保护和必需审批人数为“待确认”。
 9. 运行聚焦测试、全量测试、compileall 和相关静态检查。
 10. 更新 README、项目规范、数据登记或部署文档。
 11. 显式暂存本任务文件，提交并创建 draft PR。
-12. 由维护者审查和合并，Codex 不直接合并 `main`。
+12. 按 AGENTS 第 8 节完成审查与明确授权合并，不自行合并。
 
 ## 16. Bug 修复流程
 
@@ -440,7 +418,10 @@ GitHub 分支保护和必需审批人数为“待确认”。
 - 命令旁标注来源文件或适用环境；
 - 不确定内容统一写“待确认”；
 - 路径、配置项、端口、模型和依赖变更时同步更新相关文档；
-- `AGENTS.md` 保持短而可执行，详细规则放本文件；
+- 文档入口与职责见 [文档索引](README.md)：README 管快速使用，AGENTS 管协作/提交，本文件管工程细则，部署教程管逐步操作，deployment README 管生产补充约束；
+- 相同规则或操作步骤只维护一份正文，其他页面链接引用；保留安全提示和适用条件，不复制整套安装/配置命令；
+- 修改标题时检查入站锚点链接；历史计划、handoff 和验收报告保留日期、commit、失败与限制，不能当作当前状态保证；
+- `AGENTS.md` 保持短而可执行；新增专题须更新文档索引，链接必须指向真实存在的文件；
 - 每轮重要任务更新 `docs/handoff/latest.md`；
 - 数据资产变化更新 `data/REGISTRY.md`；
 - 部署变化更新 `deployment/README.md`；

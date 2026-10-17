@@ -1,192 +1,37 @@
 # MedChat 服务器部署环境文档
 
-本文档用于把 MedChat 项目从本地开发环境迁移到服务器并挂网运行。内容覆盖系统环境、Python/conda 环境、药物化学工具链、数据资产、Web 服务、nginx、systemd、权限、健康检查和常见遗漏项。
+本文是部署模板与生产运行约束的入口。首次部署按 [Ubuntu 单机部署教程](../docs/DEPLOYMENT_TUTORIAL.md) 执行；本页保留资产要求、权限、Temporal worker 和上线门禁，不重复整套安装步骤。
+
+两种部署布局不可混用：教程以 home 目录中的 `user` 账号为例；本页 Temporal worker 使用 root-owned 的 `/opt/medchat/molecular_chat_system` 和 `/opt/conda/envs/medchat`。先确定实际服务账号和路径，再配置 unit。
 
 ## 1. 推荐服务器配置
 
-推荐操作系统：
+参考配置：Ubuntu 22.04/24.04 LTS、8 核 CPU、32 GB 内存（推荐 64 GB）、500 GB 磁盘（推荐 1 TB SSD）。GPU 按本地模型需求配置；这些是容量起点，不是性能保证。
 
-```bash
-Ubuntu 22.04 LTS
-Ubuntu 24.04 LTS
-```
-
-推荐硬件：
-
-```text
-CPU: 8 核以上
-内存: 32 GB 起步，推荐 64 GB
-磁盘: 500 GB 起步，推荐 1 TB SSD
-GPU: 非必须；如果后续跑本地大模型或深度学习模型，再配置 NVIDIA GPU
-```
-
-推荐部署目录：
-
-```text
-/opt/medchat/molecular_chat_system
-/opt/medchat/tools
-/opt/medchat/data
-```
+通用模板使用 `/opt/medchat/molecular_chat_system`（代码）、`/opt/medchat/tools`（工具）、`/opt/medchat/data`（数据）。Temporal 的目录权限另见第 8、11.1 节。
 
 ## 2. 系统依赖
 
-服务器先安装基础系统包：
-
-```bash
-sudo apt update
-sudo apt install -y \
-  git curl wget unzip tar ca-certificates \
-  build-essential gcc g++ make \
-  sqlite3 nginx \
-  libglib2.0-0 libxrender1 libxext6 libsm6 libgl1 \
-  python3-dev
-```
-
-公网部署必须启用 HTTPS/WSS；先安装证书工具：
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
-```
+安装命令集中在 [教程第 1 节](../docs/DEPLOYMENT_TUTORIAL.md#1-登录服务器并准备基础软件)，包括系统库、nginx 和证书工具。公网部署使用 HTTPS/WSS。
 
 ## 3. Python / Conda 环境
 
-建议使用 conda 环境，不建议服务器使用 Python 3.13 直接部署。RDKit、FAISS、部分药化依赖在 Python 3.10/3.11 更稳定。
+按 [教程第 3 节](../docs/DEPLOYMENT_TUTORIAL.md#3-创建-python-环境并安装依赖) 创建 Python 3.10 环境。依赖只选择适用的一套：
 
-推荐创建环境：
+- [根 requirements.txt](../requirements.txt)：CPU/CI 开发环境。
+- [deployment/requirements.txt](requirements.txt)：Linux/CUDA 12.1/RTX3090 部署环境。
 
-```bash
-conda create -n medchat python=3.10 -y
-conda activate medchat
-```
-
-RTX3090 服务器建议优先安装部署版依赖：
-
-```bash
-pip install -r deployment/requirements.txt
-```
-
-根目录 `requirements.txt` 更偏通用开发环境；`deployment/requirements.txt` 固定了 CUDA 12.1、PyTorch、PyG、药化和 Web 服务部署所需版本，更适合 RTX3090 服务器。
-
-分子对接还需要安装 AutoDock Vina、ADFRsuite、Meeko/mk_prepare_ligand。Meeko 已包含在 `deployment/requirements.txt` 中，Vina 和 ADFRsuite 需要按服务器系统单独安装，详细步骤见 `deployment/docking_tools.md`。
-
-如果 `rdkit` 或 `faiss-cpu` 通过 pip 安装不稳定，优先使用 conda-forge：
-
-```bash
-conda install -c conda-forge rdkit faiss-cpu -y
-```
-
-如果后续确实需要 FAISS GPU，可在服务器上改用 conda 安装：
-
-```bash
-conda install -c pytorch -c nvidia faiss-gpu -y
-```
-
-项目核心 Python 依赖包括：
-
-```text
-fastapi
-uvicorn[standard]
-python-multipart
-websockets
-aiofiles
-pandas
-numpy
-tqdm
-rdkit
-faiss-cpu
-pydantic
-pyyaml
-jinja2
-requests
-httpx
-pubchempy
-```
+不要机械混装两套 profile。RDKit/FAISS 安装兼容性和基础导入检查见教程；确需 FAISS GPU 时按目标环境单独验证。
 
 ## 4. 分子对接工具链
 
-分子对接模块不是纯 Python 功能，需要额外安装外部程序。
-
-必须准备：
-
-```text
-AutoDock Vina
-ADFRsuite
-Meeko / mk_prepare_ligand
-```
-
-推荐版本：
-
-```text
-AutoDock Vina 1.2.5
-ADFRsuite 1.0
-Meeko 0.5.0
-```
-
-详细安装说明见 `deployment/docking_tools.md`。
-
-示例目录：
-
-```text
-/opt/medchat/tools/autodock/vina/vina
-/opt/medchat/tools/ADFRsuite/bin/prepare_receptor
-/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
-```
-
-`.env` 中需要配置：
-
-```env
-MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
-MOLECULAR_DOCKING_VINA=/opt/medchat/tools/autodock/vina/vina
-MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
-MOLECULAR_DOCKING_PREPARE_LIGAND=/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
-```
-
-验证命令：
-
-```bash
-$MOLECULAR_DOCKING_VINA --help
-ls $MOLECULAR_DOCKING_ADFR_BIN/prepare_receptor*
-which mk_prepare_ligand.py
-```
-
-如果服务器上的 Meeko 命令名是 `mk_prepare_ligand`，不是 `mk_prepare_ligand.py`，就按真实路径填写 `MOLECULAR_DOCKING_PREPARE_LIGAND`。
+Vina、ADFRsuite 是外部程序，Meeko 是 Python 配体准备工具。版本、安装命令、路径环境变量和验证方法统一见 [docking_tools.md](docking_tools.md)，不要只安装 Python 依赖就认为对接已就绪。
 
 ## 5. 模型服务环境
 
-项目可使用两类模型后端：Ollama 本地模型或 ModelScope API。
+主聊天模型的用户级配置、服务账号、Key 保留/清除和升级行为统一见 [README](../README.md#主模型接入与一次保存)。不能用旧 `MODELSCOPE_*` 或 `OPENAI_COMPATIBLE_*` 环境变量替代首页配置；独立验收 CLI 的显式环境接口不受影响。
 
-### 5.1 Ollama 本地模型
-
-安装并启动：
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama serve
-ollama pull qwen2.5:3b
-```
-
-检查：
-
-```bash
-curl http://127.0.0.1:11434/api/tags
-```
-
-默认配置通常使用：
-
-```text
-Ollama 地址: http://127.0.0.1:11434
-```
-
-### 5.2 ModelScope API
-
-如果使用 ModelScope API，`.env` 中配置：
-
-```env
-MODELSCOPE_API_KEY=你的真实key
-MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn/v1/chat/completions
-```
-
-生产环境不要把 API key 写死在 YAML 文件里，统一放到 `.env`。
+分子生成独立使用 Ollama `gmm-llama:latest`；安装与检查见 [教程第 4.1 节](../docs/DEPLOYMENT_TUTORIAL.md#41-ollama-本地模型)。其他通用聊天模型不能替代它。
 
 ## 6. 必须迁移的数据资产
 
@@ -327,44 +172,9 @@ scratch/
 
 ## 7. `.env` 完整示例
 
-项目根目录准备 `.env`：
+环境变量名称以 [.env.example](../.env.example) 为模板；服务器环境文件的创建、权限和路径示例统一见 [教程第 6 节](../docs/DEPLOYMENT_TUTORIAL.md#6-创建生产环境文件)。复制时使用实际服务账号与路径，不能将教程的 home 目录套到 Temporal worker。
 
-```env
-MEDCHAT_ENV_FILE=.env
-MEDCHAT_HOST=127.0.0.1
-MEDCHAT_PORT=6000
-MEDCHAT_DEBUG=false
-MEDCHAT_RELOAD=false
-MEDCHAT_WORKERS=1
-MEDCHAT_LOG_LEVEL=info
-# Optional exact host allowlist for HTTP-only deployments; plaintext traffic is exposed.
-MEDCHAT_INSECURE_HTTP_HOSTS=medchat.tdd-lab.com
-MEDCHAT_LOG_DIR=logs
-MEDCHAT_TEMP_DOCKING_DIR=temp_docking
-MEDCHAT_SCRATCH_DIR=scratch
-
-MODELSCOPE_API_KEY=
-MODELSCOPE_BASE_URL=https://api-inference.modelscope.cn/v1/chat/completions
-
-OLLAMA_BASE_URL=http://127.0.0.1:11434
-
-MOLECULAR_DOCKING_ROOT=/opt/medchat/tools/autodock
-MOLECULAR_DOCKING_VINA=/opt/medchat/tools/autodock/vina/vina
-MOLECULAR_DOCKING_ADFR_BIN=/opt/medchat/tools/ADFRsuite/bin
-MOLECULAR_DOCKING_PREPARE_LIGAND=/opt/conda/envs/medchat/bin/mk_prepare_ligand.py
-
-TARGET_DB_PATH=data/target_db/target_database.sqlite
-TARGET_CACHE_DIR=data/target_db/cache
-
-CHEMBL_DB_PATH=/opt/medchat/data/chembl/chembl_36.db
-REVERSE_TARGET_DATA_DIR=data/reverse_target
-
-ACTIVITY_MODEL_DIR=data/activity/models
-RAG_INDEX_PATH=data/molecular_faiss_index.index
-
-MEDCHAT_SYSTEMD_SERVICE=deployment/medchat.service
-MEDCHAT_NGINX_CONFIG=deployment/nginx-medchat.conf
-```
+首页主模型保存在服务账号的仓库外私有配置目录，不写进本节的 Web 运行参数模板。Key 不得进入 Git、日志或报告。
 
 ### 7.1 当前 HTTP 映射（无 HTTPS 终止）
 
@@ -417,96 +227,25 @@ no-follow 方式创建或验证。
 
 ## 9. 启动前健康检查
 
-在项目根目录执行：
+在已激活的部署 Python 环境、仓库根目录执行：
 
 ```bash
-conda activate medchat
-python scripts/health_check.py --strict
+python scripts/health_check.py --env-file /etc/medchat/medchat.env --strict
 ```
 
-理想结果：
-
-```text
-RDKit: OK
-AutoDock Vina: OK
-ADFRsuite: OK
-Ligand Preparation: OK
-Target DB: OK
-Target Cache: OK
-Ollama: OK
-ModelScope: OK 或 optional
-Reverse Target Data: OK
-Activity Models: OK
-RAG Index: OK
-Writable Directories: OK
-systemd Service: OK
-nginx Config: OK
-```
-
-如果只是查看状态，不希望失败时返回非 0 状态码：
-
-```bash
-python scripts/health_check.py
-```
+环境文件路径须与实际部署一致。去掉 `--strict` 可仅查看状态。各失败项的处理见 [教程第 7 节](../docs/DEPLOYMENT_TUTORIAL.md#7-运行健康检查)；检查通过不替代真实科学验收或生产恢复验证。
 
 ## 10. 本地启动验证
 
-先不接 nginx，直接启动服务：
+按 [教程第 8 节](../docs/DEPLOYMENT_TUTORIAL.md#8-先绕过-nginx-做本机验证) 先验证应用，再接 nginx。后端为 `127.0.0.1:6000`，浏览器通过本地 6001 SSH 隧道或 HTTPS 域名访问，不关闭受限端口保护。
 
-```bash
-conda activate medchat
-python main.py --no-reload
-```
-
-检查：
-
-```bash
-curl http://127.0.0.1:6000/health
-```
-
-浏览器不要直接访问服务器 6000：应用仅监听本机，且 6000 是浏览器受限端口。
-配置下文 nginx HTTPS 后访问实际域名（将 `<domain>` 替换为真实值）：
-
-```text
-https://<domain>/
-https://<domain>/target-search
-https://<domain>/molecular-docking
-https://<domain>/reverse-target
-https://<domain>/activity-prediction
-https://<domain>/molecular-design
-```
-
-nginx 配置前可按 [部署教程](../docs/DEPLOYMENT_TUTORIAL.md#8-先绕过-nginx-做本机验证)
-建立本地 6001 到服务器 6000 的 SSH 隧道进行浏览器验证。
+日常启动优先使用 `main.py`，由它加载环境、检查目录并选择配置；可用参数见 `python main.py --help`。
 
 ## 11. systemd 服务
 
-根据服务器真实路径修改 `deployment/medchat.service`：
+Web unit 的字段、安装与运维命令见 [教程第 9 节](../docs/DEPLOYMENT_TUTORIAL.md#9-配置-systemd)，通用模板为 [medchat.service](medchat.service)。核对 `User`、`Group`、`WorkingDirectory`、`EnvironmentFile` 和 `ExecStart`。
 
-```text
-User
-Group
-WorkingDirectory
-EnvironmentFile
-ExecStart
-```
-
-安装并启动：
-
-```bash
-sudo cp deployment/medchat.service /etc/systemd/system/medchat.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now medchat
-sudo systemctl status medchat
-```
-
-常用命令：
-
-```bash
-sudo systemctl restart medchat
-sudo systemctl stop medchat
-sudo journalctl -u medchat -f
-```
+教程的 home 目录单机 Web 配置不能替代下面的 Temporal worker 可信安装流程。
 
 ### 11.1 Temporal docking worker 的可信安装
 
@@ -618,97 +357,23 @@ sudo systemctl restart medchat-temporal-worker.service
 
 ## 12. nginx 反向代理
 
-根据服务器域名修改 `deployment/nginx-medchat.conf` 中的：
-
-```text
-server_name
-client_max_body_size
-proxy_pass
-```
-
-安装配置：
-
-```bash
-sudo cp deployment/nginx-medchat.conf /etc/nginx/conf.d/medchat.conf
-sudo nginx -t
-sudo systemctl reload nginx
-```
-
-注意 `/ws` 必须保留 WebSocket 相关配置：
-
-```text
-Upgrade
-Connection
-```
-
-否则聊天或实时功能可能异常。
+配置、证书和验证步骤见 [教程第 10 节](../docs/DEPLOYMENT_TUTORIAL.md#10-配置-nginx-和-httpswss)，模板为 [nginx-medchat.conf](nginx-medchat.conf)。修改真实域名、证书、上游和上传限制后，先 `nginx -t` 再 reload；`/ws` 必须保留 WebSocket 升级头。
 
 ## 13. 防火墙和端口
 
-如果使用 UFW：
-
-```bash
-sudo ufw allow 22
-sudo ufw allow 80
-sudo ufw allow 443
-sudo ufw enable
-```
-
-对公网只暴露 80/443。应用端口建议只监听本机或内网，由 nginx 转发。
+公网业务使用 nginx 80/443；SSH 使用实际配置端口，并按运维来源限制访问。不要暴露应用 6000、Ollama 11434 和内部数据库；防火墙步骤见 [教程第 10.3 节](../docs/DEPLOYMENT_TUTORIAL.md#103-防火墙)。
 
 ## 14. 上线后验证清单
 
-上线后逐项验证：
-
-```text
-首页可打开
-聊天接口可响应
-WebSocket 正常
-靶点搜索可查询 WDR5 / EGFR / PDE4D
-靶点结构文件可下载
-分子对接可上传受体/配体文件
-反向寻靶可返回结果
-活性预测模型可加载
-分子设计页面可打开
-日志正常写入
-大文件上传不被 nginx 拦截
-```
+基础 Web 与科学功能的逐项检查见 [教程第 11 节](../docs/DEPLOYMENT_TUTORIAL.md#11-上线验收)，完成标准见 [第 14 节](../docs/DEPLOYMENT_TUTORIAL.md#14-部署完成标准)。首页可打开不等于科学资产、真实工具或后台任务恢复已通过验收。
 
 ## 15. 常见遗漏项
 
-最容易遗漏：
-
-```text
-RDKit 和 FAISS 使用了不兼容的 Python 版本
-Vina / ADFRsuite / Meeko 没有安装或路径没填
-data/target_db/cache/ 没有迁移
-反向寻靶 fingerprint 文件没有迁移
-活性预测模型文件没有迁移
-RAG index 没有迁移
-systemd 的 WorkingDirectory 不对
-systemd 的 EnvironmentFile 不对
-服务用户没有写 logs/temp_docking/scratch 的权限
-nginx 没有配置 /ws WebSocket
-nginx client_max_body_size 太小
-公网部署必须使用 HTTPS/WSS；`nginx-medchat.conf` 已将 80 重定向到 443，
-并代理 WebSocket 升级。部署前需将配置中的证书路径替换为实际证书，不能直接以明文 80 对公网提供服务。
-API key 写进了 YAML 或代码
-```
+先查 [教程故障排查](../docs/DEPLOYMENT_TUTORIAL.md#13-常见故障排查)：依赖 profile、工具路径、数据/缓存、服务账号权限、WebSocket 和上传限制。Temporal worker 不得通过递归放宽权限绕过失败，须遵守第 8、11.1 节。
 
 ## 16. 建议上线顺序
 
-推荐顺序：
-
-1. 在服务器创建 conda 环境并安装依赖
-2. 迁移代码和数据资产
-3. 配置 `.env`
-4. 跑 `python scripts/health_check.py --strict`
-5. 用 `python main.py --no-reload` 手动启动验证
-6. 配置 systemd
-7. 配置 nginx，并替换 `nginx-medchat.conf` 中的实际证书路径
-8. 用 HTTPS 页面和 `wss://` 连接完成一次验收；未完成前不得对公网开放明文 HTTP
-9. 做全模块功能验收
-10. 设置日志轮转和数据备份
+基础单机步骤以部署教程为准；更新、备份和回滚见 [部署教程](../docs/DEPLOYMENT_TUTORIAL.md)第 12 节。按实际启用能力再检查以下门禁。
 
 如果部署要求进程重启后仍能恢复后台任务，应在生产环境设置：
 
