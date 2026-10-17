@@ -236,6 +236,56 @@ metadata / summary 文件
 CHEMBL_DB_PATH=/opt/medchat/data/chembl/chembl_36.db
 ```
 
+聊天反向寻靶在应用启动时对完整来源逐行重算 Morgan/MACCS 指纹并核对原始
+popcount，完成后才发布私有紧凑来源。文件存在、metadata 声称已对齐或健康检查
+通过，不等于聊天来源已经 READY。校验期间聊天立即返回“来源正在进行全量科学
+校验”，不会等待预热或在完成后自动重放请求；完成后需重新发起查询。
+
+服务端可配置独立预热期限（默认 1800 秒，仅接受 120–3600 的十进制整数）：
+
+```env
+REVERSE_TARGET_PREWARM_TIMEOUT_SECONDS=1800
+```
+
+该参数不延长单次聊天查询期限，也不放宽旧 strict 接口限制。紧凑来源逻辑预算
+为快照 768 MiB、获取峰值 1 GiB、单次查询 128 MiB，最多两个并发查询；这些是
+受控分配限额，不是进程 RSS 上限，仍需为原生库、映射页及其他服务留出内存。
+任何坏行、缓存不一致、预算耗尽或预热超时均不发布部分来源，也不自动重试。
+修复或更换资产后由管理员显式重启应用；禁止抽样、裁剪数据或关闭科学校验。
+应用关闭会撤销发布资格并等待实际预热线程退出；原生调用尚未返回时可能需要
+等待，不应把清理中状态视为已释放。独立反向寻靶页面的 legacy 按需加载不变。
+
+聊天对接必须使用单 worker：仅当 `MEDCHAT_CHAT_DOCKING_ENABLED=1`（严格等于
+`1`，其他值仍按原逻辑禁用）时启用聊天对接。其 WebSocket 任务归属及 HTTP
+controls 的任务集合是 process-local，多进程分流会使控制请求落到无该任务的进程，
+产生随机 404。`main.py` 在加载 env-file 并解析 CLI `--workers` / 环境变量
+`MEDCHAT_WORKERS` 后，对聊天对接加多 worker（N > 1）执行 fail-fast，非零退出；
+该检查在 reload 的 worker 调整及环境探测、应用装配、服务器启动之前执行，
+不会自动降为单 worker 或关闭聊天对接。请显式使用 `--workers 1` 或
+`MEDCHAT_WORKERS=1`（CLI 优先）。聊天对接未启用时，其他功能保留以下原有
+`main.py` 多 worker 支持边界。
+
+上述自动拒绝保证属于 `main.py` 启动入口。应用无法可靠获知外部 Uvicorn
+CLI 或其他进程管理器配置的 worker 数量；`MEDCHAT_WORKERS` 不能作为其实际
+进程数的证明。直接 ASGI 启用聊天对接也必须由部署方保证单 worker，不能将
+`main.py` 的 guard 当作外部入口的多 worker 检测。
+
+标准 `python main.py` 单 worker 和直接
+`python -m uvicorn src.web.app:app` 单 worker 在应用导入时初始化 RDKit
+诊断路由。`python main.py --workers N`（或 `MEDCHAT_WORKERS=N`）的每个
+spawn 子进程在 `main.py` 以 `__mp_main__` 重导入时先初始化，再进入 Uvicorn
+的进程目标函数及 heartbeat 线程；不依赖父进程已初始化，也不豁免任何线程。
+直接 `python -m uvicorn src.web.app:app --workers N`（N > 1）没有该引导钩子，
+不属于支持的多 worker 启动方式：首次应用导入时已有 heartbeat 线程会拒绝初始化；
+请改用上述 `main.py` 启动方式。其他进程管理器须提供同等的每子进程早期引导。
+
+嵌入式使用紧凑来源时，必须在主线程、所有 Python **及原生**工作线程
+启动前调用 `src.system.rdkit_logging.initialize_rdkit_logging()`，并且之后不得
+切换 RDKit 日志接收器。已知存在 Python 工作线程时的首次初始化会拒绝执行，
+不会在并发请求中重置全局日志开关；原生线程是否空闲无法通过 Python 枚举验证，
+因此仍由嵌入方保证启动顺序。初始化保留首次 RDKit 导入前已有的日志配置；
+未配置命名 logger 时保留 RDKit 默认设置。私有诊断过滤仅作用于调用线程。
+
 ### 6.3 活性预测模块
 
 通常需要迁移：

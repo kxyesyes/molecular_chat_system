@@ -30,6 +30,40 @@ class ReverseTargetTool(BaseMolecularTool):
         self._closed = False
         self._owned = None
         self._candidate = None
+        self._source_runtime = None
+        self._prewarm_requested = False
+
+    def start_preload(self):
+        """Opt this application-owned tool into one full-corpus prewarm attempt."""
+        with self._state_lock:
+            if (self._closed or self._loading or self._predictor is not None
+                    or self._prewarm_requested):
+                return False
+            # Even configuration/start failure must not fall back to lazy loading.
+            self._prewarm_requested = True
+        from src.reverse_target.config import get_reverse_target_data_dir, get_reverse_target_prewarm_timeout
+        from src.reverse_target.source_runtime import SourceRuntime
+        runtime = SourceRuntime(get_reverse_target_data_dir(),
+                                timeout_seconds=get_reverse_target_prewarm_timeout())
+        with self._state_lock:
+            publish = not self._closed
+            if publish:
+                self._source_runtime = runtime
+        if not publish:
+            runtime.close()
+            return False
+        runtime.start()
+        return True
+
+    def source_status(self):
+        with self._state_lock:
+            runtime = self._source_runtime
+            closed = self._closed
+        if runtime is not None:
+            return runtime.snapshot()
+        return dict(state='closed' if closed else 'failed', phase='unavailable',
+                    verified_rows=0, total_rows=0, elapsed_seconds=0.0,
+                    reason='source_unavailable', cleanup_pending=False)
 
     def _is_closed(self):
         with self._state_lock:
@@ -48,25 +82,41 @@ class ReverseTargetTool(BaseMolecularTool):
         # Producer callbacks may take the tool lock under their own lock.
         # Capture references here, but NEVER call the producer under this lock.
         with self._state_lock:
-            if self._closed:
-                return
             self._closed = True
             owned, candidate = self._owned, self._candidate
             self._owned = self._candidate = None
-            if self._predictor is owned:
+            runtime = self._source_runtime
+            if runtime is not None or self._predictor is owned:
                 self._predictor = None
         self._close_owned(owned)
         if candidate is not owned:
             self._close_owned(candidate)
+        if runtime is not None:
+            # Repeated callers still wait for the same actual worker settlement.
+            runtime.close()
 
     def _get_predictor(self, *, timeout_seconds=180, cancelled=None):
         deadline = time.monotonic() + timeout_seconds
         with self._state_lock:
             if self._closed or self._loading:
                 raise _Unavailable()
-            if self._predictor is not None:
+            prewarmed, runtime = self._prewarm_requested, self._source_runtime
+            if not prewarmed and self._predictor is not None:
                 return self._predictor
-            self._loading = True
+            if not prewarmed:
+                self._loading = True
+        if prewarmed:
+            if runtime is None:
+                raise _Unavailable()
+            try:
+                predictor = runtime.ready_predictor()
+            except ValueError:
+                raise _Unavailable() from None
+            with self._state_lock:
+                if self._closed or self._source_runtime is not runtime:
+                    raise _Unavailable()
+                self._predictor = predictor
+            return predictor
         candidate = None
         published = False
         try:
@@ -266,7 +316,10 @@ class ReverseTargetTool(BaseMolecularTool):
             return self._failure(result, 'tool_timeout', '反向寻靶超时，未返回预测结果。',
                                  details={'stage': phase, 'reason': 'timeout'})
         except _Unavailable:
-            return self._failure(result, 'tool_unavailable', '反向寻靶暂不可用，未返回预测结果。',
+            status = self.source_status()
+            message = ('反向寻靶来源正在进行全量科学校验，请在校验完成后重新发起请求；未返回预测结果。'
+                       if status['state'] == 'loading' else '反向寻靶暂不可用，未返回预测结果。')
+            return self._failure(result, 'tool_unavailable', message,
                                  details={'stage': phase, 'reason': 'source_unavailable'})
         except ValueError as error:
             code = 'tool_unavailable' if phase == 'source' else 'invalid_output'

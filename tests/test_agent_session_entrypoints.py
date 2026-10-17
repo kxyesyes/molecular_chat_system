@@ -113,3 +113,33 @@ def test_app_session_wiring_leaves_unrelated_health_routes_available(tmp_path, m
     assert response.status_code == 200
     assert "set-cookie" not in response.headers
     assert not (tmp_path / "sessions.sqlite").exists()
+
+
+@pytest.mark.parametrize("path", [
+    "/api/agent/docking/tasks/task/source-page",
+    "/api/agent/docking/tasks/task/selection",
+    "/api/agent/docking/tasks/task/parameters",
+    "/api/agent/docking/tasks/task/cancel",
+    "/api/agent/docking/preparations",
+    "/api/agent/docking/preparations/prep/approve",
+    "/api/agent/docking/preparations/prep/artifacts/pose",
+])
+def test_chat_docking_apis_reuse_browser_entry_identity(tmp_path, monkeypatch, path):
+    from src.web.agent_session_config import setup_agent_sessions
+    monkeypatch.setenv("MEDCHAT_AGENT_SESSION_DB", str(tmp_path / "sessions.sqlite"))
+    app = FastAPI()
+    setup_agent_sessions(app)
+
+    async def owner(request: Request):
+        return {"owner": request.scope.get("agent_session_id")}
+    app.add_api_route("/", owner, methods=["GET"])
+    app.add_api_route(path, owner, methods=["GET", "POST"])
+    with TestClient(app, base_url="http://localhost") as client:
+        expected = client.get("/").json()["owner"]
+        assert expected
+        assert client.post(path, headers={"Origin": "http://localhost"}).json()["owner"] == expected
+        assert client.get(path).json()["owner"] == expected
+        assert client.post(path, headers={"Origin": "https://foreign.invalid"}).status_code == 403
+    with TestClient(app, base_url="http://localhost") as other:
+        actual = other.get(path).json()["owner"]
+        assert actual and actual != expected

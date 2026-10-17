@@ -15,9 +15,12 @@ from src.system.redaction import redact_sensitive
 from src.system.scientific_status import normalize_observation_status, summarize_completion
 
 from .route_compat import lazy_dependency
+from .docking_consent_guard import DockingConsentGuard
 
 
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
+_HISTORY_PAGE_SIZE = 200
+_HISTORY_SCAN_LIMIT = 10_000
 
 
 def _normalize_warning_strings(values) -> list[str]:
@@ -215,27 +218,59 @@ def _owned_history(request: Request, work_dir: str, job_id: str) -> dict:
     return record
 
 
-def _clear_owned_history_records(work_dir: str, owner_session_id: str) -> int:
-    """Remove every history page owned by one browser session."""
+def _legacy_history_records(work_dir, owner_session_id, guard):
+    """Bounded atomic metadata snapshot; filter before pagination and counting."""
+    from src.docking.history_index import read_owned_history_snapshot
+
+    guard.preflight()
+    try:
+        rows = read_owned_history_snapshot(
+            work_dir, owner_session_id, max_records=_HISTORY_SCAN_LIMIT,
+        )
+    except Exception as exc:
+        raise HTTPException(503, 'Docking history snapshot unavailable') from exc
+    records = [row for row in rows if guard.is_legacy(row['job_id'])]
+    # Recheck earlier rows after all collision-owned metadata reads.
+    return [row for row in records if guard.is_legacy(row['job_id'])]
+
+
+def _validated_history_directory(work_dir, job_id):
+    _validate_job_id(job_id)
+    root = Path(work_dir).resolve(strict=True)
+    directory = root / f'docking_{job_id}'
+    resolved = directory.resolve()
+    if resolved.parent != root or resolved != directory or directory.is_symlink():
+        raise HTTPException(404, '对接任务不存在')
+    return directory
+
+
+def _clear_owned_history_records(work_dir: str, owner_session_id: str, *, guard=None) -> int:
+    """Remove bounded owned non-C history, rechecking before each deletion."""
     import shutil
 
-    from src.docking.history_index import read_history_page, remove_history_record
+    from src.docking.history_index import get_history_record, remove_history_record
 
+    guard = guard or DockingConsentGuard()
     deleted = 0
-    while True:
-        history, _, _, _ = read_history_page(
-            work_dir, page=1, limit=200, owner_session_id=owner_session_id,
-        )
-        if not history:
-            return deleted
-        for record in history:
-            job_id = str(record.get("job_id") or "")
-            _validate_job_id(job_id)
-            job_dir = os.path.join(work_dir, f"docking_{job_id}")
-            if os.path.isdir(job_dir):
-                shutil.rmtree(job_dir)
-            remove_history_record(work_dir, job_id)
-            deleted += 1
+    for record in _legacy_history_records(work_dir, owner_session_id, guard):
+        job_id = record['job_id']
+        if not guard.is_legacy(job_id):
+            continue
+        if get_history_record(work_dir, job_id, owner_session_id=owner_session_id) is None:
+            continue
+        if not guard.is_legacy(job_id):
+            continue
+        job_dir = _validated_history_directory(work_dir, job_id)
+        if job_dir.is_dir():
+            guard.require_legacy(job_id)
+            shutil.rmtree(job_dir)
+        if get_history_record(work_dir, job_id, owner_session_id=owner_session_id) is None:
+            continue
+        if not guard.is_legacy(job_id):
+            continue
+        remove_history_record(work_dir, job_id)
+        deleted += 1
+    return deleted
 
 
 def setup_docking_routes(
@@ -266,13 +301,14 @@ def setup_docking_routes(
             label=f"docking dependency: {attribute}",
         )()
 
-    def current_task_runtime():
-        if task_runtime is None:
-            return None
-        return task_runtime() if callable(task_runtime) else task_runtime
+    consent_guard = DockingConsentGuard(task_runtime)
+    app.state.legacy_docking_consent_guard = consent_guard
+    current_task_runtime = consent_guard.current_runtime
 
     async def read_owned_docking_pose(job_id: str, request: Request) -> bytes:
         """Read either a legacy result or a verified durable task artifact."""
+        _session_id(request)
+        consent_guard.require_legacy(job_id)
         if docking_service:
             work_dir = docking_service.work_dir
             try:
@@ -281,6 +317,7 @@ def setup_docking_routes(
                 if exc.status_code != 404:
                     raise
             else:
+                consent_guard.require_legacy(job_id)
                 result_file = Path(work_dir) / f"docking_{job_id}" / "result.pdbqt"
                 if not result_file.is_file():
                     raise HTTPException(status_code=404, detail="对接结果文件不存在")
@@ -289,6 +326,7 @@ def setup_docking_routes(
                 except OSError as exc:
                     raise HTTPException(status_code=500, detail="获取结果失败") from exc
 
+        consent_guard.require_legacy(job_id)
         try:
             runtime = current_task_runtime()
         except Exception as exc:
@@ -307,6 +345,9 @@ def setup_docking_routes(
             )
         except KeyError:
             raise HTTPException(status_code=404, detail="对接任务不存在") from None
+        except Exception as exc:
+            raise HTTPException(503, 'Task ownership storage unavailable') from exc
+        consent_guard.require_unambiguous_durable(runtime, job_id)
         status = getattr(
             getattr(record, "status", None),
             "value",
@@ -331,6 +372,7 @@ def setup_docking_routes(
 
     async def resolve_owned_durable_docking_task(job_id: str, request: Request):
         """Resolve an owned durable docking task after the legacy lookup misses."""
+        consent_guard.require_legacy(job_id)
         try:
             runtime = current_task_runtime()
         except HTTPException:
@@ -342,13 +384,16 @@ def setup_docking_routes(
         store = getattr(runtime, "store", None)
         get_owned = getattr(store, "get_owned", None)
         if not callable(get_owned):
-            return None
+            raise HTTPException(503, 'Task ownership storage unavailable')
         try:
             record = await asyncio.to_thread(
                 get_owned, job_id, _session_id(request)
             )
         except KeyError:
             return None
+        except Exception as exc:
+            raise HTTPException(503, 'Task ownership storage unavailable') from exc
+        consent_guard.require_unambiguous_durable(runtime, job_id)
         status = getattr(
             getattr(record, "status", None),
             "value",
@@ -890,6 +935,8 @@ def setup_docking_routes(
         required for defensible interaction assignment.
         """
         _validate_job_id(job_id)
+        _session_id(request)
+        consent_guard.require_legacy(job_id)
         work_dir = docking_service.work_dir if docking_service else os.path.join(
             os.getcwd(), "temp_docking"
         )
@@ -912,6 +959,7 @@ def setup_docking_routes(
                 )
             raise
 
+        consent_guard.require_legacy(job_id)
         job_dir = os.path.join(work_dir, f"docking_{job_id}")
         if not os.path.isdir(job_dir):
             raise HTTPException(status_code=404, detail="对接任务不存在")
@@ -1052,6 +1100,7 @@ def setup_docking_routes(
             pdbqt_text = (await read_owned_docking_pose(job_id, request)).decode(
                 "utf-8", errors="ignore"
             )
+            consent_guard.require_legacy(job_id)
             from src.docking.pose_export import PoseExportError, pose_sdf_from_pdbqt
 
             try:
@@ -1076,6 +1125,7 @@ def setup_docking_routes(
         """获取对接历史记录列表"""
         owner = _session_id(request)
         try:
+            consent_guard.preflight()
             work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
             if not os.path.isdir(work_dir):
                 return {
@@ -1086,14 +1136,12 @@ def setup_docking_routes(
                     "limit": max(1, limit),
                 }
 
-            from src.docking.history_index import read_history_page
-
-            history, total, resolved_page, resolved_limit = read_history_page(
-                work_dir,
-                page=page,
-                limit=limit,
-                owner_session_id=owner,
-            )
+            records = _legacy_history_records(work_dir, owner, consent_guard)
+            resolved_page = max(1, page)
+            resolved_limit = max(1, min(200, limit or 50))
+            total = len(records)
+            start = (resolved_page - 1) * resolved_limit
+            history = records[start:start + resolved_limit]
             return {
                 "success": True,
                 "history": history,
@@ -1102,6 +1150,8 @@ def setup_docking_routes(
                 "limit": resolved_limit,
             }
 
+        except HTTPException:
+            raise
         except Exception:
             resolve(logger, "logger").exception("获取对接历史失败")
             return api_error("DOCKING_HISTORY_READ_FAILED", "获取历史失败", status_code=500)
@@ -1111,13 +1161,16 @@ def setup_docking_routes(
         """清除所有对接历史记录"""
         owner = _session_id(request)
         try:
+            consent_guard.preflight()
             work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
             if not os.path.isdir(work_dir):
                 return {"success": True, "message": "无历史记录", "deleted": 0}
 
-            deleted = _clear_owned_history_records(work_dir, owner)
+            deleted = _clear_owned_history_records(work_dir, owner, guard=consent_guard)
 
             return {"success": True, "message": f"已清除 {deleted} 条历史记录", "deleted": deleted}
+        except HTTPException:
+            raise
         except Exception:
             resolve(logger, "logger").exception("清除对接历史失败")
             return api_error("DOCKING_HISTORY_CLEAR_FAILED", "清除历史失败", status_code=500)
@@ -1130,12 +1183,18 @@ def setup_docking_routes(
             from src.docking.history_index import remove_history_record
 
             _validate_job_id(job_id)
+            _session_id(request)
+            consent_guard.require_legacy(job_id)
             work_dir = docking_service.work_dir if docking_service else os.path.join(os.getcwd(), "temp_docking")
             _owned_history(request, work_dir, job_id)
-            job_dir = os.path.join(work_dir, f"docking_{job_id}")
+            consent_guard.require_legacy(job_id)
+            job_dir = _validated_history_directory(work_dir, job_id)
             if not os.path.isdir(job_dir):
                 raise HTTPException(status_code=404, detail="记录不存在")
+            consent_guard.require_legacy(job_id)
             _shutil.rmtree(job_dir)
+            _owned_history(request, work_dir, job_id)
+            consent_guard.require_legacy(job_id)
             remove_history_record(work_dir, job_id)
             return {"success": True, "message": f"已删除任务 {job_id}"}
         except HTTPException:

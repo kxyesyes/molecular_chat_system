@@ -11,6 +11,7 @@ import time
 
 from src.agent.contracts import CandidateSet, ObservationStatus, ToolProvenance, ToolResult
 from src.agent.contracts.scientific_references import ScientificPresentation, reference_json
+from src.agent.contracts.target_request import analyze_target_request
 from src.agent.evidence.ledger import EvidenceLedger
 from src.agent.validators.result_validator import AgentResultValidator
 
@@ -236,6 +237,13 @@ def publish(store, trace_id, *, session_id, selections, target=None):
         connection.execute("BEGIN IMMEDIATE")
         try:
             row, metadata, views, latest, version = _source(connection, trace_id, session_id)
+            if target is None and type(row["query"]) is str:
+                # The owned source query is part of source_version. Bind only
+                # an explicit, single, unqualified target in this transaction;
+                # never recover one from browser hints or other run history.
+                request = analyze_target_request(row["query"])
+                if request.explicit and not request.needs_clarification:
+                    target = request.targets[0]
             by_id = {item["id"]: item for item in latest.values()}
             decoded, ordered, evidence, warnings = {}, [], [], []
             for selection in selections:

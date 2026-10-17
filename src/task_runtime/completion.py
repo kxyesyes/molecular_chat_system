@@ -591,6 +591,81 @@ class DockingCompletionStore:
                 raise CompletionError("completion_artifact_invalid")
         return completion
 
+    def read_verified_artifact(
+        self,
+        task_id: str,
+        *,
+        input_hash: str,
+        config_hash: str,
+        completion_digest: str,
+        artifact_id: str,
+    ) -> dict[str, Any]:
+        """Return verified bytes, not a path or an authorization grant.
+
+        Callers must separately enforce owner, grant and lifecycle authority.
+        The final checks bound this read; they do not lock future invalidation.
+        """
+        task_root = self._task_root(task_id)
+        _require_sha256(input_hash)
+        _require_sha256(config_hash)
+        _require_sha256(completion_digest)
+        if type(artifact_id) is not str or (
+            artifact_id != "pose" and re.fullmatch(r"extra-0[0-7]", artifact_id) is None
+        ):
+            raise CompletionError("completion_artifact_invalid")
+
+        def load_expected() -> DockingCompletionManifest:
+            completion = self.load_verified(
+                task_id, input_hash=input_hash, config_hash=config_hash,
+            )
+            digest = hashlib.sha256(json.dumps(
+                completion.to_dict(), sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False,
+            ).encode("ascii")).hexdigest()
+            if digest != completion_digest:
+                raise CompletionError("completion_identity_mismatch")
+            return completion
+
+        completion = load_expected()
+        record: DockingPoseRecord | DockingArtifactRecord
+        if artifact_id == "pose":
+            record = completion.pose
+            path = _pose_path(task_root, record.path)
+            max_bytes = MAX_DOCKING_POSE_BYTES
+            mime_type = "chemical/x-pdbqt"
+        else:
+            # IDs address the verified metadata order, not filename indices.
+            index = int(artifact_id[-2:])
+            if index >= len(completion.result_metadata.artifacts):
+                raise CompletionError("completion_artifact_invalid")
+            record = completion.result_metadata.artifacts[index]
+            path = _additional_artifact_path(task_root, record.path)
+            max_bytes = MAX_ADDITIONAL_ARTIFACT_BYTES
+            mime_type = (
+                record.mime_type if record.mime_type is not None
+                else "application/octet-stream"
+            )
+        content, digest = _secure_read_regular(
+            path,
+            max_bytes=max_bytes,
+            containment_root=task_root,
+            expected_size=record.size,
+            invalid_code="completion_artifact_invalid",
+        )
+        if digest != record.sha256:
+            raise CompletionError("completion_artifact_invalid")
+        load_expected()
+        if self.has_invalidation_marker(task_id):
+            raise CompletionError("completion_ownership_uncertain")
+        return {
+            "content": content,
+            "sha256": digest,
+            "size": len(content),
+            "mime_type": mime_type,
+            "artifact_id": artifact_id,
+            "completion_digest": completion_digest,
+        }
+
     def read_pose(self, task_id: str) -> bytes:
         """Read the committed pose after revalidating its completion manifest."""
         task_root = self._task_root(task_id)

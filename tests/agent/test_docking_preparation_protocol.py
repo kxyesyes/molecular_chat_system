@@ -615,6 +615,64 @@ def test_c_transport_api_present():
     c_transport_api()
 
 
+@pytest.mark.parametrize('index, accepted', [
+    (0, True), (1, False), (-1, False), (True, False), (False, False),
+    (0.0, False), ('0', False), (None, False), ([], False), ({}, False),
+])
+def test_c_single_native_call_accepts_only_optional_exact_zero_index(index, accepted):
+    import asyncio
+    import httpx
+    transport, Model = c_transport_api()
+    journal = c_journal(transport)
+    body = c_wire('native')
+    body['choices'][0]['message']['tool_calls'][0]['index'] = index
+    posts = []
+
+    def handle(request):
+        posts.append(request)
+        return httpx.Response(200, json=body)
+
+    async def run():
+        async with c_opted_in_client(transport=httpx.MockTransport(handle)) as client:
+            model = Model('synthetic-only-key', 'test-model', 'https://example.invalid/v1', client=client)
+            return await model.propose_docking_preparation(
+                [{'role': 'user', 'content': 'dock'}], _journal=journal)
+
+    result = asyncio.run(run())
+    assert result.success is accepted
+    assert len(posts) == 1
+    if accepted:
+        assert result.proposal.model_dump() == proposal()
+        assert journal.snapshot()['stage'] == 'parsed'
+    else:
+        assert result.error.details == {'reason': 'invalid_function_call'}
+        assert journal.snapshot()['stage'] == 'failed'
+
+
+@pytest.mark.parametrize('fault', ['call_extra', 'function_extra', 'empty_span', 'two_calls'])
+def test_c_native_zero_index_does_not_relax_other_closed_boundaries(fault):
+    import copy
+    transport, _ = c_transport_api()
+    body = c_wire('native')
+    calls = body['choices'][0]['message']['tool_calls']
+    call = calls[0]
+    call['index'] = 0
+    if fault == 'call_extra':
+        call['unexpected'] = 'marker'
+    elif fault == 'function_extra':
+        call['function']['unexpected'] = 'marker'
+    elif fault == 'two_calls':
+        calls.append(copy.deepcopy(call))
+    else:
+        envelope = json.loads(MINIMAL)
+        envelope['proposal']['source_spans'] = [
+            {'source_id': 'query', 'start': 0, 'end': 0, 'role': 'request'}]
+        call['function']['arguments'] = json.dumps(envelope)
+    with pytest.raises(DecisionProtocolError):
+        transport._parse_response(body, 'native', set(), {},
+            transport.ProtocolProfile.DOCKING_PREPARATION_V1)
+
+
 @pytest.mark.parametrize("mode", ["native", "json"])
 def test_c_actual_request_and_journal(mode):
     import asyncio
@@ -649,6 +707,12 @@ def test_c_actual_request_and_journal(mode):
     assert payload["messages"][1:] == messages and payload["stream"] is False
     assert payload["max_tokens"] == 256 and payload["temperature"] == 0
     assert calls[0].headers["accept-encoding"] == "identity"
+    instruction = payload['messages'][0]['content']
+    assert 'one full-current-text request span' in instruction
+    assert 'PDB ID or SMILES is not a receptor_ref or ligand_ref' in instruction
+    assert 'Only syntactic NAME=VALUE assignments in the CURRENT text are fields' in instruction
+    assert 'fields must be {} and source_spans must contain only the full-current-text request span' in instruction
+    assert 'Never bind a field to the request span' in instruction
     if mode == "native":
         assert len(payload["tools"]) == 1 and payload["parallel_tool_calls"] is False
         assert payload["tool_choice"]["function"]["name"] == "docking_preparation"
@@ -656,7 +720,7 @@ def test_c_actual_request_and_journal(mode):
     else:
         assert "tools" not in payload and payload["response_format"] == {"type": "json_object"}
         instruction = payload["messages"][0]["content"]
-        assert json.loads(instruction[instruction.index("{"):]) == contract().docking_preparation_json_schema()
+        assert json.loads(instruction.split("without markdown: ", 1)[1]) == contract().docking_preparation_json_schema()
     snapshot = journal.snapshot()
     assert set(snapshot) == {"proposal_id", "trace_id", "turn_id", "query_digest", "refinement_revision",
         "model_generation", "capability_generation", "phase", "protocol_name", "protocol_version",
@@ -1009,7 +1073,7 @@ def test_c_three_profiles_share_transport_and_hold_actual_model_gate(mode):
                 name = payload["tools"][0]["function"]["name"]
             else:
                 instruction = payload["messages"][0]["content"]
-                properties = json.loads(instruction[instruction.index("{"):])["properties"]
+                properties = json.loads(instruction.split("without markdown: ", 1)[1])["properties"]
                 name = {"proposal": names[0], "intent": names[1], "decision": names[2]}[next(iter(properties))]
             assert name not in requests
             requests[name] = payload
@@ -1673,7 +1737,7 @@ def test_c_constructor_guard_three_profiles_keep_request_local_close_ownership(m
             if mode == "native":
                 return payload["tools"][0]["function"]["name"]
             instruction = payload["messages"][0]["content"]
-            key = next(iter(json.loads(instruction[instruction.index("{"):])["properties"]))
+            key = next(iter(json.loads(instruction.split("without markdown: ", 1)[1])["properties"]))
             return {"proposal": names[0], "intent": names[1], "decision": names[2]}[key]
 
         class Body(httpx.AsyncByteStream):

@@ -37,6 +37,7 @@ class AgentEntrySessionMiddleware(AgentSessionMiddleware):
                 "/api/tasks/",
                 "/api/agent/workflows/",
                 "/api/agent/runs/",
+                "/api/agent/docking/",
                 "/api/llm/",
                 "/api/switch_model",
                 "/api/docking/",

@@ -1,3 +1,9 @@
+# Covers both main.py and direct uvicorn src.web.app:app startup, before any
+# application dependency can start background work. Late embedding fails closed.
+from src.system.rdkit_logging import initialize_rdkit_logging
+
+initialize_rdkit_logging()
+
 import asyncio
 from contextlib import AsyncExitStack, nullcontext
 import inspect
@@ -140,8 +146,59 @@ class MolecularChatApp:
         self._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
         if ordinary_chat_policy == 'semantic_v1':
             raise ValueError('Semantic assembly requires create_async')
-        self._assemble(config_path, normal_chat_mode=normal_chat_mode,
-                       decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
+        if os.environ.get('MEDCHAT_CHAT_DOCKING_ENABLED') != '1':
+            self._assemble(config_path, normal_chat_mode=normal_chat_mode,
+                           decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
+            return
+        # C can fail after the model/RAG/tool constructors but before lifespan
+        # hooks exist. Give synchronous bootstrap the same owner ledger as
+        # create_async, without moving construction onto a temporary event loop.
+        stack = AsyncExitStack()
+        self._assembly_stack = stack
+        self._assembly_owner_ids = set()
+        self._ordinary_owned_tools = ()
+        try:
+            self._assemble(config_path, normal_chat_mode=normal_chat_mode,
+                           decision_wire_mode=decision_wire_mode, ordinary_chat_policy=ordinary_chat_policy)
+        except BaseException:
+            self._close_failed_sync_assembly(stack)
+            raise
+        finally:
+            self._assembly_stack = None
+            self._assembly_owner_ids.clear()
+        stack.pop_all()
+        self._assembly_owners_transferred = True
+
+    def _close_failed_sync_assembly(self, stack):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No serving loop exists. Finish every async closer before exposing
+            # the original construction failure to the synchronous caller.
+            asyncio.run(stack.aclose())
+            return
+        class CleanupTask(asyncio.Task):
+            def cancel(self, msg=None):
+                # Cleanup is already committed. asyncio.run cancels every Task,
+                # including shielded children: keep ONE actual stack owner that
+                # it must join, without interrupting or retrying entered closers.
+                return False
+
+        # A sync constructor cannot await here. Do not block/replace the host
+        # loop: retain cleanup independently of the failed instance/traceback.
+        pending = getattr(type(self), '_failed_assembly_cleanups', None)
+        if pending is None:
+            pending = set()
+            type(self)._failed_assembly_cleanups = pending
+        task = CleanupTask(stack.aclose(), loop=loop, name='medchat-failed-assembly-cleanup')
+        self._assembly_cleanup_task = task
+        pending.add(task)
+
+        def completed(done):
+            pending.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning('Assembly owner cleanup failed; exception details omitted')
+        task.add_done_callback(completed)
 
     @staticmethod
     def _validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy):
@@ -873,14 +930,7 @@ class MolecularChatApp:
         from .routes.api_routes import setup_api_routes
         from ..docking import docking_service
         docking_service.configure(docking_config)
-        task_runtime = None
-        try:
-            from src.task_runtime import TaskRuntimeBinding
-
-            task_runtime = TaskRuntimeBinding()
-            task_runtime.install(self.app, logger)
-        except Exception:
-            logger.warning("Durable task runtime initialization failed")
+        task_runtime = self._bind_task_runtime(docking_service)
         self.task_runtime_binding = task_runtime
         setup_api_routes(
             self.app,
@@ -923,6 +973,23 @@ class MolecularChatApp:
         except Exception as e:
             logger.warning(f"Task runtime routes registration failed: {e}")
 
+    def _bind_task_runtime(self, docking_service):
+        # Exact trusted opt-in only. The default does not import or construct C.
+        if os.environ.get('MEDCHAT_CHAT_DOCKING_ENABLED') == '1':
+            from .docking_app import assemble_docking_app
+            assembly = assemble_docking_app(self, docking_service, logger=logger)
+            self._register_assembly_owner(assembly.binding)
+            return assembly.binding
+        task_runtime = None
+        try:
+            from src.task_runtime import TaskRuntimeBinding
+
+            task_runtime = TaskRuntimeBinding()
+            task_runtime.install(self.app, logger)
+        except Exception:
+            logger.warning("Durable task runtime initialization failed")
+        return task_runtime
+
     async def _reject_websocket_without_chat_handler(self, websocket: WebSocket):
         """Fail closed when the modern ChatHandler/Agent entrypoint is unavailable.
 
@@ -954,23 +1021,19 @@ class MolecularChatApp:
         if self.config.get("rag", {}).get("enabled", True):
             await self.rag_system.initialize()
         
-        # 预加载反向寻靶数据库（在后台线程中执行，避免阻塞启动）
+        # Prewarm the registered chat tool's owned strict source, not the legacy
+        # page singleton. The non-daemon worker remains attached through shutdown.
         try:
-            import threading
-            def preload_reverse_target():
-                try:
-                    from src.reverse_target.predictor import get_predictor
-                    logger.info("🔄 预加载反向寻靶数据库...")
-                    predictor = get_predictor()
-                    logger.info(f"✅ 反向寻靶数据库预加载完成")
-                except Exception as e:
-                    logger.warning(f"⚠️ 反向寻靶数据库预加载失败: {e}")
-            
-            # 在后台线程中预加载，不阻塞应用启动
-            preload_thread = threading.Thread(target=preload_reverse_target, daemon=True)
-            preload_thread.start()
-        except Exception as e:
-            logger.warning(f"⚠️ 无法启动反向寻靶预加载: {e}")
+            registry = getattr(self, 'agent_tool_registry', None)
+            if registry is not None and getattr(self, '_reverse_preload_tool', None) is None:
+                adapter = registry.as_mapping().get('reverse_target_predictor')
+                tool = getattr(adapter, 'tool', None)
+                if callable(getattr(tool, 'start_preload', None)):
+                    self._reverse_preload_tool = tool
+                    if tool.start_preload():
+                        logger.info('Reverse-target full-source validation started')
+        except Exception:
+            logger.warning('Reverse-target prewarm unavailable; private diagnostics omitted')
         
         logger.info("Molecular Chat System initialized successfully")
 
@@ -984,9 +1047,24 @@ class MolecularChatApp:
 
     async def _shutdown(self):
         """Stop application-owned background tasks."""
-        runtime = getattr(self, 'decision_runtime', None)
-        if runtime is not None:
-            await runtime.shutdown()
+        assembly = getattr(self, 'docking_assembly', None)
+        closed_runtimes = set()
+        if assembly is not None:
+            # The binding hook normally runs first. Direct shutdown and a prior
+            # failed hook must enforce the SAME physical drain before models.
+            await finish_on_cancel(assembly.binding.close())
+            closed_runtimes.add(id(assembly.runtime))
+        for runtime in (getattr(self, 'decision_runtime', None),
+                        getattr(self, 'docking_runtime', None)):
+            if runtime is not None and id(runtime) not in closed_runtimes:
+                await runtime.shutdown()
+                closed_runtimes.add(id(runtime))
+        preload_tool = getattr(self, '_reverse_preload_tool', None)
+        if preload_tool is not None:
+            # Joining an in-flight native validation must not block the loop.
+            # Retain both this reference and the registry until the join returns.
+            await finish_on_cancel(asyncio.to_thread(preload_tool.close))
+            self._reverse_preload_tool = None
         if self._llm_watch_task is not None:
             self._llm_watch_task.cancel()
             try:
@@ -1019,6 +1097,7 @@ class MolecularChatApp:
             # and registry.close stops at its first error.
             tools, self._ordinary_owned_tools = self._ordinary_owned_tools, ()
             seen = {id(getattr(self, name, None)) for name in ('model', 'molecular_generator_model')}
+            seen.add(id(preload_tool))
             for owner in (*tools, self.rag_system):
                 if id(owner) not in seen:
                     seen.add(id(owner))
@@ -1032,9 +1111,14 @@ class MolecularChatApp:
                 for adapter in registry.as_mapping().values()
                 if (tool := getattr(adapter, "tool", None)) is not None
             }
-            registry.close()
+            for _, adapter in sorted(registry.as_mapping().items()):
+                if preload_tool is not None and getattr(adapter, 'tool', None) is preload_tool:
+                    continue
+                close = getattr(adapter, 'close', None)
+                if callable(close):
+                    close()
         for tool in agent_tools:
-            if id(tool) in registry_tool_ids:
+            if id(tool) in registry_tool_ids or tool is preload_tool:
                 continue
             close = getattr(tool, "close", None)
             if callable(close):

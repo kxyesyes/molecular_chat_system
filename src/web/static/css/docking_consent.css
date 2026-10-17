@@ -1,0 +1,45 @@
+/* Scoped scientific worksheet: values stay legible without restyling chat. */
+.docking-consent-card {
+  margin: 16px 0 8px;
+  padding: 22px;
+  width: min(100%, 760px);
+  border: 1px solid var(--theme-primary-border, #ddd7c9);
+  border-left: 4px solid var(--theme-primary-text, #6b4a16);
+  border-radius: 10px;
+  background: var(--theme-primary-bg-3, #fff);
+  color: #27323b;
+  text-align: left;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.docking-consent-card .docking-eyebrow {font-size: 10px; letter-spacing: .15em; color: var(--theme-primary-text, #6b4a16);}
+.docking-consent-card h3 {font-size: 18px; font-weight: 600; margin: 4px 0 6px;}
+.docking-consent-card p {margin: 10px 0; font-size: 13px;}
+.docking-consent-card .docking-identity {font-size: 11px; color: #66717d;}
+.docking-consent-card .docking-notice {padding: 10px 12px; border-radius: 5px; background: #fff5dd; color: #765510;}
+.docking-consent-card .docking-facts {display: grid; grid-template-columns: minmax(100px, 28%) minmax(0, 1fr); gap: 0 14px; margin: 14px 0; font-size: 12px;}
+.docking-consent-card dt, .docking-consent-card dd {padding: 7px 0; border-bottom: 1px solid #edf0f2;}
+.docking-consent-card dt {color: #65717c;}
+.docking-consent-card dd {font-family: Consolas, "SFMono-Regular", monospace;}
+.docking-consent-card label {display: block; margin: 12px 0; font-size: 13px;}
+.docking-consent-card input:not([type="checkbox"]):not([type="radio"]), .docking-consent-card textarea, .docking-consent-card select {
+  display: block; width: 100%; margin-top: 5px; padding: 9px 10px;
+  border: 1px solid #cbd2d8; border-radius: 5px; background: #fff; color: #27323b; font: inherit;
+}
+.docking-consent-card textarea {min-height: 90px; resize: vertical;}
+.docking-consent-card button, .docking-consent-card a {
+  display: inline-block; margin: 7px 8px 0 0; padding: 9px 14px;
+  border: 1px solid var(--theme-primary-border, #ddd7c9); border-radius: 5px;
+  background: var(--theme-primary-soft, #fff3dc); color: var(--theme-primary-text, #6b4a16);
+  font: inherit; font-size: 13px; cursor: pointer;
+}
+.docking-consent-card button:disabled {opacity: .45; cursor: not-allowed;}
+.docking-consent-card :focus-visible {outline: 2px solid #47718b; outline-offset: 3px;}
+.docking-consent-card details {margin: 12px 0; font-size: 12px;}
+.docking-consent-card pre {white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto;}
+@media (max-width: 600px) {
+  .docking-consent-card {padding: 15px;}
+  .docking-consent-card .docking-facts {grid-template-columns: 1fr;}
+  .docking-consent-card dt {border: 0; padding-bottom: 0;}
+  .docking-consent-card dd {padding-top: 2px;}
+}

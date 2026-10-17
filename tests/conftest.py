@@ -1,5 +1,6 @@
 """Never allow UI configuration tests/imports to touch real user credentials."""
 import os
+import importlib.util
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -7,6 +8,13 @@ import pytest
 
 
 def pytest_configure(config):
+    # Pytest is also a threaded embedder. A subset may first import app.py only
+    # after earlier chat tests have started retained executor threads. Establish
+    # the privacy sink at host bootstrap, without making RDKit mandatory for
+    # dependency-light environments. Cold/late-install tests use fresh children.
+    if importlib.util.find_spec('rdkit') is not None:
+        from src.system.rdkit_logging import initialize_rdkit_logging
+        initialize_rdkit_logging()
     # app.py constructs its global app during collection, before fixtures run.
     config._llm_test_directory = TemporaryDirectory(prefix="medchat-test-config-")
     root = Path(config._llm_test_directory.name)

@@ -3,6 +3,7 @@ import re
 from collections.abc import Mapping
 
 from src.activity.family_contract import resolve_activity_family
+from src.agent.contracts.target_request import _TARGET_ROLE, analyze_target_request
 from .molecular_input import (
     _FIELD_END, _MARKER, _looks_like_structure, _unquote, parse_molecular_smiles,
 )
@@ -36,6 +37,16 @@ _LABELLED_TARGET = re.compile(
     r"(?:预测|评估)\s*([^\s；，,对]+?)\s*(?:的)?活性|"
     r"\b(?:predict|assess|evaluate)\s+([^\s；，,]+)\s+(?:activity|potency)\b",
     re.I,
+)
+_MOLECULE_LIST_TOKEN = r"[^\s\u4e00-\u9fff，！？：、；。;,]"
+_CHINESE_COMPOUND_LABEL = re.compile(r"对[\u4e00-\u9fff]+[酚胺酸醚醇醛酮酯烷烯炔苯腈]")
+_TARGET_LIKE_LABEL = re.compile(r"酶|蛋白|受体|通道|靶点|抗体|核酸|基因")
+_NAMED_MOLECULE_IN_LIST = re.compile(
+    rf"(?:(?<!{_MOLECULE_LIST_TOKEN})(?P<previous>{_MOLECULE_LIST_TOKEN}+)[ \t]*[、，,和及与]"
+    r"|(?:^|[；;]|预测|评估|比较))[ \t]*"
+    r"(?P<name>对[\u4e00-\u9fff]+)[ \t]+"
+    # Leave this structure unconsumed so it can anchor the next list member.
+    rf"(?=(?P<smiles>{_MOLECULE_LIST_TOKEN}+)(?=[ \t]*(?:$|[\u4e00-\u9fff，！？：、；。;,])))"
 )
 _INVALID = "SMILES 无效或缺失；请提供完整结构，并用换行或分号分隔，不会提取片段替代。"
 
@@ -128,15 +139,50 @@ def _context_clauses(text):
 
 def activity_target(text, validate_smiles):
     """Resolve bounded target positions; never infer arbitrary biomedical intent."""
+    if _TARGET_ROLE.search(text):
+        request = analyze_target_request(text)
+        if request.needs_clarification:
+            raise ValueError("Ambiguous design target")
+        _strict_family(request.targets[0])
+        # Only a fully validated role/design/tail may treat 靶点 as a role noun,
+        # not a forward target label. Keep all identifiers and other declarations
+        # for the activity-specific checks below; never bypass them wholesale.
+        text = _TARGET_ROLE.sub(
+            lambda match: match[0].removesuffix(match[2]) + "语境", text,
+        )
     text = "；".join(_context_clauses(text))
     explicit = re.findall(r"(?:靶点|\btarget)\s*(?:[:：=]|\s)\s*([^；，,]*)", text, re.I)
     for value in explicit:
         _strict_family(value)
+    molecule_name_positions = set()
+    for match in _NAMED_MOLECULE_IN_LIST.finditer(text):
+        # A following structure alone cannot turn an unknown target into a
+        # molecule label. Require chemical naming syntax, never protein-like text.
+        if (not _CHINESE_COMPOUND_LABEL.fullmatch(match["name"])
+                or _TARGET_LIKE_LABEL.search(match["name"])):
+            continue
+        # 对 may be the positional prefix of a compound name. Accept the first
+        # item or a delimited list item only with its own complete structure;
+        # a preceding item, when present, must be a complete structure too.
+        try:
+            _strict_family(match["name"][1:])
+        except ValueError:
+            if ((match["previous"] is None or validate_smiles(match["previous"]))
+                    and validate_smiles(match["smiles"])):
+                molecule_name_positions.add(match.start("name"))
     positions = re.finditer(_TARGET_LABEL, text, re.I)
     # Preserve the legacy 'predict activity for CCO' molecule position. Explicit
     # target labels above are still authoritative, including target: CCO.
     positioned = []
     for match in positions:
+        if match.start() in molecule_name_positions:
+            continue
+        # A resolved candidate ordinal is a molecule object, not a target name.
+        # Structure/reference admission remains the caller's responsibility.
+        if match[1] == "对" and re.match(
+                r"第\s*(?:[1-9]\d?|[一二三四五六七八九十]+)\s*个\s*(?:候选(?:分子)?|分子)"
+                r"(?=\s*(?:做|进行|优化|$|[，,。;；]))", text[match.end():]):
+            continue
         label = match[1]
         value_match = re.match(_TARGET_VALUE, text[match.end():], re.I)
         if value_match is None:

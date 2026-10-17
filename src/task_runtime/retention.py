@@ -4,6 +4,7 @@ This module is intentionally not wired to an implicit background deleter.  A
 deployment must call :func:`purge_terminal_tasks` with ``apply=True`` after its
 retention and backup policy has been approved.  The default is a read-only
 preview so accidental invocation cannot destroy user results.
+Consent-owned tasks are outside this generic purge, including settled tombstones.
 """
 
 from __future__ import annotations
@@ -113,18 +114,22 @@ def _artifact_paths(root: Path | None, row: dict[str, Any]) -> tuple[list[Path],
     return paths, None
 
 
-def _consent_blocks(conn, task_id: str) -> bool:
+def _consent_skip_reason(conn, task_id: str) -> str | None:
+    # Match TaskStore.is_docking_consent_task's durable membership, not names
+    # or lifecycle state. Storage errors must propagate before task file access.
     rows = conn.execute(
         "SELECT state, cleanup_state, execution_occupied "
         "FROM docking_consents WHERE task_id = ?",
         (task_id,),
     ).fetchall()
-    return any(
+    if any(
         row["state"] in _ACTIVE_CONSENT_STATES
         or row["cleanup_state"] != "settled"
         or bool(row["execution_occupied"])
         for row in rows
-    )
+    ):
+        return "active_docking_consent"
+    return "docking_consent_retained" if rows else None
 
 
 def _remove_path(path: Path) -> None:
@@ -148,9 +153,11 @@ def purge_terminal_tasks(
 ) -> RetentionResult:
     """Preview or remove terminal tasks older than the approved retention age.
 
-    Only terminal rows are considered.  A task with an active/unsettled docking
-    consent, malformed metadata, or an artifact path outside ``artifact_root``
-    is skipped.  ``apply`` must be explicitly true to delete anything.
+    Only terminal rows are considered. Any durable docking consent membership
+    excludes the task, its evidence and private files, even after settlement.
+    Malformed metadata or paths outside ``artifact_root`` are also skipped.
+    ``apply`` must be explicitly true to delete anything. Classification errors
+    propagate without treating unavailable consent evidence as non-membership.
     """
     if type(retention_days) is not int or retention_days <= 0:
         raise ValueError("retention_days must be a positive integer")
@@ -167,6 +174,11 @@ def purge_terminal_tasks(
     reasons: dict[str, str] = {}
 
     with connection(database_path) as conn:
+        if apply:
+            # SELECT alone does not start a write transaction. Hold the writer
+            # from classification through physical deletion and commit so a
+            # consent cannot appear between the check and a destructive step.
+            conn.execute("BEGIN IMMEDIATE")
         placeholders = ", ".join("?" for _ in _TERMINAL_VALUES)
         rows = conn.execute(
             f"SELECT * FROM tasks WHERE status IN ({placeholders}) "
@@ -178,14 +190,15 @@ def purge_terminal_tasks(
             finished = _parse_timestamp(row.get("finished_at")) or _parse_timestamp(row.get("updated_at"))
             if finished is None or finished > cutoff:
                 continue
-            paths, reason = _artifact_paths(root, row)
+            reason = _consent_skip_reason(conn, task_id)
             if reason is not None:
                 skipped.append(task_id)
                 reasons[task_id] = reason
                 continue
-            if _consent_blocks(conn, task_id):
+            paths, reason = _artifact_paths(root, row)
+            if reason is not None:
                 skipped.append(task_id)
-                reasons[task_id] = "active_docking_consent"
+                reasons[task_id] = reason
                 continue
             eligible.append(task_id)
             if not apply:
@@ -194,7 +207,6 @@ def purge_terminal_tasks(
                 for path in paths:
                     _remove_path(path)
                 conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
-                conn.execute("DELETE FROM docking_consents WHERE task_id = ?", (task_id,))
                 cursor = conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
             except OSError:
                 skipped.append(task_id)

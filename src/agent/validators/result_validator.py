@@ -44,6 +44,11 @@ _DOCKING_TOOL_NAMES = frozenset(
 _DOCKING_SCIENTIFIC_QUALITY_KEYS = frozenset(
     {"binding_energy", "best_pose", "total_poses", "pose_file", "output_file", "results"}
 )
+_ADMET_MODEL_DISCLAIMERS = frozenset({
+    "ADMET-AI outputs are model predictions; they are not experimental results.",
+    "Physicochemical endpoints are calculated by RDKit inside ADMET-AI.",
+    "Risk summary is a screening heuristic, not a safety conclusion.",
+})
 
 
 class AgentResultValidator:
@@ -132,9 +137,41 @@ class AgentResultValidator:
         result.warnings = warnings
         result.quality = {
             **result.quality,
-            "validated": not bool(warnings) and result.success,
+            "validated": result.success and (
+                not warnings or self._only_admet_model_disclaimers(result)
+            ),
         }
         return result
+
+    @staticmethod
+    def _only_admet_model_disclaimers(result: ToolResult) -> bool:
+        """Recognize exact backend notices, never a generic warning exemption."""
+        if result.tool_name != "admet_predictor" or any(
+            type(warning) is not str or warning not in _ADMET_MODEL_DISCLAIMERS
+            for warning in result.warnings
+        ):
+            return False
+        # The exemption must not turn a typed/domain/source failure into
+        # accepted evidence, even for direct callers outside the adapter.
+        from src.agent.evidence.ledger import EvidenceLedger
+        from src.agent.tooling.analysis_contract import ADMETOutput
+
+        try:
+            ADMETOutput.model_validate(vars(result))
+            provenance = result.provenance
+            return bool(
+                provenance is not None
+                and provenance.tool_name == "admet_predictor"
+                and provenance.model_name == "ADMET-AI"
+                and provenance.model_version == "1.4.0"
+                and not provenance.demo_mode and not provenance.fallback_used
+                and provenance.output_digest == EvidenceLedger.output_digest(result.data)
+                and all(row.get("status", "succeeded") == "succeeded"
+                        and row["admet"]["prediction_method"] == "admet_ai"
+                        for row in result.data)
+            )
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return False
 
     @staticmethod
     def _scrub_docking_failure(
