@@ -14,9 +14,8 @@ from src.agent.contracts.generation_request import (
     generation_request_error_details,
 )
 from src.agent.orchestrators.base import WorkflowStep
-from src.agent.evidence_followup import MAX_CANDIDATES, comparison_tools
+from src.agent.evidence_followup import comparison_tools, _requested_smiles
 from src.agent.property_constraints import requested_property_bounds
-from src.agent.utils.validators import InputValidator
 
 from . import request_parsing, step_templates, workflow_selection
 from src.target_search.exact_pdb import has_pdb_constraint
@@ -80,8 +79,11 @@ class TaskPlanner:
             return self._molecular_design_plan(query, context.metadata)
 
         if selected == "target_database_search":
-            target_request = analyze_target_request(query)
-            search_input = self._extract_target_hint(query)
+            # Only lookup inputs use this view. Keep context.query intact for
+            # audit/history and leave generation's target collection unchanged.
+            lookup_query = request_parsing.target_lookup_text(query)
+            target_request = analyze_target_request(lookup_query)
+            search_input = self._extract_target_hint(lookup_query)
             if (
                 len(target_request.targets) > 1
                 and not target_request.unknown
@@ -94,10 +96,10 @@ class TaskPlanner:
                     plan.metadata["message"] = "每次最多比较 5 个靶点，请缩小比较范围后重试。"
                     return plan
                 search_input = list(target_request.targets)
-            if has_pdb_constraint(query):
+            if has_pdb_constraint(lookup_query):
                 # Preserve both the constraint and any qualification/conflict
                 # for deterministic tool validation, not only a target hint.
-                search_input = query
+                search_input = lookup_query
             return WorkflowPlan(
                 workflow_name="target_database_search",
                 steps=[
@@ -176,15 +178,17 @@ class TaskPlanner:
     def _comprehensive_plan(self, query: str) -> WorkflowPlan:
         requested_tools = comparison_tools(query)
         if requested_tools:
-            identity = InputValidator().analyze_molecular_input(query)
-            if identity.blocks_execution or not identity.valid_smiles or len(identity.valid_smiles) > MAX_CANDIDATES:
+            # Dispatch the same validated, bounded canonical identities that
+            # the evidence presenter uses; equivalent SMILES are one candidate.
+            smiles = _requested_smiles(query)
+            if not smiles:
                 return WorkflowPlan("comprehensive_evaluation", [],
                     {"reason": "comparison_input_required", "message": "请提供不超过 16 个明确有效的候选 SMILES。"})
             # Every independent endpoint gets exactly the same explicit batch.
             # Failure of one endpoint must not suppress the other requested work.
-            batch = "\n".join(identity.valid_smiles)
+            batch = "\n".join(smiles)
             steps = [replace(step, required=False, continue_on_error=True,
-                input_data=({"smiles": list(identity.valid_smiles), "query": query}
+                input_data=({"smiles": list(smiles), "query": query}
                             if step.tool_name == "activity_predictor" else batch))
                 for step in step_templates.comprehensive_steps(query) if step.tool_name in requested_tools]
             return WorkflowPlan("comprehensive_evaluation", steps,

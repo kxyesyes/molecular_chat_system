@@ -308,6 +308,137 @@ finding; network attempts 0, test SQLite isolated outside Git. Both slices now
 have independent SPEC then QUALITY closure; the next publication must pass its
 own exact-head CI. No merge or speculative future outcome is recorded here.
 
+## 2eec7648 root CI failure and additional review gate
+
+[quality39031043202](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39031043202)
+root job117391375514 failed: 6134 passed /106 skipped /1 failed /12 warnings,
+409.13s. Traceback shows the watchdog test reading a just-disappeared
+`/proc/<pid>/stat` raised `ProcessLookupError(ESRCH)`; its survivor assertion did
+not fail. The test caught missing files but not a process disappearing during
+read. No broad exception, production timing or kill policy is changed.
+
+Deterministic regression invokes the actual integration-test body with simulated
+subprocess/procfs/clock and forbidden real signals: RED 1 failed /4 controls;
+minimal exact exception-tuple fix gives GREEN5. Missing-file/process and zombie
+are stopped; live still fails survivor assertion, permission errors propagate.
+Full local file: 41 passed /2 Linux-only skips (38.65s). Real Linux GNU-timeout
+integration, original 5s/2s/12s and assertion remain unchanged and must pass CI.
+Independent SPEC verified the actual remote traceback and passed 5 controls,
+memory RED1/4, and 18 safety contracts. Final independent QUALITY PASS: 18 tests
+/25 deselected (0.28s), original RED1/4 and ten complete monkeypatch-restoration
+cycles checked. No important finding; real Linux integration still requires CI.
+
+The same final gate read seven new automated P2 threads (12:14 UTC): supported
+Chinese bound operators, verb-first fresh reverse requests, expletive `it`,
+positive work after negated conjuncts, docking summary-budget evidence handoff,
+equivalent comparison molecule spellings and non-target protein knowledge
+routing. These are under tests-first independent verification/repair in disjoint
+scopes; CI failure and new threads are not waived or blindly rerun. Parent review
+of the in-progress conjunct patch reproduced shared-negation resurrection in
+`不要计算性质和预测活性` / `Do not calculate properties and predict activity`;
+the worker added fail-closed RED controls and replaced the broad conjunction
+restart with a whole-clause activity-opt-out followed by ADMET-calculation
+grammar. Other shared negation and extra chained operations remain blocked;
+activity routing uses the filtered positive text.
+
+Planning/routing worker tests first: operators RED6 ->17 focused passed;
+conjunct RED4 then shared-negation/parser RED11 and router RED3 ->23 passed;
+canonical-batch RED3 ->10 passed; lookup-object RED2 then reference RED1 ->10
+passed. Final new file has 60 tests; 24-file affected batch 2025 passed.
+Comparison dispatch uses the same bounded validated canonical identity helper
+as presentation; no successful duplicate evidence is falsely labelled unavailable.
+Compileall/diff passed. Final independent planning SPEC PASS: 60 new tests,
+51 independent controls and 14-file1323 affected regressions. Per-item operator,
+conjunct, canonical batch and lookup gates passed; no important finding. Final
+QUALITY still required. Parent/worker/reviewer batches overlap, not a unique sum.
+
+Web worker tests first: verb-first fresh reverse RED12/6 controls ->19 focused
+passed; expletive-it RED4 plus gerund-object references RED2/6 ->12 passed;
+budget fallback RED2/6 ->8 passed. New file39 passed, existing web batch595
+passed/4 old deprecation warnings, consent/execution/source/retention batch294
+passed/7 old warnings. Successfully delivered budget fallback returns the same
+previously captured docking result to the original hook, not a new preparation
+or approval; wrong owner/trace/provenance and send-failure controls remain.
+All fixtures are synthetic with Git-external temporary stores, no real Vina or
+network. Valid English `SMILES:` label probing requires baseline/current
+comparison by SPEC; admission alone is not claimed as execution success.
+Final web SPEC PASS: 39 focused, memory RED19/20, 814 reference/web tests
+/7 old warnings and 276 receiver/docking tests /7 old warnings, plus 12 actual
+ChatHandler reference groups. The label+`and` probe is a pre-existing limitation:
+an already supported old prediction phrase fails on both baseline/current,
+semicolon-separated form passes both; no prior success regressed. New admission
+does not promise broader field syntax. Parent four-file joint gate/prompt/routing
+regression: 134 passed (15.47s). Final original web QUALITY PASS: 867 tests
+/4 existing warnings (365.74s), 12 actual ChatHandler groups and 26 independent
+parsing assertions; no important finding. Three initial environment failures
+were isolated and rerun, not counted as a passed initial run. Addendum: application
+import attempted default SQLite and the audit hook denied before connection;
+two attachment-publication spawn variants could not restore a Windows stdin
+entrypoint. Redirecting AGENT_STATE_DB/TARGET_DB_PATH/TARGET_CACHE_DIR into Git-
+external Temp and using `python -B -c` gave targeted 3 passed /4 warnings (12.59s),
+then the same full group867 passed. No production safety change or skipped
+assertion, real Vina, service network, production DB or credential use.
+
+Planning QUALITY passed the operator/conjunct/canonical slices but found
+structure-prediction-method knowledge still routed to lookup. Worker RED6/6
+then locally masks that knowledge object, not every occurrence of `method`,
+preserving an independent explicit structure lookup. Final new-file72 passed,
+24-file2037 affected passed, compileall/diff passed; original SPEC/QUALITY
+closure of this last lookup P2 is required before publication. SPEC then found
+the separate comparison-scoring path still used the original, unmasked method
+object (two knowledge-comparison sentences caused actual lookup). The worker is
+adding router/runtime RED controls and applying the same view to every lookup
+scoring path; this finding is not waived because the focused tests passed.
+Worker formal RED5/11 included two actual EGFR dispatches and an old-rank
+clarification bypass. Direct, comparison and weak-entity scoring plus reference
+clarification now consistently use the same lookup view. Exact GREEN16,
+P2-4 focused32 and 25-file2097 affected tests passed; other three source slices
+remained hash-identical. Compileall/diff passed. Original SPEC closed scoring
+bypass but found mixed knowledge/explicit lookup still dispatched both target
+IDs from raw query. Different-ID runtime controls are required: a target named
+only in method knowledge must not enter tool input. Shared lookup-view admission
+and execution binding were closed with a shared `target_lookup_text()` view.
+Worker formal RED6/4 -> exact GREEN10; final new-file92 and 28-file2161 affected
+tests passed. Mixed distinct-target requests dispatch only the explicitly looked-
+up target, while query/history/persisted audit and global design target collection
+remain unchanged. Double explicit lookups and PDB qualifications retain guards.
+Original independent SPEC final PASS: 1415 repository tests (92 new-file plus
+14 related files), 31 independent route/runtime/audit controls; no important
+finding. Parent final cross-scope gate/prompt/routing batch: 166 passed (14.99s).
+Original final QUALITY closure remains required; actual Linux procfs CI remains
+unrun locally. No tests are summed into a unique project-wide count.
+Parent also reproduced knowledge aliases (`prediction algorithms` and Chinese
+`原理`) still selecting lookup. Worker RED40/12 across routing/runtime/distinct-
+target inputs, then expanded only a finite set of knowledge-object aliases;
+exact GREEN52, final new-file144 and 28-file2213 affected passed. Router/planner/
+target-contract hashes stayed fixed; no new positive authorization grammar or
+complete NLP-support claim. Alias SPEC caught incorrect `approaches?` singular
+spelling: worker RED4/5 -> exact GREEN9, pattern fixed to `approach(?:es)?`;
+final new-file153 passed without repeating2213. Original SPEC final PASS: 9
+focused +14 independent controls, including mixed-ID runtime, double explicit,
+PDB/oldref/audit/design and near-spelling negatives. Final original QUALITY
+closure remained required at that checkpoint; no general knowledge-NLP
+completeness is claimed. Final original planning QUALITY PASS: 153 tests (7.95s),
+23 independent route/input/qualification/audit controls; frozen five-file hashes,
+memory compile and diff passed. Earlier six cold-import orders passed. No
+important finding remains in the seven-review/CI-test repair scopes.
+
+Final parent cross-scope regression:
+
+```powershell
+python -m pytest tests/agent/test_review_planning_route_gates.py tests/agent/test_review_web_admission_gates.py tests/agent/test_prompt_acceptance.py tests/agent/test_open_review_routing.py -q -p no:cacheprovider --tb=short
+# 227 passed (18.80s), Git-external isolated basetemp
+python -m compileall -q src scripts
+git diff --check
+```
+
+The full local watchdog-contract file passed41 /2 Linux-only skips, with its
+deterministic race controls independently reviewed. All seven feedback items and
+the exact-ESRCH test repair have SPEC then QUALITY closure. The next commit must
+be published and pass its own complete CI, including real Linux watchdog. Prior
+2eec7648 run finished9 successful jobs, root failure and consequent aggregate
+failure; no failed check is waived or presented as a success.
+
 Independent review and exact-head CI outcomes are recorded in the current PR
 status sections before merging. This saved document is not proof of a future
 merge or future CI outcome. No auto-merge, admin bypass or human approval is

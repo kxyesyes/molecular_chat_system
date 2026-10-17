@@ -108,13 +108,24 @@ def prior_molecule_reference(query):
         r"\b(?:from|using|like|based\s+on)\s+(?:these|those)"
         r"(?=\s*(?:[.,;!?]|$|\b(?:and|then|with)\b))"
     )
+    # "Is it possible to generate ..." has no molecular source. Bind "it"
+    # locally to a source/property relation or an action's object instead of
+    # letting a bare grammatical subject borrow an old card's authority.
+    english_it_relation = (
+        r"\b(?:from|using|like|based\s+on|similar\s+to|for|of|on|with)\s+it\b|"
+        r"\b(?:us(?:e|ing)|optimi[sz](?:e|ing)|modif(?:y|ying)|improv(?:e|ing)|"
+        r"evaluat(?:e|ing)|assess(?:ing)?|analy[sz](?:e|ing)|dock(?:ing)?|"
+        r"redesign(?:ing)?|calculat(?:e|ing)|predict(?:ing)?)"
+        r"\s+(?:(?:also|only|further)\s+){0,2}it\b"
+    )
     return bool(re.search(
         r"刚才|之前|上一个|前一个|(?:这|那)(?:个|些)(?:候选|分子)|"
         r"(?:上面|前面|上文|上次|上述|该|选中|已确认)的?\s*(?:候选|分子)|"
-        r"\b(?:previous|earlier|it|"
+        r"\b(?:previous|earlier|"
         r"(?:above|selected|confirmed|last|former|latter|this|that|these|those)\s+"
         r"(?:candidates?|molecules?))\b|"
-        + chinese_source + "|" + english_source + "|" + english_pronoun_source, query, re.I))
+        + chinese_source + "|" + english_source + "|" + english_pronoun_source
+        + "|" + english_it_relation, query, re.I))
 
 
 def valid_pointer(value, *, manifest=False):

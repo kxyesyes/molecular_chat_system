@@ -322,7 +322,7 @@ def test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path
         def still_running():
             try:
                 fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return False
             return int(fields[2]) == group and fields[0] not in {'Z', 'X'}
 
@@ -340,6 +340,53 @@ def test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path
                     os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize('state', ['missing_file', 'missing_process', 'zombie', 'live', 'permission'])
+def test_watchdog_proc_exit_observation_is_narrow_and_race_safe(tmp_path, monkeypatch, state):
+    """Exercise the actual watchdog assertion with deterministic procfs races."""
+    import itertools
+    import time
+    from types import SimpleNamespace
+
+    pid, group = 987654321, 987654320
+    read_text = Path.read_text
+
+    def run(*args, **kwargs):
+        (tmp_path / 'owned-child.json').write_text(json.dumps([pid, group]))
+        return SimpleNamespace(returncode=124)
+
+    def proc_read(path, *args, **kwargs):
+        if path.name == 'stat' and path.parent.name == str(pid):
+            if state == 'missing_file':
+                raise FileNotFoundError('fixture process exited before open')
+            if state == 'missing_process':
+                raise ProcessLookupError('fixture process exited during read')
+            if state == 'permission':
+                raise PermissionError('fixture denial is not process exit')
+            return f'{pid} (fixture) {"Z" if state == "zombie" else "S"} 1 {group} 0'
+        return read_text(path, *args, **kwargs)
+
+    def gone(*args):
+        raise ProcessLookupError('fixture child is already reaped')
+
+    def forbidden_kill(*args):
+        pytest.fail('observation fixture must never signal a real process')
+
+    ticks = itertools.count()
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(Path, 'read_text', proc_read)
+    monkeypatch.setattr(time, 'monotonic', lambda: 100 * next(ticks))
+    monkeypatch.setattr(os, 'getpgid', gone, raising=False)
+    monkeypatch.setattr(os, 'kill', forbidden_kill)
+    if state == 'live':
+        with pytest.raises(AssertionError, match='owned descendant survived'):
+            test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path)
+    elif state == 'permission':
+        with pytest.raises(PermissionError):
+            test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path)
+    else:
+        test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path)
 
 
 @pytest.mark.parametrize('api', ['sendto', 'sendmsg', 'getaddrinfo', 'gethostbyname',

@@ -11,7 +11,9 @@ from typing import Any
 from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
-from src.agent.planning.request_parsing import positive_intent_text, property_calculation_forbidden
+from src.agent.planning.request_parsing import (
+    positive_intent_text, property_calculation_forbidden, target_lookup_text,
+)
 from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
@@ -101,20 +103,33 @@ class HybridSkillRouter:
 
         target_request = analyze_target_request(text)
         has_target = bool(target_request.targets)
+        # A generic protein/nutrition list is not a target-database request.
+        # Require a positive identifier or a domain-specific lookup object;
+        # unresolved target references still reach the clarification gate.
+        # Prediction methods are knowledge objects, not structures. Mask only
+        # that noun phrase (including its target qualifier), so an independent
+        # explicit structure lookup survives even when methods are also asked.
+        lookup_text = target_lookup_text(lower)
+        lookup_has_target = bool(TARGET_PATTERN.search(lookup_text))
+        lookup_subject = bool(lookup_has_target or re.search(
+            r"靶点|\b(?:targets?|uniprot|pdb|alphafold)\b|蛋白(?:质)?结构|"
+            r"(?:实验|晶体|冷冻电镜)结构|"
+            r"\b(?:protein|experimental|crystal|cryo[- ]?em)\s+structures?\b", lookup_text
+        ))
         target_lookup = bool(re.search(
-            r"查找|搜索|检索|找一下|列出|\b(?:find|search|list|look\s+up)\b", lower
-        ) and re.search(r"靶点|结构|资料|蛋白|uniprot|pdb|structures?|protein", lower))
-        if (self._contains(lower, "反向寻靶", "反向预测靶点", "reverse target")
-                and not re.search(r"排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个)|previous|ranked|top\s*1\b", lower)
-                and not re.search(r"结构|蛋白|uniprot|pdb|structures?|protein", lower)):
+            r"(?:查找|搜索|检索)(?!结果)|找一下|列出|查(?=\s)|\b(?:find|search|list|look\s+up)\b", lookup_text
+        ) and lookup_subject)
+        if (self._contains(lookup_text, "反向寻靶", "反向预测靶点", "reverse target")
+                and not re.search(r"排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个)|previous|ranked|top\s*1\b", lookup_text)
+                and not re.search(r"结构|蛋白|uniprot|pdb|structures?|protein", lookup_text)):
             # Listing a fresh molecular ranking is not looking up an earlier
             # target. Keep normal molecular/negation checks below intact.
             target_lookup = False
-        if target_lookup and not has_target and re.search(r"排名|上述|那个|第[一二三]|previous|ranked|top", lower):
+        if target_lookup and not lookup_has_target and re.search(r"排名|上述|那个|第[一二三]|previous|ranked|top", lookup_text):
             return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
                 requires_confirmation=True, reasons=["target_reference_required"])
-        if (target_lookup and re.search(r"亚型|subtype|isoform", lower)
-                and re.search(r"澄清|clarif", lower)):
+        if (target_lookup and re.search(r"亚型|subtype|isoform", lookup_text)
+                and re.search(r"澄清|clarif", lookup_text)):
             return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
                 requires_confirmation=True, reasons=["target_subtype_clarification_required"])
         input_validator = InputValidator()
@@ -169,11 +184,13 @@ class HybridSkillRouter:
             add("rag_search", 1.0, "local knowledge or sourced explanation intent")
         if self._contains(lower, "完整工作流", "完整流程", "全流程", "full workflow"):
             add("comprehensive_evaluation", 1.0, "explicit full workflow intent")
-        if (target_lookup and not generation) or self._contains(lower, "pdb", "蛋白结构", "可用于 docking 的", "查 ", "搜索"):
+        if (target_lookup and not generation) or (
+            lookup_subject and self._contains(lookup_text, "pdb", "蛋白结构", "可用于 docking 的")
+        ):
             add("target_database_search", 0.92, "target structure search intent")
         if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "反向寻靶", "反向预测靶点", "reverse target"):
             add("reverse_target_prediction", 0.95, "reverse target intent")
-        if activity_intent_requested(text):
+        if activity_intent_requested(lower):
             add("activity_prediction", 0.9, "activity endpoint requested")
         bounds, unknown_bounds = requested_property_bounds(lower)
         bounded_generation = generation and bool(bounds or unknown_bounds)
@@ -213,8 +230,8 @@ class HybridSkillRouter:
             "配体",
         ) and self._contains(lower, "center", "size", "box"):
             add("docking_simulation", 1.0, "structured docking files and box intent")
-        if has_target and self._contains(
-            lower,
+        if lookup_has_target and self._contains(
+            lookup_text,
             "比较",
             "差异",
             "准备",
@@ -224,7 +241,7 @@ class HybridSkillRouter:
             "structure information",
         ):
             add("target_database_search", 0.95, "target structure comparison intent")
-        if has_target:
+        if lookup_has_target:
             add("target_database_search", 0.12, "recognized target entity")
         if has_smiles:
             for skill in (

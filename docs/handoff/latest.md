@@ -1,5 +1,13 @@
 # Latest handoff
 
+## PR #209 七项 P2 与 CI 观察竞态闭环（2026-10-17）
+
+- `2eec7648` CI 为9成功、root失败及汇总失败；root6134 passed/106 skipped/1 failed，实际是已退出PID的procfs读取抛ESRCH，不是存活断言失败。先确定性RED1/4，精确捕获ProcessLookupError；原Linux watchdog、5s/2s/12s、生产/CI配置不变。本机41 passed/2 Linux skips，独立SPEC/QUALITY均PASS；仍须真实Linux新CI。
+- 新七条P2先验证后修复：已支持中文阈值运算符、窄混合否定、canonical比较批次、有限知识对象lookup门禁、verb-first新反向请求、语气it、对接摘要预算回退证据承接。复审发现的共享否定、方法比较评分及混合目标输入泄漏均补RED关闭；路由与实际lookup输入用同一视图，原query/history/audit不改。
+- 全部切片独立SPEC→QUALITY最终PASS，无重要finding。最终父交叉227 passed，规划worker受影响2213、web595/294及独立867等为重叠批次，不累计唯一总数；compileall/diff通过。详细失败、环境隔离及命令见[验收记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。
+- 范围限制保留：有限知识别名/窄activity→ADMET语法，不声称任意NLP完整支持；cap5/10不新增cap1；label+and既有执行语法限制不当作新成功。没有真实Vina/服务网络/生产库/凭据或6SAM制品改动。
+- 随修复发布，当前新提交CI仍待单独核对，未合并。维护者授权顺序Squash #209，再正常同步新main进六文档#210、复审及新CI后Squash #210；不启用auto-merge、不绕过质量或审批门禁、不动D:用户工作区。
+
 ## PR #209 语言、单位与 freshphrase 兼容性审查（2026-10-17）
 
 - `f86e3c29` 新CI 11/11 success；随后最终门禁读到另3条审查（英文文字阈值、target-role合法单位、prediction/action-first fresh反向请求），继续修复而未合并。

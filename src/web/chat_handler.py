@@ -1026,7 +1026,9 @@ class ChatHandler:
                     "error": {"code": "interpretation_budget_exceeded"},
                 }, ensure_ascii=False))
                 self._append_history(history, {"user": message, "assistant": content, "agent_used": True})
-                return
+                # Same post-delivery evidence hook as normal presentation; this
+                # captured execution result is not a preparation or approval.
+                return docking_result
         else:
             prompt = self._build_prompt(
                 message,

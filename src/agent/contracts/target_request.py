@@ -22,7 +22,7 @@ _LABEL = re.compile(
 # "以" or backtrack across "为". Keep the whole body, including unknown prose.
 _TARGET_ROLE = re.compile(r'以([^以为。！？!?;；\r\n]+)为\s*(靶点)')
 _ROLE_DESIGN = re.compile(r'\s*(?:[,，]\s*)?(?:设计|生成)')
-_ROLE_DESIGN_BOUNDARY = re.compile(r'[,，.。;；!！?？\r\n]')
+_ROLE_DESIGN_BOUNDARY = re.compile(r'[,，.。;；!！?？\r\n]|(?=要求|限制|满足)')
 _ROLE_DESIGN_OBJECT = re.compile(
     r'(?:[0-9零〇一二两三四五六七八九十百千万]+个?)?'
     r'(?:类药)?(?:候选)?(?:分子|化合物|结构)',
@@ -119,7 +119,7 @@ _ANALYSIS_JOIN = re.compile(
     re.I,
 )
 _DESIGN_PROPERTY_VALUE = (
-    r'[ \t]*(?:不超过|不低于|小于|大于|低于|高于|<=|>=|<|>|≤|≥)'
+    r'[ \t]*(?:不超过|不低于|不大于|不小于|小于|大于|低于|高于|<=|>=|<|>|≤|≥)'
     r'[ \t]*[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)'
     r'(?![A-Za-z0-9_.])[ \t]*'
 )
@@ -207,7 +207,9 @@ def _role_tail(query: str, start: int, end: int) -> tuple[list[str], list[tuple[
             if position == end:
                 position = connector.start()
                 break  # A conjunction requires a following action.
-        elif separator is None:
+        elif separator is None and not (
+            position == start and query.startswith(('要求', '限制', '满足'), position)
+        ):
             break
         clause_start = position
         # Consume bounded non-target instructions in full, preserving the

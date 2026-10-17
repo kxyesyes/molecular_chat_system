@@ -158,8 +158,8 @@ def _fresh_molecule_reverse_request(message):
                              + r'\s*(?:做|进行|运行)\s*' + chinese_action + chinese_display, clause, re.I)
                     or re.fullmatch(chinese_prefix + r'(?:(?:做|进行|运行)\s*)?'
                                     + chinese_action + r'\s*(?:对\s*)?' + label + token + chinese_display, clause, re.I)
-                    or re.fullmatch(r'\s*(?:please\s+)?(?:(?:run|perform|rerun)\s+)?'
-                                    r'reverse[ -]target(?:ing)?\s+(?:prediction\s+)?(?:for\s+)?'
+                    or re.fullmatch(r'\s*(?:please\s+)?(?:(?:run|perform|rerun|predict)\s+)?'
+                                    r'reverse[ -]target(?:s|ing)?\s+(?:prediction\s+)?(?:for\s+)?'
                                     + label + token + r'\s*', clause, re.I)):
                 return True
     return False

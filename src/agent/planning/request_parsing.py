@@ -8,6 +8,7 @@ from src.agent.contracts.generation_request import (
     has_generation_intent, parse_generation_count, validate_generation_count,
 )
 from src.agent.contracts.target_request import analyze_target_request
+from src.target_identifiers import TARGET_PATTERN
 
 
 _DOCKING_FIELD = re.compile(
@@ -95,6 +96,24 @@ def extract_target_hint(query: str) -> str:
     return request.targets[0] if not request.needs_clarification else query.strip()
 
 
+_STRUCTURE_METHOD_OBJECT = re.compile(
+    rf"(?:{TARGET_PATTERN.pattern}\s*(?:的\s*)?)?"
+    r"(?:蛋白(?:质)?结构预测(?:的)?(?:方法|算法|原理|技术|思路|理论)|"
+    r"\bprotein\s+structure\s+prediction\s+"
+    r"(?:methods?|algorithms?|principles?|techniques?|approach(?:es)?|theor(?:y|ies))\b)"
+    rf"(?:\s+(?:for|of)\s+{TARGET_PATTERN.pattern})?", re.I,
+)
+
+
+def target_lookup_text(query: str) -> str:
+    """Lookup-only view; knowledge targets cannot authorize a structure search.
+
+    Leave the caller's original query/audit and global design target collection
+    untouched. Preserve all remaining qualifications for tool validation.
+    """
+    return _STRUCTURE_METHOD_OBJECT.sub("", query)
+
+
 def looks_like_unauthorized_tool_request(query: str) -> bool:
     lowered = query.lower()
     return (
@@ -126,6 +145,16 @@ def extract_top_n(query: str, default: int) -> int:
 # ASCII dots inside SMILES, decimals and paths are not sentence boundaries.
 # Ambiguous unspaced ASCII prose stays in the same clause (fail closed).
 _CLAUSE_END = r"[,，;；。!！?？\n]|\.(?=\s|$|[\u3400-\u9fff\"'”’])|但是|而是|\bbut\b|\band\s+then\b"
+# Only the explicit activity opt-out followed by an ADMET calculation has an
+# unambiguous restart here. Do not generalize conjunction + verb: "do not
+# calculate properties and predict activity" shares its negation. Full-clause
+# matching also prevents a later operation from inheriting this exemption.
+_OPERATION_SMILES = r"[A-Za-z0-9@+\-\[\]()=#./\\%:]+"
+_NEW_OPERATION = re.compile(
+    r"\s*(?:skip\s+activity\s+and\s+|不要\s*预测\s*活性\s*并(?:且)?\s*)"
+    r"(?P<positive>(?:please\s+)?calculate\s+ADMET(?:\s+for\s+" + _OPERATION_SMILES + r")?"
+    r"|(?:请\s*)?计算\s*(?:ADMET|" + _OPERATION_SMILES + r"\s*的\s*ADMET))\s*", re.I,
+)
 # Consume explicit path tokens before considering any internal punctuation.
 # Ambiguous unspaced text attached to a path stays in its original clause.
 _PATH_START = r"(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])"
@@ -157,6 +186,8 @@ def positive_intent_text(query: str) -> str:
     clauses.append(text[start:])
     output = []
     for clause in clauses:
+        if restart := _NEW_OPERATION.fullmatch(clause):
+            clause = restart['positive']
         # Also cover the ordinary object-before-prohibition order.
         clause = re.sub(
             r"(?:admet|adme|毒性|活性|对接|docking|类药性)\s*" + _NEGATION + r".*$",
