@@ -1482,3 +1482,25 @@ seed未指定。legacy adapter的通用box来源仍记录user_explicit并给出�
 - `tests/agent/test_web_docking_http.py`
 
 对应设计、计划、validation及handoff文档随提交更新。无JS、依赖或科学算法修改。
+
+### 最后闭环文档提交的 CI 终验（2026-10-17）
+
+维护者要求继续核对最后文档提交，全部通过后更新记录并确认PR状态。本次只读
+追踪原运行，没有主动重跑已通过分片或重新执行Vina。
+
+- 提交：`39728e8afd4c2a7cb953e0ea21dfbeb9d483f08b`。
+- [GitHub quality run39014083190](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39014083190)，
+  attempt1，07:33:35 UTC开始，07:53:07 UTC最终completed/success。
+- **11/11 job success**：`static-quality`；`python-tests (root)`、
+  `(agent-web-lifecycle)`、`(agent-docking)`、`(agent)`、`(root-activity)`、
+  `(agent-docking-publication)`、`(sandbox-core)`、`(sandbox-api)`、`(task-runtime)`；
+  `offline-quality`汇总。没有失败、取消、跳过或待完成job；各套件内原有skip不被
+  job成功抹除，也不从job状态虚构测试计数。
+- 通过GitHub运行与jobs接口直接读取并与PR head比对，不沿用793f17b9或更早
+  提交的结果替代本提交。记录更新前PR #209仍Open/Draft、base=main、
+  mergeable=true、merged=false。未核实的分支保护/必需审查不宣称已满足。
+
+本次只有本validation及latest handoff两份文档更新，`git diff --check`用于本地
+校验；没有代码/JS/部署/科学输入变更，未重复本地科学或全仓测试。记录提交后若
+出现新head CI，另行等待其终态，并在PR最新状态说明中绑定该SHA/运行链接；不为
+回写自身成功状态不断制造新的文档提交。保持原分支及Draft PR，不执行合并。

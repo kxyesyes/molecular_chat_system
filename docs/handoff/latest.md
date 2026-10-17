@@ -1,5 +1,16 @@
 # Latest handoff
 
+## PR #209 文档提交 CI 已全通过（2026-10-17）
+
+- 真实6SAM闭环验收文档提交`39728e8afd4c2a7cb953e0ea21dfbeb9d483f08b`的
+  [quality run39014083190](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39014083190)
+  已completed/success，11/11 job均success：static-quality、九个Python分片、
+  offline-quality汇总。运行于07:53:07 UTC完成；没有主动重跑已通过job。
+- 只读复核PR #209仍Open/Draft，base=main、mergeable=true、merged=false。
+  没有合并、关闭、转Ready或变更分支保护；mergeable并不代表必需审查已满足。
+- 本次仅补验收/交接文档，不改变已核验的科学制品或代码。若此记录提交触发新
+  head CI，须单独回收结果；上述通过严格绑定39728e8a，不冒充后续提交的证据。
+
 ## S10 6SAM 真实闭环完成（2026-10-17，文件级构象核验）
 
 - 方案 A 由维护者确认；浏览器选择和当前 READY 点击由维护者明确委托 Agent，
