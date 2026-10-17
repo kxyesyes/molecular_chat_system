@@ -1,5 +1,12 @@
 # Latest handoff
 
+## PR #209 聊天对接 worker 与解析性质身份（2026-10-17）
+
+- `5f22015c` 新CI 11/11 success；最终审查新增1 P1/1 P2，未带着新问题合并。聊天对接根为process-local，main入口现对严格flag1且workers>1在env-file/CLI解析后、reload降级/探测/app/server前非零拒绝，不默降worker或禁功能；外部launcher仍须部署保证single，非万能检测。其它功能main多worker原支持边界保持。
+- 已确认候选性质证据改用受控resolved routing身份验证，而不是无SMILES用户原文。原message/history/descriptor意图及validated/provenance/finite/canonical/唯一行门禁不改；下一轮仅算新分子，复用真实prior。错owner、撤销/未确认源、foreign row、缺值仍拒绝。
+- 正式RED分别12/28与2/5；父性质115 passed/7既有警告、联合91 passed。两切片独立SPEC→QUALITY最终PASS，无important finding；main shell退出码与disabled/CLI/env/reload控制通过。compileall/diff通过；strict health因隔离资产缺失未跑，4个app/probe回归未跑、1 Windows POSIX项skip，均未冒充部署验收。
+- 原导入期日志副作用保留，不声称零文件写入。没有真实服务/Vina/凭据/生产DB或6SAM制品变更；[完整记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。随修复发布，新head完整CI仍待核对，之后按已授权Squash209→集成复审CI→Squash210，不动D:用户工作区。
+
 ## PR #209 套件导入隔离夹具修复（2026-10-17）
 
 - `601b8b7a` CI 9成功，Agent14194 passed/2 skipped/1 failed及汇总失败；root含真实Linuxwatchdog已通过，18条审查均解决。唯一失败在新测试的字符串monkeypatch找不到lazy父包的validators属性，尚未触发生产断言。

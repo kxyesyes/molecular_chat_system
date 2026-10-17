@@ -341,6 +341,16 @@ def main():
     reload_enabled = args.reload or _parse_bool(os.environ.get("MEDCHAT_RELOAD"), False)
     workers = args.workers if args.workers is not None else _env_int("MEDCHAT_WORKERS", 1)
 
+    # Match the app's exact opt-in, after env-file/CLI resolution and before
+    # reload can silently reduce workers. Chat task ownership is process-local.
+    if os.environ.get("MEDCHAT_CHAT_DOCKING_ENABLED") == "1" and workers > 1:
+        logger.error(
+            "MEDCHAT_CHAT_DOCKING_ENABLED=1 requires exactly one worker: "
+            "chat docking task ownership and HTTP controls are process-local; "
+            "use --workers 1 or MEDCHAT_WORKERS=1. Refusing startup."
+        )
+        return 1
+
     if args.no_reload:
         reload_enabled = False
     if reload_enabled and workers != 1:

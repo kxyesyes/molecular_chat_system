@@ -255,6 +255,21 @@ REVERSE_TARGET_PREWARM_TIMEOUT_SECONDS=1800
 应用关闭会撤销发布资格并等待实际预热线程退出；原生调用尚未返回时可能需要
 等待，不应把清理中状态视为已释放。独立反向寻靶页面的 legacy 按需加载不变。
 
+聊天对接必须使用单 worker：仅当 `MEDCHAT_CHAT_DOCKING_ENABLED=1`（严格等于
+`1`，其他值仍按原逻辑禁用）时启用聊天对接。其 WebSocket 任务归属及 HTTP
+controls 的任务集合是 process-local，多进程分流会使控制请求落到无该任务的进程，
+产生随机 404。`main.py` 在加载 env-file 并解析 CLI `--workers` / 环境变量
+`MEDCHAT_WORKERS` 后，对聊天对接加多 worker（N > 1）执行 fail-fast，非零退出；
+该检查在 reload 的 worker 调整及环境探测、应用装配、服务器启动之前执行，
+不会自动降为单 worker 或关闭聊天对接。请显式使用 `--workers 1` 或
+`MEDCHAT_WORKERS=1`（CLI 优先）。聊天对接未启用时，其他功能保留以下原有
+`main.py` 多 worker 支持边界。
+
+上述自动拒绝保证属于 `main.py` 启动入口。应用无法可靠获知外部 Uvicorn
+CLI 或其他进程管理器配置的 worker 数量；`MEDCHAT_WORKERS` 不能作为其实际
+进程数的证明。直接 ASGI 启用聊天对接也必须由部署方保证单 worker，不能将
+`main.py` 的 guard 当作外部入口的多 worker 检测。
+
 标准 `python main.py` 单 worker 和直接
 `python -m uvicorn src.web.app:app` 单 worker 在应用导入时初始化 RDKit
 诊断路由。`python main.py --workers N`（或 `MEDCHAT_WORKERS=N`）的每个

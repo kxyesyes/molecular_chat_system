@@ -797,8 +797,12 @@ class ChatHandler:
                     if constraint_report:
                         agent_result = {**agent_result, "final_answer": constraint_report + "\n\n"
                                         + agent_result.get("final_answer", "")}
+                    # A confirmed reference supplies identity out of band. Use
+                    # its validated routing view, not SMILES-free user prose;
+                    # leave original request/history and evidence gates intact.
+                    property_query = routing_message if resolved_molecule is not None else message
                     property_evidence = property_comparison.accepted_property_evidence(
-                        agent_result, message, session_id)
+                        agent_result, property_query, session_id)
                 if presentation_status == "completed":
                     property_result = property_comparison.descriptor_result(
                         message, property_evidence, scientific_history, session_id)

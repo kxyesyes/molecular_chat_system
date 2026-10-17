@@ -461,6 +461,55 @@ and genuine invalid/17-valid-input controls checked. Final original QUALITY PASS
 both parent states restored. No important finding, production/CI/assertion change
 or blind workflow rerun. Next exact-head full CI remains a required gate.
 
+## 5f22015c green CI and final two review gates
+
+`5f22015c0bb783e2b744fb6e9ccb3119e970c8f4` passed
+[quality39038149544](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39038149544),
+all11 jobs success, no reruns. Final audit found two further automated threads
+(13:58 UTC): chat docking roots are process-local and cannot serve random HTTP
+workers, and resolved-candidate property observations were validated against
+SMILES-free reference prose. Both are being repaired before merge; a green CI
+does not waive a new important review finding.
+
+Resolved-property tests first: actual ChatHandler/Supervisor, confirmed synthetic
+SQLite sources and real local RDKit gave RED2 failed /5 controls. Minimal
+property-evidence query uses the trusted routing identity only when a resolved
+molecule exists; original message/history/descriptor intent and all observation
+validation remain. Wrong owner/revoked/unconfirmed sources never execute; foreign
+row/missing-logP evidence stays unavailable. An intermediate fixture used an
+unsupported ambiguous prior-name phrase, then assumed explicit property input
+was bare SMILES; these failed comparison/input expectations were corrected to
+the existing anonymous prior-turn and raw-query contracts without changing
+production behavior or weakening identity/reuse assertions. Final parent four-
+file regression:115 passed /7 existing warnings (17.81s). Original independent
+SPEC PASS:115 same-scope tests,110 isolation/presentation/RDKit tests and23
+additional gate controls; memory restoration reproduced RED2/5. Disabled context,
+explicit input precedence and observation validity remain. Final original property
+QUALITY PASS:7 new plus175 related tests and21 identity/retention/session controls;
+memory compile/diff passed, no important finding. No gate is loosened.
+
+Multiworker repair uses a deliberate fail-fast at the supported main.py entry:
+after env-file/CLI/environment worker parsing and before reload adjustment or
+environment probing/app/server startup, exact docking flag`1` plus workers>1
+returns failure. It never silently changes worker count or disables docking;
+non-`1` flags keep their old disabled semantics. Worker RED12/28 ->40 focused
+passed; startup/transport/deploy/env regression65 passed /1 platform skip /
+4 excluded app/probe cases, warning-strict under UTF-8, compileall/diff passed.
+Direct external launchers remain deployment-owned single-worker constraints,
+not a falsely claimed automatic worker-count detector. No shared affinity/state
+architecture or nonce/owner change; strict health not run without deployment assets.
+Original startup SPEC PASS:40 contract tests and24 independent real `__main__`
+shell-exit controls (12 exit1 /12 exit0), warning-strict UTF-8 and memory compile/
+diff passed. No important finding; automatic guarantee is only the main entry.
+Parent joint startup/property/context regression:91 passed (15.68s), compileall/
+diff passed. Final startup independent QUALITY PASS:40 tests and12 independent
+`__main__` exit controls (6 reject /6 success), warning-strict UTF-8 memory compile
+and diff passed. No important finding. Original import-time logs/app.log creation
+and static refusal logging remain; this is not an absolute zero-file-side-effect
+claim. No new startup, shared-state, affinity or scientific execution side effects.
+Both new feedback items now have SPEC then QUALITY closure; publication must
+receive its own exact-head CI and live review/protection audit before merging.
+
 Independent review and exact-head CI outcomes are recorded in the current PR
 status sections before merging. This saved document is not proof of a future
 merge or future CI outcome. No auto-merge, admin bypass or human approval is
