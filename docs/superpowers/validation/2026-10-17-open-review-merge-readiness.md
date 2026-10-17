@@ -257,6 +257,57 @@ All four new GitHub findings now have SPEC then QUALITY closure. Publication
 requires a new commit, evidence replies/thread resolution and its own full CI;
 the previous 7db27b2e green result does not cover this subsequent code.
 
+## Further compatibility review after f86e3c29 green CI
+
+`f86e3c291a4f002e5d200d6429442b0ced2e2e05` passed
+[quality39028674153](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39028674153),
+11/11 success without reruns. The final gate audit read three additional
+automated threads posted at 11:35 UTC: prediction/action-first fresh reverse
+phrasing, English worded numeric intent, and target-role supported descriptor
+units. The PR remained unmerged; no new thread was waived because CI passed.
+
+Parent numerical/language tests: RED 16 failed /9 controls, then 433 affected
+tests passed (3.34s). English worded thresholds are conservatively classified as
+unknown, not silently dropped and not converted into a new calculation grammar;
+generation/planning/reporting retain the request and show unverified. Target-role
+tails consume mass/area units only for their corresponding metrics; attached
+unknown targets, switching suffixes and unknown units still require clarification.
+SPEC found seven additional recognized-metric/compact-number cases: RED 7 failed
+/12 controls, then numeric-prefix word boundaries were relaxed only to admit
+adjacent numeric intent as unknown, not new positive metric aliases. A review
+scope disagreement was checked against original comment4302515484; the reviewer
+withdrew requiring fully glued `molecularweightbelow450` as new positive syntax.
+The existing `_METRIC` boundary is retained. Final ten-file parent regression:
+1127 passed /3 existing SWIG deprecation warnings (6.38s). Original SPEC PASS:
+421 repository tests and 336 independent offline controls. QUALITY then found
+`lower/higher than` numeric thresholds could be rescued by relative improvement:
+RED 4 failed /32 controls (including actual verifier mismatches). Two prefix
+tokens were added only for conservative unknown detection; normal bare relative
+objectives and the calculation grammar remain unchanged. Final parent ten-file
+batch: 1131 passed /3 existing SWIG warnings (6.40s). Original SPEC follow-up PASS:
+433 repository tests and 116 independent controls. Original QUALITY final PASS:
+166 tests (2.08s), 35 closed-loop controls, no important finding. No change to
+positive metric/operator grammar, evidence comparisons or scientific claims.
+
+Fresh-phrase worker: initial RED 24 failed /72 controls /33 deselected, additional
+negation/reference RED 10 failed /50 controls /83 deselected; final focused
+143 passed and five-file affected regression 318 passed. Whole affirmative
+molecule-bound commands admit prediction/action-first variants; negative action,
+previous-reference or ligand-aside text cannot become fresh science. The original
+query/history, tool switches, SMILES validation, cap5/10 and full ten-row evidence
+remain. Compileall/diff passed. SPEC found a fullmatch regression for Chinese
+`并列出/并显示` fresh requests: worker formal RED 9 failed /161 controls, then
+kept fullmatch with a strict connected display suffix rather than splitting bare
+`并`. Final focused 170 passed, five-file affected 345 passed. Original SPEC
+closed the P2: 170 tests and 12 independent controls passed; no important finding.
+Parent preliminary joint five-file batch: 318 passed (32.36s), before that change;
+final four-file language/unit/web/old-prompt/routing joint batch 241 passed
+(38.01s), compileall/diff passed. Web original QUALITY final PASS: 278 tests
+(58.89s), 78 independent assertions, memory compile/diff passed. No important
+finding; network attempts 0, test SQLite isolated outside Git. Both slices now
+have independent SPEC then QUALITY closure; the next publication must pass its
+own exact-head CI. No merge or speculative future outcome is recorded here.
+
 Independent review and exact-head CI outcomes are recorded in the current PR
 status sections before merging. This saved document is not proof of a future
 merge or future CI outcome. No auto-merge, admin bypass or human approval is

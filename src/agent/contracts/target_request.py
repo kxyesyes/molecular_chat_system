@@ -118,12 +118,18 @@ _ANALYSIS_JOIN = re.compile(
     r'[ \t]*(?:和|及|与|并|、|[,，]|(?<![A-Za-z0-9_-])and(?![A-Za-z0-9_-]))[ \t]*',
     re.I,
 )
-_DESIGN_PROPERTY_CONSTRAINT = re.compile(
-    r'(?:要求|限制|满足)?[ \t]*'
-    r'(?:分子量|MW|molecular[ \t]+weight|logP|TPSA|QED|HBA|HBD)'
+_DESIGN_PROPERTY_VALUE = (
     r'[ \t]*(?:不超过|不低于|小于|大于|低于|高于|<=|>=|<|>|≤|≥)'
     r'[ \t]*[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)'
-    r'(?![A-Za-z0-9_.])[ \t]*(?:(?:Da|g/mol)(?![A-Za-z0-9_/-]))?', re.I,
+    r'(?![A-Za-z0-9_.])[ \t]*'
+)
+_DESIGN_PROPERTY_CONSTRAINT = re.compile(
+    r'(?:要求|限制|满足)?[ \t]*(?:'
+    r'(?:分子量|MW|molecular[ \t]+weight)' + _DESIGN_PROPERTY_VALUE
+    + r'(?:(?:Da|g/mol|g·mol-1)(?![A-Za-z0-9_/-]))?'
+    + r'|TPSA' + _DESIGN_PROPERTY_VALUE
+    + r'(?:(?:Å²|A²|A2)(?![A-Za-z0-9_/]))?'
+    + r'|(?:logP|QED|HBA|HBD)' + _DESIGN_PROPERTY_VALUE + r')', re.I,
 )
 _DESIGN_OUTPUT = re.compile(r'(?:返回|输出|给出)[ \t]*(?:SMILES|分子结构)(?![A-Za-z0-9_])', re.I)
 _DESIGN_CONSTRAINT_CHECK = re.compile(r'(?:逐项)?(?:检查|验证)(?:上述|所有)?(?:约束|条件)')

@@ -21,7 +21,9 @@ _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
 # an unsupported operator as equality or rounding it to a supported bound.
 _NUMERIC_PREFIX = re.compile(
     r"\s*(?:约为|约等于|等于|接近|介于|约|为|"
-    r"\b(?:equals?|approximately|approx|about|around|between|is)\b)\s*", re.I)
+    r"\b(?:equals?|approximately|approx|about|around|between|is|"
+    r"(?:less|greater|more|lower|higher)\s*than|below|above|at\s*(?:most|least)|"
+    r"no\s*more\s*than|not\s*greater\s*than)(?![A-Za-z_]))\s*", re.I)
 _UNSUPPORTED_NUMERIC = re.compile(
     r"\s*(?:[=~≈≃≅]|" + _OP.pattern
     + r"|[+-]?(?:\d|\.\d|NaN\b|inf(?:inity)?\b))", re.I)

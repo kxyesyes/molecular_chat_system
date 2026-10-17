@@ -142,15 +142,25 @@ def _fresh_molecule_reverse_request(message):
     # ligand mentioned elsewhere in a reference to a previous ranking.
     # In particular, ASCII dots belong to disconnected SMILES, not clauses.
     clauses = re.split(r'[，,;；。!?！？\n]|\b(?:and|but|then)\b|并且|然后', message, flags=re.I)
+    chinese_prefix = r'\s*(?:请\s*)?(?:重新\s*)?'
+    chinese_action = r'(?:反向寻靶|反向靶点预测|反向预测靶点)'
+    # Keep bare 并 inside the whole command: splitting it would also admit
+    # 并非 negation or a display clause referring to a previous ranking.
+    chinese_display = (r'(?:\s*并\s*(?:列出|展示|显示)\s*'
+                       r'(?:排名第[一1]|第[一1]名)的(?:候选)?靶点)?\s*')
     for clause in clauses:
         for molecule in InputValidator().extract_potential_smiles_candidates(clause):
             token = re.escape(molecule)
             label = r'(?:SMILES\s*[:：]\s*)?'
-            if (re.match(r'\s*(?:请\s*)?(?:重新\s*)?对\s*' + label + token
-                         + r'\s*(?:做|进行|运行)\s*(?:反向寻靶|反向靶点预测)', clause, re.I)
-                    or re.match(r'\s*(?:please\s+)?(?:(?:run|perform|rerun)\s+)?'
-                                r'reverse[ -]target(?:ing)?\s+(?:for\s+)?' + label + token
-                                + r'(?![A-Za-z0-9@+\-\[\]()=#./\\:%])', clause, re.I)):
+            # A whole affirmative command, not a prefix of a negated action
+            # or a description of a previous result for this same molecule.
+            if (re.fullmatch(chinese_prefix + r'对\s*' + label + token
+                             + r'\s*(?:做|进行|运行)\s*' + chinese_action + chinese_display, clause, re.I)
+                    or re.fullmatch(chinese_prefix + r'(?:(?:做|进行|运行)\s*)?'
+                                    + chinese_action + r'\s*(?:对\s*)?' + label + token + chinese_display, clause, re.I)
+                    or re.fullmatch(r'\s*(?:please\s+)?(?:(?:run|perform|rerun)\s+)?'
+                                    r'reverse[ -]target(?:ing)?\s+(?:prediction\s+)?(?:for\s+)?'
+                                    + label + token + r'\s*', clause, re.I)):
                 return True
     return False
 

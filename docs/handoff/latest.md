@@ -1,5 +1,12 @@
 # Latest handoff
 
+## PR #209 语言、单位与 freshphrase 兼容性审查（2026-10-17）
+
+- `f86e3c29` 新CI 11/11 success；随后最终门禁读到另3条审查（英文文字阈值、target-role合法单位、prediction/action-first fresh反向请求），继续修复而未合并。
+- 英文数值词法只保守记unknown，不新增计算运算符；明确阈值不被relative improvement救活。单位按mass/area指标消费，目标附加/切换/错误单位仍澄清。fullmatch接纳已有prediction/action-first句式及严格并列显示后缀，不任意拆“并”，否定/旧引用保持。
+- 正式RED及复审反例均关闭：最终语言/单位SPEC433+116控制、原QUALITY166+35控制PASS；web SPEC170+12控制、原QUALITY278+78控制PASS，无重要finding。父10文件1131 passed/3既有SWIG警告，最终联合241 passed；compileall/diff通过，批次重叠不累计。
+- 仍不增加cap1，保留cap5/10及完整10行证据/provenance/原文/工具和SMILES门禁；不新增真实Vina或模型结果、不动6SAM制品。随补丁发布，新head须单独CI绿后才可Squash #209，再按门禁处理#210；[完整验收](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。
+
 ## PR #209 新增 GitHub 审查四项修复（2026-10-17）
 
 - `7db27b2e` 新 CI 11/11 success；最终门禁发现另四条自动审查（1 P1 /3 P2），因此仍未合并，不把 CI 绿等同于审查关闭。

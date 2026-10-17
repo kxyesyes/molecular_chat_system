@@ -59,6 +59,12 @@ REVIEW_COUNT_SCOPES = [
     ('Reverse target CCO; top five targets must be displayed', 5),
     ('Reverse target CCO; top five targets should not be docked', 5),
     ('对 CCO 做反向寻靶，不要对接但不要列出前五个候选靶点', 10),
+    ('Reverse target prediction for CCO and show rank 1 target, show top five, not docking', 5),
+    ('Reverse target prediction for CCO and show top 1 target, do not show top five', 10),
+    ('反向寻靶 CCO，列出排名第一的候选靶点，列出前五个候选靶点，不要对接', 5),
+    ('反向预测靶点 CCO，列出排名第一的候选靶点，不要列出前五个候选靶点', 10),
+    ('对 CCO 做反向寻靶并列出排名第一的候选靶点，列出前五个候选靶点，不要对接', 5),
+    ('请对 CCO 做反向寻靶并显示第一名的靶点，列出前十个候选靶点', 10),
 ]
 
 
@@ -137,6 +143,15 @@ FRESH_REQUESTS = [
     'Reverse target CCO.CCN and show top 1 target',
     '对 CCO.CCN 做反向寻靶，列出排名第一的候选靶点',
     'Reverse target CCO and show rank 1 target',
+    'Reverse target prediction for CCO and show top 1 target',
+    'Reverse target prediction CCO and show top 1 target',
+    'Please perform reverse target prediction for SMILES: CCO.CCN; show top 1 target',
+    '反向寻靶 CCO，列出排名第一的候选靶点',
+    '请重新反向寻靶 SMILES：CCO.CCN，显示第一名的靶点',
+    '反向预测靶点 CCO，列出排名第一的候选靶点',
+    '请对 CCO 进行反向预测靶点，列出排名第一的候选靶点',
+    '对 CCO 做反向寻靶并列出排名第一的候选靶点',
+    '请对 CCO 做反向寻靶并显示第一名的靶点',
 ]
 
 
@@ -163,7 +178,8 @@ def test_chat_molecule_bound_reverse_dispatches_new_workflow(ranked, monkeypatch
     monkeypatch.setattr(handler, '_execute_agent', execute)
     result, frames = turn(handler, message, history)
     assert len(calls) == 1 and calls[0][0] == message, (result, frames)
-    context = history[-1]['reverse_target_evidence']
+    context = history[-1].get('reverse_target_evidence')
+    assert context, (result, calls[0][1].get('status'), calls[0][1].get('error'))
     assert context['trace_id'] == calls[0][1]['trace_id']
     assert context['trace_id'] != previous_trace
     assert history[-1]['user'] == message
@@ -177,6 +193,13 @@ def test_chat_molecule_bound_reverse_dispatches_new_workflow(ranked, monkeypatch
     assert len(observation['data']) == 10
     assert RankedReverseEvidence(ranked.store, ranked.tool).resolve(
         context, session_id='owner-session', rank=10)['record'] == observation['data'][9]
+    with ranked.store._connect() as connection:
+        payload = json.loads(connection.execute(
+            'SELECT output_json FROM agent_checkpoints WHERE id=?',
+            (context['observation_id'],)).fetchone()[0])
+    assert payload['data'] == observation['data']
+    assert payload['provenance'] == observation['provenance']
+    assert payload['evidence'] == observation['evidence']
     assert not any(frame['type'] == 'docking_consent' for frame in frames)
 
 
@@ -188,6 +211,10 @@ def test_fresh_routing_view_preserves_molecule_and_negation_but_execution_keeps_
 @pytest.mark.parametrize('message', [
     '对 CC(C)(( 做反向寻靶，列出排名第一的候选靶点',
     'Reverse target SMILES: CC(C)(( and show rank 1 target',
+    'Reverse target prediction for SMILES: CC(C)(( and show top 1 target',
+    '反向寻靶 CC(C)((，列出排名第一的候选靶点',
+    '反向预测靶点 SMILES：CC(C)((，列出排名第一的候选靶点',
+    '对 CC(C)(( 做反向寻靶并列出排名第一的候选靶点',
 ])
 def test_chat_fresh_rank_request_does_not_bypass_molecular_validation(ranked, monkeypatch, message):
     handler = make_handler(ranked)
@@ -201,7 +228,7 @@ def test_chat_fresh_rank_request_does_not_bypass_molecular_validation(ranked, mo
     assert not any(frame['type'] == 'docking_consent' for frame in frames)
 
 
-@pytest.mark.parametrize('message', FRESH_REQUESTS[:2])
+@pytest.mark.parametrize('message', FRESH_REQUESTS)
 def test_chat_fresh_rank_request_does_not_enable_disabled_tools(ranked, monkeypatch, message):
     handler, socket, history = make_handler(ranked), Socket(), []
 
@@ -234,6 +261,28 @@ FOLLOWUP_REQUESTS = [
     ('Do not reverse target CCO; show rank 1 target structure', 'clarify'),
     ('Show top 1 target from the previous reverse target results', 'clarify'),
     ('Show top 1 reverse target structure for ligand CCO.CCN', 'clarify'),
+    ('Do not reverse target prediction for CCO; show top 1 target', 'clarify'),
+    ("Don't perform reverse target prediction for CCO; show top 1 target", 'clarify'),
+    ('不要反向寻靶 CCO，列出排名第一的候选靶点', 'clarify'),
+    ('不要反向预测靶点 CCO，列出排名第一的候选靶点', 'clarify'),
+    ('Reverse target prediction for CCO is not requested; show top 1 target', 'clarify'),
+    ('反向寻靶 CCO 不要运行，列出排名第一的候选靶点', 'clarify'),
+    ('Reverse target prediction for CCO from previous results; show top 1 target', 'clarify'),
+    ('反向寻靶 CCO 的上次结果，列出排名第一的候选靶点', 'clarify'),
+    ('Show top 1 target from previous reverse target prediction for CCO', 'clarify'),
+    ('查找反向寻靶 CCO 上次排名第一的靶点结构', 'clarify'),
+    ('Show top 1 reverse target prediction for ligand CCO.CCN', 'clarify'),
+    ('反向寻靶的排名第一靶点结构，配体 CCO.CCN', 'clarify'),
+    ('Reverse target CCO is not requested; show top 1 target', 'clarify'),
+    ('Reverse target CCO from previous results; show top 1 target', 'clarify'),
+    ('对 CCO 做反向寻靶的上次结果，列出排名第一的候选靶点', 'clarify'),
+    ('对 CCO 做反向寻靶并非本次请求，列出排名第一的候选靶点', 'clarify'),
+    ('对 CCO 做反向寻靶并非重新运行，列出排名第一的候选靶点', 'clarify'),
+    ('并非对 CCO 做反向寻靶并列出排名第一的候选靶点', 'clarify'),
+    ('不要对 CCO 做反向寻靶并显示第一名的靶点', 'clarify'),
+    ('对 CCO 做反向寻靶的上次结果并列出排名第一的候选靶点', 'clarify'),
+    ('对 CCO 做反向寻靶并显示上次排名第一的靶点', 'clarify'),
+    ('对 CCO 做反向寻靶并列出排名第一的候选靶点是上次的请求', 'clarify'),
 ]
 
 
