@@ -18,6 +18,7 @@ from src.agent.evidence_followup import MAX_CANDIDATES, comparison_tools
 from src.agent.utils.validators import InputValidator
 
 from . import request_parsing, step_templates, workflow_selection
+from src.target_search.exact_pdb import has_pdb_constraint
 
 
 @dataclass
@@ -92,6 +93,10 @@ class TaskPlanner:
                     plan.metadata["message"] = "每次最多比较 5 个靶点，请缩小比较范围后重试。"
                     return plan
                 search_input = list(target_request.targets)
+            if has_pdb_constraint(query):
+                # Preserve both the constraint and any qualification/conflict
+                # for deterministic tool validation, not only a target hint.
+                search_input = query
             return WorkflowPlan(
                 workflow_name="target_database_search",
                 steps=[

@@ -6,7 +6,8 @@ from typing import Any, Dict
 import logging
 import re
 import threading
-from src.target_identifiers import canonical_target_identifier
+from src.target_identifiers import canonical_target_identifier, target_mentions
+from src.target_search.exact_pdb import requested_pdb_id, target_text_without_pdb
 
 from .base_tool import BaseMolecularTool
 
@@ -96,7 +97,24 @@ class TargetDatabaseTool(BaseMolecularTool):
 
     def execute(self, query: Any) -> Dict[str, Any]:
         result = self._create_base_result(query)
-        search_queries = self._search_queries(query)
+        try:
+            pdb_id = requested_pdb_id(query)
+        except ValueError:
+            result.update(status="invalid_input", message="Please provide one unambiguous PDB identifier.",
+                error={"code": "validation_error", "message": "Invalid or ambiguous PDB constraint."})
+            return result
+        target_query = target_text_without_pdb(query) if pdb_id is not None else query
+        named_targets = target_mentions(target_query) if pdb_id is not None and type(target_query) is str else ()
+        search_queries = self._search_queries(target_query)
+        if pdb_id is not None and type(target_query) is str and not _ACCESSION_LABEL.search(target_query):
+            from src.agent.contracts.target_request import analyze_target_request
+            request = analyze_target_request(target_query)
+            if request.targets and not request.needs_clarification:
+                search_queries = list(request.targets)
+        if pdb_id is not None and (len(search_queries) != 1 or len(named_targets) > 1):
+            result.update(status="invalid_input", message="An exact PDB lookup requires one target.",
+                error={"code": "validation_error", "message": "Ambiguous exact PDB target."})
+            return result
         if not search_queries:
             result["message"] = "No target search keyword was found."
             result["reasoning"] = (
@@ -117,9 +135,20 @@ class TargetDatabaseTool(BaseMolecularTool):
             service_retryabilities: list[bool] = []
             result["warnings"] = []
             for search_query in search_queries:
-                search_result = service.search_targets(search_query)
+                search_result = service.search_targets(search_query,
+                    **({"pdb_id": pdb_id} if pdb_id is not None else {}))
                 searched.append(search_query)
                 service_results = search_result.get("results", [])
+                # A labelled accession is a lookup key, not permission to drop
+                # a named target. Bind both against authoritative gene evidence.
+                if named_targets and any(
+                    not isinstance(target, dict) or
+                    canonical_target_identifier(target.get("gene_symbol")) != named_targets[0]
+                    for target in service_results
+                ):
+                    result.update(status="invalid_input", message="Target name and accession do not agree.",
+                        error={"code": "validation_error", "message": "Conflicting exact PDB target identifiers."})
+                    return result
                 service_status = search_result.get("status")
                 if not isinstance(service_status, str):
                     service_status = "resolved" if service_results else "not_found"

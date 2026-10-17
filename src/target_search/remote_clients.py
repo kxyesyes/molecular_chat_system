@@ -41,6 +41,22 @@ _UNIPROT_ACCESSION_RE = re.compile(
 )
 _GENE_SYMBOL_RE = re.compile(r"[A-Z0-9][A-Z0-9_.-]{0,63}")
 _RCSB_POLYMER_ENTITY_ID_RE = re.compile(r"([0-9][A-Z0-9]{3})_([1-9][0-9]*)")
+# wwPDB _exptl.method controlled vocabulary, excluding THEORETICAL MODEL:
+# https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_exptl.method.html
+_EXPERIMENTAL_METHODS = frozenset({
+    "ELECTRON CRYSTALLOGRAPHY",
+    "ELECTRON MICROSCOPY",
+    "EPR",
+    "FIBER DIFFRACTION",
+    "FLUORESCENCE TRANSFER",
+    "INFRARED SPECTROSCOPY",
+    "NEUTRON DIFFRACTION",
+    "POWDER DIFFRACTION",
+    "SOLID-STATE NMR",
+    "SOLUTION NMR",
+    "SOLUTION SCATTERING",
+    "X-RAY DIFFRACTION",
+})
 _SUPPORTED_ORGANISMS = {
     "homo sapiens": ("Homo sapiens", 9606),
     "human": ("Homo sapiens", 9606),
@@ -750,23 +766,46 @@ query Entries($ids: [String!]!) {
         self._http = http
         self._max_structures = max_structures
 
-    def search(self, uniprot_accession: str) -> list[dict[str, Any]]:
+    def search(
+        self, uniprot_accession: str, *, pdb_id: str | None = None
+    ) -> list[dict[str, Any]]:
         deadline = self._http._begin_operation()
         accession = _validate_uniprot_accession(uniprot_accession, "RCSB_PDB")
-        selected_polymer_ids: dict[str, str] = {}
+        if pdb_id is not None:
+            if not isinstance(pdb_id, str) or re.fullmatch(
+                r"[0-9][A-Za-z0-9]{3}", pdb_id
+            ) is None:
+                raise RemoteSourceError(
+                    "RCSB_PDB", "invalid_identifier", retryable=False
+                )
+            pdb_id = pdb_id.upper()
+        selected_polymer_ids: dict[str, set[str]] = {}
         start = 0
         scanned_hits = 0
         search_hit_limit = self._max_structures * self._SEARCH_PAGE_LIMIT
         while (
-            len(selected_polymer_ids) < self._max_structures
+            (pdb_id is not None or len(selected_polymer_ids) < self._max_structures)
             and scanned_hits < search_hit_limit
         ):
             rows = min(self._max_structures, search_hit_limit - scanned_hits)
+            search_request = self._search_request(accession, start=start, rows=rows)
+            if pdb_id is not None:
+                search_request["query"]["nodes"].append(
+                    {
+                        "type": "terminal",
+                        "service": "text",
+                        "parameters": {
+                            "attribute": "rcsb_polymer_entity_container_identifiers.entry_id",
+                            "operator": "exact_match",
+                            "value": pdb_id,
+                        },
+                    }
+                )
             payload = self._http.request_json(
                 "RCSB_PDB",
                 "POST",
                 self.SEARCH_URL,
-                json=self._search_request(accession, start=start, rows=rows),
+                json=search_request,
                 _deadline=deadline,
             )
             self._http._remaining_time("RCSB_PDB", deadline)
@@ -799,12 +838,17 @@ query Entries($ids: [String!]!) {
                     )
                 identifier = item["identifier"].upper()
                 match = _RCSB_POLYMER_ENTITY_ID_RE.fullmatch(identifier)
-                if match is None:
+                if match is None or (
+                    pdb_id is not None and match.group(1) != pdb_id
+                ):
                     raise RemoteSourceError(
                         "RCSB_PDB", "invalid_response", retryable=False
                     )
-                selected_polymer_ids.setdefault(match.group(1), identifier)
-                if len(selected_polymer_ids) == self._max_structures:
+                polymer_ids = selected_polymer_ids.setdefault(match.group(1), set())
+                if pdb_id is not None or not polymer_ids:
+                    polymer_ids.add(identifier)
+                # Exact requests validate the whole page before fetching details.
+                if pdb_id is None and len(selected_polymer_ids) == self._max_structures:
                     break
             scanned_hits += len(page)
             start += len(page)
@@ -851,7 +895,8 @@ query Entries($ids: [String!]!) {
                 entries_by_id[entry_id],
                 entry_id,
                 accession,
-                {selected_polymer_ids[entry_id]},
+                selected_polymer_ids[entry_id],
+                _strict_exact=pdb_id is not None,
             )
             for entry_id in entry_ids
         ]
@@ -1099,6 +1144,8 @@ def _normalize_rcsb_graphql_entry(
     requested_id: str,
     requested_accession: str,
     requested_polymer_ids: set[str],
+    *,
+    _strict_exact: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(entry, dict):
         raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
@@ -1126,6 +1173,8 @@ def _normalize_rcsb_graphql_entry(
         value = experiment.get("method")
         if not isinstance(value, str) or not value.strip():
             raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
+        if _strict_exact and value.strip() not in _EXPERIMENTAL_METHODS:
+            raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
         if method is None:
             method = value.strip()
 
@@ -1134,6 +1183,7 @@ def _normalize_rcsb_graphql_entry(
         raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
     matched_polymer_ids: set[str] = set()
     organisms: set[str] = set()
+    organism_pairs: set[tuple[str, int]] = set()
     for entity in polymer_entities:
         if not isinstance(entity, dict):
             raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
@@ -1183,6 +1233,17 @@ def _normalize_rcsb_graphql_entry(
                 or taxonomy_id <= 0
             ):
                 raise RemoteSourceError("RCSB_PDB", "invalid_response", retryable=False)
+            if _strict_exact:
+                pair = (scientific_name.strip(), taxonomy_id)
+                if pair not in _SUPPORTED_ORGANISMS.values():
+                    raise RemoteSourceError(
+                        "RCSB_PDB", "invalid_response", retryable=False
+                    )
+                organism_pairs.add(pair)
+                if len(organism_pairs) != 1:
+                    raise RemoteSourceError(
+                        "RCSB_PDB", "invalid_response", retryable=False
+                    )
             organisms.add(scientific_name.strip())
         matched_polymer_ids.add(polymer_id)
     if matched_polymer_ids != requested_polymer_ids or not organisms:

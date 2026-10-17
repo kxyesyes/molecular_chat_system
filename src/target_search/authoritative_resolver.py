@@ -14,6 +14,7 @@ from .remote_clients import (
     RemoteSourceError,
     UniProtClient,
 )
+from .exact_pdb import normalize_pdb_id
 
 
 _RESOLUTION_STATUSES = frozenset(
@@ -123,9 +124,14 @@ class AuthoritativeTargetResolver:
         return client
 
     def resolve(
-        self, query: str, organism: str | int = "Homo sapiens"
+        self, query: str, organism: str | int = "Homo sapiens", *, pdb_id: str | None = None
     ) -> TargetResolution:
         lookup_path = ["UniProt"]
+        if pdb_id is not None:
+            try:
+                pdb_id = normalize_pdb_id(pdb_id)
+            except ValueError:
+                return TargetResolution(status="unavailable", source="RCSB_PDB", code="invalid_identifier")
         try:
             target = self._uniprot.resolve(query, organism)
         except RemoteSourceError as exc:
@@ -138,7 +144,7 @@ class AuthoritativeTargetResolver:
         accession = str(target["uniprot_id"])
         lookup_path.append("RCSB_PDB")
         try:
-            structures = self._rcsb.search(accession)
+            structures = self._rcsb.search(accession, **({"pdb_id": pdb_id} if pdb_id is not None else {}))
         except RemoteSourceError as exc:
             return self._failure(exc, lookup_path)
         if structures:
@@ -148,6 +154,9 @@ class AuthoritativeTargetResolver:
                 structures=tuple(structures),
                 lookup_path=tuple(lookup_path),
             )
+
+        if pdb_id is not None:
+            return TargetResolution(status="not_found", lookup_path=tuple(lookup_path))
 
         lookup_path.append("AlphaFold")
         try:

@@ -1319,3 +1319,42 @@ source counts 与上述真实诊断相同，原始 PDB 摘要和版本2.2保持�
 审批/执行、能量、pose 或下载文件。1P0I 仍不合格；需后续明确结构选择及当前会话
 权威检索支持。fac3e351 的 CI run39005148262 在最近只读检查时仍 in_progress，
 不使用历史487fde5e的通过结论替代当前增量，不合并。
+
+### 精确 PDB 检索与 6SAM 来源核验（2026-10-17）
+
+维护者已确认方案 A。精确约束由 planner 保留原文，经工具、service、resolver
+传入 RCSB 官方 entry_id exact_match；默认调用与查询形状保持不变。精确请求
+绕过本地宽泛命中，结构缓存单独绑定 accession/物种/PDB；读回重验身份、来源、
+实验方法和唯一结构集，不回退 AlphaFold 或旧宽泛缓存。
+
+规格审查发现并补测：已缓存错误靶点、逗号切分丢约束、隐含多个 PDB、未知实验
+方法、矛盾物种。最终质量审查再独立复现三项边界：命名 EGFR 被标记 P06276
+覆盖、复合连接词/“或者”后的备选 PDB 被丢弃、搜索路径折叠同 entry 的额外
+命中实体。父边界用例先 **4 failed / 12 passed**；实体路径先 **5 failed /
+77 passed**，逐项修复。命名靶点/标记 accession 通过权威 gene_symbol 绑定，
+不硬编码 accession 对应关系；所有精确命中实体（含跨页）均保留并严格验证。
+
+最终命令：
+
+```text
+python -m pytest tests/test_target_pdb_exact.py tests/test_rcsb_pdb_exact.py tests/test_target_search.py tests/test_target_search_fallback.py tests/agent/test_task_planner.py tests/agent/test_web_docking_sources.py -q -m "not real_external" --basetemp scratch/exact-pdb-quality-final
+python -m compileall -q src scripts
+git diff --check
+```
+
+结果 **664 passed, 1 skipped, 1 deselected / 95.54s**；编译及 diff check 通过。
+独立规格审查批准；最终独立质量审查批准，另做 19 项只读离线聚焦检查通过。
+本增量未改 JS，未重复旧全仓或无关 Node 检查；当前 head CI 不据此推断通过。
+
+此前官方严格精确请求实际返回 6SAM / Homo sapiens / X-RAY DIFFRACTION，
+2.453s；工具结构化请求亦返回 6SAM。6SAM 官方 PDB/CIF 来源及受体检查成功，
+参考为 model1/chainA/L3H603，8 条限制。PDB SHA256
+`471ee4ee714e13da6c07a895bcf2dd5cc29859623fe5942236c65499ced8e7f1`，
+CIF SHA256 `bb0e444acca25f86861aa5003a9353c6e73b3b044f0cc84adb6e23856e67c878`，
+修订2.2。额外只读完整性检查23.156s：保留蛋白/糖基/参考配体的重原子无缺失、
+多余或零占有率问题；三处替代构象均完整，HIS214的B占有率较高、HIS372与
+SER466的A较高。这些不是科学选择或执行授权，最终仍必须页面显式提交。
+
+最终冻结代码服务于14:19:01开始831120行来源预热。当前尚未进行新页面检索、
+READY、Vina或下载；不以任何上述诊断宣称真实闭环完成。没有提交真实结构、
+聊天、运行库、日志或截图。

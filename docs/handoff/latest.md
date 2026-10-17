@@ -1,5 +1,20 @@
 # Latest handoff
 
+## S10 精确 PDB 检索（2026-10-17，6SAM 真实执行待完成）
+
+- 维护者已确认方案 A，并授权 Agent 完成浏览器科学选择及当前 READY 一次性确认，
+  无需重复询问；没有绕过或制造运行时审批。
+- 新增可选精确 PDB 约束，贯穿原始请求、planner、工具、权威 resolver 和 RCSB。
+  精确缓存独立绑定 accession/物种/PDB，不回退宽泛结构或 AlphaFold。
+- 输入歧义、所有命中实体的物种/身份及实验方法均严格校验；命名靶点和 accession
+  同现时，还需与权威 gene_symbol 一致。独立规格及质量审查已批准。
+- 最终相关回归 **664 passed, 1 skipped, 1 deselected / 95.54s**，compileall、
+  diff check 通过；本增量无 JS 修改，没有重复执行无关 Node 或全仓套件。
+- 6SAM 官方来源/受体只读检查成功：参考 L3H A603、蛋白链 A、8 条限制；
+  保留蛋白/糖基/参考的重原子完整性诊断无问题。这不等于 READY 或 Vina 成功。
+- 最终服务于 14:19:01 开始完整来源预热；普通聊天精确检索、科学选择、READY、
+  实际 Vina/构象/下载核对仍待完成。不得用诊断结果替代真实页面验收。
+
 ## S10 官方结构来源兼容修复（2026-10-17，真实闭环待验收）
 
 - 继续 `codex/browser-agent-real-acceptance` / Draft PR #209。修复独立编号的

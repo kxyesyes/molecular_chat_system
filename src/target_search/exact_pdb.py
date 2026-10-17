@@ -1,0 +1,56 @@
+"""Explicit PDB request syntax only; no identity, source or execution authority."""
+import re
+
+
+_LABEL = re.compile(r"(?<![A-Za-z0-9_-])PDB(?:\s+ID)?(?:\s*[:：=]\s*|\s+(?=[0-9]))", re.I)
+_VALUE = re.compile(r"([0-9][A-Za-z0-9]{3})(?=$|[\s、，,;；。)）\]}]|[.!！?？](?:\s|$))")
+_QUALIFIED = re.compile(r"不(?:要|是|查)|勿|别|而非|而是|排除|改(?:为|用)|换成|\b(?:not|except|exclude|instead|without)\b", re.I)
+
+
+def normalize_pdb_id(value):
+    if type(value) is not str or re.fullmatch(r"[0-9][A-Za-z0-9]{3}", value.strip()) is None:
+        raise ValueError("invalid_pdb_constraint")
+    return value.strip().upper()
+
+
+def has_pdb_constraint(query):
+    return type(query) is str and _LABEL.search(query) is not None
+
+
+def target_text_without_pdb(query):
+    """Remove only the already validated constraint and its clause separators."""
+    requested_pdb_id(query)
+    if type(query) is not str or not has_pdb_constraint(query):
+        return query
+    label = _LABEL.search(query)
+    value = _VALUE.match(query, label.end())
+    return query[:label.start()].rstrip(" ,，;；") + " " + query[value.end():].lstrip(" ,，;；")
+
+
+def requested_pdb_id(query):
+    if type(query) is dict:
+        if "pdb_id" not in query:
+            return None
+        targets = [query[k] for k in ("gene_symbol", "target_gene", "uniprot_id", "target_name", "protein_name")
+                   if query.get(k)]
+        if len(targets) != 1 or type(targets[0]) is not str:
+            raise ValueError("ambiguous_pdb_target")
+        return normalize_pdb_id(query["pdb_id"])
+    if type(query) in (list, tuple):
+        if any(requested_pdb_id(item) is not None for item in query):
+            raise ValueError("ambiguous_pdb_constraint")
+        return None
+    if type(query) is not str:
+        return None
+    labels = list(_LABEL.finditer(query))
+    if not labels:
+        return None
+    if len(labels) != 1 or _QUALIFIED.search(query):
+        raise ValueError("ambiguous_pdb_constraint")
+    value = _VALUE.match(query, labels[0].end())
+    if value is None:
+        raise ValueError("invalid_pdb_constraint")
+    if re.match(r"\s*(?:(?:[,，、;；/]|以及|或者|和|及|与|或|\band\b|\bor\b)\s*)+[0-9][A-Za-z0-9]{3}(?![A-Za-z0-9_-])",
+                query[value.end():], re.I):
+        raise ValueError("ambiguous_pdb_constraint")
+    return normalize_pdb_id(value[1])
