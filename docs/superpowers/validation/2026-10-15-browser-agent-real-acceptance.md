@@ -1390,3 +1390,95 @@ python -m pytest tests/agent/test_web_docking_control_http.py tests/agent/test_w
 compileall和diff check通过，独立质量审查批准并另做12项离线检查。没有改JS、
 复制Cookie、伪造owner或绕过审批。14:51:11再次加载修复并完整预热，待后续页面
 科学选择/READY/Vina/构象/下载核验，仍不宣称S10闭环完成。
+
+### S10 6SAM 真实执行与下载闭环完成（2026-10-17）
+
+会话修复`793f17b9` CI run39011586874 completed/success。15:12:52.030最终
+进程完成全部831120行来源预热。普通首页真实精确检索再次返回人源BCHE/P06276、
+仅6SAM，fresh、实验结构、非AlphaFold。
+
+首次修复后任务41d8892a已越过会话401并完整加载结构事实、生成受体和配体，但
+在参数确认前超过原180秒准备预算，HTTP409拒绝；没有READY审批或科学执行。
+没有修改预算或重放该请求。重新发起任务
+`00137413-9b9b-4e01-8386-4bd9f394966c`，在原预算内完成选择/参数/确认单。
+维护者明确授权Agent操作浏览器及READY，本次不是维护者手动点击，也没有伪造
+同意、nonce、输入引用或绕过来源/选择/准备/执行门禁。
+
+实际科学选择：model1/chainA/entity1/P06276/9606；参考L3H A603不保留于受体；
+保留13个糖基以保持已记录连接，移除86水与5个独立unproven组分。HIS214选B、
+HIS372和SER466选A，均完整且占有率较高；8项缺失/截短/变体限制均明确审阅，
+没有补原子、补残基或猜口袋。派生受体358614字节/SHA256
+`dd89f6363c5d3b672e2ea8b66172864517c6fbbca4fa2007aef21800d3643d59`；配体
+1820字节/SHA256 `efc47bf95ee18c785c6ef7b352b48dbda9bc1c231b89627911bc70501c7854c6`。
+选择摘要 `492df679733873d7a1385fa15a94aebafc118d3d808b1e743edafaa3c4134081`。
+配体来自RDKit2025.03.6/ETKDGv3/seed20261015/MMFF94/200步、optimizer return0，
+不是实验构象。参考25重原子经heavy-aabb-margin4-min10-v1产生中心
+(135.9765,112.2345,40.7585)Å、盒尺寸(18.475,14.837,13.677)Å。
+页面确认exhaustiveness8、num_modes9、energy_range3；READY输入摘要与上述一致。
+
+15:21 Agent点击当前“确认并运行Vina”一次，非终端代跑。Vina1.1.2（实际`--version`
+只读核对），二进制SHA256
+`ec7a0d40cad1a10375d8fbb96526b64cc670293d51787460f141c3f3455792d7`，与完成
+清单model_version一致。15:21:23原命令成功、returncode0、attempt1、real_execution
+true、demo_mode false、fallback_used false。页面显示“对接计算完成”、−6.2kcal/mol、
+9构象和计算非实验免责声明。原始PDBQT能量与Vina相对首构象的RMSD边界如下，
+这些RMSD不是与实验参考的重对接RMSD：
+
+| Mode | kcal/mol | RMSD下界Å | RMSD上界Å |
+|---|---:|---:|---:|
+| 1 | -6.2 | 0.000 | 0.000 |
+| 2 | -6.2 | 5.933 | 7.702 |
+| 3 | -6.1 | 2.055 | 2.826 |
+| 4 | -5.9 | 2.208 | 3.115 |
+| 5 | -5.9 | 2.379 | 4.440 |
+| 6 | -5.9 | 1.766 | 3.840 |
+| 7 | -5.7 | 1.218 | 1.483 |
+| 8 | -5.7 | 6.170 | 7.504 |
+| 9 | -5.6 | 2.324 | 4.030 |
+
+页面“下载已验证构象”真实下载到浏览器下载目录`pose.pdbqt`，13833字节。
+下载、原始result.pdbqt、发布artifacts/docking_pose.pdbqt三份逐字节一致：
+`69af21e29773e6d7664a6dd093f70b5b5d2e28078faa288a6bbb7b78311731af`。
+输入SHA256 `8feadcd0b38e42c36663f261a0d42c8e34f70fda117cf63af4d3886abc0c7c14`；
+页面/输入/完成清单的规范化配置摘要
+`17abd1598c35f7bf57a4e720799c8d83aba87118f5a5f6747d78b0bdd9f381c8`一致；物理
+config.txt自身字节摘要为`e9d600174b0faf3512c618054400f9403036f9f26fc0229876b6fe91212c2d58`，
+与run_manifest一致。这是不同对象的摘要，不混为同一哈希。
+
+本机忽略目录只读验证脚本核对所有9个模型，逐model与准备配体的原子身份/顺序/
+类型一致；每pose14原子、13重原子(C9O4)，坐标有限且全部位于确认盒内。按SMILES
+IDX映射原始化学键，重原子键长1.2173–1.4998Å；最佳pose与受体最近重原子距离
+3.0386Å。准备前受体与最终PDBQT的4361个重原子身份及三位小数坐标完全一致，
+13个糖基保留、无参考配体/水/已移除buffer。SQLite只读核对cleanup=settled、
+execution_occupied=0、view_status=SUCCEEDED，1个publication、0 suppression；
+state仍为防重复派发的DISPATCH_RESERVED，不误解为仍在物理执行。独立只读复核
+运行该验证器并核查实际制品/生命周期，无具体差异。
+
+限制必须保留：reduce return1未生成可用显式氢分析受体，analysis hydrogens为
+unavailable；完整氢化/质子化状态未专项验证。Meeko/ADFR和Vina实际完成不证明
+化学或生物有效性。没有相互作用分析，没有重对接RMSD，没有实验验证，Vina随机
+seed未指定。legacy adapter的通用box来源仍记录user_explicit并给出未独立认证
+口袋的警告；本次C上游L3H来源/投影/参数绑定另外核对，不删除该警告。现有首页
+仅结果/下载卡，没有3D查看器；核验为文件/坐标/化学几何级，未宣称渲染3D验收。
+
+截图`outputs/s10-6sam-ready.png`、`outputs/s10-6sam-result-top.png`及下载文件仅
+存本机，不提交。验证脚本亦留忽略输出目录；不提交真实结构/运行库/原始聊天。
+本次源代码修复回归664 passed/1 skipped/1 deselected及会话213 passed/2 skipped、
+16 passed证据保留，不重复旧全仓或无关Node套件。后续只有验收文档更新；保持
+原分支与Draft PR #209，不合并。
+
+本轮准确源码/测试范围（不含此前已推送来源兼容修复）：
+
+- `src/agent/planning/task_planner.py`
+- `src/agent/tools/target_database_tool.py`
+- `src/target_search/exact_pdb.py`
+- `src/target_search/authoritative_resolver.py`
+- `src/target_search/remote_clients.py`
+- `src/target_search/service.py`
+- `src/web/agent_session_config.py`
+- `tests/test_rcsb_pdb_exact.py`
+- `tests/test_target_pdb_exact.py`
+- `tests/test_agent_session_entrypoints.py`
+- `tests/agent/test_web_docking_http.py`
+
+对应设计、计划、validation及handoff文档随提交更新。无JS、依赖或科学算法修改。

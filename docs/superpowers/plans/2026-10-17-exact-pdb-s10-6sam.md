@@ -48,13 +48,13 @@ Include positive labeled/structured requests; invalid, conflicting and negated l
 
 No credentials, raw chat, runtime databases or downloaded structures are committed.
 
-- [ ] Restart only the verified owned 6001 service with the existing isolated Python/toolchain/asset configuration. Wait for this process's real full-source prewarm.
-- [ ] In ordinary chat query human P06276 with `PDB: 6SAM`; verify actual accepted current source contains exactly that experimentally determined entry.
-- [ ] Submit the existing aspirin SMILES docking request for 6SAM, using deposited L3H to define the pocket. Review all source choices and applicable limitations, then explicitly choose the protein, reference, hetero actions and conformers without repair or guessed coordinates.
-- [ ] Inspect input provenance, derived hashes, ligand preparation and pocket geometry; confirm parameters then the current READY through the UI, as expressly authorized by the user.
-- [ ] Compare real Vina executable/version, successful physical completion, original energy table and pose count with the visible result. Inspect actual pose geometry and validated structure rendering.
-- [ ] Download through the visible artifact link. Compare actual downloaded bytes/size/hash with published artifact and original output; check molecule/pose counts and scores. No terminal execution or fabricated result substitutes for this flow.
-- [ ] Update validation/handoff with precise files, commands, failures, skipped checks, browser evidence and actual scientific outputs. Push to original Draft PR #209; do not merge.
+- [x] Restart only the verified owned 6001 service with the existing isolated Python/toolchain/asset configuration. Wait for this process's real full-source prewarm.
+- [x] In ordinary chat query human P06276 with `PDB: 6SAM`; verify actual accepted current source contains exactly that experimentally determined entry.
+- [x] Submit the existing aspirin SMILES docking request for 6SAM, using deposited L3H to define the pocket. Review all source choices and applicable limitations, then explicitly choose the protein, reference, hetero actions and conformers without repair or guessed coordinates.
+- [x] Inspect input provenance, derived hashes, ligand preparation and pocket geometry; confirm parameters then the current READY through the UI, as expressly authorized by the user.
+- [x] Compare real Vina executable/version, successful physical completion, original energy table and pose count with the visible result. Inspect actual pose geometry at file/coordinate/bond level. The existing home card has no 3D viewer; rendered-3D validation was not performed or claimed, and no viewer was added for acceptance.
+- [x] Download through the visible artifact link. Compare actual downloaded bytes/size/hash with published artifact and original output; check molecule/pose counts and scores. No terminal execution or fabricated result substitutes for this flow.
+- [x] Update validation/handoff with precise files, commands, failures, skipped checks, browser evidence and actual scientific outputs. Push to original Draft PR #209; do not merge.
 
 ## Self-review
 
