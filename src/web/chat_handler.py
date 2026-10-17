@@ -5,6 +5,7 @@ import json
 import asyncio
 import logging
 import math
+import re
 import time
 from collections.abc import Mapping
 from typing import List, Dict, Any
@@ -37,6 +38,12 @@ from src.web.prompt_budget import (
 )
 from src.web import agent_result_presentation as result_presentation
 from src.web import chat_prompt_builder as prompt_builder
+from src.web import property_comparison
+from src.web.ranked_target_structures import (
+    rank_followup_kind, ranked_structure_followup, reverse_rank_routing_query,
+)
+from src.web.property_constraints import generation_constraint_report
+from src.agent import evidence_followup
 from src.web.agent_result_presentation import (
     _AGENT_FAILURE_FALLBACK,
     _AGENT_FAILURE_CONTENT_MAX_CHARS,
@@ -111,7 +118,37 @@ class ChatHandler:
         self.refresh_model_config = refresh_model_config
         self.scientific_references = scientific_references
         self.decision_runtime = None
+        self.docking_controller = None
         self._allocation_tasks = set()
+
+    def _ranked_reverse_evidence(self):
+        """Use the current registered tool, never instantiate another producer."""
+        from .reverse_target_followup import RankedReverseEvidence
+        agent = self.agent_system
+        store = getattr(agent, 'state_store', None)
+        registry = getattr(agent, 'tool_registry', None)
+        tools = registry.as_mapping() if registry is not None else getattr(agent, 'tools', {})
+        tool = tools.get('reverse_target_predictor') if isinstance(tools, Mapping) else None
+        tool = getattr(tool, 'tool', tool)
+        if store is not None and callable(getattr(tool, 'validate_current_observation', None)):
+            return RankedReverseEvidence(store, tool)
+        return None
+
+    @staticmethod
+    def _reverse_display_count(message):
+        counts = list(re.finditer(r'前\s*([0-9一二三四五六七八九十百]+)|\btop\s*(five|[0-9]+)\b', message, re.I))
+        if len(counts) != 1 or ''.join(value or '' for value in counts[0].groups()).casefold() not in {'5', '五', 'five'}:
+            return 10
+        # Only a negation governing the count phrase can veto its display cap.
+        # "not docking" in another clause is not a negated ranking request.
+        prefix = re.split(r'[，,;；。.!?！？\n]|\b(?:and|but|then)\b|并且|然后|但是?',
+                          message[:counts[0].start()], flags=re.I)[-1]
+        negated = re.search(r"不要|不用|不是|而是|不只|不仅|别|勿|无需|\b(?:not|never|instead|don['’]t)\b", prefix, re.I)
+        postfix_negated = re.match(
+            r'\s*(?:个)?\s*(?:候选)?(?:靶点)?\s*(?:不要|不用|无需|别|勿)\s*(?:列出|展示|显示)|'
+            r'\s*(?:targets?\s*)?(?:(?:are|is|should|must)\s*)?not\s+(?:be\s+)?(?:requested|wanted|shown|displayed)\b',
+            message[counts[0].end():], re.I)
+        return 10 if negated or postfix_negated else 5
 
     async def _with_allocation(self, websocket, operation, *, cancel_event=None,
                                timeout_result=None, handoff_timeout=False,
@@ -284,28 +321,47 @@ class ChatHandler:
         if self.decision_runtime is not None:
             await self.decision_runtime.handle_websocket(handler=self, websocket=websocket)
             return
+        controller = None
+        if self.docking_controller is not None:
+            from .decision_runtime import _Sender, _enabled_docking_controller, _docking_history
+            controller = _enabled_docking_controller(self)
+        if controller is not None and controller.runtime.closing:
+            await websocket.close(code=1008)
+            return
         await websocket.accept()
         conversation_history: List[Dict[str, Any]] = []
-        
-        # 连接建立后立即发送连接成功消息
-        try:
-            await websocket.send_text(json.dumps({
-                "type": "connection_ready",
-                "message": "连接成功",
-                "model_status": "ready",
-                "timestamp": time.time()
-            }))
-            logger.info("WebSocket连接已建立，发送就绪消息")
-        except Exception as e:
-            logger.error(f"发送连接就绪消息失败: {e}")
+        output = websocket
+        if controller is not None:
+            output = _Sender(websocket)
+            output._runtime = controller.runtime
+            output._chat_controller = controller
+            controller.runtime.sockets.add(output)
         
         try:
+            # Handshake delivery belongs to the same registered socket lifetime.
+            try:
+                await output.send_text(json.dumps({
+                    "type": "connection_ready",
+                    "message": "连接成功",
+                    "model_status": "ready",
+                    "timestamp": time.time(),
+                    **({"capabilities": {"chat_docking": {"preparation_available": True,
+                        "execution_authorized": False}}} if controller is not None else {}),
+                }))
+                logger.info("WebSocket连接已建立，发送就绪消息")
+            except Exception as e:
+                logger.error(f"发送连接就绪消息失败: {e}")
+                if controller is not None:
+                    return
+
             while True:
                 data = await websocket.receive_text()
+                if controller is not None and (controller.runtime.closing or not output.writable):
+                    break
                 try:
-                    message_data = decode_legacy_frame(data)
+                    message_data = decode_legacy_frame(data, allow_docking_controls=controller is not None)
                 except LegacyFrameError as exc:
-                    await websocket.send_text(json.dumps({
+                    await output.send_text(json.dumps({
                         "type": "error",
                         "message": "请求格式无效。",
                         "error": {"code": exc.code},
@@ -314,11 +370,20 @@ class ChatHandler:
 
                 # 处理 ping 消息
                 if message_data.get("type") == "ping":
-                    await websocket.send_text(json.dumps({
+                    await output.send_text(json.dumps({
                         "type": "pong",
                         "timestamp": message_data.get("timestamp", 0)
                     }))
                     continue
+
+                if controller is not None:
+                    if await controller.handle(output, message_data,
+                            history=_docking_history(conversation_history)):
+                        continue
+                    if controller.busy(output):
+                        await output.send({'type': 'error', 'code': 'docking_in_progress',
+                                           'docking_request_rejected': True})
+                        continue
 
                 message = message_data.get("message", "")
                 enable_rag = message_data.get("enable_rag", True)
@@ -335,7 +400,7 @@ class ChatHandler:
                     try:
                         await self.refresh_model_config()
                     except Exception:
-                        await websocket.send_text(json.dumps({
+                        await output.send_text(json.dumps({
                             "type": "error",
                             "message": "本机模型配置不可用；请检查配置文件与目录权限。",
                         }))
@@ -343,11 +408,11 @@ class ChatHandler:
                         return
 
                 # 发送确认
-                await self._send_status(websocket, "Processing your message...")
+                await self._send_status(output, "Processing your message...")
 
                 # 处理消息，传递高级配置
                 await self._process_message(
-                    websocket,
+                    output,
                     message,
                     enable_rag,
                     enable_tools,
@@ -369,12 +434,24 @@ class ChatHandler:
             else:
                 logger.error(f"WebSocket error: {e}")
                 try:
-                    await websocket.send_text(json.dumps({
+                    await output.send_text(json.dumps({
                         "type": "error",
                         "message": f"处理错误: {str(e)[:100]}..."
                     }))
                 except:
                     pass
+        finally:
+            if controller is not None:
+                output.writable = False
+                output.receiver_attached = False
+                output.memory = []
+                output.waiting = None
+                await controller.disconnect(output)
+                runtime = controller.runtime
+                if output._docking_used:
+                    runtime._stop_docking(output)
+                if not any(op.sender is output for op in runtime.docking_operations):
+                    runtime.sockets.discard(output)
     
     async def _process_message(self, websocket: WebSocket, message: str,
                               enable_rag: bool, enable_tools: bool,
@@ -383,14 +460,29 @@ class ChatHandler:
                               conversation_history: List[Dict[str, Any]] | None = None,
                               session_id: str | None = None,
                               reference=None, selection=None):
+        # Consume the prior turn's continuation pointer at admission, before
+        # allocation/model-gate/input-validation early returns. Only a successful
+        # current turn may publish a new one; historical receipts stay unchanged.
+        reverse_context = None
+        if type(conversation_history) is list and conversation_history and type(conversation_history[-1]) is dict:
+            reverse_context = conversation_history[-1].pop('reverse_target_evidence', None)
         async def process(sender):
             return await self._process_message_body(
                 sender, message, enable_rag, enable_tools, rag_count, temperature,
-                mol_count, conversation_history, session_id, reference, selection)
+                mol_count, conversation_history, session_id, reference, selection,
+                reverse_context=reverse_context)
         if enable_tools and self.agent_system is not None:
-            return await self._with_allocation(websocket, process,
+            result = await self._with_allocation(websocket, process,
                 handoff_timeout=isinstance(getattr(self, 'model_request_gate', None), ModelRequestGate))
-        return await process(websocket)
+        else:
+            result = await process(websocket)
+        if self.docking_controller is None:
+            return result
+        from .decision_runtime import _Sender, _enabled_docking_controller, _capture_docking_result
+        if type(websocket) is _Sender and type(result) is dict:
+            controller = _enabled_docking_controller(self, websocket._runtime)
+            if controller is not None:
+                await _capture_docking_result(controller, websocket, result)
 
     @model_request
     async def _process_message_body(self, websocket: WebSocket, message: str,
@@ -399,7 +491,7 @@ class ChatHandler:
                               mol_count: int | None = None,
                               conversation_history: List[Dict[str, Any]] | None = None,
                               session_id: str | None = None,
-                              reference=None, selection=None):
+                              reference=None, selection=None, *, reverse_context=None):
         """处理用户消息 - 性能优化版"""
         # Hold one client for generation, retries and completion metadata.
         request_model = self.model
@@ -417,6 +509,13 @@ class ChatHandler:
             if conversation_history is not None
             else self.conversation_history
         )
+        # Legacy conversational history is not a socket-bound scientific source.
+        # Both fields are supplied by the standard WebSocket entry point.
+        scientific_context_enabled = (
+            isinstance(conversation_history, list)
+            and isinstance(session_id, str) and bool(session_id.strip())
+        )
+        scientific_history = history if scientific_context_enabled else []
         try:
             validate_question(message, self._input_limit())
             for section in ("history", "rag", "tool"):
@@ -432,11 +531,43 @@ class ChatHandler:
         agent_used = False
         agent_response = ""
         agent_result = None
+        docking_result = None
         
         # 初始化 Agent 执行状态
         agent_task = None
         agent_event_queue = None
         live_agent_events = 0
+        property_evidence = None
+        property_answer = None
+        activity_evidence = None
+        reverse_target_evidence = None
+        reverse_answer = None
+        comparison_answer = None
+        execution_message = property_comparison.corrected_property_query(message, scientific_history)
+
+        if rank_followup_kind(message) is not None:
+            ranked_followup = await owned_allocation_call(ranked_structure_followup,
+                message, ([{'reverse_target_evidence': reverse_context}]
+                          if scientific_context_enabled and reverse_context is not None else []),
+                session_id=session_id, enable_tools=enable_tools,
+                boundary=self._ranked_reverse_evidence())
+            await websocket.send_text(json.dumps({'type': 'complete',
+                'content': ranked_followup['content'], 'status': ranked_followup['status']}, ensure_ascii=False))
+            self._append_history(history, {'user': message, 'assistant': ranked_followup['content'],
+                'agent_used': False, 'rag_enabled': False, 'molecules_retrieved': 0,
+                **({'reverse_target_evidence': ranked_followup['context']} if ranked_followup['context'] is not None else {})})
+            return
+
+        # Evidence reuse is socket-local, before molecular-input admission. No
+        # shared handler history, persistence lookup or tool/model execution.
+        followup = evidence_followup.followup_answer(message,
+            scientific_history, session_id)
+        if followup is not None:
+            await websocket.send_text(json.dumps({"type": "complete",
+                "content": followup["final_answer"], "status": followup["status"]}, ensure_ascii=False))
+            self._append_history(history, {"user": message, "assistant": followup["final_answer"],
+                "agent_used": False, "rag_enabled": False, "molecules_retrieved": 0})
+            return
 
         try:
             validated_mol_count = preflight_generation_request(
@@ -469,18 +600,22 @@ class ChatHandler:
         matched_skill = None
         route_decision = None
         resolved_molecule = None
-        routing_message = message
+        routing_message = execution_message
         if self.scientific_references is not None:
             try:
                 resolved_molecule = await owned_allocation_call(
                     self.scientific_references.resolve, message, reference, selection,
                     session_id=session_id, enable_tools=enable_tools)
+                if resolved_molecule is not None:
+                    execution_message = await owned_allocation_call(
+                        self.scientific_references.continuation_query, execution_message,
+                        resolved_molecule, session_id=session_id)
+                    routing_message = resolved_molecule.routing_query(execution_message)
             except ValueError:
                 from .scientific_references import REFERENCE_CLARIFICATION
                 await websocket.send_text(json.dumps({"type": "complete", "content": REFERENCE_CLARIFICATION}, ensure_ascii=False))
                 return
-            if resolved_molecule is not None:
-                routing_message = resolved_molecule.routing_query(message)
+        routing_message = reverse_rank_routing_query(routing_message)
         molecular_input = InputValidator().analyze_molecular_input(routing_message)
         clarification = self._molecular_input_clarification(molecular_input)
         skill_router = getattr(self.agent_system, "skill_router", None)
@@ -574,7 +709,7 @@ class ChatHandler:
 
             agent_task = asyncio.create_task(
                 self._execute_agent(
-                    message,
+                    execution_message,
                     temperature,
                     mol_count,
                     matched_skill,
@@ -617,6 +752,67 @@ class ChatHandler:
                 if not live_agent_events:
                     await self._send_agent_events(websocket, agent_result)
                 presentation_status = self._agent_presentation_status(agent_result)
+                if presentation_status == 'completed' and self.docking_controller is not None:
+                    from .decision_runtime import _enabled_docking_controller
+                    if _enabled_docking_controller(self) is not None:
+                        # Hold the actual execution result before presentation
+                        # rewrites; return it only after successful completion.
+                        docking_result = dict(agent_result)
+                sequence = agent_result.get('tool_result_sequence')
+                reverse_observations = [item for item in sequence if type(item) is dict
+                    and item.get('tool_name') == 'reverse_target_predictor'] if type(sequence) is list else []
+                # Only a single-tool reverse workflow has a pure ranked presentation.
+                # Mixed workflows retain their other tool results and final status.
+                if (scientific_context_enabled and reverse_observations
+                        and presentation_status in {'partial', 'completed'}):
+                    boundary = self._ranked_reverse_evidence()
+                    if boundary is not None:
+                        reverse_target_evidence = await owned_allocation_call(
+                            boundary.capture, agent_result, session_id=session_id)
+                    if len(sequence) == 1:
+                        count = self._reverse_display_count(message)
+                        if reverse_target_evidence is not None:
+                            reverse_answer = await owned_allocation_call(boundary.render_prefix,
+                                reverse_target_evidence, session_id=session_id, count=count)
+                        if reverse_answer is None:
+                            reverse_target_evidence = None
+                            reverse_answer = '排名证据不可用：无法确认同会话、已接受且仍有效的来源；请重新运行反向寻靶。'
+                            agent_result = {**agent_result, 'success': False, 'status': 'partial', 'partial': True}
+                            presentation_status = 'partial'
+                        agent_result = {**agent_result, 'final_answer': reverse_answer}
+                if presentation_status in {"partial", "completed"}:
+                    if scientific_context_enabled:
+                        activity_evidence = evidence_followup.accepted_activity_evidence(
+                            agent_result, message, session_id)
+                    comparison_answer = evidence_followup.comparison_answer(message, agent_result, session_id)
+                    if comparison_answer is not None:
+                        # A presentation can demote incomplete coverage, never
+                        # promote an existing partial run to completed.
+                        if presentation_status == "partial":
+                            comparison_answer.update(success=False, status="partial", partial=True)
+                        agent_result = {**agent_result, **comparison_answer}
+                        presentation_status = self._agent_presentation_status(agent_result)
+                if presentation_status in {"partial", "completed"}:
+                    constraint_report = generation_constraint_report(agent_result, execution_message)
+                    if constraint_report:
+                        agent_result = {**agent_result, "final_answer": constraint_report + "\n\n"
+                                        + agent_result.get("final_answer", "")}
+                    # A confirmed reference supplies identity out of band. Use
+                    # its validated routing view, not SMILES-free user prose;
+                    # leave original request/history and evidence gates intact.
+                    property_query = routing_message if resolved_molecule is not None else message
+                    property_evidence = property_comparison.accepted_property_evidence(
+                        agent_result, property_query, session_id)
+                if presentation_status == "completed":
+                    property_result = property_comparison.descriptor_result(
+                        message, property_evidence, scientific_history, session_id)
+                    if property_result is not None:
+                        property_answer = property_result["final_answer"]
+                        existing_warnings = agent_result.get("warnings")
+                        agent_result = {**agent_result, **property_result,
+                            "warnings": (existing_warnings if isinstance(existing_warnings, list) else [])
+                                        + property_result["warnings"]}
+                        presentation_status = self._agent_presentation_status(agent_result)
                 if presentation_status in {"partial", "completed"}:
                     retrieved_molecules, rag_warnings = await self._send_agent_rag_results(
                         websocket, agent_result, rag_count,
@@ -644,6 +840,10 @@ class ChatHandler:
                         "rag_enabled": enable_rag,
                         "molecules_retrieved": len(retrieved_molecules),
                         "assistant": agent_response,
+                        **({"property_evidence": property_evidence}
+                           if scientific_context_enabled and property_evidence is not None else {}),
+                        **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
+                        **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
                     })
                     return
                 if presentation_status == "completed":
@@ -676,6 +876,10 @@ class ChatHandler:
                         history=history,
                     )
                     return
+            except AllocationStopped:
+                # Allocation owns the terminal. A late event/result is control
+                # flow, not a presentation failure to retry on the sealed socket.
+                return
             except Exception:
                 logger.error(
                     "Agent result processing failed; exception details omitted"
@@ -714,8 +918,16 @@ class ChatHandler:
             finally:
                 # Event delivery may fail while the executor thread still owns
                 # the model. Drain it before releasing the request lease.
-                if not agent_task.done():
-                    await finish_on_cancel(agent_task)
+                if agent_task.done():
+                    # An event send may lose the deadline race before the
+                    # settled worker was awaited. Retrieve its exception too.
+                    if not agent_task.cancelled():
+                        agent_task.exception()
+                else:
+                    try:
+                        await finish_on_cancel(agent_task)
+                    except AllocationStopped:
+                        pass  # Expected settlement after allocation expiry.
 
         # Ordinary chat/retrieval and post-tool summaries are not allocation.
         finish_allocation()
@@ -782,7 +994,7 @@ class ChatHandler:
             agent_used
             and agent_response
             and is_workflow_result
-            and not summarize_workflow
+            and (not summarize_workflow or property_answer is not None or comparison_answer is not None or reverse_answer is not None)
         ):
             full_response = agent_response
             await websocket.send_text(json.dumps({
@@ -797,8 +1009,12 @@ class ChatHandler:
                 "rag_enabled": enable_rag,
                 "molecules_retrieved": len(retrieved_molecules),
                 "assistant": full_response,
+                **({"property_evidence": property_evidence}
+                   if scientific_context_enabled and property_evidence is not None else {}),
+                **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
+                **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
             })
-            return
+            return docking_result
 
         if agent_used and agent_response:
             try:
@@ -814,7 +1030,9 @@ class ChatHandler:
                     "error": {"code": "interpretation_budget_exceeded"},
                 }, ensure_ascii=False))
                 self._append_history(history, {"user": message, "assistant": content, "agent_used": True})
-                return
+                # Same post-delivery evidence hook as normal presentation; this
+                # captured execution result is not a preparation or approval.
+                return docking_result
         else:
             prompt = self._build_prompt(
                 message,
@@ -905,8 +1123,13 @@ class ChatHandler:
             "agent_response": agent_response if agent_used else None,
             "rag_enabled": enable_rag,
             "molecules_retrieved": len(retrieved_molecules),
-            "assistant": full_response
+            "assistant": full_response,
+            **({"property_evidence": property_evidence}
+               if scientific_context_enabled and property_evidence is not None else {}),
+            **({"activity_evidence": activity_evidence} if activity_evidence is not None else {}),
+            **({'reverse_target_evidence': reverse_target_evidence} if reverse_target_evidence is not None else {}),
         })
+        return docking_result
 
     @staticmethod
     def _append_history(history, entry):
@@ -1504,6 +1727,10 @@ class ChatHandler:
             from src.agent.contracts.target_request import TARGET_CLARIFICATION
 
             return TARGET_CLARIFICATION
+        if "target_reference_required" in route_decision.reasons:
+            return "请提供已确认的靶点名称或 UniProt 标识；当前没有可绑定的排名靶点，不能猜测或运行对接。"
+        if "target_subtype_clarification_required" in route_decision.reasons:
+            return "请明确要查询的具体靶点亚型或 UniProt 标识；不同亚型的结构不能混用。本次未生成分子或运行对接。"
         if "invalid SMILES" in reasons:
             return (
                 "你提供的 SMILES 无效，请检查并更正结构后重试。"
@@ -1520,6 +1747,8 @@ class ChatHandler:
                 "SMILES。收到结构后，系统会调用 RDKit 计算，而不会由语言模型"
                 "猜测数值。"
             )
+        if route_decision.selected_skill == "docking_simulation":
+            return "请提供明确的配体 SMILES/文件、受体结构及对接口袋参数（center/size）；输入不足，本次未运行对接。"
         return ""
 
     @staticmethod

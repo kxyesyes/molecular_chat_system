@@ -1,5 +1,172 @@
 # Latest handoff
 
+## PR #209 聊天对接 worker 与解析性质身份（2026-10-17）
+
+- `5f22015c` 新CI 11/11 success；最终审查新增1 P1/1 P2，未带着新问题合并。聊天对接根为process-local，main入口现对严格flag1且workers>1在env-file/CLI解析后、reload降级/探测/app/server前非零拒绝，不默降worker或禁功能；外部launcher仍须部署保证single，非万能检测。其它功能main多worker原支持边界保持。
+- 已确认候选性质证据改用受控resolved routing身份验证，而不是无SMILES用户原文。原message/history/descriptor意图及validated/provenance/finite/canonical/唯一行门禁不改；下一轮仅算新分子，复用真实prior。错owner、撤销/未确认源、foreign row、缺值仍拒绝。
+- 正式RED分别12/28与2/5；父性质115 passed/7既有警告、联合91 passed。两切片独立SPEC→QUALITY最终PASS，无important finding；main shell退出码与disabled/CLI/env/reload控制通过。compileall/diff通过；strict health因隔离资产缺失未跑，4个app/probe回归未跑、1 Windows POSIX项skip，均未冒充部署验收。
+- 原导入期日志副作用保留，不声称零文件写入。没有真实服务/Vina/凭据/生产DB或6SAM制品变更；[完整记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。随修复发布，新head完整CI仍待核对，之后按已授权Squash209→集成复审CI→Squash210，不动D:用户工作区。
+
+## PR #209 套件导入隔离夹具修复（2026-10-17）
+
+- `601b8b7a` CI 9成功，Agent14194 passed/2 skipped/1 failed及汇总失败；root含真实Linuxwatchdog已通过，18条审查均解决。唯一失败在新测试的字符串monkeypatch找不到lazy父包的validators属性，尚未触发生产断言。
+- 新参数确定性RED1/2后改为importlib获取模块对象再注入；原验证不可用/invalid/raw16上限断言不变。父369+261相关回归通过（重叠），SPEC3及QUALITY7+8控制独立PASS，注入命中真实validator globals且teardown身份/父属性完整恢复；compileall/diff通过。
+- 仅测试和记录，无生产/CI配置或科学结果修改。首个不存在测试文件的命令未跑测试、不计pass；准确失败与复跑见[验收记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。新提交完整CI尚待核对，未合并，不盲目重跑旧workflow。
+
+## PR #209 七项 P2 与 CI 观察竞态闭环（2026-10-17）
+
+- `2eec7648` CI 为9成功、root失败及汇总失败；root6134 passed/106 skipped/1 failed，实际是已退出PID的procfs读取抛ESRCH，不是存活断言失败。先确定性RED1/4，精确捕获ProcessLookupError；原Linux watchdog、5s/2s/12s、生产/CI配置不变。本机41 passed/2 Linux skips，独立SPEC/QUALITY均PASS；仍须真实Linux新CI。
+- 新七条P2先验证后修复：已支持中文阈值运算符、窄混合否定、canonical比较批次、有限知识对象lookup门禁、verb-first新反向请求、语气it、对接摘要预算回退证据承接。复审发现的共享否定、方法比较评分及混合目标输入泄漏均补RED关闭；路由与实际lookup输入用同一视图，原query/history/audit不改。
+- 全部切片独立SPEC→QUALITY最终PASS，无重要finding。最终父交叉227 passed，规划worker受影响2213、web595/294及独立867等为重叠批次，不累计唯一总数；compileall/diff通过。详细失败、环境隔离及命令见[验收记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。
+- 范围限制保留：有限知识别名/窄activity→ADMET语法，不声称任意NLP完整支持；cap5/10不新增cap1；label+and既有执行语法限制不当作新成功。没有真实Vina/服务网络/生产库/凭据或6SAM制品改动。
+- 随修复发布，当前新提交CI仍待单独核对，未合并。维护者授权顺序Squash #209，再正常同步新main进六文档#210、复审及新CI后Squash #210；不启用auto-merge、不绕过质量或审批门禁、不动D:用户工作区。
+
+## PR #209 语言、单位与 freshphrase 兼容性审查（2026-10-17）
+
+- `f86e3c29` 新CI 11/11 success；随后最终门禁读到另3条审查（英文文字阈值、target-role合法单位、prediction/action-first fresh反向请求），继续修复而未合并。
+- 英文数值词法只保守记unknown，不新增计算运算符；明确阈值不被relative improvement救活。单位按mass/area指标消费，目标附加/切换/错误单位仍澄清。fullmatch接纳已有prediction/action-first句式及严格并列显示后缀，不任意拆“并”，否定/旧引用保持。
+- 正式RED及复审反例均关闭：最终语言/单位SPEC433+116控制、原QUALITY166+35控制PASS；web SPEC170+12控制、原QUALITY278+78控制PASS，无重要finding。父10文件1131 passed/3既有SWIG警告，最终联合241 passed；compileall/diff通过，批次重叠不累计。
+- 仍不增加cap1，保留cap5/10及完整10行证据/provenance/原文/工具和SMILES门禁；不新增真实Vina或模型结果、不动6SAM制品。随补丁发布，新head须单独CI绿后才可Squash #209，再按门禁处理#210；[完整验收](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。
+
+## PR #209 新增 GitHub 审查四项修复（2026-10-17）
+
+- `7db27b2e` 新 CI 11/11 success；最终门禁发现另四条自动审查（1 P1 /3 P2），因此仍未合并，不把 CI 绿等同于审查关闭。
+- 修复英文合法双阈值、仅绝对优化目标的匹配证据状态、数量短语局部否定和带排名第一的新分子反向请求。unsupported 数值语法统一进 unknown，组合前缀线性扫描，不伪造 equality/relative improvement；缺失/失败/foreign/结构约束保持未验证。
+- 先 RED 后最小实现，复审反例均补失败测试关闭。父最终数值/规划回归662 passed，web/数值/原越权验收联合523 passed（重叠）；数值 SPEC/原QUALITY及web SPEC/freshQUALITY最终均PASS，无未关闭重要 finding。compileall/diff通过。
+- 完整十行 ranking/evidence/checkpoint/provenance不截断，执行与history保留原文；cap仍仅5/10，top1本次只修fresh dispatch，不宣称显示cap1。未重跑真实科学服务或变更6SAM制品。
+- 随本次修复发布；新提交仍须完整CI通过，才可按已授权顺序Squash #209后集成/审查/验证#210。逐项RED、失败、命令与限制见[验收记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。
+
+## PR #209 新 CI 兼容性修复（2026-10-17）
+
+- `49b4fec6` 的 CI 9 项成功，Agent 13683 passed /2 skipped /1 failed，汇总随之失败；唯一失败是原 HF004 普通生成只授予 generator 的断言。没有盲目重跑或放宽验收。
+- 新增回归 RED 4 failed /19 controls 后，路由白名单与工具可用性计分均按当前请求过滤：无界或禁止计算不授予 property，显式有界且未禁止才保留；catalog、planner 与原 CI 断言不改。
+- 父回归 328 +207 passed（重叠批次）；独立 SPEC PASS172 tests+114 controls，QUALITY PASS170 tests+原HF004/HF005两项+84 controls，无重要 finding；compileall/diff通过。准确命令及失败见下方验收记录。
+- 随补丁发布，本提交的新 head CI 仍待核对，暂未合并。#209 → #210 有序 Squash 授权不变；不修改科学结果、运行审批或 D: 用户工作区。
+
+## PR #209 剩余自动审查关闭与有序合并门禁（2026-10-17）
+
+- 维护者已确认完成修复、独立复审、新 CI 后按 #209 → #210 分别 Squash merge；这项最新授权覆盖下方历史“暂不合并”，不允许绕过失败、保护或审批边界。
+- 基线 `1c567b30` 的剩余反馈已补 RED 后最小修复：普通阈值设计保留生成并追加身份绑定的独立性质计算，缺失结果明确未验证；无关禁止对接不阻断精确 PDB，但否定/混合标签歧义仍拒绝；泛知识“的性质”不误路由，中文化合物主体保留。
+- SPEC 与 QUALITY 发现的禁止计算/性质保留及混合标签边界均先补失败回归；最终 SPEC PASS，原 QUALITY 审查者确认三项 P2 全关闭、无剩余 finding。最终联合回归 739 passed，独立 QUALITY 157 passed +31 离线探针；compileall/diff 通过。批次重叠，不累计唯一总数。
+- 本记录随修复发布，当前新提交 CI 尚待核对，未合并；随后远端结果更新 PR 最新状态。#210 必须收到新 main、保留六文档范围及预热/多 worker 指导、独立复审并通过自己的新 CI，才可合并。
+- [完整 RED/GREEN、审查与限制](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。本轮不重跑真实 Vina，不改变既有 6SAM 结果，不提交运行资产/凭据，也不改动 D: 主工作区。
+
+## PR #209 最终独立审查修复（2026-10-17）
+
+- 在原 `codex/browser-agent-real-acceptance` 分支修复 1 P1 / 4 P2，基线 `ff1d3c06`；先 RED 后最小实现。工具链在每次配体命令前重验，archive/CCD 已知形式电荷冲突拒绝，名称/accession 逐项绑定，新增描述符阈值不再静默遗漏，SMILES/小数/显式路径点号不破坏否定。
+- 独立需求/质量复审期间发现多目标/未知名称、中文路径和复合阈值遗漏，均补失败回归并交原审查者关闭；最终 SPEC 和 QUALITY 五项全部 PASS，无未关闭的重要 finding。
+- 父级最终集成/精确检索 685 passed，审批/当前执行上下文 196 passed，执行证据/复用 116 passed、2 skipped；compileall/diff 通过。审查者独立回归与探针、长临时根前置失败和修正过程保留在验收记录，不累计重叠批次为总数。
+- 本记录随修复提交；新 head CI 必须单独核对，最终结果写入 PR #209 最新状态段，不沿用 ff1d3c06 的 11/11，也不创建自引用文档提交链。
+- 验证命令、RED/GREEN、重叠批次、平台跳过及科学限制见 [验收记录](../superpowers/validation/2026-10-15-browser-agent-real-acceptance.md#2026-10-17-最终独立审查修复基线-ff1d3c06)。不重跑真实服务/Vina，不修改既有 6SAM 科学结果或下载文件，不提交运行资产/日志/凭据。
+- PR 在本次修复前已 Open / Ready for review；下文旧 Draft 表述为历史状态。维护者明确要求暂不合并，不启用 auto-merge，不把 Agent 复审当作人工审批。
+
+## PR #209 文档提交 CI 已全通过（2026-10-17）
+
+- 真实6SAM闭环验收文档提交`39728e8afd4c2a7cb953e0ea21dfbeb9d483f08b`的
+  [quality run39014083190](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39014083190)
+  已completed/success，11/11 job均success：static-quality、九个Python分片、
+  offline-quality汇总。运行于07:53:07 UTC完成；没有主动重跑已通过job。
+- 只读复核PR #209仍Open/Draft，base=main、mergeable=true、merged=false。
+  没有合并、关闭、转Ready或变更分支保护；mergeable并不代表必需审查已满足。
+- 本次仅补验收/交接文档，不改变已核验的科学制品或代码。若此记录提交触发新
+  head CI，须单独回收结果；上述通过严格绑定39728e8a，不冒充后续提交的证据。
+
+## S10 6SAM 真实闭环完成（2026-10-17，文件级构象核验）
+
+- 方案 A 由维护者确认；浏览器选择和当前 READY 点击由维护者明确委托 Agent，
+  本次 Agent 通过正常页面完成，没有构造 nonce、回放授权或终端代跑 Vina。
+- 最终服务15:12:52完成831120行预热；普通聊天再次精确返回人源BCHE/P06276
+  的6SAM。旧准备41d8892a在参数确认前超过180秒被拒，未执行，未扩大时限。
+- 新任务`00137413-9b9b-4e01-8386-4bd9f394966c`修订2，在原准备时限内完成
+  选择/参数/READY。链A，L3H A603定义25重原子口袋；13糖基保留、86水与5
+  unproven组分移除；HIS214=B、HIS372=A、SER466=A，8限制均明确审阅。
+- 15:21 Agent点击当次READY；真实Vina1.1.2退出0，attempt1，9构象，最佳
+  −6.2 kcal/mol；demo=false/fallback=false。页面SUCCEEDED与原始文件一致。
+- 页面下载`pose.pdbqt`13833字节，与原输出、发布制品完全一致，SHA256
+  `69af21e29773e6d7664a6dd093f70b5b5d2e28078faa288a6bbb7b78311731af`。
+- 独立文件核查通过：每pose14原子/13重原子(C9O4)，坐标有限且在口袋内；
+  4361受体重原子身份/坐标完整保留，13糖基保留；cleanup=settled、执行占用0、
+  view=SUCCEEDED，1 publication/0 suppression。独立只读复核未发现差异。
+- 限制：reduce没有产生可用的显式氢分析受体；未验证完整质子化状态，未做相互
+  作用分析、重对接RMSD或实验验证，Vina seed未指定。首页只有下载卡，未做
+  3D查看器渲染验收，构象核验为真实文件/化学键长/坐标级，不冒称可视化验收。
+- `793f17b9` CI run39011586874 success；此前`e97f49d6` CI亦success。
+  本次新增修复及测试见下文，保留原Draft PR #209，未合并。截图、下载、运行库、
+  原始结构、验证脚本均留在本机忽略目录或下载目录，没有提交。
+
+## S10 当前浏览器来源已纳入 6SAM；会话路径修复（2026-10-17）
+
+- `e97f49d6` 已推送，当前 head CI run39009545946 success。最终精确检索代码
+  服务于14:40:15完成831120行预热；14:43普通首页实际返回人源P06276、仅6SAM。
+- 同会话S10来源准备成功，任务显示6SAM和正确原始摘要、修订2.2、参考1条；但
+  查看结构失败。浏览器取消请求证实401 / Browser session required。
+- 根因是生产 `AgentEntrySessionMiddleware` 未包含 `/api/agent/docking/`，
+  不是科学事实不合格。仅补现有会话校验前缀；共享HTTP夹具使用生产entry类，
+  覆盖所有既有来源/所有权/Origin/审批/nonce边界，不放宽验证。
+- 新entry用例7项先因私有路径夹具位置错误失败（不算缺陷RED），改用系统临时
+  目录后7项明确因owner=None失败；修复后213 passed/2 skipped（160.99s），
+  来源/控制/HTTP envelope与prepare deadline16 passed（203.04s）。编译/diff通过。
+- 独立根因规格核对及质量审查批准，质量审查另12项离线检查通过。14:51:11
+  服务加载该修复并重新完整预热；尚无READY、审批、Vina或下载结果。
+
+## S10 精确 PDB 检索（2026-10-17，6SAM 真实执行待完成）
+
+- 维护者已确认方案 A，并授权 Agent 完成浏览器科学选择及当前 READY 一次性确认，
+  无需重复询问；没有绕过或制造运行时审批。
+- 新增可选精确 PDB 约束，贯穿原始请求、planner、工具、权威 resolver 和 RCSB。
+  精确缓存独立绑定 accession/物种/PDB，不回退宽泛结构或 AlphaFold。
+- 输入歧义、所有命中实体的物种/身份及实验方法均严格校验；命名靶点和 accession
+  同现时，还需与权威 gene_symbol 一致。独立规格及质量审查已批准。
+- 最终相关回归 **664 passed, 1 skipped, 1 deselected / 95.54s**，compileall、
+  diff check 通过；本增量无 JS 修改，没有重复执行无关 Node 或全仓套件。
+- 6SAM 官方来源/受体只读检查成功：参考 L3H A603、蛋白链 A、8 条限制；
+  保留蛋白/糖基/参考的重原子完整性诊断无问题。这不等于 READY 或 Vina 成功。
+- 最终服务于 14:19:01 开始完整来源预热；普通聊天精确检索、科学选择、READY、
+  实际 Vina/构象/下载核对仍待完成。不得用诊断结果替代真实页面验收。
+
+## S10 官方结构来源兼容修复（2026-10-17，真实闭环待验收）
+
+- 继续 `codex/browser-agent-real-acceptance` / Draft PR #209。修复独立编号的
+  PDB REVDAT/mmCIF 修订历史、独立更新的 CCD 日期、零占有率水注释、明确缺失
+  残基上的序列差异，以及无需重复 modification_feature 的显式糖基化连接。
+- 原子完整清单、坐标/占有率/B 因子/电荷、CCD 原子/键、准确身份和离去原子
+  仍严格核对；不修补坐标、不猜配体角色、不扩大执行或确认权限。
+- 来源/投影/口袋/准备/任务门禁聚焦回归 **748 passed**；`compileall -q src scripts`
+  和 `git diff --check` 通过。独立只读审查无可操作发现，另有 16 项聚焦验证。
+- 受体派生/准备生命周期/Web 协调器/输入及执行上下文消费者回归 **684 passed**
+  （348.26s）。兼容修复已提交并推送 `fac3e351`，不代表当前 head CI 或 S10 通过。
+- 官方 1P0I/P06276 来源专用诊断现已成功（24.187s，生命周期 settled），但
+  明确 `input_ready=False` / `execution_authorized=False`，不是 READY 或 Vina 证据。
+- 后续真实受体检查亦成功（24.453s，两 owner 均 settled）：1 条蛋白选择、
+  **0 个合格参考配体**、11 条限制。不得将 unproven 配体升级为口袋依据。
+- strict health 缺省路径为 21/23（工作树未配置的反向来源/RAG），指定现有
+  S10 资产路径后 23/23；没有复制或提交这些运行资产。
+- 本地 6001 于 13:20:11 完成全部 831120 行预热；当前普通首页 S03 实际返回人源
+  P06276。真实 S10 来源准备已越过原来的误拒绝，进入结构选择阶段。
+- 另修正前端将合法 `reference_residue=0` 误报为“确认已失效”的缺陷：现在明确说明
+  无合格参考配体，保持等待输入，禁用所有结构准备提交，不触发请求或执行。
+  Node 49/49、父控制器集成、模板静态契约 7 项及语法检查通过；独立只读审查批准。
+- 13:26 实际页面已显示上述缺参说明、原始结构摘要、`input_ready=false` 和
+  `execution_authorized=false`。1P0I 仍不具备合格口袋参考；READY/Vina/构象/下载
+  均未发生。后续需另选并纳入当前权威检索的合格结构，不能绕过来源选择门禁。
+- 详细依据和 RED/GREEN 见
+  `docs/superpowers/validation/2026-10-15-browser-agent-real-acceptance.md`。
+
+## PR #209 普通聊天对接 D6 集成（2026-10-17）
+
+- 分支 `codex/browser-agent-real-acceptance`；继续同一 Draft PR，不直接修改 main。
+- 共享聊天 controller、两模式既有 receiver、可信默认关闭装配、内联来源/参数/
+  一次性确认/结果卡已通过独立规格与质量审查。未增加 receiver 或模型权限恢复。
+- 当前聚焦 controller/receiver/服务端 DOM 85 passed；app 72 passed；旧 transport/
+  lifecycle 283 passed；首页 71/71，全部 44 个 Node 文件与 Python 编译通过。
+- 完整离线 pytest 正在运行，尚不是最终通过证据；最后 acceptance 实际发送回执
+  补丁由当前 85 项重跑覆盖，须与先启动的完整运行分别记录。strict health 23/23。
+- C 默认仍关闭；真实服务、当前 S03/S10、用户亲自点击 READY、真实 pose/能量/
+  下载摘要核验、最终集成审查及当前 head CI 为剩余 D7 门禁。没有新 Vina 结果，
+  开发/提交/合并授权不替代运行时人工确认。
+- 完整命令、RED/GREEN、审查与平台限制见
+  `docs/superpowers/validation/2026-10-15-browser-agent-real-acceptance.md`。
+
 ## PR #183 恢复逻辑兼容审查（2026-10-15）
 
 - 以当前 `main` 的 `web_request`、owner-scoped continuation CAS 和独立进程恢复契约为准；

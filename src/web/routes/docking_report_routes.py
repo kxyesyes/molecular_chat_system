@@ -6,6 +6,7 @@ from fastapi import Body, HTTPException, Request
 from src.web.api_response import api_error
 
 from .route_compat import lazy_dependency
+from .docking_consent_guard import report_consent_guard
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -24,9 +25,13 @@ def _register_docking_report_routes(
         if not docking_service:
             raise HTTPException(status_code=503, detail="分子对接服务不可用")
 
-        from .docking_routes import _owned_history, _validate_job_id
+        from .docking_routes import _owned_history, _validate_job_id, _session_id
         _validate_job_id(job_id)
+        _session_id(request)
+        guard = report_consent_guard(app)
+        guard.require_legacy(job_id)
         _owned_history(request, docking_service.work_dir, job_id)
+        guard.require_legacy(job_id)
 
         try:
             job_dir = os.path.join(docking_service.work_dir, f"docking_{job_id}")

@@ -22,7 +22,7 @@ _LABEL = re.compile(
 # "以" or backtrack across "为". Keep the whole body, including unknown prose.
 _TARGET_ROLE = re.compile(r'以([^以为。！？!?;；\r\n]+)为\s*(靶点)')
 _ROLE_DESIGN = re.compile(r'\s*(?:[,，]\s*)?(?:设计|生成)')
-_ROLE_DESIGN_BOUNDARY = re.compile(r'[,，.。;；!！?？\r\n]')
+_ROLE_DESIGN_BOUNDARY = re.compile(r'[,，.。;；!！?？\r\n]|(?=要求|限制|满足)')
 _ROLE_DESIGN_OBJECT = re.compile(
     r'(?:[0-9零〇一二两三四五六七八九十百千万]+个?)?'
     r'(?:类药)?(?:候选)?(?:分子|化合物|结构)',
@@ -118,6 +118,21 @@ _ANALYSIS_JOIN = re.compile(
     r'[ \t]*(?:和|及|与|并|、|[,，]|(?<![A-Za-z0-9_-])and(?![A-Za-z0-9_-]))[ \t]*',
     re.I,
 )
+_DESIGN_PROPERTY_VALUE = (
+    r'[ \t]*(?:不超过|不低于|不大于|不小于|小于|大于|低于|高于|<=|>=|<|>|≤|≥)'
+    r'[ \t]*[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)'
+    r'(?![A-Za-z0-9_.])[ \t]*'
+)
+_DESIGN_PROPERTY_CONSTRAINT = re.compile(
+    r'(?:要求|限制|满足)?[ \t]*(?:'
+    r'(?:分子量|MW|molecular[ \t]+weight)' + _DESIGN_PROPERTY_VALUE
+    + r'(?:(?:Da|g/mol|g·mol-1)(?![A-Za-z0-9_/-]))?'
+    + r'|TPSA' + _DESIGN_PROPERTY_VALUE
+    + r'(?:(?:Å²|A²|A2)(?![A-Za-z0-9_/]))?'
+    + r'|(?:logP|QED|HBA|HBD)' + _DESIGN_PROPERTY_VALUE + r')', re.I,
+)
+_DESIGN_OUTPUT = re.compile(r'(?:返回|输出|给出)[ \t]*(?:SMILES|分子结构)(?![A-Za-z0-9_])', re.I)
+_DESIGN_CONSTRAINT_CHECK = re.compile(r'(?:逐项)?(?:检查|验证)(?:上述|所有)?(?:约束|条件)')
 
 
 def _analysis_item(query: str, position: int, end: int) -> tuple[int, str] | None:
@@ -192,10 +207,20 @@ def _role_tail(query: str, start: int, end: int) -> tuple[list[str], list[tuple[
             if position == end:
                 position = connector.start()
                 break  # A conjunction requires a following action.
-        elif separator is None:
+        elif separator is None and not (
+            position == start and query.startswith(('要求', '限制', '满足'), position)
+        ):
             break
         clause_start = position
-        if head := _ANALYSIS_HEAD.match(query, position, end):
+        # Consume bounded non-target instructions in full, preserving the
+        # original query for generation and verification. Any unknown suffix
+        # still reaches the conservative clarification path below.
+        constraint = _DESIGN_PROPERTY_CONSTRAINT.match(query, position, end)
+        output = _DESIGN_OUTPUT.match(query, position, end)
+        check = _DESIGN_CONSTRAINT_CHECK.match(query, position, end)
+        if constraint or output or check:
+            position = (constraint or output or check).end()
+        elif head := _ANALYSIS_HEAD.match(query, position, end):
             item = _analysis_item(query, head.end(), end)
             if item is None:
                 break

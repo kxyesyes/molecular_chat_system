@@ -35,11 +35,44 @@ from .decision_request import (
     assess_whole_request, prepare_with_intent, ASSESSMENT_REVISION,
 )
 from .ordinary_capabilities import ORIGINAL_FOUR
+from . import docking_consent as _docking
 
 
 _now = time.monotonic
 _WEB_WAITING_TTL_SECONDS = 15 * 60
 _WEB_REQUEST_VERSION = 1
+
+
+def _enabled_docking_controller(handler, runtime=None):
+    """Only trusted assembly can opt the existing receiver into C."""
+    controller = getattr(handler, 'docking_controller', None)
+    if controller is None:
+        return None
+    from .docking_chat_controller import DockingChatController
+    if (type(controller) is DockingChatController and controller.enabled is True
+            and (runtime is None or controller.runtime is runtime)):
+        return controller
+    return None
+
+
+def _docking_history(memory):
+    """Plain recent pairs only; never serialize server scientific pointers."""
+    if type(memory) is not list:
+        return []
+    pairs = [pair for pair in memory[-16:] if type(pair) is dict
+             and all(type(pair.get(role)) is str and len(pair[role]) <= 16384
+                     for role in ('user', 'assistant'))]
+    return [{'role': role, 'content': pair[role]}
+            for pair in pairs for role in ('user', 'assistant')]
+
+
+async def _capture_docking_result(controller, sender, result):
+    # A post-delivery optional source failure must not rewrite the delivered
+    # answer or leave an older pointer presented as this accepted result.
+    try:
+        await controller.accept_result(sender, result)
+    except Exception:
+        sender._docking_structure = None
 
 
 class _SemanticFailure(Exception):
@@ -124,6 +157,7 @@ class _Turn:
     intent_requests: int = 0
     admission_carry: object = None
     admission_exchange: object = None
+    docking_result: dict | None = None
 
     def cancel(self):
         if self.result_started or self.finishing or self.cancel_event.is_set():
@@ -145,13 +179,140 @@ class _Sender:
         self.waiting = None
         self.close_attempted = False
         self.close_delivered = False
+        self._runtime = None
+        self.receiver_attached = True
+        self._docking_used = False
+        self._docking_generation = 0
+        self._docking_close = None
 
-    async def send_text(self, text, *, on_sent=None):
+    async def send_docking(self, text, *, identity):
+        """C-only non-draining gate. No callbacks or publication authority.
+
+        Caller cancellation returns a fixed undeliverable receipt; the runtime
+        retains physical send/close. Standalone A2 senders fail closed here.
+        """
+        return await self._send_docking_operation(text, identity=identity)
+
+    async def send_docking_view(self, coordinator, *, root_id):
+        """Capture and send only this socket owner's original live C root.
+
+        Sequence and generation come from the SAME physical operation. The
+        original feedback slice includes lock queueing, capture and sending;
+        a late capture cannot renew it or issue another send owner.
+        """
+        deadline = _docking._now() + _docking.FEEDBACK_SECONDS
+        from .docking_coordinator import DockingRequestCoordinator, _label
+        from .docking_view import capture_docking_view
+        if (type(coordinator) is not DockingRequestCoordinator or not _label(root_id)
+                or type(self._docking_generation) is not int
+                or not 0 <= self._docking_generation < 2**53 - 1):
+            return _docking.DockingDelivery('undeliverable')
+        session = self.websocket.scope.get('agent_session_id')
+        root = coordinator._owned(root_id, session)
+        if root is None:
+            return _docking.DockingDelivery('undeliverable')
+        identity = dict(root_id=root_id, task_id=root.task_id, turn_id=root.origin,
+                        revision=root.accepted_revision, sequence=self._docking_generation + 1)
+        preparation = root.preparation_id
+
+        def current(*, released_failure=False):
+            captured = coordinator._owned(root_id, session)
+            released = (released_failure and captured is None and root.closed
+                and root_id not in coordinator._roots and root.close_state in {'confirmed', 'not_acquired'})
+            return (self.websocket.scope.get('agent_session_id') == session
+                and (captured is root or released)
+                and root.task_id == identity['task_id'] and root.origin == identity['turn_id']
+                and root.preparation_id == preparation and root.accepted_revision == identity['revision'])
+
+        async def capture(binding):
+            if not current():
+                raise ValueError('docking_view_unavailable')
+            event = await capture_docking_view(coordinator, root_id=root_id,
+                owner_session_id=session, origin_turn_id=identity['turn_id'],
+                sequence=binding.identity.sequence, send_generation=binding.send_generation)
+            if (not current(released_failure=event['terminal'] and event['view_status'] != 'SUCCEEDED')
+                    or event['revision'] != binding.identity.revision):
+                raise ValueError('docking_view_unavailable')
+            return json.dumps(event, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+
+        return await self._send_docking_operation(None, identity=identity, capture=capture, deadline=deadline)
+
+    async def _send_docking_operation(self, text, *, identity, capture=None, deadline=None):
+        deadline = _docking._now() + _docking.FEEDBACK_SECONDS if deadline is None else deadline
+        owner = self._runtime
+        if (not isinstance(owner, WebDecisionRuntime) or self not in owner.sockets
+                or owner.closing or not self.receiver_attached or not self.writable
+                or _docking._now() >= deadline):
+            return _docking.DockingDelivery('undeliverable')
+        try:
+            frozen = _docking.DockingIdentity.parse(identity)
+            if capture is None and (type(text) is not str or len(text.encode('utf-8')) > _docking.MAX_TEXT_BYTES):
+                raise ValueError('invalid transport text')
+        except (ValueError, TypeError, UnicodeError):
+            return _docking.DockingDelivery('undeliverable')
+        if sum(op.kind == 'send' for op in owner.docking_operations) >= _docking.MAX_PENDING_SENDS:
+            return _docking.DockingDelivery('undeliverable')
+        self._docking_used = True
+        self._docking_generation += 1
+        op = _docking._PhysicalOperation(self, 'send', _docking._Binding(
+            frozen, self._docking_generation, deadline))
+        owner.docking_operations.add(op)  # Reserve BEFORE any physical dispatch.
+
+        async def physical_send():
+            try:
+                async with self.lock:
+                    if (not op.live or not self.writable or owner.closing
+                            or _docking._now() >= op.binding.deadline):
+                        return
+                    op.started = True
+                    payload = text if capture is None else await capture(op.binding)
+                    if (not op.live or not self.writable or owner.closing
+                            or not self.receiver_attached or _docking._now() >= op.binding.deadline):
+                        return
+                    if type(payload) is not str or len(payload.encode('utf-8')) > _docking.MAX_TEXT_BYTES:
+                        return
+                    await self.websocket.send_text(payload)
+                    op.succeeded = True  # Physical fact, NOT delivery authority.
+            except (Exception, asyncio.CancelledError):
+                pass  # Never retain raw transport diagnostics.
+            finally:
+                op.settled = True
+
+        operation = physical_send()
+        try:
+            op.task = asyncio.create_task(operation, name='docking-physical-send')
+        except (Exception, asyncio.CancelledError):
+            operation.close()
+            op.settled = True  # No dispatch occurred; reservation can roll back.
+            op.seal('undeliverable')
+            owner._stop_docking(self)
+            owner._docking_changed(op)
+            return op.receipt
+        op.task.add_done_callback(lambda task: owner._docking_done(op, task))
+        try:
+            await asyncio.wait({op.task}, timeout=max(0.0, deadline - _docking._now()))
+        except asyncio.CancelledError:
+            owner._stop_docking(self)
+        else:
+            if (op.task.done() and op.settled and op.succeeded and op.live
+                    and self.writable and not owner.closing and _docking._now() < deadline):
+                op.seal('delivered')
+            else:
+                owner._stop_docking(self)
+        owner._docking_changed(op)
+        return op.receipt
+
+    async def send_text(self, text, *, on_sent=None, capture=None):
         async def deliver():
             async with self.lock:
                 if not self.writable:
                     raise ConnectionError('Decision socket is unavailable')
-                await self.websocket.send_text(text)
+                # Trusted synchronous capture runs after queueing, immediately
+                # before transport. None suppresses a no-longer-owned receipt.
+                payload = text if capture is None else capture()
+                if payload is None:
+                    return
+                await self.websocket.send_text(payload)
                 if on_sent is not None:
                     on_sent()
         try:
@@ -166,6 +327,39 @@ class _Sender:
 
     async def close_failed_delivery(self):
         """One bounded close after physical turn drain; never invent delivery."""
+        if self._docking_used:
+            # A2 callers still drain. C's logical gate never calls this method.
+            deadline = time.monotonic() + SEND_TIMEOUT_SECONDS
+            stop_close = False
+            self._runtime._stop_docking(self)
+            while True:
+                pending = [op.task for op in self._runtime.docking_operations
+                           if op.sender is self and op.task is not None and not op.task.done()]
+                if not pending:
+                    return
+                if not stop_close:
+                    try:
+                        done, _ = await asyncio.wait(pending,
+                            timeout=max(0.0, deadline - time.monotonic()),
+                            return_when=asyncio.FIRST_COMPLETED)
+                        if done:
+                            continue
+                    except asyncio.CancelledError:
+                        pass
+                    stop_close = True
+                # Preserve A2's timeout/caller-cancel -> cancel once -> drain.
+                # The shared close can appear only after a retained C send
+                # settles; that does not restart this A2 invocation's budget.
+                if self._docking_close is not None:
+                    self._docking_close.cancel_once()
+                for task in pending:
+                    try:
+                        await retain_until_done(task)
+                    except asyncio.CancelledError:
+                        # As in A2's original close path, caller cancellation
+                        # cannot finish close before its physical I/O drains.
+                        # Send settlement may have just registered the close.
+                        pass
         if self.close_attempted:
             return
         self.close_attempted = True
@@ -236,10 +430,98 @@ class WebDecisionRuntime:
         self.active_owners = set()
         self.tasks = set()
         self.sockets = set()
+        # Live/unresolved operations, not a growing delivery history or a
+        # replacement scheduler. Confirmed settled records are removed.
+        self.docking_operations = set()
         self.closing = False
         self.semantic = getattr(application, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1'
         self.timeout_seconds = 300.0
         self.max_model_requests = 16
+
+    async def send_docking(self, sender, text, *, identity):
+        """Trusted future D6 hook; no receiver/profile activation in this slice."""
+        if not isinstance(sender, _Sender) or sender._runtime is not self:
+            return _docking.DockingDelivery('undeliverable')
+        return await sender.send_docking(text, identity=identity)
+
+    def _stop_docking(self, sender):
+        sender.writable = False
+        sender.waiting = None
+        sender.memory = []
+        for op in tuple(self.docking_operations):
+            if op.sender is sender and op.kind == 'send':
+                op.seal('undeliverable')
+                op.cancel_once()
+        if sender._docking_used and not sender.close_attempted:
+            sender.close_attempted = True  # Shared close-once claim.
+            sender._docking_close = _docking._PhysicalOperation(sender, 'close')
+            self.docking_operations.add(sender._docking_close)
+        self._queue_docking_close(sender)
+
+    def _queue_docking_close(self, sender):
+        op = sender._docking_close
+        if op is None or op.task is not None or op.failed or op.settled:
+            return
+        if any(item.sender is sender and item.kind == 'send' and not item.settled
+               for item in self.docking_operations):
+            return  # Never even schedule close while a C send is physical.
+
+        async def physical_close():
+            try:
+                async with sender.lock:  # Also excludes every A2 physical send.
+                    op.started = True
+                    await sender.websocket.close(code=1011, reason='Decision result delivery failed')
+                    sender.close_delivered = op.succeeded = True
+            except (Exception, asyncio.CancelledError):
+                op.failed = True  # Close error is unresolved, never retried.
+            finally:
+                op.settled = True
+
+        operation = physical_close()
+        try:
+            op.task = asyncio.create_task(operation, name='docking-physical-close')
+        except (Exception, asyncio.CancelledError):
+            operation.close()
+            op.failed = True  # Required cleanup did NOT happen: retain reservation.
+            return
+        op.task.add_done_callback(lambda task: self._docking_done(op, task))
+
+    def _docking_done(self, op, task):
+        # A task cancelled before entry has no physical send. A cancelled close
+        # has not fulfilled the close obligation and cannot release ownership.
+        if task.cancelled() and not op.started:
+            op.settled = True
+            op.failed = op.kind == 'close'
+        self._docking_changed(op)
+
+    def _docking_changed(self, op):
+        if op.settled and not op.failed and (op.kind == 'close' or op.receipt is not None):
+            self.docking_operations.discard(op)
+        self._queue_docking_close(op.sender)
+        if not op.sender.receiver_attached and not any(
+                item.sender is op.sender for item in self.docking_operations):
+            self.sockets.discard(op.sender)
+
+    async def _observe_docking_shutdown(self):
+        # Separate observation window; timeout never releases ownership. No
+        # timer, cancelled wrapper, or retry is accepted as physical proof.
+        deadline = _docking._now() + _docking.SHUTDOWN_SECONDS
+        while self.docking_operations:
+            for op in tuple(self.docking_operations):
+                if op.kind == 'close' and op.started:
+                    op.cancel_once()
+            pending = {op.task for op in self.docking_operations
+                       if op.task is not None and not op.task.done()}
+            remaining = deadline - _docking._now()
+            if not pending or remaining <= 0:
+                raise WorkerCleanupError()
+            try:
+                done, _ = await asyncio.wait(pending, timeout=remaining,
+                                             return_when=asyncio.FIRST_COMPLETED)
+            except asyncio.CancelledError:
+                raise WorkerCleanupError() from None
+            if not done:
+                raise WorkerCleanupError()
 
     def _clock(self):
         return _now() if self.semantic else time.monotonic()
@@ -634,6 +916,12 @@ class WebDecisionRuntime:
                        if self.semantic else {}))
                 if turn.allocation_timed_out:
                     return  # Never mutate a newer turn's history/waiting state.
+                if (_enabled_docking_controller(handler, self) is not None
+                        and type(result) is AgentResult and result.success is True
+                        and result.outcome == RunOutcome.COMPLETED):
+                    # The actual bridge return is authoritative, not a model
+                    # frame. Its legacy dictionary omits the server trace.
+                    turn.docking_result = {**result.to_legacy_dict(), 'trace_id': turn.trace_id}
                 bridge_returned_at = self._clock()
                 if (result.metadata.get('waiting_for_input') is True
                         and type(result.metadata.get('continuation_id')) is str):
@@ -763,15 +1051,19 @@ class WebDecisionRuntime:
             self.active_owners.discard(turn)
         if sender.writable and turn.pending_complete is not None:
             try:
+                capture_delivered = False
+                terminal_status = json.loads(turn.pending_complete).get('status')
                 if turn.history_update is not None:
                     frame = json.loads(turn.pending_complete)
                     frame['metadata'] = {'history_omission': turn.history_update.omission,
                                          'history_evicted_pairs': turn.history_update.evicted_pairs}
                     turn.pending_complete = json.dumps(frame, ensure_ascii=False, allow_nan=False)
                 def completed():
+                    nonlocal capture_delivered
                     # An in-flight physical send may finish after shutdown or
                     # disconnect cleared this socket's server-only state.
                     if sender.writable and not self.closing:
+                        capture_delivered = terminal_status == 'completed'
                         if turn.history_update is not None:
                             sender.memory = turn.history_update.memory
                         if turn.next_waiting is not None:
@@ -796,11 +1088,16 @@ class WebDecisionRuntime:
                     turn.terminal_sent = True
                 await sender.send_text(turn.pending_complete,
                     on_sent=completed)
+                controller = _enabled_docking_controller(handler, self)
+                if capture_delivered and turn.docking_result is not None and controller is not None:
+                    await _capture_docking_result(controller, sender, turn.docking_result)
             except (asyncio.CancelledError, ConnectionError, WebSocketDisconnect, asyncio.TimeoutError):
                 sender.writable = False
                 if self.semantic:
                     sender.waiting = None
                     turn.next_waiting = None
+            finally:
+                turn.docking_result = None
 
     async def handle_websocket(self, *, handler, websocket):
         if self.closing or not websocket.scope.get('agent_session_id'):
@@ -808,6 +1105,9 @@ class WebDecisionRuntime:
             return
         await websocket.accept()
         sender, turn = _Sender(websocket), None
+        sender._runtime = self
+        controller = _enabled_docking_controller(handler, self)
+        sender._chat_controller = controller
         self.sockets.add(sender)
         receiver = asyncio.current_task()
 
@@ -826,7 +1126,9 @@ class WebDecisionRuntime:
                 'capabilities': {'cancel': True, 'rag_retrieval': False,
                                  'scientific_tools': sorted(set(self.registry.as_mapping()) & {
                                      'property_calculator', 'drug_likeness_assessment',
-                                     'activity_predictor', 'target_database_search'})}})
+                                     'activity_predictor', 'target_database_search'}),
+                                 **({'chat_docking': {'preparation_available': True,
+                                      'execution_authorized': False}} if controller is not None else {})}})
             while not self.closing:
                 raw = await websocket.receive_text()
                 if not sender.writable:
@@ -858,14 +1160,43 @@ class WebDecisionRuntime:
                     else:
                         await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
-                if kind not in {'chat', 'resume', 'abandon'}:
+                allowed_kinds = {'chat', 'resume', 'abandon'}
+                if controller is not None:
+                    allowed_kinds.update({'docking_refine', 'docking_watch'})
+                if kind not in allowed_kinds:
                     await sender.send({'type': 'error', 'code': 'invalid_control'})
                     continue
-                if turn is not None and not turn.task.done() and not turn.terminal_sent:
+                # C controls address an existing attachment, not a new A2
+                # turn. Preserve their strict validation/status semantics even
+                # while an unrelated ordinary turn owns the model worker.
+                if controller is not None and kind in {'docking_refine', 'docking_watch'}:
+                    if await controller.handle(sender, payload):
+                        continue
+                if (turn is not None and not turn.task.done()
+                        and (not turn.terminal_sent
+                             or controller is not None and not turn.allocation_timed_out)):
                     await sender.send({'type': 'error', 'code': 'turn_in_progress'})
                     continue
                 if turn is not None and turn.task.done():
                     turn.task.result()
+                if controller is not None:
+                    # C must not bypass normal envelope validation, nor allocate
+                    # an A2 turn/trace before the controller accepts its own root.
+                    if kind == 'chat':
+                        try:
+                            validate_request_envelope(payload,
+                                session_id=sender.scope['agent_session_id'],
+                                trace_id='docking-envelope')
+                        except DecisionAdmissionError:
+                            pass  # Preserve ordinary invalid-request handling.
+                        else:
+                            if await controller.handle(sender, payload,
+                                    history=_docking_history(sender.memory)):
+                                continue
+                    if controller.busy(sender):
+                        await sender.send({'type': 'error', 'code': 'docking_in_progress',
+                                           'docking_request_rejected': True})
+                        continue
                 waiting = None
                 if kind in {'resume', 'abandon'}:
                     expected = {'type', 'trace_id', 'continuation_id'} | ({'message'} if kind == 'resume' else set())
@@ -936,7 +1267,13 @@ class WebDecisionRuntime:
             sender.writable = False
             sender.waiting = None
             sender.memory = []
-            self.sockets.discard(sender)
+            sender.receiver_attached = False
+            if controller is not None:
+                await controller.disconnect(sender)
+            if sender._docking_used:
+                self._stop_docking(sender)
+            if not any(op.sender is sender for op in self.docking_operations):
+                self.sockets.discard(sender)
             if turn is not None and turn.task is not None:
                 if not turn.task.done():
                     turn.cancel_event.set()
@@ -950,9 +1287,15 @@ class WebDecisionRuntime:
             sender.writable = False
             sender.waiting = None
             sender.memory = []
+            controller = getattr(sender, '_chat_controller', None)
+            if controller is not None:
+                await controller.disconnect(sender)
+            if sender._docking_used:
+                self._stop_docking(sender)
         owners = tuple(self.active_owners)
         for turn in owners:
             turn.cancel()
+        await self._observe_docking_shutdown()
         for turn in owners:
             if turn.task is not None:
                 await retain_until_done(turn.task)

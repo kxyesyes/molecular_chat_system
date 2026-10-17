@@ -115,7 +115,13 @@ async def _invoke_isolated_activity(
         waiter = asyncio.create_task(asyncio.to_thread(process.wait))
         try:
             remaining = max(0.001, deadline - asyncio.get_running_loop().time())
-            envelope = await asyncio.wait_for(asyncio.shield(waiter), timeout=remaining)
+            # Unlike wait_for(shield(...)) on Python 3.10, wait does not lose
+            # caller cancellation when the result completes in the same turn.
+            # It also leaves the waiter owned by process cleanup on timeout.
+            done, _ = await asyncio.wait({waiter}, timeout=remaining)
+            if not done:
+                raise asyncio.TimeoutError
+            envelope = waiter.result()
         except asyncio.TimeoutError:
             await _stop_activity_process(process, waiter)
             raise HTTPException(

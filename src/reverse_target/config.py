@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def get_reverse_target_prewarm_timeout() -> int:
+    """Server-only full-source acquisition budget; never a request override."""
+    value = os.environ.get("REVERSE_TARGET_PREWARM_TIMEOUT_SECONDS", "1800")
+    if re.fullmatch(r"[1-9][0-9]{2,3}", value) is None or not 120 <= int(value) <= 3600:
+        raise ValueError("Invalid reverse-target prewarm timeout configuration.")
+    return int(value)
 
 
 def configure_console_output() -> None:

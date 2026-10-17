@@ -650,11 +650,35 @@ class WorkflowRunSession:
                 journal.model_version = observed_model_version
             candidate_source = step.metadata.get("candidate_source")
             if candidate_source and has_usable_observation(result):
-                result = align_candidate_results(
-                    self.outputs.get(str(candidate_source)),
-                    result,
-                    required=step.required,
-                )
+                recorded_digest = result.provenance.output_digest if result.provenance else None
+                # Static alignment adds identities and may discard rows. Verify
+                # the producer's digest BEFORE that transformation; never seal
+                # a mismatched provider payload as authoritative evidence.
+                if not self.dynamic and recorded_digest is not None:
+                    try:
+                        verified = recorded_digest == EvidenceLedger.output_digest(result.data)
+                    except (ValueError, TypeError):
+                        verified = False
+                    if not verified:
+                        result = ToolResult.error_result(
+                            step.tool_name, AgentErrorCode.INVALID_OUTPUT,
+                            "Candidate source output digest mismatch before alignment",
+                            warnings=list(result.warnings),
+                            quality={"step_id": step.name, "output_key": step.output_key,
+                                     "validated": False},
+                        )
+                if has_usable_observation(result):
+                    result = align_candidate_results(
+                        self.outputs.get(str(candidate_source)),
+                        result,
+                        required=step.required,
+                    )
+                    if (not self.dynamic and recorded_digest is not None
+                            and has_usable_observation(result)):
+                        result.provenance = replace(
+                            result.provenance,
+                            output_digest=EvidenceLedger.output_digest(result.data),
+                        )
             journal.reused_result_changed = journal.checkpoint_reused and prior_outcome != (
                 result.success, result.status, result.error)
             if self._observation_prepare is not None:

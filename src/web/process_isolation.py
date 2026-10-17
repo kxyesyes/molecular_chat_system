@@ -47,7 +47,13 @@ async def start_isolated_process(
         if timeout is None:
             await asyncio.shield(start_task)
         else:
-            await asyncio.wait_for(asyncio.shield(start_task), timeout=timeout)
+            # Python 3.10 wait_for can swallow caller cancellation when the
+            # shielded task completes in the same loop turn. wait preserves
+            # cancellation without cancelling the thread's lifecycle task.
+            done, _ = await asyncio.wait({start_task}, timeout=timeout)
+            if not done:
+                raise asyncio.TimeoutError
+            start_task.result()
     except (asyncio.CancelledError, asyncio.TimeoutError):
         start_task.add_done_callback(_observe_background_task)
         try:

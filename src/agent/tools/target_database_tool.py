@@ -4,12 +4,49 @@
 
 from typing import Any, Dict
 import logging
+import re
 import threading
-from src.target_identifiers import canonical_target_identifier
+from src.target_identifiers import canonical_target_identifier, target_mentions
+from src.target_search.exact_pdb import requested_pdb_id, target_text_without_pdb
 
 from .base_tool import BaseMolecularTool
 
 logger = logging.getLogger(__name__)
+
+# Only explicitly labelled accessions (or a complete short lookup command)
+# are separated from prose. Never truncate an unknown identifier to a valid
+# prefix, or treat arbitrary words in a protein name as a target identifier.
+_ACCESSION = r"(?:[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9](?:[A-Z][A-Z0-9]{2}[0-9]){1,2})"
+_ACCESSION_END = r"(?=$|[\s、，,;；。)）\]}]|\.(?:\s|$))"
+_LABELLED_ACCESSION = re.compile(
+    rf"(?<![A-Za-z0-9_-])UniProt(?:\s+(?:ID|accession))?\s*[:：=]?\s*"
+    rf"({_ACCESSION}){_ACCESSION_END}", re.I,
+)
+_ACCESSION_LABEL = re.compile(r"(?<![A-Za-z0-9_-])UniProt(?![A-Za-z0-9_-])", re.I)
+_QUALIFIED_LOOKUP = re.compile(
+    r"不(?:要|是|查)|勿|别|而非|而是|排除|改(?:为|用)|换成|\b(?:not|except|exclude|instead|without)\b", re.I,
+)
+_ACCESSION_JOIN = re.compile(r"\s*(?:和|及|与|、|[,，]|\band\b|\bor\b)\s*", re.I)
+_NEXT_ACCESSION = re.compile(rf"({_ACCESSION}){_ACCESSION_END}", re.I)
+_ACCESSION_LOOKUP = re.compile(
+    rf"(?:请\s*)?(?:搜索|查找|查询|search|find|lookup)\s*[:：]?\s*"
+    rf"({_ACCESSION})[。.!！]?", re.I,
+)
+# A deliberately bounded identity grammar, not a vocabulary of protein names.
+# Unknown explicit names are compared literally to service gene evidence.
+_NAMED_ACCESSION = re.compile(
+    rf"([^\W\d][\w-]*)\s*(?:[(（]\s*{_LABELLED_ACCESSION.pattern}\s*[)）]"
+    rf"|[;；,，]\s*{_LABELLED_ACCESSION.pattern})", re.I,
+)
+_ACCESSION_ITEM = rf"(?:{_NAMED_ACCESSION.pattern}|{_LABELLED_ACCESSION.pattern}|{_ACCESSION})"
+_EXPLICIT_ACCESSION_QUERY = re.compile(
+    rf"\s*(?:(?:find|search|lookup|compare)\s+|(?:请\s*)?(?:查找|搜索(?:靶点数据库)?|查询|比较)\s*[:：]?\s*)?"
+    rf"(?:人源\s*)?(?:丁酰胆碱酯酶\s+)?{_ACCESSION_ITEM}"
+    rf"(?:{_ACCESSION_JOIN.pattern}{_ACCESSION_ITEM})*"
+    r"\s*(?:(?:for\s+)?(?:experimental\s+)?structures|(?:的实验结构|的结构)"
+    r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?)?"
+    r"[。.！!]?\s*", re.I,
+)
 
 
 class TargetDatabaseTool(BaseMolecularTool):
@@ -75,7 +112,50 @@ class TargetDatabaseTool(BaseMolecularTool):
 
     def execute(self, query: Any) -> Dict[str, Any]:
         result = self._create_base_result(query)
-        search_queries = self._search_queries(query)
+        try:
+            pdb_id = requested_pdb_id(query)
+        except ValueError:
+            result.update(status="invalid_input", message="Please provide one unambiguous PDB identifier.",
+                error={"code": "validation_error", "message": "Invalid or ambiguous PDB constraint."})
+            return result
+        target_query = target_text_without_pdb(query) if pdb_id is not None else query
+        search_queries = self._search_queries(target_query)
+        # Preserve names when prose was reduced to accession lookup keys, but
+        # leave unconstrained name/family and multi-target searches unchanged.
+        named_targets = target_mentions(target_query) if type(target_query) is str and (
+            pdb_id is not None or (search_queries and all(
+                re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries
+            ))
+        ) else ()
+        accession_names = {}
+        if (type(target_query) is str and _ACCESSION_LABEL.search(target_query)
+                and search_queries and all(re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries)):
+            pair_text = re.sub(r"^\s*(?:请\s*)?(?:查找|搜索(?:靶点数据库)?|查询|比较)\s*[:：]?\s*", "", target_query)
+            pair_text = re.sub(r"^\s*人源\s*", "", pair_text)
+            pairs = list(_NAMED_ACCESSION.finditer(pair_text))
+            for pair in pairs:
+                name = canonical_target_identifier(pair[1]) or pair[1].upper()
+                accession_names[(pair[2] or pair[3]).upper()] = name
+            if (not _EXPLICIT_ACCESSION_QUERY.fullmatch(target_query)
+                    or (pairs and (len(pairs) != len(accession_names)
+                        or set(accession_names) != set(search_queries)
+                        or not set(named_targets).issubset(accession_names.values())))):
+                result.update(status="invalid_input", message="Please clarify explicit target name and accession pairs.",
+                    error={"code": "validation_error", "message": "Ambiguous target name and accession identifiers."})
+                return result
+        if pdb_id is None and len(named_targets) > 1 and not accession_names:
+            result.update(status="invalid_input", message="Please clarify one target name for the accession lookup.",
+                error={"code": "validation_error", "message": "Ambiguous target name and accession identifiers."})
+            return result
+        if pdb_id is not None and type(target_query) is str and not _ACCESSION_LABEL.search(target_query):
+            from src.agent.contracts.target_request import analyze_target_request
+            request = analyze_target_request(target_query)
+            if request.targets and not request.needs_clarification:
+                search_queries = list(request.targets)
+        if pdb_id is not None and (len(search_queries) != 1 or len(named_targets) > 1):
+            result.update(status="invalid_input", message="An exact PDB lookup requires one target.",
+                error={"code": "validation_error", "message": "Ambiguous exact PDB target."})
+            return result
         if not search_queries:
             result["message"] = "No target search keyword was found."
             result["reasoning"] = (
@@ -96,9 +176,24 @@ class TargetDatabaseTool(BaseMolecularTool):
             service_retryabilities: list[bool] = []
             result["warnings"] = []
             for search_query in search_queries:
-                search_result = service.search_targets(search_query)
+                search_result = service.search_targets(search_query,
+                    **({"pdb_id": pdb_id} if pdb_id is not None else {}))
                 searched.append(search_query)
                 service_results = search_result.get("results", [])
+                # A labelled accession is a lookup key, not permission to drop
+                # a named target. Bind both against authoritative gene evidence.
+                expected_name = accession_names.get(search_query) or (named_targets[0] if named_targets else None)
+                if expected_name and any(
+                    not isinstance(target, dict) or
+                    (canonical_target_identifier(target.get("gene_symbol")) or
+                        str(target.get("gene_symbol") or "").strip().upper()) != expected_name or
+                    (search_query in accession_names and
+                        str(target.get("uniprot_id") or "").strip().upper() != search_query)
+                    for target in service_results
+                ):
+                    result.update(status="invalid_input", message="Target name and accession do not agree.",
+                        error={"code": "validation_error", "message": "Conflicting target name and accession identifiers."})
+                    return result
                 service_status = search_result.get("status")
                 if not isinstance(service_status, str):
                     service_status = "resolved" if service_results else "not_found"
@@ -299,6 +394,12 @@ class TargetDatabaseTool(BaseMolecularTool):
                         lines.append(
                             f"  - {structure_id} ({source}; {recommendation})"
                         )
+                        ligands = structure.get("ligand_ids")
+                        if isinstance(ligands, list) and all(isinstance(value, str) for value in ligands):
+                            ligand_text = ", ".join(ligands) if ligands else "none recorded"
+                        else:
+                            ligand_text = "unavailable"
+                        lines.append(f"    Ligand IDs: {ligand_text}; pocket role not verified.")
                 elif structures_unavailable:
                     lines.append("- Recommended structures: unavailable")
                 else:
@@ -429,6 +530,49 @@ class TargetDatabaseTool(BaseMolecularTool):
 
         def collect(value: Any) -> None:
             if isinstance(value, str):
+                labelled = list(_LABELLED_ACCESSION.finditer(value))
+                if (len(labelled) != len(_ACCESSION_LABEL.findall(value))
+                        or _QUALIFIED_LOOKUP.search(value)
+                        or (labelled and re.search(
+                            r"(?:和|及|与|、|/|\band\b|\bor\b)\s*$",
+                            value[:labelled[0].start()], re.I))):
+                    add(value)
+                    return
+                accessions = []
+                accession_spans = set()
+                for match in labelled:
+                    accessions.append(match[1])
+                    accession_spans.add(match.span(1))
+                    position = match.end()
+                    while join := _ACCESSION_JOIN.match(value, position):
+                        position = join.end()
+                        if _ACCESSION_LABEL.match(value, position):
+                            break  # The outer loop handles the next label.
+                        following = _NEXT_ACCESSION.match(value, position)
+                        if following:
+                            accessions.append(following[1])
+                            accession_spans.add(following.span(1))
+                            position = following.end()
+                        else:
+                            # Unknown list members (including Chinese names)
+                            # and dangling joins must not silently disappear.
+                            add(value)
+                            return
+                short_lookup = _ACCESSION_LOOKUP.fullmatch(value.strip())
+                if short_lookup:
+                    add(short_lookup[1].upper())
+                    return
+                if accessions:
+                    # Check occurrences, not only valid token values: an
+                    # accession embedded in a malformed token must also be
+                    # accounted for, even if it repeats an extracted value.
+                    all_mentions = {match.span() for match in re.finditer(_ACCESSION, value, re.I)}
+                    if all_mentions != accession_spans:
+                        add(value)
+                        return
+                    for accession in accessions:
+                        add(accession.upper())
+                    return
                 add(value)
                 return
             if isinstance(value, dict):

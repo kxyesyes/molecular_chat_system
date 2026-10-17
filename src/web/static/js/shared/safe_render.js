@@ -96,12 +96,15 @@
       const trustedHost = trustedHosts.some(
         (host) => parsed.hostname === host || parsed.hostname.endsWith(`.${host}`),
       );
+      // Rank continuation emits only canonical UniProt entry pages. Do not
+      // grant the entire domain (or its subdomains) redirect privileges.
+      const uniprotEntry = /^https:\/\/www\.uniprot\.org\/uniprotkb\/[A-Z0-9]{6}(?:[A-Z0-9]{4})?\/entry$/.test(raw);
       if (
         parsed.protocol !== "https:" ||
         parsed.username ||
         parsed.password ||
         parsed.port ||
-        !trustedHost
+        !(trustedHost || uniprotEntry)
       ) {
         return "#";
       }

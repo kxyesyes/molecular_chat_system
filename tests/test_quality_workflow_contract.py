@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -19,6 +20,8 @@ AGENT_WEB_TARGET = (
 AGENT_CORE_TARGET = "tests/agent " + " ".join(
     "--ignore=" + path for path in AGENT_WEB_TARGET.split()
 )
+AGENT_DOCKING_TARGET = "tests/agent/test_*docking*.py"
+AGENT_PUBLICATION_TARGET = "tests/agent/test_docking_publication*.py"
 
 
 def test_quality_workflow_uses_complete_cpu_profile() -> None:
@@ -89,11 +92,13 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         "${{ matrix.pytest_target }} -q -p no:cacheprovider "
         "${{ matrix.pytest_args }}"
     ) in workflow
-    assert workflow.count("command_timeout:") == 7
+    assert workflow.count("command_timeout:") == 9
     assert "command_timeout: 180" in workflow
     for target in (
         AGENT_CORE_TARGET,
         AGENT_WEB_TARGET,
+        AGENT_DOCKING_TARGET,
+        AGENT_PUBLICATION_TARGET,
         "tests/sandbox_broker/test_api.py",
         "tests/sandbox_broker --ignore=tests/sandbox_broker/test_api.py",
         "tests/task_runtime",
@@ -118,16 +123,32 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
               _quality_jobs()["python-tests"]["strategy"]["matrix"]["include"]}
     assert matrix["agent"] == {
         "name": "agent", "pytest_target": AGENT_CORE_TARGET,
+        "pytest_exclude": AGENT_DOCKING_TARGET,
         "pytest_args": "-vv --durations=25", "command_timeout": 1200,
     }
     assert matrix["agent-web-lifecycle"] == {
         "name": "agent-web-lifecycle", "pytest_target": AGENT_WEB_TARGET,
         "pytest_args": "-vv --durations=25", "command_timeout": 600,
     }
+    assert matrix["agent-docking"] == {
+        "name": "agent-docking", "pytest_target": AGENT_DOCKING_TARGET,
+        "pytest_exclude": AGENT_PUBLICATION_TARGET,
+        "pytest_args": "-vv --durations=25", "command_timeout": 1200,
+    }
     assert {name: row["pytest_args"] for name, row in matrix.items()
-            if name not in {"agent", "agent-web-lifecycle"}} == {
+            if name not in {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication"}} == {
         "sandbox-api": "--timeout=60", "sandbox-core": "--timeout=60",
         "task-runtime": "", "root": "", "root-activity": "",
+    }
+
+
+def test_publication_partition_has_its_own_unchanged_budget_and_diagnostics():
+    matrix = {row["name"]: row for row in
+              _quality_jobs()["python-tests"]["strategy"]["matrix"]["include"]}
+    assert "agent-docking-publication" in matrix
+    assert matrix["agent-docking-publication"] == {
+        "name": "agent-docking-publication", "pytest_target": AGENT_PUBLICATION_TARGET,
+        "pytest_args": "-vv --durations=25", "command_timeout": 1200,
     }
 
 
@@ -146,14 +167,14 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
     matrix = {row["name"]: row for row in python["strategy"]["matrix"]["include"]}
-    assert set(matrix) == {"agent", "agent-web-lifecycle", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"}
+    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"}
     assert python["strategy"]["fail-fast"] is False
     assert matrix["root"]["pytest_target"] == "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
     assert matrix["root"]["pytest_args"] == ""
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
     assert all(row["command_timeout"] == (
-                   1200 if name == "agent" else
+                   1200 if name in {"agent", "agent-docking", "agent-docking-publication"} else
                    900 if name == "root-activity" else
                    180 if name == "sandbox-api" else 600)
                for name, row in matrix.items())
@@ -169,6 +190,11 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     assert 'extra_args+=(--ignore "$activity_test")' in run["run"]
     assert '"${extra_args[@]}"' in run["run"]
     assert "--ignore-glob" not in run["run"]
+    assert run['env']['PYTEST_EXCLUDE'] == '${{ matrix.pytest_exclude }}'
+    assert 'for excluded_test in $PYTEST_EXCLUDE; do' in run['run']
+    assert 'if [ -f "$excluded_test" ]; then' in run['run']
+    assert 'extra_args+=(--ignore "$excluded_test")' in run['run']
+    assert 'extra_args+=(--deselect "$excluded_test")' in run['run']
 
 
 def test_root_partition_actual_pytest_collection_is_disjoint_and_exhaustive(tmp_path):
@@ -296,7 +322,7 @@ def test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path
         def still_running():
             try:
                 fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
-            except FileNotFoundError:
+            except (FileNotFoundError, ProcessLookupError):
                 return False
             return int(fields[2]) == group and fields[0] not in {'Z', 'X'}
 
@@ -314,6 +340,53 @@ def test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path
                     os.kill(pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize('state', ['missing_file', 'missing_process', 'zombie', 'live', 'permission'])
+def test_watchdog_proc_exit_observation_is_narrow_and_race_safe(tmp_path, monkeypatch, state):
+    """Exercise the actual watchdog assertion with deterministic procfs races."""
+    import itertools
+    import time
+    from types import SimpleNamespace
+
+    pid, group = 987654321, 987654320
+    read_text = Path.read_text
+
+    def run(*args, **kwargs):
+        (tmp_path / 'owned-child.json').write_text(json.dumps([pid, group]))
+        return SimpleNamespace(returncode=124)
+
+    def proc_read(path, *args, **kwargs):
+        if path.name == 'stat' and path.parent.name == str(pid):
+            if state == 'missing_file':
+                raise FileNotFoundError('fixture process exited before open')
+            if state == 'missing_process':
+                raise ProcessLookupError('fixture process exited during read')
+            if state == 'permission':
+                raise PermissionError('fixture denial is not process exit')
+            return f'{pid} (fixture) {"Z" if state == "zombie" else "S"} 1 {group} 0'
+        return read_text(path, *args, **kwargs)
+
+    def gone(*args):
+        raise ProcessLookupError('fixture child is already reaped')
+
+    def forbidden_kill(*args):
+        pytest.fail('observation fixture must never signal a real process')
+
+    ticks = itertools.count()
+    monkeypatch.setattr(subprocess, 'run', run)
+    monkeypatch.setattr(Path, 'read_text', proc_read)
+    monkeypatch.setattr(time, 'monotonic', lambda: 100 * next(ticks))
+    monkeypatch.setattr(os, 'getpgid', gone, raising=False)
+    monkeypatch.setattr(os, 'kill', forbidden_kill)
+    if state == 'live':
+        with pytest.raises(AssertionError, match='owned descendant survived'):
+            test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path)
+    elif state == 'permission':
+        with pytest.raises(PermissionError):
+            test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path)
+    else:
+        test_agent_collection_outer_deadline_kills_term_ignoring_descendant(tmp_path)
 
 
 @pytest.mark.parametrize('api', ['sendto', 'sendmsg', 'getaddrinfo', 'gethostbyname',
@@ -368,7 +441,46 @@ print('NETWORK_GUARD_OK')
     assert result.stdout.strip() == 'NETWORK_GUARD_OK'
 
 
-@pytest.mark.parametrize('fault', [None, 'overlap', 'omission', 'duplicate_rows',
+def _collect_agent_with_actual_bash(root, row, environment):
+    # Execute the workflow's actual expansion and exclusion loop. Only replace
+    # the test runner with a collecting probe; never execute scientific tests.
+    bash = shutil.which('bash')
+    git_bash = Path(os.environ.get('PROGRAMFILES', 'C:/Program Files')) / 'Git/bin/bash.exe'
+    if sys.platform == 'win32' and git_bash.is_file():
+        bash = str(git_bash)
+    if not bash:
+        pytest.skip('Bash unavailable; actual shell collection requires Bash')
+    probe = """
+import json, sys, pytest
+class Capture:
+    def pytest_collection_finish(self, session):
+        print('BASH_IDS_JSON=' + json.dumps([item.nodeid for item in session.items]))
+raise SystemExit(pytest.main(sys.argv[1:], plugins=[Capture()]))
+"""
+    step = next(step for step in _quality_jobs()['python-tests']['steps']
+                if step['name'] == 'Run Python tests')
+    command = 'timeout ${{ matrix.command_timeout }}s python -m pytest'
+    assert step['run'].count(command) == 1
+    script = step['run'].replace(command,
+        shlex.quote(Path(sys.executable).as_posix()) + ' -B -c ' + shlex.quote(probe) + ' --collect-only')
+    for key in ('name', 'pytest_target', 'pytest_args'):
+        script = script.replace('${{ matrix.' + key + ' }}', row[key])
+    result = subprocess.run([bash, '--noprofile', '--norc', '-c', script], cwd=root,
+        env=dict(environment, PYTEST_EXCLUDE=row.get('pytest_exclude', ''),
+                 PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'),
+        capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
+    assert result.returncode == 0, result.stdout + result.stderr
+    captures = [line.split('=', 1)[1] for line in result.stdout.splitlines()
+                if line.startswith('BASH_IDS_JSON=')]
+    assert len(captures) == 1
+    ids = json.loads(captures[0])
+    assert ids and len(ids) == len(set(ids))
+    return set(ids)
+
+
+@pytest.mark.parametrize('fault', [None, 'overlap', 'omission', 'docking_overlap', 'docking_omission', 'docking_empty',
+    'publication_overlap', 'publication_core_overlap', 'publication_web_overlap',
+    'publication_omission', 'publication_empty', 'duplicate_rows',
     'duplicate_ids', 'collection_error', 'timeout', 'final_cleanup_deadline'])
 def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, fault):
     # Execute the exact workflow program, not a separately reimplemented selector.
@@ -377,10 +489,19 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     rows = workflow['jobs']['python-tests']['strategy']['matrix']['include']
     matrix = {row['name']: row for row in rows}
     assert len(matrix) == len(rows)
+    assert 'agent-docking' in matrix, 'missing bounded docking partition'
     files = (*AGENT_WEB_TARGET.split(), 'tests/agent/test_future_agent.py',
              'tests/agent/test_ordinary_web_runtime_future.py',
              'tests/agent/future/test_nested.py',
-             'tests/agent/future/test_web_decision_runtime_lifecycle.py')
+             'tests/agent/future/test_web_decision_runtime_lifecycle.py',
+             'tests/agent/test_web_docking_future.py',
+             'tests/agent/test_docking_new_future.py',
+             'tests/agent/test_docking_publication.py',
+             'tests/agent/test_docking_publication_future.py',
+             'tests/agent/future/test_docking_publication_future.py',
+             'tests/agent/test_docking_publication_extra/test_nested_publication.py',
+             'tests/agent/future/test_web_docking_nested.py',
+             'tests/agent/test_docking_area/test_nested.py')
     for name in files:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -394,6 +515,22 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
         matrix['agent']['pytest_target'] = 'tests/agent'
     elif fault == 'omission':
         matrix['agent']['pytest_target'] += ' --ignore=tests/agent/test_future_agent.py'
+    elif fault == 'docking_overlap':
+        matrix['agent']['pytest_exclude'] = ''
+    elif fault == 'docking_omission':
+        matrix['agent-docking']['pytest_target'] = 'tests/agent/test_web_docking_future.py'
+    elif fault == 'docking_empty':
+        matrix['agent-docking']['pytest_target'] = 'tests/agent/test_missing_docking_*.py'
+    elif fault == 'publication_overlap':
+        matrix['agent-docking']['pytest_exclude'] = ''
+    elif fault == 'publication_core_overlap':
+        matrix['agent-docking-publication']['pytest_target'] += ' tests/agent/test_future_agent.py'
+    elif fault == 'publication_web_overlap':
+        matrix['agent-docking-publication']['pytest_target'] += ' ' + AGENT_WEB_TARGET.split()[0]
+    elif fault == 'publication_omission':
+        matrix['agent-docking-publication']['pytest_target'] = 'tests/agent/test_docking_publication.py'
+    elif fault == 'publication_empty':
+        matrix['agent-docking-publication']['pytest_target'] = 'tests/agent/test_missing_publication_*.py'
     elif fault == 'duplicate_rows':
         rows.append(dict(matrix['agent']))
     elif fault == 'duplicate_ids':
@@ -419,7 +556,7 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
                 "        global _offset, _exits\n"
                 "        result = super().__exit__(*args)\n"
                 "        _exits += 1\n"
-                "        if _exits == 3:\n            _offset += 181\n"
+                "        if _exits == 5:\n            _offset += 181\n"
                 "        return result\n"
                 "tempfile.TemporaryDirectory = DelayedFinalCleanup\n" + code)
     configuration = tmp_path / '.github/workflows/quality.yml'
@@ -434,7 +571,18 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     assert completed.stderr == ''
     if fault is None:
         assert completed.returncode == 0, completed.stdout
-        assert completed.stdout.strip() == 'AGENT_COLLECTION_OK baseline=14 agent=8 web=6'
+        assert completed.stdout.strip() == 'AGENT_COLLECTION_OK baseline=30 agent=16 web=6 docking=4 publication=4'
+        baseline = _collect_agent_with_actual_bash(tmp_path,
+            dict(name='baseline', pytest_target='tests/agent', pytest_args=''), environment)
+        names = ('agent', 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')
+        partitions = [_collect_agent_with_actual_bash(tmp_path, matrix[name], environment) for name in names]
+        expected = {f'{path}::test_case[{n}]' for path in files for n in (1, 2)}
+        assert baseline == expected
+        assert set.union(*partitions) == baseline
+        assert all(left.isdisjoint(right) for i, left in enumerate(partitions) for right in partitions[i + 1:])
+        assert [len(ids) for ids in partitions] == [16, 6, 4, 4]
+        assert 'tests/agent/future/test_docking_publication_future.py::test_case[1]' in partitions[0]
+        assert 'tests/agent/test_docking_publication_extra/test_nested_publication.py::test_case[2]' in partitions[0]
     else:
         assert completed.returncode != 0
         assert completed.stdout.strip() == 'AGENT_COLLECTION_FAILED'

@@ -107,8 +107,8 @@ assert(
   "Homepage must load safe_render.js before home formatters",
 );
 assert(
-  indexHtml.includes("/static/js/shared/safe_render.js?v=20261007-url-policy-v2") &&
-    indexHtml.includes("/static/js/home/formatters.js?v=20261007-chat-url-policy-v1"),
+  indexHtml.includes("/static/js/shared/safe_render.js?v=20261016-uniprot-entry-v1") &&
+    indexHtml.includes("/static/js/home/formatters.js?v=20261015-comparison-table-v1"),
   "Homepage must invalidate cached chat URL policy scripts",
 );
 assert(

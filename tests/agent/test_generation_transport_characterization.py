@@ -338,7 +338,8 @@ def assert_attempts(probe, mode, script, *, optimizing=False, invocations=1):
         assert payload["options"] == {"temperature": TEMPERATURE, "num_predict": 1000}
         if optimizing:
             expected_prompt = probe.tool.optimization_prompt_template.format(
-                smiles="CCO", objectives="improve drug-likeness", count=10)
+                smiles="CCO", objectives="improve drug-likeness", count=10,
+                requirements="optimize 10 molecules; SMILES: CCO")
         else:
             expected_prompt = probe.tool.generation_prompt_template.format(
                 requirements=QUERY, count=10, target_evidence="[]")
@@ -440,9 +441,6 @@ def test_same_generator_failure_state_does_not_leak_into_next_success(
     split = len(first_script)
     assert probe.invocation_spans == [(0, split), (split, split + 1)]
     assert len(probe.results) == 2 and probe.results[0] is not probe.results[1]
-    if optimizing:
-        first_expected = ("CCO", *first_expected[:9]) if first_expected else ()
-        second = ("CCO", *second[:9])
     assert_raw_result(production, probe.results[0], first_expected, failed_rounds=True)
     assert_raw_result(production, probe.results[1], second, failed_rounds=False)
 
@@ -1002,14 +1000,19 @@ def test_no_valid_response_candidate_does_not_manufacture_optimization_seed(prod
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("script,expected,failed_rounds", [
-    pytest.param((ok(*TEN),), ("CCO", *TEN[:9]), False, id="successful-seed-preserved"),
-    pytest.param((("http-error", ""), ok(*TEN)), ("CCO", *TEN[:9]), True,
+    pytest.param((ok(*TEN),), TEN, False, id="successful-seed-excluded"),
+    pytest.param((("http-error", ""), ok(*TEN)), TEN, True,
                  id="failed-round-no-seed-then-real-success"),
-    pytest.param((ok("I"),) * 5, ("CCO", "I"), False, id="valid-iodine-partial"),
+    pytest.param((ok("I"),) * 5, ("I",), False, id="valid-iodine-partial"),
     pytest.param((ok(*TEN[:2]), ok(*TEN[2:4]), ok(*TEN[4:6]), ok(*TEN[6:8]),
-                  ok(*TEN[8:])), ("CCO", *TEN[:9]), False, id="fifth-round-optimization-ten"),
+                  ok(*TEN[8:])), TEN, False, id="fifth-round-optimization-ten"),
+    pytest.param((ok("CCO", "OCC"),) * 5, (), False, id="seed-echo-only-fails"),
+    pytest.param((ok("CCO", "OCC", "CCN"),) * 5, ("CCN",), False,
+                 id="seed-echo-does-not-fill-shortage"),
+    pytest.param((ok("CCO", "OCC", *TEN),), TEN, False,
+                 id="seed-echo-does-not-displace-new-candidates"),
 ])
-def test_optimization_positive_controls_preserve_seed_only_after_valid_output(
+def test_optimization_counts_only_novel_model_output(
         production, mode, script, expected, failed_rounds):
     probe = run_probe(production, mode, script, query="optimize 10 molecules; SMILES: CCO")
     assert_attempts(probe, mode, script, optimizing=True)
@@ -1070,7 +1073,7 @@ def test_capability_loss_between_rounds_discards_valid_partial_batch(
     assert probe.errors == [] and len(probe.results) == 1
     assert_unavailable_result(probe.results[0])
     assert not probe.results[0].get("warnings")
-    # Valid CCN (plus a successful optimization's CCO seed) was available after
+    # Valid CCN (but not the unchanged CCO optimization seed) was available after
     # round one. Round two must reject capability, not return that partial success
     # or execute the new function. Real private helpers are still profiled.
     assert probe.counts == Counter({"execute": 1, "_generate_with_retry": 1,
@@ -1083,7 +1086,8 @@ def test_capability_loss_between_rounds_discards_valid_partial_batch(
     assert (event["thread"] == probe.worker_thread) is (mode != "coroutine-running-loop")
     assert event["payload"]["options"] == {"temperature": TEMPERATURE, "num_predict": 1000}
     template = (probe.tool.optimization_prompt_template.format(
-        smiles="CCO", objectives="improve drug-likeness", count=10) if optimizing else
+        smiles="CCO", objectives="improve drug-likeness", count=10,
+        requirements="optimize 10 molecules; SMILES: CCO") if optimizing else
         probe.tool.generation_prompt_template.format(requirements=QUERY, count=10, target_evidence="[]"))
     assert event["payload"]["prompt"] == template
 

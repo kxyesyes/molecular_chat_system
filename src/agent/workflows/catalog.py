@@ -56,7 +56,8 @@ WORKFLOW_POLICIES = (
     WorkflowPolicy(
         "molecular_design",
         "使用本地生成模型生成候选分子。",
-        ("llm_molecular_generator",),
+        ("llm_molecular_generator", "property_calculator"),
+        True,
     ),
     WorkflowPolicy(
         "activity_prediction",

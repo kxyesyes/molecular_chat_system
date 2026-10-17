@@ -646,6 +646,38 @@ class DockingInputStager:
             self.resolve_manifest_locator(task_id, manifest_locator),
         )
 
+    def read_verified_input_bytes(
+        self,
+        task_id: str,
+        manifest_locator: str,
+    ) -> dict[str, Any]:
+        """Read current inputs and a detached manifest; not execution authority."""
+
+        with self._lock:
+            manifest_path = self.resolve_manifest_locator(task_id, manifest_locator)
+            manifest = self._load_verified_unlocked(task_id, manifest_path)
+            task_root = self._root / task_id
+            result: dict[str, Any] = {"manifest": manifest}
+            for key in ("receptor", "ligand"):
+                record = manifest[key]
+                limit = (
+                    MAX_SMILES_BYTES
+                    if key == "ligand" and manifest["ligand_mode"] == "smiles"
+                    else MAX_DOCKING_INPUT_BYTES
+                )
+                content, digest = _secure_read_file(
+                    _manifest_candidate(task_root, record),
+                    max_bytes=limit,
+                    expected_size=record["size"],
+                    collect=True,
+                    reason_code="manifest_integrity_failed",
+                    containment_root=task_root,
+                )
+                if digest != record["sha256"]:
+                    raise ManifestError("manifest_integrity_failed")
+                result[f"{key}_bytes"] = content
+            return result
+
     def resolve_manifest_locator(
         self,
         task_id: str,

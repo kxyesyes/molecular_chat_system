@@ -11,9 +11,14 @@ from typing import Any
 from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
+from src.agent.planning.request_parsing import (
+    positive_intent_text, property_calculation_forbidden, target_lookup_text,
+)
+from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
 from src.agent.tools.activity_input import activity_intent_requested
+from src.agent.evidence_followup import comparison_tools
 from src.agent.utils.validators import InputValidator, MolecularInputAnalysis
 from src.agent.runtime.allocation import (
     AllocationStopped, await_routing_model, routing_model_call,
@@ -80,7 +85,7 @@ class HybridSkillRouter:
         llm: Any = None,
     ) -> RouteDecision:
         text = query.strip()
-        lower = text.lower()
+        lower = positive_intent_text(text).lower()
         if self._is_general_chat(lower):
             return RouteDecision(
                 selected_skill=None,
@@ -98,10 +103,47 @@ class HybridSkillRouter:
 
         target_request = analyze_target_request(text)
         has_target = bool(target_request.targets)
+        # A generic protein/nutrition list is not a target-database request.
+        # Require a positive identifier or a domain-specific lookup object;
+        # unresolved target references still reach the clarification gate.
+        # Prediction methods are knowledge objects, not structures. Mask only
+        # that noun phrase (including its target qualifier), so an independent
+        # explicit structure lookup survives even when methods are also asked.
+        lookup_text = target_lookup_text(lower)
+        lookup_has_target = bool(TARGET_PATTERN.search(lookup_text))
+        lookup_subject = bool(lookup_has_target or re.search(
+            r"靶点|\b(?:targets?|uniprot|pdb|alphafold)\b|蛋白(?:质)?结构|"
+            r"(?:实验|晶体|冷冻电镜)结构|"
+            r"\b(?:protein|experimental|crystal|cryo[- ]?em)\s+structures?\b", lookup_text
+        ))
+        target_lookup = bool(re.search(
+            r"(?:查找|搜索|检索)(?!结果)|找一下|列出|查(?=\s)|\b(?:find|search|list|look\s+up)\b", lookup_text
+        ) and lookup_subject)
+        if (self._contains(lookup_text, "反向寻靶", "反向预测靶点", "reverse target")
+                and not re.search(r"排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个)|previous|ranked|top\s*1\b", lookup_text)
+                and not re.search(r"结构|蛋白|uniprot|pdb|structures?|protein", lookup_text)):
+            # Listing a fresh molecular ranking is not looking up an earlier
+            # target. Keep normal molecular/negation checks below intact.
+            target_lookup = False
+        if target_lookup and not lookup_has_target and re.search(r"排名|上述|那个|第[一二三]|previous|ranked|top", lookup_text):
+            return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
+                requires_confirmation=True, reasons=["target_reference_required"])
+        if (target_lookup and re.search(r"亚型|subtype|isoform", lookup_text)
+                and re.search(r"澄清|clarif", lookup_text)):
+            return RouteDecision(selected_skill=None, confidence=0.0, source="fallback",
+                requires_confirmation=True, reasons=["target_subtype_clarification_required"])
         input_validator = InputValidator()
         molecular_input = input_validator.analyze_molecular_input(text)
         has_smiles = bool(molecular_input.valid_smiles)
-        generation = self._has_generation_intent(lower)
+        requested_tools = comparison_tools(text)
+        if requested_tools:
+            # Explicit endpoint coverage must not lose activity to ADMET scoring,
+            # memory feedback, tool availability discounts or LLM arbitration.
+            confirmation = self._confirmation_reasons("comprehensive_evaluation", lower, molecular_input)
+            return RouteDecision(selected_skill="comprehensive_evaluation", confidence=1.0,
+                source="rule", reasons=["explicit bounded endpoint comparison", *confirmation],
+                requires_confirmation=bool(confirmation), allowed_tools=list(requested_tools))
+        generation = self._has_generation_intent(text)
         if (
             generation
             and (has_target or target_request.explicit)
@@ -142,13 +184,18 @@ class HybridSkillRouter:
             add("rag_search", 1.0, "local knowledge or sourced explanation intent")
         if self._contains(lower, "完整工作流", "完整流程", "全流程", "full workflow"):
             add("comprehensive_evaluation", 1.0, "explicit full workflow intent")
-        if self._contains(lower, "pdb", "蛋白结构", "可用于 docking 的", "查 ", "搜索"):
+        if (target_lookup and not generation) or (
+            lookup_subject and self._contains(lookup_text, "pdb", "蛋白结构", "可用于 docking 的")
+        ):
             add("target_database_search", 0.92, "target structure search intent")
-        if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "reverse target"):
+        if self._contains(lower, "哪些靶点", "作用于哪些", "潜在靶点", "可能作用", "反向寻靶", "反向预测靶点", "reverse target"):
             add("reverse_target_prediction", 0.95, "reverse target intent")
-        if activity_intent_requested(text):
+        if activity_intent_requested(lower):
             add("activity_prediction", 0.9, "activity endpoint requested")
-        if self._contains(
+        bounds, unknown_bounds = requested_property_bounds(lower)
+        bounded_generation = generation and bool(bounds or unknown_bounds)
+        molecular_subject = has_smiles or bool(re.search(r"分子|化合物|候选|\bmolecules?\b|\bcompounds?\b|\bcandidates?\b", lower))
+        if (not bounded_generation or "admet" in lower) and (self._contains(
             lower,
             "admet",
             "分子量",
@@ -162,11 +209,20 @@ class HybridSkillRouter:
             "性质计算",
             "性质评估",
             "属性",
-        ):
+        ) or (molecular_subject and "的性质" in lower)):
             add("admet_assessment", 0.88, "property or ADMET endpoint requested")
-        if self._contains(lower, "docking", "对接", "结合能", "binding affinity"):
+        docking_action = re.sub(
+            r"(?:可?用于|适合|能否(?:继续)?|是否(?:可以)?)(?:\s*(?:分子)?对接|\s*docking)|"
+            r"(?:suitable\s+for|for\s+use\s+in)\s+docking", "", lower,
+        )
+        if self._contains(docking_action, "docking", "对接", "结合能", "binding affinity"):
             add("docking_simulation", 0.82, "docking intent")
-        if self._contains(lower, ".pdb", ".pdbqt") and self._contains(
+        # Files may survive in a later clause after an explicitly negated
+        # docking operation. They must not restore that removed authorization.
+        docking_terms = r"对接|结合能|\bdocking\b|\bbinding\s+affinity\b"
+        negated_docking = (len(re.findall(docking_terms, text, re.I))
+                           > len(re.findall(docking_terms, lower, re.I)))
+        if not negated_docking and self._contains(lower, ".pdb", ".pdbqt") and self._contains(
             lower,
             ".sdf",
             ".mol2",
@@ -174,8 +230,8 @@ class HybridSkillRouter:
             "配体",
         ) and self._contains(lower, "center", "size", "box"):
             add("docking_simulation", 1.0, "structured docking files and box intent")
-        if has_target and self._contains(
-            lower,
+        if lookup_has_target and self._contains(
+            lookup_text,
             "比较",
             "差异",
             "准备",
@@ -185,7 +241,7 @@ class HybridSkillRouter:
             "structure information",
         ):
             add("target_database_search", 0.95, "target structure comparison intent")
-        if has_target:
+        if lookup_has_target:
             add("target_database_search", 0.12, "recognized target entity")
         if has_smiles:
             for skill in (
@@ -246,7 +302,7 @@ class HybridSkillRouter:
 
         self._apply_feedback(text, scores, reasons)
         self._apply_memory(memory or [], scores, reasons)
-        self._apply_tool_availability(scores, reasons)
+        self._apply_tool_availability(scores, reasons, text)
 
         candidates = self._rank(scores, reasons)
         if not candidates or candidates[0].score < self.minimum_confidence:
@@ -305,7 +361,7 @@ class HybridSkillRouter:
             reasons=decision_reasons + confirmation_reasons,
             source=source,
             requires_confirmation=bool(confirmation_reasons),
-            allowed_tools=self._allowed_tools_for(selected),
+            allowed_tools=self._allowed_tools_for(selected, text),
         )
 
     @staticmethod
@@ -366,12 +422,13 @@ class HybridSkillRouter:
         self,
         scores: dict[str, float],
         reasons: dict[str, list[str]],
+        query: str,
     ) -> None:
         if not self.tool_registry:
             return
         for skill, score in list(scores.items()):
             unavailable = []
-            for tool_name in self._allowed_tools_for(skill):
+            for tool_name in self._allowed_tools_for(skill, query):
                 try:
                     self.tool_registry.resolve(tool_name)
                 except (KeyError, RuntimeError):
@@ -382,9 +439,14 @@ class HybridSkillRouter:
                     f"unavailable tools: {', '.join(sorted(unavailable))}"
                 )
 
-    def _allowed_tools_for(self, workflow_name: str) -> list[str]:
+    def _allowed_tools_for(self, workflow_name: str, query: str) -> list[str]:
         policy = self.catalog.get(workflow_name)
-        return list(policy.allowed_tools) if policy else []
+        tools = list(policy.allowed_tools) if policy else []
+        if workflow_name == "molecular_design":
+            bounds, unknown = requested_property_bounds(query)
+            if not (bounds or unknown) or property_calculation_forbidden(query):
+                tools = [tool for tool in tools if tool != "property_calculator"]
+        return tools
 
     @staticmethod
     def _rank(

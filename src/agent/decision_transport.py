@@ -55,13 +55,29 @@ _INTENT_INSTRUCTION = (
     'Include intent.version as the string "1". This is only an intent proposal, '
     'not admission or permission to execute tools. Do not answer or execute the request.'
 )
+_DOCKING_COVERAGE_INSTRUCTION = (
+    'For a docking_request or docking_refinement include one full-current-text request span '
+    'using the supplied current source_id and exact range, plus one exact value span per '
+    'explicitly named field in that current text. Offsets count Unicode code points, '
+    'start-inclusive and end-exclusive; never use an empty span. Do not borrow history spans. '
+    'A PDB ID or SMILES is not a receptor_ref or ligand_ref; those fields require explicit '
+    'named references. Omit absent fields, never null or inferred defaults. Missing scientific '
+    'inputs remain unresolved even when the docking intent is clear. '
+    'Only syntactic NAME=VALUE assignments in the CURRENT text are fields: receptor_ref=..., '
+    'ligand_ref=..., center=..., size=..., exhaustiveness=..., num_modes=.... Natural-language '
+    'PDB IDs and SMILES belong to the request, NOT these fields. If no such assignments appear, '
+    'fields must be {} and source_spans must contain only the full-current-text request span. '
+    'Never bind a field to the request span; each named assignment needs its own exact value '
+    'span with role field. '
+)
 _DOCKING_INSTRUCTION = (
     'The only callable function is docking_preparation. Propose preparation of the whole '
     'current docking request or refinement using all supplied history, without truncation. '
     'Call docking_preparation with exactly one {"proposal": {...}} envelope matching the schema. '
     'Include proposal.version as the string "1". Copy only explicit fields with source spans; '
     'leave missing inputs unresolved. This is not admission, consent or execution authority. '
-    'Do not invent inputs, approve consent, execute tools or answer with scientific results.'
+    'Do not invent inputs, approve consent, execute tools or answer with scientific results. '
+    + _DOCKING_COVERAGE_INSTRUCTION
 )
 
 
@@ -285,7 +301,11 @@ def _function_call(call, profile=ProtocolProfile.DECISION_V1):
     call_id = call.get("id")
     function = call.get("function")
     if profile is ProtocolProfile.DOCKING_PREPARATION_V1 and (
-        type(call) is not dict or set(call) != {"id", "type", "function"}
+        type(call) is not dict or set(call) not in (
+            {"id", "type", "function"}, {"id", "type", "function", "index"})
+        # Some compatible providers retain the single tool call's index in a
+        # non-streamed response. It is metadata, never another call or authority.
+        or "index" in call and (type(call["index"]) is not int or call["index"] != 0)
         or type(function) is not dict or set(function) != {"name", "arguments"}
         or type(function["arguments"]) is not str
     ):
@@ -404,6 +424,7 @@ def _payload(model, messages, mode, max_tokens, profile=ProtocolProfile.DECISION
         json_instruction = (
             "Return one JSON docking preparation proposal for the whole request and supplied history. "
             "Copy explicit fields with source spans, leave missing inputs unresolved; do not invent inputs. "
+            + _DOCKING_COVERAGE_INSTRUCTION +
             "This is not admission, consent or execution authority. Match this schema, without markdown: ")
     else:
         raise DecisionProtocolError("invalid_protocol_profile")

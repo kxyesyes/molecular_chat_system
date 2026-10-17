@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import socket
+import ssl
 import stat
 import threading
 import time
@@ -1158,12 +1160,68 @@ def test_real_uds_drip_is_cut_off_per_socket_read_and_cancel_is_bounded(
     monkeypatch.setattr(runner_module, "_CANCEL_DEADLINE_SECONDS", 0.03)
     runner = SandboxDockingRunner(socket_path, tmp_path / "output")
 
-    started = time.monotonic()
-    result = runner.execute(payload, job_id=f"drip-{phase}")
-    elapsed = time.monotonic() - started
+    timings: list[dict[str, Any]] = []
+    diagnostic_origin = time.monotonic()
+
+    def record(event: str, **details: Any) -> None:
+        timings.append(
+            {
+                "event": event,
+                "wall_s": time.monotonic() - diagnostic_origin,
+                "thread_cpu_s": time.thread_time(),
+                "thread_id": threading.get_ident(),
+                **details,
+            }
+        )
+
+    def timed(label: str, original: Any) -> Any:
+        def call(*args: Any, **kwargs: Any) -> Any:
+            segment = f"response.{kwargs['stage']}" if label == "response" else label
+            record(f"{segment}.enter")
+            try:
+                return original(*args, **kwargs)
+            except BaseException as exc:
+                record(f"{segment}.error", error_type=type(exc).__name__)
+                raise
+            finally:
+                record(f"{segment}.exit")
+
+        return call
+
+    def record_gc(boundary: str, info: dict[str, Any]) -> None:
+        record(f"gc.{boundary}", generation=info["generation"])
+
+    # Instrument only the failing parameter; clocks, deadlines and I/O stay real.
+    # CPU samples are per-thread cumulative values, paired with thread identity.
+    with monkeypatch.context() as timing_patch:
+        if phase == "manifest":
+            for owner, name, label in (
+                (SandboxDockingRunner, "execute", "execute"),
+                (SandboxDockingRunner, "_new_transport", "transport"),
+                (SandboxDockingRunner, "_cancel_best_effort", "cancel"),
+                (httpx.Client, "__init__", "client_init"),
+                (ssl.SSLContext, "load_verify_locations", "ssl_ca_load"),
+                (runner_module, "_response_model", "response"),
+                (runner_module._AbsoluteDeadlineNetworkStream, "read", "socket_read"),
+            ):
+                timing_patch.setattr(owner, name, timed(label, getattr(owner, name)))
+            gc.callbacks.append(record_gc)
+        try:
+            started = time.monotonic()
+            result = runner.execute(payload, job_id=f"drip-{phase}")
+            elapsed = time.monotonic() - started
+        finally:
+            if phase == "manifest":
+                gc.callbacks.remove(record_gc)
     server.join()
 
     assert result.success is False
+    if phase == "manifest" and elapsed > 0.3:
+        print("MANIFEST_DEADLINE_TIMING " + json.dumps({
+            "elapsed_s": elapsed,
+            "error_code": result.error.code.value if result.error is not None else None,
+            "timings": timings,
+        }))
     assert elapsed <= 0.3
     assert server.requests[-1].endswith(
         f"/v1/docking/jobs/{BROKER_JOB_ID}/cancel HTTP/1.1".encode("ascii")

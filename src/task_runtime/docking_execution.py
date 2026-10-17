@@ -140,7 +140,17 @@ class DockingExecution:
         raw_executor: RawExecutor | None = None,
         *,
         allowed_output_root: str | os.PathLike[str] | None = None,
+        chat_toolchain=None,
     ) -> None:
+        if chat_toolchain is not None:
+            from src.docking.chat_toolchain import ChatDockingToolchain
+            if (type(chat_toolchain) is not ChatDockingToolchain
+                    or (raw_executor is None and os.environ.get(
+                        "MEDCHAT_DOCKING_EXECUTION_BACKEND", "local") != "local")):
+                raise DockingConsentError("consent_policy_unavailable")
+            chat_toolchain.require_current()
+        self._chat_toolchain = chat_toolchain
+        self._chat_toolchain_at_construction = chat_toolchain
         self._stager = DockingInputStager(root)
         self._completions = DockingCompletionStore(root)
         if raw_executor is not None and allowed_output_root is None:
@@ -440,16 +450,35 @@ class DockingExecution:
             if command_gate is not None:
                 command_gate.enter()
             try:
+                toolchain = self._chat_toolchain_at_construction
+                if self._chat_toolchain is not toolchain:
+                    raise DockingConsentError("consent_policy_unavailable")
+                if toolchain is not None:
+                    toolchain.require_current()
+                    payload["runtime_config"] = toolchain.runtime_config()
                 if consent_guard is not None:
                     consent_guard(inputs, "dispatch")
+                # Consent hooks cannot change the pinned resolver/files before raw.
+                if self._chat_toolchain is not toolchain:
+                    raise DockingConsentError("consent_policy_unavailable")
+                if toolchain is not None:
+                    toolchain.require_current()
                 control = dict(job_id=inputs.task_id, progress_callback=progress_callback,
                                cancel_event=cancel_event)
-                if command_gate is not None and not self._raw_executor_injected:
+                if not self._raw_executor_injected and (
+                    command_gate is not None or toolchain is not None
+                ):
                     # Per-call private binding; shared raw_executor/compatibility
                     # identity and explicitly injected raw signatures stay intact.
-                    tool_result = execute_tool_compat(MolecularDocking(
-                        command_scope=command_gate.scope, allowed_output_root=self._allowed_output_root,
-                    ), payload, **control)
+                    adapter_binding = {}
+                    if command_gate is not None:
+                        adapter_binding.update(command_scope=command_gate.scope,
+                                               allowed_output_root=self._allowed_output_root)
+                    if toolchain is not None:
+                        adapter_binding["chat_toolchain"] = toolchain
+                    tool_result = execute_tool_compat(
+                        MolecularDocking(**adapter_binding), payload, **control,
+                    )
                 else:
                     tool_result = self.raw_executor(payload, **control)
             finally:

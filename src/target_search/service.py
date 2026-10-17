@@ -22,6 +22,8 @@ from .database import (
     resolve_project_root,
 )
 from .downloader import StructureDownloader
+from .exact_pdb import normalize_pdb_id
+from .remote_clients import _EXPERIMENTAL_METHODS
 from .seed import seed_database
 from .schemas import as_bool, split_list
 from .scoring import calculate_structure_score
@@ -142,10 +144,22 @@ class TargetSearchService:
         has_experimental: Optional[bool] = None,
         docking_recommended: Optional[bool] = None,
         has_ligand: Optional[bool] = None,
+        *,
+        pdb_id: Optional[str] = None,
     ) -> dict:
         query = (query or "").strip()
         if not query:
             return self._search_payload(query, [], status="not_found")
+
+        if pdb_id is not None:
+            try:
+                pdb_id = normalize_pdb_id(pdb_id)
+            except ValueError:
+                return self._search_payload(query, [], status="unavailable",
+                    warnings=["invalid_pdb_constraint"], retryable=False)
+            return self._search_authoritative(query, target_type=target_type,
+                source=source, has_experimental=has_experimental,
+                docking_recommended=docking_recommended, has_ligand=has_ligand, pdb_id=pdb_id)
 
         local_results = self._search_local(query)
         if local_results:
@@ -298,9 +312,18 @@ class TargetSearchService:
         has_experimental: Optional[bool],
         docking_recommended: Optional[bool],
         has_ligand: Optional[bool],
+        pdb_id: Optional[str] = None,
     ) -> dict[str, Any]:
         target_key = self._target_cache_key(query)
         target_cached = self._read_target_cache(target_key)
+        if pdb_id is not None and target_cached is not None:
+            cached = target_cached.payload
+            if (self._canonical_organism(cached["organism"]) != self._canonical_organism(self.organism)
+                    or (_UNIPROT_ACCESSION_RE.fullmatch(query.upper())
+                        and cached["uniprot_id"] != query.upper())):
+                # An internally valid cache envelope cannot rebind an explicit
+                # accession/organism request to another target.
+                target_cached = None
         target_fresh = target_cached is not None and not target_cached.stale
         target_state = (
             "fresh" if target_fresh else "expired" if target_cached else "miss"
@@ -314,6 +337,7 @@ class TargetSearchService:
                 structures_cached = self._read_structures_cache(
                     accession,
                     organism=str(target_cached.payload["organism"]),
+                    **({"pdb_id": pdb_id} if pdb_id is not None else {}),
                 )
                 structures_state = (
                     "fresh"
@@ -344,7 +368,7 @@ class TargetSearchService:
             if target_fresh and target_cached is not None
             else query
         )
-        resolution = self._resolve_safely(resolve_query)
+        resolution = self._resolve_safely(resolve_query, **({"pdb_id": pdb_id} if pdb_id is not None else {}))
         lookup_path = ["local", *resolution.lookup_path]
 
         if resolution.status == "resolved":
@@ -355,6 +379,16 @@ class TargetSearchService:
                     accession=normalized_target["uniprot_id"],
                     organism=normalized_target["organism"],
                 )
+                if pdb_id is not None:
+                    if (len(normalized_structures) != 1
+                            or normalized_structures[0]["structure_id"] != pdb_id
+                            or normalized_structures[0]["source"] != "RCSB_PDB"
+                            or normalized_structures[0]["method"] not in _EXPERIMENTAL_METHODS
+                            or self._canonical_organism(normalized_target["organism"])
+                            != self._canonical_organism(self.organism)
+                            or (_UNIPROT_ACCESSION_RE.fullmatch(resolve_query.upper())
+                                and normalized_target["uniprot_id"] != resolve_query.upper())):
+                        raise ValueError("exact structure identity mismatch")
             except (KeyError, TypeError, ValueError):
                 return self._search_payload(
                     query,
@@ -397,7 +431,8 @@ class TargetSearchService:
 
             accession = str(target_evidence.payload["uniprot_id"])
             structures_evidence = self.cache.upsert(
-                self._structures_cache_key(accession),
+                self._structures_cache_key(accession, **({"pdb_id": pdb_id,
+                    "organism": str(target_evidence.payload["organism"])} if pdb_id is not None else {})),
                 "structures",
                 self._structure_cache_source(normalized_structures),
                 accession,
@@ -419,7 +454,7 @@ class TargetSearchService:
                 },
             )
 
-        if self._resolution_is_retryable(resolution) and target_cached is not None:
+        if pdb_id is None and self._resolution_is_retryable(resolution) and target_cached is not None:
             if structures_cached is None:
                 record = self._target_only_record(target_cached)
                 warnings = [
@@ -478,9 +513,10 @@ class TargetSearchService:
             retryable=resolution.retryable,
         )
 
-    def _resolve_safely(self, query: str) -> TargetResolution:
+    def _resolve_safely(self, query: str, *, pdb_id=None) -> TargetResolution:
         try:
-            return self._get_resolver().resolve(query, self.organism)
+            return self._get_resolver().resolve(query, self.organism,
+                **({"pdb_id": pdb_id} if pdb_id is not None else {}))
         except Exception:
             return TargetResolution(
                 status="unavailable",
@@ -530,7 +566,12 @@ class TargetSearchService:
         return f"target:{digest}"
 
     @staticmethod
-    def _structures_cache_key(accession: str) -> str:
+    def _structures_cache_key(accession: str, *, pdb_id=None, organism=None) -> str:
+        if pdb_id is not None:
+            pdb_id = normalize_pdb_id(pdb_id)
+            identity = TargetSearchService._canonical_organism(organism).casefold()
+            digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()
+            return f"structures:exact:{accession.strip().upper()}:{digest}:{pdb_id}"
         return f"structures:{accession.strip().upper()}"
 
     def _read_target_cache(self, cache_key: str) -> Optional[CachedEvidence]:
@@ -574,8 +615,10 @@ class TargetSearchService:
         accession: str,
         *,
         organism: str,
+        pdb_id=None,
     ) -> Optional[CachedEvidence]:
-        cache_key = self._structures_cache_key(accession)
+        cache_key = self._structures_cache_key(accession,
+            **({"pdb_id": pdb_id, "organism": organism} if pdb_id is not None else {}))
         evidence = self.cache.get(cache_key, allow_stale=True)
         if evidence is None:
             return None
@@ -589,6 +632,10 @@ class TargetSearchService:
                 organism=organism,
             )
             expected_source = self._structure_cache_source(normalized)
+            if pdb_id is not None and (len(normalized) != 1
+                    or normalized[0]["structure_id"] != pdb_id or normalized[0]["source"] != "RCSB_PDB"
+                    or normalized[0]["method"] not in _EXPERIMENTAL_METHODS):
+                raise ValueError("cached exact structure identity is invalid")
             if (
                 evidence.cache_key != cache_key
                 or evidence.record_type != "structures"

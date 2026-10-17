@@ -28,14 +28,41 @@ def _finite_number(value: Any, *, name: str) -> float:
     return float(value)
 
 
-def decode_legacy_frame(raw: str) -> dict[str, Any]:
+def _unique_frame_object(pairs):
+    """Identify frames without silently discarding any duplicate type/key."""
+    payload = {}
+    for key, value in pairs:
+        if key in payload:
+            raise LegacyFrameError("invalid_frame", "WebSocket frame contains duplicate fields")
+        payload[key] = value
+    return payload
+
+
+def decode_legacy_frame(raw: str, *, allow_docking_controls: bool = False) -> dict[str, Any]:
     """Decode and normalize one legacy frame without invoking application logic."""
     if not isinstance(raw, str) or len(raw) > MAX_FRAME_CHARS:
         raise LegacyFrameError("invalid_frame", "WebSocket frame is too large")
-    try:
-        payload = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise LegacyFrameError("invalid_frame", "WebSocket frame is not valid JSON") from exc
+    if allow_docking_controls is True:
+        try:
+            # The raw frame is already bounded. Reject ambiguous keys before
+            # examining type, but do not impose C depth/UTF-8/scalar rules on
+            # otherwise-valid legacy reference/selection values.
+            payload = json.loads(raw, object_pairs_hook=_unique_frame_object)
+        except (TypeError, ValueError, RecursionError):
+            raise LegacyFrameError("invalid_frame", "WebSocket frame is not valid JSON") from None
+        if (type(payload) is dict and type(payload.get("type")) is str
+                and payload["type"] in {"docking_refine", "docking_watch"}):
+            from src.web.docking_consent import DockingControlError, decode_docking_control
+
+            try:
+                return decode_docking_control(raw)
+            except DockingControlError:
+                raise LegacyFrameError("invalid_frame", "Invalid WebSocket control frame") from None
+    else:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise LegacyFrameError("invalid_frame", "WebSocket frame is not valid JSON") from exc
     if not isinstance(payload, dict):
         raise LegacyFrameError("invalid_frame", "WebSocket frame must be an object")
     unknown = set(payload).difference(_ALLOWED_KEYS)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import os
 import re
@@ -27,6 +28,8 @@ from .errors import TaskErrorCode
 from .docking_consent import (
     CONSENT_TTL_MS, MAX_PENDING_CONSENTS, DockingConsentError,
     DockingConsentPolicy, canonical_json, validate_clocks, validate_identity,
+    materialize_draft_identity, validate_chat_draft, validate_draft_context,
+    validate_draft_identity, validate_draft_patch, _draft_label,
 )
 from .models import (
     ResultProjectionPolicy,
@@ -54,6 +57,15 @@ TERMINAL_STATUSES = frozenset(
 )
 _SAFE_CODE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _SHA256_DIGEST = re.compile(r"[a-f0-9]{64}\Z")
+_PUBLICATION_LABELS = ('receipt_id', 'preparation_id', 'task_id', 'root_id',
+    'owner_session_id', 'runtime_generation', 'model_generation',
+    'capability_generation', 'execution_token')
+_PUBLICATION_DIGESTS = ('consent_digest', 'binding_digest', 'completion_digest',
+    'science_digest', 'context_fingerprint', 'projection_digest', 'source_digest',
+    'original_receptor_digest', 'ligand_identity_digest', 'input_hash', 'config_hash',
+    'tool_policy_digest')
+_PUBLICATION_FIELDS = (*_PUBLICATION_LABELS, *_PUBLICATION_DIGESTS,
+    'consent_version', 'operation_deadline_ms', 'operation_monotonic_expires')
 WORKER_FUTURE_SKEW_SECONDS = 5.0
 _ERROR_MESSAGES = {
     TaskErrorCode.TASK_INPUT_INVALID.value: "Task input invalid",
@@ -675,6 +687,252 @@ class TaskStore:
             raise DockingConsentError("consent_not_found")
         return self._consent_record(row)
 
+    def reserve_chat_docking_draft(
+        self, *, identity, draft, policy, wall_time_ms, monotonic, current_context,
+    ) -> dict[str, Any]:
+        """Trusted server admission, NOT descriptor authentication or dispatch.
+
+        identity excludes source_refs; draft carries six explicit slots. Clocks
+        and current_context are live trusted callbacks, sampled under the lock.
+        No caller text, input bytes, paths, credentials or journal are accepted.
+        """
+        identity = validate_draft_identity(identity)
+        draft = validate_chat_draft(draft)
+        identity = materialize_draft_identity(identity, draft)
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            validate_draft_context(policy, draft["model_generation"],
+                                   draft["capability_generation"], current_context)
+            now_ms, monotonic_now = wall_time_ms(), monotonic()
+            validate_clocks(now_ms, monotonic_now)
+            self._expire_consents(conn, now_ms, monotonic_now,
+                                  policy.runtime_generation, policy.policy_generation)
+            if (conn.execute("SELECT 1 FROM docking_consents WHERE preparation_id=? OR task_id=?",
+                             (identity["preparation_id"], identity["task_id"])).fetchone()
+                    or conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (identity["task_id"],)).fetchone()):
+                raise DockingConsentError("consent_identity_conflict")
+            occupied = "(state IN ('AWAITING_INPUT','PREPARING','READY') OR cleanup_state != 'settled')"
+            if conn.execute(f"SELECT 1 FROM docking_consents WHERE owner_session_id=? AND {occupied}",
+                            (identity["owner_session_id"],)).fetchone():
+                raise DockingConsentError("consent_owner_busy")
+            if conn.execute(f"SELECT COUNT(*) AS n FROM docking_consents WHERE {occupied}").fetchone()["n"] >= MAX_PENDING_CONSENTS:
+                raise DockingConsentError("consent_capacity_full")
+            conn.execute(
+                """INSERT INTO docking_consents (
+                    preparation_id,task_id,owner_session_id,identity_json,policy_json,
+                    runtime_generation,policy_generation,expires_at_ms,monotonic_expires,draft_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (identity["preparation_id"], identity["task_id"], identity["owner_session_id"],
+                 canonical_json(identity).decode("ascii"), canonical_json(asdict(policy)).decode("ascii"),
+                 policy.runtime_generation, policy.policy_generation,
+                 now_ms + CONSENT_TTL_MS, monotonic_now + CONSENT_TTL_MS / 1000,
+                 canonical_json(draft).decode("ascii")),
+            )
+            result = self._chat_draft_record(conn.execute(
+                "SELECT * FROM docking_consents WHERE preparation_id=?", (identity["preparation_id"],)
+            ).fetchone())
+        return result  # No receipt before the commit has returned successfully.
+
+    def get_chat_docking_draft(self, *, preparation_id, owner_session_id):
+        """Owner-bound detached metadata. A read never renews or reserves budget."""
+        return self._chat_draft_record(self._owned_docking_consent(
+            preparation_id=preparation_id, owner_session_id=owner_session_id))
+
+    def close_chat_docking_draft(
+        self, *, preparation_id, owner_session_id, expected_revision, expected_version,
+        task_id, trace_id, origin_turn_id,
+    ) -> bool:
+        """Revoke only the exact settled waiting chat draft, after confirmed commit.
+
+        This is not execution cancellation or cleanup. The caller must retain
+        in-flight SQL across wrapper cancellation until physical settlement; a
+        cancelled wrapper or uncertain commit is not a receipt. No read-back
+        recovery or stale retry can manufacture success. Closing an already
+        invalidated context needs neither live clocks nor generation callbacks.
+        """
+        expected_identity = dict(preparation_id=preparation_id, owner_session_id=owner_session_id,
+                                 task_id=task_id, trace_id=trace_id, origin_turn_id=origin_turn_id)
+        for key, value in expected_identity.items():
+            _draft_label(value, session_owner=key == "owner_session_id")
+        if (type(expected_revision) is not int or not 0 <= expected_revision < 2**63 - 1
+                or type(expected_version) is not int or not 1 <= expected_version < 2**63 - 1):
+            raise DockingConsentError("consent_invalid_input")
+        try:
+            with connection(self.db_path) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute(
+                    "SELECT * FROM docking_consents WHERE preparation_id=? AND owner_session_id=?",
+                    (preparation_id, owner_session_id),
+                ).fetchone()
+                if row is None:
+                    raise DockingConsentError("consent_not_found")
+                if row["draft_json"] is None:
+                    raise DockingConsentError("consent_invalid_input")
+                try:
+                    identity = json.loads(row["identity_json"])
+                    if type(identity) is not dict:
+                        raise ValueError
+                    identity = validate_draft_identity({
+                        key: value for key, value in identity.items() if key != "source_refs"
+                    })
+                except (TypeError, ValueError):
+                    raise DockingConsentError("consent_invalid_input") from None
+                if (identity["refinement_revision"] != expected_revision
+                        or row["version"] != expected_version):
+                    raise DockingConsentError("consent_revision_conflict")
+                if (any(identity[key] != value for key, value in expected_identity.items())
+                        or row["task_id"] != task_id):
+                    raise DockingConsentError("consent_binding_mismatch")
+                if (row["state"] != "AWAITING_INPUT" or row["cleanup_state"] != "settled"
+                        or row["operation_token"] is not None
+                        or row["execution_token"] is not None or row["execution_occupied"] != 0
+                        or row["dispatch_state"] != "not_reserved"
+                        or conn.execute("SELECT 1 FROM tasks WHERE task_id=?", (task_id,)).fetchone()):
+                    raise DockingConsentError("consent_not_waiting")
+                changed = conn.execute(
+                    """UPDATE docking_consents SET state='REVOKED',version=version+1,
+                    approval_nonce_hash=NULL,primary_reason='consent_cancelled'
+                    WHERE preparation_id=? AND owner_session_id=? AND task_id=?
+                    AND identity_json=? AND version=? AND draft_json IS NOT NULL
+                    AND state='AWAITING_INPUT' AND cleanup_state='settled' AND operation_token IS NULL
+                    AND execution_token IS NULL AND execution_occupied=0 AND dispatch_state='not_reserved'
+                    AND NOT EXISTS (SELECT 1 FROM tasks WHERE task_id=?)""",
+                    (preparation_id, owner_session_id, task_id, row["identity_json"], expected_version, task_id),
+                ).rowcount
+                if changed != 1:
+                    raise DockingConsentError("consent_revision_conflict")
+        except (sqlite3.Error, OSError):
+            raise DockingConsentError("consent_persistence_unavailable") from None
+        return True  # The connection context has committed successfully.
+
+    @classmethod
+    def _chat_draft_record(cls, row):
+        if row["draft_json"] is None:
+            raise DockingConsentError("consent_invalid_input")
+        try:
+            draft = validate_chat_draft(json.loads(row["draft_json"]))
+        except (TypeError, ValueError):
+            raise DockingConsentError("consent_invalid_input") from None
+        return {**cls._consent_record(row), "draft": draft,
+                "monotonic_expires": row["monotonic_expires"]}
+
+    def refine_docking_consent_draft(
+        self, *, preparation_id, owner_session_id, expected_revision, expected_version,
+        policy, model_generation, capability_generation, wall_time_ms, monotonic,
+        current_context, patch,
+    ):
+        """AWAITING_INPUT only: fill missing slots; fixed changes revoke atomically.
+
+        A current identical patch returns the same snapshot without a new revision.
+        Fixed changes return outcome=new_root_required after durable revocation.
+        """
+        return self._change_chat_draft(
+            preparation_id=preparation_id, owner_session_id=owner_session_id,
+            expected_revision=expected_revision, expected_version=expected_version,
+            policy=policy, model_generation=model_generation, capability_generation=capability_generation,
+            wall_time_ms=wall_time_ms, monotonic=monotonic, current_context=current_context,
+            patch=patch, reserve_budget=False,
+        )
+
+    def reserve_docking_draft_budget(
+        self, *, preparation_id, owner_session_id, expected_revision, expected_version,
+        policy, model_generation, capability_generation, wall_time_ms, monotonic,
+        current_context, call_slice_ms,
+    ):
+        """Precharge one proposal slot plus the entire permitted call-time slice.
+
+        No refund, including failed/uncertain transport or a lost receipt. This
+        is NOT factual dispatch accounting: DockingPreparationJournal owns that.
+        CAS version changes, refinement revision does not. A stale retry rejects.
+        """
+        return self._change_chat_draft(
+            preparation_id=preparation_id, owner_session_id=owner_session_id,
+            expected_revision=expected_revision, expected_version=expected_version,
+            policy=policy, model_generation=model_generation, capability_generation=capability_generation,
+            wall_time_ms=wall_time_ms, monotonic=monotonic, current_context=current_context,
+            call_slice_ms=call_slice_ms, reserve_budget=True,
+        )
+
+    def _change_chat_draft(
+        self, *, preparation_id, owner_session_id, expected_revision, expected_version,
+        policy, model_generation, capability_generation, wall_time_ms, monotonic,
+        current_context, reserve_budget, patch=None, call_slice_ms=None,
+    ):
+        if any(type(v) is not str or not v for v in (preparation_id, owner_session_id)):
+            raise DockingConsentError("consent_not_found")
+        with connection(self.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM docking_consents WHERE preparation_id=? AND owner_session_id=?",
+                               (preparation_id, owner_session_id)).fetchone()
+            if row is None:
+                raise DockingConsentError("consent_not_found")
+            result = self._chat_draft_record(row)
+            identity, draft = result["identity"], result["draft"]
+            if (type(expected_revision) is not int or type(expected_version) is not int
+                    or identity["refinement_revision"] != expected_revision
+                    or row["version"] != expected_version):
+                raise DockingConsentError("consent_revision_conflict")
+            if row["state"] == "EXPIRED":
+                raise DockingConsentError("consent_expired")
+            if row["state"] != "AWAITING_INPUT":
+                raise DockingConsentError("consent_not_waiting")
+            validate_draft_context(policy, model_generation, capability_generation, current_context)
+            if (row["runtime_generation"] != policy.runtime_generation
+                    or row["policy_generation"] != policy.policy_generation
+                    or draft["model_generation"] != model_generation
+                    or draft["capability_generation"] != capability_generation):
+                raise DockingConsentError("consent_generation_mismatch")
+            if row["policy_json"] != canonical_json(asdict(policy)).decode("ascii"):
+                raise DockingConsentError("consent_policy_unavailable")
+            now_ms, monotonic_now = wall_time_ms(), monotonic()
+            validate_clocks(now_ms, monotonic_now)
+            if now_ms >= row["expires_at_ms"] or monotonic_now >= row["monotonic_expires"]:
+                raise DockingConsentError("consent_expired")
+            revoke = False
+            if reserve_budget:
+                if type(call_slice_ms) is not int or not 0 < call_slice_ms <= 180000:
+                    raise DockingConsentError("consent_invalid_input")
+                budget = draft["budget"]
+                if (budget["proposal_slots_spent"] >= 4
+                        or budget["spent_ms"] + call_slice_ms > budget["limit_ms"]):
+                    raise DockingConsentError("consent_budget_exhausted")
+                budget["proposal_slots_spent"] += 1
+                budget["spent_ms"] += call_slice_ms
+            else:
+                patch = validate_draft_patch(patch)
+                revoke = any(draft["slots"][key]["state"] == "fixed"
+                             and draft["slots"][key]["value"] != value for key, value in patch.items())
+                if not revoke:
+                    missing = {key: value for key, value in patch.items() if draft["slots"][key]["state"] == "pending"}
+                    if not missing:
+                        return result
+                    for key, value in missing.items():
+                        draft["slots"][key] = {"state": "fixed", "value": value}
+                    identity["refinement_revision"] += 1
+                    identity = materialize_draft_identity(identity, draft)
+            if revoke:
+                changed = conn.execute(
+                    """UPDATE docking_consents SET state='REVOKED',version=version+1,
+                    approval_nonce_hash=NULL,primary_reason='consent_new_root_required'
+                    WHERE preparation_id=? AND owner_session_id=? AND version=? AND state='AWAITING_INPUT'""",
+                    (preparation_id, owner_session_id, expected_version),
+                ).rowcount
+            else:
+                changed = conn.execute(
+                    """UPDATE docking_consents SET identity_json=?,draft_json=?,version=version+1
+                    WHERE preparation_id=? AND owner_session_id=? AND version=? AND state='AWAITING_INPUT'""",
+                    (canonical_json(identity).decode("ascii"), canonical_json(draft).decode("ascii"),
+                     preparation_id, owner_session_id, expected_version),
+                ).rowcount
+            if changed != 1:
+                raise DockingConsentError("consent_revision_conflict")
+            result = self._chat_draft_record(conn.execute(
+                "SELECT * FROM docking_consents WHERE preparation_id=?", (preparation_id,)
+            ).fetchone())
+            if revoke:
+                result["outcome"] = "new_root_required"
+        return result
+
     @staticmethod
     def _consent_record(row) -> dict[str, Any]:
         return {
@@ -707,7 +965,7 @@ class TaskStore:
 
     def _begin_docking_preparation(self, *, preparation_id, owner_session_id,
                                    revision, policy, now_ms, monotonic_now, token,
-                                   still_current):
+                                   still_current, expected_chat_draft=None):
         self.expire_docking_consents(
             now_ms=now_ms, monotonic_now=monotonic_now,
             runtime_generation=policy.runtime_generation, policy_generation=policy.policy_generation,
@@ -729,6 +987,14 @@ class TaskStore:
                 raise DockingConsentError("consent_not_waiting")
             if row["policy_json"] != canonical_json(asdict(policy)).decode("ascii"):
                 raise DockingConsentError("consent_policy_unavailable")
+            if row["draft_json"] is not None:
+                draft = self._chat_draft_record(row)["draft"]
+                if any(slot["state"] != "fixed" for slot in draft["slots"].values()):
+                    raise DockingConsentError("consent_draft_incomplete")
+                if materialize_draft_identity(identity, draft) != identity:
+                    raise DockingConsentError("consent_binding_mismatch")
+                validate_identity(identity)
+            self._require_chat_staging_receipt(row, expected_chat_draft)
             conn.execute(
                 """UPDATE docking_consents SET state='PREPARING',version=version+1,
                 operation_token=?,cleanup_state='pending' WHERE preparation_id=? AND version=?""",
@@ -736,9 +1002,48 @@ class TaskStore:
             )
         return identity
 
+    @classmethod
+    def _require_chat_staging_receipt(cls, row, expected):
+        # This is a concurrency comparison, not source authentication. The
+        # runtime obtains this private snapshot only from its concrete live
+        # input context; ordinary runtime callers supply no such context.
+        if row["draft_json"] is None:
+            if expected is not None:
+                raise DockingConsentError("consent_proof_mismatch")
+        elif type(expected) is not dict or cls._chat_draft_record(row) != expected:
+            raise DockingConsentError("consent_proof_mismatch")
+
+    @classmethod
+    def _validate_chat_staging_parameters(cls, row, parameters):
+        """Frozen chat metadata, not byte/source authentication or permission."""
+        if row["draft_json"] is None:
+            return None  # Preserve the original non-chat C1 contract.
+        record = cls._chat_draft_record(row)
+        draft, identity = record["draft"], record["identity"]
+        if any(slot["state"] != "fixed" for slot in draft["slots"].values()):
+            raise DockingConsentError("consent_draft_incomplete")
+        if materialize_draft_identity(identity, draft) != identity:
+            raise DockingConsentError("consent_binding_mismatch")
+        checked = validate_draft_patch(parameters)
+        names = {"center", "size", "exhaustiveness", "num_modes"}
+        if set(checked) != names or any(checked[key] != draft["slots"][key]["value"] for key in names):
+            raise DockingConsentError("consent_binding_mismatch")
+
+    def _validate_docking_preparation_parameters(self, preparation_id, token, *, parameters):
+        """Only the acquired physical writer may validate fixed staging values."""
+        with connection(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT * FROM docking_consents WHERE preparation_id=? AND operation_token=? AND state='PREPARING'",
+                (preparation_id, token),
+            ).fetchone()
+            if row is None:
+                raise DockingConsentError("consent_not_waiting")
+            self._validate_chat_staging_parameters(row, parameters)
+
     def _seal_docking_preparation(self, preparation_id, token, binding, digest,
                                   nonce_hash, *, now_ms, monotonic_now,
-                                  still_current, wall_time_ms, monotonic) -> None:
+                                  still_current, wall_time_ms, monotonic,
+                                  expected_chat_draft=None) -> None:
         validate_clocks(now_ms, monotonic_now)
         with connection(self.db_path) as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -747,6 +1052,15 @@ class TaskStore:
                 raise DockingConsentError("consent_preparation_timeout")
             current_ms, current_mono = wall_time_ms(), monotonic()
             validate_clocks(current_ms, current_mono)
+            row = conn.execute(
+                "SELECT * FROM docking_consents WHERE preparation_id=? AND operation_token=? AND state='PREPARING'",
+                (preparation_id, token),
+            ).fetchone()
+            if row is None:
+                raise DockingConsentError("consent_expired")
+            self._require_chat_staging_receipt(row, expected_chat_draft)
+            self._validate_chat_staging_parameters(row, {
+                key: binding[key] for key in ("center", "size", "exhaustiveness", "num_modes")})
             if (current_ms >= binding["expires_at_ms"]
                     or current_mono >= monotonic_now + CONSENT_TTL_MS / 1000):
                 raise DockingConsentError("consent_expired")
@@ -829,6 +1143,93 @@ class TaskStore:
         if row is None:
             raise DockingConsentError("consent_not_found")
         return dict(row)
+
+    @staticmethod
+    def _publication_receipt(receipt):
+        """Bounded native facts, not a DTO, score input or success authority."""
+        if type(receipt) is not dict or set(receipt) != set(_PUBLICATION_FIELDS):
+            raise ValueError('docking_publication_unavailable')
+        value = dict(receipt)
+        for name in _PUBLICATION_LABELS:
+            if (type(value[name]) is not str
+                    or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', value[name]) is None):
+                raise ValueError('docking_publication_unavailable')
+        for name in _PUBLICATION_DIGESTS:
+            if type(value[name]) is not str or _SHA256_DIGEST.fullmatch(value[name]) is None:
+                raise ValueError('docking_publication_unavailable')
+        for name in ('consent_version', 'operation_deadline_ms'):
+            if type(value[name]) is not int or not 0 < value[name] < 2**63:
+                raise ValueError('docking_publication_unavailable')
+        mono = value['operation_monotonic_expires']
+        if type(mono) is not float or not math.isfinite(mono) or mono <= 0:
+            raise ValueError('docking_publication_unavailable')
+        return value
+
+    @staticmethod
+    def _commit_docking_publication(conn):
+        """Physical commit/ack seam; a late or lost return conveys no authority."""
+        conn.commit()
+
+    def _record_docking_publication(self, *, expected_consent, receipt):
+        """Single insert with the COMPLETE canonical consent CAS in one writer.
+
+        Never call under the Agent-first attached read transaction. The caller
+        releases that guard, awaits this write, then freshly verifies evidence.
+        Even an acknowledged row is only private candidate evidence.
+        """
+        value = self._publication_receipt(receipt)
+        if (type(expected_consent) is not bytes or not 0 < len(expected_consent) <= 65536
+                or hashlib.sha256(expected_consent).hexdigest() != value['consent_digest']):
+            raise ValueError('docking_publication_unavailable')
+        try:
+            with connection(self.db_path) as conn:
+                conn.execute('BEGIN IMMEDIATE')
+                row = conn.execute('SELECT * FROM docking_consents WHERE preparation_id=? AND owner_session_id=?',
+                    (value['preparation_id'], value['owner_session_id'])).fetchone()
+                if row is None or canonical_json(dict(row)) != expected_consent:
+                    raise ValueError('docking_publication_unavailable')
+                binding = json.loads(row['binding_json'])
+                draft = json.loads(row['draft_json'])
+                if (row['state'] not in {'CLAIMED', 'DISPATCH_RESERVED'}
+                        or row['view_status'] != 'SUCCEEDED' or row['cleanup_state'] != 'settled'
+                        or row['execution_occupied'] != 0 or row['cancel_requested'] != 0
+                        or row['primary_reason'] is not None
+                        or row['version'] != value['consent_version']
+                        or any(draft[key] != value[key] for key in (
+                            'model_generation', 'capability_generation'))
+                        or binding['trace_id'] != value['root_id']
+                        or any(row[key] != value[key] for key in ('task_id', 'runtime_generation',
+                            'execution_token', 'binding_digest', 'operation_deadline_ms',
+                            'operation_monotonic_expires'))
+                        or any(binding[key] != value[key] for key in ('preparation_id', 'task_id',
+                            'owner_session_id', 'runtime_generation', 'input_hash', 'config_hash',
+                            'tool_policy_digest'))):
+                    raise ValueError('docking_publication_unavailable')
+                conn.execute('INSERT INTO docking_publications (' + ','.join(_PUBLICATION_FIELDS)
+                    + ') VALUES (' + ','.join('?' for _ in _PUBLICATION_FIELDS) + ')',
+                    tuple(value[key] for key in _PUBLICATION_FIELDS))
+                self._commit_docking_publication(conn)
+        except (sqlite3.IntegrityError, KeyError, TypeError):
+            raise ValueError('docking_publication_unavailable') from None
+        return value  # No readback or retry, and no persisted successful latch.
+
+    def _suppress_docking_publication(self, *, receipt, status):
+        """Append one conservative receipt even if the candidate commit is unknown.
+
+        No FK/readback of the candidate, and no changes to consent/science.
+        A missing acknowledgement remains unresolved to the live owner.
+        """
+        value = self._publication_receipt(receipt)
+        if type(status) is not str or status not in {'CANCELLED', 'TIMED_OUT', 'UNKNOWN'}:
+            raise ValueError('docking_publication_unavailable')
+        fields = ('receipt_id', 'preparation_id', 'task_id', 'root_id', 'owner_session_id',
+                  'runtime_generation', 'consent_digest', 'completion_digest')
+        with connection(self.db_path) as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute('INSERT INTO docking_publication_suppressions (' + ','.join(fields)
+                + ',status) VALUES (' + ','.join('?' for _ in range(len(fields) + 1)) + ')',
+                (*[value[key] for key in fields], status))
+        return True
 
     def _claim_docking_consent(self, expected, token, validate, wall_time_ms, monotonic):
         with connection(self.db_path) as conn:
@@ -1300,6 +1701,23 @@ class TaskStore:
             )
         return True
 
+    def is_docking_consent_task(self, task_id: str) -> bool:
+        """Classify exact durable membership, independent of task/state/owner.
+
+        Do not initialize, migrate, expire or create a missing database while
+        checking authority. Storage failures must propagate to the caller.
+        """
+        if type(task_id) is not str or not 1 <= len(task_id) <= 255:
+            raise ValueError("invalid task_id")
+        task_id = _validate_required_string(task_id, "task_id")
+        conn = sqlite3.connect(f"{self.db_path.as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            return conn.execute(
+                "SELECT 1 FROM docking_consents WHERE task_id = ? LIMIT 1", (task_id,)
+            ).fetchone() is not None
+        finally:
+            conn.close()
+
     def get(self, task_id: str) -> TaskRecord:
         with connection(self.db_path) as conn:
             row = conn.execute(
@@ -1351,6 +1769,7 @@ class TaskStore:
         exclude_task_type: str | None = None,
         owner_session_id: str | None = None,
         require_owner: bool = False,
+        exclude_docking_consents: bool = False,
     ) -> list[TaskRecord]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -1363,6 +1782,11 @@ class TaskStore:
         if exclude_task_type:
             clauses.append("task_type != ?")
             params.append(exclude_task_type)
+        if exclude_docking_consents:
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM docking_consents "
+                "WHERE docking_consents.task_id = tasks.task_id)"
+            )
         if enforce_agent_ownership:
             clauses.append(
                 "(task_type != 'agent_workflow' OR "

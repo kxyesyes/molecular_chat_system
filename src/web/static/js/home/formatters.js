@@ -45,8 +45,63 @@ window.HomeFormatters = (function () {
     `;
   }
 
+  // Input is already escaped; only complete, rectangular pipe tables are promoted.
+  function renderComparisonTables(escaped) {
+    const lines = escaped.split(/\r?\n/);
+    function cells(line) {
+      const value = line.trim();
+      if (!value.startsWith("|") || !value.endsWith("|") || value.includes("\\|")) return null;
+      return value.slice(1, -1).split("|").map(function (cell) { return cell.trim(); });
+    }
+    const output = [];
+    let plain = [];
+    function flushPlain() {
+      if (plain.length) output.push(renderEscapedMarkdown(plain.join("\n")));
+      plain = [];
+    }
+    for (let i = 0; i < lines.length; i++) {
+      const header = cells(lines[i]);
+      const divider = i + 1 < lines.length ? cells(lines[i + 1]) : null;
+      if (!header || !divider || header.length !== divider.length ||
+          !divider.every(function (cell) { return /^:?-{3,}:?$/.test(cell); })) {
+        plain.push(lines[i]);
+        continue;
+      }
+      const rows = [];
+      let end = i + 2;
+      let valid = true;
+      while (end < lines.length) {
+        const row = cells(lines[end]);
+        if (!row) break;
+        if (row.length !== header.length) valid = false;
+        rows.push(row);
+        end++;
+      }
+      if (!valid || !rows.length) {
+        plain.push(...lines.slice(i, end));
+      } else {
+        flushPlain();
+        const cellStyle = ' style="padding: 8px 12px; border: 1px solid #e2e8f0; text-align: left;"';
+        const heading = header.map(function (cell) { return '<th scope="col"' + cellStyle + '>' + renderEscapedMarkdown(cell) + '</th>'; }).join("");
+        const body = rows.map(function (row) {
+          return '<tr>' + row.map(function (cell) { return '<td' + cellStyle + '>' + renderEscapedMarkdown(cell) + '</td>'; }).join("") + '</tr>';
+        }).join("");
+        output.push('<div style="overflow-x: auto; margin: 12px 0;"><table style="border-collapse: collapse; width: 100%;"><thead><tr>' + heading + '</tr></thead><tbody>' + body + '</tbody></table></div>');
+      }
+      i = end - 1;
+    }
+    flushPlain();
+    return output.join("<br>");
+  }
+
   function renderMarkdownLike(content) {
-    return escapeHtml(content)
+    return renderComparisonTables(escapeHtml(content));
+  }
+
+  // Format each cell independently so inline syntax cannot consume HTML
+  // boundaries or combine the scientific values of neighboring cells.
+  function renderEscapedMarkdown(escaped) {
+    return escaped
       .replace(
         /```(.*?)\n([\s\S]*?)```/g,
         '<pre style="background: #f7fafc; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 12px 0;"><code class="language-$1">$2</code></pre>',

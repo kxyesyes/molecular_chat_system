@@ -129,7 +129,7 @@ def _history_transaction(work_dir: str | Path) -> Iterator[None]:
             yield
 
 
-def _load_records_unlocked(work_dir: str | Path) -> list[dict[str, Any]]:
+def _load_records_unlocked(work_dir: str | Path, *, strict: bool = False) -> list[dict[str, Any]]:
     path = history_index_path(work_dir)
     if not path.exists():
         return []
@@ -137,9 +137,16 @@ def _load_records_unlocked(work_dir: str | Path) -> list[dict[str, Any]]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
+        if strict:
+            raise
         return []
 
+    if strict and not (isinstance(payload, list) or
+                       isinstance(payload, dict) and isinstance(payload.get('records'), list)):
+        raise ValueError('Invalid history metadata')
     raw_records = payload if isinstance(payload, list) else payload.get("records", [])
+    if strict and any(not isinstance(record, dict) for record in raw_records):
+        raise ValueError('Invalid history metadata')
     return [record for record in raw_records if isinstance(record, dict)]
 
 
@@ -406,6 +413,45 @@ def upsert_history_record(work_dir: str | Path, record: dict[str, Any]) -> None:
         }
         records_by_id[job_id] = record
         _write_records_unlocked(work_dir, list(records_by_id.values()))
+
+
+def read_owned_history_snapshot(
+    work_dir: str | Path,
+    owner_session_id: str,
+    *,
+    max_records: int = 10_000,
+) -> list[dict[str, Any]]:
+    """Copy a bounded owner-only metadata view in one existing index transaction.
+
+    No artifact inspection/cache refresh and no lock escapes this synchronous call.
+    The JSON index must be loaded whole, but the detached owned view is capped.
+    """
+    if type(max_records) is not int or not 1 <= max_records <= 10_000:
+        raise ValueError('Invalid history snapshot limit')
+    if type(owner_session_id) is not str or not owner_session_id.strip():
+        raise ValueError('Invalid history owner')
+    with _history_transaction(work_dir):
+        raw_records = _load_records_unlocked(work_dir, strict=True)
+        records, seen = [], {}
+        for row in raw_records:
+            if row.get('owner_session_id') != owner_session_id:
+                continue
+            job_id = row.get('job_id')
+            if type(job_id) is not str or not job_id or job_id in seen:
+                raise ValueError('Invalid history identity')
+            if len(records) >= max_records:
+                raise ValueError('History snapshot limit exceeded')
+            seen[job_id] = 0
+            records.append(dict(row))
+        # Count only bounded owned IDs, but across the same locked raw snapshot.
+        # Match remove_history_record's ID comparison, including foreign rows.
+        for row in raw_records:
+            job_id = str(row.get('job_id'))
+            if job_id in seen:
+                seen[job_id] += 1
+                if seen[job_id] > 1:
+                    raise ValueError('Invalid history identity')
+        return sorted(records, key=lambda item: float(item.get('timestamp') or 0), reverse=True)
 
 
 def read_history_page(

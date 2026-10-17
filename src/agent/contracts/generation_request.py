@@ -213,11 +213,33 @@ _ENGLISH_COUNT_TAIL = (
     rf"(?={_ENGLISH_COUNT_BOUNDARY})"
 )
 _CHINESE_REFERENCE = r"[A-Za-z0-9\u3400-\u9fff-]{1,24}"
+# Returning an ordinal selects an existing result, not a new candidate count.
+_CHINESE_GENERATION_VERB = r"(?:生成|创建|设计|制作|构建|合成|给我|提供|优化成|返回(?!\s*第))"
 _CHINESE_MOLECULAR_NOUN = (
-    r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物)"
+    r"(?:分子|化合物|结构|候选|配体|骨架|类似物|抑制剂|激动剂|拮抗剂|药物|(?i:SMILES))"
+)
+# A selected candidate's ordinal precedes this action and is never a count.
+# Capture the entire numeric-looking slot, including malformed/grouped values,
+# so an invalid count cannot silently become a valid prefix or the default.
+_CHINESE_OPTIMIZATION_COUNT_SLOT = (
+    r"(?P<count>[-+\u2212.\d零〇一二两三四五六七八九十百点A-Za-z∞_,，/\s]+)"
+)
+_CHINESE_OPTIMIZATION_COUNT_BODY = (
+    _CHINESE_OPTIMIZATION_COUNT_SLOT +
+    r"(?:种|个)\s*(?:结构)?优化"
+)
+_CHINESE_OPTIMIZATION_COUNT_PATTERN = re.compile(
+    rf"(?:做|进行|^){_CHINESE_OPTIMIZATION_COUNT_BODY}"
+)
+_CHINESE_OPTIMIZATION_ACTION = (
+    rf"(?:做|进行)(?={_CHINESE_OPTIMIZATION_COUNT_BODY})"
 )
 _CHINESE_COUNT_OBJECT_FOLLOW = (
     rf"(?=[^,，。；;、!?！？\r\n]{{0,24}}{_CHINESE_MOLECULAR_NOUN}|用于|给|$)"
+)
+_CHINESE_OPTIMIZATION_OUTPUT_PATTERN = re.compile(
+    rf"优化成{_CHINESE_OPTIMIZATION_COUNT_SLOT}(?:个|种|份)\s*"
+    rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
 )
 _CHINESE_TARGET_PREFIX = r"(?:[A-Za-z][A-Za-z0-9-]{0,19}\s*)?"
 _CHINESE_REPEAT_PREFIX = (
@@ -235,7 +257,7 @@ _COUNT_PATTERNS = (
         rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
-        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_GENERATION_VERB}\s*"
         rf"(?P<count>{_CHINESE_REQUEST_COUNT})\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
@@ -259,7 +281,7 @@ _COUNT_SLOT_PATTERNS = (
         rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
-        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_GENERATION_VERB}\s*"
         rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
@@ -275,7 +297,7 @@ _MALFORMED_GROUPED_COUNT_PATTERNS = (
         rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
-        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_GENERATION_VERB}\s*"
         rf"(?P<count>{_GROUPED_ARABIC_COUNT})\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
@@ -288,7 +310,7 @@ _CHINESE_ARABIC_HYBRID_COUNT = (
 )
 _MALFORMED_HYBRID_COUNT_PATTERNS = (
     re.compile(
-        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_GENERATION_VERB}\s*"
         rf"(?P<count>{_CHINESE_ARABIC_HYBRID_COUNT})"
         rf"\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
@@ -302,7 +324,7 @@ _MALFORMED_SPACED_SIGN_COUNT_PATTERNS = (
         rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
-        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_GENERATION_VERB}\s*"
         rf"(?P<count>{_SPACED_SIGNED_ARABIC_COUNT})"
         rf"\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
@@ -325,7 +347,7 @@ _MALFORMED_WORD_COUNT_PATTERNS = (
         rf"{_ENGLISH_COUNT_TAIL}"
     ),
     re.compile(
-        rf"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*"
+        rf"{_CHINESE_GENERATION_VERB}\s*"
         rf"{_CHINESE_DECIMAL_PART}\s*点\s*{_CHINESE_DECIMAL_PART}"
         rf"\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
@@ -355,21 +377,21 @@ _FUZZY_COUNTS = (
     ),
     (
         re.compile(
-            r"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*(?:几个|若干)"
+            rf"{_CHINESE_GENERATION_VERB}\s*(?:几个|若干)"
             r"\s*(?:个|种|份)?\s*(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
         ),
         3,
     ),
     (
         re.compile(
-            r"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*(?:多个|很多)"
+            rf"{_CHINESE_GENERATION_VERB}\s*(?:多个|很多)"
             r"\s*(?:个|种|份)?\s*(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
         ),
         5,
     ),
     (
         re.compile(
-            r"(?:生成|创建|设计|制作|构建|合成|给我|提供)\s*(?:一个|单个)"
+            rf"{_CHINESE_GENERATION_VERB}\s*(?:一个|单个)"
             r"\s*(?:个|种|份)?\s*(?=(?:类药)?(?:候选)?(?:分子|化合物|结构|候选))"
         ),
         1,
@@ -518,6 +540,8 @@ def _collect_generation_occurrences(value: str) -> list[_GenerationOccurrence]:
     pattern_groups = (
         ("malformed", _MALFORMED_PREMASK_COUNT_PATTERNS),
         ("malformed", _MALFORMED_WORD_COUNT_PATTERNS),
+        ("optimization_output", (_CHINESE_OPTIMIZATION_OUTPUT_PATTERN,)),
+        ("optimization", (_CHINESE_OPTIMIZATION_COUNT_PATTERN,)),
         ("count", _CLAUSE_TERMINATED_COUNT_PATTERNS),
         ("count", _COUNT_PATTERNS),
         ("slot", _COUNT_SLOT_PATTERNS),
@@ -580,11 +604,16 @@ def _parse_generation_occurrence_count(
             value=_safe_count_error_value(malformed.match.groupdict().get("count")),
         )
     for item in ordered:
-        if item.category != "count":
+        if item.category not in {"count", "optimization", "optimization_output"}:
             continue
         count = _parse_count_token(item.match.group("count"))
         if count is not None:
             return count
+        if item.category in {"optimization", "optimization_output"}:
+            raise GenerationRequestError(
+                "generation count must be an integer",
+                value=_safe_count_error_value(item.match.group("count")),
+            )
     for item in ordered:
         if item.category == "slot" and _looks_numeric_like_count_token(
             item.match.group("count")
@@ -659,7 +688,7 @@ _NON_MOLECULAR_OUTPUT_HEAD = re.compile(
     r"slides?)\Z"
 )
 _CHINESE_GENERATION_VERB_PATTERN = re.compile(
-    r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    _CHINESE_GENERATION_VERB
 )
 _CHINESE_MOLECULAR_ENTITY = re.compile(
     _CHINESE_MOLECULAR_NOUN
@@ -719,6 +748,11 @@ def _occurrence_has_molecular_scope(
     value: str,
     occurrence: _GenerationOccurrence,
 ) -> bool:
+    if any(item.category == "optimization" for item in occurrence.matches):
+        # "Do two optimizations" describes the preceding molecular object;
+        # the word optimization alone must not turn algorithm edits into chemistry.
+        prefix = re.split(r"[,，。；;!?！？\r\n]", value[:occurrence.start])[-1]
+        return _CHINESE_MOLECULAR_ENTITY.search(prefix) is not None
     occurrence_text = value[occurrence.start : occurrence.end]
     verb = re.search(rf"(?i)\b{_GENERATION_VERB}\b", occurrence_text)
     if verb is None:
@@ -732,7 +766,7 @@ def _occurrence_has_molecular_scope(
         ]
         object_phrase = re.split(
             r"(?:[,，](?!\s*[0-9])|[。；;!?！？]|关于|有关|描述|涉及|包含|含有|带有|"
-            r"并且|然后|同时)",
+            r"并且|然后|同时|并(?:比较|计算|分析|预测|评估))",
             object_phrase,
             maxsplit=1,
         )[0]
@@ -931,6 +965,16 @@ def _mask_non_actionable_generation_occurrences(
 
 
 def _has_generation_negation(value: str) -> bool:
+    optimization_reference = (
+        rf"(?:(?:对|把|将)\s*(?:第\s*{_CHINESE_REQUEST_COUNT}\s*(?:个|种)\s*|这个\s*)?"
+        rf"(?:候选\s*分子|{_CHINESE_MOLECULAR_NOUN})\s*)?"
+    )
+    if re.search(
+        rf"(?:请勿|勿|不要|无需|不需要|禁止|别|不可|不能|不)\s*"
+        rf"{optimization_reference}(?:{_CHINESE_OPTIMIZATION_ACTION}|优化成)",
+        value,
+    ):
+        return True
     english_negation = (
         r"(?:do\s+not|don['’]t|dont|can(?:not|['’]t)|never|"
         r"not(?:\s+to)?|without)"
@@ -942,7 +986,7 @@ def _has_generation_negation(value: str) -> bool:
         value,
     ):
         return True
-    chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    chinese_verb = _CHINESE_GENERATION_VERB
     chinese_target_scope = (
         rf"(?:(?:为|针对|给)\s*{_CHINESE_REFERENCE}\s*)"
     )
@@ -966,7 +1010,7 @@ def _has_generation_example_prefix(value: str) -> bool:
         value,
     ):
         return True
-    chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    chinese_verb = rf"(?:{_CHINESE_GENERATION_VERB}|{_CHINESE_OPTIMIZATION_ACTION})"
     return bool(
         re.search(
             rf"(?:例如|比如|示例|例子|解释|说明)"
@@ -983,7 +1027,7 @@ def _has_generation_example_suffix(value: str) -> bool:
         value,
     ):
         return True
-    chinese_verb = r"(?:生成|创建|设计|制作|构建|合成|给我|提供)"
+    chinese_verb = rf"(?:{_CHINESE_GENERATION_VERB}|{_CHINESE_OPTIMIZATION_ACTION})"
     return bool(
         re.search(
             rf"{chinese_verb}[^；。！？]{{0,48}}(?:作为|当作)(?:一个)?示例",

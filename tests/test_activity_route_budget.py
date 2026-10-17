@@ -89,6 +89,59 @@ def test_cancel_terminates_child_and_releases_capacity(admission, monkeypatch, t
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("cancel_stage", ["start", "wait"])
+def test_cancellation_wins_when_process_stage_completes(
+    admission, monkeypatch, tmp_path, cancel_stage
+):
+    marker = tmp_path / "marker.txt"
+    real_to_thread = asyncio.to_thread
+    processes = []
+    cancellation_accepted = []
+
+    def cancel_on_stage_completion(function, *args, **kwargs):
+        owner = asyncio.current_task()
+
+        async def run():
+            if function.__name__ in {"terminate", "close"}:
+                available = admission.acquire(blocking=False)
+                if available:
+                    admission.release()
+                assert not available, "capacity released before process cleanup"
+            result = await real_to_thread(function, *args, **kwargs)
+            if function.__name__ == cancel_stage:
+                processes.append(function.__self__)
+                # Complete the real worker and cancel in the same loop turn,
+                # before its owner resumes; no sleep-based race or fake wait.
+                asyncio.get_running_loop().call_soon(
+                    lambda: cancellation_accepted.append(owner.cancel())
+                )
+            return result
+
+        return run()
+
+    monkeypatch.setattr(routes.asyncio, "to_thread", cancel_on_stage_completion)
+
+    async def exercise():
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await routes._invoke_activity_with_budget(
+                    operation="cancel-at-completion",
+                    isolated_payload=(str(marker), "PDE5A"),
+                    isolated_target=(
+                        _slow_activity_child if cancel_stage == "start" else _success_activity_child
+                    ),
+                )
+        finally:
+            assert cancellation_accepted == [True]
+            assert len(processes) == 1
+            assert not processes[0].is_alive()
+            assert admission.acquire(blocking=False)
+            admission.release()
+
+    asyncio.run(exercise())
+    assert not marker.exists()
+
+
 def test_hung_process_start_consumes_activity_budget(admission, monkeypatch):
     class HungStartProcess:
         def start(self):

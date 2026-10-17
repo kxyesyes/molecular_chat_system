@@ -330,6 +330,13 @@ class AgentSessionMiddleware:
             await send({"type": "websocket.close", "code": 1008})
             return
 
+        # Only explicit C route registration supplies this server-owned scope
+        # object. Ordinary HTTP, entrypoint policy and WebSocket A2 are unchanged.
+        envelope = None
+        if scope['type'] == 'http':
+            from src.web.docking_http import envelope_for
+            envelope = envelope_for(scope)
+
         try:
             if scope["type"] == "websocket":
                 session_id = (
@@ -337,6 +344,8 @@ class AgentSessionMiddleware:
                     if token
                     else None
                 )
+            elif envelope is not None:
+                session_id = await envelope.auth(self.store.resolve_and_touch, token) if token else None
             else:
                 session_id = (
                     await asyncio.to_thread(self.store.resolve_and_touch, token)
@@ -348,7 +357,8 @@ class AgentSessionMiddleware:
                     await send({"type": "websocket.close", "code": 1008})
                     return
             elif not session_id:
-                token, session_id = await asyncio.to_thread(self.store.issue)
+                token, session_id = (await envelope.auth(self.store.issue) if envelope else
+                                     await asyncio.to_thread(self.store.issue))
         except (sqlite3.Error, OSError):
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1013})
