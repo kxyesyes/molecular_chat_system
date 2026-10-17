@@ -112,7 +112,7 @@
     closed(s.choice_counts, SECTIONS.join(" "));
     let total = 0;
     SECTIONS.forEach(k => { require(integer(s.choice_counts[k], 0, MAX_ROWS)); total += s.choice_counts[k]; });
-    require(total <= MAX_ROWS && s.choice_counts.protein_selection > 0 && s.choice_counts.reference_residue > 0 && s.choice_counts.residues > 0);
+    require(total <= MAX_ROWS && s.choice_counts.protein_selection > 0 && s.choice_counts.residues > 0);
     return s;
   }
 
@@ -439,8 +439,16 @@
     try {
       require(typeof request === "function" && typeof isCurrent === "function");
       event = detached(options.event); source = validateEvent(event);
-      if (current()) element("pre", `来源（非执行授权）\n${JSON.stringify(source, null, 2)}`, facts);
-      else disable();
+      if (current()) {
+        element("pre", `来源（非执行授权）\n${JSON.stringify(source, null, 2)}`, facts);
+        if (source.choice_counts.reference_residue === 0) {
+          // A valid source can have no eligible pocket reference. This is a
+          // scientific blocker, not an expired/failed confirmation. Keep all
+          // preparation controls inert, including manually dispatched events.
+          failed = true; disable();
+          status.textContent = "当前结构没有经核验的合格参考配体，无法据此定义共晶口袋。请取消本次请求并选择其他结构；尚未运行 Vina。";
+        }
+      } else disable();
     } catch (_) { unavailable(); }
     return {dispose() {
       if (disposed) return;

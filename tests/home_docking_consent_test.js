@@ -87,6 +87,21 @@ async function run() {
     assert.strictEqual(r.requests.length, 0, "event alone must never prepare or approve");
     assert(button(r.host, "补充本次请求"));
   }
+  {
+    const r = rig();
+    r.ui.handle(view({reason_code: "scientific_selection_required", preview: {source: {
+      pdb_id: "1ABC", target: {uniprot_id: "P06276", taxonomy_id: 9606}, source_sha256: hash,
+      revision_version: "1.0", input_ready: false, execution_authorized: false,
+      choice_counts: {protein_selection: 1, reference_residue: 0, hetero_choices: 0,
+        conformer_choices: 0, residues: 1, conformer_constraints: 0, connections: 0, limitations: 0}
+    }}}), r.socket);
+    assert(r.host.textContent.includes("没有经核验的合格参考配体"));
+    assert(r.host.textContent.includes("等待补充输入"));
+    assert(!r.host.textContent.includes("本次确认已失效"));
+    assert.strictEqual(r.requests.length, 0);
+    assert.strictEqual(r.sent.length, 0);
+    assert(button(r.host, "确认结构选择并生成输入").disabled);
+  }
   for (const patch of [{task_id: "foreign", root_trace_id: "foreign"}, {origin_turn_id: "foreign"},
     {sequence: -1}, {sequence: 1.5}, {send_generation: 0}, {revision: Number.MAX_SAFE_INTEGER + 1},
     {schema: "Other"}, {terminal: "false"}, {preview: {consent: {...consent(), approval_nonce: hash}}},

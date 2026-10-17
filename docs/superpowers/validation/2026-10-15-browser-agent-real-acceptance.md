@@ -1281,3 +1281,41 @@ protein=523、glycan=9、unproven=9、water=483。这证明兼容修复后仍保
 设置现有 `REVERSE_TARGET_DATA_DIR`、`RAG_INDEX_PATH` 和配体准备路径为 S10 实际资产
 后 **23/23**。没有修改资产、默认配置或安全边界。全部离线套件、当前 head CI、
 真实 Vina/构象/下载仍未完成，不能从聚焦测试或健康检查推断为通过。
+
+消费者回归命令：
+
+```text
+python -m pytest tests/test_receptor_projection.py tests/test_chat_docking_preparation.py tests/agent/test_web_docking_coordinator.py tests/task_runtime/test_chat_docking_input_context.py tests/task_runtime/test_chat_docking_execution_context.py -q --basetemp scratch/s10-sourcefix-consumers
+```
+
+结果 **684 passed，348.26s**。兼容修复提交 `fac3e351` 已推送同一 Draft PR #209，
+未合并。以上没有重复运行旧全仓、无关 S08/S09 或 Node 套件；本次回归限定于修改后
+受影响的来源、受体和确认链路。当前 head CI 和真实对接仍待核验。
+
+### S10 零参考配体的真实界面错误（2026-10-17）
+
+6001 于 13:20:11.406 完成 831120/831120 行预热。预热后普通首页真实 S03 返回
+人源 P06276，后续 S10 的来源准备成功进入 `scientific_selection_required`，但
+`docking_source_selection.js::validateEvent` 要求参考配体数量大于零，将合法空列表
+经 onError 错误呈现为确认失效。这与来源损坏、超限或确认过期不是同一语义。
+
+修复只将合法非负的零计数呈现为明确科学阻断，不调用 onError；两准备按钮禁用，
+内部 failed 标记连人工派发 click 也不能加载、选择或提交。其它事件验证、预算、
+当前身份、来源/科学门禁不变；仅更新该脚本的模板缓存版本，不更换执行链路。
+
+新增用例先 **1 failed / 48 passed**，修复后 source-selection **49/49 passed**；
+`home_docking_consent_test.js` 父控制器集成通过，确认等待状态保持、没有控制帧或
+HTTP 请求。`test_static_placeholder_cleanup.py` **7 passed / 24.55s**；
+`node --check`、`compileall`、`git diff --check` 通过。独立只读增量审查批准，
+另独立验证49/49、父控制器集成及语法，无可操作发现。未重跑旧全仓或无关 Node 模块。
+
+13:26 实际普通首页加载新脚本后，真实 S10 页面显示“等待补充输入”，并明确
+“当前结构没有经核验的合格参考配体，无法据此定义共晶口袋”，结构准备控件禁用；
+source counts 与上述真实诊断相同，原始 PDB 摘要和版本2.2保持一致，
+`input_ready=false`、`execution_authorized=false`。本地忽略输出目录保存截图，
+没有提交截图、聊天输入、运行数据库或真实结构数据。
+
+这关闭的是兼容误拒绝和空参考的界面误报，不是 S10 科学闭环：没有 READY、Vina
+审批/执行、能量、pose 或下载文件。1P0I 仍不合格；需后续明确结构选择及当前会话
+权威检索支持。fac3e351 的 CI run39005148262 在最近只读检查时仍 in_progress，
+不使用历史487fde5e的通过结论替代当前增量，不合并。

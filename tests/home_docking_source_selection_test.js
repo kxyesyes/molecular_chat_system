@@ -134,6 +134,20 @@ async function choose(h) {
 }
 const unavailable = h => { assert.ok(/不可用/.test(h.host.textContent), "must explicitly show unavailable"); assert.ok(!submit(h) || submit(h).disabled); };
 
+test("zero eligible reference is an explicit scientific blocker, not an expired confirmation", async () => {
+  const data = fixture(); data.reference_residue = [];
+  data.residues.filter(r => r.role === "deposited_ligand").forEach(r => r.role = "unproven");
+  data.hetero_choices.filter(r => r.role === "deposited_ligand").forEach(r => r.role = "unproven");
+  const h = harness({data});
+  assert.equal(h.errors.length, 0);
+  assert.match(h.host.textContent, /没有经核验的合格参考配体/);
+  assert.match(h.host.textContent, /尚未运行 Vina/);
+  assert.equal(h.button("查看结构并选择").disabled, true);
+  assert.equal(submit(h).disabled, true);
+  await h.button("查看结构并选择").fire("click"); await submit(h).fire("click");
+  assert.equal(h.calls.length, 0); assert.equal(h.submitted.length, 0);
+});
+
 test("mount is inert; eight complete sections load only on explicit click with exact paginated requests", async () => {
   const data = fixture();
   data.connections = Array.from({length: 65}, (_, i) => ({record_index: i + 1, record_type: "CONECT", atom_serials: [3, 4], kind: "coordination", symmetry: []}));
