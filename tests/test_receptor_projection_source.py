@@ -353,6 +353,31 @@ def test_constraints_and_limitations_are_frozen_explicit_facts(constrained_fixtu
     assert_immutable(result)
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_absent_variant_requires_exact_explicit_missing_residue(constrained_fixture, reverse):
+    raw, source = constrained_fixture
+    source["limitations"][1]["residues"] = [identity("GLY", 2)]
+    if reverse:
+        source["limitations"].reverse()
+    result = validate(raw, source)
+    variant = next(row for row in result.limitations if row.kind == "sequence_variant")
+    assert variant.residues == ((1, "A", "GLY", 2, ""),)
+    assert all(row.identity != variant.residues[0] for row in result.residues)
+
+
+@pytest.mark.parametrize("mutation", ["no_gap", "truncation", "name", "position", "insertion"])
+def test_absent_variant_cannot_use_unrelated_absence(constrained_fixture, mutation):
+    raw, source = constrained_fixture
+    source["limitations"][1]["residues"] = [identity("GLY", 2)]
+    gap = source["limitations"][0]
+    if mutation == "no_gap": source["limitations"].pop(0)
+    elif mutation == "truncation": gap["kind"] = "construct_truncation"
+    elif mutation == "name": gap["residues"][0]["resname"] = "ALA"
+    elif mutation == "position": gap["residues"][0]["resseq"] = 3
+    else: gap["residues"][0]["icode"] = "A"
+    bad_source(raw, source)
+
+
 @pytest.mark.parametrize("mutation", ["empty", "absent", "label", "width", "duplicate", "duplicate_residue",
     "duplicate_id", "missing_key", "extra_key", "no_assignments", "blank", "boolean"])
 def test_constraints_never_invent_or_drop_recorded_dependencies(constrained_fixture, mutation):

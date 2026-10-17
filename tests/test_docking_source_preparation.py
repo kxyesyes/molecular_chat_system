@@ -348,7 +348,8 @@ def test_download_success_does_not_bypass_independent_compilation(monkeypatch, s
     elif change == "target":
         accession = "P12345"
     else:
-        components = {key: value.replace(b"2023-01-01", b"2025-01-01") for key, value in components.items()}
+        components = {key: value.replace(b"LIG C1 O1 SING N N", b"LIG C1 O1 DOUB N N")
+                      for key, value in components.items()}
     mock_downloads(monkeypatch, (pdb, cif, components))
     result = api()._source_candidate("1ABC", accession, 9606, time.monotonic() + 10)
     assert result["ok"] is False and result["code"] == "RCSB_SOURCE_INVALID"

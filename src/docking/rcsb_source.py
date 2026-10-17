@@ -255,17 +255,19 @@ def _capture(pdb_bytes, cif_bytes, component_files, pdb_id, target, budget):
 
 def _revisions(cif, parsed, pdb_id):
     rows = cif.rows("pdbx_audit_revision_history", required=True)
-    _unique(rows, "ordinal")
-    history = []
+    _unique(rows, "ordinal", integer_fields=("ordinal",))
+    history, ordinals = [], []
     for row in rows:
+        ordinal = _int(_field(row, "ordinal"), 1)
+        ordinals.append(ordinal)
         if _field(row, "data_content_type") == "Structure model":
-            history.append({"ordinal": _int(_field(row, "ordinal"), 1),
+            history.append({"ordinal": ordinal,
                 "date": _date(_field(row, "revision_date")),
                 "major": _int(_field(row, "major_revision"), 1),
                 "minor": _int(_field(row, "minor_revision"))})
     _require(bool(history), "revision_mismatch")
+    _require(sorted(ordinals) == list(range(1, len(rows) + 1)), "revision_mismatch")
     history.sort(key=lambda r: r["ordinal"])
-    _require([r["ordinal"] for r in history] == list(range(1, len(history)+1)), "revision_mismatch")
     _require(all(a["date"] <= b["date"] and (a["major"], a["minor"]) < (b["major"], b["minor"])
                  for a, b in zip(history, history[1:])), "revision_mismatch")
     _require(parsed.header[62:66] == pdb_id, "revision_mismatch")
@@ -280,12 +282,9 @@ def _revisions(cif, parsed, pdb_id):
         suffix = line[10:12].strip()
         if not suffix:
             _require(number not in first and line[23:27] == pdb_id, "revision_mismatch")
-            _require(line[31] in "0123456789", "revision_mismatch")
+            _require(previous is None or number == previous - 1, "revision_mismatch")
+            _require(line[31] == ("0" if number == 1 else "1"), "revision_mismatch")
             _require(re.fullmatch(r"[0-9]{2}-[A-Z]{3}-[0-9]{2}", line[13:22]), "revision_mismatch")
-            _require(1 <= number <= len(history), "revision_mismatch")
-            expected = history[number-1]["date"]
-            formatted = expected[8:10] + "-" + months[int(expected[5:7])-1] + "-" + expected[2:4]
-            _require(line[13:22] == formatted, "revision_mismatch")
             first[number], previous, continuation = line, number, 1
         else:
             _require(previous == number and _int(suffix, 2) == continuation+1, "revision_mismatch")
@@ -293,7 +292,43 @@ def _revisions(cif, parsed, pdb_id):
             for start, end in ((13, 22), (23, 27), (31, 32)):
                 _require(not line[start:end].strip() or line[start:end] == first[number][start:end], "revision_mismatch")
             continuation += 1
-    _require(set(first) == set(range(1, len(history)+1)), "revision_mismatch")
+    _require(bool(first), "revision_mismatch")
+    latest_number = max(first)
+    _require(set(first) == set(range(1, latest_number + 1)), "revision_mismatch")
+
+    # REVDAT modification numbers and mmCIF history ordinals are independent
+    # identifiers. Structure-factor rows can also interrupt model ordinals.
+    # Bind release/latest dates; _inventory still compares EVERY actual atom,
+    # including coordinates, occupancy, B factor and charge, without tolerance.
+    start, end = date.fromisoformat(history[0]["date"]), date.fromisoformat(history[-1]["date"])
+    _require(latest_number > 1 or start == end, "revision_mismatch")
+
+    def pdb_date(value):
+        return f"{value.day:02d}-{months[value.month - 1]}-{value.year % 100:02d}"
+
+    _require(first[1][13:22] == pdb_date(start)
+             and first[latest_number][13:22] == pdb_date(end), "revision_mismatch")
+    dates = []
+    for number in range(1, latest_number + 1):
+        if number in {1, latest_number}:
+            dates.append(start if number == 1 else end)
+            continue
+        value = first[number][13:22]
+        _require(value[3:6] in months, "revision_mismatch")
+        candidates = []
+        for century in range(start.year // 100, end.year // 100 + 1):
+            try:
+                candidate = date(century * 100 + int(value[7:9]),
+                                 months.index(value[3:6]) + 1, int(value[:2]))
+            except ValueError:
+                continue
+            if start <= candidate <= end:
+                candidates.append(candidate)
+        # Do not guess a century, accept invalid calendar dates, or extrapolate
+        # an intermediate modification outside the authenticated endpoints.
+        _require(len(candidates) == 1, "revision_mismatch")
+        dates.append(candidates[0])
+    _require(all(a <= b for a, b in zip(dates, dates[1:])), "revision_mismatch")
     return history
 
 
@@ -313,7 +348,9 @@ def _chemistry(cif, component_files, latest, budget):
         definition = rows[0]
         _require(_field(definition, "pdbx_release_status") == "REL", "component_invalid")
         modified = _date(_field(definition, "pdbx_modified_date"))
-        _require(modified <= latest, "component_invalid")
+        # CCD modification dates describe the independently versioned component
+        # dictionary, not the structure's revision. Bind its actual date/hash
+        # below and compare the complete embedded chemical definition instead.
         kind = _field(definition, "type").lower()
         _require(kind == _field(embedded[component_id], "type").lower(), "component_invalid")
 
@@ -337,6 +374,13 @@ def _chemistry(cif, component_files, latest, budget):
         official_atoms, leaving = atoms(ccd.rows("chem_comp_atom", required=True), ccd=True)
         entry_atoms, _ = atoms(atom_rows[component_id])
         _require(entry_atoms == official_atoms, "component_invalid")
+        # Archive entry atom tables need not contain leaving-atom flags. When
+        # supplied, however, they must agree with the bound CCD definition.
+        for row in atom_rows[component_id]:
+            if "pdbx_leaving_atom_flag" in row:
+                flag = row["pdbx_leaving_atom_flag"]
+                _require(flag in {"Y", "N"} and (flag == "Y") == (row["atom_id"] in leaving),
+                         "component_invalid")
 
         def bonds(rows):
             result = {}
@@ -545,7 +589,7 @@ def _sequences(cif, residues, annotations, components, target, pdb_id, model, bu
     return list(proteins.values()), mappings, seq_by_entity, entities, limitations, explanation
 
 
-def _sequence_limitations(cif, residues, mappings, proteins, pdb_id, limitations, explanation):
+def _sequence_limitations(cif, residues, annotations, mappings, proteins, pdb_id, limitations, explanation):
     """Preserve deposited absence/variant facts without inventing UniProt length."""
     protein_index = {(row["model"], row["chain"]): row for row in proteins}
     mapped_identities = set(mappings.values())
@@ -553,9 +597,27 @@ def _sequence_limitations(cif, residues, mappings, proteins, pdb_id, limitations
     rows = cif.rows("pdbx_unobs_or_zero_occ_residues")
     _unique(rows, "id")
     for row in rows:
-        _require(_field(row, "polymer_flag") == "Y", "context_unsupported")
+        polymer = _field(row, "polymer_flag")
+        _require(polymer in {"Y", "N"}, "context_unsupported")
         ident = (_int(_field(row, "pdb_model_num"), 1, 9999), _blank(row["auth_asym_id"]),
                  _field(row, "auth_comp_id"), _int(_field(row, "auth_seq_id"), -999, 9999), _blank(row["pdb_ins_code"]))
+        if polymer == "N":
+            # Archive annotations also describe waters whose deposited atoms
+            # have zero occupancy. Preserve them; never invent absent solvent
+            # coordinates or promote an unobserved ligand/protein to this case.
+            observed = residues.get(ident)
+            _require(observed is not None and observed["role"] == "water"
+                     and ident not in missing and _field(row, "occupancy_flag") == "0"
+                     and all(a["occupancy_hundredths"] == 0 for a in observed["atoms"]),
+                     "context_unsupported")
+            entity, label, number = annotations[ident]
+            for field, expected in (("label_asym_id", label), ("label_comp_id", ident[2]),
+                                    ("label_seq_id", number)):
+                _require(row.get(field, "?") in {"?", ".", expected}, "sequence_invalid")
+            missing.add(ident)
+            explanation.append({"residue": p2.identity_dict(ident),
+                "annotation": "zero_occupancy_water", "source_record_id": "unobserved-" + _field(row, "id")})
+            continue
         _require(ident in mapped_identities and ident not in missing, "sequence_invalid")
         missing.add(ident)
         if row.get("label_asym_id", "?") not in {"?", "."}:
@@ -591,7 +653,7 @@ def _sequence_limitations(cif, residues, mappings, proteins, pdb_id, limitations
         protein = protein_index[ident[:2]]
         _require(_field(row, "pdbx_seq_db_accession_code") == protein["uniprot_id"]
                  and _field(row, "pdbx_seq_db_name") == "UNP", "sequence_invalid")
-        _require(ident in residues, "context_unsupported")  # P2 variants require an observed residue.
+        _require(ident in residues or ident in missing, "context_unsupported")
         db_monomer = row["db_mon_id"]
         _require(db_monomer in {"?", "."} or re.fullmatch(r"[A-Z0-9]{1,3}", db_monomer), "sequence_invalid")
         position = _int(_field(row, "seq_num"), 1)
@@ -827,6 +889,22 @@ def _glycan_context(cif, residues, annotations, components, entities, edges, exp
             row["required_heavy_atoms"] = [a for a in row["required_heavy_atoms"] if a["name"] != leaving]
         explanations.append({"residue": p2.identity_dict(ident), "removed_atom": leaving, "basis": basis})
 
+    def glycosylation_context(edge, a, b, feature_type, basis):
+        _require(edge["kind"] == "covalent" and edge["order"] in {None, 1}
+                 and edge["row"].get("pdbx_role") == feature_type
+                 and edge["row"].get("pdbx_leaving_atom_flag") == "one", "context_unsupported")
+        sugar, protein = a[0], b[0]
+        _require("saccharide" in components[sugar[2]]["type"] and residues[protein]["role"] == "protein"
+                 and residues[sugar]["role"] in {"unproven", "glycan"}, "context_unsupported")
+        _require(components[protein[2]]["atoms"][b[1]][0] == ("N" if feature_type == "N-Glycosylation" else "O")
+                 and components[sugar[2]]["atoms"][a[1]][0] == "C", "context_unsupported")
+        component = components[sugar[2]]
+        leaving = [name for name in component["leaving"] if component["atoms"][name][0] not in {"H", "D"}
+                   and tuple(sorted((a[1], name))) in component["bonds"]]
+        _require(len(leaving) == 1, "context_unsupported")
+        residues[sugar]["role"] = "glycan"
+        remove_leaving(sugar, a[1], leaving[0], basis)
+
     for row in links:
         entity = _field(row, "entity_id")
         _require((entity,) in branches, "sequence_invalid")
@@ -895,19 +973,20 @@ def _glycan_context(cif, residues, annotations, components, entities, edges, exp
         supported_edges.add(edge["row"]["id"])
         if disulfide:
             continue
-        _require(edge["row"].get("pdbx_role") == feature_type
-                 and edge["row"].get("pdbx_leaving_atom_flag") == "one", "context_unsupported")
-        sugar, protein = a[0], b[0]
-        _require("saccharide" in components[sugar[2]]["type"] and residues[protein]["role"] == "protein"
-                 and residues[sugar]["role"] in {"unproven", "glycan"}, "context_unsupported")
-        _require(components[protein[2]]["atoms"][b[1]][0] == ("N" if feature_type == "N-Glycosylation" else "O")
-                 and components[sugar[2]]["atoms"][a[1]][0] == "C", "context_unsupported")
-        component = components[sugar[2]]
-        leaving = [name for name in component["leaving"] if component["atoms"][name][0] not in {"H", "D"}
-                   and tuple(sorted((a[1], name))) in component["bonds"]]
-        _require(len(leaving) == 1, "context_unsupported")
-        residues[sugar]["role"] = "glycan"
-        remove_leaving(sugar, a[1], leaving[0], "modification-" + _field(feature, "ordinal"))
+        glycosylation_context(edge, a, b, feature_type, "modification-" + _field(feature, "ordinal"))
+    # struct_conn can explicitly identify glycosylation and displaced atoms
+    # without a duplicate modification_feature. Both endpoints already match
+    # raw PDB topology and atom_site; the same CCD leaving-atom gate applies.
+    for edge in edges.values():
+        feature_type = edge["row"].get("pdbx_role")
+        if edge["row"]["id"] in supported_edges or feature_type not in {"N-Glycosylation", "O-Glycosylation"}:
+            continue
+        orientations = [(a, b) for a, b in ((edge["a"], edge["b"]), (edge["b"], edge["a"]))
+                        if "saccharide" in components[a[0][2]]["type"] and residues[b[0]]["role"] == "protein"]
+        _require(len(orientations) == 1, "context_unsupported")
+        a, b = orientations[0]
+        glycosylation_context(edge, a, b, feature_type, "struct-conn-" + _field(edge["row"], "id"))
+        supported_edges.add(edge["row"]["id"])
     for edge in edges.values():
         a, b = edge["a"][0], edge["b"][0]
         if a != b and edge["kind"] == "covalent" and (residues[a]["role"] == "glycan" or residues[b]["role"] == "glycan"):
@@ -933,7 +1012,7 @@ def _compile(pdb_bytes, cif_bytes, component_files, pdb_id, target, *, budget=No
     residues, annotations, atoms = _inventory(cif, parsed, components, budget)
     proteins, mappings, sequences, entities, limitations, sequence_evidence = _sequences(
         cif, residues, annotations, components, target, pdb_id, parsed.model, budget)
-    _sequence_limitations(cif, residues, mappings, proteins, pdb_id, limitations, sequence_evidence)
+    _sequence_limitations(cif, residues, annotations, mappings, proteins, pdb_id, limitations, sequence_evidence)
     chemical_evidence = []
     _reserve_required_atoms(residues, components, budget)
     _required_atoms(residues, annotations, components, sequences, chemical_evidence)

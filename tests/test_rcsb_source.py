@@ -3,6 +3,7 @@
 import importlib
 import importlib.util
 import hashlib
+import json
 import pytest
 
 
@@ -27,7 +28,7 @@ def loop(category, fields, rows):
 
 
 def revline(number=1, date="01-JAN-24", continuation="  "):
-    return f"REVDAT {number:3d}{continuation} {date} 1ABC    0"
+    return f"REVDAT {number:3d}{continuation} {date} 1ABC    {0 if number == 1 else 1}"
 
 
 @pytest.fixture
@@ -158,10 +159,37 @@ def test_unknown_ligand_role_not_promoted(sample):
     assert result["source"]["residues"][2]["role"] == "unproven"
 
 
-@pytest.mark.parametrize("replacement", [b"2025-01-01", b"?", b"2023-02-31"])
+@pytest.mark.parametrize("replacement", [b"2025-13-01", b"?", b"2023-02-31"])
 def test_component_date(sample, replacement):
     sample[2]["LIG"] = sample[2]["LIG"].replace(b"2023-01-01", replacement)
     rejected(compile_sample(sample))
+
+
+def test_newer_ccd_metadata_date_is_allowed_for_identical_chemistry(sample):
+    sample[2]["LIG"] = sample[2]["LIG"].replace(b"2023-01-01", b"2025-01-01")
+    result = compile_sample(sample)
+    assert result["ok"], result
+    assert next(c for c in result["evidence"]["components"] if c["id"] == "LIG")["date"] == "2025-01-01"
+
+
+def test_entry_and_ccd_leaving_atom_flags_must_match(sample):
+    pdb, cif, components = sample
+    cif = cif.replace(b"LIG O1 O N N N", b"LIG O1 O N N Y")
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "component_invalid"
+
+
+@pytest.mark.parametrize("old,new", [
+    (b"LIG O1 O N N N", b"LIG O1 O N N Y"),
+    (b"LIG O1 O N N N", b"LIG O1 N N N N"),
+    (b"LIG C1 O1 SING N N", b"LIG C1 O1 DOUB N N"),
+])
+def test_newer_ccd_metadata_does_not_allow_chemical_drift(sample, old, new):
+    sample[2]["LIG"] = sample[2]["LIG"].replace(b"2023-01-01", b"2025-01-01").replace(old, new)
+    result = compile_sample(sample)
+    rejected(result)
+    assert result["reason"] == "component_invalid"
 
 
 def test_exact_component_set(sample):
@@ -271,18 +299,59 @@ def test_exact_interresidue_link(sample):
     rejected(compile_sample((linked, cif+table.replace(b"covale", b"unsupported"), components)))
 
 
-def test_missing_residues_and_variant_are_carried(sample):
+@pytest.mark.parametrize("variant_seq,variant_auth", [(1, 10), (2, 11)])
+def test_missing_residues_and_variant_are_carried(sample, variant_seq, variant_auth):
     pdb, cif, components = sample
     pdb = b"\n".join(row for row in pdb.split(b"\n") if not row.startswith((b"ATOM      3", b"ATOM      4")))
     cif = b"\n".join(row for row in cif.split(b"\n") if not row.startswith((b"ATOM 3 ", b"ATOM 4 ")))
     cif += loop("pdbx_unobs_or_zero_occ_residues", "id polymer_flag occupancy_flag PDB_model_num auth_asym_id auth_comp_id auth_seq_id PDB_ins_code label_asym_id label_comp_id label_seq_id",
                 ["1 Y 1 1 A ALA 11 ? A ALA 2"]).encode()
     cif += loop("struct_ref_seq_dif", "pdbx_ordinal align_id seq_num mon_id db_mon_id pdbx_pdb_strand_id pdbx_pdb_id_code pdbx_seq_db_accession_code pdbx_seq_db_name pdbx_auth_seq_num pdbx_pdb_ins_code pdbx_seq_db_seq_num details",
-                ["1 1 1 ALA GLY A 1ABC P06276 UNP 10 ? 1 'engineered mutation'"]).encode()
+                [f"1 1 {variant_seq} ALA GLY A 1ABC P06276 UNP {variant_auth} ? {variant_seq} 'engineered mutation'"]).encode()
     result = compile_sample((pdb, cif, components))
     assert result["ok"], result
     assert {row["kind"] for row in result["source"]["limitations"]} == {"missing_residues", "sequence_variant"}
+    assert not any(row["identity"]["resseq"] == 11 for row in result["source"]["residues"])
+    assert result["evidence"]["sequence_context"][-1]["residue"]["resseq"] == variant_auth
     rejected(compile_sample((pdb, cif.replace(b"1 Y 1 1 A ALA 11", b"1 Y 1 1 A ALA 12"), components)))
+
+
+@pytest.fixture
+def annotated_zero_occupancy_water(sample):
+    pdb, cif, components = sample
+    cif += loop("pdbx_unobs_or_zero_occ_residues",
+        "id polymer_flag occupancy_flag PDB_model_num auth_asym_id auth_comp_id auth_seq_id PDB_ins_code label_asym_id label_comp_id label_seq_id",
+        ["1 N 0 1 Z HOH 40 ? C HOH ."]).encode()
+    return pdb, cif, components
+
+
+def test_observed_zero_occupancy_water_annotation_is_preserved(annotated_zero_occupancy_water):
+    result = compile_sample(annotated_zero_occupancy_water)
+    assert result["ok"], result
+    water = next(row for row in result["source"]["residues"] if row["role"] == "water")
+    assert water["atoms"][0]["occupancy_hundredths"] == 0
+    assert water["atoms"][0]["xyz_milli"] == [7000, 8000, 9000]
+    annotation = next(row for row in result["evidence"]["sequence_context"]
+                      if row.get("annotation") == "zero_occupancy_water")
+    assert annotation == {"residue": water["identity"], "annotation": "zero_occupancy_water",
+                          "source_record_id": "unobserved-1"}
+    proof = hashlib.sha256(json.dumps(result["evidence"], sort_keys=True,
+        separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    assert result["source"]["provenance"]["proof_id"] == proof
+
+
+@pytest.mark.parametrize("old,new", [
+    (b"1 N 0 1 Z HOH 40", b"1 N 1 1 Z HOH 40"),
+    (b"1 N 0 1 Z HOH 40", b"1 N 0 1 Z HOH 41"),
+    (b"1 N 0 1 Z HOH 40", b"1 N 0 1 A LIG 20"),
+    (b"40 ? C HOH .", b"40 ? A HOH ."),
+    (b"40 ? C HOH .", b"40 ? C LIG ."),
+    (b"40 ? C HOH .", b"40 ? C HOH 1"),
+])
+def test_zero_occupancy_water_annotation_must_match_source(annotated_zero_occupancy_water, old, new):
+    pdb, cif, components = annotated_zero_occupancy_water
+    assert old in cif
+    rejected(compile_sample((pdb, cif.replace(old, new), components)))
 
 
 def test_missing_terminal_oxt_is_required_not_repaired(sample):
@@ -384,6 +453,104 @@ def test_all_revisions_and_continuations(sample):
         rejected(compile_sample((bad, cif, components)))
 
 
+@pytest.fixture
+def independent_revision_histories(sample):
+    """Synthetic histories with different numbering, as observed for 1P0I."""
+    pdb, cif, components = sample
+    pdb = pdb.replace(revline().encode(), "\n".join([
+        revline(3, "01-FEB-24"), revline(2, "15-JAN-24"), revline(),
+    ]).encode())
+    cif = cif.replace(b"1 'Structure model' 1 0 2024-01-01",
+        b"1 'Structure model' 1 0 2024-01-01\n2 'Structure model' 1 1 2024-02-01")
+    return pdb, cif, components
+
+
+def test_independent_revision_numbering_preserves_verified_structure(independent_revision_histories):
+    result = compile_sample(independent_revision_histories)
+    assert result["ok"], result
+    assert result["evidence"]["revision_version"] == "1.1"
+    assert result["evidence"]["latest_revision_date"] == "2024-02-01"
+    assert len(result["evidence"]["revision_history"]) == 2
+
+
+def test_structure_history_ordinals_can_include_other_file_types(independent_revision_histories):
+    pdb, cif, components = independent_revision_histories
+    cif = cif.replace(b"2 'Structure model' 1 1 2024-02-01",
+        b"2 'Structure factors' 1 0 2024-01-15\n3 'Structure model' 1 1 2024-02-01")
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+    assert [row["ordinal"] for row in result["evidence"]["revision_history"]] == [1, 3]
+
+
+@pytest.mark.parametrize("ordinals", [(1, 3), (2, 3)])
+def test_missing_global_revision_ordinals_are_rejected(independent_revision_histories, ordinals):
+    pdb, cif, components = independent_revision_histories
+    cif = cif.replace(b"1 'Structure model' 1 0 2024-01-01\n2 'Structure model' 1 1 2024-02-01",
+        f"{ordinals[0]} 'Structure model' 1 0 2024-01-01\n{ordinals[1]} 'Structure model' 1 1 2024-02-01".encode())
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "revision_mismatch"
+
+
+@pytest.mark.parametrize("old,new", [
+    (revline(3, "01-FEB-24"), revline(3, "02-FEB-24")),
+    (revline(), revline(1, "02-JAN-24")),
+    (revline(2, "15-JAN-24") + "\n", ""),
+    (revline(2, "15-JAN-24"), revline(3, "15-JAN-24")),
+    (revline(2, "15-JAN-24"), revline(2, "31-JAN-24") + "\n" + revline(2, "15-JAN-24")),
+    (revline(2, "15-JAN-24"), revline(2, "31-FEB-24")),
+    (revline(2, "15-JAN-24"), revline(2, "01-DEC-23")),
+    (revline(), revline()[:-1] + "1"),
+    (revline(3, "01-FEB-24"), revline(3, "01-FEB-24")[:-1] + "2"),
+])
+def test_independent_histories_still_reject_invalid_pdb_history(independent_revision_histories, old, new):
+    pdb, cif, components = independent_revision_histories
+    assert old.encode() in pdb
+    result = compile_sample((pdb.replace(old.encode(), new.encode()), cif, components))
+    rejected(result)
+    assert result["reason"] == "revision_mismatch"
+
+
+def test_matching_revision_dates_do_not_hide_coordinate_changes(independent_revision_histories):
+    pdb, cif, components = independent_revision_histories
+    cif = cif.replace(b"1.000 2.000 3.000", b"1.001 2.000 3.000")
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "inventory_mismatch"
+
+
+def test_pdb_revision_dates_can_cross_century_boundary(independent_revision_histories):
+    pdb, cif, components = independent_revision_histories
+    for old, new in [(b"01-JAN-24", b"01-DEC-99"), (b"15-JAN-24", b"15-JAN-00"),
+                     (b"01-FEB-24", b"01-FEB-00")]:
+        pdb = pdb.replace(old, new)
+    cif = cif.replace(b"2024-01-01", b"1999-12-01").replace(b"2024-02-01", b"2000-02-01")
+    components = {key: raw.replace(b"2023-01-01", b"1998-01-01") for key, raw in components.items()}
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+    assert result["evidence"]["latest_revision_date"] == "2000-02-01"
+
+
+def test_single_pdb_revision_cannot_mask_a_century_of_changes(sample):
+    pdb, cif, components = sample
+    pdb = pdb.replace(b"01-JAN-24", b"01-JAN-04")
+    cif = cif.replace(b"1 'Structure model' 1 0 2024-01-01",
+        b"1 'Structure model' 1 0 1904-01-01\n2 'Structure model' 1 1 2004-01-01")
+    components = {key: raw.replace(b"2023-01-01", b"1998-01-01") for key, raw in components.items()}
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "revision_mismatch"
+
+
+def test_ambiguous_intermediate_pdb_century_is_rejected(independent_revision_histories):
+    pdb, cif, components = independent_revision_histories
+    pdb = pdb.replace(b"01-JAN-24", b"01-JAN-04").replace(b"15-JAN-24", b"15-JAN-04").replace(b"01-FEB-24", b"01-FEB-04")
+    cif = cif.replace(b"2024-01-01", b"1904-01-01").replace(b"2024-02-01", b"2004-02-01")
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "revision_mismatch"
+
+
 def test_scan_safe_errors(sample):
     rejected(api().required_rcsb_components(sample[1], pdb_id="2ABC"))
     rejected(api().required_rcsb_components(bytearray(sample[1]), pdb_id="1ABC"))
@@ -440,6 +607,38 @@ def test_modification_ambiguous_leaving_group_rejected(modification_sample):
         components[key] = components[key].replace(b"SUG O1 O N N Y", b"SUG O1 O N N Y\nSUG O2 O N N Y").replace(b"SUG C1 O1 SING N N", b"SUG C1 O1 SING N N\nSUG C1 O2 SING N N")
     cif = cif.replace(b"SUG O1 O N N Y", b"SUG O1 O N N Y\nSUG O2 O N N Y").replace(b"SUG C1 O1 SING N N", b"SUG C1 O1 SING N N\nSUG C1 O2 SING N N")
     rejected(compile_sample((pdb, cif, components)))
+
+
+@pytest.fixture
+def connection_only_glycosylation(modification_sample):
+    pdb, cif, components = modification_sample
+    marker = b"loop_\n_pdbx_modification_feature.ordinal\n"
+    assert marker in cif
+    cif, _ = cif.split(marker)
+    return pdb, cif, components
+
+
+def test_explicit_glycosylation_connection_needs_no_duplicate_feature(connection_only_glycosylation):
+    result = compile_sample(connection_only_glycosylation)
+    assert result["ok"], result
+    sugar = next(row for row in result["source"]["residues"] if row["identity"]["resseq"] == 31)
+    assert sugar["role"] == "glycan"
+    assert "O1" not in {a["name"] for a in sugar["required_heavy_atoms"]}
+    assert any(row.get("basis") == "struct-conn-c2" and row["removed_atom"] == "O1"
+               for row in result["evidence"]["chemical_context"])
+
+
+@pytest.mark.parametrize("old,new", [
+    (b"sing N-Glycosylation one", b"sing . one"),
+    (b"sing N-Glycosylation one", b"sing N-Glycosylation none"),
+    (b"sing N-Glycosylation one", b"sing N-Glycosylation both"),
+    (b"sing N-Glycosylation one", b"sing O-Glycosylation one"),
+    (b"sing N-Glycosylation one", b"doub N-Glycosylation one"),
+])
+def test_connection_only_glycosylation_keeps_exact_evidence_gate(connection_only_glycosylation, old, new):
+    pdb, cif, components = connection_only_glycosylation
+    assert old in cif
+    rejected(compile_sample((pdb, cif.replace(old, new), components)))
 
 
 def test_deposited_joint_alt_assignments(sample):

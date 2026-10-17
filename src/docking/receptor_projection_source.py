@@ -413,7 +413,7 @@ def _limitations(rows, residues, proteins, budget):
     _list(rows, 99999)
     budget.reserve(1024 * len(rows) + 256 * len(residues))
     positions = {(k[0], k[1], k[3], k[4]): k for k in residues}
-    result, ids = [], set()
+    result, ids, declared_missing = [], set(), set()
     for row in rows:
         _closed(row, {"id", "kind", "residues", "source_record_id"})
         _token(row["id"])
@@ -429,16 +429,20 @@ def _limitations(rows, residues, proteins, budget):
             _require(key[:2] in proteins and key not in seen)
             position = key[0], key[1], key[3], key[4]
             _require(position not in positions or positions[position] == key)
-            # A missing residue or truncated terminus can be absent from the raw
-            # inventory, but only on an explicitly inventoried protein chain.
+            # Absence is allowed only on an explicitly inventoried protein chain.
+            # An absent variant must also have an exact missing-residue fact;
+            # check that after all rows so source order grants no authority.
             # An observed residue must actually be protein, never ligand/water.
             if key in residues:
                 _require(residues[key].role == "protein")
-            else:
-                _require(row["kind"] in {"missing_residues", "construct_truncation"})
+            if row["kind"] == "missing_residues":
+                declared_missing.add(key)
             seen.add(key)
             keys.append(key)
         result.append(Limitation(row["id"], row["kind"], tuple(keys), row["source_record_id"]))
+    for row in result:
+        if row.kind == "sequence_variant":
+            _require(all(key in residues or key in declared_missing for key in row.residues))
     return tuple(result)
 
 

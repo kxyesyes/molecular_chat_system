@@ -1227,3 +1227,57 @@ mmCIF SHA256 `cf3d9b8b481dcbaca4cdefc3bcfd12063898a520604bd22815b06b28ff723a2f`�
 PDB 有 8 个 REVDAT 修改编号，mmCIF 有 6 条 Structure model 修订记录，
 最新日期均为 2023-08-16；现有编译器要求两份完整历史按同编号逐条同日，
 因此失败。跨格式版本核验尚待厘清，不能因此声称来源一致或 S10 通过。
+
+### S10 官方 1P0I 来源兼容修复（2026-10-17）
+
+沿用当前五个源码/测试文件的最小兼容修复，没有修改科学执行、确认、模型权限或
+配体角色策略。官方结构 PDB/mmCIF 摘要与上节相同。诊断逐一定位并保留各类证据：
+
+1. PDB 修改编号与 mmCIF 历史 ordinal 独立；分别验证完整编号、顺序和有效日期，
+   锚定首次/最新日期，而不是强求同编号同日。跨格式仍逐原子精确比较全部坐标等字段。
+2. CCD 修改日期属于组件词典，不受结构修订日期上界约束；保留组件日期和摘要，
+   并核对完整嵌入化学定义。结构有离去原子标志时必须一致，不能以日期容忍化学漂移。
+3. 非聚合物零占有率注释只允许准确匹配已存在且全部原子占有率为零的水；保留
+   原子/坐标和来源记录，不凭注释创造未观测配体或溶剂。
+4. 显式缺失的同一蛋白残基可以同时具有 sequence_variant；保留两条限制事实。
+   P2 要求缺失突变与 missing_residues 完整身份精确匹配，与行序无关；截短不能替代。
+5. struct_conn 可直接给出 N/O 糖基化和 one 离去标志，无需重复 feature。仍要求
+   PDB/mmCIF 两端和连接一致、明确糖/蛋白角色、正确元素、单键/未指明键级、唯一
+   CCD 重原子离去基团且该原子未出现在坐标中。缺失或矛盾声明仍拒绝。
+
+格式依据：
+[REVDAT](https://www.wwpdb.org/documentation/file-format-content/format33/sect2.html#REVDAT)、
+[mmCIF 修订历史](https://mmcif.wwpdb.org/docs/user-guide/resources/entry_revision_history.html)、
+[CCD 修改日期](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_chem_comp.pdbx_modified_date.html)、
+[struct_conn 角色](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_struct_conn.pdbx_role.html)、
+[离去原子标志](https://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_struct_conn.pdbx_leaving_atom_flag.html)。
+
+新增缺失残基突变用例先 **3 failed / 6 passed**；修复后 compiler/P2/source preparation
+为 **390 passed**。糖基化重复注释用例先 **1 failed / 5 passed**，后 compiler
+**156 passed**。最终受影响命令：
+
+```text
+python -m pytest tests/test_rcsb_source.py tests/test_receptor_projection_source.py tests/test_docking_source_preparation.py tests/test_receptor_projection_pdb.py tests/test_docking_pocket_evidence.py tests/test_chat_receptor_preparation_integrity.py tests/task_runtime/test_chat_docking_projection_gate.py tests/agent/test_web_docking_sources.py -q --basetemp scratch/s10-sourcefix-regression
+```
+
+结果 **748 passed，60.84s**。`python -m compileall -q src scripts`、`git diff --check`
+通过。此前一次回归用 outputs 作 basetemp 导致门禁夹具失败（1 failed / 541 passed），
+改用允许的 scratch 后该用例通过；不能将最初失败算作通过。独立只读审查无可操作发现，
+另运行 16 项聚焦测试；未替代真实验收。未修改 JS，不涉及 Node 变更。
+
+官方来源专用诊断现为 **ok=True，24.187s，settled=True**，仅证明来源准备可完成；
+输出仍明确没有输入就绪或执行授权。6001 修复服务已启动，预热和浏览器确认/实际 Vina
+结果、构象、下载核验仍待完成。没有因诊断成功伪造打分或宣称 S10 通过。
+
+进一步使用固定 source → projection_inspect 子进程链路，真实 1P0I 成功
+**24.453s**，两个 owner 均 settled。选择数量为 protein=1、reference_residue=0、
+hetero=501、conformer=4、residues=1024、connections=189；限制 11 条。角色为
+protein=523、glycan=9、unproven=9、water=483。这证明兼容修复后仍保留参考配体
+资格门禁：没有将存在坐标或组件名称当作口袋角色证明，不能据此进入 READY。
+补充零占有率水 source_record_id 和 canonical evidence/proof_id 绑定断言，
+**1 passed / 155 deselected**。
+
+严格健康检查首次缺省配置 **21/23**：工作树缺省反向来源和 RAG 索引路径不存在；
+设置现有 `REVERSE_TARGET_DATA_DIR`、`RAG_INDEX_PATH` 和配体准备路径为 S10 实际资产
+后 **23/23**。没有修改资产、默认配置或安全边界。全部离线套件、当前 head CI、
+真实 Vina/构象/下载仍未完成，不能从聚焦测试或健康检查推断为通过。

@@ -1,5 +1,25 @@
 # Latest handoff
 
+## S10 官方结构来源兼容修复（2026-10-17，真实闭环待验收）
+
+- 继续 `codex/browser-agent-real-acceptance` / Draft PR #209。修复独立编号的
+  PDB REVDAT/mmCIF 修订历史、独立更新的 CCD 日期、零占有率水注释、明确缺失
+  残基上的序列差异，以及无需重复 modification_feature 的显式糖基化连接。
+- 原子完整清单、坐标/占有率/B 因子/电荷、CCD 原子/键、准确身份和离去原子
+  仍严格核对；不修补坐标、不猜配体角色、不扩大执行或确认权限。
+- 来源/投影/口袋/准备/任务门禁聚焦回归 **748 passed**；`compileall -q src scripts`
+  和 `git diff --check` 通过。独立只读审查无可操作发现，另有 16 项聚焦验证。
+- 官方 1P0I/P06276 来源专用诊断现已成功（24.187s，生命周期 settled），但
+  明确 `input_ready=False` / `execution_authorized=False`，不是 READY 或 Vina 证据。
+- 后续真实受体检查亦成功（24.453s，两 owner 均 settled）：1 条蛋白选择、
+  **0 个合格参考配体**、11 条限制。不得将 unproven 配体升级为口袋依据。
+- strict health 缺省路径为 21/23（工作树未配置的反向来源/RAG），指定现有
+  S10 资产路径后 23/23；没有复制或提交这些运行资产。
+- 已启动加载修复的本地 6001 服务；完整来源预热、浏览器 S03/S10、合法科学选择、
+  READY 确认及实际能量/构象/下载核验尚待完成。不得将离线通过标为真实闭环成功。
+- 详细依据和 RED/GREEN 见
+  `docs/superpowers/validation/2026-10-15-browser-agent-real-acceptance.md`。
+
 ## PR #209 普通聊天对接 D6 集成（2026-10-17）
 
 - 分支 `codex/browser-agent-real-acceptance`；继续同一 Draft PR，不直接修改 main。
