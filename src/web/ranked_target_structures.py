@@ -8,6 +8,7 @@ from html import escape
 import re
 
 from src.agent.harness.decision_bounds import validate_json
+from src.agent.utils.validators import InputValidator
 from src.target_search.authoritative_resolver import AuthoritativeTargetResolver
 from src.target_search.exact_name import ExactTargetNameResolver
 from src.target_search.remote_clients import (
@@ -135,9 +136,42 @@ def resolve_ranked_structures(boundary, context, *, session_id, http=None):
                 return _failure('ranked_structure_unavailable')
 
 
+def _fresh_molecule_reverse_request(message):
+    # This is only routing admission, not SMILES validation or tool consent.
+    # Bind an affirmative reverse action to its molecule, not an arbitrary
+    # ligand mentioned elsewhere in a reference to a previous ranking.
+    # In particular, ASCII dots belong to disconnected SMILES, not clauses.
+    clauses = re.split(r'[，,;；。!?！？\n]|\b(?:and|but|then)\b|并且|然后', message, flags=re.I)
+    for clause in clauses:
+        for molecule in InputValidator().extract_potential_smiles_candidates(clause):
+            token = re.escape(molecule)
+            label = r'(?:SMILES\s*[:：]\s*)?'
+            if (re.match(r'\s*(?:请\s*)?(?:重新\s*)?对\s*' + label + token
+                         + r'\s*(?:做|进行|运行)\s*(?:反向寻靶|反向靶点预测)', clause, re.I)
+                    or re.match(r'\s*(?:please\s+)?(?:(?:run|perform|rerun)\s+)?'
+                                r'reverse[ -]target(?:ing)?\s+(?:for\s+)?' + label + token
+                                + r'(?![A-Za-z0-9@+\-\[\]()=#./\\:%])', clause, re.I)):
+                return True
+    return False
+
+
+def reverse_rank_routing_query(message):
+    """Keep fresh display qualifiers out of the legacy rank-reference gate.
+
+    The original query must still reach execution/history, with all molecular
+    validation, negation and capabilities intact. This view is for routing only.
+    """
+    if not _fresh_molecule_reverse_request(message):
+        return message
+    return re.sub(r'((?:列出|展示|显示)\s*)(?:排名第[一1]|第[一1]名)的((?:候选)?靶点)',
+                  r'\1\2', message)
+
+
 def rank_followup_kind(message):
+    if _fresh_molecule_reverse_request(message):
+        return None
     if (re.search(r'反向寻靶|反向靶点预测|reverse.target', message, re.I)
-            and not re.search(r'排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个).*?靶点|\brank(?:ed)?\s*(?:one|first|1)\b', message, re.I)):
+            and not re.search(r'排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个).*?靶点|\brank(?:ed)?\s*(?:one|first|1)\b|\btop\s*1\b', message, re.I)):
         # A fresh ranking request still goes through the normal molecular-input
         # and negation/routing checks. Merely saying "排名" is not a reference.
         return None

@@ -159,6 +159,104 @@ Final follow-up QUALITY PASS: 170 focused tests plus original HF004/HF005
 controls. No important finding, no source edits by reviewers. Original overreach
 assertion passes unchanged. New exact-head CI remains required at commit time.
 
+## Green CI followed by new independent GitHub findings
+
+`7db27b2e38256f8a0bc5332ba96758bb307fe04d` independently passed
+[quality39025652897](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39025652897),
+all 11 jobs success, no workflow reruns. Final gate audit found four additional
+automated threads posted at 10:21 UTC (1 P1 / 3 P2): English bound conjunction,
+absolute-only optimization goals, unrelated negation of display counts, fresh
+molecule-bound top-one reverse searches. CI green did not waive review findings;
+the PR remained unmerged and each feedback item was checked against real code.
+
+Numerical tests first: 21 failed / 10 controls; then the two smallest consumer
+changes passed 348 affected tests (2.88s). SPEC then found that an unsupported
+second condition (`logP = 3`, `logP ~ 3`, approximate QED) could be dropped;
+three added tests failed, and the English conjunction boundary now requires a
+recognized metric followed by a supported comparison operator. It does not add
+equality/approximation syntax. Final affected batch: 351 passed (2.81s).
+
+Absolute goals use only matched candidate constraint checks; no relative
+comparisons are fabricated. Missing/failed/foreign evidence and unknown
+structural constraints remain unverified. The original no-goal warning remains
+for genuinely absent goals. No model or experimental validation is claimed.
+
+Initial numerical SPEC closed its conjunction finding (88 tests /31 offline
+controls), but QUALITY found an important shared-parser gap: punctuation-separated
+unsupported conditions were still silently skipped, enabling false absolute-goal
+support. Parent reproduced 30 failed /3 relative-goal controls across six clause
+separators and five unsupported numeric forms. Instead of more conjunction-only
+exceptions, the parser now records explicit unsupported numeric intent as unknown
+when no supported operator matches; it does not evaluate equality/approximation.
+Seven affected files passed 621 tests (3.79s). Follow-up SPEC found a relative
+wording regression (`logP is lower`, `QED is higher`); three new controls failed
+before requiring textual numeric introducers to be followed by numeric intent.
+That seven-file batch passed 624 tests (3.79s), compileall/diff passed. SPEC then
+found prefixed comparisons (`logP is < 3`, `approximately <= 3`) still omitted;
+18 added cases failed /30 controls passed. Numeric-intent detection now reuses
+the existing complete comparison-operator grammar, without evaluating unsupported
+prefix combinations. Final parent seven-file batch: 642 passed (3.88s).
+Original SPEC PASS: 142 offline tests /1 deselected, 252 prefixed-operator controls
+and 12 relative/legal-bound controls. No remaining SPEC finding; original QUALITY
+closure is still required. QUALITY then found combined prefixes (`is approximately
+3`, `is about 3`) still dropped numeric intent: 18 new cases failed /56 controls
+passed. Prefixes are now consumed iteratively before the numeric-intent check,
+instead of enumerating one-level combinations in a regex. Numeric comparisons
+and units remain unchanged; no numeric intent means normal relative behavior.
+Final parent seven-file batch: 662 passed (3.89s). Original numerical SPEC final
+PASS: 162 offline tests /1 deselected, 324 combined-prefix controls and 11
+relative/legal-bound controls; scanning strictly advances without combination
+backtracking. Intermediate passes are not
+substituted for independent closure or exact-new-head CI.
+
+Web worker first reproduced 14 failed /27 controls; further count-negation
+controls 3 failed /50 passed and old top-one-reference controls 2 failed /8
+passed. Minimal web fixes passed 57 focused tests, 165 ranking tests, and 742
+affected tests /4 existing FastAPI deprecation warnings (overlapping batches).
+Only the count phrase's governing negation vetoes cap5. Explicit molecule-bound
+fresh reverse requests bypass stale rank-reference interpretation, with a routing
+view that preserves validation/permissions and sends the original query to
+execution/history. The full ten-row observation/checkpoint/provenance is retained.
+Scope limitation: top-one text is now admitted as fresh dispatch, not implemented
+as cap1; display still supports 5/10 and tests explicitly preserve that contract.
+English `show top 1` already dispatched fresh at baseline; the reproduced blockers
+were Chinese ranked-first and English `show rank 1`. No real network/science or
+production database was used. Web SPEC independently ran 57/165 tests and found
+two count edge cases (postfix modal negation and Chinese adversative conjunction);
+the worker is adding RED controls and repairing them before re-review. Fresh
+dispatch scope passed SPEC. Worker reproduced the two count findings with
+6 failed /8 controls, then added postfix modal negation and Chinese adversative
+clause boundaries: 14 targeted passed, 179 ranking regression passed; affected
+regression 742 passed /4 existing warnings. Independent final web SPEC/QUALITY
+remain pending. The cap1 limitation is unchanged and explicitly tested.
+Original web SPEC subsequently PASS: independent memory RED 6 failed /8 controls,
+then 179 current tests passed; no remaining important finding. Parent combined
+web/numeric/old prompt acceptance seven-file regression: 523 passed (17.01s),
+compileall/diff passed. Final numerical original-reviewer QUALITY PASS: 108 tests
+(1.58s) and 74 independent controls. All previous numeric P1/P2 findings closed,
+no important finding; long 2048-prefix scan completes normally. Only web final
+QUALITY and exact-new-head CI remained outstanding at that checkpoint.
+Final web QUALITY PASS: 179 related tests (35.54s), 22 independent assertions,
+memory compilation/diff passed, no important permission/provenance/regression or
+performance finding. Service network attempts: 0. All SQLite test files were
+isolated outside Git. No cap1 acceptance or actual scientific run is claimed.
+
+Final parent commands (same existing Python, cache disabled, Git-external
+isolated basetemp, no real service):
+
+```powershell
+python -m pytest tests/agent/test_review_absolute_bounds.py tests/agent/test_lead_optimization_verifier.py tests/agent/test_browser_property_constraints.py tests/agent/test_target_role_property_constraints.py tests/agent/test_plain_design_constraints.py tests/agent/test_open_review_routing.py tests/agent/test_task_planner.py -q -p no:cacheprovider --tb=short
+# 662 passed (3.89s)
+python -m pytest tests/agent/test_review_absolute_bounds.py tests/agent/test_web_reverse_rank_review.py tests/agent/test_browser_property_constraints.py tests/agent/test_target_role_property_constraints.py tests/agent/test_open_review_routing.py tests/agent/test_prompt_acceptance.py tests/agent/test_plain_design_constraints.py -q -p no:cacheprovider --tb=short
+# 523 passed (17.01s), overlaps the prior batch
+python -m compileall -q src scripts
+git diff --check
+```
+
+All four new GitHub findings now have SPEC then QUALITY closure. Publication
+requires a new commit, evidence replies/thread resolution and its own full CI;
+the previous 7db27b2e green result does not cover this subsequent code.
+
 Independent review and exact-head CI outcomes are recorded in the current PR
 status sections before merging. This saved document is not proof of a future
 merge or future CI outcome. No auto-merge, admin bypass or human approval is

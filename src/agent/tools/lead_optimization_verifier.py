@@ -48,6 +48,7 @@ class LeadOptimizationVerifier:
         objectives = self._objectives(query)
         unverifiable_constraints = self._unverifiable_constraints(query)
         bounds, unknown_bounds = requested_property_bounds(query)
+        has_goals = bool(objectives or bounds)
         unverifiable_constraints.extend(unknown_bounds)
         baseline = self._first_by_smiles(baseline_rows)
         baseline_admet = self._first_by_smiles(self._rows(outputs.get("baseline_admet")))
@@ -114,7 +115,7 @@ class LeadOptimizationVerifier:
 
             constraint_checks = check_property_bounds(bounds, (property_row or {}).get("properties"))
             missing.extend(check["metric"] for check in constraint_checks if check["satisfied"] is None)
-            if not objectives or missing or unverifiable_constraints:
+            if not has_goals or missing or unverifiable_constraints:
                 status = "unverified"
             elif all(item["satisfied"] for item in comparisons + constraint_checks):
                 status = "supported"
@@ -135,7 +136,7 @@ class LeadOptimizationVerifier:
             overall_status = "unverified"
         elif any(item["status"] == "supported" for item in results):
             overall_status = "supported"
-        elif objectives and all(
+        elif has_goals and all(
             item["status"] == "evaluated_not_improved" for item in results
         ):
             overall_status = "evaluated_not_improved"
@@ -143,7 +144,7 @@ class LeadOptimizationVerifier:
             overall_status = "unverified"
 
         warnings: list[str] = []
-        if not objectives:
+        if not has_goals:
             warnings.append("未识别到明确的优化指标，未验证目标是否改善")
         if any(item["status"] == "unverified" for item in results):
             warnings.append("部分候选缺少与基线对应的真实端点证据，结果未验证")

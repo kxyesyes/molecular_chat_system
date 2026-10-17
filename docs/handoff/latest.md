@@ -1,5 +1,13 @@
 # Latest handoff
 
+## PR #209 新增 GitHub 审查四项修复（2026-10-17）
+
+- `7db27b2e` 新 CI 11/11 success；最终门禁发现另四条自动审查（1 P1 /3 P2），因此仍未合并，不把 CI 绿等同于审查关闭。
+- 修复英文合法双阈值、仅绝对优化目标的匹配证据状态、数量短语局部否定和带排名第一的新分子反向请求。unsupported 数值语法统一进 unknown，组合前缀线性扫描，不伪造 equality/relative improvement；缺失/失败/foreign/结构约束保持未验证。
+- 先 RED 后最小实现，复审反例均补失败测试关闭。父最终数值/规划回归662 passed，web/数值/原越权验收联合523 passed（重叠）；数值 SPEC/原QUALITY及web SPEC/freshQUALITY最终均PASS，无未关闭重要 finding。compileall/diff通过。
+- 完整十行 ranking/evidence/checkpoint/provenance不截断，执行与history保留原文；cap仍仅5/10，top1本次只修fresh dispatch，不宣称显示cap1。未重跑真实科学服务或变更6SAM制品。
+- 随本次修复发布；新提交仍须完整CI通过，才可按已授权顺序Squash #209后集成/审查/验证#210。逐项RED、失败、命令与限制见[验收记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。
+
 ## PR #209 新 CI 兼容性修复（2026-10-17）
 
 - `49b4fec6` 的 CI 9 项成功，Agent 13683 passed /2 skipped /1 failed，汇总随之失败；唯一失败是原 HF004 普通生成只授予 generator 的断言。没有盲目重跑或放宽验收。

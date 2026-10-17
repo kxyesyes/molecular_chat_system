@@ -17,6 +17,14 @@ _OP = re.compile(r"\s*(不超过|不大于|不低于|不小于|小于|低于|大
 _OPS = {"不超过": "<=", "不大于": "<=", "不低于": ">=", "不小于": ">=",
         "小于": "<", "低于": "<", "大于": ">", "高于": ">", "≤": "<=", "≥": ">="}
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?")
+# These indicate an explicit numeric condition, but do not authorize evaluating
+# an unsupported operator as equality or rounding it to a supported bound.
+_NUMERIC_PREFIX = re.compile(
+    r"\s*(?:约为|约等于|等于|接近|介于|约|为|"
+    r"\b(?:equals?|approximately|approx|about|around|between|is)\b)\s*", re.I)
+_UNSUPPORTED_NUMERIC = re.compile(
+    r"\s*(?:[=~≈≃≅]|" + _OP.pattern
+    + r"|[+-]?(?:\d|\.\d|NaN\b|inf(?:inity)?\b))", re.I)
 
 
 def finite_number(value):
@@ -35,6 +43,13 @@ def requested_property_bounds(query):
         metric = name if name in _UNITS else "molecular_weight"
         op = _OP.match(query, match.end())
         if op is None:
+            # Consume prefixes iteratively: "is approximately" must not drop
+            # a numeric goal, but "is lower" remains a relative objective.
+            end = match.end()
+            while prefix := _NUMERIC_PREFIX.match(query, end):
+                end = prefix.end()
+            if _UNSUPPORTED_NUMERIC.match(query, end):
+                unknown.append(metric + "_bound")
             continue  # relative optimization objectives are handled elsewhere
         number = _NUMBER.match(query, op.end())
         prefix = re.split(r"[，,。;；\n]", query[:match.start()])[-1]
@@ -47,7 +62,9 @@ def requested_property_bounds(query):
             tail = tail[unit.end():]
         # A threshold must end at a known clause boundary. Unknown units and
         # arithmetic suffixes must not silently become a different constraint.
-        bounded_tail = re.match(r"\s*(?:$|[，,。;；\n、]|的(?:约束|要求|限制)(?:$|[，,。;；\n、])|并|且|和|同时)", tail)
+        bounded_tail = re.match(
+            r"\s*(?:$|[，,。;；\n、]|的(?:约束|要求|限制)(?:$|[，,。;；\n、])|并|且|和|同时"
+            + r"|\band\b(?=\s*" + _METRIC.pattern + _OP.pattern + r"))", tail, re.I)
         continuation = re.match(r"\s*(?:[，,。;；、]\s*)*(?:(?:并且|同时|并|且|和|and)\s*)?", tail, re.I)
         implicit_bound = continuation and (
             _OP.match(tail, continuation.end()) or tail[continuation.end():].startswith("="))

@@ -39,7 +39,9 @@ from src.web.prompt_budget import (
 from src.web import agent_result_presentation as result_presentation
 from src.web import chat_prompt_builder as prompt_builder
 from src.web import property_comparison
-from src.web.ranked_target_structures import rank_followup_kind, ranked_structure_followup
+from src.web.ranked_target_structures import (
+    rank_followup_kind, ranked_structure_followup, reverse_rank_routing_query,
+)
 from src.web.property_constraints import generation_constraint_report
 from src.agent import evidence_followup
 from src.web.agent_result_presentation import (
@@ -134,9 +136,19 @@ class ChatHandler:
 
     @staticmethod
     def _reverse_display_count(message):
-        counts = re.findall(r'前\s*([0-9一二三四五六七八九十百]+)|\btop\s*(five|[0-9]+)\b', message, re.I)
-        negated = re.search(r'不要|不是|而是|不只|不仅|\b(?:not|instead)\b', message, re.I)
-        return 5 if not negated and len(counts) == 1 and ''.join(counts[0]).casefold() in {'5', '五', 'five'} else 10
+        counts = list(re.finditer(r'前\s*([0-9一二三四五六七八九十百]+)|\btop\s*(five|[0-9]+)\b', message, re.I))
+        if len(counts) != 1 or ''.join(value or '' for value in counts[0].groups()).casefold() not in {'5', '五', 'five'}:
+            return 10
+        # Only a negation governing the count phrase can veto its display cap.
+        # "not docking" in another clause is not a negated ranking request.
+        prefix = re.split(r'[，,;；。.!?！？\n]|\b(?:and|but|then)\b|并且|然后|但是?',
+                          message[:counts[0].start()], flags=re.I)[-1]
+        negated = re.search(r"不要|不用|不是|而是|不只|不仅|别|勿|无需|\b(?:not|never|instead|don['’]t)\b", prefix, re.I)
+        postfix_negated = re.match(
+            r'\s*(?:个)?\s*(?:候选)?(?:靶点)?\s*(?:不要|不用|无需|别|勿)\s*(?:列出|展示|显示)|'
+            r'\s*(?:targets?\s*)?(?:(?:are|is|should|must)\s*)?not\s+(?:be\s+)?(?:requested|wanted|shown|displayed)\b',
+            message[counts[0].end():], re.I)
+        return 10 if negated or postfix_negated else 5
 
     async def _with_allocation(self, websocket, operation, *, cancel_event=None,
                                timeout_result=None, handoff_timeout=False,
@@ -603,6 +615,7 @@ class ChatHandler:
                 from .scientific_references import REFERENCE_CLARIFICATION
                 await websocket.send_text(json.dumps({"type": "complete", "content": REFERENCE_CLARIFICATION}, ensure_ascii=False))
                 return
+        routing_message = reverse_rank_routing_query(routing_message)
         molecular_input = InputValidator().analyze_molecular_input(routing_message)
         clarification = self._molecular_input_clarification(molecular_input)
         skill_router = getattr(self.agent_system, "skill_router", None)
