@@ -15,6 +15,7 @@ from src.agent.contracts.generation_request import (
 )
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.evidence_followup import MAX_CANDIDATES, comparison_tools
+from src.agent.property_constraints import requested_property_bounds
 from src.agent.utils.validators import InputValidator
 
 from . import request_parsing, step_templates, workflow_selection
@@ -269,14 +270,17 @@ class TaskPlanner:
                     },
                 },
             )
+        bounds, unknown = requested_property_bounds(query)
+        include_properties = bool(bounds or unknown) and not request_parsing.property_calculation_forbidden(query)
         return WorkflowPlan(
             workflow_name="molecular_design",
             steps=step_templates.molecular_design_steps(
                 build_generation_request(query, requested_count),
+                **({"include_properties": True} if include_properties else {}),
             ),
             metadata={
                 "input_type": "structured_generation_request",
-                "atomic": True,
+                "atomic": not include_properties,
                 "requested_count": requested_count,
             },
         )

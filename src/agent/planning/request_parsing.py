@@ -179,6 +179,20 @@ def wants_activity(query: str) -> bool:
                           positive_intent_text(query), re.I))
 
 
+def property_calculation_forbidden(query: str) -> bool:
+    """A design bound does not override an explicit descriptor prohibition."""
+    text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
+    operation = r"(?:(?:计算|运行|执行|评估|预测|进行)|\b(?:calculat\w*|comput\w*|run\w*|perform\w*|predict\w*)\b)"
+    subject = r"(?:(?:候选)?(?:分子的?)?(?:理化性质|性质|描述符|分子量)|property_calculator\b|\b(?:properties|property|descriptors?|MW|logP|TPSA|QED|HBA|HBD)\b)"
+    qualifier = r"(?:(?:任何|全部|分子)|\b(?:any|all|the|molecular)\b)"
+    negation = rf"(?:{_NEGATION}|不(?=计算|运行|执行|评估|预测|进行))"
+    calculation_tail = r"(?=\s*(?:$|[,，;；。.!！?？\n]|计算|评估|\b(?:calculations?|computations?|assessments?|checks?)\b))"
+    return bool(re.search(
+        negation + rf"\s*(?:(?:{operation}\s*)+(?:{qualifier}\s*)*{subject}"
+        + rf"|(?:{qualifier}\s*)*{subject}{calculation_tail})"
+        + rf"|{subject}\s*" + negation + rf"\s*{operation}", text, re.I))
+
+
 def restricted_properties(query: str) -> bool:
     """An explicit 'only' limits the default assessment bundle to descriptors."""
     positive = positive_intent_text(query)

@@ -175,8 +175,10 @@ def target_design_steps(
     ]
 
 
-def molecular_design_steps(generation_request: dict[str, Any]) -> list[WorkflowStep]:
-    return [
+def molecular_design_steps(
+    generation_request: dict[str, Any], *, include_properties: bool = False,
+) -> list[WorkflowStep]:
+    steps = [
         WorkflowStep(
             name="molecular_design",
             tool_name="llm_molecular_generator",
@@ -184,6 +186,23 @@ def molecular_design_steps(generation_request: dict[str, Any]) -> list[WorkflowS
             output_key="result",
         )
     ]
+    if include_properties:
+        steps.append(
+            WorkflowStep(
+                "properties",
+                "property_calculator",
+                input_from="result",
+                input_binding="$.outputs.result",
+                input_transform="smiles_text",
+                output_key="properties",
+                required=False,
+                continue_on_error=True,
+                metadata={"candidate_source": "result"},
+                capability="molecule.properties",
+                output_contract="PropertyAssessmentSet@1",
+            )
+        )
+    return steps
 
 
 def lead_optimization_steps(

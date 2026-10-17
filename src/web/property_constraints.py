@@ -36,7 +36,7 @@ def generation_constraint_report(result, query):
     generators = [item for item in sequence if type(item) is dict and item.get("tool_name") == "llm_molecular_generator"]
     properties = [item for item in sequence if type(item) is dict and item.get("tool_name") == "property_calculator"]
     # Optimization has its own baseline/candidate verifier and comparison table.
-    if len(generators) != 1 or len(properties) != 1 or not _accepted(generators[0], "llm_molecular_generator"):
+    if len(generators) != 1 or len(properties) > 1 or not _accepted(generators[0], "llm_molecular_generator"):
         return None
     data = generators[0].get("data")
     candidates = data.get("candidates") if type(data) is dict else None
@@ -50,7 +50,7 @@ def generation_constraint_report(result, query):
         if identity is None or row["candidate_id"] in expected or identity in expected.values():
             return None
         expected[row["candidate_id"]] = identity
-    item = properties[0]
+    item = properties[0] if properties else {}
     rows = item.get("data")
     trace = result.get("trace_id")
     valid = bool(isinstance(trace, str) and _ID.fullmatch(trace)

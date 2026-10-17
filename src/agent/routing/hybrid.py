@@ -12,6 +12,7 @@ from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
 from src.agent.planning.request_parsing import positive_intent_text
+from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
 from src.agent.tools.activity_input import activity_intent_requested
@@ -174,7 +175,10 @@ class HybridSkillRouter:
             add("reverse_target_prediction", 0.95, "reverse target intent")
         if activity_intent_requested(text):
             add("activity_prediction", 0.9, "activity endpoint requested")
-        if self._contains(
+        bounds, unknown_bounds = requested_property_bounds(lower)
+        bounded_generation = generation and bool(bounds or unknown_bounds)
+        molecular_subject = has_smiles or bool(re.search(r"分子|化合物|候选|\bmolecules?\b|\bcompounds?\b|\bcandidates?\b", lower))
+        if (not bounded_generation or "admet" in lower) and (self._contains(
             lower,
             "admet",
             "分子量",
@@ -184,12 +188,11 @@ class HybridSkillRouter:
             "lipinski",
             "基础性质",
             "分子性质",
-            "的性质",
             "理化性质",
             "性质计算",
             "性质评估",
             "属性",
-        ):
+        ) or (molecular_subject and "的性质" in lower)):
             add("admet_assessment", 0.88, "property or ADMET endpoint requested")
         docking_action = re.sub(
             r"(?:可?用于|适合|能否(?:继续)?|是否(?:可以)?)(?:\s*(?:分子)?对接|\s*docking)|"
