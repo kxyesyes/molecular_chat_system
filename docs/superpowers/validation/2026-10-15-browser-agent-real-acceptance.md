@@ -1,5 +1,48 @@
 # MedChat 真实浏览器智能体验收
 
+## 2026-10-17 最终独立审查修复（基线 ff1d3c06）
+
+维护者明确要求修复 1 项 P1 和 4 项 P2，先失败测试、最小修复、相关回归及独立复审，再更新原 PR #209 并检查新 head CI；暂不合并。本节是离线代码修复证据，不是新的浏览器/Vina 验收，不改写下文历史 6SAM 真实运行记录。
+
+| 发现 | 修复前 RED | 最小修复及 GREEN |
+|---|---|---|
+| P1 工具链确认晚于配体命令 | 8 failed / 8 controls passed | 统一 `_run_prepare_ligand` 入口重验原绑定；16 passed，涵盖 file/SMILES、scoped/unscoped、直接调用、隐式氢重试和 legacy 控制 |
+| P2 官方化学定义遗漏形式电荷 | 30 failed / 43 controls passed | 已知整数 charge 冲突拒绝；缺列/`?`/`.` 仍未知、不推定为 0；畸形值拒绝；73 passed |
+| P2 普通名称/UniProt 冲突 | 初始 6 failed / 13 controls；配对返修 7 failed / 30 controls，兼容性 1 failed / 41 controls；无空格前缀 3 failed | 显式名称/accession 逐项绑定、未知名称按权威 gene 字面核对；错误/不完整配对拒绝，正确多靶点与中文前缀保留；45 passed |
+| P2 新靶点角色阈值遗漏 | 初始 56 failed；复合省略指标 12 failed；标点/连接词矩阵 100 failed / 28 controls | TPSA/QED/HBA/HBD 进入已有数值约束通道；缺失或未支持复合语法未验证，不计算/补造属性；184 passed |
+| P2 点号破坏否定 | 初始 18 failed / 8 controls；中文路径 9 failed / 26 controls；引号空格/句末点号 12 failed / 35 controls | SMILES/小数点号保留；显式路径整体消费，支持引号内空格，不吞掉路径后的句界；47 passed |
+
+父级执行记录（MedChat Python 3.10，独立 scratch basetemp，均使用 `-q -p no:cacheprovider --tb=short`）：
+
+```powershell
+python -m pytest tests/test_chat_ligand_toolchain_fence.py tests/test_chat_receptor_preparation_integrity.py tests/task_runtime/test_chat_docking_toolchain.py
+# 105 passed, 1 skipped (14.79s)
+python -m pytest tests/test_docking_configuration.py tests/test_docking_manifest_execution.py tests/test_docking_p0_correctness.py tests/test_docking_reproducibility.py tests/test_docking_command_cancellation.py
+# 221 passed, 7 skipped (39.91s)
+python -m pytest tests/agent/test_negation_token_dots.py tests/agent/test_browser_quality_boundaries.py tests/agent/test_browser_s02_context.py
+# 92 passed (12.73s)
+python -m pytest tests/agent/test_task_planner.py tests/agent/test_hybrid_router.py tests/agent/test_routing_prompt_matrix.py tests/agent/test_planner_step_templates.py tests/agent/test_planner_template_execution.py tests/agent/test_planner_responsibilities.py tests/agent/test_browser_s03_routing.py
+# 475 passed (4.06s)
+python -m pytest tests/agent/test_browser_property_constraints.py -k drug_likeness_tpsa_report
+# 1 passed, 46 deselected (1.36s); actual local RDKit descriptor contract
+python -m pytest tests/test_chat_ligand_toolchain_fence.py tests/agent/test_negation_token_dots.py tests/test_rcsb_source.py tests/agent/test_target_database_identity.py tests/agent/test_target_role_property_constraints.py
+# Five-fix integration: 346 passed (5.22s)
+python -m compileall -q src scripts
+git diff --check
+```
+
+实施者相关回归：source/download/projection/exact-PDB 七文件 1321 passed (15.85s)；靶点七文件 322 passed，工具契约子集 9 passed、214 deselected；约束/生成/优化/模板 481 passed、1 deselected (4.52s)，其中唯一排除的本地描述符测试已由父级补跑通过；计数/planner 283 passed (3.73s)。各批有重叠，不能相加为去重总数。
+
+首次独立需求复审没有通过：正确配对多个名称/accession 被拒绝、词表外名称仍被丢弃、中文路径内部点号仍被拆句。路径复审继续发现尾句点和引号内空格，质量复审发现复合数值边界上限丢弃，需求复审进一步发现标点续接。各反例均先补 RED，再最小修复，未用早期通过数量替代关闭依据。目标返修相关 306 passed；中文无空格前缀及第一轮复合边界后相关十文件 723 passed (5.38s)；最终复合标点处理相关五文件 530 passed (3.88s)；最终路径消费者九文件 541 passed (14.74s)。
+
+独立需求复审最终五项全部 PASS：P1/charge 沿用未变 slice 的通过结论，目标配对/前缀和路径反例关闭，最后约束三个套件 239 passed、独立双消费者/标点/连接词/兼容断言 130 passed。没有改下载快照交付契约，没有将 Agent 复审称为 GitHub 人工审批。
+
+最终五项集成及精确 PDB/名称七文件 `685 passed (11.04s)`。额外执行证据与复用核验 `tests/task_runtime/test_docking_execution.py` 为 `116 passed, 2 skipped (33.29s)`；审批/当前执行上下文两文件为 `196 passed (391.64s)`。审批扩展首轮长 basetemp 出现失败标记后主动中止，随后 fail-fast 定位到既有 Windows 文件名测试的 full-path 前置断言 `253 > 240`（1 failed / 73 passed），不是审批实现被放宽；改用短临时根 `$env:TEMP/m209c` 后 196 项通过，未改路径限制或测试断言。另一次中间正则拼接语法错误导致收集失败，立即修正并重跑，未计为通过。未宣称被中止的组合批通过。
+
+最终独立质量复审五项全部 PASS，无未关闭的重要 finding；原复合阈值 P2 已关闭，P1/charge 文件哈希未变，冻结范围一致。质量审查者独立执行：聚焦 521 passed，约束十文件 765 passed，target/path 十六文件 1022 passed；额外属性 128、身份 81、路径/否定 53 个探针全部通过，内存编译及限定 diff 检查通过。各批有重叠，不累计总数；不是人工 GitHub approval。
+
+限制与兼容性：工具链是执行前校验，不是 OS 文件锁或传递依赖认证；未知 charge 不证明一致，也不证明完整质子化状态；合成阈值和命令结果均为测试夹具，不是新科学结果。显式名称/accession 采用有界语法，不支持的复杂名称/配对要求澄清，不猜别名。没有更改审批 nonce、READY、所有权、下载不可变快照交付、API/schema、JS、部署或数据资产。此次未重跑真实服务、Vina、浏览器或全仓离线测试；平台跳过不算通过。此记录随修复提交，新 head CI 的最终结果写入 [PR #209](https://github.com/kxyesyes/molecular_chat_system/pull/209) 最新状态段，避免自引用文档提交不断触发新 head；不沿用旧 head CI，不合并。
+
 验收日期：2026-10-15，后续复验至 2026-10-16。基线为 `5168da5f`，工作分支为 `codex/browser-agent-real-acceptance`。14 个预先定义场景的累计浏览器结果为 13 个 PASS，1 个 BLOCKED（S10）；这不是所有场景在最终集成版本上的完整重跑。下文保留首次失败及中间修复证据，最终结论以“最终复验”列及最新增量记录为准。
 
 ## 范围与判定

@@ -1,5 +1,14 @@
 # Latest handoff
 
+## PR #209 最终独立审查修复（2026-10-17）
+
+- 在原 `codex/browser-agent-real-acceptance` 分支修复 1 P1 / 4 P2，基线 `ff1d3c06`；先 RED 后最小实现。工具链在每次配体命令前重验，archive/CCD 已知形式电荷冲突拒绝，名称/accession 逐项绑定，新增描述符阈值不再静默遗漏，SMILES/小数/显式路径点号不破坏否定。
+- 独立需求/质量复审期间发现多目标/未知名称、中文路径和复合阈值遗漏，均补失败回归并交原审查者关闭；最终 SPEC 和 QUALITY 五项全部 PASS，无未关闭的重要 finding。
+- 父级最终集成/精确检索 685 passed，审批/当前执行上下文 196 passed，执行证据/复用 116 passed、2 skipped；compileall/diff 通过。审查者独立回归与探针、长临时根前置失败和修正过程保留在验收记录，不累计重叠批次为总数。
+- 本记录随修复提交；新 head CI 必须单独核对，最终结果写入 PR #209 最新状态段，不沿用 ff1d3c06 的 11/11，也不创建自引用文档提交链。
+- 验证命令、RED/GREEN、重叠批次、平台跳过及科学限制见 [验收记录](../superpowers/validation/2026-10-15-browser-agent-real-acceptance.md#2026-10-17-最终独立审查修复基线-ff1d3c06)。不重跑真实服务/Vina，不修改既有 6SAM 科学结果或下载文件，不提交运行资产/日志/凭据。
+- PR 在本次修复前已 Open / Ready for review；下文旧 Draft 表述为历史状态。维护者明确要求暂不合并，不启用 auto-merge，不把 Agent 复审当作人工审批。
+
 ## PR #209 文档提交 CI 已全通过（2026-10-17）
 
 - 真实6SAM闭环验收文档提交`39728e8afd4c2a7cb953e0ea21dfbeb9d483f08b`的

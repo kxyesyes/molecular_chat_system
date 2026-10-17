@@ -32,6 +32,21 @@ _ACCESSION_LOOKUP = re.compile(
     rf"(?:请\s*)?(?:搜索|查找|查询|search|find|lookup)\s*[:：]?\s*"
     rf"({_ACCESSION})[。.!！]?", re.I,
 )
+# A deliberately bounded identity grammar, not a vocabulary of protein names.
+# Unknown explicit names are compared literally to service gene evidence.
+_NAMED_ACCESSION = re.compile(
+    rf"([^\W\d][\w-]*)\s*(?:[(（]\s*{_LABELLED_ACCESSION.pattern}\s*[)）]"
+    rf"|[;；,，]\s*{_LABELLED_ACCESSION.pattern})", re.I,
+)
+_ACCESSION_ITEM = rf"(?:{_NAMED_ACCESSION.pattern}|{_LABELLED_ACCESSION.pattern}|{_ACCESSION})"
+_EXPLICIT_ACCESSION_QUERY = re.compile(
+    rf"\s*(?:(?:find|search|lookup|compare)\s+|(?:请\s*)?(?:查找|搜索(?:靶点数据库)?|查询|比较)\s*[:：]?\s*)?"
+    rf"(?:人源\s*)?(?:丁酰胆碱酯酶\s+)?{_ACCESSION_ITEM}"
+    rf"(?:{_ACCESSION_JOIN.pattern}{_ACCESSION_ITEM})*"
+    r"\s*(?:(?:for\s+)?(?:experimental\s+)?structures|(?:的实验结构|的结构)"
+    r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?)?"
+    r"[。.！!]?\s*", re.I,
+)
 
 
 class TargetDatabaseTool(BaseMolecularTool):
@@ -104,8 +119,34 @@ class TargetDatabaseTool(BaseMolecularTool):
                 error={"code": "validation_error", "message": "Invalid or ambiguous PDB constraint."})
             return result
         target_query = target_text_without_pdb(query) if pdb_id is not None else query
-        named_targets = target_mentions(target_query) if pdb_id is not None and type(target_query) is str else ()
         search_queries = self._search_queries(target_query)
+        # Preserve names when prose was reduced to accession lookup keys, but
+        # leave unconstrained name/family and multi-target searches unchanged.
+        named_targets = target_mentions(target_query) if type(target_query) is str and (
+            pdb_id is not None or (search_queries and all(
+                re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries
+            ))
+        ) else ()
+        accession_names = {}
+        if (type(target_query) is str and _ACCESSION_LABEL.search(target_query)
+                and search_queries and all(re.fullmatch(_ACCESSION, keyword, re.I) for keyword in search_queries)):
+            pair_text = re.sub(r"^\s*(?:请\s*)?(?:查找|搜索(?:靶点数据库)?|查询|比较)\s*[:：]?\s*", "", target_query)
+            pair_text = re.sub(r"^\s*人源\s*", "", pair_text)
+            pairs = list(_NAMED_ACCESSION.finditer(pair_text))
+            for pair in pairs:
+                name = canonical_target_identifier(pair[1]) or pair[1].upper()
+                accession_names[(pair[2] or pair[3]).upper()] = name
+            if (not _EXPLICIT_ACCESSION_QUERY.fullmatch(target_query)
+                    or (pairs and (len(pairs) != len(accession_names)
+                        or set(accession_names) != set(search_queries)
+                        or not set(named_targets).issubset(accession_names.values())))):
+                result.update(status="invalid_input", message="Please clarify explicit target name and accession pairs.",
+                    error={"code": "validation_error", "message": "Ambiguous target name and accession identifiers."})
+                return result
+        if pdb_id is None and len(named_targets) > 1 and not accession_names:
+            result.update(status="invalid_input", message="Please clarify one target name for the accession lookup.",
+                error={"code": "validation_error", "message": "Ambiguous target name and accession identifiers."})
+            return result
         if pdb_id is not None and type(target_query) is str and not _ACCESSION_LABEL.search(target_query):
             from src.agent.contracts.target_request import analyze_target_request
             request = analyze_target_request(target_query)
@@ -141,13 +182,17 @@ class TargetDatabaseTool(BaseMolecularTool):
                 service_results = search_result.get("results", [])
                 # A labelled accession is a lookup key, not permission to drop
                 # a named target. Bind both against authoritative gene evidence.
-                if named_targets and any(
+                expected_name = accession_names.get(search_query) or (named_targets[0] if named_targets else None)
+                if expected_name and any(
                     not isinstance(target, dict) or
-                    canonical_target_identifier(target.get("gene_symbol")) != named_targets[0]
+                    (canonical_target_identifier(target.get("gene_symbol")) or
+                        str(target.get("gene_symbol") or "").strip().upper()) != expected_name or
+                    (search_query in accession_names and
+                        str(target.get("uniprot_id") or "").strip().upper() != search_query)
                     for target in service_results
                 ):
                     result.update(status="invalid_input", message="Target name and accession do not agree.",
-                        error={"code": "validation_error", "message": "Conflicting exact PDB target identifiers."})
+                        error={"code": "validation_error", "message": "Conflicting target name and accession identifiers."})
                     return result
                 service_status = search_result.get("status")
                 if not isinstance(service_status, str):

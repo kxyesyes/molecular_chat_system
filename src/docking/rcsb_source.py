@@ -363,7 +363,13 @@ def _chemistry(cif, component_files, latest, budget):
                 element = _field(row, "type_symbol").capitalize()
                 aromatic, stereo = _field(row, "pdbx_aromatic_flag"), _field(row, "pdbx_stereo_config")
                 _require(element in p1._ELEMENTS and aromatic in {"Y", "N"} and stereo in {"R", "S", "N"}, "component_invalid")
-                result[name] = (element, aromatic, stereo)
+                charge = row.get("charge")
+                if charge not in {None, "?", "."}:
+                    _require(re.fullmatch(r"[+-]?[0-9]{1,10}", charge) is not None, "component_invalid")
+                    charge = int(charge)
+                else:
+                    charge = None
+                result[name] = (element, aromatic, stereo, charge)
                 if ccd:
                     flag = _field(row, "pdbx_leaving_atom_flag")
                     _require(flag in {"Y", "N"}, "component_invalid")
@@ -373,7 +379,13 @@ def _chemistry(cif, component_files, latest, budget):
 
         official_atoms, leaving = atoms(ccd.rows("chem_comp_atom", required=True), ccd=True)
         entry_atoms, _ = atoms(atom_rows[component_id])
-        _require(entry_atoms == official_atoms, "component_invalid")
+        _require(entry_atoms.keys() == official_atoms.keys(), "component_invalid")
+        for name, entry in entry_atoms.items():
+            official = official_atoms[name]
+            # Archive entries may omit charge; missing/unknown is not neutral.
+            # Compare supplied integers only when BOTH definitions know them.
+            _require(entry[:3] == official[:3] and (entry[3] is None or official[3] is None
+                     or entry[3] == official[3]), "component_invalid")
         # Archive entry atom tables need not contain leaving-atom flags. When
         # supplied, however, they must agree with the bound CCD definition.
         for row in atom_rows[component_id]:

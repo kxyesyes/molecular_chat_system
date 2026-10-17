@@ -180,6 +180,73 @@ def test_entry_and_ccd_leaving_atom_flags_must_match(sample):
     assert result["reason"] == "component_invalid"
 
 
+def with_component_atom_charge(raw, charge, atom="LIG O1"):
+    """Independently add synthetic charge cells, or omit the entire column."""
+    if charge is None:
+        return raw
+    header = b"_chem_comp_atom.pdbx_leaving_atom_flag\n"
+    assert raw.count(header) == 1
+    before, table = raw.split(header)
+    rows, after = table.split(b"#\n", 1)
+    prefix = atom.encode() + b" "
+    assert sum(row.startswith(prefix) for row in rows.splitlines()) == 1
+    rows = b"\n".join(row + b" " + (charge.encode() if row.startswith(prefix) else b"0")
+                       for row in rows.splitlines())
+    return before + header + b"_chem_comp_atom.charge\n" + rows + b"\n#\n" + after
+
+
+@pytest.mark.parametrize("atom", ["LIG O1", "LIG H1"])
+@pytest.mark.parametrize("entry_charge,ccd_charge", [
+    ("0", "+1"), ("0", "-1"), ("+1", "0"), ("-1", "0"),
+    ("+1", "-1"), ("-1", "+1"),
+])
+def test_component_atom_charge_disagreement_is_rejected(sample, atom, entry_charge, ccd_charge):
+    pdb, cif, components = sample
+    cif = with_component_atom_charge(cif, entry_charge, atom)
+    components["LIG"] = with_component_atom_charge(components["LIG"], ccd_charge, atom)
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "component_invalid"
+
+
+@pytest.mark.parametrize("entry_charge,ccd_charge", [
+    ("0", "0"), ("+0", "-0"), ("1", "+1"), ("+1", "1"),
+    ("-1", "-1"), ("+2", "2"), ("-2", "-02"),
+])
+def test_component_atom_charge_signed_integer_agreement(sample, entry_charge, ccd_charge):
+    pdb, cif, components = sample
+    cif = with_component_atom_charge(cif, entry_charge)
+    components["LIG"] = with_component_atom_charge(components["LIG"], ccd_charge)
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+    assert next(c for c in result["evidence"]["components"] if c["id"] == "LIG")["sha256"] == hashlib.sha256(components["LIG"]).hexdigest()
+
+
+@pytest.mark.parametrize("unknown", [None, "?", "."])
+@pytest.mark.parametrize("other", [None, "?", ".", "0", "+1", "-1"])
+@pytest.mark.parametrize("unknown_side", ["entry", "ccd"])
+def test_component_atom_charge_unknown_is_not_assumed_zero(sample, unknown, other, unknown_side):
+    pdb, cif, components = sample
+    entry_charge, ccd_charge = (unknown, other) if unknown_side == "entry" else (other, unknown)
+    cif = with_component_atom_charge(cif, entry_charge)
+    components["LIG"] = with_component_atom_charge(components["LIG"], ccd_charge)
+    result = compile_sample((pdb, cif, components))
+    assert result["ok"], result
+
+
+@pytest.mark.parametrize("charge", ["''", "1.0", "1e0", "NaN", "1+", "--1", "+-1", "abc", "10000000000"])
+@pytest.mark.parametrize("side", ["entry", "ccd"])
+def test_component_atom_charge_malformed_is_rejected_even_when_other_missing(sample, charge, side):
+    pdb, cif, components = sample
+    if side == "entry":
+        cif = with_component_atom_charge(cif, charge)
+    else:
+        components["LIG"] = with_component_atom_charge(components["LIG"], charge)
+    result = compile_sample((pdb, cif, components))
+    rejected(result)
+    assert result["reason"] == "component_invalid"
+
+
 @pytest.mark.parametrize("old,new", [
     (b"LIG O1 O N N N", b"LIG O1 O N N Y"),
     (b"LIG O1 O N N N", b"LIG O1 N N N N"),

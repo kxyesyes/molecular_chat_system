@@ -428,6 +428,9 @@ class MolecularDockingService:
         adapter_control = {}
         if cancel_event is not None:
             adapter_control["cancel_event"] = cancel_event
+        # Fence every initial/retry command, after in-process ligand work and
+        # progress callbacks. The later Vina check cannot undo a prep launch.
+        self._require_chat_toolchain()
         result = self.ligand_adapter.prepare_ligand(
             input_path,
             output_path,

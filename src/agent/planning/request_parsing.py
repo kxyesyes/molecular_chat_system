@@ -123,7 +123,19 @@ def extract_top_n(query: str, default: int) -> int:
     return max(1, min(100, int(match.group(1))))
 
 
-_CLAUSE_END = r"[,，;；。.!！?？\n]|但是|而是|\bbut\b|\band\s+then\b"
+# ASCII dots inside SMILES, decimals and paths are not sentence boundaries.
+# Ambiguous unspaced ASCII prose stays in the same clause (fail closed).
+_CLAUSE_END = r"[,，;；。!！?？\n]|\.(?=\s|$|[\u3400-\u9fff\"'”’])|但是|而是|\bbut\b|\band\s+then\b"
+# Consume explicit path tokens before considering any internal punctuation.
+# Ambiguous unspaced text attached to a path stays in its original clause.
+_PATH_START = r"(?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\\/])"
+_PATH_TOKEN = (
+    rf'"{_PATH_START}[^"\r\n]*"|'
+    rf"'{_PATH_START}[^'\r\n]*'|"
+    rf"`{_PATH_START}[^`\r\n]*`|"
+    + _PATH_START + r"[^\s,，;；。!?！？\"'`]*(?<!\.)"
+)
+_CLAUSE_PART = re.compile(_PATH_TOKEN + r"|(?P<boundary>" + _CLAUSE_END + r")", re.I)
 # 别 is imperative except inside compounds such as 分别/特别/识别/类别.
 _NEGATION = r"(?:不要|无需|不需要|不做|不运行|不预测|禁止|跳过|避免|勿|(?<![分特区识鉴辨类级差个])别|\bwithout\b|\bdo\s+not\b|\bdon't\b|\bskip\b|\bexclude\b)"
 
@@ -137,7 +149,12 @@ def positive_intent_text(query: str) -> str:
     text = re.sub(r"不要\s*跳过|do\s+not\s+skip|don't\s+skip", "", query, flags=re.I)
     # Keep punctuation intact: it can be part of a receptor path, a decimal
     # docking-box coordinate, or the canonical generation grammar.
-    clauses = re.split(f"({_CLAUSE_END})", text, flags=re.I)
+    clauses, start = [], 0
+    for match in _CLAUSE_PART.finditer(text):
+        if match.group("boundary") is not None:
+            clauses.extend((text[start:match.start()], match[0]))
+            start = match.end()
+    clauses.append(text[start:])
     output = []
     for clause in clauses:
         # Also cover the ordinary object-before-prohibition order.
