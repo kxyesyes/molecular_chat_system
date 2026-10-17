@@ -439,6 +439,28 @@ be published and pass its own complete CI, including real Linux watchdog. Prior
 2eec7648 run finished9 successful jobs, root failure and consequent aggregate
 failure; no failed check is waived or presented as a success.
 
+## 601b8b7a suite-order fixture follow-up
+
+[quality39036020906](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39036020906)
+finished9 successful jobs, Agent failure and consequent aggregate failure. Root
+including real Linux watchdog passed. Agent job117405829251: 14194 passed,
+2 skipped /1 failed (1114.42s); the new unavailable-validation test failed before
+its production assertion because string-path monkeypatch traversed a lazy parent
+package without its cached validators attribute. This is not a waived CI gate.
+
+Parent deterministic regression adds that exact cached-submodule/missing-parent
+state: RED1 failed /2 controls. Minimal test-only fix obtains the module object
+via importlib before injection; original validation-failure and raw16-cap
+assertions unchanged. Parent real tests: 369 planner/gate passed (8.91s),
+261 validators/evidence/gate passed (10.05s), compileall/diff passed. One initial
+command referenced nonexistent `test_evidence_followup.py` and ran no tests; it
+is not verification. Independent SPEC PASS:3 focused, old string-path memory
+failure, actual validator globals injection, teardown object/attribute restoration
+and genuine invalid/17-valid-input controls checked. Final original QUALITY PASS:
+7 tests /147 deselected (1.30s),8 independent controls, old failure reproduced,
+both parent states restored. No important finding, production/CI/assertion change
+or blind workflow rerun. Next exact-head full CI remains a required gate.
+
 Independent review and exact-head CI outcomes are recorded in the current PR
 status sections before merging. This saved document is not proof of a future
 merge or future CI outcome. No auto-merge, admin bypass or human approval is

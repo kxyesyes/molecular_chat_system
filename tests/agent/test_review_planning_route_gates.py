@@ -222,11 +222,16 @@ def test_p2_3_runtime_report_accepts_deduplicated_evidence(tmp_path, tail, inclu
     assert accepted_activity_evidence(result, query, "synthetic-socket") is None
 
 
-@pytest.mark.parametrize("defect", ["unavailable_validation", "oversized_batch"])
+@pytest.mark.parametrize("defect", ["unavailable_validation", "unavailable_validation_without_parent_attribute", "oversized_batch"])
 def test_p2_3_canonical_dispatch_preserves_validation_and_raw_count_caps(monkeypatch, defect):
     query = "Compare and rank properties and BuChE activity; SMILES: CCO; SMILES: OCC"
-    if defect == "unavailable_validation":
-        monkeypatch.setattr("src.agent.utils.validators._load_rdkit_chem", lambda: None)
+    if defect.startswith("unavailable_validation"):
+        import importlib
+        validators = importlib.import_module("src.agent.utils.validators")
+        if defect.endswith("without_parent_attribute"):
+            package = importlib.import_module("src.agent.utils")
+            monkeypatch.delattr(package, "validators", raising=False)
+        monkeypatch.setattr(validators, "_load_rdkit_chem", lambda: None)
     else:
         # The canonical path must retain the existing 16-candidate cap.
         query = "Compare and rank properties and BuChE activity; " + "; ".join(

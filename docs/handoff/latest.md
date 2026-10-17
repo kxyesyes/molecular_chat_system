@@ -1,5 +1,11 @@
 # Latest handoff
 
+## PR #209 套件导入隔离夹具修复（2026-10-17）
+
+- `601b8b7a` CI 9成功，Agent14194 passed/2 skipped/1 failed及汇总失败；root含真实Linuxwatchdog已通过，18条审查均解决。唯一失败在新测试的字符串monkeypatch找不到lazy父包的validators属性，尚未触发生产断言。
+- 新参数确定性RED1/2后改为importlib获取模块对象再注入；原验证不可用/invalid/raw16上限断言不变。父369+261相关回归通过（重叠），SPEC3及QUALITY7+8控制独立PASS，注入命中真实validator globals且teardown身份/父属性完整恢复；compileall/diff通过。
+- 仅测试和记录，无生产/CI配置或科学结果修改。首个不存在测试文件的命令未跑测试、不计pass；准确失败与复跑见[验收记录](../superpowers/validation/2026-10-17-open-review-merge-readiness.md)。新提交完整CI尚待核对，未合并，不盲目重跑旧workflow。
+
 ## PR #209 七项 P2 与 CI 观察竞态闭环（2026-10-17）
 
 - `2eec7648` CI 为9成功、root失败及汇总失败；root6134 passed/106 skipped/1 failed，实际是已退出PID的procfs读取抛ESRCH，不是存活断言失败。先确定性RED1/4，精确捕获ProcessLookupError；原Linux watchdog、5s/2s/12s、生产/CI配置不变。本机41 passed/2 Linux skips，独立SPEC/QUALITY均PASS；仍须真实Linux新CI。
