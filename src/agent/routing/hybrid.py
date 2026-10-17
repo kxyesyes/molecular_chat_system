@@ -11,7 +11,7 @@ from typing import Any
 from src.agent.persistence.base import AgentStateStore
 from src.agent.contracts.generation_request import has_generation_intent
 from src.agent.contracts.target_request import analyze_target_request, TARGET_CLARIFICATION
-from src.agent.planning.request_parsing import positive_intent_text
+from src.agent.planning.request_parsing import positive_intent_text, property_calculation_forbidden
 from src.agent.property_constraints import requested_property_bounds
 from src.target_identifiers import TARGET_PATTERN
 from src.agent.tooling import ToolRegistry
@@ -285,7 +285,7 @@ class HybridSkillRouter:
 
         self._apply_feedback(text, scores, reasons)
         self._apply_memory(memory or [], scores, reasons)
-        self._apply_tool_availability(scores, reasons)
+        self._apply_tool_availability(scores, reasons, text)
 
         candidates = self._rank(scores, reasons)
         if not candidates or candidates[0].score < self.minimum_confidence:
@@ -344,7 +344,7 @@ class HybridSkillRouter:
             reasons=decision_reasons + confirmation_reasons,
             source=source,
             requires_confirmation=bool(confirmation_reasons),
-            allowed_tools=self._allowed_tools_for(selected),
+            allowed_tools=self._allowed_tools_for(selected, text),
         )
 
     @staticmethod
@@ -405,12 +405,13 @@ class HybridSkillRouter:
         self,
         scores: dict[str, float],
         reasons: dict[str, list[str]],
+        query: str,
     ) -> None:
         if not self.tool_registry:
             return
         for skill, score in list(scores.items()):
             unavailable = []
-            for tool_name in self._allowed_tools_for(skill):
+            for tool_name in self._allowed_tools_for(skill, query):
                 try:
                     self.tool_registry.resolve(tool_name)
                 except (KeyError, RuntimeError):
@@ -421,9 +422,14 @@ class HybridSkillRouter:
                     f"unavailable tools: {', '.join(sorted(unavailable))}"
                 )
 
-    def _allowed_tools_for(self, workflow_name: str) -> list[str]:
+    def _allowed_tools_for(self, workflow_name: str, query: str) -> list[str]:
         policy = self.catalog.get(workflow_name)
-        return list(policy.allowed_tools) if policy else []
+        tools = list(policy.allowed_tools) if policy else []
+        if workflow_name == "molecular_design":
+            bounds, unknown = requested_property_bounds(query)
+            if not (bounds or unknown) or property_calculation_forbidden(query):
+                tools = [tool for tool in tools if tool != "property_calculator"]
+        return tools
 
     @staticmethod
     def _rank(

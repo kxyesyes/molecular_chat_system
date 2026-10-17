@@ -1,5 +1,12 @@
 # Latest handoff
 
+## PR #209 新 CI 兼容性修复（2026-10-17）
+
+- `49b4fec6` 的 CI 9 项成功，Agent 13683 passed /2 skipped /1 failed，汇总随之失败；唯一失败是原 HF004 普通生成只授予 generator 的断言。没有盲目重跑或放宽验收。
+- 新增回归 RED 4 failed /19 controls 后，路由白名单与工具可用性计分均按当前请求过滤：无界或禁止计算不授予 property，显式有界且未禁止才保留；catalog、planner 与原 CI 断言不改。
+- 父回归 328 +207 passed（重叠批次）；独立 SPEC PASS172 tests+114 controls，QUALITY PASS170 tests+原HF004/HF005两项+84 controls，无重要 finding；compileall/diff通过。准确命令及失败见下方验收记录。
+- 随补丁发布，本提交的新 head CI 仍待核对，暂未合并。#209 → #210 有序 Squash 授权不变；不修改科学结果、运行审批或 D: 用户工作区。
+
 ## PR #209 剩余自动审查关闭与有序合并门禁（2026-10-17）
 
 - 维护者已确认完成修复、独立复审、新 CI 后按 #209 → #210 分别 Squash merge；这项最新授权覆盖下方历史“暂不合并”，不允许绕过失败、保护或审批边界。

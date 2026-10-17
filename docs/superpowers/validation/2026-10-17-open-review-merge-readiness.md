@@ -129,6 +129,36 @@ closed-loop offline probes, diff check passed. No repeated broad review batches.
 This completes both independent review gates for the frozen source/test changes;
 publication and exact-new-head CI are still pending at document commit time.
 
+## First publication CI and compatibility follow-up
+
+Published repair `49b4fec6a3221adf0beb66f8d9d7765cf59effb8` passed nine
+checks, but [quality39023955092](https://github.com/kxyesyes/molecular_chat_system/actions/runs/39023955092)
+failed Agent and consequently the aggregate: 13683 passed / 2 skipped / 1 failed
+in 1062.15s. The sole failure was existing
+`test_prompt_acceptance.py::test_hf004_generation_overreach_is_bounded_to_generator`:
+catalog descriptor capability was being returned in routing permissions even
+for an unbounded request. This CI is a failure, not a waived gate or flaky rerun.
+
+Parent reproduced the original assertion and added request-scope/availability
+controls: RED 4 failed / 19 passed. Minimal router change filters descriptor
+permission to bounded, non-prohibited ordinary-design requests for both final
+permissions and tool-availability scoring. Catalog execution capability, planner,
+other workflows and the existing CI assertion remain unchanged. Full prompt
+acceptance plus affected design/planner tests: 328 passed (2.83s); compileall and
+diff passed. An initial command referenced nonexistent `test_router.py` and ran
+no tests; it is not counted as verification. Independent review and a new
+exact-head CI are required before merging.
+
+Affected existing router/browser/routing-matrix/react-routing plus new controls:
+207 passed (2.55s). Independent follow-up SPEC PASS: 172 focused tests and 114
+offline controls, including baseline comparison of other workflows. No important
+finding; original CI assertion, catalog and planner unchanged. QUALITY pending.
+
+Final follow-up QUALITY PASS: 170 focused tests plus original HF004/HF005
+2 passed, and 84 independent permission/availability/planner/simulated-LLM
+controls. No important finding, no source edits by reviewers. Original overreach
+assertion passes unchanged. New exact-head CI remains required at commit time.
+
 Independent review and exact-head CI outcomes are recorded in the current PR
 status sections before merging. This saved document is not proof of a future
 merge or future CI outcome. No auto-merge, admin bypass or human approval is

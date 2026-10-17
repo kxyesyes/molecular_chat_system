@@ -40,3 +40,27 @@ def test_bounded_target_design_and_optimization_stay_primary():
 def test_negated_generation_does_not_disable_requested_property_calculation():
     decision = HybridSkillRouter().decide("计算 CCO 的分子量，要求 MW < 450；不要生成分子")
     assert decision.selected_skill == "admet_assessment"
+
+
+@pytest.mark.parametrize("query,expected", [
+    ("生成2个分子", ["llm_molecular_generator"]),
+    ("生成2个分子，MW < 450；不要计算性质", ["llm_molecular_generator"]),
+    ("生成2个分子，MW < 450", ["llm_molecular_generator", "property_calculator"]),
+    ("生成2个分子，MW < 450；不要跳过性质计算", ["llm_molecular_generator", "property_calculator"]),
+])
+def test_plain_design_route_permissions_match_request_scope(query, expected):
+    assert HybridSkillRouter().decide(query).allowed_tools == expected
+
+
+def test_unneeded_descriptor_tool_does_not_discount_plain_generation():
+    class GeneratorOnlyRegistry:
+        def resolve(self, name):
+            if name != "llm_molecular_generator":
+                raise KeyError(name)
+            return object()
+
+    decision = HybridSkillRouter(tool_registry=GeneratorOnlyRegistry()).decide("生成2个分子")
+    assert decision.selected_skill == "molecular_design"
+    assert decision.confidence == pytest.approx(0.78)
+    assert decision.allowed_tools == ["llm_molecular_generator"]
+    assert not any("unavailable tools" in reason for reason in decision.reasons)
