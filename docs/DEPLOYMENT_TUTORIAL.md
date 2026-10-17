@@ -609,11 +609,27 @@ sudo systemctl reload nginx
 至少备份以下内容：
 
 - /etc/medchat/medchat.env，通过受控密钥管理保存，不能进入 Git；
+- 实际 Web 服务账号仓库外的主聊天配置 `llm.env`，包含已保存的接口、模型和 Key，必须通过密钥管理器或受控加密备份保存；不能只备份项目 `.env`。
 - /home/user/XIAOKX/molecular_chat_system/data/ 和 scratch/ 中的 SQLite、模型元数据、FAISS 索引和结构缓存；
 - logs/ 中需要留存的脱敏运维日志；
 - 当前代码 commit SHA 和依赖 profile。
 
 备份 API key 时使用密钥管理器或加密备份，不要把明文环境文件放进普通备份目录。
+
+#### 主聊天私有配置的备份与恢复
+
+以实际运行 Web 的服务账号定位文件，不要误备份维护者或 root 的家目录。设置了
+`MEDCHAT_USER_CONFIG_DIR` 时，备份该仓库外绝对目录中的 `llm.env`；否则 Linux
+使用该服务账号的 `$XDG_CONFIG_HOME/medchat/llm.env`，未设置 XDG 时为
+`~/.config/medchat/llm.env`。路径来源是 `src/web/user_llm_config.py` 的
+`user_llm_config_path()`；同时记录服务账号和目录配置，但不要打印或记录 Key。
+
+恢复由授权运维者在维护窗口执行：
+
+1. 停止 Web 服务，从密钥管理器或已验证的加密备份恢复 `llm.env` 到仓库外的专用私有目录；目标及其父路径不得是符号链接，也不得位于任何 Git checkout 内。
+2. 将该目录和文件的属主设为实际 Web 服务账号，Linux 目录权限为 `0700`、文件为 `0600`；不要递归放宽整个项目或 Temporal worker 的权限。权限不符合时应修复权限，不能绕过应用校验。
+3. 如采用自定义目录，在该服务的运行环境中恢复对应的 `MEDCHAT_USER_CONFIG_DIR` 路径，再启动服务。通过同一服务账号的界面核对接口和模型，并执行一次经授权的连接检查；不要输出文件内容或 Key。旧主模型环境变量不会替代这份私有配置；没有可用密钥备份时，在界面重新录入。
+4. 本节只恢复连接配置，不承诺旧任务可续跑。不要用 `.generation`、锁文件或备份中的 checkpoint、READY/nonce 推定或转移运行授权；旧任务恢复仍须通过当前 owner、版本和一次性审批门禁。连接正常也不等于真实科学验收通过。
 
 ### 12.3 回滚
 

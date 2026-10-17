@@ -36,7 +36,7 @@ python main.py --port 6001
 
 需要分子生成时，先运行 `.\start_ollama.ps1` 或 `ollama serve`，并确认已有 `gmm-llama:latest`。主聊天模型配置不能覆盖分子生成工具模型。
 
-启动选项见 `python main.py --help`；主模型设置见 [README](README.md#主模型接入与一次保存)。Linux 服务部署与启动方式见 [部署文档](deployment/README.md)。
+启动选项见 `python main.py --help`；主模型设置见 [README](README.md#主模型接入与一次保存)。Linux、直接 ASGI 与多 worker 的适用边界见 [部署文档](deployment/README.md)。
 
 ## 5. 构建、测试、lint 命令
 
