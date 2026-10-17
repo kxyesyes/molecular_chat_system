@@ -8,7 +8,8 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore, COOKIE_NAME
+from src.web.agent_session import AgentSessionStore, COOKIE_NAME
+from src.web.agent_session_config import AgentEntrySessionMiddleware
 from tests.task_runtime.test_chat_docking_input_context import authenticated_rig, target_case
 
 
@@ -39,7 +40,7 @@ def app_for(case, tmp_path, *, enabled=True, middleware=True):
     # slot as production assembly, not version-specific Middleware internals.
     app.state.agent_session_store = store
     if middleware:
-        app.add_middleware(AgentSessionMiddleware, store=store)
+        app.add_middleware(AgentEntrySessionMiddleware, store=store)
     api()(app, coordinator=case.coordinator, task_runtime=case.runtime, enabled=enabled)
     return app, token, foreign
 

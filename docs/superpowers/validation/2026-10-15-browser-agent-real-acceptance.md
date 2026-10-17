@@ -1358,3 +1358,35 @@ SER466的A较高。这些不是科学选择或执行授权，最终仍必须页�
 最终冻结代码服务于14:19:01开始831120行来源预热。当前尚未进行新页面检索、
 READY、Vina或下载；不以任何上述诊断宣称真实闭环完成。没有提交真实结构、
 聊天、运行库、日志或截图。
+
+### 真实 6SAM 页面来源及会话路径漏接（2026-10-17）
+
+`e97f49d6` 远端 quality run39009545946 已 completed/success。14:40:15.890
+完整预热831120/831120。14:43普通聊天实际精确返回人源BCHE/P06276、仅1个实验
+结构6SAM、fresh、无AlphaFold；后续同会话S10来源准备成功，页面显示6SAM、
+上述原始PDB摘要、版本2.2、protein1/reference1/hetero105/conformer3/residues631/
+connections245/limitations8。尚未输入就绪或执行授权。
+
+点击“查看结构并选择”却进入未确认错误。只读浏览器网络诊断显示取消HTTP401，
+固定正文 `Browser session required`。代码核对发现生产入口会话中间件保护
+`/api/docking/`，遗漏新的`/api/agent/docking/`；Cookie虽然随同源请求发送，
+scope从未绑定owner。独立规格核对确认不是库存内容错误，middleware顺序无需改变。
+
+最小修复只补一个前缀，使既有会话服务、HTTPS/Origin及owner绑定照常应用。
+新增7个路径用例通过真实setup_agent_sessions验证主页owner贯穿GET/POST、
+异源POST403、另一浏览器身份不同；共享对接HTTP夹具从基础中间件改用生产entry
+类，使既有C1/C2、来源控制、外来owner、缺Origin、nonce和deadline测试覆盖该路径。
+
+首次指定仓库内basetemp触发既有私有会话库路径保护，7项失败不当作bug RED；
+改用系统临时目录后，7项明确因owner=None失败，修复后命令：
+
+```text
+python -m pytest tests/test_agent_session_entrypoints.py tests/test_agent_session.py tests/agent/test_web_docking_http.py tests/agent/test_web_docking_approval_http.py tests/agent/test_web_docking_approval_deadlines.py -q --tb=short
+python -m pytest tests/agent/test_web_docking_control_http.py tests/agent/test_web_docking_http_envelope.py tests/agent/test_web_docking_prepare_deadlines.py -q --tb=short
+```
+
+结果 **213 passed, 2 skipped /160.99s**；**16 passed /203.04s**。
+曾用不存在的inputs_http文件名导致未收集，已改为实际control_http，未报通过。
+compileall和diff check通过，独立质量审查批准并另做12项离线检查。没有改JS、
+复制Cookie、伪造owner或绕过审批。14:51:11再次加载修复并完整预热，待后续页面
+科学选择/READY/Vina/构象/下载核验，仍不宣称S10闭环完成。

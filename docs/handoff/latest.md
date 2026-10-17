@@ -1,5 +1,20 @@
 # Latest handoff
 
+## S10 当前浏览器来源已纳入 6SAM；会话路径修复（2026-10-17）
+
+- `e97f49d6` 已推送，当前 head CI run39009545946 success。最终精确检索代码
+  服务于14:40:15完成831120行预热；14:43普通首页实际返回人源P06276、仅6SAM。
+- 同会话S10来源准备成功，任务显示6SAM和正确原始摘要、修订2.2、参考1条；但
+  查看结构失败。浏览器取消请求证实401 / Browser session required。
+- 根因是生产 `AgentEntrySessionMiddleware` 未包含 `/api/agent/docking/`，
+  不是科学事实不合格。仅补现有会话校验前缀；共享HTTP夹具使用生产entry类，
+  覆盖所有既有来源/所有权/Origin/审批/nonce边界，不放宽验证。
+- 新entry用例7项先因私有路径夹具位置错误失败（不算缺陷RED），改用系统临时
+  目录后7项明确因owner=None失败；修复后213 passed/2 skipped（160.99s），
+  来源/控制/HTTP envelope与prepare deadline16 passed（203.04s）。编译/diff通过。
+- 独立根因规格核对及质量审查批准，质量审查另12项离线检查通过。14:51:11
+  服务加载该修复并重新完整预热；尚无READY、审批、Vina或下载结果。
+
 ## S10 精确 PDB 检索（2026-10-17，6SAM 真实执行待完成）
 
 - 维护者已确认方案 A，并授权 Agent 完成浏览器科学选择及当前 READY 一次性确认，
