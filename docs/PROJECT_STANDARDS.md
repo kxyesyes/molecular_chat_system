@@ -430,74 +430,33 @@ PR 目标、draft 默认值、描述字段、科学/数据变更证据和合并�
 
 ## 18. Temporal docking canary 运行规范
 
-Temporal 是 docking 长任务的可选执行后端，不是全局默认，也不替代现有科学工具、Validator 或同步 API。开发和未放量环境的默认配置必须保持：
-
-```powershell
-$env:MEDCHAT_TASK_BACKEND = "local"
-$env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "0"
-```
+Temporal 是 docking 长任务的可选执行后端，不是全局默认，也不替代现有科学工具、Validator 或同步 API。开发和未放量环境保持 `MEDCHAT_TASK_BACKEND=local`、`MEDCHAT_TEMPORAL_CANARY_PERCENT=0`；非法配置必须 fail closed 到该默认状态。
 
 ### 18.1 生产边界与安装
 
-- 生产目标仅为 native Linux + systemd + cgroup v2；Windows、SDK dev server、contract fake 和 replay 不能作为生产证据。
-- Docker Compose 基础设施由 operator 先启动并确认健康，systemd Web/worker unit 不启动、重启或修改 Docker。
-- worker 独立于 Web，docking 并发固定为 `1`；Temporal/PostgreSQL/UI/Prometheus/Grafana 端口与 worker metrics 仅允许 loopback 或私有网络。
-- secrets 只从运行时 secret file/环境注入，不得进入 Git、argv、日志或报告；专用 worker env 是 `root:root 0600` 的精确无秘密 allowlist。
-- worker 资产只能由 `install-temporal-worker.sh` stage 为不可变 generation，再由 `activate-temporal-worker-generation.sh` 事务 activate、rollback 或 migrate。禁止手工复制 unit/helper、修改 `current`、绕过 digest/manifest，或恢复 legacy tmpfiles。
-- prepare service 只能从已激活 generation 执行环境验证和目录 helper；只有四个受控运行目录属于 `medchat:medchat 0700`，源码、Conda 与部署资产保持 `root:root`、`go-w`。
+- 生产证据仅接受 native Linux + systemd + cgroup v2；Windows、SDK dev server、contract fake 和 replay 不能冒充生产证据。
+- Docker/Compose 基础设施由 operator 管理并先确认健康；systemd Web/worker unit 不启动、重启或修改 Docker。worker 独立于 Web，docking 并发固定为 `1`，内部端口和 metrics 只允许 loopback 或私有网络。
+- secrets 只能由运行时 secret file/环境注入，不得进入 Git、argv、日志或报告；专用 worker env 必须是 `root:root 0600` 的无秘密 allowlist。
+- worker 资产由 `install-temporal-worker.sh` stage 为不可变 generation，再由 `activate-temporal-worker-generation.sh` 事务 activate、rollback 或 migrate。禁止手工修改 `current`、固定 unit/helper、digest/manifest 或 legacy tmpfiles；prepare service 只能使用已激活 generation。
+- 只有受控运行目录属于 `medchat:medchat 0700`；源码、Conda 和部署资产保持 `root:root`、`go-w`。
 
-完整生产步骤见 `docs/runbooks/temporal_docking_canary.md`。可选依赖仍来自 `requirements-agent-temporal.txt`：
+完整安装、迁移、激活、健康检查和回滚步骤以 [Temporal canary 运行手册](runbooks/temporal_docking_canary.md) 为唯一操作来源；部署总览只保留生产边界。可选依赖仍使用 `requirements-agent-temporal.txt`，本地开发 server/worker 也只能用于开发和验收。
 
-```powershell
-python -m pip install -r requirements-agent-temporal.txt
-```
+### 18.2 API、数据与科学结果边界
 
-本地开发可分别启动 SDK 开发服务器和单并发 docking worker，但不得用于生产：
+- 异步 `POST /api/docking/tasks`、事件查询和取消接口需要管理鉴权；同步 `/api/docking/submit` 保持原响应契约，不通过 Temporal。
+- Temporal workflow/history 只保存任务控制信息、相对 artifact 标识、hash、状态码和脱敏 provenance，不保存 receptor、ligand、SMILES、manifest 内容、凭据或绝对路径；SQLite 是查询投影，Temporal 是已接收任务的执行权威。
+- 成功必须同时满足一次真实 Vina 执行、一个终态事件、数值能量、有效 pose、artifact SHA-256 一致，以及 `demo_mode=false`、`fallback_used=false` 的真实 provenance。
 
-```powershell
-python scripts/run_temporal_dev_server.py
+### 18.3 验收、晋级与回滚
 
-$env:MEDCHAT_TASK_BACKEND = "temporal_canary"
-$env:MEDCHAT_TEMPORAL_CANARY_PERCENT = "100"
-$env:MEDCHAT_TEMPORAL_DOCKING_CONCURRENCY = "1"
-python scripts/run_temporal_docking_worker.py
-```
+验收命令、报告位置和 host capability 检查见运行手册第 [6](runbooks/temporal_docking_canary.md#6-validate-the-deployment)–[8](runbooks/temporal_docking_canary.md#8-run-production-preflight-at-0) 节。`contract` 只验证生命周期并必须标记 `scientific_execution=false`；`real` 才能验证真实 Vina、pose、hash、provenance、终态和执行次数。缺失、不可用或 skipped 的 required evidence 必须保持 `partial`，不能记为 passed。
 
-`run_temporal_dev_server.py` 仅用于开发和验收。非法配置必须 fail closed 到 `local`、0%。
+生产流量只能按 `0% -> 5% -> 10% -> 25%` 晋级，每档观察真实 Temporal 终态任务；任一硬门禁失败立即用 `manage_temporal_canary.py rollback` 将新流量降为 0%，但不删除 history、TaskStore、staging、artifact 或报告，也不在 local 重放已接收任务。PostgreSQL 备份/恢复使用受信版本化 bin，密码只进入 child env，恢复目标固定为 `temporal_verify` 且不 drop source。
 
-### 18.2 API 与兼容边界
+### 18.4 证据真实性
 
-- 异步入口 `POST /api/docking/tasks`、事件查询和取消接口需要管理鉴权；
-- 现有同步 `/api/docking/submit` 保持原响应契约，不通过 Temporal；
-- Temporal workflow/history 只保存任务控制信息、相对 artifact 标识、hash、状态码和脱敏 provenance，不保存 receptor、ligand、SMILES、manifest 内容、凭据或绝对路径；
-- SQLite 是当前查询投影，Temporal 是已接收 Temporal 任务的执行权威；不得长期扩展为 SQLite 与其他数据库双写；
-- 成功必须同时满足：一次 Vina 执行、一个终态事件、数值能量、有效 pose、artifact SHA-256 一致，以及 `demo_mode=false`、`fallback_used=false` 的真实 provenance。
-
-### 18.3 验收与健康检查
-
-```powershell
-python scripts/health_check.py --strict
-python scripts/run_temporal_docking_acceptance.py --mode contract --repeat 3 --output outputs/agent_evaluation/temporal_docking_contract.json
-python scripts/run_temporal_docking_acceptance.py --mode real --repeat 3 --output outputs/agent_evaluation/temporal_docking_acceptance.json
-```
-
-`contract` 使用受控 fake 验证生命周期，不是科学结果；报告必须标记 `scientific_execution=false`。`real` 使用仓库 MAGL 样例和真实 Vina，任何依赖、pose、hash、provenance、终态或执行次数异常都必须失败。报告只允许安全逻辑标识、版本、耗时、相对路径和 hash；不得记录输入载荷、环境变量值或凭据。
-
-### 18.4 发布、晋级与回滚
-
-生产流量只能按固定顺序晋级：
-
-```text
-0% -> 5% -> 10% -> 25%
-```
-
-不得跳级或 force 绕过。每一档必须观察至少 20 个真实 Temporal 已接受并进入终态的任务，或完整 24 小时且至少 3 个此类任务。晋级还要求 deployment、真实 Vina repeat 3、Temporal/PostgreSQL/Prometheus、告警、备份与隔离恢复，以及 Vina 次数、单终态、artifact/hash 和真实 provenance 全部通过。任一 required evidence 缺失、unavailable 或 skipped 都是 `partial` 并阻断晋级，绝不能记为 passed。
-
-任一硬门禁失败立即通过 `manage_temporal_canary.py rollback` 把 Web 新流量降为 0%。回滚只改变新流量，不删除 Temporal history、TaskStore、staging、artifact 或报告，也不得在 local 重放已被 Temporal 接受的任务；accepted workflow 继续由 worker 收敛。PostgreSQL 备份/恢复必须使用受信的版本化 bin 目录，密码只进入 child env，恢复目标固定为 `temporal_verify` 且永不 drop source。
-
-### 18.5 证据真实性
-
-contract/replay 只证明生命周期契约；它们、fake runner、Windows 静态验证和缺少宿主工具的检查都不能冒充真实 Vina、Temporal、PostgreSQL、systemd 或 cgroup 证据。报告必须逐项保留 `passed`、`failed`、`skipped`，总体状态按最严格结果收敛。
+contract/replay、fake runner、Windows 静态验证和缺少宿主工具的检查只证明契约或静态条件，不能冒充真实 Vina、Temporal、PostgreSQL、systemd 或 cgroup 证据。报告必须逐项保留 `passed`、`failed`、`skipped`，总体状态按最严格结果收敛。
 
 ## 待确认事项汇总
 

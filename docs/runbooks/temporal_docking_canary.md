@@ -29,6 +29,19 @@ docker compose version
 /opt/conda/envs/medchat/bin/python scripts/health_check.py --strict
 ```
 
+After the deployment profile is installed, add the optional Temporal worker
+dependencies to the same environment before starting the worker:
+
+```bash
+cd /usr/local/src/medchat-release
+sudo /opt/conda/envs/medchat/bin/python -m pip install -r requirements-agent-temporal.txt
+sudo /opt/conda/envs/medchat/bin/python -c \
+  "import temporalio, prometheus_client"
+```
+
+This profile adds `temporalio` and `prometheus-client`; it does not replace
+`deployment/requirements.txt`.
+
 The activation cleanup protocol requires cgroup v2 and a usable `cgroup.kill`
 file for the old worker cgroup. There is no PID-based or `systemctl kill`
 fallback. Treat a missing capability, failed health check, unavailable Vina or
@@ -253,7 +266,8 @@ file-SD target, or live override.
 
 ## 4. Stage and activate an immutable worker generation
 
-`deployment/install-temporal-worker.sh` only stages a content-addressed
+`deployment/install-temporal-worker.sh` creates the installation lock at
+`run/medchat-temporal-worker/install.lock` and stages a content-addressed
 generation. It does not create `current`, install a production environment file,
 reload systemd, enable a unit, or start a service.
 
