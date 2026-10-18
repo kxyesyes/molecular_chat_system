@@ -253,8 +253,9 @@ Web unit 的字段、安装与运维命令见 [教程第 9 节](../docs/DEPLOYME
 
 Docker/Compose 由 operator 管理并先确认健康；systemd unit 不启动、重启或修改 Docker/Compose。发布前必须核验 release commit/SHA256，并确保源码、`/opt/conda/envs/medchat`、安装脚本和已激活 generation 均为 `root:root`、`go-w`；禁止递归 `chown`，只有受控运行目录属于 `medchat:medchat 0700`。
 
-可信安装入口是 `deployment/install-temporal-worker.sh --destdir`，只生成内容寻址的
-`releases/<bundle-sha256>`，并核对 `manifest.sha256`；激活、rollback 和 legacy 迁移统一使用
+可信安装入口是 `deployment/install-temporal-worker.sh --destdir`，会生成
+`run/medchat-temporal-worker/install.lock` 和内容寻址的 `releases/<bundle-sha256>`，并核对
+`manifest.sha256`；激活、rollback 和 legacy 迁移统一使用
 `activate-temporal-worker-generation.sh`，`--migrate-legacy` 失败必须 fail closed，危险策略移出搜索路径到
 `legacy-tmpfiles.disabled`。固定 unit 只能是 root-owned symlink，不能手工修改 `current` 或 generation。
 
