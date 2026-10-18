@@ -283,7 +283,7 @@ sudo systemctl restart medchat-temporal-worker.service
 
 #### 当前 release blockers
 
-- isolated live-root runner 的 private mount namespace、只读 lower root、tmpfs upper/work、overlay merged root 和 chroot 检查，必须在 disposable Linux opt-in 实跑；Windows 禁止冒充通过，runner 也不能把不可信源码变成可信输入。
+- isolated live-root runner 的 private mount namespace、只读 lower root、tmpfs upper/work、overlay merged root 和 chroot 检查，必须在 disposable Linux opt-in 实跑；Windows 禁止冒充通过，mount namespace 不能抵御恶意 root 代码，也不能把不可信源码变成可信输入。
 - staging failure/signal/concurrency 用例若在 Windows 因 POSIX 能力 skip，必须在 native Linux 直接通过，不能用静态断言替代。
 - disposable production candidate 尚未完成真实 systemd activation/migration、`systemd-analyze verify`、mixed lifecycle 和 runtime-mask + old `cgroup.kill` fd 测试前，均为 release blocker；无 cgroup v2 或不可打开 `cgroup.kill` 时不得使用 PID 或 `systemctl kill` fallback。
 
