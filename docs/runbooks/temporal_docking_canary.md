@@ -34,7 +34,9 @@ dependencies to the same environment before starting the worker:
 
 ```bash
 cd /usr/local/src/medchat-release
-/opt/conda/envs/medchat/bin/python -m pip install -r requirements-agent-temporal.txt
+sudo /opt/conda/envs/medchat/bin/python -m pip install -r requirements-agent-temporal.txt
+sudo /opt/conda/envs/medchat/bin/python -c \
+  "import temporalio, prometheus_client"
 ```
 
 This profile adds `temporalio` and `prometheus-client`; it does not replace
