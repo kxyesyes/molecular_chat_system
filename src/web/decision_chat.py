@@ -227,7 +227,12 @@ def _result_frame(handler, result, display_changed):
         result.success is False and not result.partial
         and not result.metadata.get('waiting_for_input')
     )
-    if not terminal_failure:
+    # A property-only projection must not replace other tool observations,
+    # partial-result diagnostics, or a question awaiting user input.
+    if (envelope['success'] and terminal_status == 'completed'
+            and not result.metadata.get('waiting_for_input')
+            and result.tool_results
+            and all(item.tool_name == 'property_calculator' for item in result.tool_results)):
         display_answer = scientific_display_answer(result.tool_results)
         if display_answer:
             # Keep final_answer as the authoritative structured audit payload.
