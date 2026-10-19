@@ -5,7 +5,7 @@ const template = fs.readFileSync("src/web/templates/index.html", "utf8");
 const main = fs.readFileSync("src/web/static/js/home/main.js", "utf8");
 
 assert(
-  template.replace(/<!--[\s\S]*?-->/g, "").includes('<script src="/static/js/home/main.js?v=20261017-docking-v1"></script>'),
+  template.replace(/<!--[\s\S]*?-->/g, "").includes('<script src="/static/js/home/main.js?v=20261018-display-answer-v1"></script>'),
   "the homepage script cache version must change with the protocol fix"
 );
 assert(!template.includes("智能工具"), "the smart-tool toggle must not render");
