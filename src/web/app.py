@@ -1060,11 +1060,6 @@ class MolecularChatApp:
                 await runtime.shutdown()
                 closed_runtimes.add(id(runtime))
         preload_tool = getattr(self, '_reverse_preload_tool', None)
-        if preload_tool is not None:
-            # Joining an in-flight native validation must not block the loop.
-            # Retain both this reference and the registry until the join returns.
-            await finish_on_cancel(asyncio.to_thread(preload_tool.close))
-            self._reverse_preload_tool = None
         if self._llm_watch_task is not None:
             self._llm_watch_task.cancel()
             try:
@@ -1083,6 +1078,12 @@ class MolecularChatApp:
                         if model is not None and id(model) not in seen:
                             seen.add(id(model))
                             await finish_on_cancel(close_owned_model(model))
+
+        if preload_tool is not None:
+            # The preloader is also the registered scientific tool. Drain
+            # background workflow consumers before closing its native source.
+            await finish_on_cancel(asyncio.to_thread(preload_tool.close))
+            self._reverse_preload_tool = None
 
         registry = getattr(self, "agent_tool_registry", None)
         self.agent_tool_registry = None

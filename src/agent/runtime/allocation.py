@@ -14,6 +14,7 @@ from threading import BoundedSemaphore, Lock
 from time import monotonic
 
 from src.system.model_lifecycle import finish_on_cancel
+from src.agent.runtime.worker_ownership import reserve_worker
 
 
 DEFAULT_ALLOCATION_TIMEOUT_SECONDS = 30.0
@@ -144,6 +145,9 @@ def routing_model_call(call):
 
     Within a chat request the outer owned call already holds the worker slot
     and model lease; never create a second worker or release that lease early.
+    Background workflow routing without that allocation scope instead registers
+    its per-call executor with the active worker owner. The process-wide pool
+    remains reserved for standalone calls and must never be joined by an owner.
     """
     scope = current_allocation()
     if scope is not None:
@@ -161,17 +165,33 @@ def routing_model_call(call):
         scope.check()
         return call()
 
+    reservation = None
+    executor = None
     try:
-        future = _workers.submit(context.run, run)
+        reservation = reserve_worker()
+        if reservation is None:
+            future = _workers.submit(context.run, run)
+        else:
+            executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="agent-routing")
+            future = executor.submit(context.run, reservation.run, run)
     except BaseException:
+        if reservation is not None:
+            reservation.rollback(executor)
         _slots.release()
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         raise
+    if reservation is not None:
+        reservation.attach(executor, future)
     # A non-cooperative provider keeps this slot until it physically returns.
     future.add_done_callback(lambda _: _slots.release())
     try:
         result = future.result(timeout=max(0, scope.deadline - monotonic()))
     except FutureTimeout:
         raise AllocationStopped() from None
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
     scope.check()
     return result
 

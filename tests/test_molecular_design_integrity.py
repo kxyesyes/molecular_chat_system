@@ -23,6 +23,35 @@ def test_molecular_design_rejects_out_of_range_qed(monkeypatch, invalid_qed):
         calculate_properties("CCO")
 
 
+@pytest.mark.parametrize("command,passed", [("LogP > -0.0012", False), ("LogP < -0.0012", True)])
+def test_property_goals_compare_unrounded_descriptors(command, passed):
+    result = calculate_properties("CCO", command)
+    assert result["properties"]["logp"] == -0.001
+    assert result["raw_properties"]["logp"] < -0.0012
+    goal = result["goals"]["items"][0]
+    assert goal["value"] == result["raw_properties"]["logp"]
+    assert goal["passed"] is passed
+
+
+def test_sa_goal_keeps_raw_score_for_boundary_comparison():
+    import importlib.util
+    from pathlib import Path
+    from rdkit import Chem, RDConfig
+
+    spec = importlib.util.spec_from_file_location(
+        "fixture_sascorer", Path(RDConfig.RDContribDir) / "SA_Score" / "sascorer.py"
+    )
+    sascorer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sascorer)
+
+    raw = float(sascorer.calculateScore(Chem.MolFromSmiles("CCO")))
+    threshold = (raw + round(raw, 3)) / 2
+    result = calculate_properties("CCO", f"SA Score > {threshold:.15f}")
+    assert result["properties"]["sa_score"] == round(raw, 3)
+    assert result["raw_properties"]["sa_score"] == raw
+    assert result["goals"]["items"][0]["passed"] is (raw > threshold)
+
+
 def test_substitution_requires_one_explicit_single_connection_point():
     with pytest.raises(ValueError, match="一个.*连接点|连接点"):
         substitute_fragment("c1ccccc1", "[*]C")

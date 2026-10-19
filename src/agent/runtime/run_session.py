@@ -34,6 +34,7 @@ from src.agent.runtime.allocation import (
 from src.agent.runtime.task_state import TaskEventType
 from src.agent.validators import align_candidate_results
 from src.agent.validators.partial_observations import has_usable_observation
+from src.task_runtime.cancellation import current_task_cancellation
 
 if TYPE_CHECKING:
     from src.agent.orchestrators.base import WorkflowStep
@@ -212,7 +213,10 @@ class WorkflowRunSession:
         self._start_state: Any = None
         self._start_ledger: EvidenceLedger | None = None
         self._start_run_persisted = False
-        self.cancel_event = cancel_event
+        # Capture the server-owned task signal before delegated threads run.
+        # Never place it in the serializable context/metadata or shared tools.
+        self.cancel_event = (cancel_event if cancel_event is not None
+                             else current_task_cancellation())
 
         self.results: list[ToolResult] = []
         self.state: Any = None

@@ -1,5 +1,13 @@
 # Latest handoff
 
+## 八项独立审查问题修复（2026-10-20）
+
+- 基线 `73d75a7f`，隔离分支 `codex/fix-independent-review-findings`。本轮只授权提交并创建指向 main 的 draft PR，**不合并**；原工作区未提交改动保留。
+- 修复目标方向/否定作用域、Family 嵌套 provenance、原始精度阈值验证、任务取消传播、后台模型/工具物理 worker 生命周期、旧 docking 响应污染新任务、结构准备阻塞事件循环及性质错误日志泄露分子输入。
+- 独立 SPEC 与 QUALITY 复审均 PASS。复审发现的 pIC50/概率语义、否定绝对阈值及路由仲裁线程租约遗漏均补 RED 回归后关闭；最终综合复审无剩余 actionable finding。
+- 科学扩展回归 407 passed，路由回归 77 passed，最终运行时回归 150 passed；批次可能重叠，不累计。45 个 Node 契约文件、JS 语法、compileall、diff 检查通过。全量本地测试在旧代码上启动，最终修复后停止，不能算全量通过；最终提交完整 CI 待 PR 创建后核对。
+- 不新增真实科学结果、生产数据、依赖或 schema 变更；真实服务验收与部署健康检查未运行。取消仍是协作式，无法强杀已运行 native worker；清理完成前保留资源租约。详细命令、失败证据、兼容性及边界见[验证记录](../superpowers/validation/2026-10-20-review-findings.md)。
+
 ## PR #209 聊天对接 worker 与解析性质身份（2026-10-17）
 
 - `5f22015c` 新CI 11/11 success；最终审查新增1 P1/1 P2，未带着新问题合并。聊天对接根为process-local，main入口现对严格flag1且workers>1在env-file/CLI解析后、reload降级/探测/app/server前非零拒绝，不默降worker或禁功能；外部launcher仍须部署保证single，非万能检测。其它功能main多worker原支持边界保持。

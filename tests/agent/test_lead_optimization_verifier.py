@@ -1,3 +1,7 @@
+import copy
+
+import pytest
+
 from src.agent.tools.lead_optimization_verifier import LeadOptimizationVerifier
 from src.agent.tooling import build_tool_registry
 
@@ -126,5 +130,164 @@ def test_unverified_candidate_prevents_overall_supported_claim():
 
     assert result["data"]["candidates"][0]["status"] == "supported"
     assert result["data"]["candidates"][1]["status"] == "unverified"
+    assert result["data"]["status"] == "unverified"
+    assert result["quality"]["goal_supported"] is False
+
+
+@pytest.mark.parametrize("query", [
+    "increase LogP and reduce QED", "提高 LogP 并降低 QED",
+    "LogP is higher; QED is lower", "LogP 提高、QED 降低",
+])
+def test_opposite_metric_directions_are_not_reversed(query):
+    result = LeadOptimizationVerifier().execute(_payload(query))
+    assert result["data"]["status"] == "evaluated_not_improved"
+    assert {item["metric"]: item["direction"] for item in result["data"]["objectives"]} == {
+        "logp": "higher", "qed": "lower",
+    }
+
+
+@pytest.mark.parametrize("query", [
+    "increase QED but do not reduce LogP", "提高 QED，但不要降低 LogP",
+    "increase QED and never reduce LogP", "提高 QED，禁止降低 LogP",
+    "increase QED and do not increase LogP", "提高 QED，LogP 不降低",
+    "increase QED and adjust LogP", "提高 QED，同时调整 LogP",
+    "increase QED and increase or decrease LogP", "提高 QED，降低或提高 LogP",
+    "increase QED and increase LogP and reduce LogP",
+    "increase QED and LogP", "提高 QED 和 LogP",
+    "increase QED by 0.5", "提高 QED 至 0.9", "lower LogP by 90%",
+    "increase QED and keep LogP", "increase QED and adjust TPSA",
+])
+def test_ambiguous_or_negated_metric_clause_cannot_be_supported(query):
+    result = LeadOptimizationVerifier().execute(_payload(query))
+    assert result["data"]["status"] == "unverified"
+    assert result["quality"]["goal_supported"] is False
+    assert result["data"]["unverifiable_constraints"]
+
+
+def _family_activity_payload(key="activity_probability"):
+    # Match the envelope emitted by FamilyActivityPredictor._provenance.
+    from src.activity.family_predictor import _provenance
+
+    bundle = {
+        "family_id": "fixture-family", "bundle_id": "fixture-bundle",
+        "source_sha256": "source", "assignment_sha256": "assignment", "scope": {},
+        "label_threshold": 6.0, "probability_threshold": 0.5,
+        "models": {
+            task: {"model_id": "fixture-" + task, "target_id": "fixture-family",
+                   "task_type": task, "endpoint": endpoint, "units": units,
+                   "weights_sha256": task + "-digest", "scientific_readiness": "endpoint_ready",
+                   "demo_mode": False, "fallback_used": False}
+            for task, endpoint, units in [("classification", "activity", "probability"),
+                                          ("regression", "pIC50", "pIC50")]
+        },
+    }
+    payload = _payload("increase activity")
+    for name, smiles, value in [("baseline_activity", "CCO", 0.7),
+                                 ("candidate_activity", "CCN", 0.8)]:
+        payload["outputs"][name] = [{
+            "smiles": smiles, "success": True, "status": "passed", "execution_status": "passed",
+            key: value if key != "predicted_pIC50" else value * 10,
+            "units": "pIC50", "errors": {}, "provenance": _provenance(bundle),
+        }]
+    return payload
+
+
+@pytest.mark.parametrize("key", ["activity_probability", "predicted_pIC50"])
+def test_real_family_provenance_supports_matching_successful_endpoint(key):
+    result = LeadOptimizationVerifier().execute(_family_activity_payload(key))
+    assert result["data"]["status"] == "supported"
+    assert result["data"]["candidates"][0]["comparisons"][0]["satisfied"] is True
+
+
+@pytest.mark.parametrize("key,task", [("activity_probability", "classification"),
+                                     ("predicted_pIC50", "regression")])
+@pytest.mark.parametrize("defect", ["missing", "demo", "fallback", "unready", "endpoint", "units", "failed"])
+def test_other_family_endpoint_cannot_vouch_for_bad_evidence(key, task, defect):
+    payload = _family_activity_payload(key)
+    row = payload["outputs"]["candidate_activity"][0]
+    model = row["provenance"]["models"][task]
+    if defect == "missing":
+        row["provenance"]["models"].pop(task)
+    elif defect == "failed":
+        row["errors"][task] = "stage_failed"
+    else:
+        model.update({"demo": {"demo_mode": True}, "fallback": {"fallback_used": True},
+                      "unready": {"scientific_readiness": "unavailable"},
+                      "endpoint": {"endpoint": "other"}, "units": {"units": "nM"}}[defect])
+    assert LeadOptimizationVerifier().execute(payload)["data"]["status"] == "unverified"
+
+
+@pytest.mark.parametrize("defect", ["metric", "model", "weights", "family", "request", "units", "status"])
+def test_activity_comparisons_require_matching_endpoint_and_model_context(defect):
+    payload = _family_activity_payload()
+    row = payload["outputs"]["candidate_activity"][0]
+    if defect == "metric":
+        row["predicted_pIC50"] = 8.0
+        row.pop("activity_probability")
+    elif defect in {"model", "weights", "units"}:
+        field = {"model": "model_id", "weights": "weights_sha256", "units": "units"}[defect]
+        row["provenance"]["models"]["classification"][field] = "different"
+    elif defect == "family":
+        row["provenance"]["family_id"] = "different-family"
+    elif defect == "request":
+        row["provenance"]["request"] = {"identity": "different-request"}
+    else:
+        row["execution_status"] = "failed"
+    assert LeadOptimizationVerifier().execute(payload)["data"]["status"] == "unverified"
+
+
+@pytest.mark.parametrize("defect", ["demo", "fallback", "missing", "model", "endpoint", "metric"])
+def test_flat_legacy_provenance_remains_fail_closed(defect):
+    payload = _payload("maintain activity")
+    row = payload["outputs"]["candidate_activity"][0]
+    row["model_provenance"] = copy.deepcopy(row["model_provenance"])
+    if defect == "missing":
+        row["model_provenance"] = {}
+    elif defect == "metric":
+        row["predicted_pIC50"] = 8.0
+        row.pop("normalized_activity")
+    else:
+        row["model_provenance"].update({"demo": {"demo_mode": True},
+                                        "fallback": {"fallback_used": True},
+                                        "model": {"model_id": "different"},
+                                        "endpoint": {"endpoint": "pIC50", "units": "pIC50"}}[defect])
+    assert LeadOptimizationVerifier().execute(payload)["data"]["status"] == "unverified"
+
+
+@pytest.mark.parametrize("field,value", [("demo_mode", True), ("fallback_used", True), ("status", "failed")])
+def test_nested_endpoint_does_not_override_explicit_untrusted_envelope(field, value):
+    payload = _family_activity_payload()
+    payload["outputs"]["candidate_activity"][0]["provenance"][field] = value
+    assert LeadOptimizationVerifier().execute(payload)["data"]["status"] == "unverified"
+
+
+@pytest.mark.parametrize("query", ["increase potency", "maintain potency", "提高效力", "保持效力",
+                                   "increase activity", "提高活性"])
+def test_potency_uses_pic50_even_when_classification_probability_improves(query):
+    payload = _family_activity_payload()
+    payload["query"] = payload["metadata"]["query"] = query
+    payload["outputs"]["baseline_activity"][0]["predicted_pIC50"] = 8.0
+    payload["outputs"]["candidate_activity"][0]["predicted_pIC50"] = 7.0
+    result = LeadOptimizationVerifier().execute(payload)
+    assert result["data"]["status"] == "evaluated_not_improved"
+    comparison = result["data"]["candidates"][0]["comparisons"][0]
+    assert comparison["baseline_value"] == 8.0
+    assert comparison["candidate_value"] == 7.0
+    assert comparison["satisfied"] is False
+    assert comparison["endpoint"] == comparison["units"] == "pIC50"
+
+
+def test_probability_only_evidence_cannot_establish_potency():
+    payload = _family_activity_payload()
+    payload["query"] = payload["metadata"]["query"] = "increase potency"
+    assert LeadOptimizationVerifier().execute(payload)["data"]["status"] == "unverified"
+
+
+@pytest.mark.parametrize("query", [
+    "increase QED and avoid LogP < 2", "increase QED and never allow LogP < 2",
+    "提高 QED，同时避免 LogP < 2", "提高 QED，不要 LogP < 2",
+])
+def test_negated_absolute_bound_cannot_bypass_objective_negation(query):
+    result = LeadOptimizationVerifier().execute(_payload(query))
     assert result["data"]["status"] == "unverified"
     assert result["quality"]["goal_supported"] is False

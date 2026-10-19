@@ -146,7 +146,7 @@ def setup_target_search_routes(app: FastAPI) -> None:
     @app.post("/api/target-db/structures/{structure_db_id}/send-to-docking")
     async def send_to_docking(structure_db_id: int):
         try:
-            return service.send_to_docking(structure_db_id)
+            return await run_in_threadpool(service.send_to_docking, structure_db_id)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc))
         except StructureDownloadError as exc:

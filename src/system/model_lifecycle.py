@@ -19,6 +19,7 @@ class ModelRequestGate:
         self._writing = False
         self.closed = False
         self._background = set()
+        self._background_owners = {}
 
     def retain_task(self, task):
         """Track a bounded caller-owned task which already retains its lease.
@@ -36,25 +37,40 @@ class ModelRequestGate:
         task.add_done_callback(completed)
 
     async def submit_background(self, manager, **kwargs):
-        """Transfer a request lease to the lifetime of an accepted task."""
+        """Retain the lease until the accepted task and its physical workers settle."""
+        from src.agent.runtime.worker_ownership import WorkerOwner
+
+        owner = WorkerOwner()
+        root = owner.start_action()
         lease = self.request()
         await lease.__aenter__()
         task_id = kwargs.get('task_id') or str(uuid4())
         kwargs['task_id'] = task_id
-        try:
-            record = manager.submit(**kwargs)
-        except BaseException:
-            try:
-                await finish_on_cancel(asyncio.to_thread(manager.wait_for_completion, task_id))
-            finally:
-                await lease.__aexit__(None, None, None)
-            raise
+        handler = kwargs['handler']
+        kwargs['handler'] = lambda payload: root.run(handler, payload)
+        # Keep the async lease alive even if cleanup fails. Finalizing its
+        # generator would release the reader without proof of physical exit.
+        self._background_owners[owner] = lease
 
         async def drain():
             try:
                 await finish_on_cancel(asyncio.to_thread(manager.wait_for_completion, task_id))
             finally:
-                await lease.__aexit__(None, None, None)
+                # Queued cancellation, failed submit, and failed task claiming
+                # can all finish without ever entering the handler.
+                root.abort_unstarted()
+                try:
+                    await finish_on_cancel(owner.settle())
+                finally:
+                    if owner.status == 'settled':
+                        await lease.__aexit__(None, None, None)
+                        self._background_owners.pop(owner, None)
+
+        try:
+            record = manager.submit(**kwargs)
+        except BaseException:
+            await finish_on_cancel(drain())
+            raise
 
         task = asyncio.create_task(drain())
         self._background.add(task)

@@ -1,4 +1,4 @@
-"""Request-local ownership of the two instrumented executor submission paths.
+"""Request-local ownership of adapter, orchestrator, and routing submissions.
 
 This is a lifetime ledger, not a scheduler. Detached tool-internal threads are
 not covered. A blocked worker deliberately keeps its action/turn unsettled.

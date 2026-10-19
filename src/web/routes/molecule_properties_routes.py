@@ -32,12 +32,12 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
             if not smiles:
                 raise HTTPException(status_code=400, detail="缺少SMILES参数")
             
-            get_logger().info(f"计算分子属性: {smiles}")
+            get_logger().info("开始计算分子属性")
             
             try:
                 result = chemistry.calculate_properties(smiles)
             except ValueError:
-                get_logger().warning(f"RDKit无法解析SMILES: {smiles}")
+                get_logger().warning("RDKit无法解析分子结构；输入内容已省略")
                 return {
                     "success": False,
                     "error": f"无法识别的分子结构: {smiles}",
@@ -78,7 +78,8 @@ def setup_molecule_properties_routes(app, *, logger=None, _support=None):
             }
             
         except Exception as e:
-            get_logger().error(f"分子属性计算失败: {e}", exc_info=True)
+            # Provider errors and tracebacks can embed the submitted structure.
+            get_logger().error("分子属性计算失败；异常详情已省略")
             return {
                 "success": False,
                 "error": str(e),

@@ -137,6 +137,34 @@ test("single mode refuses multiple files without posting", () => {
   assert.match(c.lastAlert, /单配体|一个|单个/);
 });
 
+for (const staleResult of ["running", "canceled", "failed", "http-error", "network-error"]) {
+  test(`stale ${staleResult} poll cannot mutate a newer task`, async () => {
+    const { context: c, get, timers } = harness();
+    let resolveGet, rejectGet;
+    c.rememberDockingTask("task-1");
+    c.fetch = async (url) => url.endsWith("/cancel")
+      ? response(record("canceled"))
+      : new Promise((resolve, reject) => { resolveGet = resolve; rejectGet = reject; });
+    const pending = c.pollDockingTask("task-1").catch(c.handleDockingTaskError);
+    await c.cancelDockingTask();
+    c.rememberDockingTask("task-2");
+    c.setDockingTaskButtonState(true);
+    get("results-content").innerHTML = "new task";
+    get("docking-progress").style.width = "12%";
+    vm.runInContext("dockingPollTimer = setTimeout(() => {}, 500)", c);
+    if (staleResult === "network-error") rejectGet(new Error("old request failed"));
+    else if (staleResult === "http-error") resolveGet({ ok: false, json: async () => ({ success: false, message: "old error" }) });
+    else resolveGet(response(record(staleResult)));
+    await pending;
+    assert.equal(c.readRememberedDockingTask(), "task-2");
+    assert.equal(get("start-btn").disabled, true);
+    assert.equal(get("cancel-docking-btn").disabled, false);
+    assert.equal(get("results-content").innerHTML, "new task");
+    assert.equal(get("docking-progress").style.width, "12%");
+    assert.equal(timers.size, 1);
+  });
+}
+
 (async () => {
   let failures = 0;
   for (const [name, fn] of tests) {
