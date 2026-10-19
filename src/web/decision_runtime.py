@@ -43,6 +43,14 @@ _WEB_WAITING_TTL_SECONDS = 15 * 60
 _WEB_REQUEST_VERSION = 1
 
 
+def terminal_message_for_reason(reason):
+    """Return a user-facing terminal message without exposing internal codes."""
+    if reason == 'request_clarification_required':
+        return ('请提供要评估的分子结构（SMILES），并说明评估方向（例如 ADMET、活性或类药性）。'
+                '当前请求未执行科学工具。')
+    return '请求未执行或未完成。'
+
+
 def _enabled_docking_controller(handler, runtime=None):
     """Only trusted assembly can opt the existing receiver into C."""
     controller = getattr(handler, 'docking_controller', None)
@@ -812,7 +820,7 @@ class WebDecisionRuntime:
             # waiting audit and bad-resume REJECTED retry behavior unchanged.
             sender.waiting = None
             turn.next_waiting = None
-        result = AgentResult(turn.trace_id, False, '请求未执行或未完成。', outcome=outcome,
+        result = AgentResult(turn.trace_id, False, terminal_message_for_reason(reason), outcome=outcome,
                              metadata={'stop_reason': reason})
         if self.semantic:
             record = (turn.intent_journal.snapshot() if turn.intent_journal is not None else

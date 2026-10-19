@@ -17,6 +17,14 @@ import pytest
 
 from src.agent.openai_compatible_model import OpenAICompatibleModel
 from src.agent.tools import get_core_tools
+from src.web.decision_runtime import terminal_message_for_reason
+
+
+def test_clarification_terminal_message_is_actionable():
+    message = terminal_message_for_reason('request_clarification_required')
+    assert 'SMILES' in message
+    assert '评估' in message
+    assert '请提供' in message
 
 
 def chat_decision(text='Protocol-only explanation'):

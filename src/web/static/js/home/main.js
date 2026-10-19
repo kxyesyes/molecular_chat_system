@@ -319,7 +319,8 @@
     if (message.trace_id !== turn.traceId) return true;
     if (message.type === "agent_result") {
       if (turn.result || !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status)) return true;
-      const baseText = typeof message.final_answer === "string" ? message.final_answer : message.message || "";
+      const baseText = typeof message.display_answer === "string" ? message.display_answer :
+        (typeof message.final_answer === "string" ? message.final_answer : message.message || "");
       const structuredReason = message.error && typeof message.error.message === "string"
         ? message.error.message : typeof message.metadata?.failure_reason === "string"
           ? message.metadata.failure_reason : "";

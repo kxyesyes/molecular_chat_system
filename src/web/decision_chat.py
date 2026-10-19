@@ -21,6 +21,72 @@ _TERMINAL_EVENTS = frozenset({'task_completed', 'task_partial', 'task_failed',
                               'task_rejected', 'task_cancelled'})
 
 
+def _display_cell(value):
+    """Keep deterministic scientific cells safe for Markdown table output."""
+    if value is None:
+        return '不可用'
+    return str(value).replace('|', r'\|').replace('`', r'\`').replace('\r', ' ').replace('\n', ' ')
+
+
+def scientific_display_answer(results):
+    """Render verified property observations for people while retaining JSON audit data.
+
+    The decision policy deliberately stores scientific answers as allowlisted JSON.
+    This presentation-only projection consumes the already validated tool result,
+    never model prose, and returns ``None`` when no supported observation exists.
+    """
+    rows = []
+    evidence_ids = []
+    versions = []
+    for result in results or ():
+        if getattr(result, 'tool_name', None) != 'property_calculator':
+            continue
+        status = getattr(getattr(result, 'status', None), 'value', None)
+        if status not in {'succeeded', 'partial'} or getattr(result, 'error', None) is not None:
+            continue
+        for row in (getattr(result, 'data', None) or ()):
+            if not isinstance(row, dict) or not isinstance(row.get('properties'), dict):
+                continue
+            props = row['properties']
+            rows.append((row.get('smiles'), props))
+        quality = getattr(result, 'quality', {}) or {}
+        evidence_id = quality.get('evidence_id')
+        if isinstance(evidence_id, str) and evidence_id:
+            evidence_ids.append(evidence_id)
+        provenance = getattr(result, 'provenance', None)
+        version = getattr(provenance, 'tool_version', None)
+        if isinstance(version, str) and version:
+            versions.append(version)
+    if not rows:
+        return None
+    lines = [
+        '## 分子性质计算结果',
+        '',
+        '以下数值由 RDKit 根据输入结构计算，仅供研究参考，不构成实验验证。',
+        '',
+        '| SMILES | 分子式 | 分子量 (Da) | logP | TPSA (Å²) | HBD | HBA | QED |',
+        '|---|---|---:|---:|---:|---:|---:|---:|',
+    ]
+    for smiles, props in rows:
+        lines.append('| ' + ' | '.join(_display_cell(value) for value in (
+            smiles,
+            props.get('molecular_formula'),
+            props.get('molecular_weight'),
+            props.get('logp'),
+            props.get('tpsa'),
+            props.get('hbd'),
+            props.get('hba'),
+            props.get('qed'),
+        )) + ' |')
+    lines.extend(['', '来源：property_calculator（结构化工具结果）。'])
+    if versions:
+        lines.append('工具版本：' + ', '.join(dict.fromkeys(versions)) + '。')
+    if evidence_ids:
+        lines.append('证据 ID：' + '、'.join(dict.fromkeys(evidence_ids)) + '。')
+    lines.extend(['', '限制：这些是计算描述符，不能据此判断疗效、选择性或实验结果。'])
+    return '\n'.join(lines)
+
+
 class _DeliveryError(Exception):
     """Only fixed internal reason codes, never provider diagnostics."""
 
@@ -161,6 +227,12 @@ def _result_frame(handler, result, display_changed):
         result.success is False and not result.partial
         and not result.metadata.get('waiting_for_input')
     )
+    if not terminal_failure:
+        display_answer = scientific_display_answer(result.tool_results)
+        if display_answer:
+            # Keep final_answer as the authoritative structured audit payload.
+            # The extra field is presentation-only and is consumed by Web.
+            envelope['display_answer'] = display_answer
     if terminal_failure:
         # decision_a2 has its own transport serializer, so apply the same
         # terminal claim boundary as the legacy ChatHandler path before any
