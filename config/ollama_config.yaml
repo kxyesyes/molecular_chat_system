@@ -27,6 +27,12 @@ inference:
   external_max_tokens: 4096  # 外部主模型不复用本地 GPU 输出限制
   timeout: 120 # 增加超时时间
 
+# Agent 决策首轮也使用外部模型；分配窗口必须覆盖一次完整的模型推理，
+# 否则 DeepSeek 尚未返回工具决策就会被误报为 allocation_timeout。
+agent:
+  allocation_timeout_seconds: 120
+  allocation_progress_seconds: 5
+
 web:
   host: "${MEDCHAT_HOST:-127.0.0.1}"
   port: ${MEDCHAT_PORT:-6000}

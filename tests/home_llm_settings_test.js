@@ -232,5 +232,5 @@ test("settings markup omits verbose persistence and API-key instructions", () =>
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {
   const activeHtml = html.replace(/<!--[\s\S]*?-->/g, "");
-  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261017-docking-v1"></script>'));
+  assert.ok(activeHtml.includes('<script src="/static/js/home/main.js?v=20261018-display-answer-v1"></script>'));
 });
