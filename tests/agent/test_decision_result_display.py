@@ -36,6 +36,10 @@ def test_property_result_display_is_human_readable_and_keeps_provenance():
     assert "CCO" in answer
     assert "evidence-1" in answer
     assert '"molecular_weight"' not in answer
+    header = next(line for line in answer.splitlines() if line.startswith('| SMILES'))
+    row = next(line for line in answer.splitlines() if line.startswith('| CCO'))
+    column = [cell.strip() for cell in header.split('|')].index('可旋转键数')
+    assert row.split('|')[column].strip() == '0'
 
 
 def test_completed_property_only_frame_keeps_audit_answer_and_display():
@@ -47,7 +51,8 @@ def test_completed_property_only_frame_keeps_audit_answer_and_display():
     assert complete['content'] == result.final_answer
 
 
-@pytest.mark.parametrize('case', ['mixed_tools', 'waiting', 'partial', 'waiting_completed'])
+@pytest.mark.parametrize('case', ['mixed_tools', 'waiting', 'partial', 'waiting_completed',
+                                 'tool_warning', 'aggregate_warning'])
 def test_property_projection_does_not_hide_other_results_or_clarification(case):
     result = AgentResult('display-test', True, '', final_answer='original answer',
                          tool_results=[property_result()])
@@ -61,6 +66,13 @@ def test_property_projection_does_not_hide_other_results_or_clarification(case):
     if case in {'waiting', 'partial'}:
         result.success = False
         result.partial = True
+    if case in {'tool_warning', 'aggregate_warning'}:
+        warning = 'Optional checkpoint was ignored after validation.'
+        if case == 'tool_warning':
+            result.tool_results[0].warnings.append(warning)
+        else:
+            result.warnings.append(warning)
+        result.final_answer = json.dumps({'warnings': [warning]})
     frame, complete = map(json.loads, _result_frame(ChatHandler, result, False))
     assert 'display_answer' not in frame
     assert frame['final_answer'] == result.final_answer

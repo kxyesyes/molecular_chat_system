@@ -64,8 +64,8 @@ def scientific_display_answer(results):
         '',
         '以下数值由 RDKit 根据输入结构计算，仅供研究参考，不构成实验验证。',
         '',
-        '| SMILES | 分子式 | 分子量 (Da) | logP | TPSA (Å²) | HBD | HBA | QED |',
-        '|---|---|---:|---:|---:|---:|---:|---:|',
+        '| SMILES | 分子式 | 分子量 (Da) | logP | TPSA (Å²) | HBD | HBA | QED | 可旋转键数 |',
+        '|---|---|---:|---:|---:|---:|---:|---:|---:|',
     ]
     for smiles, props in rows:
         lines.append('| ' + ' | '.join(_display_cell(value) for value in (
@@ -77,6 +77,7 @@ def scientific_display_answer(results):
             props.get('hbd'),
             props.get('hba'),
             props.get('qed'),
+            props.get('rotatable_bonds'),
         )) + ' |')
     lines.extend(['', '来源：property_calculator（结构化工具结果）。'])
     if versions:
@@ -228,11 +229,13 @@ def _result_frame(handler, result, display_changed):
         and not result.metadata.get('waiting_for_input')
     )
     # A property-only projection must not replace other tool observations,
-    # partial-result diagnostics, or a question awaiting user input.
+    # partial-result diagnostics, specific warnings, or a question awaiting input.
     if (envelope['success'] and terminal_status == 'completed'
             and not result.metadata.get('waiting_for_input')
+              and not result.warnings
             and result.tool_results
-            and all(item.tool_name == 'property_calculator' for item in result.tool_results)):
+              and all(item.tool_name == 'property_calculator' and not item.warnings
+                      for item in result.tool_results)):
         display_answer = scientific_display_answer(result.tool_results)
         if display_answer:
             # Keep final_answer as the authoritative structured audit payload.

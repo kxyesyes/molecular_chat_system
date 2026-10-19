@@ -46,7 +46,7 @@ _WEB_REQUEST_VERSION = 1
 def terminal_message_for_reason(reason):
     """Return a user-facing terminal message without exposing internal codes."""
     if reason == 'request_clarification_required':
-        return ('请提供要评估的分子结构（SMILES），并说明评估方向（例如 ADMET、活性或类药性）。'
+        return ('请明确要处理的对象和具体问题；如包含多个任务，请拆分后重试。'
                 '当前请求未执行科学工具。')
     return '请求未执行或未完成。'
 

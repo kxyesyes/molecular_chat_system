@@ -25,6 +25,10 @@ modelscope:
 
 # Agent配置
 agent:
+  # 分配窗口覆盖外部模型的推理超时预算，并定期发送进度。
+  allocation_timeout_seconds: 150
+  allocation_progress_seconds: 5
+
   # Agent类型: "react" (推理模式) 或 "simple" (快速模式)
   type: "react"
 
