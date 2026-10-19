@@ -59,6 +59,57 @@ def success():
     return ToolResult.success_result('owned_test', {'value': 1})
 
 
+@pytest.mark.parametrize('failure', ['creation', 'submit'])
+def test_owned_routing_submit_failure_rolls_back_without_closing_shared_pool(monkeypatch, failure):
+    from src.agent.runtime import allocation
+    from src.agent.runtime.worker_ownership import WorkerOwner
+
+    owner = WorkerOwner()
+    root = owner.start_action()
+    slots = threading.BoundedSemaphore(2)
+    monkeypatch.setattr(allocation, '_slots', slots)
+    invoked, created = [], []
+
+    class Broken(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            assert len(root.records) == 1, 'reserve before constructing an owned executor'
+            if failure == 'creation':
+                raise RuntimeError('routing creation failure')
+            super().__init__(*args, **kwargs)
+            self.joined = False
+            created.append(self)
+
+        def submit(self, *args, **kwargs):
+            raise RuntimeError('routing submit failure')
+
+        def shutdown(self, wait=True, **kwargs):
+            super().shutdown(wait=wait, **kwargs)
+            if wait:
+                self.joined = True
+
+    monkeypatch.setattr(allocation, 'ThreadPoolExecutor', Broken)
+
+    async def exercise():
+        with pytest.raises(RuntimeError, match='routing .* failure'):
+            await asyncio.to_thread(root.run, allocation.routing_model_call,
+                                    lambda: invoked.append(True))
+        await owner.settle()
+        assert owner.status == 'settled'
+        assert not root.records
+        assert not invoked
+        assert all(executor.joined for executor in created)
+        assert slots.acquire(blocking=False)
+        assert slots.acquire(blocking=False)
+        assert not slots.acquire(blocking=False)
+        slots.release()
+        slots.release()
+        # No owner must continue using the live process-wide executor, even
+        # while new per-call executor construction is deliberately broken.
+        assert await asyncio.to_thread(allocation.routing_model_call, lambda: 'standalone') == 'standalone'
+
+    asyncio.run(exercise())
+
+
 def make_session(adapter, timeout, outer_ended=None, timeout_returned=None):
     class Workflow(WorkflowOrchestrator):
         def _execute_step(self, *args):

@@ -1,6 +1,7 @@
 """Real basic descriptors, unavailable endpoint ADMET; no providers or assets."""
 from types import SimpleNamespace
 from unittest.mock import Mock
+import logging
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -9,6 +10,28 @@ from rdkit import Chem
 from rdkit.Chem import Crippen, Descriptors, Lipinski, QED
 
 from src.web.routes.molecule_properties_routes import setup_molecule_properties_routes
+
+
+@pytest.mark.parametrize("failure", [None, ValueError, RuntimeError])
+def test_route_logs_never_contain_molecule_or_provider_exception(monkeypatch, caplog, failure):
+    from src.molecular_design import chemistry
+
+    smiles = "CC(=O)Oc1ccccc1C(=O)O"
+    if failure:
+        def fail(_smiles):
+            raise failure(f"private structure: {_smiles}")
+        monkeypatch.setattr(chemistry, "calculate_properties", fail)
+    app = FastAPI()
+    logger = logging.getLogger("test.molecule_privacy")
+    setup_molecule_properties_routes(app, logger=logger)
+    with caplog.at_level(logging.INFO, logger=logger.name), TestClient(app) as client:
+        response = client.post("/api/molecule/properties", json={"smiles": smiles})
+    assert response.status_code == 200
+    assert response.json()["success"] is (failure is None)
+    assert caplog.records
+    assert smiles not in caplog.text
+    assert "private structure" not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records if record.name == logger.name)
 
 
 def client_for_properties():

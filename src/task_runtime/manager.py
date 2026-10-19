@@ -10,6 +10,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from .errors import TaskErrorCode
+from .cancellation import task_cancellation
 from .models import (
     ResultProjectionPolicy,
     TaskRecord,
@@ -164,7 +165,8 @@ class TaskManager:
                 )
             return
         try:
-            result = handler(payload)
+            with task_cancellation(self.store, task_id):
+                result = handler(payload)
         except Exception as exc:  # pragma: no cover - exact failures are task-specific
             completed = self._mark_finished(task_id, TaskStatus.FAILED, error=str(exc))
             if not completed:

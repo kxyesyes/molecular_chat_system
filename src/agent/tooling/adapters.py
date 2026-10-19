@@ -5,6 +5,7 @@ import inspect
 import time
 from abc import ABC, abstractmethod
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from functools import wraps
 from threading import BoundedSemaphore
 from typing import Any, Callable
 
@@ -383,6 +384,7 @@ class LegacyPythonToolAdapter(ToolAdapter):
         self.readiness_unknown = readiness_unknown
         self._last_execution = {}
 
+    @wraps(ToolAdapter.execute)
     def execute(self, input_data: Any, **kwargs) -> ToolResult:
         result = super().execute(input_data, **kwargs)
         # A request-specific failure/success cannot establish tool-wide readiness.

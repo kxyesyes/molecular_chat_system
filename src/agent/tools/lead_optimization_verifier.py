@@ -45,8 +45,9 @@ class LeadOptimizationVerifier:
                 "Baseline and generated candidate evidence are both required",
             )
 
-        objectives = self._objectives(query)
+        objectives, unknown_objectives = self._parse_objectives(query)
         unverifiable_constraints = self._unverifiable_constraints(query)
+        unverifiable_constraints.extend(unknown_objectives)
         bounds, unknown_bounds = requested_property_bounds(query)
         has_goals = bool(objectives or bounds)
         unverifiable_constraints.extend(unknown_bounds)
@@ -83,6 +84,13 @@ class LeadOptimizationVerifier:
             ):
                 property_row = None
             for metric, direction in objectives:
+                if metric in {"activity", "potency"}:
+                    baseline_evidence = self._activity_evidence(baseline_activity_row, metric=metric)
+                    candidate_evidence = self._activity_evidence(candidate_activity.get(key), metric=metric)
+                    if (baseline_evidence is None or candidate_evidence is None
+                            or baseline_evidence[1] != candidate_evidence[1]):
+                        missing.append(metric)
+                        continue
                 baseline_value = self._metric_value(
                     metric,
                     baseline_properties_row,
@@ -112,6 +120,9 @@ class LeadOptimizationVerifier:
                     "delta": round(candidate_value - baseline_value, 8),
                     "satisfied": satisfied,
                 })
+                if metric in {"activity", "potency"}:
+                    comparisons[-1].update(endpoint=baseline_evidence[1]["endpoint"],
+                                           units=baseline_evidence[1]["units"])
 
             constraint_checks = check_property_bounds(bounds, (property_row or {}).get("properties"))
             missing.extend(check["metric"] for check in constraint_checks if check["satisfied"] is None)
@@ -149,7 +160,7 @@ class LeadOptimizationVerifier:
         if any(item["status"] == "unverified" for item in results):
             warnings.append("部分候选缺少与基线对应的真实端点证据，结果未验证")
         if unverifiable_constraints:
-            warnings.append("存在尚未由结构工具核验的结构约束，不能宣称目标已满足")
+            warnings.append("存在未解析的优化要求或未核验的结构约束，不能宣称目标已满足")
         if overall_status != "supported":
             warnings.append("未宣称先导优化完成；请补充证据或调整约束后重新评估")
 
@@ -188,28 +199,60 @@ class LeadOptimizationVerifier:
 
     @classmethod
     def _objectives(cls, query: str) -> list[tuple[str, str]]:
-        lowered = query.casefold()
+        return cls._parse_objectives(query)[0]
+
+    @staticmethod
+    def _parse_objectives(query: str) -> tuple[list[tuple[str, str]], list[str]]:
+        """Bind a direction to one metric in its own clause, never globally.
+
+        Negation, shared verbs and conflicting directions require clarification;
+        omitting such a clause must not let the other goals certify success.
+        Explicit absolute bounds are evaluated by requested_property_bounds.
+        """
+        metric_pattern = re.compile(
+            r"(?<![a-z0-9_])(?:logp|qed|solubility|potency|activity|tpsa|mw|hba|hbd|sa(?:\s*score)?|molecular\s+weight)(?![a-z0-9_])|溶解(?:度)?|活性|效力|分子量",
+            re.I,
+        )
+        directions = {
+            "lower": r"降低|减少|下降|\b(?:lower|reduce|decrease)\b",
+            "higher": r"提高|提升|增加|改善|\b(?:higher|improve|increase)\b",
+            "preserve": r"保持|保留|维持|\b(?:maintain|preserve|retain|keep)\b",
+        }
         objectives: list[tuple[str, str]] = []
-        if "logp" in lowered and re.search(r"降低|减少|下降|lower|reduce|decrease", lowered):
-            objectives.append(("logp", "lower"))
-        if "qed" in lowered and re.search(r"提高|提升|增加|higher|improve|increase", lowered):
-            objectives.append(("qed", "higher"))
-        if ("溶解" in lowered or "solubility" in lowered) and re.search(
-            r"提高|提升|增加|higher|improve|increase", lowered
-        ):
-            objectives.append(("solubility", "higher"))
-        if any(token in lowered for token in ("活性", "potency", "activity")):
-            if re.search(r"保持.{0,8}(活性|potency|activity)|保留.{0,8}(活性|potency|activity)|"
-                         r"(活性|potency|activity).{0,8}(保持|保留|维持|maintain|preserve|retain)", lowered):
-                direction = "preserve"
-            elif re.search(r"提高|提升|增加|higher|improve|increase", lowered):
-                direction = "higher"
-            elif re.search(r"降低|减少|下降|lower|reduce|decrease", lowered):
-                direction = "lower"
-            else:
-                direction = "preserve"
-            objectives.append(("activity", direction))
-        return list(dict.fromkeys(objectives))
+        unknown: list[str] = []
+        for clause in re.split(r"[，,;；。\n、]|\b(?:and|but|while|then)\b|并且|同时|并|且|但|和", query.casefold()):
+            mentions = list(metric_pattern.finditer(clause))
+            metrics = [
+                "activity" if m[0] == "活性" else "potency" if m[0] == "效力"
+                else "solubility" if m[0].startswith("溶解") else m[0]
+                for m in mentions
+            ]
+            if not metrics:
+                continue
+            found = [direction for direction, pattern in directions.items() if re.search(pattern, clause)]
+            bounds, unknown_bounds = requested_property_bounds(clause)
+            # These Chinese operators encode a positive bound; other negation
+            # must be checked before the absolute-bound shortcut.
+            negation_text = re.sub(r"不超过|不大于|不低于|不小于", "", clause)
+            negated = re.search(r"不|勿|禁止|无需|避免|\b(?:not|no|never|without|avoid|don['’]t)\b", negation_text)
+            if negated:
+                unknown.extend(metric + "_objective" for metric in metrics)
+                continue
+            if (len(mentions) == 1 and (bounds or unknown_bounds)
+                    and (not found or (found == ["preserve"] and bounds))):
+                continue
+            quantified = re.search(r"\d", clause) and not bounds
+            unsupported = any(metric not in {"logp", "qed", "solubility", "activity", "potency"} for metric in metrics)
+            if (len(mentions) != 1 or len(found) != 1 or quantified or unsupported
+                    or (found == ["preserve"] and metrics[0] not in {"activity", "potency"})):
+                unknown.extend(metric + "_objective" for metric in metrics)
+                continue
+            metric, direction = metrics[0], found[0]
+            if any(old_metric == metric and old_direction != direction for old_metric, old_direction in objectives):
+                unknown.append(metric + "_objective")
+            objectives.append((metric, direction))
+        return (list(dict.fromkeys(item for item in objectives if item[0] + "_objective" not in unknown)),
+                list(dict.fromkeys(unknown)))
 
     @staticmethod
     def _unverifiable_constraints(query: str) -> list[str]:
@@ -258,16 +301,75 @@ class LeadOptimizationVerifier:
             if not isinstance(values, Mapping):
                 return None
             return cls._number(values.get("log_s_esol", values.get("solubility_esol")))
-        if metric == "activity":
-            if not isinstance(activity, Mapping) or activity.get("success") is not True:
+        if metric in {"activity", "potency"}:
+            evidence = cls._activity_evidence(activity, metric=metric)
+            return evidence[0] if evidence is not None else None
+        return None
+
+    @classmethod
+    def _activity_evidence(cls, row: Any, *, metric: str = "activity") -> tuple[float, dict[str, Any]] | None:
+        if (not isinstance(row, Mapping) or row.get("success") is not True
+                or row.get("error") or row.get("error_code")
+                or any(row.get(field, "passed") not in {"passed", "succeeded"}
+                       for field in ("status", "execution_status"))
+                or any(field in row and row[field] is not False for field in ("demo_mode", "fallback_used"))):
+            return None
+        provenance = row.get("model_provenance") or row.get("provenance")
+        if not isinstance(provenance, Mapping):
+            return None
+        if (any(field in provenance and provenance[field] is not False
+                for field in ("demo_mode", "fallback_used"))
+                or any(provenance.get(field, "passed") not in ("passed", "succeeded")
+                       for field in ("status", "execution_status"))):
+            return None
+        if metric == "potency":
+            keys = ("predicted_pIC50",)
+        elif "models" in provenance:
+            # The real family tool returns both heads. Quantitative pIC50 takes
+            # precedence over confidence in its binary activity classification.
+            keys = ("predicted_pIC50", "activity_probability", "probability")
+        else:
+            keys = ("normalized_activity", "activity_probability", "probability", "predicted_pIC50")
+        for key in keys:
+            if row.get(key) is None:
+                continue
+            value = cls._number(row[key])
+            regression = key == "predicted_pIC50"
+            task, endpoint, units = ("regression", "pIC50", "pIC50") if regression else (
+                "classification", "activity", "probability")
+            if value is None or (not regression and not 0 <= value <= 1):
                 return None
-            provenance = activity.get("model_provenance") or activity.get("provenance")
-            if not cls._trusted_provenance(provenance):
+            models = provenance.get("models")
+            nested = "models" in provenance
+            model = models.get(task) if isinstance(models, Mapping) else None
+            if not nested:
+                model = provenance
+            if not cls._trusted_provenance(model):
                 return None
-            for key in ("normalized_activity", "activity_probability", "probability", "predicted_pIC50"):
-                value = cls._number(activity.get(key))
-                if value is not None:
-                    return value
+            if nested and (key == "normalized_activity" or model.get("scientific_readiness") != "endpoint_ready"):
+                return None
+            for field, expected in (("task_type", task), ("endpoint", endpoint), ("units", units)):
+                if (nested or field in model) and model.get(field) != expected:
+                    return None
+                # Family rows expose pIC50 units for the envelope, while each
+                # model declares its own endpoint. Legacy flat rows use theirs.
+                if not nested and field in row and row[field] != expected:
+                    return None
+            errors = row.get("errors")
+            if errors and (not isinstance(errors, Mapping) or errors.get(task) or errors.get("input") or errors.get("bundle")):
+                return None
+            context = {
+                "metric": "probability" if key == "activity_probability" else key,
+                "endpoint": endpoint, "units": units,
+                "model": {field: model.get(field) for field in (
+                    "model_id", "model_path", "weights_sha256", "model_card_sha256",
+                    "target_id", "model_contract_key", "prepared_dataset_sha256",
+                )},
+                "scope": {field: provenance.get(field) for field in (
+                    "family_id", "bundle_id", "request", "scope", "label_threshold", "probability_threshold",
+                )},
+            }
+            return value, context
         return None
 
     @staticmethod

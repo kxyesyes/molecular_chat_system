@@ -940,6 +940,7 @@ function applyDockingTaskRecord(record) {
 const DOCKING_POLL_INTERVAL_MS = 500;
 
 async function pollDockingTask(taskId) {
+  if (readRememberedDockingTask() !== taskId) return;
   clearDockingPoll();
   let response;
   let payload;
@@ -954,8 +955,11 @@ async function pollDockingTask(taskId) {
       }, 3000);
       return;
     }
-    throw error;
+    return;
   }
+  // A cancellation or a new submission may have replaced this task while
+  // either fetch or JSON decoding was in flight. Check before any mutation.
+  if (readRememberedDockingTask() !== taskId) return;
   if (!response.ok || payload.success === false) {
     throw new Error(payload.message || payload.detail || "无法读取对接任务状态");
   }
@@ -985,6 +989,7 @@ async function cancelDockingTask() {
       body: JSON.stringify({ reason: "user request" }),
     });
     const payload = await response.json();
+    if (readRememberedDockingTask() !== taskId) return;
     if (!response.ok || payload.success === false) {
       throw new Error(payload.message || payload.detail || "取消任务失败");
     }
@@ -994,7 +999,7 @@ async function cancelDockingTask() {
       pollDockingTask(taskId).catch(handleDockingTaskError);
     }
   } catch (error) {
-    handleDockingTaskError(error);
+    if (readRememberedDockingTask() === taskId) handleDockingTaskError(error);
   }
 }
 

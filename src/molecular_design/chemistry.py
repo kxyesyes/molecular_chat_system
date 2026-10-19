@@ -229,9 +229,11 @@ def calculate_properties(
             sys.path.append(sa_path)
         import sascorer
 
-        props["sa_score"] = round(float(sascorer.calculateScore(mol)), 3)
+        raw_props["sa_score"] = float(sascorer.calculateScore(mol))
+        props["sa_score"] = round(raw_props["sa_score"], 3)
         property_status["sa_score"] = "ok"
     except Exception:
+        raw_props["sa_score"] = None
         props["sa_score"] = None
         property_status["sa_score"] = "unavailable"
 
@@ -245,6 +247,6 @@ def calculate_properties(
         "success": True,
         "properties": props,
         "raw_properties": raw_props,
-        "goals": evaluate_goals(props, goals),
+        "goals": evaluate_goals(raw_props, goals),
         "property_status": property_status,
     }
