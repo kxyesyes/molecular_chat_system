@@ -1,5 +1,15 @@
 # Latest handoff
 
+## Web 响应卡顿修复（2026-10-20）
+
+- 基线 `616d8e9e`，分支 `codex/fix-web-response-latency`。本轮创建 draft PR，不合并；最终 commit、PR 与新 CI 状态以交付消息及 PR 页面为准。
+- 实测全站曾同时阻塞约 7.2 秒：配置 watcher 在事件循环中同步执行 Windows 文件/ACL 检查，后台全库指纹预热持续竞争 GIL。配置观察、读取、保存及发布前复核现在线程执行；保存取消仍等待真实落盘、发布和旧模型关闭。
+- 配置 I/O 使用引用计数的前台优先上下文；预热仅在实际 I/O 期间进行可中断短等待，空闲时不固定休眠。权限、持久化版本、全行/哈希校验与 acquisition deadline 均保留。
+- 最终 MACCS 预热运行时，五轮并发 HTTP：首页中位 2914.7→1089.9 ms，对接页 2734.8→756.9 ms；配置 GET 从两次 5640.2/6437.7 ms 降到五次中位 960.5 ms。仍有预热 CPU 波动，不声称浏览器渲染、外部模型生成或全库预热已完成。
+- 本机开发服务已应用补丁并重启。重启前确认没有活跃计算任务；原有九个 UI/测试文件逐字节哈希不变，原分支保留。
+- 最终联合 587 passed/3 平台限制 skips；追加超时/RDKit 日志 27 passed；原分支应用后 58 passed；先前运行时分配/生命周期 133 passed。批次不累计。独立 SPEC→QUALITY 均 PASS；compileall/diff 通过。未重跑本地全套、Node、真实模型/Vina或部署 health；新提交完整 CI 单独核对。
+- 修改：`src/web/app.py`、`src/agent/tools/reverse_target_tool.py`、`src/reverse_target/source_runtime.py`、两个相关测试及计划/验收/交接文档。详细命令、计时、兼容性和回滚见[验证记录](../superpowers/validation/2026-10-20-web-response-latency.md)。
+
 ## 八项独立审查问题修复（2026-10-20）
 
 - 基线 `73d75a7f`，隔离分支 `codex/fix-independent-review-findings`。本轮只授权提交并创建指向 main 的 draft PR，**不合并**；原工作区未提交改动保留。
