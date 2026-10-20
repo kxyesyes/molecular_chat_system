@@ -4,6 +4,7 @@ Status is an observation, never a load/retry authority or scientific receipt.
 Closing revokes readiness immediately and retains the worker until actual exit.
 """
 import asyncio
+from contextlib import contextmanager
 import logging
 import threading
 import time
@@ -32,6 +33,7 @@ class SourceRuntime:
         self._producer = ReverseTargetPredictor(data_dir)
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._foreground_io_count = 0
         self._start_done = threading.Event()
         self._start_done.set()
         self._thread = None
@@ -77,9 +79,22 @@ class SourceRuntime:
 
     def _run(self):
         reason = None
+
+        def cancelled():
+            if self._stop.is_set():
+                return True
+            with self._lock:
+                foreground_pending = self._foreground_io_count > 0
+            if foreground_pending:
+                # Briefly release the GIL only while actual config I/O needs it.
+                # Existing acquisition checks still account for this wait in
+                # their deadline; closing interrupts the wait immediately.
+                self._stop.wait(0.001)
+            return self._stop.is_set()
+
         try:
             self._producer.initialize_compact_strict(policy=self._policy,
-                timeout_seconds=self._timeout, cancelled=self._stop.is_set, progress=self._progress)
+                timeout_seconds=self._timeout, cancelled=cancelled, progress=self._progress)
         except TimeoutError as error:
             reason = "acquisition_timeout"
             clear_failure_frames(error)
@@ -103,6 +118,20 @@ class SourceRuntime:
             status = self.snapshot()
             logger.info("Reverse-target source prewarm %s (%d/%d rows)",
                         status["state"], status["verified_rows"], status["total_rows"])
+
+    @contextmanager
+    def foreground_io(self):
+        """Give concurrent config I/O workers room until physical I/O returns."""
+        with self._lock:
+            active = not self._stop.is_set()
+            if active:
+                self._foreground_io_count += 1
+        try:
+            yield
+        finally:
+            if active:
+                with self._lock:
+                    self._foreground_io_count -= 1
 
     def snapshot(self):
         with self._lock:

@@ -1,5 +1,6 @@
 """Lazy strict reverse-target consumer; legacy predictor lists are uncertified."""
 from copy import deepcopy
+from contextlib import nullcontext
 import re
 import threading
 import time
@@ -54,6 +55,12 @@ class ReverseTargetTool(BaseMolecularTool):
             return False
         runtime.start()
         return True
+
+    def foreground_io(self):
+        """Borrow the attached prewarm scheduler without starting any work."""
+        with self._state_lock:
+            runtime = None if self._closed else self._source_runtime
+        return runtime.foreground_io() if runtime is not None else nullcontext()
 
     def source_status(self):
         with self._state_lock:
