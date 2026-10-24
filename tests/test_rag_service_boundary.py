@@ -41,7 +41,6 @@ def _run_isolated(code, tmp_path):
         "TARGET_CACHE_DIR": str(tmp_path / "target-cache"),
         "MEDCHAT_TASK_BACKEND": "local",
         "MEDCHAT_TEMPORAL_CANARY_PERCENT": "0",
-        "AGENT_HARNESS_MODE": "legacy",
         "MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE": "0",
         "MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE": "0",
         "MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK": "0",
@@ -116,7 +115,14 @@ def test_legacy_app_exports_the_same_canonical_service(tmp_path):
             patches.enter_context(patch("src.system.model_clients.OllamaModel", OfflineModel))
             patches.enter_context(patch(
                 "src.system.model_clients.OpenAICompatibleModel", OfflineModel))
-            patches.enter_context(patch("src.agent.tools.get_all_tools", return_value=[]))
+            def registered_core(model, **kwargs):
+                from src.agent.tools import get_core_tools
+                tools = get_core_tools(model)
+                for tool in tools:
+                    patches.enter_context(patch.object(tool, "execute",
+                        side_effect=AssertionError("Import must not execute science")))
+                return tools
+            patches.enter_context(patch("src.agent.tools.get_all_tools", side_effect=registered_core))
             patches.enter_context(patch.object(
                 RAGSystem, "initialize", side_effect=AssertionError("No RAG startup")))
             patches.enter_context(patch.object(

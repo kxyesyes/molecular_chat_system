@@ -112,6 +112,7 @@ class _StepJournal:
     checkpoint_warning_entry: dict[str, str] | None = None
     running_checkpoint_saved: bool = False
     tool_attempted: bool = False
+    completed_after_cancel: bool = False
     dependency_blocked: bool = False
     result: ToolResult | None = None
     prepared: bool = False
@@ -158,6 +159,7 @@ class WorkflowRunSession:
         dynamic: bool = False,
         observation_capture: Callable[[ToolResult], None] | None = None,
         observation_prepare: Callable[[ToolResult, WorkflowStep], None] | None = None,
+        checkpoint_validate: Callable[[ToolResult | None, WorkflowStep, dict | None], bool] | None = None,
         reference_guard: Callable[[WorkflowStep, Any], None] | None = None,
         dynamic_publication: bool = False,
         cancel_event: Any | None = None,
@@ -188,6 +190,9 @@ class WorkflowRunSession:
         if observation_prepare is not None and (not dynamic or not callable(observation_prepare)):
             raise SessionLifecycleError("observation preparation requires a dynamic session and callable")
         self._observation_prepare = observation_prepare
+        if checkpoint_validate is not None and (not dynamic or not callable(checkpoint_validate)):
+            raise SessionLifecycleError("checkpoint validation requires a dynamic session and callable")
+        self._checkpoint_validate = checkpoint_validate
         if reference_guard is not None and (not dynamic or not callable(reference_guard)):
             raise SessionLifecycleError("reference guard requires a dynamic session and callable")
         self._reference_guard = reference_guard
@@ -252,7 +257,7 @@ class WorkflowRunSession:
     def step_count(self) -> int:
         return len(self.steps)
 
-    def start(self, *, resume_claimed: bool = False) -> None:
+    def start(self, *, resume_claimed: bool = False, reference_claim=None) -> None:
         """Start a new run, or trust the caller's successful continuation claim.
 
         resume_claimed is a caller precondition, not an authorization check.
@@ -262,6 +267,25 @@ class WorkflowRunSession:
             raise SessionLifecycleError("workflow session has already started")
         if resume_claimed and not self.dynamic:
             raise SessionLifecycleError("only dynamic sessions accept claimed continuation")
+        if reference_claim is not None:
+            if (not self.dynamic or getattr(self, '_decision_binding_profile', None) != 'medchat-web-v1'
+                    or type(reference_claim) is not dict
+                    or set(reference_claim) != {'receipt', 'admitted', 'verified', 'resuming'}
+                    or reference_claim['resuming'] is not resume_claimed
+                    or type(reference_claim['receipt']) is not dict):
+                raise RunClaimConflict(None)
+            store = self.orchestrator.state_store
+            receipt = reference_claim['receipt']
+            validate = getattr(store, 'validate_reference_request_claim', None)
+            authority = {name: receipt.get(name) for name in
+                         ('trace_id', 'user_id', 'session_id', 'token', 'generation')}
+            current_claim = validate(receipt.get('key'), **authority) if callable(validate) else None
+            if (current_claim != receipt
+                    or receipt.get('trace_id') != self.context.trace_id
+                    or receipt.get('user_id') != self.context.user_id
+                    or receipt.get('session_id') != self.context.session_id):
+                raise RunClaimConflict(None)
+            self.idempotency_key = receipt['key']
         if self._start_context is not None and resume_claimed != self._resume_claimed:
             raise SessionLifecycleError("workflow start mode cannot change on retry")
         self._resume_claimed = resume_claimed
@@ -302,6 +326,21 @@ class WorkflowRunSession:
         context = self._start_context
         state = self._start_state
         ledger = self._start_ledger
+
+        if reference_claim is not None:
+            if not resume_claimed and not self._start_run_persisted:
+                claimed = self.orchestrator.state_store.start_reference_run({
+                    'trace_id': context.trace_id, 'status': 'running',
+                    'skill_name': context.active_skill, 'query': context.query,
+                    'workflow_version': self.orchestrator.workflow_version,
+                    'idempotency_key': self.idempotency_key,
+                    'user_id': context.user_id, 'session_id': context.session_id,
+                    'metadata': context.metadata,
+                }, reference_claim['receipt'])
+                if claimed is not True:
+                    raise RunClaimConflict(None)
+                self._start_run_persisted = True
+            reference_claim['admitted'] = True
 
         claim_run = getattr(self.orchestrator, "run_claim", None)
         if self.orchestrator.state_store and not self._start_run_persisted and callable(claim_run):
@@ -686,7 +725,7 @@ class WorkflowRunSession:
             journal.reused_result_changed = journal.checkpoint_reused and prior_outcome != (
                 result.success, result.status, result.error)
             if self._observation_prepare is not None:
-                from src.agent.harness.decision_bounds import observation_value, validate_json
+                from src.agent.scientific_session.decision_bounds import observation_value, validate_json
 
                 # Raw tool extras cannot acquire server authority. The callback
                 # receives the accepted result and the actual append_step copy.
@@ -727,6 +766,7 @@ class WorkflowRunSession:
                     )
                     self._bind_dynamic_observation(result, step, journal)
             if self._cancel_requested():
+                journal.result = result
                 self._replace_with_cancelled(step, journal)
                 result = journal.result
                 assert result is not None
@@ -739,6 +779,7 @@ class WorkflowRunSession:
 
         if not journal.normalized:
             if self._cancel_requested():
+                journal.result = result
                 self._replace_with_cancelled(step, journal)
                 result = journal.result
                 assert result is not None
@@ -819,7 +860,7 @@ class WorkflowRunSession:
                     }
                 )
             journal.error_applied = True
-        if result.warnings:
+        if result.warnings and not self._cancelled_web_step_publication(journal):
             self._emit_once(
                 f"step:{index}:validation_warning",
                 self.context,
@@ -836,15 +877,16 @@ class WorkflowRunSession:
             if has_usable_observation(result) or self._is_dependency_blocked(result)
             else TaskEventType.TOOL_FAILED
         )
-        self._emit_once(
-            f"step:{index}:terminal",
-            self.context,
-            event_type,
-            result.message or f"{step.name} completed",
-            tool=step.tool_name,
-            progress=None if self.dynamic else (index + 1) / self.total_steps,
-            payload=result.to_legacy_dict(),
-        )
+        if not self._cancelled_web_step_publication(journal):
+            self._emit_once(
+                f"step:{index}:terminal",
+                self.context,
+                event_type,
+                result.message or f"{step.name} completed",
+                tool=step.tool_name,
+                progress=None if self.dynamic else (index + 1) / self.total_steps,
+                payload=result.to_legacy_dict(),
+            )
 
         terminal = not self.dynamic and index == len(self.steps) - 1
         reason = "last_step" if terminal else None
@@ -903,11 +945,21 @@ class WorkflowRunSession:
     ) -> None:
         if journal.input_data is _UNSET:
             try:
-                journal.input_data = self.orchestrator._resolve_input(
-                    self.context,
-                    step,
-                    self.outputs,
-                )
+                # The full Web resolver already compiled and authenticated this
+                # adapter envelope. Generation's static resolver canonicalizes
+                # strings/plan templates; applying it again corrupts the bound
+                # request (including count, temperature and target evidence).
+                if self.dynamic and getattr(self, '_decision_binding_profile', None) == 'medchat-web-v1':
+                    if (step.input_from is not None or step.input_binding is not None
+                            or step.input_template is not None or step.input_transform != 'identity'):
+                        raise SessionLifecycleError('Web actions require prebound identity input')
+                    journal.input_data = deepcopy(step.input_data)
+                else:
+                    journal.input_data = self.orchestrator._resolve_input(
+                        self.context,
+                        step,
+                        self.outputs,
+                    )
             except BindingResolutionError as exc:
                 journal.input_data = {
                     "binding": step.input_binding,
@@ -1079,6 +1131,11 @@ class WorkflowRunSession:
                         adapter_version=journal.adapter_version,
                     )
                 except json.JSONDecodeError:
+                    if self._checkpoint_validate is not None:
+                        # The authority callback must latch the decode failure
+                        # too, so a terminal FAILED row cannot become READY.
+                        self._checkpoint_validate(None, step, None)
+                        raise SessionLifecycleError("scientific checkpoint decoding failed") from None
                     checkpoint = None
                     journal.checkpoint_warning = f"Ignored incompatible checkpoint for {step.name}"
                     journal.checkpoint_warning_entry = {
@@ -1094,6 +1151,9 @@ class WorkflowRunSession:
                         checkpoint,
                     )
                 except (AttributeError, KeyError, TypeError, ValueError):
+                    if self._checkpoint_validate is not None:
+                        self._checkpoint_validate(None, step, checkpoint)
+                        raise SessionLifecycleError("scientific checkpoint decoding failed") from None
                     journal.checkpoint_warning = (
                         f"Ignored incompatible checkpoint for {step.name}"
                     )
@@ -1102,6 +1162,13 @@ class WorkflowRunSession:
                         "reason": "checkpoint_deserialization_failed",
                     }
                 else:
+                    # Authenticate the persisted receipt before any generic
+                    # provenance preparation can overwrite old commitments.
+                    # A bad Web checkpoint is not a cache miss authorizing
+                    # another execution of the same action.
+                    if self._checkpoint_validate is not None:
+                        if self._checkpoint_validate(journal.result, step, checkpoint) is not True:
+                            raise SessionLifecycleError("scientific checkpoint validation failed")
                     result_validator = getattr(tool, "validate_checkpoint_result", None)
                     if callable(result_validator):
                         try:
@@ -1243,7 +1310,28 @@ class WorkflowRunSession:
             )
         )
 
+    def _cancelled_web_step_publication(self, journal) -> bool:
+        # Capture, persistence and warning callbacks can cancel after the last
+        # preparation check. Recheck each outward boundary without changing the
+        # sealed receipt, including on a commit-then-raise settlement retry.
+        if (self.dynamic and getattr(self, '_decision_binding_profile', None) == 'medchat-web-v1'
+                and journal.tool_attempted and self._cancel_requested()):
+            journal.completed_after_cancel = True
+        return journal.completed_after_cancel
+
     def _replace_with_cancelled(self, step, journal, *, running: bool = False) -> None:
+        if (self.dynamic and getattr(self, '_decision_binding_profile', None) == 'medchat-web-v1'
+                and journal.tool_attempted and journal.result is not None):
+            # The owned callable returned; cancellation is not evidence that
+            # its execution never happened. Retain its result through the same
+            # scientific validation, current-source/config guards and sealing.
+            # The caller still cancels the turn and no later tool event is sent.
+            journal.completed_after_cancel = True
+            return
+        if journal.result is not None and journal.result.status is ObservationStatus.CANCELLED:
+            # Repeated cancellation must not discard an already prepared
+            # cancellation proof while the ledger journal retains that proof.
+            return
         journal.checkpoint_reused = False
         journal.result = self.orchestrator._cancelled_result(
             step, running=running,
@@ -1285,7 +1373,7 @@ class WorkflowRunSession:
 
     def _reject_unavailable_reference(self, step, journal) -> bool:
         if self._reference_guard is not None:
-            from src.agent.harness.decision_policy import DecisionBoundaryError
+            from src.agent.scientific_session.decision_policy import DecisionBoundaryError
             try:
                 if self._reference_guard(step, journal.input_data) is not None:
                     raise DecisionBoundaryError('invalid_dynamic_binding')

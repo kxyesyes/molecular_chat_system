@@ -1,4 +1,8 @@
-"""Real offline RDKit/session/SQLite -> ChatHandler; never activate a model/server."""
+"""Settled RDKit/session/SQLite -> pure decision delivery; no model/server.
+
+These are report/transport contracts, not normal-route generation acceptance.
+The existing fixture executes the real scientific workflow before delivery.
+"""
 import asyncio
 from copy import deepcopy
 from contextlib import closing
@@ -9,18 +13,18 @@ import subprocess
 import pytest
 
 from evidence_report_fixture import execute, execute_standard_plan
-from test_chat_handler_agent_events import FakeModel, FakeRagService, FakeWebSocket, FixedResultAgentSystem
+from test_chat_handler_agent_events import FakeModel, FakeWebSocket
 from src.web.chat_handler import ChatHandler
+from src.web.decision_chat import _deliver_result, _result_frame
 from src.web.scientific_references import ScientificReferenceService
 from test_evidence_report_contract import seal
 
 
-def capture(store, execution, *, fail_report_send=False):
+def capture(store, execution, *, fail_report_send=False, socket=None):
     model = FakeModel()
-    handler = ChatHandler(model, FakeRagService(), FixedResultAgentSystem(execution),
-        {"inference": {"stream": False}},
+    handler = ChatHandler(model, None, None, {},
         scientific_references=ScientificReferenceService(store) if store else None)
-    socket = FakeWebSocket()
+    socket = FakeWebSocket() if socket is None else socket
     if fail_report_send:
         send = socket.send_text
         async def selective_failure(payload):
@@ -29,7 +33,12 @@ def capture(store, execution, *, fail_report_send=False):
             await send(payload)
         socket.send_text = selective_failure
     socket.scope = {"agent_session_id": "owner"}
-    asyncio.run(handler._process_message(socket, "设计两个候选分子", enable_rag=False, enable_tools=True))
+    # Deliver the already-settled result and its genuine workflow plan directly.
+    # No retired chat runner, substituted agent execution, or fabricated frames.
+    result = execution["agent_result"]
+    wire_execution = deepcopy({key: value for key, value in execution.items() if key != "agent_result"})
+    asyncio.run(_deliver_result(handler, socket,
+        _result_frame(handler, result, False), wire_execution))
     return socket.messages, model
 
 
@@ -108,11 +117,20 @@ def test_no_store_or_snapshot_failure_preserves_completion(tmp_path, monkeypatch
     assert frames[-1] == baseline[-1]
 
 
-def test_report_only_send_failure_never_turns_completion_into_failure(tmp_path):
+def test_report_send_failure_stops_completion_without_changing_scientific_result(tmp_path):
     store, execution, _ = execute(tmp_path)
     baseline, _ = capture(None, execution)
-    frames, _ = capture(store, execution, fail_report_send=True)
-    assert frames[-1] == baseline[-1]
+    before = deepcopy(execution["agent_result"].to_legacy_dict())
+    checkpoints = deepcopy(store.get_tool_executions(execution["trace_id"]))
+    socket = FakeWebSocket()
+    with pytest.raises(RuntimeError, match="^fixture report-only transport failure$"):
+        capture(store, execution, fail_report_send=True, socket=socket)
+    # Strict delivery propagates the transport error rather than announcing a
+    # completed projection. The already-settled scientific result is unchanged.
+    assert [frame["type"] for frame in socket.messages] == ["agent_result", "molecule_candidates"]
+    assert socket.messages[0] == baseline[0]
+    assert execution["agent_result"].to_legacy_dict() == before
+    assert store.get_tool_executions(execution["trace_id"]) == checkpoints
 
 
 def test_source_race_between_build_and_emit_refuses_report(tmp_path, monkeypatch):

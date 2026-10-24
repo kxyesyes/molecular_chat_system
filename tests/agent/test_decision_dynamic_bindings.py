@@ -14,10 +14,10 @@ from src.agent.contracts import AgentContext
 from src.agent.contracts.decision import ToolDecision
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
 from src.agent.evidence import EvidenceLedger
-from src.agent.harness import decision_bindings as bindings
-from src.agent.harness.decision_execution import SingleAttemptTool, settle_action, settle_owned_call
-from src.agent.harness.decision_inputs import seal_observation
-from src.agent.harness.decision_policy import DecisionBoundaryError
+from src.agent.scientific_session import decision_bindings as bindings
+from src.agent.scientific_session.decision_execution import SingleAttemptTool, settle_action, settle_owned_call
+from src.agent.scientific_session.decision_inputs import seal_observation
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.run_session import WorkflowRunSession

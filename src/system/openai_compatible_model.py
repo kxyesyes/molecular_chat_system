@@ -338,12 +338,13 @@ class OpenAICompatibleModel:
 
     async def decide(
         self, messages, *, mode="native", max_tokens=1500, timeout_seconds=60.0,
+        temperature=0.0, input_budget=None,
     ):
         """Return a validated proposal, never execute a tool or a workflow."""
         transport = self._require_decision_transport("request_decision")
         return await transport.request_decision(
             self, messages, mode=mode, max_tokens=max_tokens,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=timeout_seconds, temperature=temperature, input_budget=input_budget,
         )
 
     async def propose_ordinary_intent(

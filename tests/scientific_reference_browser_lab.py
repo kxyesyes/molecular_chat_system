@@ -1,15 +1,20 @@
-"""Opt-in loopback UI fixture. Synthetic generation; real RDKit, no model API.
+"""Opt-in loopback UI fixture. Scripted model boundary; real Pi/tools/RDKit.
 
 Run with MedChat Python -B -m tests.scientific_reference_browser_lab --state-dir
 <dedicated temporary directory>. This is NOT a production launch command.
 """
 import argparse
+from contextlib import asynccontextmanager
+import json
 from pathlib import Path
 import re
+from types import SimpleNamespace
+
+import httpx
 
 
 ROOT = Path(__file__).resolve().parents[1]
-NOTICE = 'OFFLINE REFERENCE LAB — 合成候选，仅验证引用链路；性质来自 RDKit；未调用生成模型。'
+NOTICE = 'OFFLINE REFERENCE LAB — 模型响应为测试脚本；真实 Pi、生成工具与 RDKit 校验；未调用外部模型服务。'
 
 
 def create_lab(directory):
@@ -17,9 +22,12 @@ def create_lab(directory):
     from fastapi.responses import HTMLResponse
     from fastapi.staticfiles import StaticFiles
     from fastapi.templating import Jinja2Templates
-    from src.agent.contracts import CandidateRecord, CandidateSet, ToolResult
+    from src.agent.contracts.decision import ToolDecision, FinishDecision
+    from src.agent.decision_transport import DecisionResponse
     from src.agent.persistence import SQLiteAgentStateStore
-    from src.agent.supervisor import SupervisorAgent
+    from src.agent.tooling.factory import build_tool_registry
+    from src.agent.tools.llm_molecular_generator import LLMMolecularGenerator
+    from src.system.model_clients import OllamaModel
     from src.agent.tools.property_calculator import PropertyCalculator
     from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
     from src.web.agent_session import AgentSessionStore
@@ -28,19 +36,17 @@ def create_lab(directory):
     from src.web.routes.scientific_reference_routes import setup_scientific_reference_routes
     from src.web.routes.websocket_routes import setup_websocket_routes
     from src.web.scientific_references import ScientificReferenceService
+    from src.web.decision_runtime import WebDecisionRuntime
+    from src.web.model_lifecycle import ModelRequestGate
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     calls = {name: [] for name in ('llm_molecular_generator', 'property_calculator', 'drug_likeness_assessment')}
 
-    class Generator:
-        name = 'llm_molecular_generator'
+    class Generator(LLMMolecularGenerator):
         def execute(self, value):
             calls[self.name].append(value)
-            candidates = tuple(CandidateRecord.from_smiles(i, i, s, s, {'model': 'offline-fixture'})
-                               for i, s in enumerate(('CCO', 'CCN', 'CCC', 'CCCO', 'CCCN'), 1))
-            return ToolResult.success_result(self.name, data=CandidateSet(5, candidates).to_dict(),
-                                             warnings=[NOTICE], evidence=[{'source': 'offline-test-fixture'}])
+            return super().execute(value)
 
     class Properties(PropertyCalculator):
         def execute(self, value):
@@ -57,12 +63,64 @@ def create_lab(directory):
         async def generate(self, *args, **kwargs):
             return NOTICE
 
+        async def decide(self, messages, **kwargs):
+            # Script only the model boundary. All actions still traverse Pi,
+            # compiled authorization, real adapters and real scientific tools.
+            marker = '. Immutable result requirements (not a tool sequence): '
+            requirements = json.loads(messages[0]['content'].split(marker, 1)[1])
+            observations = []
+            for message in messages[1:]:
+                try:
+                    value = json.loads(message.get('content', ''))
+                except (ValueError, TypeError):
+                    continue
+                if isinstance(value, dict) and isinstance(value.get('quality'), dict):
+                    if value['quality'].get('evidence_id'):
+                        observations.append(value)
+            steps = requirements['steps']
+            if len(observations) < len(steps):
+                step = steps[len(observations)]
+                decision = ToolDecision(version='1', action='tool', tool_name=step['tool_name'],
+                    arguments={'step_ref': step['name']}, purpose='Execute the compiled lab action')
+            else:
+                decision = FinishDecision(version='1', action='finish',
+                    response_kind='scientific' if steps else 'chat', text=NOTICE,
+                    evidence_ids=[item['quality']['evidence_id'] for item in observations])
+            return DecisionResponse(decision, None, 'lab-call-' + str(len(messages)),
+                                    {'model': self.model_name, 'request_attempts': 1})
+
     store = SQLiteAgentStateStore(directory / 'agent.sqlite')
     service = ScientificReferenceService(store)
-    tools = {tool.name: tool for tool in (Generator(), Properties(), Likeness())}
-    handler = ChatHandler(OfflineModel(), None, SupervisorAgent(tools=tools, state_store=store),
+    generation_model = OllamaModel(base_url='https://example.invalid')
+    generation_model.sync_client.close()
+    generation_model.sync_client = httpx.Client(transport=httpx.MockTransport(lambda request:
+        httpx.Response(200, json={'done': True, 'response': 'CCO\nCCN\nCCC\nCCCO\nCCCN'})))
+    tools = [Generator(llm_model=generation_model), Properties(), Likeness()]
+    registry = build_tool_registry(tools)
+    model = OfflineModel()
+    handler = ChatHandler(model, None, None,
                           {'inference': {'stream': False}}, scientific_references=service)
-    app = FastAPI()
+
+    async def refresh():
+        return None
+
+    application = SimpleNamespace(model=model, model_generation='offline-lab-v1',
+        ordinary_chat_policy='medchat-web-v1', model_request_gate=ModelRequestGate(),
+        _refresh_llm_config_from_env=refresh, _get_agent_tool_registry=lambda: registry,
+        _get_agent_state_store=lambda: store, _get_scientific_references=lambda: service)
+    runtime = WebDecisionRuntime(application, wire_mode='native')
+    handler.decision_runtime = runtime
+
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            await runtime.shutdown()
+            await generation_model.close()
+            registry.close()
+
+    app = FastAPI(lifespan=lifespan)
     app.state.calls = calls
     app.state.reference_service = service
     app.add_middleware(AgentEntrySessionMiddleware, store=AgentSessionStore(directory / 'sessions.sqlite'))
@@ -109,7 +167,6 @@ def main(argv=None):
     keep = {k: os.environ[k] for k in ('SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'COMSPEC') if k in os.environ}
     os.environ.clear()
     os.environ.update(keep)
-    os.environ['AGENT_HARNESS_MODE'] = 'legacy'
     os.environ['MEDCHAT_USER_CONFIG_DIR'] = str(args.state_dir.resolve() / 'unused-user-config')
     logging.disable(logging.CRITICAL)
     import uvicorn

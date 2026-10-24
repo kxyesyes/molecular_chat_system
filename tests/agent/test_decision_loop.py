@@ -51,7 +51,9 @@ class ScriptedModel:
 class CountingTool:
     description = 'Explicit contract test double'
     version = 'test-1'
-    timeout_seconds = 0.5
+    # Cold RDKit imports in analysis_rows are not a timeout contract. Deadline
+    # tests below use their own deliberately short, signalled tool deadlines.
+    timeout_seconds = 5
 
     def __init__(self, name='property_calculator', fail=False, demo=False):
         self.name, self.fail, self.demo = name, fail, demo
@@ -127,7 +129,10 @@ def test_owned_loop_has_no_terminal_until_nested_workers_join(setup_loop, monkey
             assert owner.status == 'pending' and owner.pending_roots == 1
 
         try:
-            await signalled(entered)
+            # Fixture entry includes actual Pi's Node/SDK startup. Only this
+            # initial barrier gets the startup allowance; the 0.03s tool wait,
+            # later worker/join barriers and cancellation checks stay unchanged.
+            assert await asyncio.to_thread(entered.wait, 15), 'Pi tool entry was not reached'
             await signalled(records[0].future_done)
             assert len(records) == 2
             inner = records[1]
@@ -345,7 +350,9 @@ def test_outer_session_dispatch_failure_closes_only_unstarted_root(setup_loop, m
             request_kind='scientific', allowed_tools={'property_calculator'},
             required_tools={'property_calculator'}, event_bus=b.bus, worker_owner=owner))
         try:
-            assert await asyncio.to_thread(failed.wait, 3)
+            # Pi must start and request the scripted tool before this injected
+            # dispatch failure can fire. Keep the post-failure 0.2s bound below.
+            assert await asyncio.to_thread(failed.wait, 15)
             done, _ = await asyncio.wait({task}, timeout=0.2)
             assert not b.tools[0].inputs and len(b.model.messages) == 1
             assert done, 'never-started outer dispatch left an open action root'
@@ -376,7 +383,7 @@ def setup_loop(tmp_path):
     registries = []
 
     def build(decisions, tools=None, *, legacy_tools=(), **kwargs):
-        from src.agent.harness.decision_loop import ModelDecisionLoop
+        from src.agent.pi_runtime.runtime import PiAgentRuntime
         supplied = tools if tools is not None else [CountingTool()]
         registry = build_tool_registry(supplied)
         if legacy_tools:
@@ -400,7 +407,7 @@ def setup_loop(tmp_path):
         store = SQLiteAgentStateStore(tmp_path / f'state-{len(registries)}.sqlite')
         bus = AgentEventBus(state_store=store)
         model = ScriptedModel(decisions)
-        return SimpleNamespace(loop=ModelDecisionLoop(model, registry, store, **kwargs),
+        return SimpleNamespace(loop=PiAgentRuntime(model, registry, store, **kwargs),
                                registry=registry, store=store, bus=bus, model=model, tools=supplied)
     yield build
     for registry in registries:
@@ -449,7 +456,7 @@ def test_loop_uses_model_observations_not_planner(setup_loop, monkeypatch):
     b = setup_loop([tool(), finish_last])
     result = run(b)
     assert result.success
-    assert result.metadata['backend'] == 'model_decision_loop'
+    assert result.metadata['backend'] == 'pi'
     assert len(b.model.messages) == 2
     assert b.tools[0].inputs == ['SMILES: CCO']
     assert '46.069' in result.final_answer
@@ -505,7 +512,7 @@ def test_demo_cannot_be_promoted_to_scientific_success(setup_loop):
 @pytest.mark.parametrize('mixed', [False, True, 'classification_failed', 'regression_failed'])
 def test_family_conflict_finish_preserves_review_not_scientific_success(setup_loop, family_boundary, transport, mixed):
     from src.agent.contracts import ObservationStatus
-    from src.agent.harness.decision_policy import usable
+    from src.agent.scientific_session.decision_policy import usable
     from tests.agent.test_family_activity_tool import family_row
     from test_decision_chat import handler, Socket, terminal
     activity, calls, state = family_boundary
@@ -635,7 +642,7 @@ def test_cited_review_cannot_excuse_missing_other_required_tool(setup_loop, fami
 
 
 def test_review_exception_rejects_executed_forbidden_tool_report(setup_loop, family_boundary, monkeypatch):
-    from src.agent.harness import decision_loop
+    from src.agent.scientific_session import controller as decision_loop
     activity, calls, state = family_boundary
     state.update(rows=[conflict_row()], status='partial')
     evaluate = decision_loop.evaluate_requirements
@@ -659,7 +666,7 @@ def test_review_exception_rejects_executed_forbidden_tool_report(setup_loop, fam
 @pytest.mark.parametrize('damage', ['demo', 'fallback', 'quality_demo', 'quality_fallback', 'error', 'legacy', 'null', 'forged'])
 def test_review_renderer_rechecks_evidence_and_keeps_other_partial_data_unusable(damage):
     from src.agent.contracts import ObservationStatus, ToolProvenance, AgentExecutionError
-    from src.agent.harness.decision_policy import scientific_answer, family_review_observation, usable
+    from src.agent.scientific_session.decision_policy import scientific_answer, family_review_observation, usable
     observation = ToolResult('activity_predictor', False, '', data=[conflict_row()],
         status=ObservationStatus.PARTIAL, provenance=ToolProvenance(tool_name='activity_predictor'))
     if damage == 'demo': observation.provenance = replace(observation.provenance, demo_mode=True)
@@ -682,7 +689,7 @@ def test_review_renderer_rechecks_evidence_and_keeps_other_partial_data_unusable
 ])
 def test_review_batch_does_not_admit_forged_failed_siblings(changes):
     from src.agent.contracts import ObservationStatus, ToolProvenance
-    from src.agent.harness.decision_policy import family_review_observation, scientific_answer, usable
+    from src.agent.scientific_session.decision_policy import family_review_observation, scientific_answer, usable
     from tests.agent.test_family_activity_tool import family_row
     sibling = family_row(smiles='CCN', success=False, status='failed', execution_status='failed',
                          predicted_pIC50=None, activity_class=None, activity_probability=None,

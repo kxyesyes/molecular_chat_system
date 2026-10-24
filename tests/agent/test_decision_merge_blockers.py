@@ -9,7 +9,7 @@ import pytest
 from test_decision_loop import setup_loop, CountingTool, tool, clarify, finish_last
 from test_decision_continuation import owned_context, start, fresh, invoke
 from src.agent.contracts import AgentContext, WorkflowArtifact
-from src.agent.harness.decision_inputs import resolve_decision_input
+from src.agent.scientific_session.decision_inputs import resolve_decision_input
 
 
 @pytest.mark.parametrize('assignment', [
@@ -41,10 +41,11 @@ def test_secret_initial_input_rejected_before_store_and_model(setup_loop):
 def test_contextual_secret_in_waiting_snapshot_rejected(setup_loop):
     # Defense in depth: even a synthetic history that bypassed ingress checks
     # cannot be published as a resumable snapshot.
-    from src.agent.harness.decision_continuation import snapshot_payload
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session.decision_continuation import snapshot_payload
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     state = SimpleNamespace(counters=lambda: {}, messages=[{'role': 'user',
-        'content': 'password=synthetic-review-marker'}], call_ids=set(), deadline=10**20)
+        'content': 'password=synthetic-review-marker'}], call_ids=set(), deadline=10**20,
+        pi_entries=[])
     session = SimpleNamespace(results=[], context=owned_context(), tool_attempt_count=0)
     with pytest.raises(DecisionBoundaryError, match='continuation_snapshot_not_persistable'):
         snapshot_payload(state, session, 'synthetic-fingerprint')

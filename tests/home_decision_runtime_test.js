@@ -149,7 +149,7 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
-  for (const mode of ["legacy", "decision_a2"]) {
+  for (const mode of ["legacy", "pi"]) {
     for (const status of ["FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"]) {
       await test(`${mode} terminal ${status} keeps cleanup status refresh until drained`, () => {
         const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send(); h.socket.emit(accepted());
@@ -175,7 +175,7 @@ async function run() {
       });
     }
   }
-  for (const mode of ["legacy", "decision_a2"]) {
+  for (const mode of ["legacy", "pi"]) {
     for (const unconfirmed of [false, true]) await test(`${mode} failure before first view stays sticky (${unconfirmed})`, () => {
       const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send(); h.socket.emit(accepted());
       if (unconfirmed) h.socket.emit({type: "error", code: "docking_unavailable", trace_id: trace, turn_id: turn, docking_segment_complete: false});
@@ -200,7 +200,7 @@ async function run() {
     });
   }
   await test("marked C busy rejection releases pending abandon but preserves its waiting authority", () => {
-    const h = loadHome(); h.ready("decision_a2", true); start(h);
+    const h = loadHome(); h.ready("pi", true); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.button("开始新请求").click();
     const sent = h.socket.sent.length;
@@ -215,7 +215,7 @@ async function run() {
   });
   for (const code of ["docking_unavailable", "docking_request_active", "docking_in_progress"]) {
     await test(`C chat rejection ${code} requires an explicit admission marker`, () => {
-      const h = loadHome(); h.ready("decision_a2", true); h.input.value = "run docking"; h.send();
+      const h = loadHome(); h.ready("pi", true); h.input.value = "run docking"; h.send();
       const sent = h.socket.sent.length;
       h.socket.emit({type: "error", code});
       h.input.value = "must not overlap"; h.send();
@@ -228,7 +228,7 @@ async function run() {
       assert.equal(h.socket.sent.length, sent + 1);
     });
   }
-  for (const mode of ["legacy", "decision_a2"]) {
+  for (const mode of ["legacy", "pi"]) {
     for (const withView of [false, true]) await test(`${mode} correlated C failure releases only its drained owner (${withView})`, () => {
       const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send(); h.socket.emit(accepted());
       if (withView) h.socket.emit({type: "docking_event", schema: "DockingView@1", request_id: trace, root_trace_id: trace,
@@ -252,7 +252,7 @@ async function run() {
       assert.equal(h.socket.sent.length, sent + 1);
     });
   }
-  for (const mode of ["legacy", "decision_a2"]) {
+  for (const mode of ["legacy", "pi"]) {
     for (const stage of ["rejected", "accepted"]) await test(`${mode} scoped docking ${stage} failure releases only its pending request`, () => {
       const h = loadHome(); h.ready(mode, true); h.input.value = "run docking"; h.send();
       if (stage === "accepted") h.socket.emit(accepted());
@@ -314,7 +314,7 @@ async function run() {
     h.input.value = "legacy input"; h.send();
     assert(!Object.hasOwn(h.socket.sent.at(-1), "client_id"));
   });
-  for (const [previous, mode] of [[null, "decision_a2"], [null, "legacy"], ["legacy", "decision_a2"]]) {
+  for (const [previous, mode] of [[null, "pi"], [null, "legacy"], ["legacy", "pi"]]) {
     await test(`${previous || "first connection"} to ${mode} waits for server ready without replay`, () => {
       const h = loadHome();
       if (previous) {
@@ -350,7 +350,7 @@ async function run() {
     });
   }
   await test("only server announcement enables controls; accepted turn owns Stop", () => {
-    const h = loadHome(); h.ready("decision_a2");
+    const h = loadHome(); h.ready("pi");
     const stop = h.button("停止"); assert(stop, "missing accessible Stop button");
     assert(stop.disabled);
     h.input.value = "Explain logP"; h.send();
@@ -364,7 +364,7 @@ async function run() {
   for (const [status, label] of Object.entries({completed: "已完成", waiting_for_input: "等待补充输入",
     partial: "部分完成", failed: "失败", rejected: "已拒绝", cancelled: "已取消"})) {
     await test(`persistent ${status} survives complete, timers and stale frames`, () => {
-      const h = loadHome(); h.ready("decision_a2"); start(h);
+      const h = loadHome(); h.ready("pi"); start(h);
       h.socket.emit(result(status)); h.socket.emit(complete(status));
       const state = h.chat.querySelector('.decision-runtime-status');
       assert(state, "missing per-message persistent status");
@@ -382,7 +382,7 @@ async function run() {
     });
   }
   await test("Continue has exact socket-local nonce and full input; Start new abandons", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     const next = h.button("继续"), fresh = h.button("开始新请求");
     assert(next && fresh && !next.disabled && !fresh.disabled);
@@ -396,7 +396,7 @@ async function run() {
     h.input.value = "Explain logP"; h.send(); assert.equal(h.socket.sent.at(-1).type, "chat");
   });
   await test("waiting continuation is restored from the tab session cache after refresh", () => {
-    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("pi");
     const next = h.button("继续");
     assert(next && !next.disabled, "restored waiting state must enable Continue");
     h.input.value = "计算 logP；SMILES: CCO"; next.click();
@@ -404,7 +404,7 @@ async function run() {
       continuation_id: nonce, message: "计算 logP；SMILES: CCO"});
   });
   for (const response of ["success", "expired"]) await test(`abandon awaits ${response} before an explicit new chat`, () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.button("开始新请求").click();
     assert.deepEqual(h.socket.sent.at(-1), {type: "abandon", trace_id: trace, continuation_id: nonce});
@@ -428,7 +428,7 @@ async function run() {
     assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
   });
   for (const code of ["invalid_frame", "turn_in_progress"]) await test(`abandon ${code} retains waiting authority for an explicit retry`, () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.button("开始新请求").click();
     h.socket.emit({type: "error", code});
@@ -440,7 +440,7 @@ async function run() {
     assert.equal(h.socket.sent.length, count + 1);
   });
   for (const action of ["duplicate-abandon", "resume-before-reply"]) await test(`late cancel error cannot permit ${action}`, () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.button("停止").click(); assert.equal(h.socket.sent.at(-1).type, "cancel");
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.button("开始新请求").click(); assert.equal(h.socket.sent.at(-1).type, "abandon");
@@ -463,7 +463,7 @@ async function run() {
     assert(h.chat.querySelectorAll(".decision-runtime-status").at(-1).textContent.includes("已完成"));
   });
   for (const resumed of [false, true]) await test(`late cancel invalid_control preserves pending ${resumed ? "resume" : "chat"}`, () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.button("停止").click(); assert.equal(h.socket.sent.at(-1).type, "cancel");
     const priorStatus = resumed ? "waiting_for_input" : "completed";
     h.socket.emit(result(priorStatus)); h.socket.emit(complete(priorStatus));
@@ -488,7 +488,7 @@ async function run() {
   });
   for (const code of ["invalid_frame", "turn_in_progress", "continuation_unavailable"]) {
     await test(`current pending rejection ${code} releases UI without scientific success`, () => {
-      const h = loadHome(); h.ready("decision_a2");
+      const h = loadHome(); h.ready("pi");
       const resumed = code === "continuation_unavailable";
       if (resumed) {
         start(h); h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
@@ -510,24 +510,24 @@ async function run() {
     });
   }
   await test("waiting result caches a recovery pointer before complete without enabling live controls", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input"));
     const stored = h.storage.get("medchat.decision.waiting.v1");
     assert.equal(typeof stored, "string", "waiting pointer must survive loss of complete");
     assert.deepEqual(JSON.parse(stored), {traceId: trace, nonce});
     assert(h.button("继续").disabled && h.button("开始新请求").disabled);
-    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("pi");
     assert(!h.button("继续").disabled);
     assert(newer.sent.every(f => f.type === "ping"), "recovery must not execute automatically");
     h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
     assert.deepEqual(newer.sent.at(-1), {type: "resume", trace_id: trace,
       continuation_id: nonce, message: "计算 logP；SMILES: CCO"});
-    const refreshed = loadHome({storedWaiting: stored}); refreshed.ready("decision_a2");
+    const refreshed = loadHome({storedWaiting: stored}); refreshed.ready("pi");
     assert(!refreshed.button("继续").disabled);
     assert(refreshed.socket.sent.every(f => f.type === "ping"));
   });
   await test("unconfirmed recovery pointer is discarded by authoritative rejection", () => {
-    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("decision_a2");
+    const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("pi");
     h.input.value = "计算 logP；SMILES: CCO"; h.button("继续").click();
     h.socket.emit({type: "error", code: "continuation_unavailable"});
     assert(!h.storage.has("medchat.decision.waiting.v1"));
@@ -536,16 +536,16 @@ async function run() {
     assert.equal(h.socket.sent.at(-1).type, "chat");
   });
   await test("stale or malformed waiting results cannot cache a recovery pointer", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input", "9".repeat(32)));
     h.socket.emit({...result("waiting_for_input"), metadata: {waiting_for_input: true, continuation_id: "bad"}});
     assert(!h.storage.has("medchat.decision.waiting.v1"));
   });
   await test("disconnect retains an unconfirmed abandon until the server settles it", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
     h.button("开始新请求").click(); assert(h.button("开始新请求").disabled);
-    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("pi");
     assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
     assert(newer.sent.every(f => f.type === "ping"));
     h.button("开始新请求").click();
@@ -563,31 +563,31 @@ async function run() {
     assert.equal(newer.sent.length, sent); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
   });
   await test("disconnect restores a durable continuation without replaying stale frames", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
-    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("decision_a2");
+    h.socket.close(); h.reconnect(); const newer = h.sockets.at(-1); newer.open(); h.ready("pi");
     h.socket.emit(accepted()); h.socket.emit(result("waiting_for_input"));
     assert(!h.button("继续").disabled && h.button("停止").disabled);
     assert(newer.sent.every(f => f.type === "ping"));
   });
   await test("transport logging never captures user text or inbound raw frames", () => {
-    const h = loadHome(); h.ready("decision_a2");
+    const h = loadHome(); h.ready("pi");
     h.input.value = "PRIVATE_OUTBOUND_MARKER"; h.send(); h.socket.emit(accepted());
     h.socket.emit({...result("completed"), final_answer: "PRIVATE_INBOUND_MARKER"});
     h.socket.emit('{"PRIVATE_MALFORMED_MARKER":');
     assert(!JSON.stringify(h.logs).match(/PRIVATE_(OUTBOUND|INBOUND|MALFORMED)_MARKER/));
   });
   await test("known decision socket cannot fall back to legacy during reconnect before ready", () => {
-    const h = loadHome(); h.ready("decision_a2"); h.socket.close(); h.reconnect();
+    const h = loadHome(); h.ready("pi"); h.socket.close(); h.reconnect();
     const newer = h.sockets.at(-1); newer.open();
     h.input.value = "pending server mode"; h.send();
     assert(newer.sent.every(f => f.type === "ping"));
-    h.ready("decision_a2"); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
+    h.ready("pi"); h.send(); assert.equal(newer.sent.at(-1).type, "chat");
   });
   await test("active main script cache version includes scientific result display", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261018-display-answer-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261023-pi-runtime-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -597,7 +597,7 @@ async function run() {
       "WebSocket URL must not be hard-coded to ws");
   });
   await test("non-success decision results present structured failure reasons", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     const failure = result("failed");
     failure.final_answer = "任务未完成";
     failure.error = {code: "tool_timeout", message: "AutoDock Vina 在截止时间内未完成"};
@@ -606,7 +606,7 @@ async function run() {
       "the UI must expose the structured server failure reason");
   });
   await test("strict candidate trace is socket-bound and receive is not mounted ACK", async () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("partial"));
     h.socket.emit(candidateEvent("9".repeat(32)));
     const event = candidateEvent(); h.socket.emit(event);
@@ -622,7 +622,7 @@ async function run() {
     assert(!("turn_id" in event));
   });
   for (const fault of ["detached", "partial"]) await test(`${fault} candidate mount cannot ACK`, async () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result("partial"));
+    const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result("partial"));
     const event = candidateEvent(); h.socket.emit(event);
     const append = Element.prototype.appendChild;
     try {
@@ -638,7 +638,7 @@ async function run() {
   for (const boundary of ["next-turn", "disconnect"]) await test(`slow ACK cannot authorize after ${boundary}`, async () => {
     let resolveAck;
     const h = loadHome({request: () => new Promise(resolve => {resolveAck = resolve;})});
-    h.ready("decision_a2"); start(h); h.socket.emit(result("partial")); h.socket.emit(candidateEvent());
+    h.ready("pi"); start(h); h.socket.emit(result("partial")); h.socket.emit(candidateEvent());
     h.socket.emit(complete("partial")); await tick();
     assert.equal(typeof resolveAck, "function");
     if (boundary === "next-turn") {h.input.value = "Explain logP"; h.send();}
@@ -648,7 +648,7 @@ async function run() {
     assert.equal(JSON.stringify(h.refs.outgoing()), "{}");
   });
   await test("wrong turn/trace and repeated acceptance cannot seize a new turn", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h);
+    const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("completed")); h.socket.emit(complete("completed"));
     h.input.value = "next concept"; h.send(); h.socket.emit(accepted());
     assert(h.button("停止").disabled);
@@ -662,7 +662,7 @@ async function run() {
   });
   for (const [status, label] of Object.entries({completed: "已完成", partial: "部分完成", waiting_for_input: "等待补充输入"})) {
     await test(`projection failure after ${status} is visible without rewriting scientific status`, async () => {
-      const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result(status));
+      const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result(status));
       h.socket.emit(candidateEvent());
       const failedCompletion = {...complete("failed"),
         content: "结果展示未完成，请稍后重试。已完成的计算记录仍保留。",
@@ -688,14 +688,14 @@ async function run() {
     });
   }
   await test("1011 after result preserves science status but never claims delivery complete", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result("partial"));
+    const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result("partial"));
     h.socket.close(1011); const state = h.chat.querySelector(".decision-runtime-status");
     assert(state.textContent.includes("部分完成") && state.textContent.includes("传输未确认结束"));
     assert(!state.textContent.includes("已取消"));
     assert(h.button("继续").disabled && h.button("停止").disabled);
   });
   await test("errored decision socket cannot reinterpret late frames as legacy traffic", () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h); h.socket.emit(result("partial"));
+    const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result("partial"));
     h.socket.onerror({type: "error"});
     h.socket.emit({type: "stream", content: "LATE_FRAME_MUST_NOT_RENDER"});
     assert(!h.chat.textContent.includes("LATE_FRAME_MUST_NOT_RENDER"));
@@ -713,7 +713,7 @@ async function runFrameContracts(frames) {
   assert(event && report && /^[a-f0-9]{32}$/.test(event.trace_id));
   const original = JSON.stringify(frames);
   for (const mode of ["positive", "absent", "foreign-trace"]) await test(`full main script same-frame report ${mode}`, async () => {
-    const h = loadHome(); h.ready("decision_a2"); start(h, turn, event.trace_id);
+    const h = loadHome(); h.ready("pi"); start(h, turn, event.trace_id);
     h.socket.emit(result("partial", turn, event.trace_id)); h.socket.emit(event);
     if (mode !== "absent") h.socket.emit(mode === "positive" ? report : {...report, trace_id: "9".repeat(32)});
     assert.equal(h.requests.length, 0);
@@ -730,7 +730,7 @@ async function runFrameContracts(frames) {
       assert(url.endsWith("/restore"));
       return {reference: event.reference, events: [event], source_status: "partial", warnings: [], expires_at: Date.now()/1000 + 60};
     }});
-    h.ready("decision_a2"); await tick();
+    h.ready("pi"); await tick();
     assert(h.chat.textContent.includes("已恢复此前确认的候选集合"));
     assert(!h.chat.querySelector(".scientific-evidence-report"));
     assert(h.chat.textContent.includes("当前候选事件未携带经独立性质工具验证的属性"));

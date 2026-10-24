@@ -1,9 +1,10 @@
-"""D6 existing receive loops, real coordinator/store, synthetic provider only."""
+"""D6 single Pi receiver, real coordinator/store; explicit synthetic execution."""
 import asyncio
 from contextlib import asynccontextmanager
 from copy import deepcopy
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import WebSocketDisconnect
@@ -14,7 +15,7 @@ from src.web.docking_chat_controller import DockingChatController
 from tests.agent.test_web_docking_coordinator import Rig, QUERY, proposal, wire
 from tests.agent.test_web_docking_refinement import response
 from tests.agent.test_web_docking_consent import target_case
-from tests.agent.test_chat_handler_agent_events import FakeModel, FixedResultAgentSystem
+from tests.agent.test_chat_handler_agent_events import FakeModel
 from test_web_decision_runtime import actual_app, ActualSocket, cookie_for
 
 
@@ -23,6 +24,7 @@ class Socket:
         self.scope = {'agent_session_id': owner}
         self.incoming, self.outgoing = asyncio.Queue(), asyncio.Queue()
         self.frames = []
+        self.close_codes = []
         self.accepts = self.readers = self.max_readers = 0
 
     async def accept(self):
@@ -45,7 +47,11 @@ class Socket:
         await self.outgoing.put(frame)
 
     async def close(self, **kwargs):
+        self.close_codes.append(kwargs.get('code'))
         await self.incoming.put(None)
+
+    async def send_json(self, value):
+        await self.send_text(json.dumps(value))
 
     async def send(self, payload):
         await self.incoming.put(json.dumps(payload, ensure_ascii=False))
@@ -64,25 +70,21 @@ async def settle(runtime):
 
 
 @asynccontextmanager
-async def receiver(rig, profile, monkeypatch, *, enabled=True, transport=None):
+async def receiver(rig, monkeypatch, *, enabled=True, transport=None):
     app = SimpleNamespace(_get_agent_tool_registry=lambda: SimpleNamespace(as_mapping=lambda: {}),
         _get_agent_state_store=lambda: rig.state, _get_scientific_references=lambda: None)
     runtime = WebDecisionRuntime(app, wire_mode='native')
     handler = ChatHandler(None, None, None, {})
     ordinary = []
-    async def legacy(sender, message, *args, conversation_history, **kwargs):
-        ordinary.append((sender, message))
-        conversation_history.append({'user': message, 'assistant': 'ordinary answer',
-                                     'scientific_pointer': {'private': 'not model memory'}})
-        await sender.send_text(json.dumps({'type': 'complete', 'content': 'ordinary answer'}))
     async def decision(handler, sender, turn):
         ordinary.append((sender, turn.payload['message']))
-        sender.memory.append({'user': turn.payload['message'], 'assistant': 'ordinary answer'})
+        sender.memory.append({'user': turn.payload['message'], 'assistant': 'ordinary answer',
+                              'scientific_pointer': {'private': 'not model memory'}})
         await sender.send({'type': 'complete', 'content': 'ordinary answer'})
-    monkeypatch.setattr(handler, '_process_message', legacy)
+    legacy = AsyncMock(side_effect=AssertionError('retired receiver must not dispatch'))
+    assert not hasattr(handler, '_process_message')
     monkeypatch.setattr(runtime, '_execute', decision)
-    if profile == 'decision':
-        handler.decision_runtime = runtime
+    handler.decision_runtime = runtime
     async with rig.client(transport) as client:
         coordinator = rig.coordinator(client)
         controller = DockingChatController(runtime, coordinator, enabled=enabled)
@@ -91,6 +93,7 @@ async def receiver(rig, profile, monkeypatch, *, enabled=True, transport=None):
         task = asyncio.create_task(handler.handle_websocket(socket))
         try:
             await socket.until(lambda f: f['type'] == 'connection_ready')
+            assert socket.frames[0]['normal_chat_mode'] == 'pi'
             yield SimpleNamespace(handler=handler, runtime=runtime, controller=controller,
                 coordinator=coordinator, socket=socket, task=task, ordinary=ordinary)
         finally:
@@ -100,13 +103,13 @@ async def receiver(rig, profile, monkeypatch, *, enabled=True, transport=None):
             await socket.incoming.put(None)
             await asyncio.wait_for(task, 5)
             await settle(runtime)
+            legacy.assert_not_called()
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
-def test_eligible_request_enters_existing_receiver_without_ordinary_allocation(tmp_path, monkeypatch, profile):
+def test_eligible_request_enters_existing_receiver_without_ordinary_allocation(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
     async def run():
-        async with receiver(rig, profile, monkeypatch) as case:
+        async with receiver(rig, monkeypatch) as case:
             await case.socket.send({'type': 'chat', 'message': QUERY})
             frame = await case.socket.until(lambda f: f['type'] in {'request_accepted', 'complete'})
             assert frame['type'] == 'request_accepted', 'C must bypass ordinary execution'
@@ -121,13 +124,12 @@ def test_eligible_request_enters_existing_receiver_without_ordinary_allocation(t
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
 @pytest.mark.parametrize('enabled,message', [(False, QUERY), (True, '你好'),
     (True, '不要对接，只查结构。'), (True, QUERY + ' 然后预测活性')])
-def test_disabled_and_non_c_keep_ordinary_dispatch(tmp_path, monkeypatch, profile, enabled, message):
+def test_disabled_and_non_c_keep_ordinary_dispatch(tmp_path, monkeypatch, enabled, message):
     rig = Rig(tmp_path)
     async def run():
-        async with receiver(rig, profile, monkeypatch, enabled=enabled) as case:
+        async with receiver(rig, monkeypatch, enabled=enabled) as case:
             await case.socket.send({'message': message})
             await case.socket.until(lambda f: f['type'] == 'complete')
             assert [item[1] for item in case.ordinary] == [message]
@@ -137,11 +139,10 @@ def test_disabled_and_non_c_keep_ordinary_dispatch(tmp_path, monkeypatch, profil
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
-def test_only_bounded_plain_actual_history_enters_c_source(tmp_path, monkeypatch, profile):
+def test_only_bounded_plain_actual_history_enters_c_source(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
     async def run():
-        async with receiver(rig, profile, monkeypatch) as case:
+        async with receiver(rig, monkeypatch) as case:
             for i in range(18):
                 await case.socket.send({'message': f'ordinary {i}'})
                 await case.socket.until(lambda f: f['type'] == 'complete')
@@ -159,12 +160,11 @@ def test_only_bounded_plain_actual_history_enters_c_source(tmp_path, monkeypatch
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
-def test_strict_refine_same_root_and_invalid_watch_do_not_allocate(tmp_path, monkeypatch, profile):
+def test_strict_refine_same_root_and_invalid_watch_do_not_allocate(tmp_path, monkeypatch):
     rig = Rig(tmp_path)
     rig.output = proposal('run docking')
     async def run():
-        async with receiver(rig, profile, monkeypatch) as case:
+        async with receiver(rig, monkeypatch) as case:
             await case.socket.send({'message': 'run docking'})
             await case.socket.until(lambda f: f['type'] in {'request_accepted', 'complete'})
             await case.socket.send({'type': 'ping'})
@@ -184,8 +184,7 @@ def test_strict_refine_same_root_and_invalid_watch_do_not_allocate(tmp_path, mon
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
-def test_busy_c_blocks_ordinary_and_disconnect_retains_physical_work(tmp_path, monkeypatch, profile):
+def test_busy_c_blocks_ordinary_and_disconnect_retains_physical_work(tmp_path, monkeypatch):
     import httpx
     rig = Rig(tmp_path)
     async def run():
@@ -199,7 +198,7 @@ def test_busy_c_blocks_ordinary_and_disconnect_retains_physical_work(tmp_path, m
                     pass
             return httpx.Response(200, json=wire(rig.mode, rig.output))
         try:
-            async with receiver(rig, profile, monkeypatch, transport=transport) as case:
+            async with receiver(rig, monkeypatch, transport=transport) as case:
                 await case.socket.send({'message': QUERY})
                 frame = await case.socket.until(lambda f: f['type'] in {'request_accepted', 'complete'})
                 assert frame['type'] == 'request_accepted'
@@ -223,33 +222,33 @@ def test_controller_defaults_to_none():
     assert getattr(ChatHandler(None, None, None, {}), 'docking_controller', 'missing') is None
 
 
-def test_default_legacy_receiver_does_not_load_optional_docking_stack(monkeypatch):
-    import builtins
-    imported = builtins.__import__
-    def guarded(name, *args, **kwargs):
-        assert name not in {'decision_runtime', 'docking_chat_controller'}, 'disabled legacy imported optional stack'
-        return imported(name, *args, **kwargs)
+def test_missing_pi_runtime_fails_closed_without_legacy_dispatch(monkeypatch):
     handler = ChatHandler(FakeModel(), None, None, {'inference': {'stream': False}})
+    legacy = AsyncMock(side_effect=AssertionError('retired receiver must not dispatch'))
+    assert not hasattr(handler, '_process_message')
     async def run():
         socket = Socket()
         await socket.send({'message': 'hello', 'enable_tools': False, 'enable_rag': False})
-        await socket.incoming.put(None)
-        monkeypatch.setattr(builtins, '__import__', guarded)
         await handler.handle_websocket(socket)
-        assert any(f['type'] == 'complete' for f in socket.frames)
-        assert not any(f['type'] == 'error' for f in socket.frames)
+        assert len(socket.frames) == 1
+        assert socket.frames[0]['type'] == 'error'
+        assert socket.frames[0]['code'] == 'pi_runtime_unavailable'
+        assert socket.accepts == 1 and socket.max_readers == 0
+        assert socket.close_codes == [1011]
+        legacy.assert_not_called()
     asyncio.run(run())
 
 
 @pytest.mark.parametrize('failure', ['cancel', 'send'])
-def test_enabled_legacy_failed_ready_does_not_leak_runtime_socket(tmp_path, monkeypatch, failure):
+def test_enabled_pi_failed_ready_does_not_leak_runtime_socket(tmp_path, monkeypatch, failure):
     rig = Rig(tmp_path)
     async def run():
-        app = SimpleNamespace(_get_agent_tool_registry=lambda: None,
+        app = SimpleNamespace(_get_agent_tool_registry=lambda: SimpleNamespace(as_mapping=lambda: {}),
             _get_agent_state_store=lambda: rig.state, _get_scientific_references=lambda: None)
         runtime = WebDecisionRuntime(app, wire_mode='native')
         async with rig.client() as client:
             handler = ChatHandler(None, None, None, {})
+            handler.decision_runtime = runtime
             handler.docking_controller = DockingChatController(runtime, rig.coordinator(client), enabled=True)
             socket = Socket()
             entered = asyncio.Event()
@@ -279,11 +278,10 @@ def test_enabled_legacy_failed_ready_does_not_leak_runtime_socket(tmp_path, monk
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
 @pytest.mark.parametrize('enabled', [True, False])
-def test_connection_ready_advertises_only_closed_preparation_facts(tmp_path, monkeypatch, profile, enabled):
+def test_connection_ready_advertises_only_closed_preparation_facts(tmp_path, monkeypatch, enabled):
     async def run():
-        async with receiver(Rig(tmp_path), profile, monkeypatch, enabled=enabled) as case:
+        async with receiver(Rig(tmp_path), monkeypatch, enabled=enabled) as case:
             ready = case.socket.frames[0]
             facts = ready.get('capabilities', {}).get('chat_docking')
             assert facts == ({'preparation_available': True, 'execution_authorized': False}
@@ -292,10 +290,11 @@ def test_connection_ready_advertises_only_closed_preparation_facts(tmp_path, mon
 
 
 @asynccontextmanager
-async def source_receiver(tmp_path, target, monkeypatch, profile, *, owner='owner-session',
-                          workflow=True, fail_complete=False, result_status='completed'):
+async def source_receiver(tmp_path, target, monkeypatch, *, owner='owner-session',
+                          fail_complete=False, result_status='completed'):
     """Actual handlers/turns; only agent execution is a synthetic accepted result."""
     from src.agent.contracts import AgentResult, ToolResult, ToolProvenance, RunOutcome
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.web import decision_runtime
     from src.web.decision_chat import _result_frame
     rig = Rig(tmp_path / 'source-rig')
@@ -305,13 +304,10 @@ async def source_receiver(tmp_path, target, monkeypatch, profile, *, owner='owne
                tools_used=['target_database_search'], status=result_status)
     if result_status != 'completed':
         raw['success'] = False
-    if workflow:
-        raw['workflow_plan'] = {'workflow_name': 'target_database_search'}
     model = FakeModel()
-    class AcceptedAgent(FixedResultAgentSystem):
-        def execute(self, message, **kwargs):
-            return self.result
-    handler = ChatHandler(model, None, AcceptedAgent(raw), {'inference': {'stream': False}})
+    handler = ChatHandler(model, None, None, {'inference': {'stream': False}})
+    legacy = AsyncMock(side_effect=AssertionError('retired receiver must not dispatch'))
+    assert not hasattr(handler, '_process_message')
     async def refresh():
         pass
     app = SimpleNamespace(_get_agent_tool_registry=lambda: SimpleNamespace(as_mapping=lambda: {}),
@@ -319,23 +315,23 @@ async def source_receiver(tmp_path, target, monkeypatch, profile, *, owner='owne
         model=model, model_generation='model-1', model_request_gate=rig.gate,
         _refresh_llm_config_from_env=refresh)
     runtime = WebDecisionRuntime(app, wire_mode='native')
-    if profile == 'decision':
-        handler.decision_runtime = runtime
-        original_turn = decision_runtime._Turn
-        monkeypatch.setattr(decision_runtime, '_Turn',
-                            lambda payload, **kwargs: original_turn(payload, trace_id='target-trace'))
-        observation = deepcopy(target.checkpoint['output'])
-        tool = ToolResult.success_result('target_database_search', data=observation['data'],
-            quality=observation['quality'], evidence=observation['evidence'],
-            provenance=ToolProvenance.from_dict(observation['provenance']))
-        result = AgentResult('target-trace', raw['success'], 'Synthetic accepted structure result',
-            final_answer=raw['final_answer'], tool_results=[tool], outcome=RunOutcome(result_status))
-        assert result.to_legacy_dict()['tool_result_sequence'] == target.agent['tool_result_sequence']
-        async def bridge(sender, **kwargs):
-            for frame in _result_frame(handler, result, False):
-                await sender.send_text(frame)
-            return result
-        monkeypatch.setattr(handler, 'process_decision_message', bridge)
+    handler.decision_runtime = runtime
+    original_turn = decision_runtime._Turn
+    monkeypatch.setattr(decision_runtime, '_Turn',
+                        lambda payload, **kwargs: original_turn(payload, trace_id='target-trace'))
+    observation = deepcopy(target.checkpoint['output'])
+    tool = ToolResult.success_result('target_database_search', data=observation['data'],
+        quality=observation['quality'], evidence=observation['evidence'],
+        provenance=ToolProvenance.from_dict(observation['provenance']))
+    result = AgentResult('target-trace', raw['success'], 'Synthetic accepted structure result',
+        final_answer=raw['final_answer'], tool_results=[tool], outcome=RunOutcome(result_status))
+    assert result.to_legacy_dict()['tool_result_sequence'] == target.agent['tool_result_sequence']
+    async def bridge(sender, **kwargs):
+        assert isinstance(kwargs['decision_loop'], PiAgentRuntime)
+        for frame in _result_frame(handler, result, False):
+            await sender.send_text(frame)
+        return result
+    monkeypatch.setattr(handler, 'process_decision_message', bridge)
     socket = Socket(owner)
     original_send = socket.send_text
     async def send(text):
@@ -356,21 +352,21 @@ async def source_receiver(tmp_path, target, monkeypatch, profile, *, owner='owne
         task = asyncio.create_task(handler.handle_websocket(socket))
         try:
             await socket.until(lambda f: f['type'] == 'connection_ready')
+            assert socket.frames[0]['normal_chat_mode'] == 'pi'
             yield SimpleNamespace(socket=socket, handler=handler, runtime=runtime,
                 controller=controller, captures=captures, task=task, rig=rig)
         finally:
             await socket.incoming.put(None)
             await asyncio.wait_for(task, 5)
             await settle(runtime)
+            legacy.assert_not_called()
 
 
-@pytest.mark.parametrize('profile,workflow', [('legacy', True), ('legacy', False), ('decision', True)])
 @pytest.mark.parametrize('owner', ['owner-session', 'foreign'])
 def test_actual_accepted_source_captured_only_after_terminal_delivery(
-        tmp_path, target_case, monkeypatch, profile, workflow, owner):
+        tmp_path, target_case, monkeypatch, owner):
     async def run():
-        async with source_receiver(tmp_path, target_case, monkeypatch, profile,
-                                   workflow=workflow, owner=owner) as case:
+        async with source_receiver(tmp_path, target_case, monkeypatch, owner=owner) as case:
             await case.socket.send({'message': '解释分子量', 'enable_rag': False})
             complete = await case.socket.until(lambda f: f['type'] == 'complete')
             assert complete.get('status') in {'succeeded', 'completed'}
@@ -391,12 +387,11 @@ def test_actual_accepted_source_captured_only_after_terminal_delivery(
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
 @pytest.mark.parametrize('failure', ['delivery', 'failed', 'partial'])
 def test_failed_or_undelivered_actual_result_never_captures_source(
-        tmp_path, target_case, monkeypatch, profile, failure):
+        tmp_path, target_case, monkeypatch, failure):
     async def run():
-        async with source_receiver(tmp_path, target_case, monkeypatch, profile,
+        async with source_receiver(tmp_path, target_case, monkeypatch,
                 fail_complete=failure == 'delivery',
                 result_status='completed' if failure == 'delivery' else failure) as case:
             await case.socket.send({'message': '解释分子量', 'enable_rag': False})
@@ -415,7 +410,7 @@ def test_failed_or_undelivered_actual_result_never_captures_source(
 
 def test_a2_does_not_admit_new_turn_until_accepted_source_capture_finishes(tmp_path, target_case, monkeypatch):
     async def run():
-        async with source_receiver(tmp_path, target_case, monkeypatch, 'decision') as case:
+        async with source_receiver(tmp_path, target_case, monkeypatch) as case:
             entered, release = asyncio.Event(), asyncio.Event()
             accept = case.controller.accept_result
             async def held(sender, value):
@@ -438,8 +433,7 @@ def test_a2_does_not_admit_new_turn_until_accepted_source_capture_finishes(tmp_p
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
-def test_shutdown_disconnects_c_before_waiting_for_physical_work(tmp_path, monkeypatch, profile):
+def test_shutdown_disconnects_c_before_waiting_for_physical_work(tmp_path, monkeypatch):
     import httpx
     rig = Rig(tmp_path)
     async def run():
@@ -452,7 +446,7 @@ def test_shutdown_disconnects_c_before_waiting_for_physical_work(tmp_path, monke
                 except asyncio.CancelledError:
                     pass
             return httpx.Response(200, json=wire(rig.mode, rig.output))
-        async with receiver(rig, profile, monkeypatch, transport=transport) as case:
+        async with receiver(rig, monkeypatch, transport=transport) as case:
             shutdown = None
             try:
                 await case.socket.send({'message': QUERY})
@@ -472,12 +466,11 @@ def test_shutdown_disconnects_c_before_waiting_for_physical_work(tmp_path, monke
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
 @pytest.mark.parametrize('owner', ['owner-1', 'foreign'])
-def test_watch_through_existing_receiver_is_read_only_and_owner_bound(tmp_path, monkeypatch, profile, owner):
+def test_watch_through_existing_receiver_is_read_only_and_owner_bound(tmp_path, monkeypatch, owner):
     rig = Rig(tmp_path)
     async def run():
-        async with receiver(rig, profile, monkeypatch) as case:
+        async with receiver(rig, monkeypatch) as case:
             await case.socket.send({'message': QUERY})
             await case.socket.until(lambda f: f.get('segment_complete'))
             await settle(case.runtime)
@@ -502,10 +495,9 @@ def test_watch_through_existing_receiver_is_read_only_and_owner_bound(tmp_path, 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('profile', ['legacy', 'decision'])
-def test_source_capture_waits_for_actual_physical_complete(tmp_path, target_case, monkeypatch, profile):
+def test_source_capture_waits_for_actual_physical_complete(tmp_path, target_case, monkeypatch):
     async def run():
-        async with source_receiver(tmp_path, target_case, monkeypatch, profile) as case:
+        async with source_receiver(tmp_path, target_case, monkeypatch) as case:
             entered, release = asyncio.Event(), asyncio.Event()
             original = case.socket.send_text
             async def held(text):
@@ -529,16 +521,14 @@ def test_source_capture_waits_for_actual_physical_complete(tmp_path, target_case
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
-def test_mounted_asgi_route_uses_single_receiver_and_real_controller(actual_app, tmp_path, mode):
+def test_mounted_asgi_route_uses_single_receiver_and_real_controller(actual_app, tmp_path):
     rig = Rig(tmp_path / 'asgi-rig')
     async def run():
-        async with actual_app(mode=mode) as app_case:
+        async with actual_app() as app_case:
             app = app_case.app
-            runtime = getattr(app, 'docking_runtime', None) or app.decision_runtime
-            if runtime is None:
-                # Trusted fixture assembly only; no production receiver created.
-                runtime = WebDecisionRuntime(app, wire_mode='native')
+            runtime = app.decision_runtime
+            assert runtime is app.chat_handler.decision_runtime
+            assert isinstance(runtime, WebDecisionRuntime)
             rig.state = runtime.store
             async with rig.client() as client:
                 coordinator = rig.coordinator(client)
@@ -546,6 +536,7 @@ def test_mounted_asgi_route_uses_single_receiver_and_real_controller(actual_app,
                 try:
                     async with ActualSocket(app, await cookie_for(app)) as socket:
                         ready = await socket.ready()
+                        assert ready['normal_chat_mode'] == 'pi'
                         assert ready['capabilities']['chat_docking']['execution_authorized'] is False
                         await socket.send({'message': QUERY})
                         accepted = await socket.receive()
@@ -565,7 +556,7 @@ def test_mounted_asgi_route_uses_single_receiver_and_real_controller(actual_app,
 
 @pytest.mark.parametrize('control', ['watch', 'invalid_refine'])
 def test_a2_c_controls_precede_held_ordinary_turn_guard(actual_app, tmp_path, control):
-    """Mounted receiver and actual A2 turn; only provider responses are synthetic."""
+    """Mounted Pi receiver and actual turn; only provider responses are synthetic."""
     from test_web_decision_runtime import chat_decision
     rig = Rig(tmp_path / 'held-ordinary-rig')
     async def run():
@@ -574,7 +565,7 @@ def test_a2_c_controls_precede_held_ordinary_turn_guard(actual_app, tmp_path, co
             entered.set()
             await release.wait()
             return chat_decision()
-        async with actual_app(mode='decision_a2', respond=held_ordinary) as app_case:
+        async with actual_app(respond=held_ordinary) as app_case:
             app = app_case.app
             runtime = app.decision_runtime
             rig.state = runtime.store
@@ -599,7 +590,9 @@ def test_a2_c_controls_precede_held_ordinary_turn_guard(actual_app, tmp_path, co
                         await socket.send({'message': '解释分子量', 'enable_rag': False})
                         ordinary = await socket.receive()
                         assert ordinary['type'] == 'request_accepted'
-                        await asyncio.wait_for(entered.wait(), 3)
+                        # Actual Pi starts before the provider can be held.
+                        # Post-entry control/busy and cleanup waits stay short.
+                        await asyncio.wait_for(entered.wait(), 15)
                         turn, = runtime.active_owners
                         assert not turn.task.done() and not turn.terminal_sent
                         if control == 'watch':

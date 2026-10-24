@@ -12,13 +12,13 @@ import pytest
 
 from src.agent.contracts import AgentContext, RunOutcome
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION, B1_TOOLS
-from src.agent.harness.decision_loop import ModelDecisionLoop
+from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.worker_ownership import WorkerOwner
 from src.agent.runtime.run_session import WorkflowRunSession
-from src.agent.harness.decision_bindings import B1BindingResolver
-from src.agent.harness.decision_policy import (
+from src.agent.scientific_session.decision_bindings import B1BindingResolver
+from src.agent.scientific_session.decision_policy import (
     DecisionBoundaryError, decision_system_message, encode_observation,
 )
 from src.agent.tooling.factory import build_tool_registry
@@ -49,7 +49,7 @@ def loop_case(tmp_path, monkeypatch):
         store = SQLiteAgentStateStore(str(tmp_path / f'loop-{len(registries)}.sqlite'))
         model = ScriptedModel(decisions)
         options = {} if profile is None else {'binding_profile': profile}
-        loop = ModelDecisionLoop(model, registry, store, mode=mode, **options)
+        loop = PiAgentRuntime(model, registry, store, mode=mode, **options)
         return SimpleNamespace(loop=loop, model=model, store=store, calls=calls,
                                bus=AgentEventBus(state_store=store))
 
@@ -181,7 +181,7 @@ def test_b1_requirement_prompt_preserves_redaction_and_alias_values():
 
 @pytest.mark.parametrize('bad', ['oversize', 'alias_oversize', 'cycle', 'subclass'])
 def test_b1_requirement_prompt_bounds_before_redaction(monkeypatch, bad):
-    import src.agent.harness.decision_policy as policy
+    import src.agent.scientific_session.decision_policy as policy
     def forbidden_scan(value):
         pytest.fail('unbounded/native-invalid payload reached the secret scanner')
     monkeypatch.setattr(policy, 'contains_secret_material', forbidden_scan)
@@ -261,7 +261,7 @@ def test_initial_clarification_never_mints_legacy_nonce(loop_case, mode):
     assert result.metadata.get('continuation_id') and not any(case.calls.values())
     saved = case.store.get_run('actual-b1')['metadata']['decision_continuation']
     assert saved['id'] == result.metadata['continuation_id']
-    assert saved['snapshot']['decision_protocol_revision'] == 8
+    assert saved['snapshot']['decision_protocol_revision'] == 11
     rejected = run(case, continuation_id='legacy-nonce', clarified_query='SMILES: CCO')
     assert rejected.metadata['stop_reason'] == 'continuation_rejected'
     assert len(case.model.messages) == 1
@@ -468,7 +468,7 @@ def test_native_admission_bounded_before_callbacks_or_copies(loop_case, mutation
 
 def test_original_admission_frozen_before_catalog_callbacks(loop_case, monkeypatch):
     case = loop_case([tool(), finish_last], [PropertyCalculator()])
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     catalog = module.authorized_catalog
     def mutate(registry, context, *args, **kwargs):
         result = catalog(registry, context, *args, **kwargs)
@@ -528,7 +528,7 @@ def test_uncited_success_does_not_satisfy_required_science(loop_case, sources):
 
 
 def test_legacy_nonce_helpers_explicitly_reject_b_profile():
-    from src.agent.harness.decision_continuation import claim_continuation, snapshot_payload
+    from src.agent.scientific_session.decision_continuation import claim_continuation, snapshot_payload
     loop = SimpleNamespace(binding_profile=B1_PROFILE_REVISION)
     session = SimpleNamespace(_decision_binding_profile=B1_PROFILE_REVISION)
     with pytest.raises(DecisionBoundaryError, match='continuation_rejected'):
@@ -540,7 +540,7 @@ def test_legacy_nonce_helpers_explicitly_reject_b_profile():
 @pytest.mark.parametrize('where', ['before', 'after'])
 def test_source_resolution_stays_owned_with_deadline_on_both_sides(loop_case, sources, monkeypatch, where):
     from src.agent.runtime.worker_ownership import _binding
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     source = sources('rag')
     timer = [100.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: timer[0]))
@@ -603,7 +603,7 @@ def test_actual_guard_unexpected_return_is_latched_before_next_model(loop_case, 
 
 
 def test_default_legacy_clock_order_unchanged(loop_case, monkeypatch):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     calls = []
     def now():
         calls.append(1)
@@ -640,7 +640,7 @@ def test_reverse_ancestor_expiry_prevents_target_consumer(loop_case, sources, mo
 
 
 def test_preparation_deadline_keeps_boundary_reason(loop_case, monkeypatch):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     timer = [100.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: timer[0]))
     prepare = module.prepare_binding_requirements
@@ -674,14 +674,13 @@ def test_native_proposal_arguments_are_bounded_before_model_dump(loop_case):
 @pytest.mark.parametrize('boundary', ['tail_acceptance', 'tail_boundary'])
 def test_tail_cancellation_drains_owned_worker_and_persists_one_cancelled_terminal(
         loop_case, monkeypatch, mode, boundary):
-    """Cancel real owned validation after the graph, never a mocked cancellation."""
+    """Cancel real owned validation after Pi, never a mocked cancellation."""
     import threading
-    from langgraph.graph import StateGraph
     from src.agent.runtime.worker_ownership import _binding
     from test_worker_ownership import signalled, pending
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
 
-    graph_done, terminal_phase = threading.Event(), threading.Event()
+    pi_done, terminal_phase = threading.Event(), threading.Event()
     entered, release, exited = (threading.Event() for _ in range(3))
     roots = []
     owner = WorkerOwner()
@@ -689,24 +688,19 @@ def test_tail_cancellation_drains_owned_worker_and_persists_one_cancelled_termin
     case = loop_case([tool(), finish_last], [PropertyCalculator()], mode=mode)
     terminal_names = {'task_completed', 'task_failed', 'task_cancelled', 'task_rejected'}
 
-    # Forward to the real compiled graph; mark only its actual successful return.
-    compile_graph = StateGraph.compile
-    def compile_and_mark(self, *args, **kwargs):
-        compiled = compile_graph(self, *args, **kwargs)
-        invoke = compiled.ainvoke
-        async def invoke_and_mark(*args, **kwargs):
-            result = await invoke(*args, **kwargs)
-            graph_done.set()
-            return result
-        monkeypatch.setattr(compiled, 'ainvoke', invoke_and_mark)
-        return compiled
-    monkeypatch.setattr(StateGraph, 'compile', compile_and_mark)
+    # Forward to the actual Pi bridge; mark only its successful return.
+    run_session = case.loop.run_session
+    async def run_and_mark(*args, **kwargs):
+        result = await run_session(*args, **kwargs)
+        pi_done.set()
+        return result
+    monkeypatch.setattr(case.loop, 'run_session', run_and_mark)
 
     persist = case.store.update_run_metadata
     def persist_and_mark(trace_id, metadata):
         result = persist(trace_id, metadata)
         if metadata.get('decision_loop', {}).get('phase') == 'terminal':
-            assert graph_done.is_set()
+            assert pi_done.is_set()
             terminal_phase.set()
         return result
     monkeypatch.setattr(case.store, 'update_run_metadata', persist_and_mark)
@@ -726,7 +720,7 @@ def test_tail_cancellation_drains_owned_worker_and_persists_one_cancelled_termin
     evaluate = module.evaluate_binding_acceptance
     def evaluate_and_block(*args, **kwargs):
         report = evaluate(*args, **kwargs)
-        if boundary == 'tail_acceptance' and graph_done.is_set() and not entered.is_set():
+        if boundary == 'tail_acceptance' and pi_done.is_set() and not entered.is_set():
             block_owned_validation()
         return report
     monkeypatch.setattr(module, 'evaluate_binding_acceptance', evaluate_and_block)
@@ -757,7 +751,7 @@ def test_tail_cancellation_drains_owned_worker_and_persists_one_cancelled_termin
 
         try:
             await signalled(entered)
-            assert graph_done.is_set() and len(roots) == 1
+            assert pi_done.is_set() and len(roots) == 1
             assert terminal_phase.is_set() is (boundary == 'tail_boundary')
             await still_owned()
             task.cancel()

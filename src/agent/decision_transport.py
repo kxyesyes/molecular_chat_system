@@ -391,19 +391,20 @@ def _snapshot_messages(messages, profile=ProtocolProfile.DECISION_V1):
     return copied, seen_calls
 
 
-def _validate_options(mode, max_tokens, timeout_seconds):
+def _validate_options(mode, max_tokens, timeout_seconds, temperature=0.0):
     if (
         type(mode) is not str or mode not in {"native", "json"}
         or type(max_tokens) is not int or not 1 <= max_tokens <= 8192
         or type(timeout_seconds) not in {int, float}
         or not 0 < timeout_seconds <= 60
+        or type(temperature) not in {int, float} or not 0 <= temperature <= 2
     ):
         raise DecisionProtocolError("invalid_decision_options")
 
 
-def _payload(model, messages, mode, max_tokens, profile=ProtocolProfile.DECISION_V1):
+def _payload(model, messages, mode, max_tokens, profile=ProtocolProfile.DECISION_V1, *, temperature=0.0):
     function = _function_name(profile)
-    payload = model._payload("", 0.0, max_tokens, stream=False)
+    payload = model._payload("", temperature, max_tokens, stream=False)
     payload["messages"] = messages
     if profile is ProtocolProfile.DECISION_V1:
         schema = decision_json_schema()
@@ -446,6 +447,61 @@ def _payload(model, messages, mode, max_tokens, profile=ProtocolProfile.DECISION
         }, *messages]
         payload["response_format"] = {"type": "json_object"}
     return payload
+
+
+_HISTORY_OMITTED = ('\nSome complete earlier conversation pairs were omitted for the input character budget. '
+                    'Do not infer omitted content, scientific values, or task completion.')
+
+
+def _budget_messages(messages, budget):
+    """Bound the final protocol input; only frozen ordinary history is optional.
+
+    This is a character limit, not a tokenizer estimate. Count message content
+    and native function arguments (which contain the JSON decision in that
+    protocol). Never slice a question, observation, proof, or protocol repair.
+    The durable Pi transcript and requirements remain complete and unchanged.
+    """
+    if (type(budget) is not dict or set(budget) != {'max_chars', 'history_max_chars', 'history'}
+            or any(type(budget[key]) is not int or budget[key] < 0
+                   for key in ('max_chars', 'history_max_chars'))):
+        raise DecisionProtocolError('invalid_decision_input_budget')
+    pairs = budget['history']
+    if type(pairs) is not list or len(pairs) > 20:
+        raise DecisionProtocolError('invalid_decision_input_budget')
+    optional = []
+    costs = []
+    for pair in pairs:
+        if (type(pair) is not dict or set(pair) != {'user', 'assistant'}
+                or any(type(value) is not str for value in pair.values())):
+            raise DecisionProtocolError('invalid_decision_input_budget')
+        costs.append(len(pair['user']) + len(pair['assistant']))
+        optional.extend({'role': role, 'content': pair[role]} for role in ('user', 'assistant'))
+    start = 0
+    while start < len(messages) and messages[start]['role'] == 'system':
+        start += 1
+    if messages[start:start + len(optional)] != optional:
+        # Only an exact trusted prefix is eligible, never an inferred tool pair.
+        raise DecisionProtocolError('invalid_decision_input_budget')
+    count = lambda message: len(message.get('content') or '') + sum(
+        len(call['function']['arguments']) for call in message.get('tool_calls', []))
+    total = sum(map(count, messages))
+    history_size = sum(costs)
+    dropped = 0
+    while dropped < len(costs) and (
+            history_size > budget['history_max_chars'] or total > budget['max_chars']):
+        if not dropped:
+            total += len(_HISTORY_OMITTED)
+        total -= costs[dropped]
+        history_size -= costs[dropped]
+        dropped += 1
+    if total > budget['max_chars']:
+        raise DecisionProtocolError('decision_input_budget_exceeded')
+    selected = [dict(message) for message in messages[:start]] + messages[start + dropped * 2:]
+    if dropped:
+        # The protocol always supplies a leading system message; count this
+        # fixed omission notice before accepting the selected input.
+        selected[0]['content'] += _HISTORY_OMITTED
+    return selected
 
 
 def _usage(value):
@@ -666,9 +722,11 @@ async def _post(client, url, headers, payload, timeout_seconds, journal=None, *,
             return await _read_post(owned, url, headers, payload, timeout_seconds, journal)
 
 
-async def request_decision(model, messages, *, mode="native", max_tokens=1500, timeout_seconds=60.0):
+async def request_decision(model, messages, *, mode="native", max_tokens=1500, timeout_seconds=60.0,
+                           temperature=0.0, input_budget=None):
     return await _request_protocol(model, messages, mode=mode, max_tokens=max_tokens,
-        timeout_seconds=timeout_seconds, profile=ProtocolProfile.DECISION_V1)
+        timeout_seconds=timeout_seconds, profile=ProtocolProfile.DECISION_V1,
+        temperature=temperature, input_budget=input_budget)
 
 
 async def request_ordinary_intent(model, messages, *, mode="native", max_tokens=256,
@@ -683,7 +741,8 @@ async def request_docking_preparation(model, messages, *, mode="native", max_tok
         timeout_seconds=timeout_seconds, profile=ProtocolProfile.DOCKING_PREPARATION_V1, journal=_journal)
 
 
-async def _request_protocol(model, messages, *, mode, max_tokens, timeout_seconds, profile, journal=None):
+async def _request_protocol(model, messages, *, mode, max_tokens, timeout_seconds, profile, journal=None,
+                            temperature=0.0, input_budget=None):
     started = time.perf_counter()
     docking = profile is ProtocolProfile.DOCKING_PREPARATION_V1
     metadata = {
@@ -731,7 +790,7 @@ async def _request_protocol(model, messages, *, mode, max_tokens, timeout_second
     except DecisionProtocolError as exc:
         return failure(AgentErrorCode.INTERNAL_ERROR, exc.code)
     try:
-        _validate_options(mode, max_tokens, timeout_seconds)
+        _validate_options(mode, max_tokens, timeout_seconds, temperature)
         history, previous_calls = _snapshot_messages(messages, profile)
     except DecisionProtocolError as exc:
         return failure(AgentErrorCode.INVALID_INPUT, exc.code)
@@ -759,7 +818,12 @@ async def _request_protocol(model, messages, *, mode, max_tokens, timeout_second
                 return failure(AgentErrorCode.INTERNAL_ERROR, "docking_preparation_client_not_opted_in")
     else:
         record("validated")
-        payload = _payload(model, history, mode, max_tokens, profile)
+        payload = _payload(model, history, mode, max_tokens, profile, temperature=temperature)
+        if input_budget is not None:
+            try:
+                payload['messages'] = _budget_messages(payload['messages'], input_budget)
+            except DecisionProtocolError as exc:
+                return failure(AgentErrorCode.INVALID_INPUT, exc.code)
         # Capture configuration before the first await; retain legacy ordering.
         client, url, headers = model.client, model.base_url, model._headers()
         metadata["request_attempts"] = 1

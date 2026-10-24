@@ -1,55 +1,29 @@
-"""T06-C contracts against the real ChatHandler; only external I/O is scripted."""
+"""T06-C Pi/full-Web terminals and isolated histories; scientific fixtures are offline."""
 import asyncio
 import json
 from copy import deepcopy
+from unittest.mock import Mock
 
 import pytest
-from fastapi import WebSocketDisconnect
 
+from src.agent.contracts import AgentErrorCode, ToolResult
+from src.agent.persistence import SQLiteAgentStateStore
+from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.tools.rag_search_tool import RAGSearchTool
 from src.web.chat_handler import ChatHandler
+from src.web.decision_runtime import _Sender, _Turn
 from src.web.rag_presentation import rag_info_molecule
-
-
-class Socket:
-    def __init__(self, query=None):
-        self.messages = []
-        self.scope = {}
-        self.query = query
-
-    async def send_text(self, text):
-        self.messages.append(json.loads(text))
-
-    async def accept(self):
-        pass
-
-    async def receive_text(self):
-        if self.query is None:
-            raise WebSocketDisconnect()
-        query, self.query = self.query, None
-        return json.dumps({"message": query, "enable_rag": False, "enable_tools": False})
-
-
-class Model:
-    def __init__(self, stream_error=True):
-        self.calls = []
-        self.prompts = []
-        self.stream_error = stream_error
-
-    async def generate(self, prompt, **kwargs):
-        self.calls.append("generate")
-        self.prompts.append(prompt)
-        return "model answer"
-
-    async def stream_generate(self, prompt, **kwargs):
-        self.calls.append("stream")
-        self.prompts.append(prompt)
-        yield "partial"
-        if self.stream_error:
-            raise RuntimeError("synthetic stream failure")
+from tests.agent.pi_web_support import (
+    PlannedWebModel, WebSocket, cleanup_web_handlers, make_web_handler,
+)
+from tests.agent.test_rag_tool_contract import InjectedService, record as rag_record
+from tests.agent.test_web_decision_runtime import (
+    actual_app, ActualSocket, cookie_for, chat_decision, result_of,
+)
 
 
 class Rag:
-    is_initialized = True
+    # Original pure-projection fixtures stay independent of owned retrieval.
     rows = [
         {"SMILES": "CCO", "similarity_score": .98765, "mw": 46.069,
          "source": "test-source", "unused": None, "source_index": 2,
@@ -58,52 +32,9 @@ class Rag:
          "provenance": {"vector_label": 0, "source_sha256": "a" * 64}},
     ]
 
-    def __init__(self):
-        self.calls = []
-
-    async def search_similar_molecules(self, message, count):
-        self.calls.append((message, count))
-        return deepcopy(self.rows)
-
-    async def search_similar_molecules_with_status(self, message, count):
-        records = await self.search_similar_molecules(message, count)
-        return {
-            "status": "succeeded" if records else "no_hits",
-            "records": records,
-        }
-
-
-class Agent:
-    def __init__(self, failed=False, rag=False, interpretation_overflow=False):
-        self.failed = failed
-        self.rag = rag
-        self.interpretation_overflow = interpretation_overflow
-        self.route_calls = []
-        self.calls = []
-
-    def should_use_tools(self, query):
-        self.route_calls.append(query)
-        return True
-
-    def execute(self, message, **kwargs):
-        self.calls.append(message)
-        result = {
-            "success": not self.failed,
-            "status": "failed" if self.failed else "completed",
-            "final_answer": "tool failed" if self.failed else "tool evidence",
-            "tools_used": [],
-            "workflow_plan": {"workflow_name": "test"},
-            "tool_results": {"rag_search": {"success": True, "data": deepcopy(Rag.rows)}}
-            if self.rag else {},
-        }
-        if self.interpretation_overflow:
-            result.update(partial=False, warnings=["适用范围仅限性质计算" * 5000],
-                          final_answer="性质计算完成，来源为合成测试。")
-        return result
-
 
 class History(list):
-    """Count actual appends, including duplicates that a length cap could hide."""
+    """Count admission appends, including duplicates hidden by the length cap."""
     def __init__(self, records=()):
         super().__init__(records)
         self.appended = []
@@ -118,100 +49,183 @@ def seeded_history(count=23):
                    for i in range(count))
 
 
-def terminals(socket):
-    return [item for item in socket.messages if item["type"] == "complete"]
+class Model(PlannedWebModel):
+    def __init__(self, *, fail=False):
+        super().__init__()
+        self.fail = fail
+
+    async def decide(self, messages, **kwargs):
+        if self.fail:
+            self.messages.append(deepcopy(messages))
+            raise RuntimeError('synthetic decision provider failure')
+        return await super().decide(messages, **kwargs)
+
+    async def stream_generate(self, *args, **kwargs):
+        pytest.fail('Pi must not invoke retired partial-prose streaming')
 
 
-@pytest.mark.parametrize("mode", [
-    "success", "failure", "clarification", "workflow", "stream_retry", "invalid_count",
-    "stream_success",
+class Properties(PropertyCalculator):
+    def __init__(self, *, fail=False):
+        super().__init__()
+        self.fail, self.calls = fail, []
+
+    def execute(self, query):
+        self.calls.append(deepcopy(query))
+        if self.fail:
+            return ToolResult.error_result(self.name, code=AgentErrorCode.TOOL_UNAVAILABLE,
+                                           message='synthetic property failure')
+        return super().execute(query)
+
+
+def local_case(tmp_path, *, tools=(), model=None, scientific=None, plain=(), owner='local-owner'):
+    handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'local.sqlite'),
+                               model=model or Model())
+    sender = _Sender(WebSocket(owner))
+    sender._runtime = handler.decision_runtime
+    sender.scientific_memory = scientific if scientific is not None else History()
+    sender.memory = list(plain)
+    return handler, sender
+
+
+async def invoke(handler, sender, query, **options):
+    """Run the actual Pi/Web turn and observe its delivered terminal."""
+    start = len(sender.websocket.messages)
+    payload = dict(message=query, enable_tools=True, enable_rag=False)
+    payload.update(options)
+    turn = _Turn(payload)
+    turn.task = asyncio.current_task()
+    runtime = handler.decision_runtime
+    runtime.active_owners.add(turn)
+    await runtime._execute(handler, sender, turn)
+    assert turn.worker_owner.pending_roots == 0
+    assert runtime.application.model_request_gate._readers == 0
+    assert turn not in runtime.active_owners
+    frames = sender.websocket.messages[start:]
+    complete = [frame for frame in frames if frame['type'] == 'complete']
+    assert len(complete) == 1 and turn.terminal_sent, frames
+    assert not any(frame['type'] == 'stream' for frame in frames)
+    return complete[0], frames
+
+
+@pytest.mark.parametrize('mode', [
+    'chat', 'tool_failure', 'invalid_molecule', 'scientific', 'model_failure', 'invalid_count',
 ])
-def test_each_terminal_path_appends_one_complete_history_entry(mode):
-    agent = Agent(failed=mode == "failure") if mode in {"failure", "workflow"} else None
-    model = Model(stream_error=mode != "stream_success")
-    handler = ChatHandler(model, Rag(), agent, {
-        "inference": {"stream": mode in {"stream_retry", "stream_success"}},
-    })
+def test_each_terminal_path_appends_one_scientific_marker_and_only_eligible_plain_pair(tmp_path, mode):
+    properties = Properties(fail=mode == 'tool_failure')
+    model = Model(fail=mode == 'model_failure')
     history = seeded_history()
-    original_records = list(history)
-    socket = Socket()
-    query = "请分析这个 SMILES 的成药性：CC(C)((。" if mode == "clarification" else "hello"
-    asyncio.run(handler._process_message(
-        socket, query, False, agent is not None,
-        mol_count=0 if mode == "invalid_count" else None, conversation_history=history,
-    ))
-    assert len(history) == 20
-    assert len(history.appended) == 1
-    assert all(after is before for after, before in zip(history[:-1], original_records[4:]))
-    record = history[-1]
-    assert record is history.appended[0]
-    assert record["user"] == query
-    assert record["agent_used"] is (agent is not None)
-    assert record["molecules_retrieved"] == 0
-    assert record["rag_enabled"] is False
-    assert set(record) == {
-        "user", "assistant", "agent_used", "agent_response", "rag_enabled", "molecules_retrieved",
-    } | ({"error"} if mode == "invalid_count" else set())
-    terminal = terminals(socket)
-    assert len(terminal) == 1
-    assert terminal[0]["type"] == "complete"
-    assert record["assistant"] == terminal[0].get("content", terminal[0].get("message"))
+    before = list(history)
+    plain = [{'user': 'earlier plain question', 'assistant': 'earlier plain answer'}]
+    handler, sender = local_case(tmp_path, tools=[properties], model=model,
+                                scientific=history, plain=plain)
+    query = ('请分析这个 SMILES 的成药性：CC(C)((。' if mode == 'invalid_molecule' else
+             '只计算 CCO 的分子量和 logP' if mode in {'tool_failure', 'scientific'} else 'hello')
+    options = {'mol_count': 0} if mode == 'invalid_count' else {}
+    complete, frames = asyncio.run(invoke(handler, sender, query, **options))
+
+    assert sender.scientific_memory is history
+    assert len(history) == 20 and len(history.appended) == 1
+    assert all(after is old for after, old in zip(history[:-1], before[4:]))
+    # Admission revokes old authority immediately. Only terminal delivery can
+    # replace this marker; neither list carries the retired mixed-history shape.
+    assert history.appended[0] == {'user': query, 'agent_used': False}
+    assert history[-1]['user'] == query
     assert handler.conversation_history == []
-    expected_calls = {
-        "success": ["generate"], "stream_retry": ["stream", "generate"],
-        "stream_success": ["stream"],
-    }
-    assert model.calls == expected_calls.get(mode, [])
-    assert record["agent_response"] == (record["assistant"] if agent is not None else None)
-    if agent is not None:
-        assert agent.calls == [query]
-    if mode == "failure":
-        assert terminal[0]["status"] == "failed"
-    if mode == "workflow":
-        assert record["assistant"] == "tool evidence"
-    if mode == "invalid_count":
-        assert record["error"]["code"] == "invalid_input"
-        assert record["error"]["message"]
-    if mode == "clarification":
-        assert "SMILES" in record["assistant"]
-    if mode == "stream_retry":
-        assert record["assistant"] == "model answer"
-        assert [item["content"] for item in socket.messages if item["type"] == "stream"] == ["partial"]
+    assert all(set(pair) == {'user', 'assistant'} for pair in sender.memory)
+    if mode == 'chat':
+        assert complete['status'] == 'completed'
+        assert sender.memory == plain + [{'user': query, 'assistant': complete['content']}]
+        assert len(model.messages) == 1 and properties.calls == []
+        assert history[-1] == {'user': query, 'agent_used': False}
+    else:
+        assert sender.memory == plain, 'scientific/rejected/failed content is not a plain chat pair'
+    if mode == 'scientific':
+        assert complete['status'] == 'completed'
+        assert properties.calls == [query] and len(model.messages) == 2
+        assert history[-1]['agent_used'] is True and history[-1]['property_evidence']
+        assert '分子量' in complete['content']
+    if mode == 'tool_failure':
+        # Pi can settle a scientific request as partial with an explicit failed
+        # observation. This is not the failed AgentResult injected by the old
+        # generic executor; provider failure below covers the failed terminal.
+        assert complete['status'] == 'partial'
+        assert len(properties.calls) == 1
+        assert history[-1] == {'user': query, 'agent_used': True}
+        result, = handler.web_results
+        assert not result.success and result.partial
+        assert result.tool_results[0].error.code is AgentErrorCode.TOOL_UNAVAILABLE
+        assert 'property_evidence' not in history[-1]
+        assert complete['failed_steps'] and complete['partial'] is True
+    if mode == 'model_failure':
+        assert complete['status'] == 'failed' and len(model.messages) == 1
+        assert properties.calls == [] and history[-1]['agent_used'] is False
+    if mode in {'invalid_count', 'invalid_molecule'}:
+        assert complete['status'] == 'rejected'
+        assert model.messages == [] and properties.calls == []
+        assert history[-1] == {'user': query, 'agent_used': False}
+    if mode == 'invalid_molecule':
+        assert 'SMILES' in complete['content']
+    assert not model.errors
 
 
-@pytest.mark.parametrize("agent_rag", [True, False])
-def test_rag_branches_preserve_payload_provenance_and_existing_limit(agent_rag):
-    model, rag = Model(), Rag()
-    agent = Agent(rag=True) if agent_rag else None
-    handler = ChatHandler(model, rag, agent, {"inference": {"stream": False}})
-    socket, history = Socket(), History()
-    query = "检索知识库中相关分子"
-    asyncio.run(handler._process_message(
-        socket, query, True, agent_rag, rag_count=1, conversation_history=history,
-    ))
-    packets = [item for item in socket.messages if item["type"] == "rag_info"]
-    assert len(packets) == 1
-    assert set(packets[0]) == {"type", "molecules", "message"}
-    assert packets[0]["message"] == (
-        "✅ 技能自动触发：从库中找到 2 个相关分子" if agent_rag else "✅ 找到 2 个相关分子"
-    )
-    assert len(packets[0]["molecules"]) == (1 if agent_rag else 2)
-    assert packets[0]["molecules"][0] == {
-        "smiles": "CCO", "similarity": .988,
-        "properties": {"mw": 46.07, "source": "test-source"},
-        "source_index": 2, "provenance": Rag.rows[0]["provenance"],
-    }
-    for card, row in zip(packets[0]["molecules"], Rag.rows):
-        assert card["source_index"] == row["source_index"]
-        assert card["provenance"] == row["provenance"]
-        assert "source_index" not in card["properties"] and "provenance" not in card["properties"]
-    assert len(history) == len(history.appended) == 1
-    assert history[0]["molecules_retrieved"] == 2
-    assert history[0]["rag_enabled"] is True
-    assert model.calls == ([] if agent_rag else ["generate"])
-    assert rag.calls == ([] if agent_rag else [(query, 1)])
-    assert len(terminals(socket)) == 1
-    assert terminals(socket)[0]["type"] == "complete"
+class CountedService(InjectedService):
+    """A strict synthetic producer honors k without changing source identity."""
+    def _synthetic_envelope(self, query, k):
+        from src.rag.receipt import canonical_digest
+        envelope = super()._synthetic_envelope(query, k)
+        envelope['records'] = deepcopy(envelope['records'][:k])
+        count = len(envelope['records'])
+        envelope['receipt']['result_sha256'] = canonical_digest(envelope['records'])
+        envelope['receipt']['diagnostics'].update(effective_k=count, score_count=count,
+                                                   label_count=count, accepted_count=count)
+        return envelope
+
+
+@pytest.mark.parametrize('enable_tools', [True, False])
+@pytest.mark.parametrize('count', [1, 2])
+def test_rag_capability_paths_preserve_raw_receipt_and_cap_accepted_cards(tmp_path, enable_tools, count):
+    rows = []
+    for index, source in enumerate(Rag.rows):
+        row = rag_record()
+        row.update(deepcopy(source), source_index=index)
+        row['provenance'] = {**rag_record()['provenance'], 'vector_label': index}
+        rows.append(row)
+    service = CountedService(rows)
+    before = deepcopy(service.rows)
+    handler, sender = local_case(tmp_path, tools=[RAGSearchTool(service)])
+    query = '检索知识库中相关分子'
+    complete, frames = asyncio.run(invoke(handler, sender, query,
+        enable_tools=enable_tools, enable_rag=True, rag_count=count))
+    assert service.calls == [(query, count)]
+    assert service.rows == before
+    assert complete['status'] == 'completed'
+    result, = handler.web_results
+    observation, = result.tool_results
+    assert observation.data == before[:count] and len(observation.data) == count
+    assert observation.evidence[0]['retrieval_receipt']['diagnostics']['requested_k'] == count
+    packet, = [frame for frame in frames if frame['type'] == 'rag_info']
+    assert set(packet) == {'type', 'molecules', 'message'}
+    assert len(packet['molecules']) == count, 'same immutable request cap with science tools on or off'
+    approved, = [block for block in json.loads(result.final_answer)['observations']
+                  if block['tool'] == 'rag_search']
+    assert packet['molecules'] == [rag_info_molecule(row) for row in approved['data'][:count]]
+    card = packet['molecules'][0]
+    assert card['smiles'] == 'CCO' and card['similarity'] == .988
+    assert card['source_index'] == before[0]['source_index']
+    assert card['provenance'] == approved['data'][0]['provenance']
+    assert card['provenance']['source_sha256'] == before[0]['provenance']['source_sha256']
+    assert 'source_index' not in card['properties'] and 'provenance' not in card['properties']
+    # Arbitrary CSV values survive in the immutable observation, not the
+    # accepted scientific card's closed field set.
+    assert 'mw' not in card['properties'] and 'source' not in card['properties']
+    public, = [frame for frame in frames if frame['type'] == 'agent_result']
+    assert public['metadata']['rag_requested'] is True
+    assert public['metadata']['retrieval_performed'] is True
+    assert len(sender.scientific_memory) == len(sender.scientific_memory.appended) == 1
+    assert sender.memory == [] and handler.conversation_history == []
+    assert len(handler.model.messages) == 2
+    checkpoint = handler.decision_runtime.store.latest_checkpoint(result.trace_id)
+    assert checkpoint['output']['data'] == before[:count]
 
 
 @pytest.mark.parametrize("size", [0, 19, 20, 23])
@@ -250,71 +264,152 @@ def test_rag_payload_helper_uses_shared_projection_without_mutating_records(empt
         assert json.loads(result["molecules"][-1]["properties"]["nested"]) == {"labels": ["source", 2]}
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_interpretation_budget_terminal_keeps_three_field_shape_and_appends_once(stream):
-    model, agent, socket = Model(), Agent(interpretation_overflow=True), Socket()
-    handler = ChatHandler(model, Rag(), agent, {
-        "inference": {"stream": stream}, "agent": {"summarize_workflow_results": True},
-    })
+@pytest.mark.parametrize('stream', [False, True])
+def test_scientific_terminal_never_invokes_retired_prose_summary_or_stream(tmp_path, stream):
+    properties = Properties()
     history = seeded_history()
     before = list(history)
-    asyncio.run(handler._process_message(socket, "解释结果", False, True, conversation_history=history))
-    terminal = terminals(socket)
-    assert len(terminal) == 1
-    assert terminal[0]["type"] == "complete"
-    assert terminal[0]["error"] == {"code": "interpretation_budget_exceeded"}
-    assert "性质计算完成，来源为合成测试。" in terminal[0]["content"]
-    assert "未进行模型总结" in terminal[0]["content"]
+    handler, sender = local_case(tmp_path, tools=[properties], scientific=history)
+    handler.config.update(inference={'stream': stream},
+                          agent={'summarize_workflow_results': True})
+    complete, frames = asyncio.run(invoke(handler, sender, '只计算 CCO 的分子量和 logP'))
+    assert complete['status'] == 'completed'
     assert len(history) == 20 and len(history.appended) == 1
     assert all(after is old for after, old in zip(history[:-1], before[4:]))
-    assert history[-1] is history.appended[0]
-    assert history[-1] == {"user": "解释结果", "assistant": terminal[0]["content"], "agent_used": True}
-    assert handler.conversation_history == []
-    assert agent.calls == ["解释结果"] and model.calls == []
+    assert history[-1]['property_evidence'] and history[-1]['agent_used'] is True
+    assert sender.memory == [] and handler.conversation_history == []
+    assert properties.calls == ['只计算 CCO 的分子量和 logP'] and len(handler.model.messages) == 2
+    assert not any(frame['type'] == 'stream' for frame in frames)
+    public, = [frame for frame in frames if frame['type'] == 'agent_result']
+    assert public['display_answer'] == complete['content']
+    assert public['final_answer'] == handler.web_results[-1].final_answer
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_input_budget_terminal_never_appends_or_trims_history_or_calls_model(stream):
-    model, agent, rag, socket = Model(), Agent(), Rag(), Socket()
-    handler = ChatHandler(model, rag, agent, {"inference": {"stream": stream, "input_max_chars": 6000}})
+@pytest.mark.parametrize('stream', [False, True])
+def test_input_rejection_changes_only_scientific_marker_not_plain_pairs(tmp_path, stream):
+    # Parent owns budget enforcement; this test covers only its history effect.
+    properties = Properties()
     history = seeded_history()
     before = list(history)
-    asyncio.run(handler._process_message(socket, "问" * 7000, True, True, conversation_history=history))
-    assert len(socket.messages) == 1
-    assert socket.messages[0]["type"] == "complete"
-    assert socket.messages[0]["error"] == {"code": "input_budget_exceeded"}
-    assert history == before and len(history) == 23 and history.appended == []
-    assert all(after is old for after, old in zip(history, before))
-    assert handler.conversation_history == []
-    assert agent.route_calls == agent.calls == rag.calls == model.calls == []
+    plain = [{'user': 'retained plain question', 'assistant': 'retained plain answer'}]
+    handler, sender = local_case(tmp_path, tools=[properties], scientific=history, plain=plain)
+    handler.config['inference'] = {'stream': stream, 'input_max_chars': 6000}
+    complete, frames = asyncio.run(invoke(handler, sender, '问' * 7000, enable_rag=True))
+    assert complete['status'] == 'rejected'
+    assert len([frame for frame in frames if frame['type'] == 'complete']) == 1
+    assert len(history) == 20 and len(history.appended) == 1
+    assert all(after is old for after, old in zip(history[:-1], before[4:]))
+    assert history[-1] == {'user': '问' * 7000, 'agent_used': False}
+    assert sender.memory == plain and handler.conversation_history == []
+    assert properties.calls == [] and handler.model.messages == []
 
 
-def test_explicit_histories_and_handler_default_history_remain_independent():
-    model = Model()
-    handler = ChatHandler(model, Rag(), None, {"inference": {"stream": False}})
-    first, second = History(), History()
+def test_explicit_socket_histories_and_handler_default_remain_independent(tmp_path):
+    handler, first = local_case(tmp_path)
+    second = _Sender(WebSocket('local-owner'))
+    second._runtime = handler.decision_runtime
+    second.scientific_memory = History()
     default = handler.conversation_history
-    asyncio.run(handler._process_message(Socket(), "first private question", False, False, conversation_history=first))
-    asyncio.run(handler._process_message(Socket(), "second private question", False, False, conversation_history=second))
-    assert first is not second
-    assert len(first) == len(second) == 1 and first[0] is not second[0]
-    assert "first private question" not in model.prompts[1]
-    assert default is handler.conversation_history and default == []
-    asyncio.run(handler._process_message(Socket(), "default question", False, False))
-    assert default == [dict(user="default question", assistant="model answer", agent_used=False,
-                            agent_response=None, rag_enabled=False, molecules_retrieved=0)]
-    assert len(first) == len(second) == 1
-    other = ChatHandler(Model(), Rag(), None, {})
+
+    async def run():
+        await invoke(handler, first, 'first private question', enable_tools=False)
+        await invoke(handler, second, 'second private question', enable_tools=False)
+        assert len(first.scientific_memory) == len(second.scientific_memory) == 1
+        assert first.scientific_memory[0] is not second.scientific_memory[0]
+        assert len(first.memory) == len(second.memory) == 1
+        assert 'first private question' not in json.dumps(handler.model.messages[1])
+        assert default is handler.conversation_history and default == []
+        await invoke(handler, first, 'next question', enable_tools=False)
+        assert len(first.memory) == 2 and len(second.memory) == 1
+        messages = [m for m in handler.model.messages[-1] if m['role'] != 'system']
+        assert messages[0] == {'role': 'user', 'content': 'first private question'}
+        assert messages[1] == {'role': 'assistant', 'content': first.memory[0]['assistant']}
+        assert messages[-1] == {'role': 'user', 'content': 'next question'}
+        assert 'second private question' not in json.dumps(messages)
+    asyncio.run(run())
+    other, _ = local_case(tmp_path / 'other')
     assert other.conversation_history == [] and other.conversation_history is not default
 
 
-def test_actual_websocket_connections_do_not_share_history():
-    model = Model()
-    handler = ChatHandler(model, Rag(), None, {"inference": {"stream": False}})
-    asyncio.run(handler.handle_websocket(Socket("connection one private question")))
-    asyncio.run(handler.handle_websocket(Socket("connection two private question")))
-    assert model.calls == ["generate", "generate"]
-    assert "connection one private question" in model.prompts[0]
-    assert "connection one private question" not in model.prompts[1]
-    assert "connection two private question" in model.prompts[1]
-    assert handler.conversation_history == []
+@pytest.mark.parametrize('scientific', [False, True])
+def test_histories_publish_only_after_terminal_delivery(tmp_path, monkeypatch, scientific):
+    properties = Properties()
+    handler, sender = local_case(tmp_path, tools=[properties], plain=[
+        {'user': 'earlier plain question', 'assistant': 'earlier plain answer'}])
+
+    async def run():
+        await invoke(handler, sender, '只计算 CCO 的分子量和 logP')
+        prior = sender.scientific_memory[-1]
+        assert prior['property_evidence']
+        snapshot, plain = deepcopy(prior), deepcopy(sender.memory)
+        entered, release = asyncio.Event(), asyncio.Event()
+        send = sender.websocket.send_text
+        start = len(sender.websocket.messages)
+        async def held(text):
+            if json.loads(text)['type'] == 'complete':
+                entered.set()
+                await release.wait()
+            await send(text)
+        monkeypatch.setattr(sender.websocket, 'send_text', held)
+        query = '只计算 CCN 的分子量和 logP' if scientific else 'hello'
+        task = asyncio.create_task(invoke(handler, sender, query))
+        try:
+            await asyncio.wait_for(entered.wait(), 10)
+            assert sender.memory == plain
+            assert sender.scientific_memory[-1] == {'user': query, 'agent_used': False}
+            assert sender.scientific_memory[-1] is sender.scientific_memory.appended[-1]
+            assert sender.scientific_memory[-2] is prior and prior == snapshot
+            assert not any(frame['type'] == 'complete'
+                           for frame in sender.websocket.messages[start:])
+        finally:
+            release.set()
+            complete, _ = await task
+        assert complete['status'] == 'completed'
+        assert sender.scientific_memory[-2] is prior and prior == snapshot
+        assert len(sender.scientific_memory.appended) == 2
+        if scientific:
+            assert sender.memory == plain
+            assert sender.scientific_memory[-1]['property_evidence']['smiles'] == 'CCN'
+        else:
+            assert sender.memory == plain + [{'user': query, 'assistant': complete['content']}]
+            assert sender.scientific_memory[-1] == {'user': query, 'agent_used': False}
+    asyncio.run(run())
+
+
+def test_actual_websocket_connections_do_not_share_history(actual_app, monkeypatch):
+    """Even the same authenticated owner gets fresh per-connection Pi history."""
+    first_query, second_query = 'Explain logP', '解释分子生成的概念'
+    private_answer = 'Connection one private answer'
+
+    async def respond(payload):
+        return chat_decision(private_answer if payload['messages'][-1]['content'] == first_query
+                             else 'Connection two answer')
+
+    async def run():
+        async with actual_app(respond=respond) as bundle:
+            app = bundle.app
+            handler = app.chat_handler
+            default = handler.conversation_history
+            forbidden = Mock(side_effect=AssertionError('isolated chat dispatched a tool'))
+            monkeypatch.setattr(app.agent_system, 'execute', forbidden)
+            assert not hasattr(handler, '_process_message')
+            for adapter in app.agent_tool_registry.as_mapping().values():
+                monkeypatch.setattr(adapter, 'execute', forbidden)
+            cookie = await cookie_for(app)
+            for query in (first_query, second_query):
+                async with ActualSocket(app, cookie) as socket:
+                    assert (await socket.ready())['normal_chat_mode'] == 'pi'
+                    result = result_of(await socket.turn({
+                        'message': query, 'enable_rag': False, 'enable_tools': False}))
+                    assert result['success'] and result['status'] == 'completed'
+                    assert result['tool_result_sequence'] == []
+                    assert app.agent_state_store.get_tool_executions(result['trace_id']) == []
+            assert len(bundle.calls) == 2
+            for call, query in zip(bundle.calls, (first_query, second_query)):
+                assert [m for m in call['messages'] if m['role'] != 'system'] == [
+                    {'role': 'user', 'content': query}]
+            assert first_query not in json.dumps(bundle.calls[1], ensure_ascii=False)
+            assert private_answer not in json.dumps(bundle.calls[1], ensure_ascii=False)
+            assert default is handler.conversation_history and default == []
+            assert not forbidden.called and not bundle.rag.retrieve.called
+    asyncio.run(run())

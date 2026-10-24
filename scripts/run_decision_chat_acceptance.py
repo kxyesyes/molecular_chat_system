@@ -1,4 +1,4 @@
-"""Small isolated real-model acceptance. No .env loading or production changes."""
+"""Isolated Pi acceptance for cloud or local Ollama; no .env loading or production changes."""
 import argparse
 import asyncio
 import json
@@ -18,6 +18,7 @@ if str(ROOT) not in sys.path:
 # Closed transport vocabulary: syntactically safe arbitrary strings can still be secrets.
 PUBLIC_REASONS = frozenset('''unexpected_finish_reason decision_http_error
 decision_timeout decision_provider_unavailable decision_model_not_configured
+decision_endpoint_rejected
 invalid_decision_schema invalid_decision_json invalid_decision_document
 duplicate_json_key nonfinite_json_number decision_too_large decision_too_deep
 invalid_decision_response invalid_decision_choices invalid_decision_message
@@ -25,6 +26,8 @@ invalid_decision_refusal decision_refused incomplete_decision_response
 ambiguous_decision_response invalid_function_call duplicate_call_id
 unsupported_decision_encoding decision_response_too_large invalid_decision_messages
 unmatched_tool_message missing_tool_observation invalid_decision_options'''.split())
+
+REPORT_SCOPE = 'isolated ChatHandler entry; not production browser acceptance; temporary state removed'
 
 
 class Capture:
@@ -58,7 +61,7 @@ class DecisionProbe:
 
 async def run_acceptance(model, mode='native'):
     from src.agent.contracts import AgentContext
-    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
     from src.agent.persistence.redaction import sanitize_bounded
     from src.agent.tooling.factory import build_tool_registry
@@ -71,7 +74,7 @@ async def run_acceptance(model, mode='native'):
     try:
         with tempfile.TemporaryDirectory(prefix='medchat-isolated-chat-') as directory:
             store = SQLiteAgentStateStore(Path(directory) / 'state.sqlite')
-            loop = ModelDecisionLoop(probe, registry, store, mode=mode, max_model_requests=4,
+            loop = PiAgentRuntime(probe, registry, store, mode=mode, max_model_requests=4,
                                      max_tool_attempts=2, timeout_seconds=90)
             handler = ChatHandler(None, None, None, {})
             cases = [
@@ -95,7 +98,7 @@ async def run_acceptance(model, mode='native'):
                 first_call = len(probe.calls)
                 started = time.monotonic()
                 result = await handler.process_decision_message(capture, **kwargs)
-                checks = {}
+                checks = {'pi_runtime_backend': result.metadata.get('backend') == 'pi'}
                 terminal_count = 1
                 if case_id == 'CHAT-003':
                     waiting = result.metadata.get('waiting_for_input', False)
@@ -104,6 +107,7 @@ async def run_acceptance(model, mode='native'):
                     if waiting and continuation:
                         result = await handler.process_decision_message(capture, **kwargs,
                             continuation_id=continuation, clarified_query='SMILES: CCN')
+                        checks['pi_runtime_backend'] &= result.metadata.get('backend') == 'pi'
                         terminal_count += 1
                     checks['clarification_resumed'] = bool(terminal_count == 2 and result.success)
                 completes = [m for m in capture.messages if m['type'] == 'complete']
@@ -156,7 +160,7 @@ async def run_acceptance(model, mode='native'):
     report = {'status': 'passed' if count == len(reports) else 'partial' if count else 'failed',
               'provider': 'caller-supplied', 'model': 'runtime-configured', 'mode': mode,
               'pass_rate': count / len(reports), 'cases': reports,
-              'scope': 'isolated ChatHandler entry; not production browser acceptance; temporary state removed'}
+              'scope': REPORT_SCOPE}
     return sanitize_bounded(report, max_depth=12, max_items=128, max_text_chars=512)[0]
 
 
@@ -182,24 +186,30 @@ def open_report(path):
     return path.open('x', encoding='utf-8')
 
 
-def validate_provider_endpoint(base):
+def validate_provider_endpoint(base, provider='cloud'):
     """Reject ambiguous or credential-bearing URLs before constructing a client."""
     if any(c.isspace() or ord(c) < 32 or c in '\\?#' for c in base):
         raise ValueError('unsafe_endpoint_configuration')
     url = urlsplit(base)
-    if (url.scheme != 'https' or not url.hostname or url.username is not None
+    schemes = {'http', 'https'} if provider == 'ollama' else {'https'}
+    if (url.scheme not in schemes or not url.hostname or url.username is not None
             or url.password is not None or url.port == 0):
         raise ValueError('unsafe_endpoint_configuration')
+    if provider == 'ollama':
+        from src.system.llm_transport import validate_ollama_endpoint
+        validate_ollama_endpoint(base)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=('native', 'json'), default='native')
+    parser.add_argument('--provider', choices=('cloud', 'ollama'), default='cloud')
+    parser.add_argument('--mode', choices=('native', 'json'), default='native',
+                        help='Wire mode (default: native; json recommended for Ollama)')
     parser.add_argument('--output', type=Path, default=ROOT / f'outputs/agent_evaluation/decision_chat_{uuid4().hex}.json')
     args = parser.parse_args(argv)
     try:
         with open_report(args.output) as output:
-            report = execute(args.mode)
+            report = execute(args.mode, args.provider)
             output.write(json.dumps(report, ensure_ascii=False, indent=2))
     except (OSError, ValueError):
         print(json.dumps({'status': 'failed', 'reason': 'unsafe_report_path'}))
@@ -208,25 +218,44 @@ def main(argv=None):
     return 0 if report['status'] == 'passed' else 2
 
 
-def execute(mode):
+def execute(mode, provider='cloud'):
     # Values stay in memory only. Never inspect a secret file or print configuration.
-    key = os.environ.get('OPENAI_COMPATIBLE_API_KEY', '').strip()
-    base = os.environ.get('OPENAI_COMPATIBLE_BASE_URL', '').strip()
-    name = os.environ.get('OPENAI_COMPATIBLE_MODEL', '').strip()
-    if not all((key, base, name)):
-        report = {'status': 'skipped', 'reason': 'missing_runtime_configuration', 'cases': []}
+    if provider == 'ollama':
+        key = None
+        base = os.environ.get('OLLAMA_BASE_URL', 'http://127.0.0.1:11434').strip()
+        name = os.environ.get('OLLAMA_CHAT_MODEL', '').strip()
+    else:
+        key = os.environ.get('OPENAI_COMPATIBLE_API_KEY', '').strip()
+        base = os.environ.get('OPENAI_COMPATIBLE_BASE_URL', '').strip()
+        name = os.environ.get('OPENAI_COMPATIBLE_MODEL', '').strip()
+    configured = bool(base and name) if provider == 'ollama' else all((key, base, name))
+    if not configured:
+        reason = 'missing_ollama_chat_model' if provider == 'ollama' and not name else 'missing_runtime_configuration'
+        report = {'status': 'skipped', 'reason': reason, 'cases': []}
     else:
         try:
-            validate_provider_endpoint(base)
+            validate_provider_endpoint(base, provider)
             import httpx
             from src.agent.openai_compatible_model import OpenAICompatibleModel
             async def request():
+                if provider == 'ollama':
+                    from src.agent import decision_transport
+                    from src.system.ollama_model import OllamaModel
+                    from src.system.model_lifecycle import finish_on_cancel
+                    # Same canonical model and explicit injection as Web. The
+                    # model owns per-transaction local facades and their cleanup.
+                    model = OllamaModel(base_url=base, model_name=name, decision_transport=decision_transport)
+                    try:
+                        return await run_acceptance(model, mode)
+                    finally:
+                        await finish_on_cancel(model.close())
                 async with httpx.AsyncClient(timeout=90, follow_redirects=False, trust_env=False) as client:
                     model = OpenAICompatibleModel(key, name, base, client=client)
                     return await run_acceptance(model, mode)
             report = asyncio.run(request())
         except Exception:
             report = {'status': 'failed', 'reason': 'isolated_acceptance_unavailable', 'cases': []}
+    report.update(provider=provider, mode=mode, scope=REPORT_SCOPE)
     return report
 
 

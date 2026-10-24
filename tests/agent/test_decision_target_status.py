@@ -6,7 +6,7 @@ from dataclasses import replace
 import pytest
 
 from src.agent.contracts import ToolResult, ObservationStatus
-from src.agent.harness.decision_execution import SingleAttemptTool, settle_owned_call
+from src.agent.scientific_session.decision_execution import SingleAttemptTool, settle_owned_call
 from src.agent.runtime.worker_ownership import WorkerOwner
 from src.agent.tooling.adapters import LegacyPythonToolAdapter
 from src.agent.tooling.factory import build_tool_registry

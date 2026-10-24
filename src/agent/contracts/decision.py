@@ -124,8 +124,8 @@ def _reject_constant(_value):
     raise DecisionProtocolError("nonfinite_json_number")
 
 
-def _check_depth(value, depth=0):
-    if depth > MAX_DECISION_DEPTH:
+def _check_depth(value, depth=0, *, max_depth=MAX_DECISION_DEPTH):
+    if depth > max_depth:
         raise DecisionProtocolError("decision_too_deep")
     if isinstance(value, float) and not math.isfinite(value):
         raise DecisionProtocolError("nonfinite_json_number")
@@ -136,18 +136,24 @@ def _check_depth(value, depth=0):
             key.encode("utf-8")
     children = value.values() if isinstance(value, dict) else value if isinstance(value, list) else ()
     for child in children:
-        _check_depth(child, depth + 1)
+        _check_depth(child, depth + 1, max_depth=max_depth)
 
 
-def decode_protocol_json(raw: str, *, max_bytes=MAX_DECISION_BYTES):
-    """Decode bounded, unambiguous provider JSON before schema validation."""
+def decode_protocol_json(raw: str, *, max_bytes=MAX_DECISION_BYTES, max_depth=MAX_DECISION_DEPTH):
+    """Decode strict bounded JSON; outer RPC frames may opt into a wider bound.
+
+    Decision/schema parsers keep the default depth of 16. The opt-in ceiling is
+    itself fixed so a caller cannot accidentally request an unbounded walk.
+    """
     if type(raw) is not str or not raw:
         raise DecisionProtocolError("invalid_decision_document")
+    if type(max_depth) is not int or not 0 <= max_depth <= 64:
+        raise DecisionProtocolError("invalid_decision_options")
     try:
         if len(raw.encode("utf-8")) > max_bytes:
             raise DecisionProtocolError("decision_too_large")
         value = json.loads(raw, object_pairs_hook=_unique_object, parse_constant=_reject_constant)
-        _check_depth(value)
+        _check_depth(value, max_depth=max_depth)
     except DecisionProtocolError:
         raise
     except (UnicodeError, ValueError, RecursionError):

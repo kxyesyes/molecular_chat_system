@@ -5,7 +5,7 @@ import pytest
 
 from src.agent.capabilities.catalog import CAPABILITY_CATALOG, TOOL_ALIASES, capability_for_tool
 from src.agent.contracts import AgentContext
-from src.agent.harness.decision_policy import authorized_catalog
+from src.agent.scientific_session.decision_policy import authorized_catalog
 from src.agent.tooling.factory import (
     LegacyQueryInput, TOOL_AGENT_OWNERS, build_tool_registry,
 )

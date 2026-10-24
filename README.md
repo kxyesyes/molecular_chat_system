@@ -14,13 +14,15 @@ MedChat 是面向药物设计与药物化学研究的 Web 平台，整合自然�
 ### 环境要求
 
 - Python 3.10+
+- Node.js >=22.19.0，推荐 24.15.0（Pi 运行时；不是前端构建工具）
 - Ollama 本地服务
 - 建议具备 8GB 以上内存
 
 ### 安装依赖
 
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
 ```
 
 ### 启动项目
@@ -31,15 +33,21 @@ python main.py
 
 应用默认监听 `127.0.0.1:6000`，生产环境通过 nginx 的 HTTPS 域名访问。6000 是浏览器受限端口，直接打开可能出现 `ERR_UNSAFE_PORT`；本机浏览器调试可用 `python main.py --port 6001`，再访问 `http://127.0.0.1:6001`。端口、主机、worker 数等运行参数可通过 `.env` 或命令行覆盖；命令行参数优先级最高。已有 `.env` 和服务器 nginx 配置不会随 Git 更新自动改写，迁移步骤见 [部署教程](docs/DEPLOYMENT_TUTORIAL.md#默认端口从-6001-迁移到-6000)。
 
-聊天运行链路默认保持稳定的 `legacy` 入口。完成决策链验收后，可在启动前显式启用：
+网页通用 Agent 唯一运行时为官方 Pi SDK **1.4.0**（`runtime/pi`），默认配置如下，无需显式设置即可使用：
 
 ```powershell
-$env:MEDCHAT_CHAT_PROFILE = "decision_a2"   # 或 semantic_v1
+$env:MEDCHAT_CHAT_PROFILE = "pi"          # semantic_v1 在同一 Pi 上启用语义准入
 $env:MEDCHAT_DECISION_WIRE_MODE = "native" # 或 json
 python main.py
 ```
 
-未设置 `MEDCHAT_CHAT_PROFILE` 时不会切换入口；发现问题可改回 `legacy`，保留回退路径。
+`decision_a2` 仅是临时迁移别名，仍执行 Pi；`legacy` 已拒绝。Pi 不可用时明确失败，不自动回退到旧 harness。
+确定性工作流仍由 Supervisor 直接调用工作流执行器，不是另一套通用聊天运行时。
+
+旧 checkpoint 保留为可读历史，但拒绝执行续接，不自动转换或清库。回滚须恢复完整 Git 发布版本及其
+Python/Node 依赖、npm manifest/锁文件，并按该版本执行 `npm ci`，不能只切 profile。
+安装、权限和迁移边界见 [Pi 运行手册](docs/PI_RUNTIME.md)。云端与本地真实模型/科学工具端到端验收均为
+**PENDING（待验收）**；本分支替换尚不能宣称已完整验证。
 
 ### 主模型接入与一次保存
 

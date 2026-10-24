@@ -1,28 +1,30 @@
 # Agent 当前架构与维护入口
 
-核对日期：2026-09-25。当前分支已同步 main `aa86377`：已包含 MolecularAgent/ReAct 薄适配（PR #55/#56）、Web partial 展示（#57）、科研续接（#60）、类药性评分/证据边界修复（#61）、终态标签（#62）与聊天展示/提示提取（#63）。本分支继续领域 API 等价拆分，发布状态见[本批交接](handoff/domain-api-separation.md)。代码合并不代表生产已更新。此前隔离验收与任务书对账见[集成验收记录](handoff/main-integration-acceptance.md)。
-本文记录源码维护入口；是否合并以每节明确标注和 Git 历史为准，不表示已生产部署或通过真实科研验收。后续调用关系变化也应同步更新本页。
+Pi 入口核对日期：2026-10-23。当前分支的网页通用 Agent 唯一运行时为官方 Pi SDK **1.4.0**；Python 保留领域授权、科学执行和结果校验，Supervisor 的确定性工作流直接调用执行器。安装与配置见 [Pi 运行手册](PI_RUNTIME.md)。
+本文记录本分支源码维护入口，不表示已合并或生产部署；云端与本地真实模型/科学工具端到端验收均为 **PENDING（待验收）**，不能宣称替换已完整验证。此前领域拆分与隔离验收仅作历史证据，见[领域 API 交接](handoff/domain-api-separation.md)与[集成验收记录](handoff/main-integration-acceptance.md)。
 
 协作约束见 [AGENTS.md](../AGENTS.md) 和 [项目规范](PROJECT_STANDARDS.md)。[旧问题清单](issues_and_improvement_plan.md) 仅供历史追溯。
 
-## 1. 先分清三类入口
+## 1. 先分清运行入口
 
 | 类别 | 实际位置与调用 | 维护边界 |
 |---|---|---|
-| 正式网页聊天 | [main.py](../main.py) → [MolecularChatApp](../src/web/app.py) 注册 `/ws` → [ChatHandler.handle_websocket](../src/web/chat_handler.py) | `_create_chat_agent()` 构造 `SupervisorAgent`；没有 ChatHandler 时以 1011 失败关闭，不回退到旧聊天实现。普通聊天不等于科研工具调用。 |
+| 正式网页聊天 | [main.py](../main.py) → [MolecularChatApp](../src/web/app.py) 注册 `/ws` → [ChatHandler.handle_websocket](../src/web/chat_handler.py) → [WebDecisionRuntime](../src/web/decision_runtime.py) → [PiAgentRuntime](../src/agent/pi_runtime/runtime.py) | Pi 是唯一通用 Agent 循环；没有组装 WebDecisionRuntime 时以 `pi_runtime_unavailable` / 1011 失败关闭，不回退旧聊天。`_create_chat_agent()` 保留 Supervisor 的工具/工作流组装职责，不是另一套 Web 通用循环。 |
 | 工作流 HTTP API | [agent_workflow_routes.py](../src/web/routes/agent_workflow_routes.py) 的 `/api/agent/workflows/plan`、`/run` | 使用应用注入的 `_create_supervisor_agent()`，注册表审计、specialist 委派；正式应用的 `run` 经 `ModelRequestGate.submit_background()` 转交 TaskManager，再调用 `SupervisorAgent.run()`，模型使用权覆盖实际 worker 生命周期。没有注入 gate 的独立构造仍兼容直接 submit。 |
 | 领域 HTTP API | [api_routes.py](../src/web/routes/api_routes.py) 兼容注册入口 → 同目录八个领域注册模块 | 原30个操作按原顺序注册；正式应用对活性预测、活性模型、分子工具和报告使用 `register_*_routes()` 的窄依赖入口。旧 `setup_*_routes(..., _support=...)` 仅保留给直接调用者，并通过 `route_compat.lazy_dependency` 动态解析；不能每次 setup 新建线程池或运行时。 |
-| 隔离模型决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[decision_chat.py](../src/web/decision_chat.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | 独立 loopback 验收应用；`ChatHandler.process_decision_message()` 是显式服务端桥接，正式 `/ws` 不根据浏览器参数自动启用它。不能把隔离验收通过描述为已切换生产 Agent。 |
+| 隔离模型决策验收 | [decision_lab.py](../src/web/decision_lab.py)、[decision_chat.py](../src/web/decision_chat.py)、[run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py) | 独立 loopback 验收应用；与正式 Web 一样使用 Pi，由服务端组装权限、工具和续接存储。浏览器不能任意覆盖。隔离验收不代表生产部署或真实科学验收通过。 |
 
-当前正式科学入口仍包含路由、计划和工作流执行。仓库同时有模型决策循环，但“代码已存在”不代表正式聊天已使用该循环，也不意味着可以删掉验证、任务运行时或恢复保护。
+`MEDCHAT_CHAT_PROFILE` 默认 `pi`；`semantic_v1` 在同一 Pi 上启用语义准入，`decision_a2` 仅为临时迁移别名，`legacy` 被拒绝。科学入口仍需路由、计划、验证、任务运行时和恢复保护，Pi 不可用时不自动回退。
 
 ## 2. 意图到证据的定位顺序
 
 ```text
-ChatHandler / 工作流 API
-  → SupervisorAgent：组织上下文、选择策略与执行路径
+ChatHandler → WebDecisionRuntime → PiAgentRuntime → 官方 Pi（runtime/pi）
+  ↔ Python ScientificSession：准入、工具授权、科学执行与证据校验
+
+确定性工作流 API → SupervisorAgent
   → Router + TaskPlanner + Compiler/Bindings：决定任务与数据依赖
-  → Harness / WorkflowExecutor：准备一次执行
+  → WorkflowExecutor / DelegatedWorkflowExecutor：直接执行
   → WorkflowRunSession：步骤执行、校验、事件、检查点、结果汇总
   → 工具适配 / specialist → 实际领域工具
   → ToolResult / AgentResult → 脱敏展示与证据记录
@@ -39,9 +41,11 @@ ChatHandler / 工作流 API
 | 长历史或证据挤掉当前问题 | [prompt_budget.py](../src/web/prompt_budget.py)、[chat_prompt_builder.py](../src/web/chat_prompt_builder.py)、[chat_handler.py](../src/web/chat_handler.py) | 分区字符预算不是精确 token 计数；保留完整问题和科学约束，历史/证据整块取舍，不截断 SMILES 或 JSON。输入自身超限应明确拒绝；关键状态放不下时直接保留工具结果，不强行交模型解读。 |
 | partial/失败展示与安全摘要 | [agent_result_presentation.py](../src/web/agent_result_presentation.py)、[chat_handler.py](../src/web/chat_handler.py) | 纯投影保留科学正文和失败步骤；兼容入口传入当前 sanitizer 覆写。诊断、WebSocket、历史及资源清理仍由 handler 拥有；不能因提取改变状态或让主模型改写 partial 结果。 |
 
-[HarnessFactory](../src/agent/harness/factory.py) 默认 `legacy`；这指现有执行器适配，不是启用 `ReActMolecularAgent`。`shadow` 是旁路计划比较；`langgraph_canary` 是有界灰度，委派执行器明确不扩展该灰度范围。未知模式或可选依赖不可用会记录 warning 并回到既有执行器，不代表科学工具结果被允许模拟。
+[PiAgentRuntime](../src/agent/pi_runtime/runtime.py) 连接 [Python 桥接](../src/agent/pi_runtime/bridge.py) 与 [官方 SDK 会话](../runtime/pi/session.mjs)。Pi 管理迭代和上下文；[ScientificSession](../src/agent/scientific_session/controller.py) 保留领域授权、预算、工具执行和证据校验，复用 `WorkflowRunSession`。主模型事务与凭据留在 Python；Pi 不开放内置文件/终端工具或自动扩展发现。
 
-[ModelDecisionLoop](../src/agent/harness/decision_loop.py) 通过决策协议、任务约束和预算控制动态追加动作，复用 `WorkflowRunSession`。其隔离入口、允许工具集合和续接存储必须由服务端组装，不接受浏览器任意覆盖。
+旧 `src/agent/harness/`、`HarnessFactory`、`ModelDecisionLoop` 与 legacy/shadow/canary/LangGraph 通用运行时包装已删除；历史文档中的这些名称不是可启用选项。Node.js 最低 **22.19.0**，推荐 **24.15.0**，必须按 [运行手册](PI_RUNTIME.md) 安装锁定的 `runtime/pi` 依赖。
+
+[Pi checkpoint 校验](../src/agent/pi_runtime/checkpoint.py) 拒绝旧通用循环 checkpoint 的执行续接；历史数据仍可读取，不清库、不自动转换。回滚必须恢复完整 Git 发布版本及匹配的 Python/Node 依赖、npm manifest/锁文件并执行对应版本的 `npm ci`，不能靠 profile 切换回退。停止 Pi 子进程也不等于科学 worker 已取消，仍需取消、等待与排空。
 
 ### 已接入 Registry 的类型契约
 
@@ -77,7 +81,9 @@ ChatHandler / 工作流 API
 | 已删除的 app.py 旧私有聊天/提示函数、静态备份 | `_handle_websocket` 及仅服务它的三个提示 helper、旧应用级历史已删除，正式 `/ws` 仍唯一委托 ChatHandler。无引用的 `activity_prediction_v2.legacy.backup.js` 已删除；公共占位 `script.js`、`activity_prediction_v2.js` 保留，真实页面与静态路由测试检查加载次序、200/404 和清理。 |
 | 工具输入/输出 schema | RAG、活性、对接已接入上表专用类型边界；其他工具仍为通用兼容边界。逐工具迁移，不将“已迁移三个工具”说成所有工具都已类型化，也不另造工作流 DSL。 |
 
-本基线已包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位、T10-A 三个优先工具类型契约，以及独立批准的测试分层与新旧模板签名适配。
+### 历史拆分基线（非 Pi 验收）
+
+以下 T 编号与 PR 状态记录此前的拆分基线，不是当前 Pi 替换的验收结论。该基线已包含：状态汇总和工具归属、共享 Session 委派（T02/T04/T07）、靶点身份对齐（T08）、匿名会话归属、T01 RAG 统一、T03 输入预算、T05 消费者排空、T06 三类清理、T11-A RAG 服务/索引归位、T10-A 三个优先工具类型契约，以及独立批准的测试分层与新旧模板签名适配。
 
 本次 T10-B 将 ADMET、综合评价、靶点设计、分子生成、先导优化的步骤描述归入 `step_templates.py`。`WorkflowPlan` 的定义/导入身份、TaskPlanner 的辅助解析及其他分支不动；模板不调用工具、不复制执行器。后续如需继续拆分选择与解析，须单独证明行为等价。
 
@@ -92,7 +98,7 @@ T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下�
 但旧调用者的注册后替换行为仍保持不变。对应边界回归见
 `tests/test_route_compatibility.py` 与 `tests/test_api_route_boundary.py`。
 
-仍未完成：其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成。正式首页仍未切换到隔离模型决策入口；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。
+该历史台账当时仍列出其他工具类型化、Planner 选择与参数解析拆分及历史残差逐项核对；完整第1–8项见[完成台账](handoff/remaining-through-step8.md)。不能把匿名身份、三个工具迁移、纯模板提取或文档更新视为整个任务书已完成；其中首页尚未切换的描述已被本页第 1 节 Pi 入口取代。
 
 本节只说明核对基线，避免把未合并改动描述成当前行为；不复制各批历史测试数量。每批合并后应删去相应“待发布”表述并更新源码定位。
 
@@ -109,6 +115,8 @@ T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下�
 ## 5. 验证入口与常见误判
 
 在安装项目依赖的 Python/Conda 环境执行，先查看 [tests/conftest.py](../tests/conftest.py) 的用户配置隔离。涉及数据库的独立探针必须用临时路径，禁止读写用户运行库或真实 Key。
+
+Pi 的安装、健康检查与 SDK 离线契约见 [Pi 运行手册](PI_RUNTIME.md)；通用命令见[项目规范第 11 节](PROJECT_STANDARDS.md#11-测试规范)。Python 边界回归定位到 `tests/agent/test_pi_*.py`、`tests/test_web_chat_profile.py`、`tests/test_health_pi_runtime.py` 和 `tests/agent/test_supervisor_direct_execution.py`，不再使用已删除的旧 harness 测试作为当前验收入口。
 
 ```powershell
 python -B -m pytest tests/agent/test_app_supervisor_entrypoint.py tests/test_web_app_lifecycle.py -q -p no:cacheprovider

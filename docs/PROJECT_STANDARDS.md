@@ -34,7 +34,7 @@
 - 3Dmol.js、ECharts、SmilesDrawer；
 - Ketcher 作为已构建静态资产放在 `src/web/static/ketcher/`。
 
-仓库没有 Node 包管理和前端构建步骤。第三方 CDN 和 vendored 资产版本变更必须单独审查。
+前端没有 npm 构建步骤；`runtime/pi/` 的 npm manifest/锁文件仅服务后端 Pi Agent 运行时，不是前端构建链。第三方 CDN 和 vendored 资产版本变更必须单独审查。
 
 ### 2.3 科学计算和模型
 
@@ -61,6 +61,15 @@
 
 两套 profile 不可互换，版本也不要求机械同步。CI 使用根依赖验证不需要真实模型/密钥的离线质量门；GPU 服务器使用 deployment profile，并在部署后额外运行健康检查和真实工具验收。修改依赖时必须说明目标 profile，并验证另一 profile 是否需要兼容调整。
 
+两套 Python profile 的网页通用 Agent 均依赖 `runtime/pi/` 的官方 Pi SDK **1.4.0**。
+Node.js 最低 **22.19.0**，推荐 **24.15.0**；在仓库根目录用
+`npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund` 按锁文件安装，不依赖全局 Pi。
+`requirements-agent-harness.txt` 及 CI 中对应的 include 已删除；部署方也须移除旧 include，不再安装旧 Python harness 钉住版本；RAG 依赖仍保留。
+默认 `MEDCHAT_CHAT_PROFILE=pi`，`semantic_v1` 在同一 Pi 上增加语义准入，`decision_a2` 仅为临时别名；
+`legacy` 被拒绝，不提供旧运行时 fallback。确定性工作流保留 Supervisor → 直接执行器路径。
+旧 checkpoint 只保留历史读取、拒绝执行续接；完整 Git 发布回滚须包含匹配的 Python/Node 依赖与锁文件安装。
+详见 [Pi 运行手册](PI_RUNTIME.md)，不得清库或自动转换旧 checkpoint。
+
 ## 3. 目录结构说明
 
 | 路径 | 职责 |
@@ -74,6 +83,8 @@
 | `data/samples/` | 可提交的轻量科学样例 |
 | `src/web/` | FastAPI、Jinja 模板和静态前端 |
 | `src/agent/` | Agent 路由、规划、执行、工具、持久化和评测 |
+| `src/agent/pi_runtime/`、`src/agent/scientific_session/` | Pi 桥接/续接校验与 Python 领域授权、科学执行边界 |
+| `runtime/pi/` | 官方 Pi SDK 的 Node 运行时、npm 锁文件和离线契约测试 |
 | `src/docking/` | 对接服务、适配器和结果处理 |
 | `src/molecular_design/` | 分子设计领域逻辑 |
 | `src/reverse_target/` | 反向寻靶领域逻辑 |
@@ -303,6 +314,9 @@ python -m pytest tests/agent -q
 python -m pytest tests/test_target_search.py -q
 python -m compileall -q src scripts
 
+# 官方 Pi SDK 离线契约（先按第 2.5 节安装锁定依赖）
+npm test --prefix runtime/pi
+
 # 环境检查（来源：scripts/health_check.py）
 python scripts/health_check.py
 python scripts/health_check.py --strict
@@ -315,6 +329,10 @@ python scripts/run_agent_acceptance.py --mode all
 ```
 
 `real`/`all` 会调用真实服务，运行前确认凭据、模型和工具可用；测试密钥规则见 [AGENTS 第 9 节](../AGENTS.md#9-禁止提交的内容)。contract/replay 不能替代真实科学验收。
+
+Pi 替换已尝试云端与本地真实模型验收，但两组均未通过，成功的模型/科学工具端到端验收仍为 **未验证**。
+具体失败、离线验证与部署限制见 [Pi 验收记录](superpowers/validation/2026-10-23-pi-harness-replacement.md)。
+上述命令是验证入口，不是已通过记录；离线契约和健康检查不代表替换已完整验证。
 
 靶点数据准备与检查（[详细说明](target_search_local_db.md)；seed 会写入数据，应确认目标目录）：
 

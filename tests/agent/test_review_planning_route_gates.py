@@ -11,6 +11,7 @@ from src.agent.planning.task_planner import TaskPlanner
 from src.agent.routing.hybrid import HybridSkillRouter
 from src.agent.runtime.workflow_executor import PreparedWorkflow, WorkflowExecution, WorkflowExecutor
 from src.agent.workflows import WorkflowCatalog
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler
 
 
 @pytest.fixture(autouse=True)
@@ -184,13 +185,14 @@ def test_p2_3_comparison_dispatch_canonical_identity_for_every_tool(admet):
 @pytest.mark.parametrize("tail", ["CCO and OCC", "SMILES: OCC; SMILES: CCO; SMILES: CCN"])
 @pytest.mark.parametrize("include_admet", [False, True])
 def test_p2_3_runtime_report_accepts_deduplicated_evidence(tmp_path, tail, include_admet):
-    from tests.agent.test_browser_evidence_followup import handler_for, prediction, turn
+    from tests.agent.test_browser_evidence_followup import SyntheticActivity, UnavailableAdmet, prediction, turn
     from src.agent.evidence_followup import accepted_activity_evidence
     from src.agent.tools.property_calculator import PropertyCalculator
     query = "Compare and rank properties " + ("ADMET " if include_admet else "") + "and BuChE activity"
     query += ("; " if "SMILES:" in tail else " for ") + tail
     smiles = ["CCO"] + (["CCN"] if "CCN" in tail else [])
-    handler, activity, admet = handler_for(tmp_path, [prediction(smi, 4.8) for smi in smiles])
+    activity = SyntheticActivity([prediction(smi, 4.8) for smi in smiles])
+    admet = UnavailableAdmet()
     properties = PropertyCalculator()
     calls = []
     execute = properties.execute
@@ -198,19 +200,17 @@ def test_p2_3_runtime_report_accepts_deduplicated_evidence(tmp_path, tail, inclu
         calls.append(value)
         return execute(value)
     # Registry retains the tool instance used by the real native runtime.
-    from src.agent.harness.factory import HarnessFactory
     from src.agent.persistence import SQLiteAgentStateStore
-    from src.agent.supervisor import SupervisorAgent
     properties.execute = recording
-    handler.agent_system = SupervisorAgent(tools={"activity_predictor": activity, "property_calculator": properties,
-                                               "admet_predictor": admet},
-        harness_factory=HarnessFactory(mode="legacy"), state_store=SQLiteAgentStateStore(tmp_path / "dedup.sqlite"))
+    handler = make_web_handler(tools={"activity_predictor": activity, "property_calculator": properties,
+                                     "admet_predictor": admet},
+        store=SQLiteAgentStateStore(tmp_path / "dedup.sqlite"))
     history = []
     complete, _ = turn(handler, query, history)
-    assert activity.calls == [{"smiles": smiles, "query": query}]
+    assert activity.calls == [{"smiles": smiles, "query": query, "target": "BuChE"}]
     assert calls == ["\n".join(smiles)]
     assert admet.calls == (["\n".join(smiles)] if include_admet else [])
-    assert complete["status"] == ("partial" if include_admet else "succeeded"), complete["content"][:2000]
+    assert complete["status"] == ("partial" if include_admet else "completed"), complete["content"][:2000]
     assert "| 1 | CCO |" in complete["content"]
     assert "property_calculator：不可用" not in complete["content"]
     assert "activity_predictor：不可用" not in complete["content"]
@@ -322,7 +322,6 @@ def test_p2_4_method_words_do_not_veto_explicit_structure_lookup(query):
 
 
 def _recording_lookup_runtime(tmp_path):
-    from src.agent.harness.factory import HarnessFactory
     from src.agent.persistence import SQLiteAgentStateStore
     from src.agent.supervisor import SupervisorAgent
     class RecordingLookup:
@@ -334,7 +333,7 @@ def _recording_lookup_runtime(tmp_path):
             return {"success": False, "status": "unavailable", "data": None,
                     "message": "offline recording stub; no target database queried"}
     lookup = RecordingLookup()
-    agent = SupervisorAgent(tools={lookup.name: lookup}, harness_factory=HarnessFactory(mode="legacy"),
+    agent = SupervisorAgent(tools={lookup.name: lookup},
         state_store=SQLiteAgentStateStore(tmp_path / "lookup.sqlite"))
     return agent, lookup
 
@@ -399,21 +398,34 @@ def test_p2_4_mixed_lookup_runtime_binds_only_explicit_target(tmp_path, query):
 
 @pytest.mark.parametrize("query", MIXED_LOOKUP_QUERIES)
 def test_p2_4_mixed_lookup_chat_preserves_query_and_history(tmp_path, monkeypatch, query):
-    from src.web.chat_handler import ChatHandler
-    from tests.agent.test_browser_evidence_followup import NoScienceModel, turn
+    from src.web.decision_runtime import _Sender
+    from tests.agent.pi_web_support import WebSocket
+    from tests.agent.test_browser_evidence_followup import turn
     agent, lookup = _recording_lookup_runtime(tmp_path)
+    handler = make_web_handler(tools={lookup.name: lookup}, store=agent.state_store)
     received = []
-    execute = agent.execute
-    def recording(value, *args, **kwargs):
-        received.append(value)
-        return execute(value, *args, **kwargs)
-    monkeypatch.setattr(agent, "execute", recording)
-    handler = ChatHandler(NoScienceModel(), None, agent, {})
+    received_history = []
+    execute = handler.process_decision_message
+    async def recording(*args, **kwargs):
+        received.append(kwargs["context"].query)
+        received_history.append(deepcopy(kwargs["context"].memory))
+        return await execute(*args, **kwargs)
+    monkeypatch.setattr(handler, "process_decision_message", recording)
     history = [{"user": "Prior synthetic question", "assistant": "Prior synthetic answer"}]
     before = deepcopy(history)
+    # The Web runtime separates plain model history from scientific history.
+    # Seed both on this socket rather than treating handler-global state as it.
+    sender = _Sender(WebSocket("synthetic-mixed-chat"))
+    sender._runtime = handler.decision_runtime
+    sender.memory = deepcopy(before)
+    sender.scientific_memory = history
+    handler.web_senders.append((history, "synthetic-mixed-chat", sender))
     complete, _ = turn(handler, query, history, session="synthetic-mixed-chat")
     assert received == [query]
+    assert received_history == [before]
     assert history[:-1] == before and history[-1]["user"] == query
+    assert sender.memory[:len(before)] == before
+    assert agent.state_store.get_run(handler.web_results[-1].trace_id)["query"] == query
     assert complete["content"]
     assert lookup.calls == ["PDE5A"]
 

@@ -113,7 +113,10 @@ def test_actual_rag_preserves_text_default_k_and_rows(wrapped, rows):
 
 def test_rag_factory_has_typed_schemas_and_preserves_spec():
     adapter = adapter_for(RAGSearchTool(InjectedService()))
-    assert adapter.spec.input_schema.model_fields["query"].annotation is str
+    from typing import get_args
+    from src.agent.tooling.rag_contract import RAGCountedQuery
+    assert get_args(adapter.spec.input_schema.model_fields["query"].annotation) == (str, RAGCountedQuery)
+    assert RAGCountedQuery.model_config['extra'] == 'forbid'
     assert adapter.spec.output_schema is not None
     assert adapter.spec.output_schema.schema_version == "1"
     assert "schema_version" not in adapter.spec.output_schema.model_fields

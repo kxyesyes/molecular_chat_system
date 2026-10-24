@@ -12,7 +12,6 @@ from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
 from src.agent.contracts import AgentContext, ToolResult
-from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore, redact_sensitive
 from src.agent.planning import TaskPlanner
@@ -282,7 +281,6 @@ class ScientificAcceptanceRunner:
         router: HybridSkillRouter | None = None,
         planner: TaskPlanner | None = None,
         tools: Mapping[str, Any] | None = None,
-        harness_factory: HarnessFactory | None = None,
     ):
         self.dataset_dir = Path(dataset_dir)
         self.project_root = Path(project_root)
@@ -313,7 +311,6 @@ class ScientificAcceptanceRunner:
             for name in ("target_database_search", "reverse_target_predictor"):
                 if name in registered:
                     self._execution_tools[name] = registered[name]
-        self.harness_factory = harness_factory or HarnessFactory()
 
     def run(self, repeat: int = 1) -> dict[str, Any]:
         iterations = []
@@ -361,8 +358,6 @@ class ScientificAcceptanceRunner:
         actual_skill = decision.selected_skill
         execution_error: str | None = None
         executions = []
-        harness_shadows: list[dict[str, Any]] = []
-        harness_executions: list[dict[str, Any] | None] = []
         execution_records: list[dict[str, Any]] = []
         plan_metadata: dict[str, Any] = {}
 
@@ -401,58 +396,12 @@ class ScientificAcceptanceRunner:
                                 state_store=state_store
                             ),
                         )
-                        harness_run = self.harness_factory.create(executor).execute(
+                        execution = executor.execute(
                             context=context,
                             policy=policy,
                             all_tools=self._execution_tools,
                             idempotency_key=context.metadata.get("idempotency_key"),
                         )
-                        execution = harness_run.authoritative
-                        runtime_metadata: dict[str, Any] = {}
-                        execution_metadata_record: dict[str, Any] | None = None
-                        if harness_run.execution is not None:
-                            execution_metadata = redact_sensitive(
-                                harness_run.execution.to_dict()
-                            )
-                            if _valid_harness_execution_metadata(
-                                execution_metadata,
-                                tool_result_count=len(execution.result.tool_results),
-                            ):
-                                execution.result.metadata[
-                                    "harness_execution"
-                                ] = execution_metadata
-                                execution_metadata_record = execution_metadata
-                                runtime_metadata[
-                                    "harness_execution"
-                                ] = execution_metadata
-                            else:
-                                execution_error = (
-                                    "invalid_harness_execution_metadata"
-                                )
-                                execution_metadata_record = {
-                                    "status": "invalid",
-                                    "error_code": (
-                                        "invalid_harness_execution_metadata"
-                                    ),
-                                }
-                        harness_executions.append(execution_metadata_record)
-                        shadow_metadata = (
-                            harness_run.shadow.to_dict()
-                            if harness_run.shadow is not None
-                            else None
-                        )
-                        if shadow_metadata is not None:
-                            execution.result.metadata["harness_shadow"] = shadow_metadata
-                            harness_shadows.append(shadow_metadata)
-                            runtime_metadata["harness_shadow"] = shadow_metadata
-                        if (
-                            runtime_metadata
-                            and state_store.get_run(trace_id) is not None
-                        ):
-                            state_store.update_run_metadata(
-                                trace_id,
-                                runtime_metadata,
-                            )
                         executions.append(execution)
                         for record in state_store.get_tool_executions(trace_id):
                             persisted = dict(record)
@@ -486,11 +435,6 @@ class ScientificAcceptanceRunner:
         ]
         primary_execution = executions[0] if executions else None
         actual_tools = [item.tool_name for item in tool_results]
-        if (
-            any(item is not None for item in harness_executions)
-            and any(item is None for item in harness_executions)
-        ):
-            execution_error = "harness_execution_metadata_missing"
         events = [
             event
             for execution in executions
@@ -647,27 +591,6 @@ class ScientificAcceptanceRunner:
                 "plan_metadata": plan_metadata,
                 **scoring,
             }
-        if harness_shadows:
-            report["harness_shadow"] = (
-                harness_shadows[0]
-                if len(harness_shadows) == 1
-                else {"runs": harness_shadows}
-            )
-        if any(item is not None for item in harness_executions):
-            aligned_harness_executions = [
-                item
-                if item is not None
-                else {
-                    "status": "invalid",
-                    "error_code": "harness_execution_metadata_missing",
-                }
-                for item in harness_executions
-            ]
-            report["harness_execution"] = (
-                aligned_harness_executions[0]
-                if len(aligned_harness_executions) == 1
-                else {"runs": aligned_harness_executions}
-            )
         return _redact_case_literals(
             redact_sensitive(report),
             (
@@ -1117,25 +1040,6 @@ def _resolve_docking_input(
                 path = (project_root / path).resolve()
             resolved[key] = str(path)
     return resolved
-
-
-def _valid_harness_execution_metadata(
-    metadata: Any,
-    *,
-    tool_result_count: int,
-) -> bool:
-    if not isinstance(metadata, Mapping):
-        return False
-    backend = metadata.get("backend")
-    attempts = metadata.get("tool_attempt_count")
-    fingerprint = metadata.get("plan_fingerprint")
-    return (
-        backend in {"legacy", "langgraph"}
-        and type(attempts) is int
-        and 0 <= attempts <= max(0, int(tool_result_count))
-        and type(fingerprint) is str
-        and len(fingerprint) == 64
-    )
 
 
 def _redact_case_literals(value: Any, literals: Iterable[Any]) -> Any:

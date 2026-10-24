@@ -1,4 +1,8 @@
-"""Logical-clock arithmetic and actual resource barriers over the real /ws."""
+"""Logical-clock arithmetic and actual resource barriers over the real /ws.
+
+Pi-dependent projection/send phase entry includes child startup (15 seconds);
+intent/admission and post-entry cancellation/drain guards retain their limits.
+"""
 import asyncio
 import json
 import threading
@@ -18,7 +22,7 @@ from ordinary_chat_fixtures import (
 @pytest.fixture
 def logical_clock(monkeypatch):
     from src.web import decision_runtime
-    from src.agent.harness import decision_loop, decision_continuation
+    from src.agent.scientific_session import controller as decision_loop, decision_continuation
     clock = FakeClock()
     for module in (decision_runtime, decision_loop, decision_continuation):
         monkeypatch.setattr(module, '_now', clock, raising=False)
@@ -181,7 +185,7 @@ def test_slow_projection_and_complete_never_refund_credit(actual_app, monkeypatc
                 try:
                     await socket.ready()
                     await socket.send({'message': CAPABILITY_CASES[0][1]})
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), 15)
                     sender = next(iter(b.app.decision_runtime.sockets))
                     assert sender.waiting is None
                     turn = next(iter(b.app.decision_runtime.tasks))
@@ -291,7 +295,7 @@ def test_expired_or_empty_waiting_rejected_before_claim(actual_app, logical_cloc
 
 
 def _expiry_at_claim(actual_app, monkeypatch, logical_clock, after_claim):
-    from src.agent.harness import decision_continuation
+    from src.agent.scientific_session import decision_continuation
     async def run():
         count = 0
         async def respond(payload):
@@ -420,7 +424,7 @@ def test_failed_complete_has_no_usable_waiting_authority(actual_app, monkeypatch
                 monkeypatch.setattr(WebSocket, 'send_text', send)
                 try:
                     await socket.send(payload)
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), 15)
                     sender = next(iter(b.app.decision_runtime.sockets))
                     tasks = tuple(b.app.decision_runtime.tasks)
                     release.set()
@@ -573,7 +577,7 @@ def test_complete_delivery_cannot_publish_spent_credit_or_expired_ttl(actual_app
 
 @pytest.mark.parametrize('fault', ['bad_input', 'post_claim_error', 'expiry'])
 def test_rejected_resume_keeps_only_valid_unconsumed_authority(actual_app, monkeypatch, logical_clock, fault):
-    from src.agent.harness import decision_continuation
+    from src.agent.scientific_session import decision_continuation
     async def run():
         count = 0
         async def respond(payload):

@@ -15,7 +15,6 @@ from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.run_session import RunClaimConflict, WorkflowRunSession
 from src.agent.runtime.delegated_executor import DelegatedWorkflowExecutor
 from src.agent.runtime.workflow_executor import WorkflowExecutor
-from src.agent.harness import HarnessFactory
 from src.agent.specialists import build_default_specialists
 from src.agent.supervisor import SupervisorAgent
 from test_delegated_session_lifecycle import SinglePlanner
@@ -276,7 +275,7 @@ def test_atomic_claim_requires_literal_committed_true(runtime, answer):
     assert tools["property_calculator"].calls == []
 
 
-@pytest.mark.parametrize("entry", ["executor", "harness"])
+@pytest.mark.parametrize("entry", ["executor", "supervisor_boundary"])
 @pytest.mark.parametrize("invalid_plan", [False, True])
 def test_raw_context_conflicting_trace_key_never_updates_existing_run(runtime, entry, invalid_plan):
     supervisor, store, tools = runtime
@@ -296,9 +295,8 @@ def test_raw_context_conflicting_trace_key_never_updates_existing_run(runtime, e
                   idempotency_key=key, event_callback=events.append, plan=plan)
     if supervisor.tool_registry:
         kwargs["all_tools"] = supervisor.tool_registry.as_mapping()
-    if entry == "harness":
-        supervisor.harness_factory = HarnessFactory(mode="shadow", langgraph_available=lambda: True)
-        execution = supervisor._execute_with_harness(executor, **kwargs)
+    if entry == "supervisor_boundary":
+        execution = supervisor._execute_workflow(executor, **kwargs)
     else:
         execution = executor.execute(**kwargs)
     assert execution.result.success is False
@@ -308,7 +306,7 @@ def test_raw_context_conflicting_trace_key_never_updates_existing_run(runtime, e
 
 
 @pytest.mark.parametrize("owner", ["a", "b", None])
-def test_plan_failure_on_existing_trace_has_no_harness_metadata_writes(runtime, owner):
+def test_plan_failure_on_existing_trace_has_no_state_writes(runtime, owner):
     supervisor, store, _ = runtime
     invoke(supervisor, trace_id="original", session_id="a")
     before = snapshot(store)
@@ -316,7 +314,6 @@ def test_plan_failure_on_existing_trace_has_no_harness_metadata_writes(runtime, 
         def plan(self, context):
             return WorkflowPlan(SKILL, [WorkflowStep("invalid", "not_allowed")])
     supervisor.planner = InvalidPlanner()
-    supervisor.harness_factory = HarnessFactory(mode="shadow", langgraph_available=lambda: True)
     result = invoke(supervisor, trace_id="original", session_id=owner)
     assert result["status"] == "failed"
     assert snapshot(store) == before

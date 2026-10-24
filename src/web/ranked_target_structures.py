@@ -7,8 +7,10 @@ from copy import deepcopy
 from html import escape
 import re
 
-from src.agent.harness.decision_bounds import validate_json
-from src.agent.utils.validators import InputValidator
+from src.agent.scientific_session.decision_bounds import validate_json
+from src.agent.routing.reverse_request import (
+    _fresh_molecule_reverse_request, reverse_rank_routing_query,
+)
 from src.target_search.authoritative_resolver import AuthoritativeTargetResolver
 from src.target_search.exact_name import ExactTargetNameResolver
 from src.target_search.remote_clients import (
@@ -134,47 +136,6 @@ def resolve_ranked_structures(boundary, context, *, session_id, http=None):
                 # transport exception escape to the legacy socket/log handler,
                 # or publish an otherwise successful rank context after it.
                 return _failure('ranked_structure_unavailable')
-
-
-def _fresh_molecule_reverse_request(message):
-    # This is only routing admission, not SMILES validation or tool consent.
-    # Bind an affirmative reverse action to its molecule, not an arbitrary
-    # ligand mentioned elsewhere in a reference to a previous ranking.
-    # In particular, ASCII dots belong to disconnected SMILES, not clauses.
-    clauses = re.split(r'[，,;；。!?！？\n]|\b(?:and|but|then)\b|并且|然后', message, flags=re.I)
-    chinese_prefix = r'\s*(?:请\s*)?(?:重新\s*)?'
-    chinese_action = r'(?:反向寻靶|反向靶点预测|反向预测靶点)'
-    # Keep bare 并 inside the whole command: splitting it would also admit
-    # 并非 negation or a display clause referring to a previous ranking.
-    chinese_display = (r'(?:\s*并\s*(?:列出|展示|显示)\s*'
-                       r'(?:排名第[一1]|第[一1]名)的(?:候选)?靶点)?\s*')
-    for clause in clauses:
-        for molecule in InputValidator().extract_potential_smiles_candidates(clause):
-            token = re.escape(molecule)
-            label = r'(?:SMILES\s*[:：]\s*)?'
-            # A whole affirmative command, not a prefix of a negated action
-            # or a description of a previous result for this same molecule.
-            if (re.fullmatch(chinese_prefix + r'对\s*' + label + token
-                             + r'\s*(?:做|进行|运行)\s*' + chinese_action + chinese_display, clause, re.I)
-                    or re.fullmatch(chinese_prefix + r'(?:(?:做|进行|运行)\s*)?'
-                                    + chinese_action + r'\s*(?:对\s*)?' + label + token + chinese_display, clause, re.I)
-                    or re.fullmatch(r'\s*(?:please\s+)?(?:(?:run|perform|rerun|predict)\s+)?'
-                                    r'reverse[ -]target(?:s|ing)?\s+(?:prediction\s+)?(?:for\s+)?'
-                                    + label + token + r'\s*', clause, re.I)):
-                return True
-    return False
-
-
-def reverse_rank_routing_query(message):
-    """Keep fresh display qualifiers out of the legacy rank-reference gate.
-
-    The original query must still reach execution/history, with all molecular
-    validation, negation and capabilities intact. This view is for routing only.
-    """
-    if not _fresh_molecule_reverse_request(message):
-        return message
-    return re.sub(r'((?:列出|展示|显示)\s*)(?:排名第[一1]|第[一1]名)的((?:候选)?靶点)',
-                  r'\1\2', message)
 
 
 def rank_followup_kind(message):

@@ -838,6 +838,41 @@ def test_bounded_report_cannot_pass_when_evidence_is_oversized(synthetic_snapsho
     assert "x" * 513 not in json.dumps(report)
 
 
+def test_decision_session_requires_node_before_pi_execution(tmp_path, monkeypatch):
+    from tests import family_acceptance_chain_support as chain
+
+    monkeypatch.setattr(chain.shutil, "which", lambda _: None)
+    with pytest.raises(chain.ChainFailure, match="^dependency_unavailable$"):
+        with chain.decision_session(tmp_path, target="PDE5A", query="SMILES: CCO"):
+            pass
+
+
+def test_available_node_launch_failure_is_not_missing_dependency(
+        synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
+    from src.agent.pi_runtime import bridge
+    from tests import family_acceptance_chain_support as chain
+
+    node = chain.shutil.which("node")
+    assert node is not None
+    attempted = []
+
+    def fail_launch(argv, **kwargs):
+        attempted.append(argv)
+        raise OSError("synthetic private launch failure")
+
+    monkeypatch.setattr(bridge.subprocess, "Popen", fail_launch)
+    report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
+    assert len(attempted) == 1 and attempted[0][0] == node
+    assert report["status"] == "failed" and report["reason"] == "chain_mismatch"
+    assert report["stages"]["tool"]["status"] == "passed"
+    assert report["stages"]["decision"]["status"] == "failed"
+    assert report["stages"]["decision"]["agent_status"] == "failed"
+    assert report["stages"]["decision"]["stop_reason"] == "decision_runtime_failed"
+    assert report["stages"]["decision"]["model_calls"] == 0
+    assert "dom" not in report["stages"]
+    assert "synthetic private launch failure" not in json.dumps(report)
+
+
 def test_settings_and_caches_restore_even_when_node_is_missing(synthetic_snapshot, tmp_path, monkeypatch, in_process_activity_contract):
     import os
     import torch
@@ -849,6 +884,9 @@ def test_settings_and_caches_restore_even_when_node_is_missing(synthetic_snapsho
     monkeypatch.setattr(chain.shutil, "which", lambda _: None)
     report = chain.run_family_chain(synthetic_snapshot, work_dir=tmp_path / "chain", mode="synthetic_fixture")
     assert report["status"] == "failed" and report["reason"] == "dependency_unavailable"
+    assert report["stages"]["tool"]["status"] == "passed"
+    assert report["stages"]["decision"]["status"] == "failed"
+    assert "dom" not in report["stages"]
     assert os.environ["ACTIVITY_MODEL_DIR"] == original_dir
     assert torch.cuda.is_available is original_cuda and torch.get_num_threads() == threads
     assert prediction_service._family_predictor.cache_info().currsize == 0

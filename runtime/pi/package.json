@@ -1,0 +1,12 @@
+{
+  "name": "medchat-pi-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "scripts": { "test": "node --test test/*.test.mjs" },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-coding-agent": "1.4.0"
+  }
+}

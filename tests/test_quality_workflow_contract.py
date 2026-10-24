@@ -22,6 +22,32 @@ AGENT_CORE_TARGET = "tests/agent " + " ".join(
 )
 AGENT_DOCKING_TARGET = "tests/agent/test_*docking*.py"
 AGENT_PUBLICATION_TARGET = "tests/agent/test_docking_publication*.py"
+AGENT_PI_PARTITIONS = {
+    'agent-browser-chat': 'tests/agent/test_browser_*.py tests/agent/test_chat_*.py',
+    'agent-decision-bindings': 'tests/agent/test_decision_binding*.py',
+    'agent-decision': 'tests/agent/test_decision_*.py',
+    'agent-pi': 'tests/agent/test_pi_*.py',
+    'agent-web': 'tests/agent/test_web_*.py',
+}
+
+
+def test_real_pi_work_is_split_into_bounded_disjoint_file_families():
+    jobs = _quality_jobs()
+    rows = jobs['python-tests']['strategy']['matrix']['include']
+    matrix = {row['name']: row for row in rows}
+    assert len(matrix) == len(rows)
+    for name, target in AGENT_PI_PARTITIONS.items():
+        assert name in matrix, 'real Pi execution still shares one unbounded core partition'
+        assert matrix[name]['pytest_target'] == target
+        assert matrix[name]['command_timeout'] == 1200
+        assert matrix[name]['pytest_args'] == '-vv --durations=25'
+        assert AGENT_DOCKING_TARGET in matrix[name]['pytest_exclude'].split()
+        assert all(pattern in matrix['agent']['pytest_exclude'].split()
+                   for pattern in target.split())
+    assert AGENT_PI_PARTITIONS['agent-decision-bindings'] in matrix['agent-decision']['pytest_exclude'].split()
+    assert all(path in matrix['agent-web']['pytest_exclude'].split() for path in AGENT_WEB_TARGET.split())
+    assert jobs['python-tests']['timeout-minutes'] == 30
+    assert jobs['offline-quality']['needs'] == ['python-tests', 'static-quality']
 
 
 def test_quality_workflow_uses_complete_cpu_profile() -> None:
@@ -35,7 +61,6 @@ def test_cpu_ci_profile_contains_collection_dependencies() -> None:
 
     for expected in (
         "-r requirements.txt",
-        "-r requirements-agent-harness.txt",
         "-r requirements-agent-temporal.txt",
         "--extra-index-url https://download.pytorch.org/whl/cpu",
         "torch==2.4.0+cpu",
@@ -59,17 +84,18 @@ def test_quality_workflow_runs_family_dom_selftests_in_static_job() -> None:
     assert "          node tests/activity_family_acceptance_dom.js\n" in static_job
 
 
-def test_quality_workflow_installs_node_for_root_python_chain() -> None:
+def test_quality_workflow_installs_locked_pi_for_all_python_partitions() -> None:
     workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
     python_job = workflow.split("  python-tests:\n", 1)[1].split("  static-quality:\n", 1)[0]
 
     assert (
-        "        if: matrix.name == 'root' || matrix.name == 'root-activity'\n"
         "        uses: actions/setup-node@v4\n"
         "        with:\n"
-        '          node-version: "20"\n'
+        '          node-version: "24.15.0"\n'
     ) in python_job
     assert python_job.index("uses: actions/setup-node@v4") < python_job.index("- name: Run Python tests")
+    assert 'npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund' in python_job
+    assert "if: matrix.name == 'root' || matrix.name == 'root-activity'" not in python_job
 
 
 def test_quality_workflow_disables_real_family_acceptance_for_all_jobs() -> None:
@@ -92,7 +118,7 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         "${{ matrix.pytest_target }} -q -p no:cacheprovider "
         "${{ matrix.pytest_args }}"
     ) in workflow
-    assert workflow.count("command_timeout:") == 9
+    assert workflow.count("command_timeout:") == 14
     assert "command_timeout: 180" in workflow
     for target in (
         AGENT_CORE_TARGET,
@@ -123,7 +149,10 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
               _quality_jobs()["python-tests"]["strategy"]["matrix"]["include"]}
     assert matrix["agent"] == {
         "name": "agent", "pytest_target": AGENT_CORE_TARGET,
-        "pytest_exclude": AGENT_DOCKING_TARGET,
+        "pytest_exclude": ' '.join((AGENT_DOCKING_TARGET,
+            'tests/agent/test_browser_*.py', 'tests/agent/test_chat_*.py',
+            'tests/agent/test_decision_*.py', 'tests/agent/test_decision_binding*.py',
+            'tests/agent/test_pi_*.py', 'tests/agent/test_web_*.py')),
         "pytest_args": "-vv --durations=25", "command_timeout": 1200,
     }
     assert matrix["agent-web-lifecycle"] == {
@@ -136,7 +165,7 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
         "pytest_args": "-vv --durations=25", "command_timeout": 1200,
     }
     assert {name: row["pytest_args"] for name, row in matrix.items()
-            if name not in {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication"}} == {
+            if not name.startswith('agent')} == {
         "sandbox-api": "--timeout=60", "sandbox-core": "--timeout=60",
         "task-runtime": "", "root": "", "root-activity": "",
     }
@@ -167,14 +196,14 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
     matrix = {row["name"]: row for row in python["strategy"]["matrix"]["include"]}
-    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"}
+    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"} | set(AGENT_PI_PARTITIONS)
     assert python["strategy"]["fail-fast"] is False
     assert matrix["root"]["pytest_target"] == "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
     assert matrix["root"]["pytest_args"] == ""
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
     assert all(row["command_timeout"] == (
-                   1200 if name in {"agent", "agent-docking", "agent-docking-publication"} else
+                   1200 if name in {"agent", "agent-docking", "agent-docking-publication"} | set(AGENT_PI_PARTITIONS) else
                    900 if name == "root-activity" else
                    180 if name == "sandbox-api" else 600)
                for name, row in matrix.items())
@@ -481,6 +510,8 @@ raise SystemExit(pytest.main(sys.argv[1:], plugins=[Capture()]))
 @pytest.mark.parametrize('fault', [None, 'overlap', 'omission', 'docking_overlap', 'docking_omission', 'docking_empty',
     'publication_overlap', 'publication_core_overlap', 'publication_web_overlap',
     'publication_omission', 'publication_empty', 'duplicate_rows',
+    'missing_family', 'unknown_family', 'decision_binding_overlap', 'web_lifecycle_overlap',
+    'pi_docking_overlap', 'browser_omission', 'pi_core_overlap',
     'duplicate_ids', 'collection_error', 'timeout', 'final_cleanup_deadline'])
 def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, fault):
     # Execute the exact workflow program, not a separately reimplemented selector.
@@ -501,7 +532,11 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
              'tests/agent/future/test_docking_publication_future.py',
              'tests/agent/test_docking_publication_extra/test_nested_publication.py',
              'tests/agent/future/test_web_docking_nested.py',
-             'tests/agent/test_docking_area/test_nested.py')
+             'tests/agent/test_docking_area/test_nested.py',
+             'tests/agent/test_browser_future.py', 'tests/agent/test_chat_future.py',
+             'tests/agent/test_decision_binding_future.py', 'tests/agent/test_decision_future.py',
+             'tests/agent/test_pi_future.py', 'tests/agent/test_web_future.py',
+             'tests/agent/test_pi_docking_future.py', 'tests/agent/future/test_pi_future.py')
     for name in files:
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -533,6 +568,20 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
         matrix['agent-docking-publication']['pytest_target'] = 'tests/agent/test_missing_publication_*.py'
     elif fault == 'duplicate_rows':
         rows.append(dict(matrix['agent']))
+    elif fault == 'missing_family':
+        rows.remove(matrix['agent-pi'])
+    elif fault == 'unknown_family':
+        rows.append(dict(matrix['agent-pi'], name='agent-unknown'))
+    elif fault == 'decision_binding_overlap':
+        matrix['agent-decision']['pytest_exclude'] = AGENT_DOCKING_TARGET
+    elif fault == 'web_lifecycle_overlap':
+        matrix['agent-web']['pytest_exclude'] = AGENT_DOCKING_TARGET
+    elif fault == 'pi_docking_overlap':
+        matrix['agent-pi']['pytest_exclude'] = ''
+    elif fault == 'browser_omission':
+        matrix['agent-browser-chat']['pytest_target'] = 'tests/agent/test_chat_*.py'
+    elif fault == 'pi_core_overlap':
+        matrix['agent']['pytest_exclude'] = matrix['agent']['pytest_exclude'].replace('tests/agent/test_pi_*.py', '')
     elif fault == 'duplicate_ids':
         (tmp_path / 'tests/agent/conftest.py').write_text(
             'def pytest_collection_modifyitems(items):\n    items.append(items[0])\n', encoding='utf-8')
@@ -556,7 +605,7 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
                 "        global _offset, _exits\n"
                 "        result = super().__exit__(*args)\n"
                 "        _exits += 1\n"
-                "        if _exits == 5:\n            _offset += 181\n"
+                "        if _exits == 10:\n            _offset += 181\n"
                 "        return result\n"
                 "tempfile.TemporaryDirectory = DelayedFinalCleanup\n" + code)
     configuration = tmp_path / '.github/workflows/quality.yml'
@@ -571,18 +620,23 @@ def test_agent_partition_inline_verifier_actual_synthetic_collection(tmp_path, f
     assert completed.stderr == ''
     if fault is None:
         assert completed.returncode == 0, completed.stdout
-        assert completed.stdout.strip() == 'AGENT_COLLECTION_OK baseline=30 agent=16 web=6 docking=4 publication=4'
+        assert completed.stdout.strip() == (
+            'AGENT_COLLECTION_OK baseline=46 agent=18 agent-browser-chat=4 '
+            'agent-decision-bindings=2 agent-decision=2 agent-pi=2 agent-web=2 '
+            'agent-web-lifecycle=6 agent-docking=6 agent-docking-publication=4')
         baseline = _collect_agent_with_actual_bash(tmp_path,
             dict(name='baseline', pytest_target='tests/agent', pytest_args=''), environment)
-        names = ('agent', 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')
+        names = ('agent', *AGENT_PI_PARTITIONS, 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')
         partitions = [_collect_agent_with_actual_bash(tmp_path, matrix[name], environment) for name in names]
         expected = {f'{path}::test_case[{n}]' for path in files for n in (1, 2)}
         assert baseline == expected
         assert set.union(*partitions) == baseline
         assert all(left.isdisjoint(right) for i, left in enumerate(partitions) for right in partitions[i + 1:])
-        assert [len(ids) for ids in partitions] == [16, 6, 4, 4]
+        assert [len(ids) for ids in partitions] == [18, 4, 2, 2, 2, 2, 6, 6, 4]
         assert 'tests/agent/future/test_docking_publication_future.py::test_case[1]' in partitions[0]
         assert 'tests/agent/test_docking_publication_extra/test_nested_publication.py::test_case[2]' in partitions[0]
+        assert 'tests/agent/future/test_pi_future.py::test_case[1]' in partitions[0]
+        assert 'tests/agent/test_pi_docking_future.py::test_case[1]' in partitions[-2]
     else:
         assert completed.returncode != 0
         assert completed.stdout.strip() == 'AGENT_COLLECTION_FAILED'

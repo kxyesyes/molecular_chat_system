@@ -6,15 +6,23 @@ import os
 from pathlib import Path
 
 import pytest
+from src.system import llm_transport
 
 
 @pytest.fixture(autouse=True)
 def isolated_environment(monkeypatch):
-    monkeypatch.setattr(os, 'environ', {})
+    # Real Pi needs Node and the OS runtime paths, never caller credentials/config.
+    environment = {key: os.environ[key] for key in
+                   ('PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'TEMP', 'TMP') if key in os.environ}
+    monkeypatch.setattr(os, 'environ', environment)
     import httpx
+    import socket
+    # Bind the production type before individual tests replace the constructor.
+    from src.agent.openai_compatible_model import OpenAICompatibleModel
     def no_network(*a, **kw):
         raise AssertionError('Real network connections are forbidden in CLI tests')
     monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', no_network)
+    monkeypatch.setattr(socket, 'getaddrinfo', no_network)
 
 
 def module():
@@ -45,6 +53,7 @@ def test_report_checks_real_tools_and_clarification_with_decision_doubles(mode):
     assert report['mode'] == mode
     assert report['cases'][1]['checks']['rdkit_subjects_and_metrics']
     assert report['cases'][2]['checks']['clarification_resumed']
+    assert all(case['checks']['pi_runtime_backend'] for case in report['cases'])
     assert 'api_key' not in json.dumps(report).lower()
     invalid = report['cases'][3]
     assert invalid['status'] == 'passed'
@@ -194,8 +203,9 @@ def test_report_write_failure_is_sanitized(tmp_path, monkeypatch, capsys):
     assert 'private-write-failure' not in output.out + output.err
 
 
+@pytest.mark.parametrize('provider', ['cloud', 'ollama'])
 @pytest.mark.parametrize('mode', ['native', 'json'])
-def test_cli_with_stub_http_transport_real_rdkit_and_private_temp_state(tmp_path, monkeypatch, mode):
+def test_cli_with_stub_http_transport_real_pi_rdkit_and_private_temp_state(tmp_path, monkeypatch, mode, provider):
     import httpx
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
     from src.agent.contracts.decision import DecisionEnvelope
@@ -206,8 +216,13 @@ def test_cli_with_stub_http_transport_real_rdkit_and_private_temp_state(tmp_path
                       clarify(), tool(), finish_last, tool(), finish(['missing-evidence'])])
     requests, paths = [], []
     def respond(request):
-        assert request.url.host == 'example.invalid'
+        assert request.url.host == ('127.0.0.1' if provider == 'ollama' else 'example.invalid')
+        assert request.url.path == '/v1/chat/completions'
         payload = json.loads(request.content)
+        assert payload['model'] == 'synthetic-chat-model'
+        if provider == 'ollama':
+            assert request.headers['authorization'].startswith('Bearer ')
+            assert 'synthetic-only-key' not in request.headers['authorization']
         requests.append(payload)
         if mode == 'native':
             assert payload['tools'][0]['function']['name'] == 'agent_decision'
@@ -232,24 +247,49 @@ def test_cli_with_stub_http_transport_real_rdkit_and_private_temp_state(tmp_path
     def client(**kwargs):
         assert kwargs['trust_env'] is False
         assert kwargs['follow_redirects'] is False
-        return original_client(transport=httpx.MockTransport(respond), **kwargs)
+        kwargs.setdefault('transport', httpx.MockTransport(respond))
+        return original_client(**kwargs)
     original_init = SQLiteAgentStateStore.__init__
     def init(self, path, *args, **kwargs):
         paths.append(Path(path))
         return original_init(self, path, *args, **kwargs)
     monkeypatch.setattr(SQLiteAgentStateStore, '__init__', init)
-    monkeypatch.setattr(httpx, 'AsyncClient', client)
+    if provider == 'cloud':
+        monkeypatch.setattr(httpx, 'AsyncClient', client)
     monkeypatch.setenv('OPENAI_COMPATIBLE_API_KEY', 'synthetic-only-key')
     monkeypatch.setenv('OPENAI_COMPATIBLE_BASE_URL', 'https://example.invalid')
-    monkeypatch.setenv('OPENAI_COMPATIBLE_MODEL', 'synthetic-model')
+    monkeypatch.setenv('OPENAI_COMPATIBLE_MODEL', 'synthetic-chat-model')
+    monkeypatch.setenv('OLLAMA_CHAT_MODEL', 'synthetic-chat-model')
+    monkeypatch.setenv('OLLAMA_MODEL', 'generation-model-must-not-change')
+    m = module()
+    monkeypatch.setattr(llm_transport, 'create_ollama_transport', lambda: httpx.MockTransport(respond))
+    observed_models = []
+    run_acceptance = m.run_acceptance
+    async def run_actual_model(model, wire_mode):
+        if provider == 'ollama':
+            from src.system.ollama_model import OllamaModel
+            assert type(model) is OllamaModel, 'CLI must use the same actual type as Web'
+            observed_models.append(model)
+        return await run_acceptance(model, wire_mode)
+    monkeypatch.setattr(m, 'run_acceptance', run_actual_model)
     target = tmp_path / 'report.json'
-    assert module().main(['--mode', mode, '--output', str(target)]) == 0
+    options = ['--provider', 'ollama'] if provider == 'ollama' else []  # Cloud remains the default.
+    assert m.main([*options, '--mode', mode, '--output', str(target)]) == 0
     report = json.loads(target.read_text(encoding='utf-8'))
     assert report['status'] == 'passed'
     assert report['mode'] == mode
+    assert report['provider'] == provider
+    assert all(case['checks']['pi_runtime_backend'] for case in report['cases'])
+    assert 'isolated ChatHandler' in report['scope']
+    assert 'not production browser acceptance' in report['scope']
     assert len(requests) == 8
     assert paths and all(not p.parent.exists() for p in paths)
     assert 'synthetic-only-key' not in target.read_text(encoding='utf-8')
+    assert 'synthetic-chat-model' not in target.read_text(encoding='utf-8')
+    assert os.environ['OLLAMA_MODEL'] == 'generation-model-must-not-change'
+    if provider == 'ollama':
+        assert len(observed_models) == 1
+        assert observed_models[0].client.is_closed and observed_models[0].sync_client.is_closed
 
 
 def test_report_keeps_public_protocol_reason_not_raw_error():
@@ -278,3 +318,177 @@ def test_probe_preserves_http_status_and_schema_diagnostics_not_private_fields()
     asyncio.run(probe.decide([]))
     assert probe.calls[0]['http_status'] == 503
     assert 'private-' not in json.dumps(probe.calls)
+
+
+def test_probe_retains_fixed_endpoint_policy_diagnostic():
+    from src.agent.contracts import AgentErrorCode, AgentExecutionError
+    from src.agent.decision_transport import DecisionResponse
+    class RejectedModel:
+        async def decide(self, *a, **kw):
+            return DecisionResponse(None, AgentExecutionError(AgentErrorCode.MODEL_UNAVAILABLE,
+                'private-host-or-dns-detail', {'reason': 'decision_endpoint_rejected',
+                                             'raw': 'private-host-or-dns-detail'}), None, {})
+    probe = module().DecisionProbe(RejectedModel())
+    asyncio.run(probe.decide([]))
+    assert probe.calls[0]['reason'] == 'decision_endpoint_rejected'
+    assert 'private-' not in json.dumps(probe.calls)
+
+
+def test_ollama_requires_explicit_chat_model_not_generation_or_cloud_config(tmp_path, monkeypatch):
+    monkeypatch.setenv('OLLAMA_MODEL', 'generation-only-private')
+    monkeypatch.setenv('OPENAI_COMPATIBLE_MODEL', 'cloud-only-private')
+    target = tmp_path / 'missing.json'
+    assert module().main(['--provider', 'ollama', '--mode', 'json', '--output', str(target)]) == 2
+    report = json.loads(target.read_text(encoding='utf-8'))
+    assert report['status'] == 'skipped'
+    assert report['reason'] == 'missing_ollama_chat_model'
+    assert report['provider'] == 'ollama'
+    assert report['cases'] == []
+    assert 'isolated ChatHandler' in report['scope']
+    assert 'private' not in json.dumps(report)
+
+
+@pytest.mark.parametrize('base', [
+    'https://example.invalid', 'http://192.168.1.2:11434', 'http://127.0.0.2:11434',
+    'http://private@localhost:11434', 'http://localhost:11434/?',
+    'http://localhost:11434/#', 'http://localhost:0', 'http://localhost:99999',
+])
+def test_local_unsafe_endpoint_never_creates_client(tmp_path, monkeypatch, base):
+    import httpx
+    monkeypatch.setenv('OLLAMA_CHAT_MODEL', 'private-model')
+    monkeypatch.setenv('OLLAMA_BASE_URL', base)
+    monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid,192.168.1.2')
+    calls = []
+    def client(*a, **kw):
+        calls.append(True)
+        raise AssertionError('Client must not be created')
+    monkeypatch.setattr(httpx, 'AsyncClient', client)
+    target = tmp_path / 'unsafe.json'
+    assert module().main(['--provider', 'ollama', '--output', str(target)]) == 2
+    assert not calls
+    report = json.loads(target.read_text(encoding='utf-8'))
+    assert report['status'] == 'failed'
+    assert report['reason'] == 'isolated_acceptance_unavailable'
+    assert base not in json.dumps(report)
+
+
+def test_ollama_unavailable_is_sanitized_failure_without_cloud_key(tmp_path, monkeypatch, capsys):
+    import httpx
+    m = module()
+    def refuse(request):
+        raise httpx.ConnectError('private-connection-detail', request=request)
+    monkeypatch.setattr(llm_transport, 'create_ollama_transport', lambda: httpx.MockTransport(refuse))
+    monkeypatch.setenv('OLLAMA_CHAT_MODEL', 'private-local-model')
+    target = tmp_path / 'unavailable.json'
+    assert m.main(['--provider', 'ollama', '--mode', 'json', '--output', str(target)]) == 2
+    report = json.loads(target.read_text(encoding='utf-8'))
+    assert report['status'] == 'failed'
+    assert len(report['cases']) == 4
+    assert all(case['status'] == 'failed' for case in report['cases'])
+    assert report['cases'][0]['model_calls'][0]['reason'] == 'decision_provider_unavailable'
+    output = capsys.readouterr()
+    assert 'private-' not in json.dumps(report) + output.out + output.err
+
+
+def test_backend_check_covers_initial_clarification_not_only_resume(monkeypatch):
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
+    from test_decision_loop import ScriptedModel, finish, tool, finish_last, clarify
+    original = PiAgentRuntime.run
+    async def wrong_backend(self, *args, **kwargs):
+        result = await original(self, *args, **kwargs)
+        if result.metadata.get('waiting_for_input'):
+            result.metadata.pop('backend', None)
+        return result
+    monkeypatch.setattr(PiAgentRuntime, 'run', wrong_backend)
+    model = ScriptedModel([finish(kind='chat'), tool(), finish_last, clarify(),
+                           tool(), finish_last, tool(), finish(['missing-evidence'])])
+    report = asyncio.run(module().run_acceptance(model, 'json'))
+    assert report['cases'][2]['status'] == 'failed'
+    assert report['cases'][2]['checks']['pi_runtime_backend'] is False
+    assert report['cases'][2]['checks']['clarification_resumed'] is True
+
+
+@pytest.mark.parametrize('url,address', [
+    ('http://localhost:11434/v1/chat/completions', '127.0.0.1'),
+    ('http://127.0.0.1:11434/v1/chat/completions', '127.0.0.1'),
+    ('http://[::1]:11434/v1/chat/completions', '::1'),
+])
+def test_local_transport_pins_validated_loopback_without_real_requests(monkeypatch, url, address):
+    import httpx
+    import socket
+    transport = llm_transport.create_ollama_transport()
+    connections = []
+    class Backend:
+        async def connect_tcp(self, host, port, **kwargs):
+            connections.append((host, port))
+    transport._backend._backend = Backend()
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **kw: [
+        (socket.AF_INET6 if ':' in address else socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, 11434))])
+    async def handle(self, request):
+        await self._pool._network_backend.connect_tcp(request.url.host, request.url.port)
+        return httpx.Response(200, json={})
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', handle)
+    async def request():
+        try:
+            await transport.handle_async_request(httpx.Request('POST', url))
+        finally:
+            await transport.aclose()
+    asyncio.run(request())
+    assert connections == [(address, 11434)]
+
+
+@pytest.mark.parametrize('addresses', [[], ['203.0.113.1'], ['127.0.0.1', '10.0.0.1']])
+def test_local_transport_rejects_nonloopback_dns_before_http(monkeypatch, addresses):
+    import httpx
+    import socket
+    transport = llm_transport.create_ollama_transport()
+    monkeypatch.setattr(socket, 'getaddrinfo', lambda *a, **kw: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, '', (address, 11434)) for address in addresses])
+    async def request():
+        try:
+            with pytest.raises(ValueError):
+                await transport.handle_async_request(httpx.Request('POST', 'http://localhost:11434/v1/chat/completions'))
+        finally:
+            await transport.aclose()
+    asyncio.run(request())
+
+
+def test_local_model_keeps_explicit_policy_and_scoped_pinned_transport():
+    import httpx
+    from src.agent.openai_compatible_model import OpenAICompatibleModel
+    transport = llm_transport.create_ollama_transport()
+    async def inspect():
+        async with httpx.AsyncClient(transport=transport, follow_redirects=False, trust_env=False) as client:
+            model = OpenAICompatibleModel('local-dummy', 'test-model', 'http://localhost:11434',
+                                          provider='ollama', enforce_url_policy=True, client=client)
+            assert model.provider == 'ollama'
+            assert model.enforce_url_policy is True
+            assert model.client._transport is transport
+            model._validate_request_endpoint()
+    asyncio.run(inspect())
+
+
+def test_local_transport_does_not_inherit_cloud_host_allowlist(monkeypatch):
+    import httpx
+    monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
+    transport = llm_transport.create_ollama_transport()
+    async def request():
+        try:
+            with pytest.raises(ValueError):
+                await transport.handle_async_request(httpx.Request('POST', 'https://example.invalid/v1/chat/completions'))
+        finally:
+            await transport.aclose()
+    asyncio.run(request())
+
+
+def test_cloud_does_not_automatically_allow_configured_host(tmp_path, monkeypatch):
+    monkeypatch.setenv('OPENAI_COMPATIBLE_API_KEY', 'synthetic-only-key')
+    monkeypatch.setenv('OPENAI_COMPATIBLE_BASE_URL', 'https://example.invalid')
+    monkeypatch.setenv('OPENAI_COMPATIBLE_MODEL', 'private-cloud-model')
+    target = tmp_path / 'cloud-policy.json'
+    assert module().main(['--provider', 'cloud', '--output', str(target)]) == 2
+    report = json.loads(target.read_text(encoding='utf-8'))
+    assert report['status'] == 'failed'
+    assert report['cases'] == []  # Real client policy rejects before any model call.
+    assert 'MEDCHAT_LLM_ALLOWED_HOSTS' not in os.environ
+    assert 'private-cloud-model' not in json.dumps(report)

@@ -10,10 +10,10 @@ import pytest
 
 from src.agent.contracts import AgentContext, AgentErrorCode, ObservationStatus, ToolResult, WorkflowArtifact
 from src.agent.evidence import EvidenceLedger
-from src.agent.harness import decision_execution
-from src.agent.harness.decision_execution import SingleAttemptTool
-from src.agent.harness.decision_inputs import seal_observation, verify_observation_integrity
-from src.agent.harness.decision_policy import DecisionBoundaryError
+from src.agent.scientific_session import decision_execution
+from src.agent.scientific_session.decision_execution import SingleAttemptTool
+from src.agent.scientific_session.decision_inputs import seal_observation, verify_observation_integrity
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.run_session import WorkflowRunSession, SessionLifecycleError

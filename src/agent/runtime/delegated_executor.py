@@ -152,7 +152,7 @@ class SpecialistDispatch:
             "requested_count": context.metadata["requested_count"]
         } if "requested_count" in context.metadata else {}
         reused = set(reused_steps)
-        result.metadata["_harness_delegations"] = [
+        result.metadata["_workflow_delegations"] = [
             {
                 "task_id": f"{result.trace_id}:{item.quality.get('step_id', '')}",
                 "agent_name": TOOL_AGENT_OWNERS.get(item.tool_name),
@@ -172,7 +172,7 @@ class DelegatedPreparedWorkflow(PreparedWorkflow):
     """Adapt the public delegation envelope, not the execution lifecycle."""
 
     def to_execution(self, result: AgentResult) -> WorkflowExecution:
-        if "_harness_delegations" not in result.metadata:
+        if "_workflow_delegations" not in result.metadata:
             SpecialistDispatch.decorate_result(
                 result, self.context, result.metadata.get("reused_steps", []))
         return super().to_execution(result)
@@ -185,9 +185,6 @@ class DelegatedPreparedWorkflow(PreparedWorkflow):
 
 
 class DelegatedWorkflowExecutor(WorkflowExecutor):
-    # Sharing Session does not authorize expanding the production canary cohort.
-    canary_execution_enabled = False
-
     def __init__(self, supervisor):
         super().__init__(planner=supervisor.planner, orchestrator=supervisor.orchestrator)
         self.registry = supervisor.tool_registry

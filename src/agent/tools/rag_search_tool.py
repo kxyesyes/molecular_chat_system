@@ -9,6 +9,16 @@ from src.rag.presentation import format_rag_context
 from .base_tool import BaseMolecularTool
 
 
+def _counted_input(value):
+    """Native counted requests are separate from the existing text/k API."""
+    if (type(value) is not dict or set(value) != {'query', 'k'}
+            or type(value['query']) is not str or not value['query'].strip()
+            or len(value['query'].encode('utf-8')) > 16384
+            or type(value['k']) is not int or not 1 <= value['k'] <= 50):
+        raise ValueError('invalid_retrieval_input')
+    return value['query'], value['k']
+
+
 class RAGSearchTool(BaseMolecularTool):
     def __init__(self, rag_system=None, embedding_endpoint: str | None = None):
         super().__init__(
@@ -60,15 +70,16 @@ class RAGSearchTool(BaseMolecularTool):
         callers must schedule this hook as owned work, not on the event loop.
         """
         try:
-            from src.agent.harness.decision_bounds import validate_json
+            from src.agent.scientific_session.decision_bounds import validate_json
 
             value = dict(data=data, evidence=evidence, input_data=input_data,
                          expected_source=expected_source)
             validate_json(value, max_bytes=64 * 1024, reason='current_source_unavailable')
             if expected_source is not None:
                 self._validate_current_projection(expected_source)
-            if (type(input_data) is not str or not input_data.strip()
-                    or len(input_data.encode('utf-8')) > 16 * 1024
+            query, k = _counted_input(input_data) if type(input_data) is dict else (input_data, 3)
+            if (type(query) is not str or not query.strip()
+                    or len(query.encode('utf-8')) > 16 * 1024
                     or type(evidence) is not list):
                 raise ValueError('current_source_unavailable')
             # No caller-owned records or receipt are exposed to provider calls.
@@ -87,11 +98,11 @@ class RAGSearchTool(BaseMolecularTool):
                 raise ValueError('current_source_unavailable')
             envelope = validate_retrieval_envelope(
                 dict(records=value['data'], receipt=entries[0]['retrieval_receipt']),
-                query=input_data, k=3)
+                query=query, k=k)
             if envelope['receipt']['diagnostics']['status'] not in ('valid_hits', 'valid_empty'):
                 raise ValueError('current_source_unavailable')
             fresh = capture()
-            validate_source(envelope, query=input_data, k=3, expected=fresh)
+            validate_source(envelope, query=query, k=k, expected=fresh)
             projection = dict(kind='rag', generation_id=fresh.generation_id, epoch=fresh.epoch,
                               configuration_sha256=fresh.configuration_sha256,
                               source_identity_sha256=fresh.source_identity_sha256)
@@ -107,6 +118,13 @@ class RAGSearchTool(BaseMolecularTool):
     def execute(self, query: str, **kwargs) -> Dict[str, Any]:
         unavailable = "RAG retrieval unavailable: initialization, source/index compatibility or embedding failure"
         k = kwargs.get("k", 3)
+        if type(query) is dict:
+            try:
+                if 'k' in kwargs:
+                    raise ValueError('conflicting_retrieval_count')
+                query, k = _counted_input(query)
+            except ValueError:
+                return self._failure('invalid_input', 'RAG input validation failed', 'invalid_retrieval_input')
         try:
             capture = getattr(self.rag_system, "capture_retrieval_eligibility", None)
             strict_search = getattr(self.rag_system, "search_similar_molecules_sync_with_receipt", None)

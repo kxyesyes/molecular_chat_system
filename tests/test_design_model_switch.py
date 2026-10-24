@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 
 from src.web.routes import design_routes
+from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, result_of, chat_decision
 
 
 @pytest.fixture(autouse=True)
@@ -27,9 +28,8 @@ def anyio_backend():
 
 
 @pytest.mark.anyio
-async def test_chat_stream_iterator_without_aclose_remains_supported():
-    import json
-    from src.web.chat_handler import ChatHandler
+async def test_retained_model_stream_adapter_supports_iterator_without_aclose():
+    from src.web.models import stream_for_chat
 
     class Iterator:
         def __init__(self):
@@ -48,17 +48,9 @@ async def test_chat_stream_iterator_without_aclose_remains_supported():
         def stream_generate(self, *args, **kwargs):
             return Iterator()
 
-    class Socket:
-        def __init__(self):
-            self.messages = []
-
-        async def send_text(self, value):
-            self.messages.append(json.loads(value))
-
-    socket = Socket()
-    handler = ChatHandler(Model(), None, None, {'inference': {'stream': True}})
-    await handler._process_message(socket, 'hello', False, False)
-    assert next(item for item in socket.messages if item['type'] == 'complete')['content'] == 'answer'
+    stream = stream_for_chat(Model(), 'hello')
+    assert not hasattr(stream, 'aclose')
+    assert ''.join([chunk async for chunk in stream]) == 'answer'
 
 
 @pytest.mark.anyio
@@ -112,61 +104,47 @@ async def test_design_route_snapshots_current_model(tmp_path, monkeypatch):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize('mode', ['stream', 'nonstream', 'retry'])
-async def test_chat_completion_metadata_uses_request_model(mode):
+async def test_chat_completion_metadata_uses_request_model(mode, actual_app):
     import json
-    from src.web.chat_handler import ChatHandler
     prompts = []
-
-    class Model:
-        last_response_metadata = {'finish_reason': 'stop'}
-
-        async def stream_generate(self, *args, **kwargs):
-            prompts.append(args[0])
-            yield 'original answer'
-            handler.model = replacement
-            if mode == 'retry':
-                raise RuntimeError('synthetic stream failure')
-
-        async def generate(self, *args, **kwargs):
-            prompts.append(args[0])
-            handler.model = replacement
-            return 'original answer'
-
     class Replacement:
         last_response_metadata = {'finish_reason': 'length'}
-
-    class Socket:
-        messages = []
-
-        async def send_text(self, value):
-            self.messages.append(json.loads(value))
-
     replacement = Replacement()
-    handler = ChatHandler(Model(), None, None, {'inference': {
-        'stream': mode != 'nonstream', 'input_max_chars': 7000,
-        'history_input_max_chars': 1000,
-    }})
-    socket = Socket()
-    history = [
-        {'user': 'earlier-turn-A', 'assistant': '{"SMILES":"CCO","source":"A"}'},
-        {'user': 'latest-turn-B', 'assistant': '{"SMILES":"CCN","source":"B"}'},
-    ]
-    await handler._process_message(socket, '你好', False, False,
-                                   conversation_history=history, session_id='server-owner')
+    async def respond(payload):
+        prompts.append(payload['messages'])
+        handler.model = replacement  # Presentation must not read this replacement.
+        if mode == 'retry' and len(prompts) == 1:
+            return {'version':'1', 'action':'invalid-decision'}
+        return chat_decision('original answer')
+    async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+        handler = bundle.app.chat_handler
+        handler.config = {'inference': {'stream':mode != 'nonstream', 'input_max_chars':7000,
+                                       'history_input_max_chars':1000}}
+        async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+            await socket.ready()
+            sender, = bundle.app.decision_runtime.sockets
+            history = [{'user':'earlier-turn-A', 'assistant':'earlier eligible answer'},
+                       {'user':'latest-turn-B', 'assistant':'latest eligible answer'}]
+            sender.memory[:] = history
+            frames = await socket.turn({'message':'你好', 'enable_tools':False, 'enable_rag':False})
+            public = result_of(frames)
+            assert frames[-1]['status'] == 'completed' and frames[-1]['content'] == 'original answer'
+            assert handler.model is replacement
+            assert public['metadata']['model_calls'][-1]['model'] == 'protocol-only'
+            assert public['metadata']['model_calls'][-1]['finish_reason'] == 'tool_calls'
+            assert not frames[-1].get('truncated')
     assert len(prompts) == (2 if mode == 'retry' else 1)
     for prompt in prompts:
-        assert len(prompt) <= 7000
-        assert prompt.index('earlier-turn-A') < prompt.index('latest-turn-B')
-        assert history[0]['assistant'] in prompt and history[1]['assistant'] in prompt
-        assert prompt.endswith('## 当前用户问题\n你好')
-    complete = next(item for item in socket.messages if item['type'] in {'complete', 'message'})
-    assert complete['finish_reason'] == 'stop'
-    assert not complete.get('truncated')
+        body = json.dumps(prompt, ensure_ascii=False)
+        assert len(body) <= 7000
+        assert body.index('earlier-turn-A') < body.index('latest-turn-B')
+        assert history[0]['assistant'] in body and history[1]['assistant'] in body
+        assert prompt[-1] == {'role':'user', 'content':'你好'}
 
 
 @pytest.mark.anyio
 async def test_application_constructs_once_and_switches_both_consumers(tmp_path, monkeypatch):
-    from unittest.mock import Mock
+    from src.agent.tools import get_core_tools
     from src.web.app import MolecularChatApp
 
     constructed = []
@@ -178,13 +156,23 @@ async def test_application_constructs_once_and_switches_both_consumers(tmp_path,
         async def generate(self, *args, **kwargs):
             return self.model_name + ' recommendation'
 
+        async def decide(self, messages, **kwargs):
+            from src.agent.contracts.decision import FinishDecision
+            from src.agent.decision_transport import DecisionResponse
+            return DecisionResponse(FinishDecision(version='1', action='finish', response_kind='chat',
+                text=self.model_name + ' recommendation', evidence_ids=[]), None, 'model-switch',
+                {'model':self.model_name, 'request_attempts':1})
+
     def build_model(self, config):
         model = Model(config['model_name'])
         constructed.append(model)
         return model
 
     monkeypatch.setattr(MolecularChatApp, '_create_model_from_llm_config', build_model)
-    monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Mock(tools={}))
+    # Default Web composition now requires a valid Pi tool catalog. Keep actual
+    # lazy core adapters; this model-switch test does not dispatch their science.
+    monkeypatch.setattr('src.agent.tools.get_all_tools',
+                        lambda model, **kwargs: get_core_tools(model))
     monkeypatch.setattr(design_routes, '_FRAG_DB_PATH', str(tmp_path / 'absent.csv'))
     monkeypatch.setattr(design_routes, '_SAVE_DIR', str(tmp_path / 'saved'))
     monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
@@ -210,16 +198,12 @@ async def test_application_constructs_once_and_switches_both_consumers(tmp_path,
         assert second.json()['recommendation_mode'] == 'local_rule'
         assert second.json()['fallback_used'] is True
 
-        class Socket:
-            def __init__(self):
-                self.messages = []
-
-            async def send_text(self, message):
-                self.messages.append(message)
-
-        socket = Socket()
-        await application.chat_handler._process_message(socket, '你好', False, False)
-        assert any('B recommendation' in message for message in socket.messages)
+        async with ActualSocket(application, await cookie_for(application)) as socket:
+            await socket.ready()
+            frames = await socket.turn({'message':'你好', 'enable_tools':False, 'enable_rag':False})
+            assert frames[-1]['status'] == 'completed'
+            assert frames[-1]['content'] == 'B recommendation'
+            assert result_of(frames)['metadata']['model_calls'][-1]['model'] == 'B'
     finally:
         await client.aclose()
         await application.shutdown()

@@ -23,6 +23,7 @@ except ImportError:
     RDKIT_AVAILABLE = False
 
 from .base_tool import BaseMolecularTool
+from src.agent.runtime.worker_ownership import OwnedCallStopped, provider_call_timeout, reserve_worker
 from .molecular_input import (
     MolecularInputMissing,
     MolecularInputUnavailable,
@@ -56,6 +57,7 @@ class _StrictGenerationUnavailable(Exception):
 @dataclass
 class _GenerationRoundState:
     backend_failed: bool = False
+    stopped_reason: Optional[str] = None
 
 
 class LLMMolecularGenerator(BaseMolecularTool):
@@ -228,6 +230,14 @@ class LLMMolecularGenerator(BaseMolecularTool):
             valid_molecules = self._generate_with_retry(intent, round_state=round_state)
             
             if not valid_molecules:
+                if round_state.stopped_reason:
+                    cancelled = round_state.stopped_reason == 'cancelled'
+                    result['status'] = 'cancelled' if cancelled else 'timeout'
+                    result['message'] = 'Molecular generation stopped before further provider dispatch'
+                    result['error'] = {'code': 'cancelled' if cancelled else 'tool_timeout',
+                        'message': result['message'], 'details': {'reason': round_state.stopped_reason}}
+                    result['quality'] = {'retryable': False}
+                    return result
                 if round_state.backend_failed:
                     return self._generation_failure_result(query_text)
                 result['message'] = "经过多次尝试，未能生成有效的分子结构。请尝试更具体的描述。"
@@ -259,6 +269,9 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 )
             if round_state.backend_failed:
                 result.setdefault('warnings', []).append("Some molecular generation rounds failed.")
+            if round_state.stopped_reason:
+                result['quality']['generation_stop_reason'] = round_state.stopped_reason
+                result.setdefault('warnings', []).append('Generation stopped; only completed candidates are retained.')
             logger.info("Molecular generation completed")
         except _StrictGenerationUnavailable:
             logger.warning("Molecular generation unavailable")
@@ -362,6 +375,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
             # 使用LLM生成分子
             logger.info("Molecular generation round started")
             try:
+                provider_call_timeout()
                 if intent['type'] == 'optimization' and intent.get('base_smiles'):
                     generated_smiles = self._optimize_with_llm(intent)
                 else:
@@ -398,6 +412,9 @@ class LLMMolecularGenerator(BaseMolecularTool):
                         "model": self._get_model_name(),
                         "source": "llm",
                     })
+            except OwnedCallStopped as exc:
+                round_state.stopped_reason = exc.reason
+                break
             except _StrictGenerationUnavailable:
                 raise
             except Exception:
@@ -572,7 +589,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
             # 简单按行提取
             return [line.strip() for line in response.strip().split('\n') if line.strip()]
             
-        except (OllamaGenerationError, _StrictGenerationUnavailable):
+        except (OllamaGenerationError, _StrictGenerationUnavailable, OwnedCallStopped):
             raise
         except Exception:
             pass
@@ -618,7 +635,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
 
             return smiles_list
             
-        except (OllamaGenerationError, _StrictGenerationUnavailable):
+        except (OllamaGenerationError, _StrictGenerationUnavailable, OwnedCallStopped):
             raise
         except Exception:
             pass
@@ -651,6 +668,7 @@ class LLMMolecularGenerator(BaseMolecularTool):
 
         try:
             method = self._capture_strict_generate()
+            provider_call_timeout()
             if inspect.iscoroutinefunction(method):
                 # Only loop detection owns this RuntimeError catch. Executor or
                 # result failures must never enter a second dispatch path.
@@ -662,18 +680,37 @@ class LLMMolecularGenerator(BaseMolecularTool):
                     running = True
                 if running:
                     import concurrent.futures
-                    executor = concurrent.futures.ThreadPoolExecutor()
+                    reservation = reserve_worker()
                     try:
-                        future = executor.submit(self._run_async_in_new_loop, prompt, temperature,
-                                                 generate_method=method)
-                        return future.result(timeout=30)
+                        executor = concurrent.futures.ThreadPoolExecutor()
+                    except BaseException:
+                        if reservation is not None:
+                            reservation.rollback()
+                        raise
+                    try:
+                        try:
+                            if reservation is None:
+                                future = executor.submit(self._run_async_in_new_loop, prompt, temperature,
+                                                         generate_method=method)
+                            else:
+                                def invoke():
+                                    return self._run_async_in_new_loop(prompt, temperature, generate_method=method)
+                                future = executor.submit(reservation.run, invoke)
+                        except BaseException:
+                            if reservation is not None:
+                                reservation.rollback(executor)
+                            raise
+                        if reservation is not None:
+                            reservation.attach(executor, future)
+                        return future.result(timeout=provider_call_timeout())
                     finally:
-                        # Pending work may be cancelled, but a running provider is not
-                        # terminated. Do not turn caller timeout into a blocking join.
+                        # An owned reservation retains the running provider for
+                        # settlement; timeout is never proof of remote termination.
                         executor.shutdown(wait=False, cancel_futures=True)
                 return self._run_async_in_new_loop(prompt, temperature, generate_method=method)
+            provider_call_timeout()
             return method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True)
-        except (OllamaGenerationError, _StrictGenerationUnavailable):
+        except (OllamaGenerationError, _StrictGenerationUnavailable, OwnedCallStopped):
             raise
         except (FutureTimeout, asyncio.TimeoutError):
             reason = 'timeout'
@@ -687,10 +724,11 @@ class LLMMolecularGenerator(BaseMolecularTool):
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
+            timeout = provider_call_timeout()
             return loop.run_until_complete(
                 asyncio.wait_for(
                     generate_method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True),
-                    timeout=30.0
+                    timeout=timeout
                 )
             )
         finally:

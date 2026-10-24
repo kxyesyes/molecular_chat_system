@@ -10,9 +10,9 @@ from test_decision_continuation import ContinuationModel
 from test_scientific_reference_execution import confirmed
 from src.agent.contracts import AgentContext
 from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
-from src.agent.harness import decision_bounds
-from src.agent.harness.decision_inputs import resolve_decision_input, decision_input_digest
-from src.agent.harness.decision_policy import DecisionBoundaryError
+from src.agent.scientific_session import decision_bounds
+from src.agent.scientific_session.decision_inputs import resolve_decision_input, decision_input_digest
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.agent.tools.property_calculator import PropertyCalculator
 
 

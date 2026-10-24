@@ -22,7 +22,6 @@ from src.agent.contracts.generation_request import (
 )
 from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
 from src.agent.capabilities.catalog import TOOL_ALIASES
-from src.agent.harness import HarnessFactory
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.planning import WorkflowPlan, request_parsing
 from src.agent.planning.task_planner import TaskPlanner
@@ -65,7 +64,6 @@ class SupervisorAgent:
         llm: Any = None,
         molecular_generator_llm: Any = None,
         skill_router: SkillRouter | None = None,
-        harness_factory: HarnessFactory | None = None,
     ):
         self.tools = dict(tools) if tools is not None else build_default_tools()
         self.llm = llm
@@ -89,7 +87,6 @@ class SupervisorAgent:
             event_bus=self.event_bus,
             state_store=state_store,
         )
-        self.harness_factory = harness_factory or HarnessFactory()
 
     def set_llm(self, llm: Any) -> None:
         """Update the main model without rebinding the local generator."""
@@ -317,7 +314,7 @@ class SupervisorAgent:
                 return {**failed.to_legacy_dict(), "trace_id": failed.trace_id,
                         "final_answer": failed.message, "tools_used": []}
         request_tools = self._request_tools(context)
-        execution = self._execute_with_harness(
+        execution = self._execute_workflow(
             WorkflowExecutor(
                 planner=self.planner,
                 orchestrator=self.orchestrator,
@@ -559,7 +556,7 @@ class SupervisorAgent:
         )
         delegated = self.tool_registry is not None and bool(self.specialists)
         if delegated:
-            execution = self._execute_with_harness(
+            execution = self._execute_workflow(
                 _DelegatedWorkflowExecutor(self),
                 context=context,
                 policy=policy,
@@ -567,7 +564,7 @@ class SupervisorAgent:
                 idempotency_key=idempotency_key,
                 plan=workflow_plan,
             )
-            if "_harness_delegations" in execution.result.metadata:
+            if "_workflow_delegations" in execution.result.metadata:
                 return self._format_delegated_run_result(execution)
             return self._format_run_result(
                 execution.plan.workflow_name,
@@ -576,7 +573,7 @@ class SupervisorAgent:
                 execution.result,
             )
 
-        execution = self._execute_with_harness(
+        execution = self._execute_workflow(
             executor,
             context=context,
             policy=policy,
@@ -696,11 +693,12 @@ class SupervisorAgent:
             "result": result,
         }
 
-    def _execute_with_harness(
+    def _execute_workflow(
         self,
         executor: WorkflowExecutor,
         **kwargs: Any,
     ) -> WorkflowExecution:
+        """Resolve run ownership, then invoke the deterministic executor once."""
         context = kwargs["context"]
         try:
             kwargs["context"] = self.orchestrator._resolve_idempotent_context(
@@ -711,42 +709,7 @@ class SupervisorAgent:
                 plan=kwargs.get("plan") or WorkflowPlan(context.active_skill or "", []),
                 result=exc.to_result(context), events=[],
             )
-        harness = self.harness_factory.create(executor)
-        harness_run = harness.execute(**kwargs)
-        execution = harness_run.authoritative
-        metadata_updates: dict[str, Any] = {}
-        if harness_run.execution is not None:
-            execution_metadata = harness_run.execution.to_dict()
-            execution.result.metadata["harness_execution"] = execution_metadata
-            metadata_updates["harness_execution"] = execution_metadata
-        shadow_metadata: dict[str, Any] | None = None
-        if harness_run.shadow is not None:
-            shadow_metadata = harness_run.shadow.to_dict()
-        else:
-            warning = getattr(self.harness_factory, "last_warning", None)
-            if warning:
-                shadow_metadata = {
-                    "status": "unavailable",
-                    "error_code": warning,
-                }
-        if shadow_metadata is not None:
-            execution.result.metadata["harness_shadow"] = shadow_metadata
-            metadata_updates["harness_shadow"] = shadow_metadata
-        # Preflight failures have not claimed/started a run. In particular,
-        # shadow diagnostics must not mutate a prior trace on plan rejection.
-        if (self.state_store and metadata_updates and execution.events
-                and not execution.result.metadata.get("run_claim_conflict")):
-            try:
-                if self.state_store.get_run(execution.result.trace_id) is not None:
-                    self.state_store.update_run_metadata(
-                        execution.result.trace_id,
-                        metadata_updates,
-                    )
-            except Exception:
-                warning = "harness_metadata_persistence_failed"
-                if warning not in execution.result.warnings:
-                    execution.result.warnings.append(warning)
-        return execution
+        return executor.execute(**kwargs)
 
 
     @staticmethod
@@ -755,7 +718,7 @@ class SupervisorAgent:
     ) -> dict[str, Any]:
         result = execution.result
         serialized_results = result.to_legacy_dict()
-        delegations = list(result.metadata.get("_harness_delegations", []))
+        delegations = list(result.metadata.get("_workflow_delegations", []))
         return {
             "trace_id": result.trace_id,
             "status": "succeeded" if serialized_results["status"] == "completed" else serialized_results["status"],

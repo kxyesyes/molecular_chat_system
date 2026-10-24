@@ -20,6 +20,7 @@ class _DelayedResponseStream(httpx.AsyncByteStream):
     async def __aiter__(self):
         if self.provider == 'ollama':
             yield b'{"response":"synthetic chunk"}\n'
+            yield b'{"response":"","done":true}\n'
         else:
             yield ('data: ' + json.dumps({'choices': [{'delta': {'content': 'x' * 40}}]}) + '\n').encode()
 
@@ -83,14 +84,12 @@ def _http_adapter(provider, monkeypatch, stream):
 @pytest.mark.parametrize('failure', ['normal', 'disconnect', 'consumer_cancel'])
 @pytest.mark.parametrize('cancel_owner', [False, True])
 async def test_actual_http_stream_cleanup_precedes_request_release(provider, failure, cancel_owner, monkeypatch):
-    from src.web.chat_handler import ChatHandler
-    from src.web.model_lifecycle import ModelRequestGate, close_owned_model
+    from src.web.models import stream_for_chat
+    from src.web.model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
 
     stream = _DelayedResponseStream(provider)
     model, clients, close_order = _http_adapter(provider, monkeypatch, stream)
     gate = ModelRequestGate()
-    handler = ChatHandler(model, None, None, {'inference': {'stream': True}})
-    handler.model_request_gate = gate
     writer_entered = asyncio.Event()
     retirement = []
 
@@ -107,7 +106,19 @@ async def test_actual_http_stream_cleanup_precedes_request_release(provider, fai
             retirement.append(stream.finished.is_set())
             await close_owned_model(model)
 
-    request = asyncio.create_task(handler._process_message(Socket(), 'hello', False, False))
+    async def retained_stream_consumer():
+        # Streaming remains a supported model adapter for domain consumers.
+        # General Web chat itself now uses Pi decision transactions.
+        async with gate.request():
+            async def consume():
+                iterator = stream_for_chat(model, 'hello')
+                try:
+                    async for chunk in iterator:
+                        await Socket().send_text(json.dumps({'type':'stream', 'content':chunk}))
+                finally:
+                    await finish_on_cancel(iterator.aclose())
+            await finish_on_cancel(consume())
+    request = asyncio.create_task(retained_stream_consumer())
     writer = None
     try:
         await asyncio.wait_for(stream.entered.wait(), 3)
@@ -276,6 +287,13 @@ def anyio_backend():
     return 'asyncio'
 
 
+def _registered_core_tools(model):
+    # App assembly now validates the sole Pi registry even when the test only
+    # exercises model ownership. Keep real lazy registrations, not empty mocks.
+    from src.agent.tools import get_core_tools
+    return {tool.name: tool for tool in get_core_tools(model)}
+
+
 @pytest.mark.anyio
 async def test_application_switch_drains_design_request_and_closes_clients(tmp_path, monkeypatch):
     from src.web.app import MolecularChatApp
@@ -305,7 +323,8 @@ async def test_application_switch_drains_design_request_and_closes_clients(tmp_p
         return model
 
     monkeypatch.setattr(MolecularChatApp, '_create_model_from_llm_config', build)
-    monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Mock(tools={}))
+    monkeypatch.setattr(MolecularChatApp, '_create_chat_agent',
+                        lambda self: Mock(tools=_registered_core_tools(self.molecular_generator_model)))
     monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
     monkeypatch.setattr(design_routes, '_FRAG_DB_PATH', str(tmp_path / 'absent.csv'))
     monkeypatch.setattr(design_routes, '_SAVE_DIR', str(tmp_path / 'saved'))
@@ -578,7 +597,8 @@ async def test_connection_probe_closes_only_its_temporary_model(tmp_path, monkey
         return model
 
     monkeypatch.setattr(MolecularChatApp, '_create_model_from_llm_config', build)
-    monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Mock(tools={}))
+    monkeypatch.setattr(MolecularChatApp, '_create_chat_agent',
+                        lambda self: Mock(tools=_registered_core_tools(self.molecular_generator_model)))
     app = MolecularChatApp(str(tmp_path / 'absent.yaml'))
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app.app), base_url='https://test') as client:
@@ -594,7 +614,7 @@ async def test_connection_probe_closes_only_its_temporary_model(tmp_path, monkey
 
 @pytest.mark.anyio
 async def test_cancelled_agent_waits_for_worker_before_releasing_request():
-    from src.web.chat_handler import ChatHandler
+    from src.agent.scientific_session.decision_execution import settle_owned_call
 
     started, release = threading.Event(), threading.Event()
 
@@ -604,8 +624,7 @@ async def test_cancelled_agent_waits_for_worker_before_releasing_request():
             assert release.wait(5)
             return {'success': True}
 
-    handler = ChatHandler(None, None, Agent(), {})
-    task = asyncio.create_task(handler._execute_agent('test'))
+    task = asyncio.create_task(settle_owned_call(lambda: Agent().execute('test')))
     try:
         assert await asyncio.to_thread(started.wait, 3)
         task.cancel()
@@ -619,64 +638,87 @@ async def test_cancelled_agent_waits_for_worker_before_releasing_request():
 
 @pytest.mark.anyio
 @pytest.mark.parametrize('cancel_request', [False, True])
-async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path, monkeypatch, cancel_request):
+@pytest.mark.parametrize('first_decision_delay', [0, 3.2])
+async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path, monkeypatch, cancel_request, first_decision_delay):
     from src.web.app import MolecularChatApp
     from src.web.routes import design_routes
+    from src.web.decision_runtime import _Sender, _Turn
+    from src.agent.tools.property_calculator import PropertyCalculator
+    from tests.agent.pi_web_support import PlannedWebModel
 
     started, release = threading.Event(), threading.Event()
+    protocol_ready = asyncio.Event()
     observations = []
 
-    class Model:
+    class Model(PlannedWebModel):
         def __init__(self, name):
+            super().__init__()
             self.model_name, self.closed = name, False
 
-        async def generate(self, *args, **kwargs):
-            return 'response ' + self.model_name
-
-        async def stream_generate(self, *args, **kwargs):
-            yield 'response ' + self.model_name
+        async def decide(self, *args, **kwargs):
+            first = not self.messages
+            if first and first_decision_delay:
+                await asyncio.sleep(first_decision_delay)
+            response = await super().decide(*args, **kwargs)
+            if first:
+                assert response.decision.action == 'tool'
+                assert response.decision.tool_name == 'property_calculator'
+                protocol_ready.set()
+            return response
 
         async def close(self):
             self.closed = True
 
-    class Agent:
-        tools = {}
-
-        def __init__(self, llm):
-            self.llm = llm
-
-        def set_llm(self, llm):
-            self.llm = llm
-
-        def should_use_tools(self, query):
-            return True
-
-        def execute(self, query, **kwargs):
-            assert kwargs['session_id'] == 'server-owner'
-            observations.append((self.llm, app.config['inference']['stream']))
+    class BlockingProperties(PropertyCalculator):
+        def execute(self, query):
+            observations.append((app.model, app.config['inference']['stream']))
             started.set()
             assert release.wait(5)
-            observations.append((self.llm, app.config['inference']['stream']))
-            assert not self.llm.closed
-            return {'success': True, 'final_answer': 'evidence', 'tools_used': [], 'tool_results': {}}
+            observations.append((app.model, app.config['inference']['stream']))
+            assert not app.model.closed
+            return super().execute(query)
 
     class Socket:
+        scope = {'agent_session_id':'server-owner'}
+        def __init__(self):
+            self.messages = []
         async def send_text(self, message):
-            pass
+            self.messages.append(json.loads(message))
 
     monkeypatch.setattr(MolecularChatApp, '_create_model_from_llm_config', lambda self, config: Model(config['model_name']))
-    monkeypatch.setattr(MolecularChatApp, '_create_chat_agent', lambda self: Agent(self.model))
+    properties = BlockingProperties()
+    monkeypatch.setattr('src.agent.tools.get_all_tools', lambda model, **kwargs:
+        [properties if tool.name == properties.name else tool
+         for tool in _registered_core_tools(model).values()])
     monkeypatch.setattr(design_routes, '_FRAG_DB_PATH', str(tmp_path / 'absent.csv'))
     monkeypatch.setattr(design_routes, '_SAVE_DIR', str(tmp_path / 'saved'))
     monkeypatch.setenv('MEDCHAT_LLM_ALLOWED_HOSTS', 'example.invalid')
     app = MolecularChatApp(str(tmp_path / 'absent.yaml'))
     original = app.model
     original_stream = app.config['inference']['stream']
-    chat = asyncio.create_task(app.chat_handler._process_message(
-        Socket(), 'calculate CCO', False, True, session_id='server-owner'))
+    socket = Socket()
+    sender = _Sender(socket)
+    sender._runtime = app.decision_runtime
+    turn = _Turn({'message':'只计算 CCO 的分子量与 logP', 'enable_tools':True, 'enable_rag':False})
+    async def request():
+        turn.task = asyncio.current_task()
+        app.decision_runtime.active_owners.add(turn)
+        await app.decision_runtime._execute(app.chat_handler, sender, turn)
+    chat = asyncio.create_task(request())
     switch = None
     try:
-        assert await asyncio.to_thread(started.wait, 3)
+        # This tests ownership during a running tool, not end-to-end latency.
+        # Pi startup and the first provider response have their own guard;
+        # dispatch/physical tool entry must still meet the original 3 seconds.
+        await asyncio.wait_for(protocol_ready.wait(), 15)
+        assert await asyncio.to_thread(started.wait, 3), {
+            'chat_done': chat.done(),
+            'decision_calls': len(original.messages),
+            'decision_errors': [type(error).__name__ for error in original.errors],
+            'policy': app.ordinary_chat_policy,
+            'terminal': [{key: frame.get(key) for key in ('type', 'status', 'error')}
+                         for frame in socket.messages if frame.get('type') == 'complete'],
+        }
         switch = asyncio.create_task(app._persist_user_llm_config({
             'provider': 'openai_compatible', 'model_name': 'B',
             'base_url': 'https://example.invalid/v1', 'stream': not original_stream,
@@ -688,12 +730,13 @@ async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path
         assert not original.closed
         assert not app.runtime_llm_env_path.exists(), 'waiting switch must not persist early'
         release.set()
-        if cancel_request:
-            with pytest.raises(asyncio.CancelledError):
-                await chat
-        else:
-            await chat
+        await chat
         await switch
+        complete = [frame for frame in socket.messages if frame['type'] == 'complete']
+        assert len(complete) == 1
+        assert complete[0]['status'] == ('cancelled' if cancel_request else 'completed')
+        assert app.agent_state_store.get_run(turn.trace_id)['session_id'] == 'server-owner'
+        assert not app.decision_runtime.active_owners and app.model_request_gate._readers == 0
         assert observations == [(original, original_stream)] * 2
         assert app.agent_system.llm is app.model
         assert app.model.model_name == 'B'

@@ -18,7 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from src.agent.contracts import AgentContext
 from src.agent.contracts.decision import decode_protocol_json, DecisionProtocolError
-from src.agent.harness.decision_loop import ModelDecisionLoop
+from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.persistence.redaction import contains_secret_material
 from src.agent.tooling.factory import build_tool_registry
@@ -144,7 +144,7 @@ def create_decision_lab(model, db_path, *, port=6012, mode='native', session_ttl
     closing = False
     registry = build_tool_registry([PropertyCalculator()])
     store = SQLiteAgentStateStore(db_path)
-    decision_loop = ModelDecisionLoop(model, registry, store, mode=mode,
+    decision_loop = PiAgentRuntime(model, registry, store, mode=mode,
         max_model_requests=4, max_tool_attempts=2, timeout_seconds=90)
     handler = ChatHandler(None, None, None, {})
     started_runs = 0

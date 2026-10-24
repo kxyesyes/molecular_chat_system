@@ -7,7 +7,7 @@ import re
 
 from src.agent.contracts import AgentResult
 from src.system.scientific_diagnostics import sanitize_reverse_target_diagnostics
-from src.agent.harness.ordinary_chat_policy import scan_claim_risks
+from src.agent.scientific_session.ordinary_chat_policy import scan_claim_risks
 from src.agent.persistence.redaction import (
     contains_secret_material,
     contains_sensitive_text,

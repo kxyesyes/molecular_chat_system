@@ -74,7 +74,19 @@ def _worker(case):
     with ExitStack() as patches, ExitStack() as resources:
         patches.enter_context(patch("src.system.model_clients.OllamaModel", Model))
         patches.enter_context(patch("src.system.model_clients.OpenAICompatibleModel", Model))
-        patches.enter_context(patch("src.agent.tools.get_all_tools", return_value=[]))
+        dispatch_guards = []
+
+        def core_tools(model, **kwargs):
+            from src.agent.tools import get_core_tools
+
+            # Satisfy real Pi registration without loading optional science assets.
+            tools = get_core_tools(model)
+            for tool in tools:
+                dispatch_guards.append(patches.enter_context(patch.object(
+                    tool, "execute", side_effect=AssertionError("Unexpected scientific dispatch"))))
+            return tools
+
+        patches.enter_context(patch("src.agent.tools.get_all_tools", side_effect=core_tools))
         patches.enter_context(patch("src.agent.persistence.SQLiteAgentStateStore", return_value=None))
         for name, setup in (("src.web.routes.design_routes", "setup_design_routes"),
                             ("src.target_search.routes", "setup_target_search_routes")):
@@ -141,6 +153,9 @@ def _worker(case):
                 assert callable(app._create_supervisor_agent)
             else:
                 raise AssertionError("Unknown case")
+        assert dispatch_guards
+        for guard in dispatch_guards:
+            guard.assert_not_called()
     assert models and all(model.closed for model in models)
     assert not (Path.cwd() / "agent.sqlite").exists()
     print("LEGACY_ENTRY_OK=" + case)

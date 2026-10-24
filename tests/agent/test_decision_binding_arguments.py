@@ -252,7 +252,7 @@ def test_non_native_objects_never_invoke_hooks():
 
 def boundary_spies(monkeypatch, bindings):
     # Warm harness imports, then wrap the real preflight and secret detector.
-    from src.agent.harness import decision_bounds
+    from src.agent.scientific_session import decision_bounds
     from src.agent.persistence import redaction
     events = []
     original_bounds = decision_bounds.validate_json

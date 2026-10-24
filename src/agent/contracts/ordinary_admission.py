@@ -36,7 +36,7 @@ def bounded_view(value, *, max_bytes, reason=ADMISSION_ERROR):
     Lazy import is intentional: harness package initialization imports contracts.
     No registry/model/config/asset lookup is performed by this contract.
     """
-    from src.agent.harness.decision_bounds import validate_json
+    from src.agent.scientific_session.decision_bounds import validate_json
     try:
         validate_json(value, max_bytes=max_bytes, reason=reason)
         if contains_secret_material(value):

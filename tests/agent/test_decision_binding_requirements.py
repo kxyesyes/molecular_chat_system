@@ -38,7 +38,7 @@ def reject(value):
 def prepare(value, query='SMILES: CCO', *, capabilities=None, metadata=None,
             allowed=TOOLS, required=(), kind='scientific'):
     from src.agent.contracts import AgentContext
-    from src.agent.harness.decision_bindings import prepare_binding_requirements
+    from src.agent.scientific_session.decision_bindings import prepare_binding_requirements
     data = dict(metadata or {})
     if capabilities is not None:
         data['capabilities'] = capabilities
@@ -476,7 +476,7 @@ def test_proof_requires_all_fields_and_non_duplicate_upstream_roles():
 
 def test_observation_ceiling_is_not_enlarged_by_proof_contract():
     from src.agent.contracts import ToolResult
-    from src.agent.harness.decision_bounds import observation_value
+    from src.agent.scientific_session.decision_bounds import observation_value
     result = ToolResult.success_result('property_calculator', 'x' * 65537)
     with pytest.raises(ValueError, match='^observation_too_large$'):
         observation_value(result)
@@ -495,7 +495,7 @@ def test_preparation_rag_query_uses_utf8_content_not_json_escape_budget(query):
 def test_preparation_uses_whole_selected_structure_without_source_io():
     from src.agent.contracts import AgentContext
     from src.agent.contracts.resolved_molecule import ResolvedScientificMolecule
-    from src.agent.harness.decision_bindings import prepare_binding_requirements
+    from src.agent.scientific_session.decision_bindings import prepare_binding_requirements
     selected = ResolvedScientificMolecule('source', 'presentation', 'a' * 64,
         'observation', 'candidate', 'CCO')
     context = AgentContext(query='请计算这个分子的性质', trace_id='current', resolved_molecule=selected)

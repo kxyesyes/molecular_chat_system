@@ -205,7 +205,7 @@ def test_short_smiles_batch_meets_exact_subject_requirements(setup_loop):
 
 @pytest.mark.parametrize('value', [float('nan'), float('inf'), float('-inf'), True, '0.2', None])
 def test_non_numeric_or_nonfinite_metric_is_not_evidence(value):
-    from src.agent.harness.decision_requirements import _valid_metric
+    from src.agent.scientific_session.decision_requirements import _valid_metric
     assert not _valid_metric('qed', value)
 
 
@@ -224,7 +224,7 @@ def test_missing_model_is_not_accepted(setup_loop):
 
 
 def test_terminal_acceptance_error_cannot_keep_success(setup_loop, monkeypatch):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     original, calls = module.evaluate_requirements, []
     def break_final(*args, **kw):
         calls.append(True)

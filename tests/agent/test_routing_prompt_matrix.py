@@ -1,65 +1,35 @@
 from __future__ import annotations
 
-import asyncio
-import json
-
 import pytest
 
 from src.agent.router import SkillRouter
 from src.agent.routing import HybridSkillRouter
-from src.web.chat_handler import ChatHandler
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 
 
-class _RecordingWebSocket:
-    def __init__(self):
-        self.messages = []
+class _RecordingTool:
+    def __init__(self, name, calls):
+        self.name, self.calls = name, calls
 
-    async def send_text(self, payload):
-        self.messages.append(json.loads(payload))
-
-
-class _RecordingModel:
-    def __init__(self):
-        self.generate_calls = 0
-
-    async def generate(self, *args, **kwargs):
-        self.generate_calls += 1
-        return "model response"
+    def execute(self, query):
+        self.calls.append((self.name, query))
+        # This matrix exercises admission, not scientific inference.
+        return {'success': False, 'status': 'unavailable', 'data': None,
+                'message': 'offline admission fixture unavailable'}
 
 
-class _RecordingRagService:
-    is_initialized = True
+def make_case(tmp_path):
+    from types import SimpleNamespace
+    from src.agent.contracts.web_requirements import WEB_TOOLS
+    from src.agent.persistence import SQLiteAgentStateStore
 
-    def __init__(self):
-        self.calls = []
-
-    async def search_similar_molecules(self, query, count):
-        self.calls.append((query, count))
-        return []
-
-    async def search_similar_molecules_with_status(self, query, count):
-        records = await self.search_similar_molecules(query, count)
-        return {"status": "succeeded" if records else "no_hits", "records": records}
-
-
-class _RecordingAgentSystem:
-    llm = None
-
-    def __init__(self):
-        self.skill_router = SkillRouter()
-        self.execute_calls = []
-
-    def should_use_tools(self, message):
-        return True
-
-    def execute(self, message, **kwargs):
-        self.execute_calls.append((message, kwargs))
-        return {
-            "success": True,
-            "final_answer": "unexpected execution",
-            "tools_used": ["unexpected_tool"],
-            "tool_results": {},
-        }
+    agent = SimpleNamespace(skill_router=SkillRouter(), execute_calls=[])
+    rag = _RecordingTool('rag_search', [])
+    tools = {name: _RecordingTool(name, agent.execute_calls)
+             for name in WEB_TOOLS if name != 'rag_search'}
+    tools[rag.name] = rag
+    handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'routing.sqlite'))
+    return handler, handler.model, rag, agent
 
 
 @pytest.mark.parametrize(
@@ -169,36 +139,21 @@ def test_valid_aspirin_smiles_does_not_require_smiles_confirmation():
         ),
     ],
 )
-def test_invalid_input_is_terminal_before_scientific_execution(prompt, expected_skill):
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+def test_invalid_input_is_terminal_before_scientific_execution(prompt, expected_skill, tmp_path):
+    handler, model, rag, agent = make_case(tmp_path)
 
     decision = agent.skill_router.decide(prompt)
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=True)
 
     assert decision.selected_skill == expected_skill
     assert decision.requires_confirmation is True
     assert "invalid SMILES" in " ".join(decision.reasons)
     assert agent.execute_calls == []
     assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "SMILES 无效" in websocket.messages[-1]["content"]
+    assert model.messages == []
+    assert complete["type"] == "complete"
+    assert "SMILES 无效" in complete["content"]
 
 
 def test_invalid_smiles_skips_llm_arbitration():
@@ -229,120 +184,60 @@ def test_invalid_smiles_rag_similarity_request_requires_correction():
     assert "invalid SMILES" in " ".join(decision.reasons)
 
 
-def test_invalid_smiles_is_terminal_when_scientific_tools_are_disabled():
+def test_invalid_smiles_is_terminal_when_scientific_tools_are_disabled(tmp_path):
     prompt = "Analyze LogP for SMILES: CC(C)(("
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=False,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=False)
 
     assert agent.execute_calls == []
     assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "SMILES 无效" in websocket.messages[-1]["content"]
+    assert model.messages == []
+    assert complete["type"] == "complete"
+    assert "SMILES 无效" in complete["content"]
 
 
-def test_nonlexical_labeled_smiles_is_terminal_when_tools_are_disabled():
+def test_nonlexical_labeled_smiles_is_terminal_when_tools_are_disabled(tmp_path):
     prompt = "Analyze LogP for SMILES: ?"
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=False,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=False)
 
     assert agent.execute_calls == []
     assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "SMILES 无效" in websocket.messages[-1]["content"]
+    assert model.messages == []
+    assert complete["type"] == "complete"
+    assert "SMILES 无效" in complete["content"]
 
 
-def test_invalid_smiles_rag_request_is_terminal_before_all_execution():
+def test_invalid_smiles_rag_request_is_terminal_before_all_execution(tmp_path):
     prompt = "请检索知识库中与 SMILES: CC(C)(( 相似的分子"
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=True)
 
     assert agent.execute_calls == []
     assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "SMILES 无效" in websocket.messages[-1]["content"]
+    assert model.messages == []
+    assert complete["type"] == "complete"
+    assert "SMILES 无效" in complete["content"]
 
 
 @pytest.mark.parametrize("term", ["C++", "C#", "S9+"])
-def test_non_molecular_notation_is_not_rejected_by_the_entry_gate(term):
+def test_non_molecular_notation_is_not_rejected_by_the_entry_gate(term, tmp_path):
     prompt = f"请检索关于 {term} 的普通说明"
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=False,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=False)
 
-    assert rag.calls or model.generate_calls
+    assert rag.calls or model.messages
     assert not any(
         message.get("type") == "complete" and "SMILES 无效" in message.get("content", "")
-        for message in websocket.messages
+        for message in frames
     )
 
 
@@ -353,61 +248,31 @@ def test_non_molecular_notation_is_not_rejected_by_the_entry_gate(term):
         "请解释 S9+ 对药物分子稳定性评估的影响",
     ],
 )
-def test_non_molecular_notation_in_scientific_prose_reaches_normal_processing(prompt):
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+def test_non_molecular_notation_in_scientific_prose_reaches_normal_processing(prompt, tmp_path):
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=False,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=False)
 
-    assert rag.calls or model.generate_calls
+    assert rag.calls or model.messages
     assert not any(
         message.get("type") == "complete" and "SMILES 无效" in message.get("content", "")
-        for message in websocket.messages
+        for message in frames
     )
 
 
 @pytest.mark.parametrize("term", ["C++17", "C#12", "C/C++", "C/C++17"])
-def test_versioned_programming_notation_reaches_normal_processing(term):
+def test_versioned_programming_notation_reaches_normal_processing(term, tmp_path):
     prompt = f"请检索关于 {term} 的开发说明"
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=False,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=False)
 
-    assert rag.calls or model.generate_calls
+    assert rag.calls or model.messages
     assert not any(
         message.get("type") == "complete" and "SMILES 无效" in message.get("content", "")
-        for message in websocket.messages
+        for message in frames
     )
 
 
@@ -454,33 +319,18 @@ def test_domain_acronyms_request_missing_smiles_instead_of_invalid_input(
         "请预测 IC50/P450 活性和 ADMET 风险",
     ],
 )
-def test_domain_prose_returns_missing_smiles_without_downstream_calls(prompt):
-    model = _RecordingModel()
-    rag = _RecordingRagService()
-    agent = _RecordingAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = _RecordingWebSocket()
+def test_domain_prose_returns_missing_smiles_without_downstream_calls(prompt, tmp_path):
+    handler, model, rag, agent = make_case(tmp_path)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=prompt,
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
+    complete, frames = run_web_turn(handler, prompt, [], 'routing-owner',
+                                    enable_rag=True, enable_tools=True)
 
     assert agent.execute_calls == []
     assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "有效 SMILES" in websocket.messages[-1]["content"]
-    assert "SMILES 无效" not in websocket.messages[-1]["content"]
+    assert model.messages == []
+    assert complete["type"] == "complete"
+    assert "有效 SMILES" in complete["content"]
+    assert "SMILES 无效" not in complete["content"]
 
 
 @pytest.mark.parametrize(

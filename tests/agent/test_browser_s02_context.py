@@ -1,36 +1,23 @@
-"""Browser S02 contract, exercised offline through the real native runtime.
+"""Browser S02 contract through actual Pi and the Web decision runtime.
 
-RDKit is real; no model, database evidence mutation, or external API is used.
+RDKit is real; scripted decisions are not live model or external API evidence.
 """
-import asyncio
-import json
 
 import pytest
 
 from src.agent.contracts import AgentContext
-from src.agent.harness.factory import HarnessFactory
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.planning.request_parsing import wants_admet, wants_activity
 from src.agent.planning.task_planner import TaskPlanner
-from src.agent.supervisor import SupervisorAgent
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
-from src.web.chat_handler import ChatHandler
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
+from tests.agent.pi_web_support import PlannedWebModel as NoScienceModel, WebSocket as Socket
 
 
 ASPIRIN = "CC(=O)Oc1ccccc1C(=O)O"
 CAFFEINE = "CN1C(=O)N(C)c2ncn(C)c2C1=O"
 FOLLOWUP = f"把分析对象改为咖啡因 {CAFFEINE}，只比较它和刚才阿司匹林的分子量与 logP，不要再运行 ADMET。"
-
-
-class Socket:
-    scope = {}
-
-    def __init__(self):
-        self.messages = []
-
-    async def send_text(self, text):
-        self.messages.append(json.loads(text))
 
 
 class RecordingProperties(PropertyCalculator):
@@ -54,28 +41,26 @@ class UnavailableAdmet:
         return {"success": False, "status": "unavailable", "message": "offline ADMET unavailable", "data": None}
 
 
-class NoScienceModel:
-    async def generate(self, prompt, **kwargs):
-        return "ordinary chat fallback (no scientific evidence)"
-
-
 def make_handler(tmp_path):
     properties, admet = RecordingProperties(), UnavailableAdmet()
-    agent = SupervisorAgent(tools={
+    handler = make_web_handler(tools={
         properties.name: properties, admet.name: admet,
         "drug_likeness_assessment": DrugLikenessAssessment(),
-    }, harness_factory=HarnessFactory(mode="legacy"),
-        state_store=SQLiteAgentStateStore(tmp_path / "agent.sqlite"))
-    return ChatHandler(NoScienceModel(), None, agent, {}), properties, admet
+    },
+        store=SQLiteAgentStateStore(tmp_path / "agent.sqlite"))
+    return handler, properties, admet
 
 
 def turn(handler, query, history, session="test-chat"):
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, query, enable_rag=False,
-        enable_tools=True, conversation_history=history, session_id=session))
-    complete = [m for m in socket.messages if m["type"] == "complete"]
-    assert complete, socket.messages
-    return complete[-1]["content"]
+    complete, _ = run_web_turn(handler, query, history, session)
+    return complete['content']
+
+
+def executed_result(handler, query):
+    run_web_turn(handler, query, [], 'test-chat')
+    result = handler.web_results[-1]
+    assert result.metadata['backend'] == 'pi'
+    return {**result.to_legacy_dict(), 'trace_id': result.trace_id}
 
 
 @pytest.mark.parametrize("query,expected", [
@@ -187,7 +172,7 @@ def test_property_context_rejects_unusable_or_misaligned_observations(tmp_path, 
     from src.web.property_comparison import accepted_property_evidence
     handler, properties, admet = make_handler(tmp_path)
     query = "只计算 CCO 的分子量和 logP"
-    result = handler.agent_system.execute(query)
+    result = executed_result(handler, query)
     assert accepted_property_evidence(result, query, None)
     corrupt(result["tool_result_sequence"][0])
     assert accepted_property_evidence(result, query, None) is None
@@ -226,10 +211,10 @@ def test_named_comparison_requires_positive_unambiguous_adjacent_label(tmp_path,
     handler, properties, admet = make_handler(tmp_path)
     # Real accepted descriptors; label resolution must not give ethanol an
     # unrelated, negated, or ambiguous name from the user prose.
-    previous_result = handler.agent_system.execute("只计算 CCO 的分子量和 logP")
+    previous_result = executed_result(handler, "只计算 CCO 的分子量和 logP")
     previous = accepted_property_evidence(previous_result, prior, "test-chat")
     current_query = f"只计算咖啡因 {CAFFEINE} 的分子量和 logP"
-    current_result = handler.agent_system.execute(current_query)
+    current_result = executed_result(handler, current_query)
     current = accepted_property_evidence(current_result, current_query, "test-chat")
     answer = descriptor_answer(FOLLOWUP, current, [{"property_evidence": previous}], "test-chat")
     assert "无法" in answer

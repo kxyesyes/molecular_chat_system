@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 from pathlib import Path
 
@@ -27,15 +28,44 @@ from src.agent.evaluation.scientific import (
     summarize_scientific_stability,
 )
 from src.agent.contracts import ToolProvenance, ToolResult
-from src.agent.harness import (
-    HarnessExecutionMetadata,
-    HarnessRun,
-    LegacyHarness,
-    ShadowComparison,
-)
 from src.agent.routing import HybridSkillRouter
 from src.agent.validators import AgentResultValidator
 from src.agent.workflows import WorkflowCatalog, WorkflowPolicy
+
+
+@pytest.mark.parametrize("module_name", [
+    "src.agent.evaluation.scientific", "scripts.run_agent_acceptance",
+])
+def test_deterministic_acceptance_has_no_backend_factory(module_name):
+    source = inspect.getsource(importlib.import_module(module_name))
+    for obsolete in ("HarnessFactory", "harness_factory", "src.agent.harness",
+                     "harness_shadow", "harness_canary", "harness_execution",
+                     "AGENT_HARNESS_MODE"):
+        assert obsolete not in source
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow", "langgraph_canary"])
+def test_contract_executor_probe_runs_once_without_backend_selection(monkeypatch, mode):
+    acceptance = importlib.import_module("scripts.run_agent_acceptance")
+    probe = getattr(acceptance, "_run_executor_contract_probe", None)
+    assert callable(probe), "The contract probe must use the deterministic executor"
+    monkeypatch.setenv("AGENT_HARNESS_MODE", mode)
+    monkeypatch.setenv("AGENT_LANGGRAPH_CANARY_PERCENT", "100")
+    assert probe() == {"status": "passed", "tool_attempt_count": 1}
+
+
+@pytest.mark.parametrize("status", ["failed", "unavailable"])
+def test_contract_report_fails_closed_when_executor_probe_fails(monkeypatch, status):
+    acceptance = importlib.import_module("scripts.run_agent_acceptance")
+    assert callable(getattr(acceptance, "_run_executor_contract_probe", None))
+    # Only the contract-only probe is injected; real scientific acceptance is untouched.
+    monkeypatch.setattr(acceptance, "_run_executor_contract_probe",
+                        lambda: {"status": status, "tool_attempt_count": 0})
+    report = acceptance.run_contract()
+    assert report["status"] == "failed"
+    assert report["executor_contract"]["status"] == status
+    assert "harness_canary" not in report and "harness_shadow" not in report
+    assert report["metrics"]["real_case_count"] > 0
 
 
 def test_acceptance_modules_import_without_legacy_skill_package():
@@ -86,9 +116,12 @@ def test_scientific_runner_reuses_injected_router_catalog(tmp_path):
     assert runner.catalog is catalog
 
 
-def test_scientific_report_includes_redacted_harness_shadow(tmp_path):
+def _direct_scientific_runner(tmp_path, *, fail_second=False):
+    """Local RDKit reporting test; production real-tool construction is unchanged."""
+    from src.agent.tools.property_calculator import PropertyCalculator
+
     class Decision:
-        selected_skill = "custom_workflow"
+        selected_skill = "admet_assessment"
 
     class Router:
         def __init__(self, catalog):
@@ -97,34 +130,16 @@ def test_scientific_report_includes_redacted_harness_shadow(tmp_path):
         def decide(self, _prompt):
             return Decision()
 
-    class Tool:
-        name = "custom_tool"
+    class Tool(PropertyCalculator):
+        def __init__(self):
+            super().__init__()
+            self.calls = []
 
         def execute(self, query):
-            return ToolResult.success_result(self.name, data={"query": query})
-
-    class ShadowFactory:
-        last_warning = None
-
-        def create(self, executor):
-            legacy = LegacyHarness(executor)
-
-            class Backend:
-                def execute(self, **kwargs):
-                    execution = legacy.execute(**kwargs).authoritative
-                    return HarnessRun(
-                        authoritative=execution,
-                        shadow=ShadowComparison(
-                            backend="langgraph",
-                            backend_version="test",
-                            status="matched",
-                            plan_fingerprint="a" * 64,
-                            matched=True,
-                            elapsed_ms=3,
-                        ),
-                    )
-
-            return Backend()
+            self.calls.append(query)
+            if fail_second and len(self.calls) == 2:
+                raise RuntimeError("reporting fixture second-run failure")
+            return super().execute(query)
 
     class Planner:
         def plan(self, context):
@@ -133,134 +148,40 @@ def test_scientific_report_includes_redacted_harness_shadow(tmp_path):
 
             return WorkflowPlan(
                 workflow_name=context.active_skill,
-                steps=[WorkflowStep("custom", "custom_tool", input_data=context.query)],
+                steps=[WorkflowStep("properties", "property_calculator", input_data="CCO")],
+                metadata={"fixture": "direct-execution"},
             )
 
-    catalog = WorkflowCatalog(
-        (
-            WorkflowPolicy(
-                name="custom_workflow",
-                description="custom",
-                allowed_tools=("custom_tool",),
-            ),
-        )
-    )
-    runner = ScientificAcceptanceRunner(
-        dataset_dir=tmp_path,
-        project_root=tmp_path,
-        router=Router(catalog),
-        planner=Planner(),
-        tools={"custom_tool": Tool()},
-        harness_factory=ShadowFactory(),
-    )
+    catalog = WorkflowCatalog((WorkflowPolicy(
+        name="admet_assessment", description="reporting fixture",
+        allowed_tools=("property_calculator",),
+    ),))
+    tool = Tool()
+    return ScientificAcceptanceRunner(
+        dataset_dir=tmp_path, project_root=tmp_path, router=Router(catalog),
+        planner=Planner(), tools={tool.name: tool},
+    ), tool
+
+
+@pytest.mark.parametrize("mode", ["legacy", "shadow", "langgraph_canary"])
+def test_scientific_report_uses_direct_executor_without_sensitive_inputs(tmp_path, monkeypatch, mode):
+    monkeypatch.setenv("AGENT_HARNESS_MODE", mode)
+    monkeypatch.setenv("AGENT_LANGGRAPH_CANARY_PERCENT", "100")
+    runner, tool = _direct_scientific_runner(tmp_path)
     case = EvaluationCase(
-        case_id="SHADOW-001",
-        version="1",
-        category="harness",
-        prompt="secret prompt",
-        expected_skill="custom_workflow",
-        expected_tools=["custom_tool"],
+        case_id="DIRECT-001", version="1", category="execution-contract",
+        prompt="private prompt CCO", expected_skill="admet_assessment",
+        expected_tools=["property_calculator"], metadata={"idempotency_key": "private-key"},
     )
 
     report = runner.run_case(case)
 
-    assert report["harness_shadow"]["status"] == "matched"
-    assert "prompt" not in report["harness_shadow"]
-    assert "secret prompt" not in json.dumps(report["harness_shadow"])
-
-
-def test_scientific_report_records_canary_without_sensitive_inputs(tmp_path):
-    class Decision:
-        selected_skill = "custom_workflow"
-
-    class Router:
-        def __init__(self, catalog):
-            self.catalog = catalog
-
-        def decide(self, _prompt):
-            return Decision()
-
-    class Tool:
-        name = "property_calculator"
-
-        def execute(self, query):
-            return ToolResult.success_result(self.name, data={"query": query})
-
-    class CanaryFactory:
-        last_warning = None
-
-        def create(self, executor):
-            legacy = LegacyHarness(executor)
-
-            class Backend:
-                def execute(self, **kwargs):
-                    execution = legacy.execute(**kwargs).authoritative
-                    return HarnessRun(
-                        authoritative=execution,
-                        execution=HarnessExecutionMetadata(
-                            backend="langgraph",
-                            backend_version="test",
-                            selection_reason="canary_selected",
-                            canary_bucket=7,
-                            plan_fingerprint="a" * 64,
-                            tool_attempt_count=1,
-                            fallback_before_execution=False,
-                            elapsed_ms=3,
-                        ),
-                    )
-
-            return Backend()
-
-    class Planner:
-        def plan(self, context):
-            from src.agent.orchestrators import WorkflowStep
-            from src.agent.planning import WorkflowPlan
-
-            return WorkflowPlan(
-                workflow_name=context.active_skill,
-                steps=[
-                    WorkflowStep(
-                        "properties",
-                        "property_calculator",
-                        input_data="CCO",
-                    )
-                ],
-            )
-
-    catalog = WorkflowCatalog(
-        (
-            WorkflowPolicy(
-                name="custom_workflow",
-                description="custom",
-                allowed_tools=("property_calculator",),
-            ),
-        )
-    )
-    runner = ScientificAcceptanceRunner(
-        dataset_dir=tmp_path,
-        project_root=tmp_path,
-        router=Router(catalog),
-        planner=Planner(),
-        tools={"property_calculator": Tool()},
-        harness_factory=CanaryFactory(),
-    )
-    case = EvaluationCase(
-        case_id="CANARY-001",
-        version="1",
-        category="harness",
-        prompt="private prompt CCO",
-        expected_skill="custom_workflow",
-        expected_tools=["property_calculator"],
-        metadata={"idempotency_key": "private-key"},
-    )
-
-    report = runner.run_case(case)
-
-    assert "harness_execution" in report, report
-    assert report["harness_execution"]["backend"] == "langgraph"
-    assert report["harness_execution"]["tool_attempt_count"] == len(
-        report["actual_tools"]
-    )
+    assert report["status"] == "passed", report
+    assert tool.calls == ["CCO"]
+    assert report["actual_tools"] == ["property_calculator"]
+    assert report["event_sequence"].count("task_completed") == 1
+    assert len(report["tool_provenance"]) == 1
+    assert "harness_execution" not in report and "harness_shadow" not in report
     serialized = json.dumps(report)
     assert "private prompt CCO" not in serialized
     assert "private-key" not in serialized
@@ -280,119 +201,32 @@ def test_case_literal_redaction_covers_mapping_keys():
     assert "private-key" not in serialized
 
 
-@pytest.mark.parametrize(
-    ("second_metadata", "expected_error"),
-    [
-        ("invalid", "invalid_harness_execution_metadata"),
-        ("missing", "harness_execution_metadata_missing"),
-    ],
-)
-def test_repeated_harness_metadata_keeps_invalid_run_alignment(
-    tmp_path,
-    second_metadata,
-    expected_error,
-):
-    class Decision:
-        selected_skill = "custom_workflow"
-
-    class Router:
-        def __init__(self, catalog):
-            self.catalog = catalog
-
-        def decide(self, _prompt):
-            return Decision()
-
-    class Tool:
-        name = "property_calculator"
-
-        def execute(self, query):
-            return ToolResult.success_result(self.name, data={"query": query})
-
-    class Factory:
-        last_warning = None
-
-        def __init__(self):
-            self.calls = 0
-
-        def create(self, executor):
-            legacy = LegacyHarness(executor)
-            parent = self
-
-            class Backend:
-                def execute(self, **kwargs):
-                    parent.calls += 1
-                    execution = legacy.execute(**kwargs).authoritative
-                    if parent.calls == 2 and second_metadata == "missing":
-                        return HarnessRun(authoritative=execution)
-                    attempts = 1 if parent.calls == 1 else 99
-                    return HarnessRun(
-                        authoritative=execution,
-                        execution=HarnessExecutionMetadata(
-                            backend="langgraph",
-                            backend_version="test",
-                            selection_reason="canary_selected",
-                            canary_bucket=7,
-                            plan_fingerprint="a" * 64,
-                            tool_attempt_count=attempts,
-                            fallback_before_execution=False,
-                            elapsed_ms=3,
-                        ),
-                    )
-
-            return Backend()
-
-    class Planner:
-        def plan(self, context):
-            from src.agent.orchestrators import WorkflowStep
-            from src.agent.planning import WorkflowPlan
-
-            return WorkflowPlan(
-                workflow_name=context.active_skill,
-                steps=[
-                    WorkflowStep(
-                        "properties",
-                        "property_calculator",
-                        input_data="CCO",
-                    )
-                ],
-            )
-
-    catalog = WorkflowCatalog(
-        (
-            WorkflowPolicy(
-                name="custom_workflow",
-                description="custom",
-                allowed_tools=("property_calculator",),
-            ),
-        )
-    )
-    runner = ScientificAcceptanceRunner(
-        dataset_dir=tmp_path,
-        project_root=tmp_path,
-        router=Router(catalog),
-        planner=Planner(),
-        tools={"property_calculator": Tool()},
-        harness_factory=Factory(),
-    )
+@pytest.mark.parametrize("fail_second", [False, True])
+def test_repeated_direct_scientific_runs_keep_results_events_and_failures_aligned(tmp_path, fail_second):
+    runner, tool = _direct_scientific_runner(tmp_path, fail_second=fail_second)
     case = EvaluationCase(
-        case_id="CANARY-REPEAT",
-        version="1",
-        category="harness",
-        prompt="properties for CCO",
-        expected_skill="custom_workflow",
-        expected_tools=["property_calculator", "property_calculator"],
-        metadata={"repeat_runs": 2},
+        case_id="DIRECT-REPEAT", version="1", category="execution-contract",
+        prompt="private repeated prompt", expected_skill="admet_assessment",
+        expected_tools=["property_calculator", "property_calculator"], metadata={"repeat_runs": 2},
     )
 
     report = runner.run_case(case)
 
-    runs = report["harness_execution"]["runs"]
-    assert len(runs) == 2
-    assert runs[0]["backend"] == "langgraph"
-    assert runs[1] == {
-        "status": "invalid",
-        "error_code": expected_error,
-    }
+    assert report["status"] == ("partial" if fail_second else "passed"), report
+    assert report["error"] == ("workflow_not_successful" if fail_second else None)
+    assert tool.calls == ["CCO", "CCO"]
+    assert report["actual_tools"] == ["property_calculator", "property_calculator"]
+    assert len(report["tool_provenance"]) == 2
+    assert report["plan_metadata"]["repeat_runs"] == 2
+    assert report["plan_metadata"]["runs"] == [{"fixture": "direct-execution"}] * 2
+    terminal_events = [event for event in report["events"]
+                       if event["event"] in {"task_completed", "task_failed"}]
+    assert len(terminal_events) == 2
+    assert terminal_events[0]["trace_id"] != terminal_events[1]["trace_id"]
+    assert terminal_events[0]["event"] == "task_completed"
+    assert terminal_events[1]["event"] == ("task_failed" if fail_second else "task_completed")
+    assert "private repeated prompt" not in json.dumps(report)
+    assert "harness_execution" not in report and "harness_shadow" not in report
 
 
 def test_load_cases_reads_versioned_jsonl(tmp_path):

@@ -21,9 +21,16 @@ from src.agent.persistence.redaction import redact_sensitive
 from .adapters import LegacyPythonToolAdapter
 
 
+class RAGCountedQuery(BaseModel):
+    """Explicit request-local count; no service configuration or arbitrary args."""
+    model_config = ConfigDict(strict=True, extra='forbid', revalidate_instances='always')
+    query: Annotated[str, Field(min_length=1, max_length=16384)]
+    k: Annotated[int, Field(ge=1, le=50)]
+
+
 class RAGSearchInput(BaseModel):
     model_config = ConfigDict(strict=True, revalidate_instances="always")
-    query: str
+    query: str | RAGCountedQuery
 
 
 NonemptyText = Annotated[str, Field(min_length=1)]
@@ -137,8 +144,12 @@ def _proof_digest(raw, *, query=None, normalized=False, sensitive_fields=None):
         return None
     if len(receipts) != 1:
         raise ValueError('Conflicting retrieval receipts')
+    k = None
+    if type(query) is dict:
+        counted = RAGCountedQuery.model_validate(query, strict=True)
+        query, k = counted.query, counted.k
     envelope = validate_retrieval_envelope(
-        {'records': fields.get('data'), 'receipt': receipts[0]}, query=query)
+        {'records': fields.get('data'), 'receipt': receipts[0]}, query=query, k=k)
     status, success, error = fields.get('status'), fields.get('success'), fields.get('error')
     outcome = envelope['receipt']['diagnostics']['status']
     if outcome in {'valid_hits', 'valid_empty'}:
@@ -168,7 +179,8 @@ class RAGToolAdapter(LegacyPythonToolAdapter):
     def _validate_input(self, input_data: Any) -> Any:
         if isinstance(input_data, str):
             input_data = {"query": input_data}
-        return self.spec.input_schema.model_validate(input_data).query
+        value = self.spec.input_schema.model_validate(input_data).query
+        return value.model_dump(mode='json') if type(value) is RAGCountedQuery else value
 
     def _input_validation_error(self, exc: ValidationError) -> ToolResult:
         # ValidationError.errors() includes the rejected query; never expose it.

@@ -11,6 +11,10 @@ from test_decision_loop import ScriptedModel
 
 ORIGIN = 'http://127.0.0.1:6012'
 PREFIX = '/decision-lab/'
+# Actual Pi starts a Node/SDK process before reaching the scripted provider.
+# This bounds fixture entry only; cancellation, drain and send deadlines below
+# still start after that signal and keep their original short limits.
+PI_ENTRY_TIMEOUT_SECONDS = 15
 
 
 class Socket:
@@ -89,7 +93,7 @@ def test_rotation_waits_for_retired_execution_cleanup(tmp_path, monkeypatch, ret
             ws = Socket(await establish(client))
             owner = asyncio.create_task(endpoint(app)(ws))
             ws.command({'action': 'start', 'case_id': 'chat'})
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), PI_ENTRY_TIMEOUT_SECONDS)
             if retirement == 'expiry':
                 now[0] = 31.0
                 client.cookies.clear()
@@ -141,7 +145,7 @@ def test_shutdown_retains_cleanup_ownership_after_repeated_cancellation(tmp_path
             ws = Socket(await establish(client))
             owner = asyncio.create_task(endpoint(app)(ws))
             ws.command({'action': 'start', 'case_id': 'chat'})
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), PI_ENTRY_TIMEOUT_SECONDS)
             shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
             try:
                 await asyncio.wait_for(cleanup.wait(), 2)
@@ -276,7 +280,7 @@ def test_shutdown_cancelled_while_waiting_for_reset_lock_still_drains_and_closes
             ws = Socket(await establish(client))
             owner = asyncio.create_task(endpoint(app)(ws))
             ws.command({'action': 'start', 'case_id': 'chat'})
-            await asyncio.wait_for(started.wait(), 2)
+            await asyncio.wait_for(started.wait(), PI_ENTRY_TIMEOUT_SECONDS)
             reset = asyncio.create_task(client.post(PREFIX + 'session'))
             await asyncio.wait_for(cleanup.wait(), 2)
             shutdown = asyncio.create_task(lifespan.__aexit__(None, None, None))
@@ -388,7 +392,7 @@ def test_busy_error_timeout_drains_active_work_without_dispatching_extra_command
             owner = asyncio.create_task(endpoint(app)(ws))
             ws.command({'action': 'start', 'case_id': 'chat'})
             try:
-                await asyncio.wait_for(started.wait(), 2)
+                await asyncio.wait_for(started.wait(), PI_ENTRY_TIMEOUT_SECONDS)
                 ws.command({'action': 'start', 'case_id': 'properties'})
                 completed, _ = await asyncio.wait({owner}, timeout=1)
                 assert owner in completed, 'busy-error send has no deadline'

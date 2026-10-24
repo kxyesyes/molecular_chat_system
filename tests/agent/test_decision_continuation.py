@@ -7,7 +7,7 @@ import pytest
 
 from test_decision_loop import setup_loop, ScriptedModel, CountingTool, tool, clarify, finish_last
 from src.agent.contracts import AgentContext
-from src.agent.harness.decision_loop import ModelDecisionLoop
+from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 
@@ -41,7 +41,7 @@ def fresh(b, decisions):
     b.store = SQLiteAgentStateStore(b.store.db_path)
     b.bus = AgentEventBus(state_store=b.store)
     b.model = ContinuationModel(decisions)
-    b.loop = ModelDecisionLoop(b.model, b.registry, b.store,
+    b.loop = PiAgentRuntime(b.model, b.registry, b.store,
         max_model_requests=b.loop.max_model_requests, max_tool_attempts=b.loop.max_tool_attempts,
         timeout_seconds=b.loop.timeout_seconds)
 
@@ -183,9 +183,25 @@ def test_real_invalid_input_corrected_by_user_recomputes_rdkit(setup_loop):
 def test_multiple_clarifications_keep_history_and_single_use_snapshots(setup_loop):
     b = setup_loop([])
     first = start(b, [tool(), clarify()])
+    assert 'continuation_id' in first.metadata, first.metadata
     fresh(b, [clarify()])
     second = invoke(b, continuation_id=first.metadata['continuation_id'], clarified_query='SMILES: CCO')
     assert second.metadata['continuation_id'] != first.metadata['continuation_id']
+    from src.agent.pi_runtime.checkpoint import validate_pi_checkpoint
+    saved = b.store.get_run('owned-trace')['metadata']['decision_continuation']['snapshot']
+    try:
+        validate_pi_checkpoint(saved, mode=b.loop.mode, system_message=saved['messages'][0],
+                               allowed_tools={'property_calculator'})
+    except ValueError as exc:
+        systems = [entry['message'] for entry in saved['pi_entries']
+                   if entry.get('type') == 'message' and entry['message'].get('role') == 'system']
+        pytest.fail(str(exc) + ': ' + repr([{
+            'keys': sorted(message), 'content_empty': message.get('content') == '',
+            'section_keys': sorted(message.get('sections', {})),
+            'preamble_matches': message.get('sections', {}).get('preamble') == saved['messages'][0]['content'],
+            'tools_added': [tool['name'] for tool in message.get('toolsAdded', [])],
+            'tools_removed': message.get('toolsRemoved'),
+        } for message in systems]))
     fresh(b, [tool(), finish_last])
     result = invoke(b, continuation_id=second.metadata['continuation_id'], clarified_query='SMILES: CCO')
     assert result.success and len(b.tools[0].inputs) == 1
@@ -221,7 +237,7 @@ def test_elapsed_execution_budget_survives_human_wait(setup_loop, monkeypatch):
     b = setup_loop([])
     real_clock = time.monotonic
     offset = [0]
-    monkeypatch.setattr('src.agent.harness.decision_loop.time.monotonic', lambda: real_clock() + offset[0])
+    monkeypatch.setattr('src.agent.scientific_session.controller.time.monotonic', lambda: real_clock() + offset[0])
     def spend_budget(messages):
         offset[0] += 250
         return clarify()

@@ -17,7 +17,7 @@ from typing import get_args
 
 from src.agent.contracts import ObservationStatus, ToolProvenance, ToolResult
 from src.agent.evidence.ledger import EvidenceLedger
-from src.agent.harness.decision_bounds import validate_json
+from src.agent.scientific_session.decision_bounds import validate_json
 from src.agent.persistence.scientific_references import _source
 from src.target_search.remote_clients import _validate_uniprot_accession
 

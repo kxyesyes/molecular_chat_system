@@ -584,7 +584,7 @@ def test_capture_during_reload_does_not_certify_half_published_state(tmp_path, m
 def test_actual_session_seal_and_current_source_are_separate(tmp_path, monkeypatch, post_return_drift, rag_ip_loader):
     from types import MappingProxyType
     from src.agent.contracts import AgentContext, AgentErrorCode
-    from src.agent.harness.decision_inputs import seal_observation, verify_observation_integrity
+    from src.agent.scientific_session.decision_inputs import seal_observation, verify_observation_integrity
     from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
     from src.agent.persistence import SQLiteAgentStateStore
     from src.agent.runtime.event_bus import AgentEventBus

@@ -2,19 +2,25 @@
 import asyncio
 import json
 import threading
+import time
+from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 
-from src.agent.router import SkillRouter
 from src.agent.routing import HybridSkillRouter
+from src.agent.tools.property_calculator import PropertyCalculator
 from src.web.chat_handler import ChatHandler
 from src.web.model_lifecycle import ModelRequestGate
 from tests.agent.test_decision_loop import setup_loop, tool as tool_decision, finish_last, CountingTool
 from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision, result_of
+from tests.agent.pi_web_support import make_web_handler, PlannedWebModel, cleanup_web_handlers
 
 
 QUERY = "请全面分析 CCO 的成药性并预测活性"
+PROPERTY_QUERY = "只计算 CCO 的分子量和 logP"
+PI_STARTUP_TIMEOUT = 10
 
 
 @pytest.fixture
@@ -43,38 +49,121 @@ class Model:
         return "contract fixture"
 
 
-def completed():
-    return {"success": True, "status": "completed", "final_answer": "contract fixture",
-            "tools_used": [], "tool_results": {},
-            "workflow_plan": {"workflow_name": "comprehensive_evaluation"}}
-
-
-class Agent:
-    llm = None
-
-    def __init__(self, router):
-        self.skill_router = router
-        self.calls = []
-
-    def should_use_tools(self, query):
-        return True
-
-    def execute(self, query, **kwargs):
-        self.calls.append(query)
-        return completed()
-
-
-class DelayedRouter(SkillRouter):
+class RuntimeSocket(Socket):
+    """Transport fixture for the real WebDecisionRuntime receive loop."""
     def __init__(self):
         super().__init__()
-        self.started = threading.Event()
-        self.release = threading.Event()
+        self.scope = {'agent_session_id': 'allocation-' + uuid4().hex}
+        self.incoming = asyncio.Queue()
+        self.ready = asyncio.Event()
 
-    def decide(self, query, llm=None):
-        if "slow" in query:
+    async def accept(self):
+        pass
+
+    async def close(self, **kwargs):
+        pass
+
+    async def receive_text(self):
+        value = await self.incoming.get()
+        if value is None:
+            from fastapi import WebSocketDisconnect
+            raise WebSocketDisconnect()
+        return json.dumps(value)
+
+    async def send_text(self, text):
+        await super().send_text(text)
+        if self.frames[-1]['type'] == 'connection_ready':
+            self.ready.set()
+
+    async def turn(self, query, **kwargs):
+        start = len(self.frames)
+        self.terminal.clear()
+        await self.incoming.put(dict(message=query, enable_tools=True, enable_rag=False, **kwargs))
+        await asyncio.wait_for(self.terminal.wait(), PI_STARTUP_TIMEOUT)
+        frames = self.frames[start:]
+        assert sum(frame['type'] == 'complete' for frame in frames) == 1
+        return frames
+
+
+@asynccontextmanager
+async def web_connection(handler):
+    socket = RuntimeSocket()
+    receiver = asyncio.create_task(handler.decision_runtime.handle_websocket(handler=handler, websocket=socket))
+    try:
+        await asyncio.wait_for(socket.ready.wait(), 2)
+        yield socket
+    finally:
+        await socket.incoming.put(None)
+        await asyncio.wait_for(receiver, 5)
+
+
+@asynccontextmanager
+async def allocation_web(tmp_path, *, model=None, tools=None, timeout=5, progress=.025):
+    from src.agent.persistence import SQLiteAgentStateStore
+
+    supplied = tools if tools is not None else [AllocationProperties()]
+    model = model if model is not None else PlannedWebModel()
+    handler = make_web_handler(supplied, SQLiteAgentStateStore(tmp_path / ('allocation-' + uuid4().hex + '.sqlite')), model)
+    handler.model_request_gate = handler.decision_runtime.application.model_request_gate
+    handler.config['agent'] = dict(allocation_timeout_seconds=timeout, allocation_progress_seconds=progress)
+    async with web_connection(handler) as socket:
+        yield SimpleNamespace(handler=handler, socket=socket, model=model, tools=supplied,
+                              runtime=handler.decision_runtime, store=handler.agent_system.state_store)
+    assert not handler.decision_runtime.active_owners
+    assert not handler.decision_runtime.tasks
+    assert handler.model_request_gate._readers == 0
+
+
+class AllocationProperties(PropertyCalculator):
+    def __init__(self):
+        super().__init__()
+        self.inputs = []
+
+    def execute(self, query):
+        self.inputs.append(query)
+        return super().execute(query)
+
+
+class DelayedDecision(PlannedWebModel):
+    """First provider is deliberately cancellation-resistant; no tool is faked."""
+    def __init__(self, *, asynchronous=False, timeout=.12):
+        super().__init__()
+        self.asynchronous, self.timeout = asynchronous, timeout
+        self.started, self.release, self.exited = (threading.Event() for _ in range(3))
+        self.cancelled = asyncio.Event()
+        self.block_next = True
+
+    async def decide(self, messages, **kwargs):
+        if self.block_next:
+            from src.agent.runtime.allocation import current_allocation
+            self.block_next = False
+            self.scope = current_allocation()
+            if self.timeout is not None:
+                self.scope.deadline = time.monotonic() + self.timeout
             self.started.set()
-            assert self.release.wait(5), "fixture was not released"
-        return super().decide(QUERY, llm=llm)
+            if self.asynchronous:
+                try:
+                    while not self.release.is_set():
+                        try:
+                            await asyncio.sleep(.005)
+                        except asyncio.CancelledError:
+                            self.cancelled.set()
+                finally:
+                    self.exited.set()
+            else:
+                def hold():
+                    try:
+                        assert self.release.wait(15), 'provider fixture was not released'
+                    finally:
+                        self.exited.set()
+                worker = asyncio.create_task(asyncio.to_thread(hold))
+                while not worker.done():
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        self.cancelled.set()
+                worker.result()
+        return await super().decide(messages, **kwargs)
 
 
 def handler_for(agent, *, timeout=0.12, progress=0.025):
@@ -90,208 +179,183 @@ def handler_for(agent, *, timeout=0.12, progress=0.025):
 async def drain_allocations(handler):
     async with handler.model_request_gate.exclusive():
         pass
+    if handler.decision_runtime is not None:
+        await asyncio.gather(*tuple(handler.decision_runtime.tasks))
 
 
 @pytest.mark.anyio
-async def test_delayed_route_times_out_once_with_progress_and_no_late_dispatch():
-    router = DelayedRouter()
-    agent = Agent(router)
-    handler = handler_for(agent)
-    socket = Socket()
-    request = asyncio.create_task(handler._process_message(socket, "slow " + QUERY, False, True))
-    try:
-        assert await asyncio.to_thread(router.started.wait, 2)
-        await asyncio.wait_for(socket.terminal.wait(), 0.7)
-        terminal = [frame for frame in socket.frames if frame["type"] == "complete"]
-        assert len(terminal) == 1
-        assert terminal[0]["status"] == "timeout"
-        assert terminal[0]["error"]["code"] == "allocation_timeout"
-        progress_times = [when for frame, when in zip(socket.frames, socket.times)
-                          if frame.get("stage") == "allocation"]
-        assert len(progress_times) >= 2
-        assert 0.01 <= progress_times[1] - progress_times[0] <= 0.15
-        assert progress_times[-1] < socket.times[-1]
-        assert agent.calls == []
-        # A visible timeout is not proof that a synchronous model has stopped.
-        assert handler.model_request_gate._readers == 1
-        before_release = list(socket.frames)
-        router.release.set()
-        await asyncio.wait_for(request, 2)
-        await asyncio.wait_for(drain_allocations(handler), 2)
-        assert socket.frames == before_release
-        assert agent.calls == []
-        assert handler.model_request_gate._readers == 0
-    finally:
-        router.release.set()
-        await asyncio.gather(request, return_exceptions=True)
+async def test_delayed_route_times_out_once_with_progress_and_no_late_dispatch(tmp_path):
+    model = DelayedDecision()
+    async with allocation_web(tmp_path, model=model) as case:
+        handler, socket = case.handler, case.socket
+        request = asyncio.create_task(socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(model.started.wait, PI_STARTUP_TIMEOUT)
+            frames = await asyncio.wait_for(request, .7)
+            assert frames[-1]['status'] == 'timeout'
+            assert frames[-1]['error']['code'] == 'allocation_timeout'
+            progress_times = [when for frame, when in zip(socket.frames, socket.times)
+                              if frame.get('stage') == 'allocation']
+            assert len(progress_times) >= 2
+            assert .01 <= progress_times[1] - progress_times[0] <= .15
+            assert progress_times[-1] < socket.times[-1]
+            assert case.tools[0].inputs == []
+            assert handler.model_request_gate._readers == 1 and not model.exited.is_set()
+            before_release = list(socket.frames)
+            model.release.set()
+            await asyncio.wait_for(drain_allocations(handler), 3)
+            assert socket.frames == before_release and case.tools[0].inputs == []
+            assert handler.model_request_gate._readers == 0 and model.exited.is_set()
+        finally:
+            model.release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
-async def test_cancellation_seals_routing_before_retained_worker_returns():
-    router = DelayedRouter()
-    agent = Agent(router)
-    handler = handler_for(agent, timeout=3)
-    socket = Socket()
-    request = asyncio.create_task(handler._process_message(socket, "slow " + QUERY, False, True))
-    try:
-        assert await asyncio.to_thread(router.started.wait, 2)
-        request.cancel()
-        await asyncio.sleep(0.03)
-        request.cancel()  # repeated cancellation must not bypass cleanup
-        await asyncio.sleep(0)
-        before_release = list(socket.frames)
-        router.release.set()
-        with pytest.raises(asyncio.CancelledError):
-            await request
-        assert agent.calls == []
-        assert socket.frames == before_release
-        assert handler.model_request_gate._readers == 0
-    finally:
-        router.release.set()
-        await asyncio.gather(request, return_exceptions=True)
+async def test_cancellation_seals_routing_before_retained_worker_returns(tmp_path):
+    model = DelayedDecision(timeout=None)
+    async with allocation_web(tmp_path, model=model) as case:
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(model.started.wait, PI_STARTUP_TIMEOUT)
+            turn = next(iter(case.runtime.active_owners))
+            for _ in range(2):
+                await case.socket.incoming.put(dict(type='cancel', turn_id=turn.turn_id))
+                await asyncio.sleep(.03)
+                assert not request.done() and not model.exited.is_set()
+                assert case.handler.model_request_gate._readers == 1
+            model.release.set()
+            frames = await asyncio.wait_for(request, 3)
+            # Web cancellation is a terminal frame, not a private-call exception.
+            assert frames[-1]['status'] == 'cancelled'
+            assert case.tools[0].inputs == []
+            before = list(case.socket.frames)
+            await drain_allocations(case.handler)
+            assert case.socket.frames == before and model.exited.is_set()
+            assert case.handler.model_request_gate._readers == 0
+        finally:
+            model.release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
-async def test_expired_request_does_not_cancel_concurrent_or_later_request():
-    router = DelayedRouter()
-    agent = Agent(router)
-    handler = handler_for(agent)
-    slow, fast, later = Socket(), Socket(), Socket()
-    request = asyncio.create_task(handler._process_message(slow, "slow " + QUERY, False, True))
-    try:
-        assert await asyncio.to_thread(router.started.wait, 2)
-        await asyncio.wait_for(slow.terminal.wait(), 0.7)
-        await handler._process_message(fast, QUERY, False, True, conversation_history=[])
-        assert fast.frames[-1]["status"] == "succeeded"
-        router.release.set()
-        await request
-        await handler._process_message(later, QUERY, False, True, conversation_history=[])
-        assert later.frames[-1]["status"] == "succeeded"
-        assert agent.calls == [QUERY, QUERY]
-        assert sum(frame["type"] == "complete" for frame in slow.frames) == 1
-    finally:
-        router.release.set()
-        await asyncio.gather(request, return_exceptions=True)
+async def test_expired_request_does_not_cancel_concurrent_or_later_request(tmp_path):
+    model = DelayedDecision()
+    async with allocation_web(tmp_path, model=model) as case:
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(model.started.wait, PI_STARTUP_TIMEOUT)
+            assert (await asyncio.wait_for(request, .7))[-1]['status'] == 'timeout'
+            async with web_connection(case.handler) as fast:
+                fast_frames = await fast.turn(PROPERTY_QUERY)
+                assert fast_frames[-1]['status'] == 'completed', fast_frames[-1]
+            assert not model.exited.is_set() and len(case.tools[0].inputs) == 1
+            first_input = case.tools[0].inputs[0]
+            model.release.set()
+            await drain_allocations(case.handler)
+            async with web_connection(case.handler) as later:
+                assert (await later.turn(PROPERTY_QUERY))[-1]['status'] == 'completed'
+            assert case.tools[0].inputs == [first_input, first_input]
+            assert sum(frame['type'] == 'complete' for frame in case.socket.frames) == 1
+        finally:
+            model.release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_actual_hybrid_model_arbitration_cannot_dispatch_after_timeout(asynchronous):
-    started, release = threading.Event(), threading.Event()
-
-    class DelayedModel:
-        def generate(self, *args, **kwargs):
-            started.set()
-            if asynchronous:
-                async def wait():
-                    while not release.is_set():
-                        await asyncio.sleep(0.01)
-                    return '{}'
-                return wait()
-            assert release.wait(5)
-            return '{}'
-
-    router = SkillRouter()
-    router.hybrid_router.llm_margin_threshold = 2.0
-    agent = Agent(router)
-    agent.llm = DelayedModel()
-    handler = handler_for(agent)
-    socket = Socket()
-    request = asyncio.create_task(handler._process_message(socket, QUERY, False, True))
-    try:
-        assert await asyncio.to_thread(started.wait, 2)
-        await asyncio.wait_for(socket.terminal.wait(), 0.7)
-        assert socket.frames[-1]["status"] == "timeout"
-        release.set()
-        await request
-        assert agent.calls == []
-        assert sum(frame["type"] == "complete" for frame in socket.frames) == 1
-    finally:
-        release.set()
-        await asyncio.gather(request, return_exceptions=True)
+async def test_actual_pi_model_proposal_cannot_dispatch_after_timeout(tmp_path, asynchronous):
+    model = DelayedDecision(asynchronous=asynchronous)
+    async with allocation_web(tmp_path, model=model) as case:
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(model.started.wait, PI_STARTUP_TIMEOUT)
+            assert (await asyncio.wait_for(request, .7))[-1]['status'] == 'timeout'
+            await asyncio.wait_for(model.cancelled.wait(), 1)
+            assert not model.exited.is_set()
+            before = list(case.socket.frames)
+            model.release.set()
+            await asyncio.wait_for(drain_allocations(case.handler), 3)
+            assert case.tools[0].inputs == [] and case.socket.frames == before
+            assert sum(frame['type'] == 'complete' for frame in case.socket.frames) == 1
+        finally:
+            model.release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
 async def test_direct_hybrid_router_receives_model_as_keyword_not_memory():
-    agent = Agent(HybridSkillRouter())
-    agent.llm = SimpleNamespace(generate=lambda *args, **kwargs: '{}')
-    socket = Socket()
-    await handler_for(agent, timeout=2)._process_message(socket, QUERY, False, True)
-    assert socket.frames[-1]["status"] == "succeeded"
+    # A retained domain router contract, not a generic Web execution path.
+    model = SimpleNamespace(generate=lambda *args, **kwargs: '{}')
+    decision = await asyncio.to_thread(HybridSkillRouter().decide, QUERY, llm=model)
+    assert decision.selected_skill == 'comprehensive_evaluation'
 
 
 @pytest.mark.anyio
-async def test_native_bridge_allocation_timeout_cancels_model_and_has_one_terminal():
-    from src.agent.contracts import AgentContext, AgentResult
-
+async def test_native_bridge_allocation_timeout_cancels_model_and_has_one_terminal(tmp_path):
+    from src.agent.runtime.allocation import current_allocation
     entered, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    calls = []
 
-    class Loop:
-        store = None
-
-        async def run(self, context, **kwargs):
+    class CooperativeModel(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            current_allocation().deadline = time.monotonic() + .12
             entered.set()
             try:
                 await release.wait()
             except asyncio.CancelledError:
                 cancelled.set()
                 raise
-            calls.append("tool")
-            return AgentResult(context.trace_id, True, "fixture")
+            return await super().decide(messages, **kwargs)
 
-    handler = handler_for(None)
-    socket = Socket()
-    context = AgentContext(QUERY, "allocation-native", user_id="test", session_id="test")
-    request = asyncio.create_task(handler.process_decision_message(
-        socket, context=context, decision_loop=Loop(), request_kind="scientific",
-        allowed_tools={"property_calculator"}, required_tools={"property_calculator"}))
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        await asyncio.wait_for(socket.terminal.wait(), 0.7)
-        result = await asyncio.wait_for(request, 1)
-        assert result.outcome.value == "timeout"
-        assert result.metadata["stop_reason"] == "allocation_timeout"
-        assert cancelled.is_set()
-        assert socket.frames[-1]["status"] == "timeout"
-        assert calls == []
-        release.set()
-        await asyncio.sleep(0)
-        assert sum(frame["type"] == "complete" for frame in socket.frames) == 1
-    finally:
-        release.set()
-        await asyncio.gather(request, return_exceptions=True)
+    async with allocation_web(tmp_path, model=CooperativeModel()) as case:
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            await asyncio.wait_for(entered.wait(), PI_STARTUP_TIMEOUT)
+            frames = await asyncio.wait_for(request, .7)
+            result = result_of(frames)
+            assert result['status'] == 'timeout'
+            assert result['metadata']['stop_reason'] == 'allocation_timeout'
+            await asyncio.wait_for(cancelled.wait(), 1)
+            await drain_allocations(case.handler)
+            assert case.tools[0].inputs == []
+            release.set()
+            await asyncio.sleep(0)
+            assert sum(frame['type'] == 'complete' for frame in case.socket.frames) == 1
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
-async def test_bounded_workers_do_not_queue_expired_allocation_calls():
-    from src.agent.runtime.allocation import MAX_ALLOCATION_WORKERS
-
+async def test_bounded_workers_do_not_queue_expired_allocation_calls(tmp_path):
+    from src.agent.runtime.allocation import MAX_ALLOCATION_WORKERS, current_allocation, owned_allocation_call
     entered = []
     release = threading.Event()
 
-    class BlockedRouter(SkillRouter):
-        def decide(self, query, llm=None):
-            entered.append(query)
-            assert release.wait(5)
-            return super().decide(QUERY)
+    class PooledModel(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            current_allocation().deadline = time.monotonic() + .3
+            def blocked():
+                entered.append(True)
+                assert release.wait(15)
+            await owned_allocation_call(blocked)
+            return await super().decide(messages, **kwargs)
 
-    handler = handler_for(Agent(BlockedRouter()), timeout=0.3)
-    sockets = [Socket() for _ in range(MAX_ALLOCATION_WORKERS + 1)]
-    requests = []
-    try:
-        for index, socket in enumerate(sockets):
-            requests.append(asyncio.create_task(handler._process_message(
-                socket, f"{index} " + QUERY, False, True)))
-        await asyncio.wait_for(asyncio.gather(*(socket.terminal.wait() for socket in sockets)), 2)
-        assert len(entered) == MAX_ALLOCATION_WORKERS
-        release.set()
-        await asyncio.wait_for(asyncio.gather(*requests), 2)
-        assert len(entered) == MAX_ALLOCATION_WORKERS
-        assert handler.agent_system.calls == []
-    finally:
-        release.set()
-        await asyncio.gather(*requests, return_exceptions=True)
+    async with allocation_web(tmp_path, model=PooledModel()) as case:
+        async with AsyncExitStack() as stack:
+            sockets = [case.socket, *[await stack.enter_async_context(web_connection(case.handler))
+                for _ in range(MAX_ALLOCATION_WORKERS)]]
+            requests = [asyncio.create_task(socket.turn(PROPERTY_QUERY)) for socket in sockets]
+            try:
+                frames = await asyncio.wait_for(asyncio.gather(*requests), PI_STARTUP_TIMEOUT)
+                assert all(turn[-1]['status'] == 'timeout' for turn in frames)
+                assert len(entered) == MAX_ALLOCATION_WORKERS
+                release.set()
+                await asyncio.wait_for(drain_allocations(case.handler), 3)
+                assert len(entered) == MAX_ALLOCATION_WORKERS and case.tools[0].inputs == []
+            finally:
+                release.set()
+                await asyncio.gather(*requests, return_exceptions=True)
 
 
 @pytest.mark.anyio
@@ -327,71 +391,39 @@ async def test_standalone_hybrid_arbitration_has_a_default_deadline(monkeypatch,
         await asyncio.gather(task, return_exceptions=True)
 
 
-def supervisor_fixture(*, slow_planner=False, slow_tool=False):
-    from src.agent.contracts import ToolResult
-    from src.agent.orchestrators import WorkflowStep
-    from src.agent.planning import WorkflowPlan
-    from src.agent.supervisor import SupervisorAgent
-    from tests.agent.test_analysis_contract import analysis_rows
-
-    started, release = threading.Event(), threading.Event()
-
-    class Tool:
-        name = "property_calculator"
-        calls = 0
-
-        def execute(self, query):
-            self.calls += 1
-            if slow_tool:
-                started.set()
-                assert release.wait(5)
-            return ToolResult.success_result(self.name, analysis_rows(self.name))
-
-    class Planner:
-        def plan(self, context):
-            if slow_planner:
-                started.set()
-                assert release.wait(5)
-            return WorkflowPlan(workflow_name="admet_assessment", steps=[
-                WorkflowStep("properties", "property_calculator", "CCO")])
-
-    tool = Tool()
-    supervisor = SupervisorAgent(tools={tool.name: tool}, planner=Planner())
-    return supervisor, tool, started, release
-
-
 @pytest.mark.anyio
-async def test_running_checkpoint_timeout_does_not_announce_or_dispatch_tool(monkeypatch):
+async def test_running_checkpoint_timeout_does_not_announce_or_dispatch_tool(tmp_path, monkeypatch):
     from src.agent.runtime.run_session import WorkflowRunSession
+    from src.agent.runtime.allocation import current_allocation
 
     started, release = threading.Event(), threading.Event()
     original = WorkflowRunSession._save_session_checkpoint
 
     def checkpoint(self, step, journal, **kwargs):
         if kwargs.get('checkpoint_phase') == 'running':
+            current_allocation().deadline = time.monotonic() + .12
             started.set()
-            assert release.wait(5), 'fixture was not released'
+            assert release.wait(15), 'fixture was not released'
         return original(self, step, journal, **kwargs)
 
     monkeypatch.setattr(WorkflowRunSession, '_save_session_checkpoint', checkpoint)
-    supervisor, tool, _, _ = supervisor_fixture()
-    handler, socket = handler_for(supervisor), Socket()
-    request = asyncio.create_task(handler._process_message(socket, QUERY, False, True))
-    try:
-        assert await asyncio.to_thread(started.wait, 2)
-        await asyncio.wait_for(socket.terminal.wait(), 1)
-        assert socket.frames[-1]['status'] == 'timeout'
-        assert tool.calls == 0
-        assert not any(frame.get('event', {}).get('event') == 'tool_started' for frame in socket.frames)
-        release.set()
-        await request
-        await asyncio.wait_for(drain_allocations(handler), 2)
-        assert tool.calls == 0
-        assert not any(frame.get('event', {}).get('event') == 'tool_started' for frame in socket.frames)
-    finally:
-        release.set()
-        await asyncio.gather(request, return_exceptions=True)
-        await asyncio.wait_for(drain_allocations(handler), 2)
+    async with allocation_web(tmp_path) as case:
+        handler, socket, tool = case.handler, case.socket, case.tools[0]
+        request = asyncio.create_task(socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(started.wait, PI_STARTUP_TIMEOUT)
+            assert (await asyncio.wait_for(request, 1))[-1]['status'] == 'timeout'
+            assert tool.inputs == []
+            assert not any(frame.get('event', {}).get('event') == 'tool_started' for frame in socket.frames)
+            before = list(socket.frames)
+            release.set()
+            await asyncio.wait_for(drain_allocations(handler), 3)
+            assert tool.inputs == [] and socket.frames == before
+            assert not any(frame.get('event', {}).get('event') == 'tool_started' for frame in socket.frames)
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            await asyncio.wait_for(drain_allocations(handler), 3)
 
 
 def test_tool_start_follows_checkpoint_and_dispatch_latch_without_replay_duplicate(tmp_path, monkeypatch):
@@ -439,196 +471,232 @@ def test_tool_start_follows_checkpoint_and_dispatch_latch_without_replay_duplica
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("worker_settled", [False, True])
-async def test_expiry_at_workflow_event_drains_inner_consumer_without_failure_retry(monkeypatch, worker_settled):
-    from src.agent.runtime import allocation
+async def test_expiry_at_workflow_event_drains_inner_consumer_without_failure_retry(tmp_path, monkeypatch, worker_settled):
+    from src.web import decision_chat
+    from src.web.chat_handler import _AllocationSocket
 
-    now = [100.0]
-    monkeypatch.setattr(allocation, "monotonic", lambda: now[0])
-    supervisor, tool, started, release = supervisor_fixture()
-    handler, socket = handler_for(supervisor), Socket()
+    model = DelayedDecision(timeout=None)
     entered, resume_send, send_finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    consumers, workers, retrieved_workers, failure_retries = [], [], [], []
-    send = handler._send_agent_event
-    fail = handler._finish_terminal_agent_failure
-    execute = supervisor.execute
-    execute_agent = handler._execute_agent
+    consumers, workers, retrieved, failure_retries = [], [], [], []
+    send = _AllocationSocket.send_text
+    schedule = decision_chat._create_owned_task
+    fail = decision_chat._failure
 
-    async def worker_boundary(*args, **kwargs):
-        task = asyncio.current_task()
-        workers.append(task)
-        exception = task.exception
+    def audit(task):
+        for name in ('exception', 'result'):
+            original = getattr(task, name)
+            def consumed(*args, original=original, **kwargs):
+                retrieved.append(task)
+                return original(*args, **kwargs)
+            monkeypatch.setattr(task, name, consumed)
 
-        def retrieve_exception():
-            retrieved_workers.append(task)
-            return exception()
+    def worker_boundary(coroutine, **kwargs):
+        task = schedule(coroutine, **kwargs)
+        if kwargs.get('name') == 'isolated-decision-chat':
+            workers.append(task)
+            audit(task)
+        return task
 
-        monkeypatch.setattr(task, "exception", retrieve_exception)
-        return await execute_agent(*args, **kwargs)
+    async def event_boundary(sender, text):
+        if json.loads(text).get('type') == 'agent_event' and not entered.is_set():
+            task = asyncio.current_task()
+            consumers.append(task)
+            audit(task)
+            entered.set()
+            # Keep the real event-send child physically alive through timeout.
+            while not resume_send.is_set():
+                try:
+                    await resume_send.wait()
+                except asyncio.CancelledError:
+                    pass
+            try:
+                return await send(sender, text)
+            finally:
+                send_finished.set()
+        return await send(sender, text)
 
-    def execute_at_event(query, *, event_callback=None, **kwargs):
-        def on_event(event):
-            event_callback(event)
-            if not started.is_set():
-                started.set()
-                assert release.wait(5), "event producer was not released"
-        return execute(query, event_callback=on_event, **kwargs)
-
-    async def event_boundary(sender, event):
-        consumers.append(asyncio.current_task())
-        entered.set()
-        await resume_send.wait()
-        try:
-            await send(sender, event)  # Real allocation socket rejects this late event.
-        finally:
-            send_finished.set()
-
-    async def failure_boundary(*args, **kwargs):
+    def failure_boundary(*args, **kwargs):
         failure_retries.append(True)
-        return await fail(*args, **kwargs)
+        return fail(*args, **kwargs)
 
-    monkeypatch.setattr(handler, "_send_agent_event", event_boundary)
-    monkeypatch.setattr(handler, "_finish_terminal_agent_failure", failure_boundary)
-    monkeypatch.setattr(supervisor, "execute", execute_at_event)
-    monkeypatch.setattr(handler, "_execute_agent", worker_boundary)
-    request = asyncio.create_task(handler._process_message(socket, "计算 CCO 的分子性质", False, True))
-    retained = set()
-    try:
-        assert await asyncio.to_thread(started.wait, 2)
-        await asyncio.wait_for(entered.wait(), 2)
-        retained = set(handler._allocation_tasks)
-        assert retained == handler.model_request_gate._background
-        now[0] = 1000.0  # Expire only after both real worker and event consumer are blocked.
-        await asyncio.wait_for(request, 2)
-        assert [(f["type"], f.get("status")) for f in socket.frames
-                if f["type"] == "complete"] == [("complete", "timeout")]
-        before_release = list(socket.frames)
-        if worker_settled:
+    monkeypatch.setattr(_AllocationSocket, 'send_text', event_boundary)
+    monkeypatch.setattr(decision_chat, '_create_owned_task', worker_boundary)
+    monkeypatch.setattr(decision_chat, '_failure', failure_boundary)
+    async with allocation_web(tmp_path, model=model) as case:
+        handler, socket = case.handler, case.socket
+        request = asyncio.create_task(socket.turn(PROPERTY_QUERY))
+        retained = set()
+        try:
+            assert await asyncio.to_thread(model.started.wait, PI_STARTUP_TIMEOUT)
+            await asyncio.wait_for(entered.wait(), 2)
+            retained = set(case.runtime.tasks)
+            assert len(retained) == len(handler._allocation_tasks) == 1
+            model.scope.deadline = 0  # Both producer and event consumer are blocked.
+            await asyncio.wait_for(request, 2)
+            assert [(f['type'], f.get('status')) for f in socket.frames
+                    if f['type'] == 'complete'] == [('complete', 'timeout')]
+            before_release = list(socket.frames)
+            if worker_settled:
+                model.release.set()
+                _, pending = await asyncio.wait(workers, timeout=3)
+                assert not pending and model.exited.is_set()
+            resume_send.set()
+            await asyncio.wait_for(send_finished.wait(), 2)
+            if not worker_settled:
+                assert handler.model_request_gate._readers == 1
+                assert retained == case.runtime.tasks
+                assert all(not task.done() for task in [*retained, *handler._allocation_tasks])
+            assert case.tools[0].inputs == []
+            model.release.set()
+            # Observe settled Web owners, not merely the public timeout waiter.
+            results = await asyncio.wait_for(asyncio.gather(*retained, return_exceptions=True), 3)
+            await asyncio.wait_for(drain_allocations(handler), 3)
+            assert results == [None], 'allocation control flow escaped the retained Web turn'
+            assert workers and consumers and all(task in retrieved for task in [*workers, *consumers])
+            assert failure_retries == [], 'timeout must not be retried as presentation failure'
+            assert socket.frames == before_release and case.tools[0].inputs == []
+            assert handler.model_request_gate._readers == 0
+            assert not handler._allocation_tasks and not handler.model_request_gate._background
+        finally:
+            resume_send.set()
+            model.release.set()
+            await asyncio.gather(request, *consumers, *workers, *retained, return_exceptions=True)
+            await asyncio.wait_for(drain_allocations(handler), 3)
+
+
+@pytest.mark.anyio
+async def test_web_runtime_rejects_late_dispatch_after_slow_preparation(tmp_path, monkeypatch):
+    from src.agent.scientific_session.binding_policy import BindingPolicy
+    from src.agent.runtime.allocation import current_allocation
+
+    started, release = threading.Event(), threading.Event()
+    original = BindingPolicy.prepare_requirements
+
+    def prepare(policy, *args, **kwargs):
+        current_allocation().deadline = time.monotonic() + .12
+        started.set()
+        assert release.wait(15)
+        return original(policy, *args, **kwargs)
+
+    monkeypatch.setattr(BindingPolicy, 'prepare_requirements', prepare)
+    async with allocation_web(tmp_path) as case:
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(started.wait, PI_STARTUP_TIMEOUT)
+            assert (await asyncio.wait_for(request, .7))[-1]['status'] == 'timeout'
+            before = list(case.socket.frames)
             release.set()
-            _, pending = await asyncio.wait(workers, timeout=2)
-            assert not pending
-        resume_send.set()
-        await asyncio.wait_for(send_finished.wait(), 2)
-        if not worker_settled:
-            assert handler.model_request_gate._readers == 1
-            assert retained == handler._allocation_tasks
-            assert all(not task.done() for task in [*retained, *consumers])
-        assert tool.calls == 0
-        release.set()
-        # Join the shielded body itself, not just the already-returned request.
-        results = await asyncio.wait_for(asyncio.gather(*consumers, return_exceptions=True), 2)
-        await asyncio.wait_for(asyncio.gather(*retained, return_exceptions=True), 2)
-        await asyncio.wait_for(drain_allocations(handler), 2)
-        assert results == [None], "allocation control flow escaped the inner consumer"
-        assert all(task in retrieved_workers for task in workers), "worker exception was not drained"
-        assert failure_retries == [], "timeout must not be retried as presentation failure"
-        assert socket.frames == before_release
-        assert tool.calls == 0
-        assert handler.model_request_gate._readers == 0
-        assert not handler._allocation_tasks
-        assert not handler.model_request_gate._background
-    finally:
-        resume_send.set()
-        release.set()
-        await asyncio.gather(request, *consumers, *workers, *retained, return_exceptions=True)
-        await asyncio.wait_for(drain_allocations(handler), 2)
+            await asyncio.wait_for(drain_allocations(case.handler), 3)
+            assert case.tools[0].inputs == [] and case.model.messages == []
+            assert case.socket.frames == before
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
-async def test_workflow_runtime_rejects_late_dispatch_after_slow_planning():
-    supervisor, tool, started, release = supervisor_fixture(slow_planner=True)
-    handler, socket = handler_for(supervisor), Socket()
-    request = asyncio.create_task(handler._process_message(socket, "计算 CCO 的分子性质", False, True))
-    try:
-        assert await asyncio.to_thread(started.wait, 2)
-        await asyncio.wait_for(socket.terminal.wait(), 0.7)
-        assert socket.frames[-1]["status"] == "timeout"
-        before_release = list(socket.frames)
-        release.set()
-        await asyncio.wait_for(request, 2)
-        await asyncio.wait_for(drain_allocations(handler), 2)
-        assert tool.calls == 0
-        assert socket.frames == before_release
-    finally:
-        release.set()
-        await asyncio.gather(request, return_exceptions=True)
-        await asyncio.wait_for(drain_allocations(handler), 2)
+async def test_running_scientific_tool_is_not_subject_to_allocation_deadline(tmp_path):
+    from src.agent.runtime.allocation import current_allocation
+
+    started, release = threading.Event(), threading.Event()
+    scopes = []
+
+    class ScopedModel(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            if not scopes:
+                scopes.append(current_allocation())
+            return await super().decide(messages, **kwargs)
+
+    class SlowProperties(AllocationProperties):
+        def execute(self, query):
+            scope = scopes[0]
+            assert scope.phase == 'executing'
+            scope.deadline = time.monotonic() + .12
+            started.set()
+            assert release.wait(15)
+            return super().execute(query)
+
+    tool = SlowProperties()
+    async with allocation_web(tmp_path, tools=[tool], model=ScopedModel()) as case:
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(started.wait, PI_STARTUP_TIMEOUT)
+            done, _ = await asyncio.wait({request}, timeout=.3)
+            assert not done
+            assert not case.socket.terminal.is_set(), 'allocation timer interrupted a running scientific tool'
+            assert time.monotonic() > scopes[0].deadline and scopes[0].phase == 'executing'
+            release.set()
+            assert (await asyncio.wait_for(request, 3))[-1]['status'] == 'completed'
+            assert len(tool.inputs) == 1
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 @pytest.mark.anyio
-async def test_running_scientific_tool_is_not_subject_to_allocation_deadline():
-    supervisor, tool, started, release = supervisor_fixture(slow_tool=True)
-    handler, socket = handler_for(supervisor), Socket()
-    request = asyncio.create_task(handler._process_message(socket, "计算 CCO 的分子性质", False, True))
-    try:
-        assert await asyncio.to_thread(started.wait, 2)
-        done, _ = await asyncio.wait({request}, timeout=0.3)
-        assert not done
-        assert not socket.terminal.is_set(), "allocation timer interrupted a running scientific tool"
-        release.set()
-        await asyncio.wait_for(request, 2)
-        assert tool.calls == 1
-        assert socket.frames[-1]["status"] == "succeeded"
-    finally:
-        release.set()
-        await asyncio.gather(request, return_exceptions=True)
-
-
-@pytest.mark.anyio
-async def test_allocation_task_scheduling_failure_closes_unsubmitted_coroutine(monkeypatch):
+async def test_allocation_task_scheduling_failure_closes_unsubmitted_coroutine(tmp_path, monkeypatch):
     import inspect
 
-    handler = handler_for(Agent(SkillRouter()))
     original = asyncio.create_task
     unsubmitted = []
 
     def fail(coro, *args, **kwargs):
-        if getattr(coro, "cr_code", None).co_name == "process":
+        if getattr(getattr(coro, 'cr_code', None), 'co_name', None) == 'allocate':
             unsubmitted.append(coro)
             raise RuntimeError("synthetic scheduling failure")
         return original(coro, *args, **kwargs)
 
-    monkeypatch.setattr(asyncio, "create_task", fail)
-    try:
-        with pytest.raises(RuntimeError, match="synthetic scheduling failure"):
-            await handler._process_message(Socket(), QUERY, False, True)
-        assert len(unsubmitted) == 1
-        assert inspect.getcoroutinestate(unsubmitted[0]) == inspect.CORO_CLOSED
-    finally:
-        for coro in unsubmitted:
-            coro.close()
+    async with allocation_web(tmp_path) as case:
+        monkeypatch.setattr(asyncio, 'create_task', fail)
+        try:
+            frames = await case.socket.turn(PROPERTY_QUERY)
+            assert frames[-1]['status'] == 'failed'
+            assert len(unsubmitted) == 1
+            assert inspect.getcoroutinestate(unsubmitted[0]) == inspect.CORO_CLOSED
+            assert case.model.messages == [] and case.tools[0].inputs == []
+            assert not case.handler._allocation_tasks
+        finally:
+            for coro in unsubmitted:
+                coro.close()
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("boundary", ["route", "should_use_tools"])
-async def test_legacy_router_paths_remain_responsive_and_do_not_late_dispatch(boundary):
+@pytest.mark.parametrize('boundary', ['refresh', 'requirements'])
+async def test_web_admission_paths_remain_responsive_and_do_not_late_dispatch(tmp_path, monkeypatch, boundary):
+    from src.agent.runtime.allocation import current_allocation, owned_allocation_call
+    from src.agent.scientific_session.binding_policy import BindingPolicy
     entered, release = threading.Event(), threading.Event()
 
-    class LegacyRouter:
-        def route(self, query, llm=None):
-            entered.set()
-            assert release.wait(5)
-            return SkillRouter().catalog.get("comprehensive_evaluation")
+    def pause():
+        current_allocation().deadline = time.monotonic() + .12
+        entered.set()
+        assert release.wait(15)
 
-    class LegacyAgent(Agent):
-        def should_use_tools(self, query):
-            if boundary == "should_use_tools":
-                entered.set()
-                assert release.wait(5)
-            return True
+    original = BindingPolicy.prepare_requirements
+    def prepare(policy, *args, **kwargs):
+        pause()
+        return original(policy, *args, **kwargs)
 
-    agent = LegacyAgent(LegacyRouter() if boundary == "route" else None)
-    handler, socket = handler_for(agent), Socket()
-    request = asyncio.create_task(handler._process_message(socket, QUERY, False, True))
-    try:
-        assert await asyncio.to_thread(entered.wait, 2)
-        await asyncio.wait_for(socket.terminal.wait(), 0.7)
-        assert socket.frames[-1]["status"] == "timeout"
-        release.set()
-        await asyncio.wait_for(request, 2)
-        assert agent.calls == []
-    finally:
-        release.set()
-        await asyncio.gather(request, return_exceptions=True)
+    async def refresh():
+        await owned_allocation_call(pause)
+
+    async with allocation_web(tmp_path) as case:
+        if boundary == 'refresh':
+            monkeypatch.setattr(case.runtime.application, '_refresh_llm_config_from_env', refresh)
+        else:
+            monkeypatch.setattr(BindingPolicy, 'prepare_requirements', prepare)
+        request = asyncio.create_task(case.socket.turn(PROPERTY_QUERY))
+        try:
+            assert await asyncio.to_thread(entered.wait, PI_STARTUP_TIMEOUT)
+            assert (await asyncio.wait_for(request, .7))[-1]['status'] == 'timeout'
+            before = list(case.socket.frames)
+            release.set()
+            await asyncio.wait_for(drain_allocations(case.handler), 3)
+            assert case.tools[0].inputs == [] and case.model.messages == []
+            assert case.socket.frames == before
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
 
 
 def test_dispatch_latch_uses_deadline_even_before_async_timer_runs(monkeypatch):
@@ -782,7 +850,7 @@ async def test_native_real_loop_cannot_dispatch_a_cancellation_resistant_late_mo
     decide = bundle.model.decide
 
     async def delayed(messages, **kwargs):
-        # Exclude cold graph/SQLite setup from this controlled model-wait race.
+        # Exclude cold Pi/SQLite setup from this controlled model-wait race.
         current_allocation().deadline = time.monotonic() + 0.12
         entered.set()
         while not release.is_set():
@@ -801,7 +869,7 @@ async def test_native_real_loop_cannot_dispatch_a_cancellation_resistant_late_mo
         worker_owner=owner))
     try:
         ready = asyncio.create_task(entered.wait())
-        await asyncio.wait({ready, request}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait({ready, request}, timeout=5, return_when=asyncio.FIRST_COMPLETED)
         ready.cancel()
         await asyncio.gather(ready, return_exceptions=True)
         assert entered.is_set(), socket.frames
@@ -830,10 +898,14 @@ async def test_native_real_loop_cannot_dispatch_a_cancellation_resistant_late_mo
 
 @pytest.mark.anyio
 async def test_native_real_tool_is_not_interrupted_by_allocation_clock(setup_loop):
+    import time
     from src.agent.contracts import AgentContext
+    from src.agent.runtime.allocation import current_allocation
     from src.agent.runtime.worker_ownership import WorkerOwner
 
     entered, release = threading.Event(), threading.Event()
+    provider_entered = asyncio.Event()
+    scopes = []
 
     class DelayedTool(CountingTool):
         timeout_seconds = 2
@@ -845,17 +917,35 @@ async def test_native_real_tool_is_not_interrupted_by_allocation_clock(setup_loo
 
     source = DelayedTool()
     bundle = setup_loop([tool_decision(), finish_last], [source])
-    handler, socket, owner = handler_for(None, timeout=1), Socket(), WorkerOwner()
+    decide = bundle.model.decide
+
+    async def signalled_decide(messages, **kwargs):
+        if not provider_entered.is_set():
+            scope = current_allocation()
+            assert scope.phase == 'allocating'
+            # Pi cold start has its own bound; retain the original one-second
+            # allocation window once this fixture reaches the model boundary.
+            scope.deadline = time.monotonic() + 1
+            scopes.append(scope)
+            provider_entered.set()
+        return await decide(messages, **kwargs)
+
+    bundle.model.decide = signalled_decide
+    handler, socket, owner = handler_for(None, timeout=5), Socket(), WorkerOwner()
     request = asyncio.create_task(handler.process_decision_message(
         socket, context=AgentContext("SMILES: CCO", "native-running-tool", user_id="test", session_id="test"),
         decision_loop=bundle.loop, request_kind="scientific",
         allowed_tools={"property_calculator"}, required_tools={"property_calculator"},
         worker_owner=owner))
     try:
+        await asyncio.wait_for(provider_entered.wait(), 5)
         assert await asyncio.to_thread(entered.wait, 2), socket.frames
         done, _ = await asyncio.wait({request}, timeout=1.2)
         assert not done
         assert not socket.terminal.is_set()
+        assert time.monotonic() > scopes[0].deadline
+        assert scopes[0].phase == 'executing'
+        assert owner.status != 'settled'
         release.set()
         result = await asyncio.wait_for(request, 2)
         assert result.success
@@ -927,44 +1017,8 @@ async def test_native_websocket_timeout_is_durable_and_same_socket_can_continue(
                 release.set()
 
 
-@pytest.mark.anyio
-async def test_legacy_same_socket_continues_while_timed_out_sync_worker_is_owned():
-    from fastapi import WebSocketDisconnect
-
-    class QueueSocket(Socket):
-        def __init__(self):
-            super().__init__()
-            self.incoming = asyncio.Queue()
-
-        async def accept(self):
-            pass
-
-        async def receive_text(self):
-            value = await self.incoming.get()
-            if value is None:
-                raise WebSocketDisconnect()
-            return json.dumps(value)
-
-    router, socket = DelayedRouter(), QueueSocket()
-    agent = Agent(router)
-    handler = handler_for(agent)
-    connection = asyncio.create_task(handler.handle_websocket(socket))
-    try:
-        await socket.incoming.put({"message": "slow " + QUERY, "enable_rag": False})
-        assert await asyncio.to_thread(router.started.wait, 2)
-        await asyncio.wait_for(socket.terminal.wait(), 0.7)
-        assert socket.frames[-1]["status"] == "timeout"
-        socket.terminal.clear()
-        await socket.incoming.put({"message": QUERY, "enable_rag": False})
-        await asyncio.wait_for(socket.terminal.wait(), .7)
-        assert socket.frames[-1]["status"] == "succeeded"
-        assert agent.calls == [QUERY]
-        assert not router.release.is_set()
-        assert handler.model_request_gate._readers == 1
-        router.release.set()
-        await asyncio.wait_for(drain_allocations(handler), 2)
-        assert [f["status"] for f in socket.frames if f["type"] == "complete"] == ["timeout", "succeeded"]
-    finally:
-        router.release.set()
-        await socket.incoming.put(None)
-        await asyncio.wait_for(connection, 3)
+# The duplicate legacy QueueSocket receive-loop test was retired with that
+# production loop. Its same-socket/retained-sync-worker assertions now run on
+# actual Pi /ws in test_allocation_handoff.py::
+# test_actual_native_socket_timeout_and_retry_precede_resistant_model_settlement
+# (provider_kind='sync'), including no late publication or scientific dispatch.

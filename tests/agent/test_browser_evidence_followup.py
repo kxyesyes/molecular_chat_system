@@ -1,24 +1,22 @@
 """S07/S11 offline regressions. All activity/ADMET values are synthetic fixtures.
 
-The native planner, compiler, runtime and WebSocket handler are real; no browser,
+The planner, compiler, Pi child and Web decision runtime are real; no browser,
 business API, registered model inference or acceptance database is used here.
 """
-import asyncio
 from copy import deepcopy
 import json
 
 import pytest
 
 from src.agent.contracts import AgentContext, ObservationStatus, ToolProvenance, ToolResult
-from src.agent.harness.factory import HarnessFactory
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.planning import PlanCompiler
 from src.agent.planning.task_planner import TaskPlanner
 from src.agent.routing.hybrid import HybridSkillRouter
-from src.agent.supervisor import SupervisorAgent
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.workflows import WorkflowCatalog
-from src.web.chat_handler import ChatHandler
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
+from tests.agent.pi_web_support import PlannedWebModel as NoScienceModel
 from tests.agent.test_family_activity_tool import family_row
 
 
@@ -73,34 +71,16 @@ class UnavailableAdmet:
         return {"success": False, "status": "unavailable", "message": "synthetic ADMET unavailable", "data": None}
 
 
-class NoScienceModel:
-    async def generate(self, *args, **kwargs):
-        return "ordinary chat, no scientific evidence"
-
-
-class Socket:
-    def __init__(self):
-        self.scope, self.messages = {}, []
-
-    async def send_text(self, value):
-        self.messages.append(json.loads(value))
-
-
 def handler_for(tmp_path, rows):
     activity, admet = SyntheticActivity(rows), UnavailableAdmet()
-    agent = SupervisorAgent(tools={activity.name: activity, admet.name: admet,
-        "property_calculator": PropertyCalculator()}, harness_factory=HarnessFactory(mode="legacy"),
-        state_store=SQLiteAgentStateStore(tmp_path / "agent.sqlite"))
-    return ChatHandler(NoScienceModel(), None, agent, {}), activity, admet
+    handler = make_web_handler(tools={activity.name: activity, admet.name: admet,
+        "property_calculator": PropertyCalculator()},
+        store=SQLiteAgentStateStore(tmp_path / "agent.sqlite"))
+    return handler, activity, admet
 
 
 def turn(handler, query, history, session="synthetic-socket"):
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, query, enable_rag=False, enable_tools=True,
-        conversation_history=history, session_id=session))
-    complete = [frame for frame in socket.messages if frame["type"] == "complete"]
-    assert complete, socket.messages
-    return complete[-1], socket.messages
+    return run_web_turn(handler, query, history, session)
 
 
 def test_s11_router_covers_all_requested_tools_without_llm_arbitration():
@@ -144,13 +124,21 @@ def test_s07_partial_batch_excludes_conflict_without_mutating_raw_prediction(tmp
     handler, activity, _ = handler_for(tmp_path, rows)
     history = []
     turn(handler, FIRST, history)
-    before = deepcopy(history)
+    # Scientific socket history intentionally retains only the latest entry.
+    # Verify immutability at the actual Pi result and durable source instead
+    # of requiring the retired append-only ChatHandler history representation.
+    previous = handler.web_results[-1]
+    before = deepcopy(previous.to_legacy_dict())
+    store = handler.agent_system.state_store
+    persisted = deepcopy(store.get_tool_executions(previous.trace_id))
     complete, _ = turn(handler, FOLLOWUP, history)
     assert complete.get("status") == "partial"
     answer = complete["content"]
     assert "6.4" in answer and "不一致" in answer and "排除" in answer
     assert "4.8" in answer and "4.5" in answer
-    assert history[:-1] == before and activity.rows == rows and len(activity.calls) == 1
+    assert previous.to_legacy_dict() == before
+    assert store.get_tool_executions(previous.trace_id) == persisted
+    assert activity.rows == rows and len(activity.calls) == 1
 
 
 @pytest.mark.parametrize("mode", ["fresh", "other-session", "prose-only", "intervening"])
@@ -261,20 +249,23 @@ def test_s11_properties_and_admet_are_candidate_aligned_readable_not_hidden_weig
         def execute(self, query):
             return ToolResult(self.name, True, "synthetic fixture", data=[
                 {"smiles": smi, "admet": {"prediction_method": "admet_ai", "model_name": "ADMET-AI",
+                    "backend_version": "synthetic-test", "physicochemical_source": "synthetic-fixture",
                     "model_version": "1.4.0", "weights_id": "sha256:" + "a" * 64,
                     "demo_mode": False, "fallback_used": False, "risk_count": index,
+                    "risk_endpoint_ids": ["synthetic"] if index else [],
+                    "risk_threshold": 0.5, "risk_summary_method": "synthetic_probability_threshold",
                     "total_endpoints": 1, "units": {"synthetic": "probability"},
                     "endpoints": {"synthetic": {"value": index * 0.8, "unit": "probability",
                         "task_type": "classification", "source": "admet_ai_model"}}}}
                 for index, smi in enumerate([PARACETAMOL, ASPIRIN])])
     handler, activity, _ = handler_for(tmp_path, [prediction(ASPIRIN, 4.8), prediction(PARACETAMOL, 4.5)])
-    # Build a separate native agent so registry/policy sees this fixture tool.
-    handler.agent_system = SupervisorAgent(tools={"activity_predictor": activity,
+    # Build a separate real Web registry so it sees this fixture tool.
+    handler = make_web_handler(tools={"activity_predictor": activity,
         "admet_predictor": SyntheticAdmet(), "property_calculator": PropertyCalculator()},
-        harness_factory=HarnessFactory(mode="legacy"), state_store=SQLiteAgentStateStore(tmp_path / "full.sqlite"))
+        store=SQLiteAgentStateStore(tmp_path / "full.sqlite"))
     complete, _ = turn(handler, COMPARISON, [])
     answer = complete["content"]
-    assert complete["status"] == "succeeded", answer[:3000]
+    assert complete["status"] == "completed", answer[:3000]
     assert "| SMILES | 分子量" in answer and "ADMET 风险提示" in answer
     # Lower-risk ADMET must not silently override the disclosed activity ordering.
     assert answer.index(ASPIRIN) < answer.index(PARACETAMOL)

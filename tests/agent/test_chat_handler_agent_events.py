@@ -1,16 +1,23 @@
 import asyncio
+from copy import deepcopy
 import json
 from collections.abc import Mapping
+from unittest.mock import Mock
 
 import pytest
 from fastapi import WebSocketDisconnect
 
 from src.agent.contracts import (
     AgentContext,
+    AgentResult,
+    AgentErrorCode,
+    AgentExecutionError,
     CandidateRecord,
     CandidateSet,
     ObservationStatus,
     ToolProvenance,
+    ToolResult,
+    RunOutcome,
     build_candidate_id,
 )
 from src.agent.orchestrators import WorkflowStep
@@ -19,6 +26,18 @@ from src.agent.router import SkillRouter
 from src.agent.runtime.allocation import begin_tool_dispatch, current_allocation
 from src.agent.supervisor import SupervisorAgent
 from src.web.chat_handler import ChatHandler
+from src.web.decision_chat import _deliver_result, _result_frame, _DeliveryError, _event_frame
+from src.agent.persistence import SQLiteAgentStateStore
+from src.agent.runtime.task_state import TaskEvent, TaskEventType
+from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.contracts.generation_request import GenerationRequestError
+from src.agent.scientific_session.web_requirements import compile_web_requirements
+from tests.agent.pi_web_support import PlannedWebModel
+from tests.agent.test_target_driven_design_workflow import FakeTool
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
+from tests.agent.test_web_decision_runtime import (
+    actual_app, ActualSocket, cookie_for, chat_decision, result_of,
+)
 
 
 KNOWLEDGE_BASE_PROMPT = "search the local knowledge base for molecules similar to CCO"
@@ -268,23 +287,53 @@ def _candidate_agent_result(
     }
 
 
-def _run_fixed_agent_result(result, *, model=None):
+def _typed_presentation_fixture(raw, *, web=False):
+    """Transcribe explicit fixture fields into the current typed input contract.
+
+    No execution, legacy status normalization, exception recovery, history writes,
+    accepted-audit construction or scientific validation happens in this helper.
+    Malformed raw mappings belong in the individual raw-projection unit tests.
+    """
+    def error(value):
+        if value is None:
+            return None
+        return AgentExecutionError(AgentErrorCode(value.get("code", "internal_error")),
+            value.get("message", ""), deepcopy(value.get("details")))
+
+    observations = []
+    for index, row in enumerate(raw.get("tool_result_sequence", []), 1):
+        quality = deepcopy(row.get("quality", {}))
+        if "step_id" in row:
+            quality["step_id"] = row["step_id"]
+        observations.append(ToolResult(
+            tool_name=row["tool_name"], success=row["success"],
+            message=row.get("message", ""), data=deepcopy(row.get("data")),
+            formatted=row.get("formatted", ""), error=error(row.get("error")),
+            quality=quality, warnings=deepcopy(row.get("warnings", [])),
+            status=ObservationStatus(row.get("status", "succeeded")),
+            provenance=ToolProvenance.from_dict(row["provenance"])
+                if row.get("provenance") is not None else None))
+    metadata = deepcopy(raw.get("metadata", {}))
+    if web:
+        metadata["binding_profile"] = "medchat-web-v1"
+    return AgentResult(trace_id=raw.get("trace_id", "presentation-fixture"),
+        success=raw["success"], message=raw.get("message", ""),
+        final_answer=raw.get("final_answer", ""), skill_name=raw.get("active_skill"),
+        outcome=RunOutcome(raw.get("status", "completed")),
+        partial=raw.get("partial", raw.get("status") == "partial"),
+        tool_results=observations, error=error(raw.get("error")),
+        warnings=deepcopy(raw.get("warnings", [])), metadata=metadata)
+
+
+def _run_fixed_agent_result(result, *, model=None, handler=None):
+    """Pure delivery of settled fixture data; never a replacement chat runner."""
     model = model or FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=FixedResultAgentSystem(result),
-        config={"inference": {"stream": False}},
-    )
+    handler = handler or ChatHandler(model, None, None, {})
     websocket = FakeWebSocket()
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="设计两个候选分子",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
+    typed = result if type(result) is AgentResult else _typed_presentation_fixture(result)
+    execution = {**typed.to_legacy_dict(), "trace_id": typed.trace_id}
+    asyncio.run(_deliver_result(handler, websocket,
+        _result_frame(handler, typed, False), execution))
     return websocket, model
 
 
@@ -797,43 +846,84 @@ class RagSearchAgentSystem(FakeAgentSystem):
         }
 
 
-def test_chat_handler_forwards_agent_events_before_agent_result():
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=FakeAgentSystem(),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
+def _sensitive_live_event_fixtures():
+    """Untrusted payload fixtures, with no fake execution or allocation."""
+    return [{
+            "type": "agent_event",
+            "event": "tool_failed",
+            "message": (
+                "Tool failed with api_key=live-event-key-123 at "
+                "C:\\Users\\reviewer\\private\\tool.log"
+            ),
+            "trace_id": "live-sensitive-trace",
+            "tool": "property_calculator",
+            "progress": 0.5,
+            "payload": {
+                "warnings": ["token=live-warning-token-456"],
+                "normal_key\x00": "must-not-overwrite-live-normal-value",
+                "normal_key": "keep-live-normal-value",
+                "sk-livekey123456789": "unsafe-live-sk-key",
+                "api_key=live-nested-key-123": "unsafe-live-api-key",
+                "token=live-nested-token-456": "unsafe-live-token-key",
+                "C:\\Users\\reviewer\\private\\key.txt": "unsafe-live-user-path",
+                "D:\\MedChat\\private\\key.json": "unsafe-live-drive-path",
+                "error": {
+                    "message": "pIC50=7.1; sk-liveevent123456789",
+                    "debug_path": "D:\\MedChat\\private\\debug.json",
+                },
+            },
+        },
+{
+            "type": "agent_event",
+            "event": "task_failed",
+            "message": "Task failed pIC50=7.1 token=live-task-token-789",
+            "trace_id": "live-sensitive-trace",
+            "tool": None,
+            "progress": 0.75,
+            "payload": {
+                "path": "C:\\Users\\reviewer\\private\\task.log",
+                "error": {"message": "binding energy=-8.4 kcal/mol"},
+            },
+        },
+{
+            "type": "agent_event",
+            "event": "tool_completed",
+            "message": "property calculation completed normally",
+            "trace_id": "live-sensitive-trace",
+            "tool": "property_calculator",
+            "progress": 1.0,
+            "payload": {"status": "succeeded", "count": 1},
+        }]
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
 
-    message_types = [item["type"] for item in websocket.messages]
-    assert message_types.count("agent_event") == 2
-    assert message_types.index("agent_event") < message_types.index("agent_result")
-    assert websocket.messages[1]["event"]["type"] == "task_started"
-    assert websocket.messages[2]["event"]["tool_name"] == "property_calculator"
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "status": "succeeded",
-        "content": "workflow completed",
-    }
-    assert model.generate_calls == 0
+def _rag_web_fixture(tmp_path):
+    from src.agent.tools.rag_search_tool import RAGSearchTool
+    from tests.agent.test_rag_tool_contract import InjectedService, record
+    row = record()
+    row.update(SMILES="CCO", similarity_score=0.91)
+    service = InjectedService([row])
+    handler = make_web_handler([RAGSearchTool(service)],
+                               SQLiteAgentStateStore(tmp_path / "rag.sqlite"))
+    handler.rag_service = RecordingLegacyRagService()
+    return handler, service
 
+
+def test_chat_handler_forwards_agent_events_before_agent_result(tmp_path):
+    handler = make_web_handler([PropertyCalculator()], SQLiteAgentStateStore(tmp_path / "events.sqlite"))
+    complete, frames = run_web_turn(handler, "只计算 CCO 的分子量与 logP")
+    types = [item["type"] for item in frames]
+    events = [(i, item["event"]) for i, item in enumerate(frames) if item["type"] == "agent_event"]
+    assert any(e["event"] == "task_started" for _, e in events)
+    assert any(e["event"] == "tool_completed" and e["tool"] == "property_calculator" for _, e in events)
+    assert all(i < types.index("agent_result") for i, _ in events)
+    assert types.count("agent_result") == types.count("complete") == 1
+    assert complete["status"] == "completed" and "46.07" in complete["content"]
 
 @pytest.mark.parametrize(
     "candidate_status",
     [ObservationStatus.SUCCEEDED, ObservationStatus.PARTIAL],
 )
-def test_successful_agent_emits_strict_candidate_set_before_result(
+def test_successful_agent_emits_strict_candidate_set_after_result_before_complete(
     candidate_status,
 ):
     candidate_set = _candidate_set(candidate_status)
@@ -875,7 +965,7 @@ def test_successful_agent_emits_strict_candidate_set_before_result(
     assert len(canonical_smiles) == len(set(canonical_smiles))
     message_types = [item["type"] for item in websocket.messages]
     candidate_index = message_types.index("molecule_candidates")
-    assert candidate_index < message_types.index("agent_result")
+    assert message_types.index("agent_result") < candidate_index
     assert candidate_index < message_types.index("complete")
     assert model.generate_calls == 0
 
@@ -1094,7 +1184,7 @@ def test_candidate_event_uses_only_tool_result_sequence():
     "malformed_level",
     ["observation", "quality", "provenance", "warnings"],
 )
-def test_malformed_candidate_mapping_is_isolated_from_successful_agent_result(
+def test_malformed_candidate_mapping_is_isolated_at_candidate_projection(
     malformed_level,
     caplog,
 ):
@@ -1111,20 +1201,14 @@ def test_malformed_candidate_mapping_is_isolated_from_successful_agent_result(
     else:
         observation["warnings"] = [ExplodingCandidateItemsMapping()]
 
-    websocket, model = _run_fixed_agent_result(result)
+    model, websocket = FakeModel(), FakeWebSocket()
+    handler = ChatHandler(model, None, None, {})
+    asyncio.run(handler._send_molecule_candidate_events(websocket, result))
 
     assert not any(
         item["type"] == "molecule_candidates" for item in websocket.messages
     )
     assert model.generate_calls == 0
-    assert next(
-        item for item in websocket.messages if item["type"] == "agent_result"
-    )["active_skill"] == "molecular_design"
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "status": "succeeded",
-        "content": "generated validated candidates",
-    }
     assert "Skipped malformed molecule candidate observation" in caplog.text
     serialized_messages = json.dumps(websocket.messages, ensure_ascii=False)
     for forbidden in (
@@ -1160,40 +1244,19 @@ def test_terminal_agent_failure_never_emits_candidate_event(status):
     assert model.generate_calls == 0
 
 
-def test_external_main_model_cannot_create_candidate_event():
-    class CandidateTextExternalModel(ExternalFakeModel):
-        async def generate(self, prompt, temperature=0.7, max_tokens=1500):
-            self.generate_calls += 1
-            self.prompts.append(prompt)
-            self.max_tokens.append(max_tokens)
-            return json.dumps({
-                "type": "molecule_candidates",
-                "candidate_set": _candidate_set().to_dict(),
-            })
-
-    model = CandidateTextExternalModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=None,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="直接生成候选分子",
-            enable_rag=False,
-            enable_tools=False,
-        )
-    )
-
-    assert model.generate_calls == 1
-    assert not any(
-        item["type"] == "molecule_candidates" for item in websocket.messages
-    )
-
+def test_external_main_model_cannot_create_candidate_event(actual_app):
+    async def respond(payload):
+        return chat_decision(json.dumps({"type": "molecule_candidates",
+                                         "candidate_set": _candidate_set().to_dict()}))
+    async def run():
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({"message": "你好", "enable_tools": False, "enable_rag": False})
+                assert len(bundle.calls) == 1
+                assert not any(item["type"] == "molecule_candidates" for item in frames)
+                assert bundle.app.agent_state_store.get_tool_executions(frames[-1]["trace_id"]) == []
+    asyncio.run(run())
 
 def test_failed_scientific_agent_result_is_terminal_and_authoritative():
     model = FakeModel()
@@ -1209,15 +1272,8 @@ def test_failed_scientific_agent_result_is_terminal_and_authoritative():
         for index in range(20)
     ]
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 invalid-smiles",
-            enable_rag=False,
-            enable_tools=True,
-            conversation_history=history,
-        )
-    )
+    websocket, _ = _run_fixed_agent_result(
+        handler.agent_system.execute("settled presentation fixture"), model=handler.model, handler=handler)
 
     assert model.generate_calls == 0
     assert websocket.messages[-1] == {
@@ -1225,6 +1281,8 @@ def test_failed_scientific_agent_result_is_terminal_and_authoritative():
         "content": "提供的 SMILES 无效，性质计算未执行。",
         "trace_id": "trace-invalid-1",
         "status": "failed",
+        "continuation_id": None,
+        "display_redacted_or_truncated": False,
     }
     agent_message = next(
         item for item in websocket.messages if item["type"] == "agent_result"
@@ -1237,9 +1295,7 @@ def test_failed_scientific_agent_result_is_terminal_and_authoritative():
         item["type"] == "molecule_candidates" for item in websocket.messages
     )
     assert len(history) == 20
-    assert history[-1]["agent_used"] is True
-    assert history[-1]["agent_response"] == "提供的 SMILES 无效，性质计算未执行。"
-    assert history[-1]["assistant"] == "提供的 SMILES 无效，性质计算未执行。"
+    assert all(pair["assistant"] == "old response" for pair in history)
 
 
 @pytest.mark.parametrize(
@@ -1310,14 +1366,8 @@ def test_rejected_or_cancelled_scientific_agent_status_is_terminal(status):
     )
     websocket = FakeWebSocket()
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
+    websocket, _ = _run_fixed_agent_result(
+        handler.agent_system.execute("settled presentation fixture"), model=handler.model, handler=handler)
 
     assert model.generate_calls == 0
     assert rag.calls == []
@@ -1337,73 +1387,30 @@ def test_failed_scientific_agent_does_not_fall_through_to_initialized_legacy_rag
         config={"inference": {"stream": False}},
     )
 
-    asyncio.run(
-        handler._process_message(
-            websocket=FakeWebSocket(),
-            message="全面评估 CCO",
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
+    websocket, _ = _run_fixed_agent_result(
+        handler.agent_system.execute("settled presentation fixture"), model=handler.model, handler=handler)
 
     assert rag.calls == []
     assert model.generate_calls == 0
 
 
 def test_agent_failure_warnings_mapping_is_not_forwarded_as_a_warning_list():
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=FailedScientificAgentSystem(
-            warnings={"private": "do-not-forward"}
-        ),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
+    malformed = {"private": "do-not-forward"}
+    assert ChatHandler._sanitize_agent_warnings(malformed, reject_claims=True) == []
+    typed = _typed_presentation_fixture(FailedScientificAgentSystem(warnings=malformed).execute("fixture"))
+    with pytest.raises(_DeliveryError, match="result_display_invalid"):
+        _result_frame(ChatHandler(FakeModel(), None, None, {}), typed, False)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 invalid-smiles",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    agent_message = next(
-        item for item in websocket.messages if item["type"] == "agent_result"
-    )
-    assert agent_message["warnings"] == []
-
-
-def test_agent_execution_exception_uses_safe_terminal_fallback_without_secret():
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=RaisingScientificAgentSystem(),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["content"] == (
-        "科学计算未成功完成，请检查输入或工具状态后重试。"
-    )
-    assert "private-agent-token" not in json.dumps(
-        websocket.messages,
-        ensure_ascii=False,
-    )
-
+def test_agent_execution_exception_uses_safe_terminal_fallback_without_secret(tmp_path):
+    class FailingModel(PlannedWebModel):
+        async def decide(self, *args, **kwargs):
+            raise RuntimeError("private-agent-token internal exception repr")
+    handler = make_web_handler([], SQLiteAgentStateStore(tmp_path / "exception.sqlite"), FailingModel())
+    terminal, frames = run_web_turn(handler, "你好", enable_tools=False)
+    assert terminal["status"] == "failed"
+    assert "private-agent-token" not in json.dumps(frames, ensure_ascii=False)
+    assert "internal exception repr" not in json.dumps(frames, ensure_ascii=False)
+    assert handler.web_results[-1].success is False
 
 def test_failed_scientific_agent_cannot_publish_model_generated_activity_number():
     model = FakeModel()
@@ -1417,14 +1424,8 @@ def test_failed_scientific_agent_cannot_publish_model_generated_activity_number(
     )
     websocket = FakeWebSocket()
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="预测 CCO 的 pIC50",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
+    websocket, _ = _run_fixed_agent_result(
+        handler.agent_system.execute("settled presentation fixture"), model=handler.model, handler=handler)
 
     assert model.generate_calls == 0
     assert websocket.messages[-1]["type"] == "complete"
@@ -1463,19 +1464,19 @@ def test_projection_failure_preserves_settled_agent_record(monkeypatch):
 
     monkeypatch.setattr(handler, "_send_reference_candidate_events", fail_projection)
     websocket = FakeWebSocket()
-    asyncio.run(handler._process_message(
-        websocket=websocket,
-        message="分析 CCO",
-        enable_rag=False,
-        enable_tools=True,
-    ))
+    before = deepcopy(result)
+    typed = _typed_presentation_fixture(result)
+    with pytest.raises(RuntimeError, match="synthetic projection failure"):
+        asyncio.run(_deliver_result(handler, websocket, _result_frame(handler, typed, False), result))
+    assert result == before
+    assert typed.tool_results[0].success is True
 
     envelope = next(item for item in websocket.messages if item["type"] == "agent_result")
-    assert envelope["status"] == "failed"
+    assert envelope["status"] == "completed"
     assert envelope["trace_id"] == "trace-preserve-after-projection-error"
-    assert envelope["error"]["code"] == "presentation_error"
+    assert not envelope["error"]
     assert envelope["tool_result_sequence"][0]["success"] is True
-    assert websocket.messages[-1]["content"] == "结果展示失败，但执行记录已保留。"
+    assert not any(item["type"] == "complete" for item in websocket.messages)
 
 
 @pytest.mark.parametrize(
@@ -1483,100 +1484,23 @@ def test_projection_failure_preserves_settled_agent_record(monkeypatch):
     [None, [], "not-an-agent-result", InvalidAgentMapping()],
     ids=["none", "list", "string", "invalid-mapping"],
 )
-def test_malformed_agent_result_is_safe_terminal_without_rag_or_model(
-    malformed_result,
-):
-    model = FakeModel()
-    rag = RecordingLegacyRagService()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=FixedResultAgentSystem(malformed_result),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-    history = []
+def test_malformed_agent_result_is_rejected_before_projection_or_fallback(malformed_result):
+    model, rag = FakeModel(), RecordingLegacyRagService()
+    handler = ChatHandler(model, rag, None, {})
+    with pytest.raises(_DeliveryError, match="result_display_invalid") as failure:
+        _result_frame(handler, malformed_result, False)
+    assert model.generate_calls == 0 and rag.calls == []
+    assert "private-invalid-mapping-token" not in str(failure.value)
+    assert "not-an-agent-result" not in str(failure.value)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=True,
-            enable_tools=True,
-            conversation_history=history,
-        )
-    )
-
-    assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "content": "科学计算未成功完成，请检查输入或工具状态后重试。",
-        "trace_id": "",
-        "status": "failed",
-    }
-    assert history[-1]["agent_used"] is True
-    serialized = json.dumps(
-        {"messages": websocket.messages, "history": history},
-        ensure_ascii=False,
-    )
-    assert "private-invalid-mapping-token" not in serialized
-    assert "not-an-agent-result" not in serialized
-
-
-def test_post_agent_processing_exception_is_safe_terminal_without_fallback():
-    class ExplodingToolsUsed:
-        def __iter__(self):
-            raise RuntimeError(
-                "private-post-processing-token at C:/Users/reviewer/private.txt"
-            )
-
-    result = {
-        "success": True,
-        "status": "completed",
-        "final_answer": "must not be used after post-processing failure",
-        "tools_used": ExplodingToolsUsed(),
-        "active_skill": "rag_search",
-        "trace_id": "trace-post-processing",
-        "warnings": [],
-        "tool_results": {},
-        "agent_events": [],
-        "workflow_plan": {"workflow_name": "rag_search"},
-    }
-    model = FakeModel()
-    rag = RecordingLegacyRagService()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=FixedResultAgentSystem(result),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-    history = []
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="search local knowledge base for CCO",
-            enable_rag=True,
-            enable_tools=True,
-            conversation_history=history,
-        )
-    )
-
-    assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert websocket.messages[-1]["status"] == "failed"
-    assert websocket.messages[-1]["content"] == "结果展示失败，但执行记录已保留。"
-    assert websocket.messages[-1]["trace_id"] == "trace-post-processing"
-    serialized = json.dumps(
-        {"messages": websocket.messages, "history": history},
-        ensure_ascii=False,
-    )
-    assert "private-post-processing-token" not in serialized
-    assert "C:/Users/" not in serialized
-
+def test_post_agent_processing_exception_is_rejected_without_fallback():
+    model, rag = FakeModel(), RecordingLegacyRagService()
+    handler = ChatHandler(model, rag, None, {})
+    typed = AgentResult("trace-post-processing", True, "must not publish",
+                        outcome=RunOutcome.COMPLETED, metadata={"unsafe": object()})
+    with pytest.raises(ValueError):
+        _result_frame(handler, typed, False)
+    assert model.generate_calls == 0 and rag.calls == []
 
 @pytest.mark.parametrize("message_source", ["final_answer", "error", "tool"])
 def test_sensitive_agent_failure_content_uses_generic_terminal_message(
@@ -1610,7 +1534,7 @@ def test_sensitive_agent_failure_content_uses_generic_terminal_message(
         overrides["error"] = {"message": sensitive_message}
     else:
         overrides["tool_result_sequence"] = [
-            {"success": False, "status": "failed", "message": sensitive_message}
+            {"success": False, "status": "failed", "tool_name": "property_calculator", "message": sensitive_message}
         ]
     model = FakeModel()
     handler = ChatHandler(
@@ -1622,15 +1546,8 @@ def test_sensitive_agent_failure_content_uses_generic_terminal_message(
     websocket = FakeWebSocket()
     history = []
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-            conversation_history=history,
-        )
-    )
+    websocket, _ = _run_fixed_agent_result(
+        handler.agent_system.execute("settled presentation fixture"), model=handler.model, handler=handler)
 
     assert model.generate_calls == 0
     assert websocket.messages[-1]["content"] == (
@@ -1639,7 +1556,9 @@ def test_sensitive_agent_failure_content_uses_generic_terminal_message(
     agent_message = next(
         item for item in websocket.messages if item["type"] == "agent_result"
     )
-    assert agent_message["warnings"] == ["safe scientific warning"]
+    assert agent_message["warnings"] == (["safe scientific warning"] + (
+        ["部分显示内容已脱敏或省略，请查阅授权证据记录。"] if message_source != "final_answer" else []))
+    assert agent_message["display_redacted_or_truncated"] is (message_source != "final_answer")
     serialized = json.dumps(
         {"messages": websocket.messages, "history": history},
         ensure_ascii=False,
@@ -1671,15 +1590,8 @@ def test_agent_failure_content_and_warnings_are_length_bounded():
     websocket = FakeWebSocket()
     history = []
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-            conversation_history=history,
-        )
-    )
+    websocket, _ = _run_fixed_agent_result(
+        handler.agent_system.execute("settled presentation fixture"), model=handler.model, handler=handler)
 
     completion = websocket.messages[-1]
     agent_message = next(
@@ -1688,39 +1600,20 @@ def test_agent_failure_content_and_warnings_are_length_bounded():
     assert len(completion["content"]) <= 1024
     assert len(agent_message["warnings"]) == 1
     assert len(agent_message["warnings"][0]) <= 256
-    assert history[-1]["assistant"] == completion["content"]
+    assert history == []
 
 
-@pytest.mark.parametrize("dispatched", [False, True], ids=["before-dispatch", "after-dispatch"])
-def test_live_failure_agent_events_are_recursively_sanitized(dispatched):
-    agent_system = SensitiveLiveEventAgentSystem(dispatch_tool=dispatched)
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=agent_system,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    events = [
-        item["event"]
-        for item in websocket.messages
-        if item["type"] == "agent_event"
-    ]
-    assert agent_system.phase_during_events == ("executing" if dispatched else "allocating")
-    assert [event["event"] for event in events] == (
-        ["tool_failed", "task_failed", "tool_completed"] if dispatched else
-        ["tool_failed", "tool_completed", "task_failed"]
-    )
+@pytest.mark.parametrize("typed_event", [False, True], ids=["raw-projection", "typed-event-frame"])
+def test_failure_agent_events_are_recursively_sanitized(typed_event):
+    handler = ChatHandler(FakeModel(), None, None, {})
+    raw = _sensitive_live_event_fixtures()
+    if typed_event:  # Typed current event boundary.
+        events = [json.loads(_event_frame(handler, TaskEvent(
+            trace_id=e["trace_id"], event=TaskEventType(e["event"]), message=e["message"],
+            tool=e["tool"], progress=e["progress"], payload=e["payload"]))[0])["event"] for e in raw]
+    else:  # Retained raw projection boundary.
+        events = [handler._sanitize_agent_event(e) for e in raw]
+    assert [event["event"] for event in events] == ["tool_failed", "task_failed", "tool_completed"]
     task_failure = next(event for event in events if event["event"] == "task_failed")
     tool_completion = next(event for event in events if event["event"] == "tool_completed")
     assert events[0]["message"] == (
@@ -1734,7 +1627,7 @@ def test_live_failure_agent_events_are_recursively_sanitized(dispatched):
     assert task_failure["message"] == (
         "科学计算未成功完成，请检查输入或工具状态后重试。"
     )
-    assert tool_completion == {
+    assert {k: v for k, v in tool_completion.items() if k not in {"skill", "timestamp"}} == {
         "type": "agent_event",
         "event": "tool_completed",
         "message": "property calculation completed normally",
@@ -1743,21 +1636,7 @@ def test_live_failure_agent_events_are_recursively_sanitized(dispatched):
         "progress": 1.0,
         "payload": {"status": "succeeded", "count": 1},
     }
-    result_index = next(
-        index for index, item in enumerate(websocket.messages)
-        if item["type"] == "agent_result"
-    )
-    assert all(
-        index < result_index for index, item in enumerate(websocket.messages)
-        if item["type"] == "agent_event"
-    )
-    if not dispatched:
-        # Pre-dispatch terminal delivery waits for the chosen result, not for
-        # arbitrary event frames claiming that a tool has run.
-        assert websocket.messages[result_index - 1]["event"] == task_failure
-    assert sum(item["type"] == "agent_result" for item in websocket.messages) == 1
-    assert sum(item["type"] == "complete" for item in websocket.messages) == 1
-    serialized = json.dumps(websocket.messages, ensure_ascii=False)
+    serialized = json.dumps(events, ensure_ascii=False)
     for forbidden in (
         "live-event-key-123",
         "live-warning-token-456",
@@ -1776,28 +1655,9 @@ def test_live_failure_agent_events_are_recursively_sanitized(dispatched):
 
 
 def test_buffered_failure_agent_events_are_recursively_sanitized():
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=SensitiveBufferedEventAgentSystem(),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    events = [
-        item["event"]
-        for item in websocket.messages
-        if item["type"] == "agent_event"
-    ]
+    handler = ChatHandler(FakeModel(), None, None, {})
+    raw = SensitiveBufferedEventAgentSystem().execute("presentation fixture")["agent_events"]
+    events = [handler._sanitize_agent_event(event) for event in raw]
     assert [event["type"] for event in events] == [
         "tool_failed",
         "task_failed",
@@ -1824,7 +1684,7 @@ def test_buffered_failure_agent_events_are_recursively_sanitized():
         "progress": 1.0,
         "payload": {"status": "succeeded", "count": 2},
     }
-    serialized = json.dumps(websocket.messages, ensure_ascii=False)
+    serialized = json.dumps(events, ensure_ascii=False)
     for forbidden in (
         "buffered-key-123",
         "buffered-warning-token-456",
@@ -1844,106 +1704,71 @@ def test_buffered_failure_agent_events_are_recursively_sanitized():
 
 
 @pytest.mark.parametrize("dispatched", [False, True], ids=["before-dispatch", "after-dispatch"])
-def test_chat_handler_forwards_events_while_agent_is_running(dispatched):
-    agent_system = LiveEventAgentSystem(dispatch_tool=dispatched)
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=agent_system,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
+def test_chat_handler_forwards_events_while_pi_is_running(dispatched, tmp_path):
+    import threading
+    from src.web.decision_runtime import _Sender, _Turn
+    from tests.agent.pi_web_support import WebSocket
+    entered, release = threading.Event(), threading.Event()
+    class Model(PlannedWebModel):
+        async def decide(self, messages, **kwargs):
+            if not dispatched and not self.messages:
+                entered.set()
+                assert await asyncio.to_thread(release.wait, 15)
+            return await super().decide(messages, **kwargs)
+    class Properties(PropertyCalculator):
+        def execute(self, query):
+            if dispatched:
+                entered.set()
+                assert release.wait(15)
+            return super().execute(query)
+    handler = make_web_handler([Properties()], SQLiteAgentStateStore(tmp_path / "live.sqlite"), Model())
+    runtime = handler.decision_runtime
+    socket = WebSocket("live-owner")
+    sender = _Sender(socket)
+    sender._runtime = runtime
+    turn = _Turn({"message": "只计算 CCO 的分子量与 logP", "enable_tools": True, "enable_rag": False})
+    async def run():
+        async def execute():
+            turn.task = asyncio.current_task()
+            runtime.active_owners.add(turn)
+            await runtime._execute(handler, sender, turn)
+        task = asyncio.create_task(execute())
+        try:
+            assert await asyncio.to_thread(entered.wait, 10)
+            await asyncio.sleep(0.02)
+            assert not task.done()
+            assert not any(m["type"] in {"agent_result", "complete"} for m in socket.messages)
+            live = [m["event"]["event"] for m in socket.messages if m["type"] == "agent_event"]
+            assert "task_started" in live
+            assert ("tool_started" in live) is dispatched
+        finally:
+            release.set()
+            await task
+        types = [m["type"] for m in socket.messages]
+        events = [(i, m["event"]) for i, m in enumerate(socket.messages) if m["type"] == "agent_event"]
+        assert any(e["event"] == "tool_completed" for _, e in events)
+        assert all(i < types.index("agent_result") for i, _ in events)
+        assert types.count("agent_result") == types.count("complete") == 1
+        assert socket.messages[-1]["status"] == "completed"
+        assert turn.worker_owner.pending_roots == 0 and not runtime.active_owners
+    asyncio.run(run())
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="全面评估 CCO 并展示进度",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    live_events = [
-        item["event"]["event"]
-        for item in websocket.messages
-        if item["type"] == "agent_event"
-    ]
-    assert agent_system.phase_during_events == ("executing" if dispatched else "allocating")
-    assert live_events == [
-        "task_started",
-        "planning_started",
-        "planning_completed",
-        "tool_started",
-        "tool_completed",
-        "tool_failed",
-    ] + (["task_completed", "task_failed"] if dispatched else ["task_failed"])
-    result_index = next(
-        index
-        for index, item in enumerate(websocket.messages)
-        if item["type"] == "agent_result"
-    )
-    assert all(
-        index < result_index
-        for index, item in enumerate(websocket.messages)
-        if item["type"] == "agent_event"
-    )
-    if not dispatched:
-        assert websocket.messages[result_index - 1]["event"]["event"] == "task_failed"
-    assert sum(item["type"] == "agent_result" for item in websocket.messages) == 1
-    assert sum(item["type"] == "complete" for item in websocket.messages) == 1
-
-
-def test_non_workflow_agent_result_can_still_use_model_interpretation():
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=NonWorkflowAgentSystem(),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="临时分析 CCO",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    assert model.generate_calls == 1
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "status": "succeeded",
-        "content": "assistant response",
-    }
-
+def test_non_workflow_settled_result_is_not_reinterpreted_by_main_model():
+    result = NonWorkflowAgentSystem().execute("fixture")
+    socket, model = _run_fixed_agent_result(result)
+    assert model.generate_calls == 0
+    assert socket.messages[-1]["status"] == "completed"
+    assert socket.messages[-1]["content"] == "raw react observation"
 
 def test_chat_handler_uses_canonical_rag_search_result_for_rag_cards():
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=RagSearchAgentSystem(),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="search local knowledge base for CCO",
-            enable_rag=True,
-            enable_tools=True,
-            rag_count=3,
-        )
-    )
-
-    rag_messages = [item for item in websocket.messages if item["type"] == "rag_info"]
-    assert len(rag_messages) == 1
-    assert rag_messages[0]["molecules"][0]["smiles"] == "CCO"
-    assert rag_messages[0]["molecules"][0]["similarity"] == 0.91
-
+    handler = ChatHandler(FakeModel(), FakeRagService(), None, {})
+    socket = FakeWebSocket()
+    result = RagSearchAgentSystem().execute("fixture")
+    molecules, warnings = asyncio.run(handler._send_agent_rag_results(socket, result, 3))
+    assert not warnings and len(molecules) == 1
+    assert len(socket.messages) == 1 and socket.messages[0]["type"] == "rag_info"
+    assert socket.messages[0]["molecules"][0]["smiles"] == "CCO"
+    assert socket.messages[0]["molecules"][0]["similarity"] == 0.91
 
 def test_agent_context_defaults_capabilities_and_preserves_overrides_with_skill():
     default_context = AgentContext(query="CCO", trace_id="default-capabilities")
@@ -1963,76 +1788,30 @@ def test_agent_context_defaults_capabilities_and_preserves_overrides_with_skill(
     }
 
 
-def test_chat_handler_rag_disabled_blocks_agent_and_legacy_rag():
-    supervisor, canonical, alias = build_rag_supervisor()
-    legacy_rag = RecordingLegacyRagService()
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=legacy_rag,
-        agent_system=supervisor,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
+def test_chat_handler_rag_disabled_blocks_agent_and_legacy_rag(tmp_path):
+    handler, service = _rag_web_fixture(tmp_path)
+    terminal, frames = run_web_turn(handler, KNOWLEDGE_BASE_PROMPT, enable_rag=False)
+    assert terminal["status"] == "rejected"
+    assert not service.calls and not handler.rag_service.calls
+    assert not handler.model.messages
+    assert not any(item["type"] == "rag_info" or (item["type"] == "agent_event"
+        and item["event"].get("tool") in {"rag_search", "rag_database_search"}) for item in frames)
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=KNOWLEDGE_BASE_PROMPT,
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    assert canonical.calls == []
-    assert alias.calls == []
-    assert legacy_rag.calls == []
-    assert supervisor.last_result["tools_used"] == []
-    assert "capability disabled" in supervisor.last_result["final_answer"].lower()
-    assert supervisor.last_result["error"]["details"]["reason"] == (
-        "capability_disabled"
-    )
-    assert not any(item["type"] == "rag_info" for item in websocket.messages)
-    assert not any(
-        item["type"] == "agent_event"
-        and item["event"].get("tool") in {"rag_search", "rag_database_search"}
-        for item in websocket.messages
-    )
-    assert any(
-        item["type"] == "status"
-        and "capability disabled" in item["message"].lower()
-        for item in websocket.messages
-    )
-
-
-def test_chat_handler_rag_enabled_preserves_agent_rag_result_and_card():
-    supervisor, canonical, alias = build_rag_supervisor()
-    legacy_rag = RecordingLegacyRagService()
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=legacy_rag,
-        agent_system=supervisor,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=KNOWLEDGE_BASE_PROMPT,
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
-
-    assert canonical.calls == [KNOWLEDGE_BASE_PROMPT]
-    assert alias.calls == []
-    assert legacy_rag.calls == []
-    assert supervisor.last_result["tools_used"] == ["rag_search"]
-    assert supervisor.last_result["tool_results"]["rag_search"]["success"] is True
-    rag_messages = [item for item in websocket.messages if item["type"] == "rag_info"]
-    assert len(rag_messages) == 1
-    assert rag_messages[0]["molecules"][0]["smiles"] == "CCO"
-
+def test_chat_handler_rag_enabled_preserves_agent_rag_result_and_card(tmp_path):
+    handler, service = _rag_web_fixture(tmp_path)
+    terminal, frames = run_web_turn(handler, KNOWLEDGE_BASE_PROMPT, enable_rag=True)
+    assert terminal["status"] == "completed"
+    assert service.calls == [(KNOWLEDGE_BASE_PROMPT, 5)]
+    assert not handler.rag_service.calls
+    public = next(item for item in frames if item["type"] == "agent_result")
+    assert [row["tool_name"] for row in public["tool_result_sequence"]] == ["rag_search"]
+    assert public["tool_results"]["rag_search"]["success"] is True
+    cards = [item for item in frames if item["type"] == "rag_info"]
+    assert len(cards) == 1 and cards[0]["molecules"][0]["smiles"] == "CCO"
+    assert cards[0]["molecules"][0]["source_index"] == 0
+    assert cards[0]["molecules"][0]["provenance"]["source_sha256"] == "a" * 64
+    types = [item["type"] for item in frames]
+    assert types.index("agent_result") < types.index("rag_info") < types.index("complete")
 
 def test_supervisor_execute_blocks_disabled_rag_alias_before_tool_events():
     alias = RecordingTool("rag_database_search")
@@ -2106,38 +1885,13 @@ def test_supervisor_blocks_all_tools_when_scientific_tools_disabled():
     assert tool.calls == []
 
 
-def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
-    tool = RecordingTool("llm_molecular_generator")
-    supervisor = SupervisorAgent(
-        tools={"llm_molecular_generator": tool},
-        skill_router=FixedRouter(MolecularDesignSkill()),
-    )
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=supervisor,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="generate one molecule",
-            enable_rag=False,
-            enable_tools=False,
-        )
-    )
-
-    assert tool.calls == []
-    assert model.generate_calls == 1
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "status": "succeeded",
-        "content": "assistant response",
-    }
-
+def test_chat_handler_tools_disabled_rejects_scientific_execution_without_fallback(tmp_path):
+    tool = FakeTool("llm_molecular_generator")
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / "disabled.sqlite"))
+    terminal, frames = run_web_turn(handler, "generate one molecule", enable_tools=False)
+    assert terminal["status"] == "rejected"
+    assert tool.inputs == [] and handler.model.messages == []
+    assert not any(item["type"] == "molecule_candidates" for item in frames)
 
 @pytest.mark.parametrize(
     "query",
@@ -2150,393 +1904,168 @@ def test_chat_handler_tools_disabled_uses_plain_chat_without_agent_execution():
         "Generate 3 potent and also synthesize 4 potent",
     ],
 )
-def test_chat_handler_omitted_count_rejects_invalid_text_before_tool(query):
-    tool = RecordingTool("llm_molecular_generator")
-    supervisor = SupervisorAgent(
-        tools={"llm_molecular_generator": tool},
-        skill_router=FixedRouter(MolecularDesignSkill()),
-    )
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=supervisor,
-        config={"inference": {"stream": False}},
-    )
+def test_contextual_generation_compile_rejects_invalid_count_before_execution(query):
+    """Preserve the baseline's explicit server-selected MolecularDesignSkill.
 
-    result = asyncio.run(
-        handler._execute_agent(query, active_skill=MolecularDesignSkill())
-    )
+    This is contextual compilation, not a claim that raw Web routing recognizes
+    nounless phrases. Rejection occurs before any executable plan is returned.
+    """
+    context = AgentContext(query, "contextual-generation", active_skill="molecular_design")
+    with pytest.raises(GenerationRequestError) as rejected:
+        compile_web_requirements(context, allowed_tools={"llm_molecular_generator"})
+    assert rejected.value.reason == (
+        "requested_count_out_of_range" if query == "Generate 11 molecules"
+        else "malformed_requested_count")
 
-    assert result["success"] is False
-    assert result["error"]["code"] == "invalid_input"
-    assert tool.calls == []
+def test_chat_handler_rejects_malformed_generation_before_should_use_or_router(tmp_path):
+    tool = FakeTool("llm_molecular_generator")
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / "malformed.sqlite"))
+    forbidden = Mock(side_effect=AssertionError("legacy routing/execution invoked"))
+    handler.agent_system.should_use_tools = forbidden
+    handler.agent_system.execute = forbidden
+    terminal, _ = run_web_turn(handler, "Generate - 1 molecules")
+    assert terminal["status"] == "rejected"
+    assert not forbidden.called and not tool.inputs and not handler.model.messages
+
+def test_chat_handler_rejects_oversized_numeric_token_before_router_or_model(tmp_path):
+    tool = FakeTool("llm_molecular_generator")
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / "oversized.sqlite"))
+    terminal, _ = run_web_turn(handler, f"Generate {'9' * 5000} molecules")
+    assert terminal["status"] == "rejected"
+    assert not tool.inputs and not handler.model.messages
+
+def test_chat_handler_authoritative_count_bypasses_malformed_generation_prose(tmp_path):
+    tool = FakeTool("llm_molecular_generator")
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / "generation.sqlite"))
+    terminal, frames = run_web_turn(handler, "Generate 7.5 molecules", mol_count=5)
+    assert tool.inputs, terminal
+    assert tool.inputs[0]["metadata"]["requested_count"] == 5
+    public = next(item for item in frames if item["type"] == "agent_result")
+    assert public["tool_results"]["llm_molecular_generator"]["quality"]["actual_count"] == 5
+
+def test_chat_handler_omitted_count_preserves_valid_text_count(tmp_path):
+    tool = FakeTool("llm_molecular_generator")
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / "generation.sqlite"))
+    terminal, frames = run_web_turn(handler, "Generate 7 molecules")
+    assert tool.inputs, terminal
+    assert tool.inputs[0]["metadata"]["requested_count"] == 7
+    public = next(item for item in frames if item["type"] == "agent_result")
+    assert public["tool_results"]["llm_molecular_generator"]["quality"]["actual_count"] == 7
+
+def test_chat_handler_explicit_count_remains_authoritative(tmp_path):
+    tool = FakeTool("llm_molecular_generator")
+    handler = make_web_handler([tool], SQLiteAgentStateStore(tmp_path / "generation.sqlite"))
+    terminal, frames = run_web_turn(handler, "Generate 7 molecules", mol_count=3)
+    assert tool.inputs, terminal
+    assert tool.inputs[0]["metadata"]["requested_count"] == 3
+    public = next(item for item in frames if item["type"] == "agent_result")
+    assert public["tool_results"]["llm_molecular_generator"]["quality"]["actual_count"] == 3
+
+def test_property_request_without_smiles_returns_clarification_without_rag_or_model(tmp_path):
+    tools = [FakeTool(name) for name in ("property_calculator", "drug_likeness_assessment",
+                                         "admet_predictor", "activity_predictor")]
+    handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / "clarify.sqlite"))
+    rag = RecordingLegacyRagService()
+    handler.rag_service = rag
+    terminal, _ = run_web_turn(handler, "计算阿司匹林的分子性质", enable_rag=True)
+    assert terminal["status"] == "rejected" and "SMILES" in terminal["content"]
+    assert not handler.model.messages and not rag.calls
+    assert not any(tool.inputs for tool in tools)
+
+def test_conceptual_question_skips_molecular_rag_and_uses_main_model(tmp_path):
+    handler, service = _rag_web_fixture(tmp_path)
+    terminal, frames = run_web_turn(handler, "什么是药物设计", enable_rag=True)
+    assert terminal["status"] == "completed"
+    assert len(handler.model.messages) == 1
+    assert not service.calls and not handler.rag_service.calls
+    assert not any(item["type"] == "rag_info" for item in frames)
+
+def test_greeting_uses_main_model_without_supervisor_or_rag(actual_app, monkeypatch):
+    """Pi lifecycle events are allowed; scientific/Supervisor dispatch is not."""
+    async def respond(payload):
+        return chat_decision("assistant response")
+
+    async def run():
+        async with actual_app(respond=respond) as bundle:
+            app = bundle.app
+            forbidden = Mock(side_effect=AssertionError('greeting dispatched a legacy/scientific path'))
+            monkeypatch.setattr(app.agent_system, 'execute', forbidden)
+            assert not hasattr(app.chat_handler, '_process_message')
+            for adapter in app.agent_tool_registry.as_mapping().values():
+                monkeypatch.setattr(adapter, 'execute', forbidden)
+            async with ActualSocket(app, await cookie_for(app)) as socket:
+                assert (await socket.ready())['normal_chat_mode'] == 'pi'
+                frames = await socket.turn({'type': 'chat', 'message': '你好', 'enable_rag': True})
+                result = result_of(frames)
+                assert result['success'] and result['status'] == 'completed'
+                assert frames[-1]['type'] == 'complete'
+                assert frames[-1]['status'] == 'completed'
+                assert frames[-1]['content'] == 'assistant response'
+                assert result['metadata']['rag_requested'] is True
+                assert result['metadata']['retrieval_performed'] is False
+                assert result['tool_result_sequence'] == []
+                assert app.agent_state_store.get_tool_executions(result['trace_id']) == []
+                assert not any(frame['type'] == 'rag_info' or (
+                    frame['type'] == 'agent_event' and frame.get('event', {}).get('event') in {
+                        'tool_started', 'tool_completed', 'tool_failed'}) for frame in frames)
+            assert app.model is bundle.model
+            assert len(bundle.calls) == 1 and bundle.calls[0]['model'] == 'protocol-only'
+            assert not forbidden.called
+            assert not bundle.rag.retrieve.called
+            assert not bundle.rag.search_similar_molecules.called
+            assert not bundle.rag.search_similar_molecules_with_status.called
+    asyncio.run(run())
 
 
-def test_chat_handler_rejects_malformed_generation_before_should_use_or_router():
-    class AgentThatMustNotRoute:
-        llm = None
-        skill_router = None
-
+def test_external_model_uses_external_output_budget(tmp_path):
+    class Model(PlannedWebModel):
+        provider_name = "openai_compatible"
         def __init__(self):
-            self.should_use_calls = []
-            self.execute_calls = []
+            super().__init__()
+            self.options = []
+        async def decide(self, messages, **kwargs):
+            self.options.append(kwargs)
+            return await super().decide(messages, **kwargs)
+    model = Model()
+    handler = make_web_handler([], SQLiteAgentStateStore(tmp_path / "budget.sqlite"), model)
+    handler.config = {"inference": {"max_tokens": 600, "external_max_tokens": 4096}}
+    complete, _ = run_web_turn(handler, "你好", enable_tools=False)
+    assert complete["status"] == "completed"
+    assert [options["max_tokens"] for options in model.options] == [4096]
 
-        def should_use_tools(self, message):
-            self.should_use_calls.append(message)
-            raise AssertionError("should_use_tools ran before generation preflight")
-
-        def execute(self, *args, **kwargs):
-            self.execute_calls.append((args, kwargs))
-            raise AssertionError("agent ran before generation preflight")
-
-    agent = AgentThatMustNotRoute()
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="Generate - 1 molecules",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    assert agent.should_use_calls == []
-    assert agent.execute_calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "Invalid molecular generation request" in websocket.messages[-1]["content"]
-
-
-def test_chat_handler_rejects_oversized_numeric_token_before_router_or_model():
-    class AgentThatMustNotRun:
-        llm = None
-        skill_router = None
-
-        def should_use_tools(self, _message):
-            raise AssertionError("router ran")
-
-        def execute(self, *_args, **_kwargs):
-            raise AssertionError("agent ran")
-
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=AgentThatMustNotRun(),
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message=f"Generate {'9' * 5000} molecules",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "Invalid molecular generation request" in websocket.messages[-1]["content"]
-
-
-def test_chat_handler_authoritative_count_bypasses_malformed_generation_prose():
-    class CapturingAgent:
-        llm = None
-        skill_router = None
-
+def test_local_model_keeps_local_output_budget(tmp_path):
+    class Model(PlannedWebModel):
+        provider_name = None
         def __init__(self):
-            self.calls = []
+            super().__init__()
+            self.options = []
+        async def decide(self, messages, **kwargs):
+            self.options.append(kwargs)
+            return await super().decide(messages, **kwargs)
+    model = Model()
+    handler = make_web_handler([], SQLiteAgentStateStore(tmp_path / "budget.sqlite"), model)
+    handler.config = {"inference": {"max_tokens": 600, "external_max_tokens": 4096}}
+    complete, _ = run_web_turn(handler, "你好", enable_tools=False)
+    assert complete["status"] == "completed"
+    assert [options["max_tokens"] for options in model.options] == [600]
 
-        def should_use_tools(self, message):
-            return True
-
-        def execute(self, message, **kwargs):
-            self.calls.append((message, kwargs))
-            return {
-                "success": True,
-                "final_answer": "generated",
-                "tools_used": ["llm_molecular_generator"],
-                "tool_results": {},
-            }
-
-    agent = CapturingAgent()
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-
-    asyncio.run(
-        handler._process_message(
-            websocket=FakeWebSocket(),
-            message="Generate 7.5 molecules",
-            enable_rag=False,
-            enable_tools=True,
-            mol_count=5,
-        )
-    )
-
-    assert agent.calls[0][1]["mol_count"] == 5
-
-
-def test_chat_handler_omitted_count_preserves_valid_text_count():
-    tool = RecordingTool("llm_molecular_generator")
-    supervisor = SupervisorAgent(
-        tools={"llm_molecular_generator": tool},
-        skill_router=FixedRouter(MolecularDesignSkill()),
-    )
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=supervisor,
-        config={"inference": {"stream": False}},
-    )
-
-    result = asyncio.run(
-        handler._execute_agent(
-            "Generate 7 molecules", active_skill=MolecularDesignSkill()
-        )
-    )
-
-    assert tool.calls
-    assert tool.calls[0]["metadata"]["requested_count"] == 7
-
-
-def test_chat_handler_explicit_count_remains_authoritative():
-    tool = RecordingTool("llm_molecular_generator")
-    supervisor = SupervisorAgent(
-        tools={"llm_molecular_generator": tool},
-        skill_router=FixedRouter(MolecularDesignSkill()),
-    )
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=supervisor,
-        config={"inference": {"stream": False}},
-    )
-
-    result = asyncio.run(
-        handler._execute_agent(
-            "Generate 7 molecules",
-            mol_count=3,
-            active_skill=MolecularDesignSkill(),
-        )
-    )
-
-    assert tool.calls
-    assert tool.calls[0]["metadata"]["requested_count"] == 3
-
-
-def test_property_request_without_smiles_returns_clarification_without_rag_or_model():
-    model = FakeModel()
-    rag = RecordingLegacyRagService()
-    agent = ConfirmationAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="计算阿司匹林的分子性质",
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
-
-    assert agent.execute_calls == []
-    assert rag.calls == []
-    assert model.generate_calls == 0
-    assert websocket.messages[-1]["type"] == "complete"
-    assert "SMILES" in websocket.messages[-1]["content"]
-
-
-def test_conceptual_question_skips_molecular_rag_and_uses_main_model():
-    model = FakeModel()
-    rag = RecordingLegacyRagService()
-    agent = ConfirmationAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="什么是药物设计",
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
-
-    assert agent.execute_calls == []
-    assert rag.calls == []
-    assert model.generate_calls == 1
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "status": "succeeded",
-        "content": "assistant response",
-    }
-
-
-def test_greeting_uses_main_model_without_agent_or_rag():
-    model = FakeModel()
-    rag = RecordingLegacyRagService()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=None,
-        config={"inference": {"stream": False}},
-    )
-    websocket = ScriptedWebSocket(
-        [{"type": "chat", "message": "你好", "enable_rag": True}]
-    )
-
-    asyncio.run(handler.handle_websocket(websocket))
-
-    assert model.generate_calls == 1
-    assert rag.calls == []
-    assert not any(item["type"] == "agent_event" for item in websocket.messages)
-    assert websocket.messages[-1] == {
-        "type": "complete",
-        "status": "succeeded",
-        "content": "assistant response",
-    }
-
-
-def test_external_model_uses_external_output_budget():
-    model = ExternalFakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=None,
-        config={
-            "inference": {
-                "stream": False,
-                "max_tokens": 600,
-                "external_max_tokens": 4096,
-            }
-        },
-    )
-
-    asyncio.run(
-        handler._process_message(
-            websocket=FakeWebSocket(),
-            message="什么是药物分子设计",
-            enable_rag=False,
-            enable_tools=False,
-        )
-    )
-
-    assert model.max_tokens == [4096]
-
-
-def test_local_model_keeps_local_output_budget():
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=None,
-        config={
-            "inference": {
-                "stream": False,
-                "max_tokens": 600,
-                "external_max_tokens": 4096,
-            }
-        },
-    )
-
-    asyncio.run(
-        handler._process_message(
-            websocket=FakeWebSocket(),
-            message="你好",
-            enable_rag=False,
-            enable_tools=False,
-        )
-    )
-
-    assert model.max_tokens == [600]
-
-
-def test_stream_length_finish_reason_is_visible_and_structured():
+def test_retained_stream_projection_marks_length_without_modifying_execution():
     model = TruncatedStreamingModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=None,
-        config={
-            "inference": {
-                "stream": True,
-                "max_tokens": 600,
-                "external_max_tokens": 4096,
-            }
-        },
-    )
-    websocket = FakeWebSocket()
+    model.last_response_metadata = {"finish_reason": "length"}
+    handler = ChatHandler(model, None, None, {})
+    content, warning, metadata = handler._finalize_model_response("药物分子设计是一个多目标优化过程。")
+    assert metadata == {"finish_reason": "length", "truncated": True}
+    assert "达到输出长度上限" in content and warning in content
+    repeated, _, _ = handler._finalize_model_response(content)
+    assert repeated == content
 
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="什么是药物分子设计",
-            enable_rag=False,
-            enable_tools=False,
-        )
-    )
-
-    completion = websocket.messages[-1]
-    assert model.max_tokens == [4096]
-    assert completion["type"] == "complete"
-    assert completion["finish_reason"] == "length"
-    assert completion["truncated"] is True
-    assert "达到输出长度上限" in completion["content"]
-    assert websocket.messages[-2]["type"] == "stream"
-    assert "达到输出长度上限" in websocket.messages[-2]["content"]
-
-
-def test_bare_smiles_preserves_legacy_molecular_rag_path():
-    model = FakeModel()
-    rag = RecordingLegacyRagService()
-    agent = ConfirmationAgentSystem()
-    handler = ChatHandler(
-        model=model,
-        rag_service=rag,
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="CCO",
-            enable_rag=True,
-            enable_tools=True,
-        )
-    )
-
-    assert agent.execute_calls == []
-    assert rag.calls == [("CCO", 5)]
-    assert model.generate_calls == 1
-    assert any(item["type"] == "rag_info" for item in websocket.messages)
-
+def test_bare_smiles_preserves_retrieval_through_pi_not_legacy_rag(tmp_path):
+    handler, service = _rag_web_fixture(tmp_path)
+    terminal, frames = run_web_turn(handler, "CCO", enable_rag=True)
+    assert terminal["status"] == "completed"
+    assert service.calls == [("CCO", 5)]
+    assert not handler.rag_service.calls
+    assert any(item["type"] == "rag_info" for item in frames)
 
 def test_prompt_history_can_be_scoped_to_one_websocket_connection():
     handler = ChatHandler(
@@ -2563,57 +2092,54 @@ def test_prompt_history_can_be_scoped_to_one_websocket_connection():
     assert "other-user-secret" not in prompt
 
 
-def test_separate_websocket_connections_do_not_share_conversation_history():
-    model = FakeModel()
-    handler = ChatHandler(
-        model=model,
-        rag_service=FakeRagService(),
-        agent_system=None,
-        config={"inference": {"stream": False}},
-    )
-    first = ScriptedWebSocket([
-        {
-            "message": "first-user-private-molecule",
-            "enable_rag": False,
-            "enable_tools": False,
-        }
-    ])
-    second = ScriptedWebSocket([
-        {
-            "message": "second-user-question",
-            "enable_rag": False,
-            "enable_tools": False,
-        }
-    ])
+def test_separate_websocket_connections_do_not_share_conversation_history(actual_app, monkeypatch):
+    first_query, second_query = 'Explain logP', '解释分子生成的概念'
+    private_answer = 'First connection private answer'
 
-    asyncio.run(handler.handle_websocket(first))
-    asyncio.run(handler.handle_websocket(second))
+    async def respond(payload):
+        return chat_decision(private_answer if payload['messages'][-1]['content'] == first_query
+                             else 'Second connection answer')
 
-    assert first.accepted is True
-    assert second.accepted is True
-    assert len(model.prompts) == 2
-    assert "first-user-private-molecule" in model.prompts[0]
-    assert "first-user-private-molecule" not in model.prompts[1]
+    async def run():
+        async with actual_app(respond=respond) as bundle:
+            app = bundle.app
+            forbidden = Mock(side_effect=AssertionError('history isolation dispatched a tool'))
+            monkeypatch.setattr(app.agent_system, 'execute', forbidden)
+            assert not hasattr(app.chat_handler, '_process_message')
+            for adapter in app.agent_tool_registry.as_mapping().values():
+                monkeypatch.setattr(adapter, 'execute', forbidden)
+            first_cookie, second_cookie = await cookie_for(app), await cookie_for(app)
+            assert first_cookie != second_cookie
+            async with ActualSocket(app, first_cookie) as first, ActualSocket(app, second_cookie) as second:
+                assert (await first.ready())['normal_chat_mode'] == 'pi'
+                assert (await second.ready())['normal_chat_mode'] == 'pi'
+                for socket, query in ((first, first_query), (second, second_query)):
+                    result = result_of(await socket.turn({
+                        'message': query, 'enable_rag': False, 'enable_tools': False}))
+                    assert result['success'] and result['tool_result_sequence'] == []
+                    assert app.agent_state_store.get_tool_executions(result['trace_id']) == []
+            assert len(bundle.calls) == 2
+            for call, query in zip(bundle.calls, (first_query, second_query)):
+                assert [m for m in call['messages'] if m['role'] != 'system'] == [
+                    {'role': 'user', 'content': query}]
+            second_payload = json.dumps(bundle.calls[1], ensure_ascii=False)
+            assert first_query not in second_payload and private_answer not in second_payload
+            assert app.chat_handler.conversation_history == []
+            assert not forbidden.called and not bundle.rag.retrieve.called
+    asyncio.run(run())
 
 
-def test_chat_handler_runs_async_route_arbitration_outside_websocket_loop():
-    agent = AsyncRoutingAgentSystem()
-    handler = ChatHandler(
-        model=FakeModel(),
-        rag_service=FakeRagService(),
-        agent_system=agent,
-        config={"inference": {"stream": False}},
-    )
-    websocket = FakeWebSocket()
-
-    asyncio.run(
-        handler._process_message(
-            websocket=websocket,
-            message="Evaluate CCO pIC50 and ADMET",
-            enable_rag=False,
-            enable_tools=True,
-        )
-    )
-
-    assert agent.llm.calls == 1
-    assert agent.selected_skills == ["activity_prediction"]
+def test_chat_handler_uses_compiled_routing_and_awaits_pi_decisions(tmp_path, monkeypatch):
+    """The former routing-model call is retired; Pi owns async decisions."""
+    import src.web.web_request as preparation
+    calls = []
+    original = preparation.compile_web_requirements
+    def observe(*args, **kwargs):
+        calls.append(args[0].query)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(preparation, "compile_web_requirements", observe)
+    handler = make_web_handler([PropertyCalculator()], SQLiteAgentStateStore(tmp_path / "routing.sqlite"))
+    terminal, _ = run_web_turn(handler, "只计算 CCO 的分子量与 logP")
+    assert terminal["status"] == "completed"
+    assert calls == ["只计算 CCO 的分子量与 logP"]
+    assert len(handler.model.messages) == 2

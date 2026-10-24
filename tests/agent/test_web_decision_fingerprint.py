@@ -5,12 +5,12 @@ import pytest
 
 from test_decision_loop import setup_loop, clarify, tool, finish_last
 from test_decision_continuation import start, invoke, ContinuationModel, owned_context
-from src.agent.harness.decision_loop import ModelDecisionLoop
-from src.agent.harness.decision_continuation import configuration_digest
+from src.agent.pi_runtime.runtime import PiAgentRuntime
+from src.agent.scientific_session.decision_continuation import configuration_digest
 
 
 def supports_generation():
-    assert 'config_generation' in inspect.signature(ModelDecisionLoop).parameters, 'server generation support missing'
+    assert 'config_generation' in inspect.signature(PiAgentRuntime).parameters, 'server generation support missing'
 
 
 @pytest.mark.parametrize('generation', ['', 1, True, {}, 'x'*129, 'api_key=synthetic-secret'])

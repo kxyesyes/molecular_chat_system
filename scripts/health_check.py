@@ -201,6 +201,96 @@ def check_modelscope() -> tuple[bool, str]:
     return True, f"API key configured; endpoint: {base_url}"
 
 
+_PI_PACKAGE = "@earendil-works/pi-coding-agent"
+_PI_REPAIR = "npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund"
+_PI_IMPORT_PROBE = """
+const version = process.versions.node.split('.').map(Number);
+const minimum = [22, 19, 0];
+if (version.length !== 3 || version.some(v => !Number.isInteger(v)) ||
+    version[0] < minimum[0] ||
+    (version[0] === minimum[0] && version[1] < minimum[1]) ||
+    (version[0] === minimum[0] && version[1] === minimum[1] && version[2] < minimum[2])) {
+  process.exit(10);
+}
+try {
+  const sdk = await import('@earendil-works/pi-coding-agent');
+  if (sdk.VERSION !== '1.4.0') process.exit(11);
+  const ai = await import('@earendil-works/pi-ai');
+  if (typeof sdk.createAgentSession !== 'function' ||
+      typeof sdk.ModelRuntime?.create !== 'function' ||
+      typeof sdk.SessionManager?.inMemory !== 'function' ||
+      typeof sdk.SettingsManager?.inMemory !== 'function' ||
+      typeof sdk.createExtensionRuntime !== 'function' ||
+      typeof ai.InMemoryCredentialStore !== 'function' ||
+      typeof ai.createAssistantMessageEventStream !== 'function') process.exit(13);
+} catch {
+  process.exit(12);
+}
+process.exit(0);
+"""
+
+
+def _pi_manifest(path: Path) -> dict:
+    # Lock files are local release assets, not unbounded provider payloads.
+    with path.open("rb") as handle:
+        raw = handle.read(1024 * 1024 + 1)
+    if len(raw) > 1024 * 1024:
+        raise ValueError("pi_manifest_too_large")
+    value = json.loads(raw)
+    if type(value) is not dict:
+        raise ValueError("pi_manifest_invalid")
+    return value
+
+
+def check_pi_runtime() -> tuple[bool, str]:
+    """Offline installed-SDK readiness only; never construct a session or model.
+
+    Probe stdout/stderr are discarded, the child gets no runtime credentials or
+    injected Node/Pi configuration, and its home/config directories are temporary.
+    Fixed exit codes distinguish installation failures without echoing child data.
+    """
+    runtime = PROJECT_ROOT / "runtime" / "pi"
+    node = shutil_which("node")
+    if not node:
+        return False, f"Node >=22.19.0 required (CI: 24.15.0); install Node, then {_PI_REPAIR}"
+    try:
+        manifest = _pi_manifest(runtime / "package.json")
+        lock = _pi_manifest(runtime / "package-lock.json")
+        if (manifest["dependencies"][_PI_PACKAGE] != "1.4.0"
+                or lock["packages"][""]["dependencies"][_PI_PACKAGE] != "1.4.0"
+                or lock["packages"][f"node_modules/{_PI_PACKAGE}"]["version"] != "1.4.0"):
+            return False, f"Pi manifest/lock must pin {_PI_PACKAGE}@1.4.0; restore release files, then {_PI_REPAIR}"
+    except (OSError, ValueError, TypeError, KeyError, RecursionError):
+        return False, f"Pi package.json/package-lock.json missing or invalid; restore release files, then {_PI_REPAIR}"
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="medchat_pi_health_") as home:
+            environment = _minimal_command_environment()
+            for key in ("HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
+                        "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "TEMP", "TMP", "TMPDIR"):
+                environment[key] = home
+            environment.update(PI_OFFLINE="1", NO_COLOR="1")
+            result = subprocess.run(
+                [node, "--input-type=module", "--eval", _PI_IMPORT_PROBE],
+                cwd=str(runtime), env=environment, timeout=15, shell=False,
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+    except subprocess.TimeoutExpired:
+        return False, f"Pi SDK import timed out after 15 seconds; verify local Node installation, then {_PI_REPAIR}"
+    except OSError:
+        return False, f"Pi runtime probe failed to start or clean up; verify Node/temp permissions, then {_PI_REPAIR}"
+    reasons = {
+        10: "Node >=22.19.0 required (CI: 24.15.0)",
+        11: "Installed Pi SDK version must be 1.4.0",
+        12: "Pi SDK import failed (missing or unusable local dependencies)",
+        13: "Pi SDK required exports missing",
+    }
+    if result.returncode != 0:
+        return False, f"{reasons.get(result.returncode, 'Pi SDK probe failed')}; {_PI_REPAIR}"
+    return True, f"Node >=22.19.0; locked {_PI_PACKAGE}@1.4.0 SDK import succeeded (offline, no session)"
+
+
 def check_agent_contracts() -> tuple[bool, str]:
     try:
         contracts = importlib.import_module("src.agent.contracts")
@@ -623,6 +713,7 @@ def run_checks(strict: bool) -> int:
         ("Target Cache", check_target_cache),
         ("Ollama", check_ollama),
         ("ModelScope", check_modelscope),
+        ("Pi Runtime", check_pi_runtime),
         ("Agent Contracts", check_agent_contracts),
         ("Agent Tool Registry", check_agent_tool_registry),
         ("Agent Components", check_agent_components),

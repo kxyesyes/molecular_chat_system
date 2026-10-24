@@ -1,5 +1,30 @@
 # Latest handoff
 
+## PR #215 首轮 CI 修复（2026-10-23）
+
+- 在原 Pi 分支上修复，基线 `8141b755`；维护者明确要求更新同一 draft PR，暂不合并，真实模型未验证项继续保留。
+- 首轮 CI 为 8 项成功、Agent 与 root-activity 失败、汇总失败。Agent 在 1200 秒截止前推进到 24%，已有 6 项浏览器旧成功终态断言失败；root-activity 为 1958 passed / 1 failed / 6 skipped，缺少 Node 被误报为 chain_mismatch。
+- 浏览器严格终态改为实际 Web completed，保留 partial、科学数值、证据/会话隔离及工具调用断言，补入既有清理夹具。原失败先复现，质量/证据/S02/隔离联合 120 passed。
+- 经维护者批准增加五个有界 Agent 分片，不增加单片时限、不改变生产运行时。工作流契约 49 passed / 2 Windows 平台跳过；实际收集 17754 个 Agent node ID，九分片无重叠无遗漏，收集器原 180/60 秒限制保留。
+- 活性验收在 Pi 入口检查 Node，保留“存在但启动失败”的独立失败分类与原环境/Torch/缓存恢复断言。聚焦 2 failed / 1 passed → 3 passed；完整验收链与 Pi bridge 联合 127 passed。两组独立 SPEC → QUALITY 均 PASS；compileall / diff 检查通过，无生产源码修改。
+- `1f586f47` 新 CI 的九个 Agent 分片全通过（17753 passed / 1 skipped，17754 ID 覆盖检查通过）；root 发现另外两处旧 9 分片快照。先复现 2 failed，再同步精确目标/预算表；部署/Pi 健康/工作流三模块 91 passed / 2 平台跳过，独立复审通过。后续提交仍需自己的完整 CI，不沿用旧 head 的成功结果。
+- 精确修复、复审与后续 CI 见[验收记录](../superpowers/validation/2026-10-23-pi-harness-replacement.md#pr-215-ci-follow-up--baseline-8141b755)及 [PR #215](https://github.com/kxyesyes/molecular_chat_system/pull/215)。此处本地通过不替代新 head 的完整 CI；云端 DNS 拒绝、本地决策协议未通过及健康检查 21/24 仍是发布门禁。
+
+## 官方 Pi 替换自研通用 Harness（2026-10-23）
+
+- 最新 Web 业务/反向排序回归 **158 passed**；实际挂载入口、浏览器实验、引用重试、续接权限与旧路径退役回归 **66 passed**。修复了证据比较误入排序、反向回执输入、ADMET endpoint-only 展示及 allocation-busy 后旧排序指针残留；保留原业务安全断言。
+- 确认分子重试采用持久化认领、稳定动作身份和经验证回执复用；取消先等真实 worker 排空，损坏回执失败关闭。恢复标记不能替代一次性 nonce。新展示重试原子归档完整旧运行并撤销旧确认，新展示须重新 ACK；不改写原始输入来源或延长原 TTL。归档/认领/来源存储回归 **214 passed**，相关持久化及生命周期回归 **589 passed**，批次重叠不累计。
+- 输入预算、冻结配置、科学 partial 和 socket-local 证据隔离修复保留。`compileall src scripts`、前端语法与四个变更契约通过，官方 Pi SDK 离线契约 **6 passed**。真实 Pi/SQLite/RDKit 与脚本化模型/生成夹具明确区分，不冒充云端或本地模型实测。
+- 最新引用/归档/校验/取消/所有权/Web 绑定/B1 续接联合回归 **610 passed / 3 既有警告**；聚焦独立审查无可操作的正确性问题，全部 44 个前端契约文件及附加 DOM 测试通过。本任务文件已显式暂存，临时产物排除。
+- **按维护者确认，保留未验证项并交付 draft PR；不发布、不合并。** 第二次 127 文件长批次为 **6720 passed / 2 failed / 5 skipped**，仅余模型生命周期启动等待。经确定性延迟 RED 后，测试将首个合法模型决策与原 3 秒物理工具等待分开；切换/配置冻结/取消/排空断言保留，无生产时限变更。独立审查通过，单模块 **39 passed**；此前失败的 44 文件前缀加生命周期组合最终 **2558 passed / 7 既有警告**。完整 127 文件未在夹具修正后重跑，不宣称全量或 CI 全绿。
+- 比较/规划/准入/默认配置 **247 passed**，检索/输入/靶点澄清 **208 passed**，反向排序/来源/续接 **312 passed**；附加动作覆盖复审反例修正后 **142 passed**。批次重叠不累计。云端 DNS 安全拒绝、本地模型决策协议未通过及部署资产缺失仍为发布门禁；宽批次启动变慢的环境根因未确认。
+- 独立分支 `codex/pi-harness-replacement`，基线 `616d8e9e`；原工作区已有改动保留。默认 draft PR，不自动合并。
+- 官方 Pi `AgentSession` 是 Web 的唯一通用决策循环；Python 仅承接模型单次事务与科学业务回调。移除旧 loop、Factory、Legacy/Shadow/Canary/LangGraph 后端及对应依赖；确定性 Supervisor/工作流直接调用现有 executor。
+- 保留领域工具、证据/provenance、审批、幂等、真实取消与 worker 排空、用户隔离及 partial/failure 展示。密钥不传入 Node，不开放内置 Shell/文件工具或自动扩展。
+- 新 Pi checkpoint 必须通过 Pi 历史和既有领域校验；旧记录不删除、不自动转换、不执行续接。回滚使用完整 Git 发布版本，不提供旧 Harness fallback。
+- 当前精确测试证据、独立审查修复、真实模型验收及未验证项见[迁移验收记录](../superpowers/validation/2026-10-23-pi-harness-replacement.md)。批次重叠，不累计通过总数；完整 CI 与部署尚不能宣称通过。
+- [Pi 安装、模型配置、故障处理与回滚](../PI_RUNTIME.md)是当前运行入口。健康检查当前为 21/24：Pi SDK 通过，隔离工作树缺反向寻靶资产、RAG 索引和 scratch 目录；云端实测被 DNS 安全策略阻断，未绕过保护。
+
 ## 八项独立审查问题修复（2026-10-20）
 
 - 基线 `73d75a7f`，隔离分支 `codex/fix-independent-review-findings`。本轮只授权提交并创建指向 main 的 draft PR，**不合并**；原工作区未提交改动保留。

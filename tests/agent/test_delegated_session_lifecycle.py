@@ -294,12 +294,14 @@ def test_delegated_entry_executes_shared_session(monkeypatch):
         assert len({event['trace_id'] for event in response['agent_events']}) == 1
         terminal = response['agent_events'][-1]
         assert terminal['event'] == 'task_completed'
-        assert terminal['payload']['metadata']['_harness_delegations'] == response['delegations']
+        assert '_workflow_delegations' in terminal['payload']['metadata']
+        assert terminal['payload']['metadata']['_workflow_delegations'] == response['delegations']
+        assert response['result']['metadata']['_workflow_delegations'] == response['delegations']
     finally:
         registry.close()
 
 
-def test_delegated_executor_supports_incremental_harness_contract():
+def test_delegated_executor_supports_incremental_session_contract():
     assert callable(getattr(_DelegatedWorkflowExecutor, 'prepare', None))
 
 
@@ -329,22 +331,22 @@ def test_preparing_delegated_workflow_does_not_claim_run_until_start(tmp_path):
         registry.close()
 
 
-def test_direct_langgraph_delegation_rejects_existing_running_trace(tmp_path):
+def test_direct_delegated_executor_rejects_existing_running_trace(tmp_path):
     from src.agent.contracts import AgentContext
-    from src.agent.harness.langgraph_execution import LangGraphExecutionHarness
-    store = SQLiteAgentStateStore(tmp_path / 'langgraph-claim.sqlite')
+    store = SQLiteAgentStateStore(tmp_path / 'direct-claim.sqlite')
     store.start_run({'trace_id': 'occupied', 'status': 'running', 'query': 'CCO'})
     registry, tools = build_registry()
     try:
         supervisor = SupervisorAgent(tools={}, planner=SinglePlanner(), tool_registry=registry,
                                      specialists=build_default_specialists(), state_store=store)
-        run = LangGraphExecutionHarness(_DelegatedWorkflowExecutor(supervisor)).execute(
+        execution = _DelegatedWorkflowExecutor(supervisor).execute(
             context=AgentContext('CCO', 'occupied', active_skill='comprehensive_evaluation'),
             policy=supervisor.catalog.get('comprehensive_evaluation'),
             all_tools=registry.as_mapping(),
         )
-        assert run.authoritative.result.metadata['run_claim_conflict'] is True
-        assert not run.authoritative.result.success
+        assert execution.result.metadata['run_claim_conflict'] is True
+        assert not execution.result.success
+        assert execution.events == []
         assert tools['property_calculator'].calls == []
         assert store.get_run('occupied')['status'] == 'running'
     finally:
@@ -352,20 +354,21 @@ def test_direct_langgraph_delegation_rejects_existing_running_trace(tmp_path):
 
 
 @pytest.mark.parametrize('mode', ['legacy', 'shadow', 'langgraph_canary'])
-def test_delegated_harness_modes_call_tool_once(monkeypatch, mode):
-    from src.agent.harness import HarnessFactory
+def test_delegated_direct_execution_ignores_obsolete_modes(monkeypatch, mode):
+    monkeypatch.setenv('AGENT_HARNESS_MODE', mode)
     monkeypatch.setenv('AGENT_LANGGRAPH_CANARY_PERCENT', '100')
     registry, tools = build_registry()
     try:
         supervisor = SupervisorAgent(
             tools={}, planner=SinglePlanner(), tool_registry=registry,
-            specialists=build_default_specialists(),
-            harness_factory=HarnessFactory(mode=mode, langgraph_available=lambda: True))
+            specialists=build_default_specialists())
         result = supervisor.run('CCO', skill_name='admet_assessment')
         assert result['status'] == 'succeeded'
         assert tools['property_calculator'].calls == ['CCO']
         assert len(result['delegations']) == 1
         assert [e['event'] for e in result['agent_events']].count('task_completed') == 1
+        assert 'harness_execution' not in result['result']['metadata']
+        assert 'harness_shadow' not in result['result']['metadata']
     finally:
         registry.close()
 
@@ -690,5 +693,13 @@ def test_same_session_idempotent_retry_reuses_trace(tmp_path):
         assert first['status'] == second['status'] == 'succeeded'
         assert first['trace_id'] == second['trace_id']
         assert tools['property_calculator'].calls == ['CCO']
+        for response in (first, second):
+            assert '_workflow_delegations' in response['result']['metadata']
+            assert response['result']['metadata']['_workflow_delegations'] == response['delegations']
+            assert '_harness_delegations' not in response['result']['metadata']
+        assert all(not item['reused'] for item in first['delegations'])
+        assert all(item['reused'] for item in second['delegations'])
+        terminal = store.get_events(second['trace_id'])[-1]
+        assert terminal['payload']['metadata']['_workflow_delegations'] == second['delegations']
     finally:
         registry.close()

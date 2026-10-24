@@ -11,7 +11,7 @@ import pytest
 
 from src.agent.contracts import AgentContext, RunOutcome
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
-from src.agent.harness.decision_execution import DecisionEvents
+from src.agent.scientific_session.decision_execution import DecisionEvents
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
@@ -680,7 +680,7 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
         'publication_stage', 'answer_released'} for event in terminals[:-1])
     if boundary == 'waiting_publication':
         assert len(published) == 1
-        assert published[0]['snapshot']['decision_protocol_revision'] == 8
+        assert published[0]['snapshot']['decision_protocol_revision'] == 11
         assert saved['metadata']['decision_continuation'] == published[0]
         assert 'continuation_id' not in result.metadata
         history = case.store.get_events('actual-b1')
@@ -694,8 +694,8 @@ def test_actual_loop_rechecks_source_after_each_terminal_callback_even_if_it_rai
 
 @pytest.mark.parametrize('overrun', [False, True])
 def test_actual_outer_drain_precedes_release_and_has_no_source_work(loop_case, monkeypatch, overrun):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     now = [1000.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     case = loop_case([tool(), finish_last], [PropertyCalculator()])
@@ -758,8 +758,8 @@ def capture_sessions(monkeypatch):
 
 
 def test_review_invalidation_during_drain_supersedes_success_without_clock_advance(loop_case, monkeypatch):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     from test_decision_binding_acceptance import requirements
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: 1000.0))
     sessions = capture_sessions(monkeypatch)
@@ -836,7 +836,7 @@ def test_review_invalidation_before_positive_status_writer_dominates_commit(
 
 
 def test_review_cancellation_in_final_acceptance_settles_and_corrects_started_run(loop_case, monkeypatch):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     from test_decision_binding_acceptance import requirements
     case = loop_case([tool(), finish_last], [PropertyCalculator()])
     entered, release = threading.Event(), threading.Event()
@@ -1041,7 +1041,7 @@ def start_real_owned_worker(owner, entered, release, exited, roots, workers):
 @pytest.mark.parametrize('stage', ['preterminal', 'postattempt'])
 def test_real_owned_cancel_respects_publication_attempt_boundary(loop_case, monkeypatch, mode, stage):
     """Same repeated cancellation; distinguish an unstarted vs committed attempt."""
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     from test_decision_binding_acceptance import requirements
     from test_worker_ownership import signalled, pending
     case = loop_case([tool(), finish_last], [PropertyCalculator()], mode=mode)
@@ -1189,7 +1189,7 @@ def test_committed_terminal_with_unconfirmed_flag_cancel_is_postattempt(loop_cas
     This needs the new post-callback owned barrier; it is not an initial-baseline
     behavioral RED node. The writer throws RuntimeError, never fake cancellation.
     """
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     from test_decision_binding_acceptance import requirements
     from test_worker_ownership import signalled, pending
     sessions = capture_sessions(monkeypatch)

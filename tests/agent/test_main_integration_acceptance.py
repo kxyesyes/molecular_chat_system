@@ -43,9 +43,9 @@ def _run_child(code, *args, timeout=30):
             'MEDCHAT_TASK_DB_PATH': 'tasks.sqlite', 'TARGET_DB_PATH': 'targets.sqlite',
             'TARGET_CACHE_DIR': 'target-cache', 'MEDCHAT_FRAGMENT_DB_PATH': '.',
         }.items()})
-        env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8', AGENT_HARNESS_MODE='legacy',
+        env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8',
                    MEDCHAT_TASK_BACKEND='local', MEDCHAT_TEMPORAL_CANARY_PERCENT='0',
-                   AGENT_LANGGRAPH_CANARY_PERCENT='0', MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE='0',
+                   MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE='0',
                    MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE='0', MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK='0',
                    RUN_REAL_TARGET_SEARCH='0')
         result = subprocess.run([sys.executable, '-B', '-s', '-c', code, *args], cwd=root,
@@ -92,7 +92,7 @@ def test_subprocess_deadline_kills_and_reaps_child(monkeypatch):
 
 
 def exchange(app, query, *, terminal='complete'):
-    """A queued ping is a processing barrier, including post-complete frames."""
+    """Completion then ping is a barrier with Pi's concurrent socket receiver."""
     messages = []
     with TestClient(app, base_url=BASE) as client:
         page = client.get('/')
@@ -103,7 +103,6 @@ def exchange(app, query, *, terminal='complete'):
             deadline = time.monotonic() + 10
             receive_until(ws, 'connection_ready', timeout=deadline - time.monotonic())
             ws.send_json({'message': query, 'enable_rag': False, 'enable_tools': True})
-            ws.send_json({'type': 'ping', 'timestamp': 1729})
             for _ in range(128):
                 remaining = deadline - time.monotonic()
                 assert remaining > 0, 'WS total receive deadline exceeded'
@@ -116,6 +115,8 @@ def exchange(app, query, *, terminal='complete'):
                     assert message['timestamp'] == 1729
                     break
                 messages.append(message)
+                if message['type'] == terminal:
+                    ws.send_json({'type': 'ping', 'timestamp': 1729})
             else:
                 pytest.fail('WS message limit exceeded before processing barrier')
         stats = client.get('/api/agent/workflows/lab/stats')

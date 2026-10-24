@@ -21,7 +21,7 @@ def test_revision7_checkpoint_and_resume_preserve_original_receipt_and_prompt(se
     exchange = admission.AdmissionExchange()
     waiting = invoke(b, exchange=exchange)
     saved = b.store.get_run('trace-1')['metadata']['decision_continuation']['snapshot']
-    assert saved['decision_protocol_revision'] == 7
+    assert saved['decision_protocol_revision'] == 10
     assert saved['total_model_requests'] == 2 and saved['intent_requests'] == 1
     assert exchange.checkpoint.created_at == 10.0
     assert exchange.checkpoint.remaining_seconds == 300.0

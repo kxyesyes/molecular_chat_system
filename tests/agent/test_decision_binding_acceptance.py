@@ -13,7 +13,7 @@ import pytest
 
 from src.agent.contracts import ToolResult, ObservationStatus, ToolProvenance, WorkflowArtifact
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION, B1_TOOLS
-from src.agent.harness.decision_policy import DecisionBoundaryError
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.agent.tools.property_calculator import PropertyCalculator
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from src.agent.tools.target_database_tool import TargetDatabaseTool
@@ -27,7 +27,7 @@ from test_decision_binding_inputs import attach, admit, selections
 
 
 def api():
-    name = 'src.agent.harness.decision_binding_acceptance'
+    name = 'src.agent.scientific_session.decision_binding_acceptance'
     assert importlib.util.find_spec(name) is not None, 'Task4A acceptance API missing'
     return importlib.import_module(name)
 
@@ -227,7 +227,7 @@ def test_family_disagreement_cited_raw_data_is_partial_never_success(build):
                      status=ObservationStatus.PARTIAL, data=[row])
     case = build('target: PDE5A; SMILES: CCO', tools=[Recorder(raw)])
     result = execute(case, decision('activity_predictor'))
-    from src.agent.harness.decision_policy import family_review_observation
+    from src.agent.scientific_session.decision_policy import family_review_observation
     assert family_review_observation(result) and result.error is None
     report = evaluate(case, required_tools=['activity_predictor'], evidence_ids=[eid(result)])
     assert not report['finish_eligible'] and not report['satisfied']

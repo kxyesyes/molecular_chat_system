@@ -6,7 +6,7 @@ import pytest
 from src.activity import prediction_service
 from src.activity.request_selection import ActivityModelRequest, request_identity
 from src.agent.contracts import AgentContext
-from src.agent.harness.decision_execution import SingleAttemptTool
+from src.agent.scientific_session.decision_execution import SingleAttemptTool
 from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.tooling import build_tool_registry

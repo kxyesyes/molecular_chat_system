@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from scripts.run_agent_acceptance import (
     _test_external_model,
     _test_activity_inference,
-    _run_harness_contract_probe,
+    _run_executor_contract_probe,
     _evaluate_activity_result,
     _evaluate_docking_result,
     _evaluate_generation_result,
@@ -16,7 +16,6 @@ from scripts.run_agent_acceptance import (
     run_replay,
     run_real,
 )
-from src.agent.harness import HarnessRun, LegacyHarness, ShadowComparison
 from src.agent.evaluation import scientific
 from src.agent.evaluation.scientific import (
     check_data_flow_evidence,
@@ -465,80 +464,49 @@ def test_execution_exception_takes_precedence_over_dependent_truth_failures():
     assert error == "execution_exception:KeyError"
 
 
-def test_contract_harness_probe_records_shadow_without_double_execution():
-    class Factory:
-        last_warning = None
+def test_contract_executor_probe_does_not_double_execute():
+    probe = _run_executor_contract_probe()
 
-        def create(self, executor):
-            legacy = LegacyHarness(executor)
-
-            class Backend:
-                def execute(self, **kwargs):
-                    execution = legacy.execute(**kwargs).authoritative
-                    return HarnessRun(
-                        authoritative=execution,
-                        shadow=ShadowComparison(
-                            backend="langgraph",
-                            backend_version="test",
-                            status="matched",
-                            plan_fingerprint="a" * 64,
-                            matched=True,
-                            elapsed_ms=2,
-                        ),
-                    )
-
-            return Backend()
-
-    probe = _run_harness_contract_probe(Factory())
-
-    assert probe["status"] == "matched"
-    assert probe["matched"] is True
-    assert probe["authoritative_tool_calls"] == 1
+    assert probe == {"status": "passed", "tool_attempt_count": 1}
 
 
-def test_contract_canary_probe_keeps_case_count_and_one_tool_call(monkeypatch):
-    monkeypatch.setenv("AGENT_HARNESS_MODE", "langgraph_canary")
-    monkeypatch.setenv("AGENT_LANGGRAPH_CANARY_PERCENT", "100")
-
+def test_contract_executor_probe_keeps_case_count_and_one_tool_call():
     report = run_contract()
 
     assert report["metrics"]["case_count"] == 34
-    assert report["harness_canary"]["authoritative_tool_calls"] == 1
-    assert report["harness_canary"]["tool_attempt_count"] == 1
-    assert report["harness_canary"]["backend"] == "langgraph"
+    assert report["executor_contract"] == {"status": "passed", "tool_attempt_count": 1}
 
 
-def test_failed_canary_probe_fails_contract_release_gate(monkeypatch):
+def test_failed_executor_probe_fails_contract_release_gate(monkeypatch):
     monkeypatch.setattr(
-        "scripts.run_agent_acceptance._run_harness_contract_probe",
+        "scripts.run_agent_acceptance._run_executor_contract_probe",
         lambda: {
             "status": "failed",
-            "error_code": "invalid_harness_execution_metadata",
-            "authoritative_tool_calls": 1,
+            "error_code": "executor_contract_failed",
+            "tool_attempt_count": 1,
         },
     )
 
     report = run_contract()
 
     assert report["status"] == "failed"
-    assert report["harness_shadow"]["status"] == "failed"
+    assert report["executor_contract"]["status"] == "failed"
 
 
-def test_unavailable_requested_canary_fails_contract_release_gate(monkeypatch):
-    monkeypatch.setenv("AGENT_HARNESS_MODE", "langgraph_canary")
+def test_unavailable_executor_probe_fails_contract_release_gate(monkeypatch):
     monkeypatch.setattr(
-        "scripts.run_agent_acceptance._run_harness_contract_probe",
+        "scripts.run_agent_acceptance._run_executor_contract_probe",
         lambda: {
             "status": "unavailable",
-            "error_code": "langgraph_optional_dependency_unavailable",
-            "authoritative_tool_calls": 1,
+            "error_code": "executor_unavailable",
+            "tool_attempt_count": 0,
         },
     )
 
     report = run_contract()
 
     assert report["status"] == "failed"
-    assert report["harness_shadow"]["status"] == "unavailable"
+    assert report["executor_contract"]["status"] == "unavailable"
 
 
 def test_external_model_probe_allows_reasoning_model_output_budget(monkeypatch):

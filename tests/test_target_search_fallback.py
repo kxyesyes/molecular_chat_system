@@ -2712,8 +2712,16 @@ def test_cleanup_target_cache_cli_deletes_at_most_requested_limit(
     assert str(project_root) not in json.dumps(output)
 
 
+@pytest.fixture
+def public_structure_dns(monkeypatch):
+    # These download tests replace HTTP with synthetic bytes. Freeze DNS too,
+    # while still exercising the real public-address and rebinding validators.
+    monkeypatch.setattr('src.target_search.downloader.socket.getaddrinfo',
+                        lambda *a, **k: [(2, 1, 6, '', ('1.1.1.1', 443))])
+
+
 def test_successful_structure_download_registers_managed_coordinate_for_90_days(
-    project_root, clock, monkeypatch
+    project_root, clock, monkeypatch, public_structure_dns
 ):
     from src.target_search.cache import TargetCacheRepository
     from src.target_search.database import get_cache_dir
@@ -2761,7 +2769,7 @@ def test_successful_structure_download_registers_managed_coordinate_for_90_days(
 
 
 def test_failed_structure_download_does_not_register_coordinate(
-    project_root, clock, monkeypatch
+    project_root, clock, monkeypatch, public_structure_dns
 ):
     from src.target_search.cache import TargetCacheRepository
     from src.target_search.downloader import StructureDownloadError, StructureDownloader
@@ -2796,7 +2804,7 @@ def test_failed_structure_download_does_not_register_coordinate(
 
 
 def test_compressed_structure_download_is_registered_and_remains_readable(
-    project_root, clock, monkeypatch
+    project_root, clock, monkeypatch, public_structure_dns
 ):
     from src.target_search.cache import TargetCacheRepository
     from src.target_search.downloader import StructureDownloader

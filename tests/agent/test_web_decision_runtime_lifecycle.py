@@ -1,4 +1,8 @@
-"""Normal application lifetime tests with in-memory HTTP protocol barriers."""
+"""Normal application lifetime tests with in-memory HTTP protocol barriers.
+
+Initial phases reached through a real Pi cold start allow 15 seconds. The
+post-entry cancellation, resource-drain and delivery deadlines remain separate.
+"""
 import asyncio
 import json
 import inspect
@@ -206,13 +210,13 @@ def test_permanent_failed_join_retains_route_owner_in_isolated_child(tmp_path, r
     env = {key: os.environ[key] for key in ('SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'COMSPEC')
            if key in os.environ}
     env.update(PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8',
-        PYTHONPATH=os.pathsep.join((str(repo), str(repo / 'tests/agent'))), AGENT_HARNESS_MODE='legacy',
+        PYTHONPATH=os.pathsep.join((str(repo), str(repo / 'tests/agent'))),
         MOLECULAR_CHAT_CONFIG=str(root / 'missing.yaml'), MEDCHAT_ENV_FILE=str(root / 'not-loaded.env'),
         MEDCHAT_USER_CONFIG_DIR=str(root / 'user-config'), MEDCHAT_LLM_LOCK_DIR=str(root / 'locks'),
         MEDCHAT_AGENT_SESSION_DB=str(root / 'sessions.sqlite'), AGENT_STATE_DB=str(root / 'agent.sqlite'),
         MEDCHAT_TASK_DB_PATH=str(root / 'tasks.sqlite'), TARGET_DB_PATH=str(root / 'targets.sqlite'),
         TARGET_CACHE_DIR=str(root / 'target-cache'), MEDCHAT_FRAGMENT_DB_PATH=str(root),
-        MEDCHAT_TASK_BACKEND='local', MEDCHAT_TEMPORAL_CANARY_PERCENT='0', AGENT_LANGGRAPH_CANARY_PERCENT='0',
+        MEDCHAT_TASK_BACKEND='local', MEDCHAT_TEMPORAL_CANARY_PERCENT='0',
         MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE='0', MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE='0',
         MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK='0', RUN_REAL_TARGET_SEARCH='0')
     fixtures = root / 'data/agent_evals'
@@ -420,7 +424,7 @@ def test_history_commits_only_after_successful_complete_send(actual_app, monkeyp
                 monkeypatch.setattr(WebSocket, 'send_text', send)
                 try:
                     await socket.send({'message': 'Explain logP'})
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), 15)
                     sender, = b.app.decision_runtime.sockets
                     assert sender.memory == []
                     tasks = tuple(b.app.decision_runtime.tasks)
@@ -543,7 +547,7 @@ def test_actual_route_two_wait_cycles_resumed_cancel_then_fresh_chat(actual_app)
                                    'message': '计算 logP；SMILES: CCO'})
                 active = await socket.receive()
                 assert active['type'] == 'request_accepted' and active['turn_id'] != accepted['turn_id']
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), 15)
                 await socket.send({'type': 'cancel', 'turn_id': active['turn_id']})
                 assert result_of(await receive_complete(socket))['status'] == 'cancelled'
                 assert exited.is_set() and not b.app.decision_runtime.active_owners
@@ -656,7 +660,7 @@ def test_shutdown_cannot_restore_socket_waiting_or_history(actual_app, monkeypat
                 try:
                     if during_complete:
                         await socket.send({'message': '计算 logP'})
-                        await asyncio.wait_for(entered.wait(), 3)
+                        await asyncio.wait_for(entered.wait(), 15)
                     else:
                         assert result_of(await socket.turn({'message': '计算 logP'}))['status'] == 'waiting_for_input'
                         assert sender.waiting is not None
@@ -876,7 +880,7 @@ def test_history_excludes_nonchat_and_uncompleted_turns(actual_app, outcome):
                     if outcome == 'cancelled':
                         await socket.send({'message': query})
                         accepted = await socket.receive()
-                        await asyncio.wait_for(entered.wait(), 3)
+                        await asyncio.wait_for(entered.wait(), 15)
                         await socket.send({'type': 'cancel', 'turn_id': accepted['turn_id']})
                         frames = await receive_complete(socket)
                     else:
@@ -1054,7 +1058,12 @@ def test_actual_route_transport_failure_drains_provider(actual_app, monkeypatch,
         async with actual_app(mode='decision_a2', respond=respond) as b:
             send_text = WebSocket.send_text
             async def block_send(self, text):
-                if json.loads(text)['type'] == 'agent_event':
+                frame = json.loads(text)
+                # task_started precedes the Pi child startup. Target the model
+                # transaction's planning event so this still tests draining an
+                # entered provider, not cancellation before it can start.
+                if (frame['type'] == 'agent_event'
+                        and frame['event']['event'] == 'planning_started'):
                     send_entered.set()
                     try:
                         await asyncio.Event().wait()
@@ -1070,7 +1079,7 @@ def test_actual_route_transport_failure_drains_provider(actual_app, monkeypatch,
             try:
                 await socket.ready()
                 await socket.send({'message': '你好'})
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), 15)
                 turn, = b.app.decision_runtime.active_owners
                 if failure == 'receiver-failure':
                     await socket.incoming.put({'type': 'websocket.receive'})
@@ -1111,7 +1120,7 @@ def test_stale_cancel_concurrent_chat_and_finish_latch_on_actual_route(actual_ap
                 try:
                     await socket.send({'message': '你好'})
                     accepted = await socket.receive()
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), 15)
                     turn, = b.app.decision_runtime.active_owners
                     await socket.send({'type': 'cancel', 'turn_id': 'foreign-turn'})
                     await socket.send({'message': 'Explain logP'})
@@ -1283,8 +1292,8 @@ def test_actual_route_nested_timeout_retains_physical_workers(
         if not adapter_first:
             # Real loop, with only its existing run deadline shortened. No run,
             # Session, admission, result or executor future is substituted.
-            monkeypatch.setattr(decision_runtime, 'ModelDecisionLoop',
-                                partial(decision_runtime.ModelDecisionLoop, timeout_seconds=2))
+            monkeypatch.setattr(decision_runtime, 'PiAgentRuntime',
+                                partial(decision_runtime.PiAgentRuntime, timeout_seconds=2))
         async def respond(payload):
             return tool().model_dump()
         async with actual_app(mode='decision_a2', respond=respond) as b:
@@ -1579,7 +1588,7 @@ def test_cancel_blocked_provider_then_next_turn_on_same_socket(actual_app):
                 await socket.send({'type': 'chat', 'message': '你好'})
                 accepted = await socket.receive()
                 assert accepted['type'] == 'request_accepted'
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), 15)
                 await socket.send({'type': 'ping', 'timestamp': 0})
                 for _ in range(15):
                     frame = await socket.receive()
@@ -1688,7 +1697,7 @@ def test_ws_switch_waits_for_captured_model_and_uses_new_epoch_next_turn(actual_
                 async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                     await socket.ready()
                     await socket.send({'message': '你好'})
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), 15)
                     switch = asyncio.create_task(b.app._replace_llm_config(dict(b.app.active_llm_config)))
                     try:
                         scheduled = asyncio.Event()
@@ -1761,7 +1770,7 @@ def test_pending_writer_blocks_second_socket_without_nested_reader_deadlock(actu
                     await first.ready()
                     await second.ready()
                     await first.send({'message': '你好'})
-                    await asyncio.wait_for(entered.wait(), 3)
+                    await asyncio.wait_for(entered.wait(), 15)
                     switch = None
                     try:
                         async with gate.request():
@@ -1825,7 +1834,7 @@ def test_shutdown_with_active_and_idle_socket_stops_admission_before_close(actua
                 await active.ready()
                 await idle.ready()
                 await active.send({'message': '你好'})
-                await asyncio.wait_for(entered.wait(), 3)
+                await asyncio.wait_for(entered.wait(), 15)
                 turn, = b.app.decision_runtime.active_owners
                 shutdown = asyncio.create_task(b.app.shutdown())
                 try:

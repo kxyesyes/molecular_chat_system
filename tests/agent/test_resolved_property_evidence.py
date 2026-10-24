@@ -1,14 +1,11 @@
 """Real local RDKit + synthetic confirmed sources; no model/scientific API."""
-import asyncio
 from copy import deepcopy
 
 import pytest
 
-from src.agent.harness.factory import HarnessFactory
-from src.agent.supervisor import SupervisorAgent
-from src.web.chat_handler import ChatHandler
-from tests.agent.test_browser_s02_context import NoScienceModel, RecordingProperties
-from tests.agent.test_scientific_reference_execution import Socket, confirmed
+from tests.agent.test_browser_s02_context import RecordingProperties
+from tests.agent.test_scientific_reference_execution import confirmed
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 from tests.agent.test_scientific_reference_web import seed, service, pointer
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 
@@ -27,18 +24,14 @@ def offline(monkeypatch):
 
 def handler(store, references, properties=None):
     properties = properties or RecordingProperties()
-    agent = SupervisorAgent(tools={properties.name: properties}, state_store=store,
-                            harness_factory=HarnessFactory(mode="legacy"))
-    return ChatHandler(NoScienceModel(), None, agent, {}, scientific_references=references), properties
+    chat = make_web_handler({properties.name: properties}, store)
+    chat.scientific_references = references
+    return chat, properties
 
 
 def turn(chat, query, history, *, reference=None, selection=None, owner="owner"):
-    socket = Socket()
-    asyncio.run(chat._process_message(socket, query, False, True,
-        conversation_history=history, session_id=owner, reference=reference, selection=selection))
-    frames = [frame for frame in socket.messages if frame.get("type") == "complete"]
-    assert frames, socket.messages
-    return frames[-1]
+    complete, _ = run_web_turn(chat, query, history, owner, reference=reference, selection=selection)
+    return complete
 
 
 @pytest.mark.parametrize("query,selection,smiles", [
