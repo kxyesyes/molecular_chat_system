@@ -14,6 +14,15 @@ from test_decision_loop import setup_loop, tool, clarify, finish, finish_last, S
 
 
 @pytest.mark.parametrize('profile', [None, B1_PROFILE_REVISION, WEB_PROFILE])
+def test_scientific_failure_guidance_does_not_consume_ordinary_chat_budget(profile):
+    text = decision_system_message('chat', set(), [], {}, binding_profile=profile)['content']
+    assert 'Let authorized tools validate supplied molecular input' not in text
+    assert 'If required input is missing, choose clarify' not in text
+    assert 'Use scientific finish with observed evidence IDs for scientific requests; ' in text
+    assert 'Use chat finish only for chat requests. Request kind: chat.' in text
+
+
+@pytest.mark.parametrize('profile', [None, B1_PROFILE_REVISION, WEB_PROFILE])
 def test_initial_prompt_explains_failure_and_evidence_before_schema_repair(profile):
     text = decision_system_message('scientific', {'property_calculator'}, [], {},
                                    binding_profile=profile)['content']
