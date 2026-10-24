@@ -16,7 +16,11 @@ missing-evidence clarification rule already present in schema correction.
 Update only the initial decision instructions: when inputs are invalid or usable
 evidence is absent, ask for clarification rather than claiming completion.
 Scientific finish requires nonempty, unique IDs from actual usable observations;
-chat finish remains exclusive to chat requests. Do not invent evidence or turn
+chat finish remains exclusive to chat requests. Preserve the existing narrowly
+authorized family-disagreement review-only completion (not scientific success).
+Missing input may be clarified immediately; supplied SMILES must be checked by
+the authorized molecular tool, not rejected by the model's own assessment.
+Do not invent evidence or turn
 failed tool observations into successful science. Preserve authorized execution
 of molecular tools and the existing valid-result completion path.
 
