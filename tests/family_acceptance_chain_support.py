@@ -137,6 +137,9 @@ class ForbiddenLegacy:
 @contextmanager
 def decision_session(work_dir, *, target, query, decisions=None, timeout=120):
     """Spy delegates unchanged to the actual tool; SQLite owns per-call connections."""
+    # Pi needs Node before the later DOM stage; execution failures stay distinct.
+    if shutil.which("node") is None:
+        raise ChainFailure("dependency_unavailable")
     from src.agent.contracts import AgentContext
     from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore

@@ -1,5 +1,14 @@
 # Latest handoff
 
+## PR #215 首轮 CI 修复（2026-10-23）
+
+- 在原 Pi 分支上修复，基线 `8141b755`；维护者明确要求更新同一 draft PR，暂不合并，真实模型未验证项继续保留。
+- 首轮 CI 为 8 项成功、Agent 与 root-activity 失败、汇总失败。Agent 在 1200 秒截止前推进到 24%，已有 6 项浏览器旧成功终态断言失败；root-activity 为 1958 passed / 1 failed / 6 skipped，缺少 Node 被误报为 chain_mismatch。
+- 浏览器严格终态改为实际 Web completed，保留 partial、科学数值、证据/会话隔离及工具调用断言，补入既有清理夹具。原失败先复现，质量/证据/S02/隔离联合 120 passed。
+- 经维护者批准增加五个有界 Agent 分片，不增加单片时限、不改变生产运行时。工作流契约 49 passed / 2 Windows 平台跳过；实际收集 17754 个 Agent node ID，九分片无重叠无遗漏，收集器原 180/60 秒限制保留。
+- 活性验收在 Pi 入口检查 Node，保留“存在但启动失败”的独立失败分类与原环境/Torch/缓存恢复断言。聚焦 2 failed / 1 passed → 3 passed；完整验收链与 Pi bridge 联合 127 passed。两组独立 SPEC → QUALITY 均 PASS；compileall / diff 检查通过，无生产源码修改。
+- 精确修复、复审与后续 CI 见[验收记录](../superpowers/validation/2026-10-23-pi-harness-replacement.md#pr-215-ci-follow-up--baseline-8141b755)及 [PR #215](https://github.com/kxyesyes/molecular_chat_system/pull/215)。此处本地通过不替代新 head 的完整 CI；云端 DNS 拒绝、本地决策协议未通过及健康检查 21/24 仍是发布门禁。
+
 ## 官方 Pi 替换自研通用 Harness（2026-10-23）
 
 - 最新 Web 业务/反向排序回归 **158 passed**；实际挂载入口、浏览器实验、引用重试、续接权限与旧路径退役回归 **66 passed**。修复了证据比较误入排序、反向回执输入、ADMET endpoint-only 展示及 allocation-busy 后旧排序指针残留；保留原业务安全断言。

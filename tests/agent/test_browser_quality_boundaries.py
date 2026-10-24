@@ -12,6 +12,7 @@ from src.agent.planning.request_parsing import (
 )
 from src.agent.routing.hybrid import HybridSkillRouter
 from src.web.property_comparison import descriptor_answer
+from tests.agent.pi_web_support import cleanup_web_handlers
 from tests.agent.test_browser_evidence_followup import handler_for, prediction, turn
 from tests.agent.test_browser_s02_context import ASPIRIN, CAFFEINE, FOLLOWUP, make_handler
 
@@ -58,7 +59,8 @@ def test_only_multimetric_comparison_keeps_native_activity_report(tmp_path, cons
     handler, activity, admet = handler_for(tmp_path, rows)
     complete, frames = turn(handler, MULTIMETRIC, [])
     answer = complete["content"]
-    assert complete["status"] == ("succeeded" if consistent else "partial")
+    # Web completion uses AgentOutcome, not the tool observation status.
+    assert complete["status"] == ("completed" if consistent else "partial")
     assert "多指标比较与活性证据排序" in answer
     assert "缺少当前聊天上一轮" not in answer
     assert "pIC50" in answer and "降序" in answer and "原始" in answer
@@ -98,7 +100,7 @@ def test_unfulfilled_s02_comparison_is_partial_and_keeps_current_properties(tmp_
     # explicit comparison can reuse caffeine without recomputing it.
     next_complete, _ = turn(handler,
         "现在用乙醇 CCO，只比较它和刚才咖啡因的分子量与 logP", history, "test-chat")
-    assert next_complete["status"] == "succeeded"
+    assert next_complete["status"] == "completed"
     assert "194.19" in next_complete["content"] and "46.07" in next_complete["content"]
     assert len(properties.calls) == calls_before + 2 and not admet.calls
 
@@ -109,6 +111,6 @@ def test_successful_s02_comparison_keeps_existing_string_helper_contract(tmp_pat
     turn(handler, f"计算阿司匹林 {ASPIRIN} 的分子性质", history, "test-chat")
     previous = deepcopy(history)
     complete, _ = turn(handler, FOLLOWUP, history, "test-chat")
-    assert complete["status"] == "succeeded"
+    assert complete["status"] == "completed"
     assert descriptor_answer(FOLLOWUP, history[-1]["property_evidence"], previous, "test-chat") == complete["content"]
     assert "180.16" in complete["content"] and "194.19" in complete["content"]

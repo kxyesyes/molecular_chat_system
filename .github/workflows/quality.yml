@@ -27,7 +27,32 @@ jobs:
         include:
           - name: agent
             pytest_target: "tests/agent --ignore=tests/agent/test_ordinary_web_lifecycle.py --ignore=tests/agent/test_ordinary_web_runtime.py --ignore=tests/agent/test_web_decision_runtime_lifecycle.py"
+            pytest_exclude: "tests/agent/test_*docking*.py tests/agent/test_browser_*.py tests/agent/test_chat_*.py tests/agent/test_decision_*.py tests/agent/test_decision_binding*.py tests/agent/test_pi_*.py tests/agent/test_web_*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 1200
+          - name: agent-browser-chat
+            pytest_target: "tests/agent/test_browser_*.py tests/agent/test_chat_*.py"
             pytest_exclude: "tests/agent/test_*docking*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 1200
+          - name: agent-decision-bindings
+            pytest_target: "tests/agent/test_decision_binding*.py"
+            pytest_exclude: "tests/agent/test_*docking*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 1200
+          - name: agent-decision
+            pytest_target: "tests/agent/test_decision_*.py"
+            pytest_exclude: "tests/agent/test_*docking*.py tests/agent/test_decision_binding*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 1200
+          - name: agent-pi
+            pytest_target: "tests/agent/test_pi_*.py"
+            pytest_exclude: "tests/agent/test_*docking*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 1200
+          - name: agent-web
+            pytest_target: "tests/agent/test_web_*.py"
+            pytest_exclude: "tests/agent/test_*docking*.py tests/agent/test_ordinary_web_lifecycle.py tests/agent/test_ordinary_web_runtime.py tests/agent/test_web_decision_runtime_lifecycle.py"
             pytest_args: "-vv --durations=25"
             command_timeout: 1200
           - name: agent-web-lifecycle
@@ -140,10 +165,15 @@ jobs:
               matrix = {row['name']: row for row in rows}
               if len(rows) != len(matrix):
                   raise ValueError('duplicate matrix row')
+              names = ('agent', 'agent-browser-chat', 'agent-decision-bindings',
+                       'agent-decision', 'agent-pi', 'agent-web', 'agent-web-lifecycle',
+                       'agent-docking', 'agent-docking-publication')
+              if {name for name in matrix if name == 'agent' or name.startswith('agent-')} != set(names):
+                  raise ValueError('unexpected Agent partition set')
               selections = [('tests/agent', matrix['agent']['pytest_args'], '')]
               selections += [(matrix[name]['pytest_target'], matrix[name]['pytest_args'],
                               matrix[name].get('pytest_exclude', ''))
-                             for name in ('agent', 'agent-web-lifecycle', 'agent-docking', 'agent-docking-publication')]
+                             for name in names]
               def matched_files(pattern):
                   paths = [path for path in sorted(repo.glob(pattern)) if path.is_file()]
                   if not paths or any(not path.resolve().is_relative_to(repo) for path in paths):
@@ -210,14 +240,15 @@ jobs:
                               or len(ids) != len(set(ids))):
                           raise ValueError('invalid collection ids')
                       collected.append(set(ids))
-              original, core, web, docking, publication = collected
+              original = collected[0]
               partitions = collected[1:]
               if (any(left & right for i, left in enumerate(partitions) for right in partitions[i + 1:])
                       or set.union(*partitions) != original):
                   raise ValueError('partition differs from original collection')
               if time.monotonic() > deadline:
                   raise TimeoutError('collection deadline after cleanup')
-              print(f'AGENT_COLLECTION_OK baseline={len(original)} agent={len(core)} web={len(web)} docking={len(docking)} publication={len(publication)}')
+              counts = ' '.join(f'{name}={len(ids)}' for name, ids in zip(names, partitions))
+              print(f'AGENT_COLLECTION_OK baseline={len(original)} {counts}')
           try:
               verify()
           except Exception:
