@@ -1,12 +1,16 @@
 import asyncio
-from pathlib import Path
-from unittest.mock import Mock
+import json
 
 from fastapi.testclient import TestClient
+import httpx
 import pytest
 
+from src.agent.openai_compatible_model import OpenAICompatibleModel
 from src.web.app import MolecularChatApp
 from src.web.user_llm_config import default_user_llm_config, load_user_llm_config, save_user_llm_config, user_llm_config_path
+from tests.agent.test_web_decision_runtime import (
+    ActualSocket, actual_app, chat_decision, cookie_for, protocol_response, result_of,
+)
 
 
 @pytest.fixture
@@ -19,8 +23,16 @@ def factory(monkeypatch, tmp_path):
         def set_llm(self, model):
             self.llm = model
 
-    monkeypatch.setattr(MolecularChatApp, "_create_chat_agent",
-                        lambda self: ConfigurationAgent(self.model))
+    def create_agent(app):
+        from src.agent.tooling import build_tool_registry
+        from src.agent.tools import get_core_tools
+
+        # Pi assembly validates the registry even in configuration-only tests.
+        # Keep the lightweight binding spy, but use real, lazy core tools.
+        app.agent_tool_registry = build_tool_registry(get_core_tools(app.molecular_generator_model))
+        return ConfigurationAgent(app.model)
+
+    monkeypatch.setattr(MolecularChatApp, "_create_chat_agent", create_agent)
     monkeypatch.setenv("AGENT_STATE_DB", str(tmp_path / "agent.sqlite"))
     def build():
         app = MolecularChatApp(str(tmp_path / "missing.yaml"))
@@ -134,18 +146,32 @@ def test_model_constructor_empty_compatible_fields_uses_deepseek(factory):
     assert model.api_key == ""
 
 
-def test_websocket_reports_invalid_user_config_without_starting_chat(factory, monkeypatch):
-    app, client = factory()
-    save_user_llm_config(user_llm_config_path(), default_user_llm_config())
-    user_llm_config_path().write_text("corrupt")
-    async def never(*args):
-        raise AssertionError("chat must not run with stale credentials")
-    app.chat_handler = Mock(handle_websocket=never)
-    client.get("/")
-    with client.websocket_connect("/ws", headers={"host": "localhost", "origin": "http://localhost", "cookie": f"medchat_agent_session={client.cookies.get('medchat_agent_session')}"}) as socket:
-        message = socket.receive_json()
-        assert message["type"] == "error"
-        assert "配置" in message["message"]
+def test_websocket_reports_invalid_user_config_without_starting_chat(actual_app, caplog):
+    async def run():
+        secret = "synthetic-stale-config-secret"
+        save_user_llm_config(user_llm_config_path(), dict(default_user_llm_config(), api_key=secret))
+        async with actual_app() as built:
+            app = built.app
+            old_model, old_generation = app.model, app.model_generation
+            cookie = await cookie_for(app)
+            assert cookie
+            user_llm_config_path().write_text("corrupt-" + secret)
+            async with ActualSocket(app, cookie) as socket:
+                assert (await socket.ready())["normal_chat_mode"] == "pi"
+                frames = await socket.turn({"message": "hello", "enable_tools": False})
+                assert frames[0]["type"] == "request_accepted"
+                result = result_of(frames)
+                assert result["status"] == frames[-1]["status"] == "failed"
+                assert result["metadata"]["stop_reason"] == "decision_request_failed"
+                assert socket.scope["agent_session_id"]
+                assert built.calls == built.admission_calls == []
+                assert app.model is app.chat_handler.model is old_model
+                assert app.model_generation == old_generation
+                assert not app.decision_runtime.active_owners
+                assert app.model_request_gate._readers == 0
+                assert secret not in json.dumps(frames) + caplog.text
+                assert "corrupt-" not in json.dumps(frames) + caplog.text
+    asyncio.run(run())
 
 
 def test_restart_applies_saved_stream_preference(factory):
@@ -155,22 +181,64 @@ def test_restart_applies_saved_stream_preference(factory):
     assert app.chat_handler.config["inference"]["stream"] is False
 
 
-def test_connected_socket_revalidates_config_before_each_message(factory, monkeypatch):
-    app, client = factory()
-    calls = []
-    async def process(socket, *args, **kwargs):
-        calls.append(app.active_llm_config["model_name"])
-        await socket.send_json({"type": "done"})
-    monkeypatch.setattr(app.chat_handler, "_process_message", process)
-    client.get("/")
-    with client.websocket_connect("/ws", headers={"host": "localhost", "origin": "http://localhost", "cookie": f"medchat_agent_session={client.cookies.get('medchat_agent_session')}"}) as socket:
-        assert socket.receive_json()["type"] == "connection_ready"
-        save_user_llm_config(user_llm_config_path(), dict(default_user_llm_config(), model_name="new-model"))
-        socket.send_json({"message": "hello"})
-        assert socket.receive_json()["type"] == "status"
-        assert socket.receive_json()["type"] == "done"
-        assert calls == ["new-model"]
-        user_llm_config_path().write_text("corrupt")
-        socket.send_json({"message": "hello again"})
-        assert socket.receive_json()["type"] == "error"
-        assert len(calls) == 1
+def test_connected_socket_revalidates_config_before_each_message(actual_app, monkeypatch, caplog):
+    async def run():
+        secret = "synthetic-refreshed-config-secret"
+        calls, models = [], []
+
+        async def transport(request):
+            payload = json.loads(request.content)
+            calls.append(payload)
+            assert request.headers["authorization"] == "Bearer " + secret
+            return protocol_response(chat_decision("Refreshed model response"))
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(transport)) as client:
+            async with actual_app() as built:
+                app = built.app
+                old_model, old_generation = app.model, app.model_generation
+                generator = app.molecular_generator_model
+
+                def create(config):
+                    model = OpenAICompatibleModel(config["api_key"], config["model_name"],
+                                                  config["base_url"], client=client)
+                    models.append(model)
+                    return model
+
+                monkeypatch.setattr(app, "_create_model_from_llm_config", create)
+                cookie = await cookie_for(app)
+                assert cookie
+                async with ActualSocket(app, cookie) as socket:
+                    assert (await socket.ready())["normal_chat_mode"] == "pi"
+                    first = await socket.turn({"message": "hello", "enable_tools": False})
+                    assert result_of(first)["status"] == first[-1]["status"] == "completed"
+                    assert len(built.calls) == 1 and built.calls[0]["model"] == old_model.model_name
+                    save_user_llm_config(user_llm_config_path(), dict(default_user_llm_config(),
+                        model_name="new-model", api_key=secret, stream=False))
+                    second = await socket.turn({"message": "你好", "enable_tools": False})
+                    result = result_of(second)
+                    assert result["status"] == second[-1]["status"] == "completed", result["metadata"].get("stop_reason")
+                    assert result["metadata"]["backend"] == "pi"
+                    assert result["final_answer"] == "Refreshed model response"
+                    assert len(calls) == len(models) == 1 and calls[0]["model"] == "new-model"
+                    assert app.model is app.chat_handler.model is app.agent_system.llm is models[0]
+                    assert app.model is not old_model and app.model_generation != old_generation
+                    assert app.active_llm_config["model_name"] == "new-model"
+                    assert app.active_llm_config["api_key"] == secret
+                    assert app.config["inference"]["stream"] is False
+                    assert app.chat_handler.config["inference"]["stream"] is False
+                    assert app.molecular_generator_model is generator
+                    for frames in (first, second):
+                        record = app.agent_state_store.get_run(frames[0]["trace_id"])
+                        assert record["session_id"] == socket.scope["agent_session_id"]
+                    generation = app.model_generation
+                    user_llm_config_path().write_text("corrupt-" + secret)
+                    failed = await socket.turn({"message": "one more", "enable_tools": False})
+                    assert result_of(failed)["status"] == failed[-1]["status"] == "failed"
+                    assert result_of(failed)["metadata"]["stop_reason"] == "decision_request_failed"
+                    assert len(calls) == len(models) == len(built.calls) == 1
+                    assert app.model is models[0] and app.model_generation == generation
+                    assert not app.decision_runtime.active_owners
+                    assert app.model_request_gate._readers == 0
+                    assert secret not in json.dumps([first, second, failed]) + caplog.text
+                    assert "corrupt-" not in json.dumps(failed) + caplog.text
+    asyncio.run(run())

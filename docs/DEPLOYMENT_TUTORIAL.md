@@ -183,6 +183,17 @@ python -c "import fastapi, uvicorn, httpx, yaml, jinja2, websockets; print('pyth
 python -m compileall -q src scripts
 ~~~
 
+### 3.3 安装必需的 Pi 运行时
+
+两套 Python profile 都须按 [Pi 运行手册：安装与启动](PI_RUNTIME.md#安装与启动) 安装符合版本要求的 Node，并确保实际服务账号的 PATH 可找到它。在仓库根目录安装当前发布版本的锁定依赖：
+
+~~~bash
+node --version
+npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
+~~~
+
+首次启动前核对服务环境中的 `MEDCHAT_CHAT_PROFILE`：当前默认 `pi`；旧 `legacy` 必须移除或改为 `pi`。其他受支持配置及失败关闭边界以 Pi 运行手册为准，不通过切换旧 profile 绕过依赖安装。
+
 ## 4. 安装可选的科学工具链
 
 基础聊天页面不一定需要全部工具；需要对应功能时再安装并验证。
@@ -586,7 +597,7 @@ python scripts/health_check.py --env-file /etc/medchat/medchat.env --strict
 
 ### 12.1 更新代码
 
-在维护窗口执行，并保留当前 commit：
+在维护窗口执行，并保留当前 commit。升级到 Pi 发布版本前，先按 [Pi 安装与启动](PI_RUNTIME.md#安装与启动) 准备 Node 和服务账号 PATH，并将服务环境中旧 `MEDCHAT_CHAT_PROFILE=legacy` 移除或改为 `pi`；下列 npm 命令必须使用切换后的发布锁文件：
 
 ~~~bash
 cd /home/user/XIAOKX/molecular_chat_system
@@ -596,6 +607,7 @@ git log -1 --oneline
 git switch --detach <reviewed-commit-sha>
 conda activate medchat
 python -m pip install -r deployment/requirements.txt
+npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
 python -m compileall -q src scripts
 python scripts/health_check.py --env-file /etc/medchat/medchat.env --strict
 sudo systemctl restart medchat
@@ -633,11 +645,16 @@ sudo systemctl reload nginx
 
 ### 12.3 回滚
 
-回滚应切回已验证的代码 commit，再重启服务：
+回滚以完整发布版本为单位，不能只切代码或 profile。先切回已验证的目标 commit：
 
 ~~~bash
 cd /home/user/XIAOKX/molecular_chat_system
 git switch --detach <previous-reviewed-commit-sha>
+~~~
+
+重启前，按目标版本文档重新安装匹配的 Python 依赖，并核对服务环境中的聊天 profile。若目标为 Pi 发布版本，必须按 [Pi 的 Checkpoint 与回滚约束](PI_RUNTIME.md#checkpoint-与回滚) 恢复匹配的 Node、npm manifest/锁文件，在仓库根目录执行 `npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund`；当前 Pi 默认 `pi`，不接受 `legacy`。若目标为 Pi 迁移前版本，则按该版本的依赖和 profile 要求操作，不混用新旧运行时。完成目标版本健康检查后再重启：
+
+~~~bash
 sudo systemctl restart medchat
 curl -fsS https://<domain>/health
 ~~~

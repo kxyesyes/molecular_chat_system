@@ -383,7 +383,7 @@ def test_factory_rejects_self_alias():
 
 def test_decision_catalog_preserves_unprobed_state():
     from src.agent.contracts import AgentContext
-    from src.agent.harness.decision_policy import authorized_catalog, decision_system_message
+    from src.agent.scientific_session.decision_policy import authorized_catalog, decision_system_message
     from src.agent.tools.activity_predictor_tool import ActivityPredictorTool
     registry = build_tool_registry([ActivityPredictorTool()])
     catalog, _ = authorized_catalog(registry, AgentContext(query="CCO", trace_id="health"),

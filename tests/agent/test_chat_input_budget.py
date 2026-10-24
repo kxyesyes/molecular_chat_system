@@ -5,6 +5,7 @@ import pytest
 
 from src.web.chat_handler import ChatHandler
 from tests.test_rag_index_manifest import retrieval_service
+from tests.agent.test_web_decision_runtime import actual_app, ActualSocket, cookie_for, chat_decision
 
 
 class Socket:
@@ -27,7 +28,9 @@ class Model:
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("source", ["history", "rag", "tools", "none"])
-def test_actual_model_input_keeps_complete_question_and_constraints(stream, source):
+def test_retained_prompt_formatter_keeps_complete_question_and_constraints(stream, source):
+    # Retained formatting API only. Actual Pi HTTP bounds are exercised in
+    # test_pi_web_input_budget; the retired prose-summary pipeline is not run.
     model, socket = Model(), Socket()
     question = "请检索知识库并解释研究方法。" + "完整中文问题" * 180 + "禁止编造结合能；最后约束必须保留。"
     history = [{"user": "旧问题" * 9000, "assistant": '{"SMILES":"' + "C" * 10000 + '"}'}]
@@ -49,15 +52,21 @@ def test_actual_model_input_keeps_complete_question_and_constraints(stream, sour
     handler = ChatHandler(model, Rag(), Agent() if source == "tools" else None,
         {"inference": {"stream": stream, "input_max_chars": 7000},
          "agent": {"summarize_workflow_results": True}})
-    asyncio.run(handler._process_message(socket, question, source == "rag", source == "tools",
-        conversation_history=history if source == "history" else []))
-    assert len(model.prompts) == 1
-    prompt = model.prompts[0]
+    records = asyncio.run(Rag().search_similar_molecules(question)) if source == 'rag' else []
+    rag_context = handler._format_rag_context(records) if records else ''
+    if source == 'tools':
+        result = Agent().execute()
+        prompt = handler._build_prompt_with_agent(question, result['final_answer'], rag_context, records,
+                                                  agent_result=result)
+    else:
+        prompt = handler._build_prompt(question, rag_context, records,
+                                       conversation_history=history if source == 'history' else [])
+    assert not model.prompts
     assert question in prompt
     assert len(prompt) <= 7000
     assert "不得编造" in prompt
     if source == "rag":
-        assert any(item["type"] == "rag_info" for item in socket.messages)
+        assert handler._rag_info_payload(records, 'fixture records')['type'] == 'rag_info'
     if source == "tools":
         assert '"status":"completed"' in prompt
         assert '"partial":false' in prompt
@@ -67,16 +76,19 @@ def test_actual_model_input_keeps_complete_question_and_constraints(stream, sour
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_oversized_input_rejected_before_agent_or_model(stream):
-    model, socket = Model(), Socket()
-    class Agent:
-        def should_use_tools(self, *args):
-            pytest.fail("oversized input must not trigger routing")
-    handler = ChatHandler(model, None, Agent(), {"inference": {"stream": stream, "input_max_chars": 6000}})
-    asyncio.run(handler._process_message(socket, "请解释" + "中文" * 6000, True, True))
-    assert not model.prompts
-    assert socket.messages[-1]["type"] == "complete"
-    assert socket.messages[-1]["error"]["code"] == "input_budget_exceeded"
+def test_oversized_input_rejected_before_agent_or_model(actual_app, stream):
+    async def run():
+        async with actual_app(ordinary_policy=None) as bundle:
+            bundle.app.chat_handler.config = {'inference': {'stream':stream, 'external_input_max_chars':6000}}
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message':'请解释' + '中文' * 1800,
+                                            'enable_rag':True, 'enable_tools':True})
+                assert not bundle.calls
+                assert frames[-1]['type'] == 'complete'
+                assert frames[-1]['error']['details']['reason'] == 'input_budget_exceeded'
+                assert bundle.app.agent_state_store.get_tool_executions(frames[-1]['trace_id']) == []
+    asyncio.run(run())
 
 
 def test_rag_context_is_bounded_before_prompt_assembly():
@@ -123,17 +135,22 @@ def test_provider_specific_budget_and_atomic_history(external):
 
 
 @pytest.mark.parametrize("value", [-1, True, "7000", None])
-def test_invalid_budget_rejected_without_model(value):
-    model, socket = Model(), Socket()
-    handler = ChatHandler(model, None, None, {"inference": {"input_max_chars": value}})
-    asyncio.run(handler._process_message(socket, "你好", False, False))
-    assert not model.prompts
-    assert socket.messages[-1]["error"]["code"] == "input_budget_exceeded"
+@pytest.mark.parametrize('field', ['external_input_max_chars', 'history_input_max_chars'])
+def test_invalid_budget_rejected_without_model(actual_app, value, field):
+    async def run():
+        async with actual_app(ordinary_policy=None) as bundle:
+            bundle.app.chat_handler.config = {'inference': {field:value}}
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message':'你好', 'enable_rag':False, 'enable_tools':False})
+                assert not bundle.calls
+                assert frames[-1]['error']['details']['reason'] == 'input_budget_exceeded'
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("status", ["partial", "completed"])
-def test_workflow_sources_survive_partial_bypass_or_completed_interpretation(stream, status):
+def test_retained_formatters_preserve_workflow_sources_and_partial_diagnostics(stream, status):
     partial = status == "partial"
     warning = "activity model unavailable" if partial else "property-only scope"
     evidence = {"status": status, "source": "RDKit:1", "molecular_weight": 46.07}
@@ -154,7 +171,17 @@ def test_workflow_sources_survive_partial_bypass_or_completed_interpretation(str
     handler = ChatHandler(model, None, Agent(), {
         "inference": {"stream": stream}, "agent": {"summarize_workflow_results": True}})
     question = "解释此分析 SMILES: " + "C" * 150 + "，保留所有失败信息。"
-    asyncio.run(handler._process_message(socket, question, False, True))
+    from src.agent.contracts import AgentResult, RunOutcome
+    from src.web.decision_chat import _result_frame
+    # Synthetic result is only a serializer fixture, never scientific success
+    # injected into Pi. Real computed partial input is tested separately.
+    result = AgentResult('formatter-fixture', not partial, body, final_answer=body,
+        partial=partial,
+        outcome=RunOutcome.PARTIAL if partial else RunOutcome.COMPLETED,
+        warnings=[warning], metadata={'binding_profile':'medchat-web-v1'})
+    socket.messages = [json.loads(frame) for frame in _result_frame(handler, result, False)]
+    assert not model.prompts
+    assert result.warnings == [warning]
     if partial:
         assert not model.prompts
         completed = [item for item in socket.messages if item["type"] == "complete"]
@@ -165,17 +192,16 @@ def test_workflow_sources_survive_partial_bypass_or_completed_interpretation(str
         assert body in completed[0]["content"]
         assert "RDKit:1" in completed[0]["content"]
         assert "model unavailable" in completed[0]["content"]
-        assert handler.conversation_history[-1]["assistant"] == completed[0]["content"]
+        assert handler.conversation_history == []  # Projection never mutates memory.
     else:
-        assert len(model.prompts) == 1
-        assert question in model.prompts[0]
-        assert len(model.prompts[0]) <= handler._input_limit()
-        assert "RDKit:1" in model.prompts[0]
-        assert "synthetic-property-fixture" in model.prompts[0]
-        assert warning in model.prompts[0]
-        assert '"status":"completed"' in model.prompts[0]
-        assert '"partial":false' in model.prompts[0]
-        assert "系统已使用专业工具完成分析" not in model.prompts[0]
+        prompt = handler._build_prompt_with_agent(question, body, '', [], agent_result=Agent().execute())
+        assert question in prompt
+        assert len(prompt) <= handler._input_limit()
+        assert "RDKit:1" in prompt and "synthetic-property-fixture" in prompt
+        assert warning in prompt
+        assert '"status":"completed"' in prompt and '"partial":false' in prompt
+        assert "系统已使用专业工具完成分析" not in prompt
+        assert socket.messages[-1]['status'] == 'completed' and body in socket.messages[-1]['content']
 
 
 def test_nested_rag_evidence_remains_atomic_and_bounded():
@@ -240,23 +266,38 @@ def test_required_metadata_too_large_skips_interpretation(stream, status):
     model, socket = Model(), Socket()
     handler = ChatHandler(model, None, Agent(), {
         "inference": {"stream": stream}, "agent": {"summarize_workflow_results": True}})
-    asyncio.run(handler._process_message(socket, "解释结果", False, True))
+    from src.web.prompt_budget import InputBudgetExceeded
+    from src.agent.contracts import AgentResult, RunOutcome
+    from src.web.decision_chat import _result_frame
+    with pytest.raises(InputBudgetExceeded):
+        handler._build_prompt_with_agent('解释结果', body, '', [], agent_result=Agent().execute())
+    # No unbounded model summary: the actual serializer preserves the original
+    # fixture result and bounds only its public warning projection.
+    result = AgentResult('oversize-display-fixture', not partial, body, final_answer=body,
+        partial=partial,
+        outcome=RunOutcome.PARTIAL if partial else RunOutcome.COMPLETED,
+        warnings=[warning * 5000], metadata={'binding_profile':'medchat-web-v1'})
+    socket.messages = [json.loads(frame) for frame in _result_frame(handler, result, False)]
+    assert result.warnings == [warning * 5000]
     assert not model.prompts
     completed = [item for item in socket.messages if item["type"] == "complete"]
     assert len(completed) == 1
     assert body in completed[0]["content"]
-    assert handler.conversation_history[-1]["assistant"] == completed[0]["content"]
+    assert handler.conversation_history == []
+    assert not any(frame['type'] in {'stream', 'message'} for frame in socket.messages)
+    assert socket.messages[0]['display_redacted_or_truncated'] is True
     if partial:
         assert completed[0]["status"] == "partial"
         assert completed[0]["partial"] is True
         assert completed[0]["error"] is None
         assert "活性模型不可用" in completed[0]["content"]
-        assert "摘要已截断" in completed[0]["content"]
+        assert '摘要已截断' in completed[0]['content']
         assert len(completed[0]["warnings"]) <= 20
         assert all(len(item) <= 256 for item in completed[0]["warnings"])
     else:
-        assert completed[0]["error"]["code"] == "interpretation_budget_exceeded"
-        assert "未进行模型总结" in completed[0]["content"]
+        assert completed[0]['status'] == 'completed'
+        assert len(socket.messages[0]['warnings']) <= 20
+        assert all(len(item) <= 256 for item in socket.messages[0]['warnings'])
 
 
 def test_empty_rag_records_cannot_exceed_budget():
@@ -274,20 +315,27 @@ def test_exact_question_boundary_and_one_character_over():
 
 
 @pytest.mark.parametrize("external", [False, True])
-def test_actual_model_boundary_uses_provider_budget(external):
-    model, socket = Model(), Socket()
-    if external:
-        model.provider_name = "openai_compatible"
-    handler = ChatHandler(model, None, None, {"inference": {
-        "stream": False, "input_max_chars": 6000, "external_input_max_chars": 16000}})
-    question = "请解释" + "研究方法" * 1800
-    asyncio.run(handler._process_message(socket, question, False, False))
-    if external:
-        assert question in model.prompts[0]
-        assert len(model.prompts[0]) <= 16000
-    else:
-        assert not model.prompts
-        assert socket.messages[-1]["error"]["code"] == "input_budget_exceeded"
+def test_actual_model_boundary_uses_provider_budget(actual_app, external):
+    async def run():
+        async with actual_app(ordinary_policy=None) as bundle:
+            # Exercise the existing provider classification without pretending
+            # this offline HTTP adapter is live Ollama acceptance.
+            bundle.model.provider_name = 'openai_compatible' if external else None
+            bundle.app.chat_handler.config = {'inference': {
+                'input_max_chars':6000, 'external_input_max_chars':16000}}
+            question = '你好，请解释' + '研究方法' * 1125
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message':question, 'enable_rag':False, 'enable_tools':False})
+                if external:
+                    payload, = bundle.calls
+                    assert payload['messages'][-1] == {'role':'user', 'content':question}
+                    assert sum(len(m.get('content') or '') for m in payload['messages']) <= 16000
+                    assert frames[-1]['status'] == 'completed'
+                else:
+                    assert not bundle.calls
+                    assert frames[-1]['error']['details']['reason'] == 'input_budget_exceeded'
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("field", ["tool_result_sequence", "tool_results_by_step"])
@@ -342,7 +390,7 @@ def test_budgeted_rag_preflights_records_before_shared_formatter(monkeypatch):
 @pytest.mark.parametrize("entry", ["legacy", "rag_search", "rag_database_search"])
 @pytest.mark.parametrize("rag_cap", [0, 1000])
 def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
-    retrieval_service, monkeypatch, entry, rag_cap,
+    actual_app, retrieval_service, monkeypatch, entry, rag_cap,
 ):
     import httpx
     from src.agent.tools.rag_search_tool import RAGSearchTool
@@ -380,31 +428,49 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
     tool = RAGSearchTool(rag)
     observations = []
 
-    class Agent:
-        def should_use_tools(self, message):
-            return True
-
-        def execute(self, message, **kwargs):
-            result = tool.execute(message, k=1)
-            observations.append(result)
-            return {"success": result["success"], "final_answer": result["summary"],
-                    "tools_used": [entry], "tool_results": {entry: result},
-                    "workflow_plan": {"name": "rag_search"}}
-
-    model, socket = Model(), Socket()
-    handler = ChatHandler(model, rag, None if entry == "legacy" else Agent(), {
-        "inference": {"stream": False, "rag_input_max_chars": rag_cap},
-        "agent": {"summarize_workflow_results": True},
-    })
-    asyncio.run(handler._process_message(
-        socket, "检索知识库中类似分子", True, entry != "legacy", rag_count=1,
-    ))
-    assert calls == (["async"] if entry == "legacy" else [])
+    execute = tool.execute
+    def observed(*args, **kwargs):
+        result = execute(*args, **kwargs)
+        observations.append(result)
+        return result
+    monkeypatch.setattr(tool, 'execute', observed)
+    query = '检索数据库中类似分子' if entry == 'rag_database_search' else '检索知识库中类似分子'
+    from src.agent.tooling.factory import build_tool_registry
+    from tests.agent.test_pi_web_input_budget import compiled_decision
+    from tests.agent.test_web_decision_runtime import result_of
+    async def run():
+        async with actual_app(ordinary_policy=None, respond=compiled_decision) as bundle:
+            extra = build_tool_registry([tool])
+            try:
+                bundle.app.agent_tool_registry.register(extra.resolve('rag_search'))
+                bundle.app.chat_handler.config = {'inference': {
+                    'rag_input_max_chars':rag_cap, 'external_input_max_chars':24000}}
+                async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                    await socket.ready()
+                    frames = await socket.turn({'message':query, 'enable_rag':True,
+                                                'enable_tools':entry != 'legacy', 'rag_count':1})
+                    result = result_of(frames)
+                    assert result['status'] == 'completed', result
+                    assert len(bundle.calls) == 2
+                    for payload in bundle.calls:
+                        assert query in json.dumps(payload['messages'], ensure_ascii=False)
+                        assert sum(len(m.get('content') or '') for m in payload['messages']) <= 24000
+                    # Tool evidence/receipt is mandatory scientific input, not
+                    # the old optional RAG prose block; rag_cap=0 cannot erase it.
+                    observation = next(m for m in bundle.calls[-1]['messages'] if m['role'] == 'tool')
+                    assert rag.manifest.source_sha256 in observation['content']
+                    assert rag.manifest.index_sha256 in observation['content']
+                    assert not bundle.rag.retrieve.called
+                    return frames
+            finally:
+                extra.close()
+    frames = asyncio.run(run())
+    assert calls == []
     assert requests == [(
-        "async" if entry == "legacy" else "sync", rag.embedding_endpoint,
-        {"model": rag.embedding_model_name, "prompt": "检索知识库中类似分子"},
+        "sync", rag.embedding_endpoint,
+        {"model": rag.embedding_model_name, "prompt": query},
     )]
-    cards = [item for item in socket.messages if item["type"] == "rag_info"]
+    cards = [item for item in frames if item["type"] == "rag_info"]
     assert len(cards) == 1
     record = cards[0]["molecules"][0]
     assert record["smiles"] == "CCC" and record["source_index"] == 2
@@ -413,54 +479,44 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
     assert record["provenance"]["index_sha256"] == rag.manifest.index_sha256
     assert "provenance" not in record["properties"]
     assert "source_index" not in record["properties"]
-    if entry != "legacy":
-        # A complete strict receipt no longer fits the fixed status reserve.
-        # Preserve it, the original answer and UI evidence; do not trim proof
-        # just to make a model-summary prompt fit (or call the model anyway).
-        from src.web.prompt_budget import STATUS_RESERVE, bounded_record
-        observation = observations[0]
-        assert observation["success"]
-        assert observation["evidence"][0]["retrieval_receipt"]["diagnostics"]["status"] == "valid_hits"
-        assert bounded_record({"tool_results": {entry: observation}}, STATUS_RESERVE - 80) is None
-        complete = [item for item in socket.messages if item["type"] == "complete"]
-        assert len(complete) == 1
-        assert complete[0]["error"]["code"] == "interpretation_budget_exceeded"
-        assert complete[0]["content"].startswith(observation["summary"] + "\n\n")
-        assert "未进行模型总结" in complete[0]["content"]
-        assert model.prompts == []
-        return
-    assert len(model.prompts) == 1
-    assert "检索知识库中类似分子" in model.prompts[0]
-    if rag_cap:
-        assert rag.manifest.source_sha256 in model.prompts[0]
-    else:
-        assert "RAG 检索证据" not in model.prompts[0]
+    from src.web.prompt_budget import STATUS_RESERVE, bounded_record
+    observation, = observations
+    assert observation['success']
+    assert observation['evidence'][0]['retrieval_receipt']['diagnostics']['status'] == 'valid_hits'
+    assert bounded_record({'tool_results': {entry:observation}}, STATUS_RESERVE - 80) is None
+    complete = [item for item in frames if item['type'] == 'complete']
+    assert len(complete) == 1 and complete[0]['status'] == 'completed'
+    assert rag.manifest.source_sha256 in complete[0]['content']
+    assert rag.manifest.index_sha256 in complete[0]['content']
 
 
-def test_input_rejection_precedes_analysis_and_preserves_history(monkeypatch):
+def test_input_rejection_precedes_analysis_and_preserves_history(actual_app, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("input analysis must not run for oversized questions")
 
-    monkeypatch.setattr("src.web.chat_handler.preflight_generation_request", forbidden)
-    monkeypatch.setattr("src.web.chat_handler.InputValidator", forbidden)
-    model, socket = Model(), Socket()
-    handler = ChatHandler(model, None, None, {"inference": {"input_max_chars": 6000}})
+    monkeypatch.setattr("src.agent.contracts.generation_request.preflight_generation_request", forbidden)
     history = [{"user": "earlier question", "assistant": "earlier response"}]
-    before = list(history)
-    asyncio.run(handler._process_message(
-        socket, "问" * 7000, True, True, conversation_history=history,
-    ))
-    assert history == before and handler.conversation_history == []
-    assert not model.prompts
-    assert socket.messages == [{"type": "complete", "content": socket.messages[0]["content"],
-                                "error": {"code": "input_budget_exceeded"}}]
+    async def run():
+        async with actual_app(ordinary_policy=None) as bundle:
+            bundle.app.chat_handler.config = {'inference': {'external_input_max_chars':6000}}
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                sender, = bundle.app.decision_runtime.sockets
+                sender.memory[:] = history
+                # The admission module imports this validator lazily. Guard
+                # the actual current boundary, not just the retired handler.
+                monkeypatch.setattr('src.agent.utils.validators.InputValidator', forbidden)
+                frames = await socket.turn({'message':'问' * 5000, 'enable_tools':True, 'enable_rag':True})
+                assert sender.memory == history and bundle.app.chat_handler.conversation_history == []
+                assert not bundle.calls
+                assert frames[-1]['error']['details']['reason'] == 'input_budget_exceeded'
+                assert bundle.app.agent_state_store.get_tool_executions(frames[-1]['trace_id']) == []
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("case", ["both", "latest_only", "oversized_old", "total_limited"])
-def test_actual_model_history_selection_and_chronology(stream, case):
-    from src.web.prompt_budget import OMITTED, STATUS_RESERVE, required_prompt
-
+def test_actual_model_history_selection_and_chronology(actual_app, stream, case):
     size = 1300 if case == "total_limited" else 100
     old = {"user": "earlier-turn-A", "assistant": json.dumps({
         "SMILES": "C" * (10000 if case == "oversized_old" else size),
@@ -476,28 +532,32 @@ def test_actual_model_history_selection_and_chronology(stream, case):
     total_cap = 7000
     question = "Explain the latest answer."
     if case == "total_limited":
-        question += "问" * (total_cap - len(required_prompt(question)) - len(OMITTED) - STATUS_RESERVE)
-    model, socket = Model(), Socket()
-    handler = ChatHandler(model, None, None, {"inference": {
-        "stream": stream, "input_max_chars": total_cap,
-        "history_input_max_chars": history_cap,
-    }})
-    asyncio.run(handler._process_message(
-        socket, question, False, False, conversation_history=history,
-    ))
-
-    assert len(model.prompts) == 1
-    prompt = model.prompts[0]
-    latest_text = "用户: " + latest["user"] + "\n助手: " + latest["assistant"]
-    assert latest_text in prompt
-    assert prompt.endswith("\n\n## 当前用户问题\n" + question)
-    assert len(prompt) <= total_cap
-    assert len(prompt) - len(required_prompt(question)) <= history_cap + len(OMITTED)
-    assert history[:2] == [old, latest]
-    if case == "both":
-        old_text = "用户: " + old["user"] + "\n助手: " + old["assistant"]
-        assert old_text in prompt
-        assert prompt.index(old_text) < prompt.index(latest_text) < prompt.index(question)
-    else:
-        assert old["user"] not in prompt and "earlier-source-A" not in prompt
-        assert "省略" in prompt
+        question += "问" * 1200
+    async def run():
+        async with actual_app(ordinary_policy=None) as bundle:
+            bundle.app.chat_handler.config = {'inference': {
+                'stream':stream, 'external_input_max_chars':total_cap, 'history_input_max_chars':history_cap}}
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                sender, = bundle.app.decision_runtime.sockets
+                sender.memory[:] = history
+                frames = await socket.turn({'message':question, 'enable_tools':False, 'enable_rag':False})
+                assert frames[-1]['status'] == 'completed', frames[-1]
+                payload, = bundle.calls
+                messages = payload['messages']
+                assert messages[-1] == {'role':'user', 'content':question}
+                assert sum(len(m.get('content') or '') for m in messages) <= total_cap
+                selected = [m for m in messages if m['role'] != 'system'][:-1]
+                latest_pair = [{'role':role, 'content':latest[role]} for role in ('user', 'assistant')]
+                assert selected[-2:] == latest_pair
+                assert sum(len(m['content']) for m in selected) <= history_cap
+                assert sender.memory[:2] == history == [old, latest]
+                if case == 'both':
+                    assert selected == [{'role':role, 'content':pair[role]}
+                                        for pair in (old, latest) for role in ('user', 'assistant')]
+                else:
+                    assert selected == latest_pair
+                    plain = json.dumps(messages, ensure_ascii=False)
+                    assert old['user'] not in plain and 'earlier-source-A' not in plain
+                    assert 'omitted for the input character budget' in plain
+    asyncio.run(run())

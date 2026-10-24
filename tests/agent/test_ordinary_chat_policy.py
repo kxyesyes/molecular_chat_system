@@ -12,14 +12,14 @@ from src.agent.contracts import AgentContext
 from src.agent.contracts.decision import parse_decision_json, DecisionProtocolError
 from src.agent.contracts.ordinary_admission import CapabilitySnapshot, CapabilityFeature
 from src.agent.evidence import EvidenceLedger
-from src.agent.harness.decision_policy import decision_system_message, encode_observation
+from src.agent.scientific_session.decision_policy import decision_system_message, encode_observation
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
 from src.agent.runtime.run_session import WorkflowRunSession
 from src.web.ordinary_capabilities import build_capability_snapshot, ORIGINAL_FOUR
 
 
 def policy():
-    name = 'src.agent.harness.ordinary_chat_policy'
+    name = 'src.agent.scientific_session.ordinary_chat_policy'
     assert importlib.util.find_spec(name) is not None, 'Task5 pure policy module is missing'
     module = importlib.import_module(name)
     for api in ('OrdinaryChatOutputError', 'scan_claim_risks', 'validate_ordinary_display'):

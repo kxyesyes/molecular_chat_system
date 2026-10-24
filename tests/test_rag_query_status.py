@@ -7,6 +7,9 @@ import httpx
 import pytest
 
 from src.rag.service import RAGSystem
+from src.agent.persistence import SQLiteAgentStateStore
+from src.agent.tools.rag_search_tool import RAGSearchTool
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 
 
 @pytest.fixture
@@ -177,11 +180,8 @@ def test_query_status_propagates_cancellation():
         asyncio.run(service.search_similar_molecules_with_status("query", 2))
 
 
-def test_legacy_chat_retrieval_unavailable_is_not_an_empty_success():
+def test_pi_chat_retrieval_unavailable_is_not_an_empty_success(tmp_path):
     pytest.importorskip("rdkit")
-    from src.web.chat_handler import ChatHandler
-
-    model = SimpleNamespace(generate_async=AsyncMock(return_value="must not be used"))
     rag = SimpleNamespace(
         is_initialized=False,
         search_similar_molecules_with_status=AsyncMock(
@@ -192,60 +192,32 @@ def test_legacy_chat_retrieval_unavailable_is_not_an_empty_success():
             }
         ),
     )
-    handler = ChatHandler(
-        model,
-        rag,
-        None,
-        {"inference": {"stream": False}},
-    )
-    socket = Socket()
-
-    asyncio.run(
-        handler._process_message(
-            socket,
-            "search local knowledge base",
-            True,
-            False,
-        )
-    )
-
-    complete = [item for item in socket.messages if item["type"] == "complete"]
-    assert len(complete) == 1
-    assert complete[0]["status"] == "failed"
-    assert complete[0]["retrieval_status"] == "unavailable"
-    assert complete[0]["error"]["code"] == "rag_unavailable"
-    model.generate_async.assert_not_awaited()
-    rag.search_similar_molecules_with_status.assert_awaited_once_with(
-        "search local knowledge base", 5
-    )
+    handler = make_web_handler([RAGSearchTool(rag)], SQLiteAgentStateStore(tmp_path / 'state.sqlite'))
+    complete, frames = run_web_turn(handler, 'search local knowledge base', [], 'owner',
+                                    enable_rag=True, enable_tools=False)
+    assert complete['status'] == 'partial'
+    public = next(frame for frame in frames if frame['type'] == 'agent_result')
+    assert not public['success'] and public['metadata']['retrieval_performed'] is None
+    observation, = public['tool_result_sequence']
+    assert observation['tool_name'] == 'rag_search' and not observation['success']
+    assert observation['error']['code'] == 'tool_unavailable'
+    assert not any(frame['type'] == 'rag_info' for frame in frames)
+    # Pi uses the receipt-verified adapter, never the retired async retrieval fallback.
+    rag.search_similar_molecules_with_status.assert_not_awaited()
+    assert all(not sender.memory for _, _, sender in handler.web_senders)
     assert handler.conversation_history == []
 
 
-def test_legacy_chat_without_rag_service_is_not_an_empty_success():
-    from src.web.chat_handler import ChatHandler
-
-    model = SimpleNamespace(generate_async=AsyncMock(return_value="must not be used"))
-    handler = ChatHandler(
-        model,
-        None,
-        None,
-        {"inference": {"stream": False}},
-    )
-    socket = Socket()
-
-    asyncio.run(
-        handler._process_message(
-            socket,
-            "search local knowledge base",
-            True,
-            False,
-        )
-    )
-
-    complete = [item for item in socket.messages if item["type"] == "complete"]
-    assert len(complete) == 1
-    assert complete[0]["status"] == "failed"
-    assert complete[0]["retrieval_status"] == "unavailable"
-    assert complete[0]["error"]["code"] == "rag_unavailable"
-    model.generate_async.assert_not_awaited()
+def test_pi_chat_without_rag_service_is_not_an_empty_success(tmp_path):
+    handler = make_web_handler([RAGSearchTool()], SQLiteAgentStateStore(tmp_path / 'state.sqlite'))
+    complete, frames = run_web_turn(handler, 'search local knowledge base', [], 'owner',
+                                    enable_rag=True, enable_tools=False)
+    assert complete['status'] == 'partial'
+    public = next(frame for frame in frames if frame['type'] == 'agent_result')
+    assert not public['success'] and public['metadata']['retrieval_performed'] is None
+    observation, = public['tool_result_sequence']
+    assert observation['tool_name'] == 'rag_search' and not observation['success']
+    assert observation['error']['code'] == 'tool_unavailable'
+    assert not any(frame['type'] == 'rag_info' for frame in frames)
+    assert all(not sender.memory for _, _, sender in handler.web_senders)
     assert handler.conversation_history == []

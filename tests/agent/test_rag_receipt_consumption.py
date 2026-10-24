@@ -101,7 +101,7 @@ def producer_envelope(tmp_path, monkeypatch):
 def test_evidence_only_redaction_rejected_before_session_seal(tmp_path, monkeypatch, mode, sensitive, rag_ip_loader):
     from types import MappingProxyType
     from src.agent.contracts import AgentContext, AgentErrorCode, RunOutcome
-    from src.agent.harness.decision_inputs import seal_observation, verify_observation_integrity
+    from src.agent.scientific_session.decision_inputs import seal_observation, verify_observation_integrity
     from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
     from src.agent.persistence import SQLiteAgentStateStore
     from src.agent.persistence.redaction import redact_sensitive
@@ -616,8 +616,8 @@ def test_real_dynamic_session_receipt_ledger_seal_and_persistence(tmp_path, monk
     from types import MappingProxyType
     from src.agent.contracts import AgentContext, ObservationStatus, RunOutcome
     from src.agent.evidence import EvidenceLedger
-    from src.agent.harness.decision_inputs import seal_observation, verify_observation_integrity
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session.decision_inputs import seal_observation, verify_observation_integrity
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
     from src.agent.persistence import SQLiteAgentStateStore
     from src.agent.runtime.event_bus import AgentEventBus

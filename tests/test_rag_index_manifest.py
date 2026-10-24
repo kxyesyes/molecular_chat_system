@@ -13,6 +13,7 @@ import numpy as np
 import httpx
 import pandas as pd
 import pytest
+from tests.agent.pi_web_support import cleanup_web_handlers
 
 
 faiss = pytest.importorskip("faiss")
@@ -687,30 +688,15 @@ def test_sync_tool_and_async_search_use_service_endpoint_and_close_client(retrie
 
 
 @pytest.mark.parametrize("use_agent", [False, True])
-def test_chat_rag_info_preserves_structured_provenance(retrieval_service, use_agent):
-    from src.web.chat_handler import ChatHandler
-    class Socket:
-        messages = None
-        def __init__(self):
-            self.messages = []
-        async def send_text(self, text):
-            self.messages.append(json.loads(text))
-    class Model:
-        async def generate(self, *args, **kwargs):
-            return "offline test response"
-    class Agent:
-        def should_use_tools(self, message):
-            return True
-        def execute(self, message, **kwargs):
-            result = RAGSearchTool(retrieval_service).execute(message, k=2)
-            return {"success": result["success"], "final_answer": result["summary"],
-                    "tools_used": ["rag_search"], "tool_results": {"rag_search": result},
-                    "workflow_plan": {"name": "rag_search"}}
-    socket = Socket()
-    handler = ChatHandler(Model(), retrieval_service, Agent() if use_agent else None,
-                          {"inference": {"stream": False}})
-    asyncio.run(handler._process_message(socket, "检索数据库中类似分子", True, use_agent, rag_count=2))
-    info = next(message for message in socket.messages if message["type"] == "rag_info")
+def test_chat_rag_info_preserves_structured_provenance(retrieval_service, use_agent, tmp_path):
+    from src.agent.persistence import SQLiteAgentStateStore
+    from tests.agent.pi_web_support import make_web_handler, run_web_turn
+    handler = make_web_handler([RAGSearchTool(retrieval_service)],
+                              SQLiteAgentStateStore(tmp_path / 'web.sqlite'))
+    complete, frames = run_web_turn(handler, "检索数据库中类似分子", [], 'owner',
+                                    enable_rag=True, enable_tools=use_agent, rag_count=2)
+    assert complete['status'] == 'completed', frames
+    info = next(message for message in frames if message["type"] == "rag_info")
     molecule = info["molecules"][0]
     assert molecule["smiles"] == "CCC"
     assert molecule["source_index"] == 2

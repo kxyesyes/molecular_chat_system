@@ -1,14 +1,19 @@
 """Browser identity is server-issued and propagated without client metadata."""
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import Mock
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 import pytest
 
 from src.web.agent_session import AgentSessionMiddleware, AgentSessionStore
 from src.web.chat_handler import ChatHandler
 from src.web.routes import agent_workflow_routes
+from tests.agent.test_web_decision_runtime import (
+    ActualSocket, actual_app, cookie_for, result_of,
+)
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 
 
 def test_http_workflow_captures_server_owner_outside_user_payload(tmp_path, monkeypatch):
@@ -50,45 +55,63 @@ def test_workflow_missing_server_identity_fails_before_submission(monkeypatch):
     assert response.status_code == 503
 
 
-def test_chat_execute_receives_server_identity():
-    received = []
-    class Agent:
-        def execute(self, query, **kwargs):
-            received.append(kwargs)
-            return {"success": True}
-    handler = ChatHandler(None, None, Agent(), {})
-    asyncio.run(handler._execute_agent("CCO", session_id="browser-owner"))
-    assert received[0]["session_id"] == "browser-owner"
+def test_chat_execution_receives_server_identity(tmp_path):
+    from src.agent.persistence import SQLiteAgentStateStore
+    store = SQLiteAgentStateStore(tmp_path / 'state.sqlite')
+    handler = make_web_handler({}, store)
+    complete, _ = run_web_turn(handler, '你好', [], 'browser-owner', enable_tools=False)
+    assert complete['status'] == 'completed'
+    run = store.get_run(complete['trace_id'])
+    assert run['session_id'] == 'browser-owner'
+    assert handler.web_results[-1].metadata['backend'] == 'pi'
 
 
-def test_websocket_session_is_propagated_through_chat_handler(tmp_path):
+def test_websocket_session_is_propagated_through_chat_handler(actual_app, monkeypatch):
     received = []
-    class RecordingHandler(ChatHandler):
-        async def _process_message(self, websocket, *args, **kwargs):
-            received.append(kwargs)
-            await websocket.send_json({"type": "complete"})
-    handler = RecordingHandler(None, None, None, {})
-    app = FastAPI()
-    app.add_middleware(AgentSessionMiddleware, store=AgentSessionStore(tmp_path / "sessions.sqlite"))
-    @app.get("/")
-    async def home(request: Request):
-        return {"owner": request.scope["agent_session_id"]}
-    app.websocket("/ws")(handler.handle_websocket)
-    with TestClient(app, base_url="http://localhost") as client:
-        owner = client.get("/").json()["owner"]
-        with client.websocket_connect("/ws", headers={"host": "localhost", "origin": "http://localhost", "cookie": f"medchat_agent_session={client.cookies.get('medchat_agent_session')}"}) as ws:
-            ws.receive_json()
-            # Unknown client ownership fields are rejected by the wire
-            # protocol; they must never reach the handler or override server
-            # session identity. A valid follow-up frame still proves the
-            # server-owned session is propagated.
-            ws.send_json({"message": "CCO", "session_id": "forged"})
-            assert ws.receive_json()["error"]["code"] == "invalid_frame"
-            assert received == []
-            ws.send_json({"message": "CCO"})
-            assert ws.receive_json()["type"] == "status"
-            assert ws.receive_json()["type"] == "complete"
-    assert received[0].get("session_id") == owner
+    original = ChatHandler.process_decision_message
+
+    async def observe(self, websocket, **kwargs):
+        context = kwargs["context"]
+        received.append((context.session_id, context.user_id, context.trace_id))
+        return await original(self, websocket, **kwargs)
+
+    monkeypatch.setattr(ChatHandler, "process_decision_message", observe)
+
+    async def run():
+        async with actual_app() as bundle:
+            forbidden = Mock(side_effect=AssertionError("legacy handler reached"))
+            assert not hasattr(bundle.app.chat_handler, '_process_message')
+            monkeypatch.setattr(bundle.app.agent_system, "execute", forbidden)
+            owners, traces = [], []
+            for browser in range(2):
+                cookie = await cookie_for(bundle.app)
+                owner = bundle.app.app.state.agent_session_store.resolve(cookie)
+                assert owner and owner != "forged" and owner not in owners
+                owners.append(owner)
+                async with ActualSocket(bundle.app, cookie) as socket:
+                    assert (await socket.ready())["normal_chat_mode"] == "pi"
+                    # Pi rejects ownership fields at admission, before the
+                    # handler's decision bridge, model call or durable run.
+                    for field in ("session_id", "user_id"):
+                        rejected = result_of(await socket.turn({
+                            "message": "你好", field: "forged"}))
+                        assert rejected["status"] == "rejected"
+                        assert rejected["success"] is False
+                        assert len(received) == len(bundle.calls) == browser
+                        assert bundle.app.agent_state_store.get_run(rejected["trace_id"]) is None
+                    result = result_of(await socket.turn({"message": "你好"}))
+                    assert result["success"] is True
+                    assert result["metadata"]["backend"] == "pi"
+                    trace = result["trace_id"]
+                    assert trace not in traces
+                    traces.append(trace)
+                    assert len(received) == len(bundle.calls) == browser + 1
+                    assert received[-1] == (owner, owner, trace)
+                    record = bundle.app.agent_state_store.get_run(trace)
+                    assert record["session_id"] == record["user_id"] == owner
+            assert [item[0] for item in received] == owners
+            assert not forbidden.called
+    asyncio.run(run())
 
 
 def test_session_default_path_is_outside_checkout_and_explicit_path_is_absolute(tmp_path, monkeypatch):

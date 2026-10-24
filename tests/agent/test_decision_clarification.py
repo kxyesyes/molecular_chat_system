@@ -64,7 +64,7 @@ def test_corrected_input_resume_uses_current_validation(setup_loop):
 
 
 def test_missing_rdkit_reports_unavailable_not_invalid(monkeypatch):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     monkeypatch.setattr('src.agent.utils.validators._load_rdkit_chem', lambda: None)
     text = scientific_clarification('SMILES: CC(C)((', {'property_calculator'})
     assert '校验暂不可用' in text
@@ -72,7 +72,7 @@ def test_missing_rdkit_reports_unavailable_not_invalid(monkeypatch):
 
 
 def test_validator_failure_does_not_echo_exception(monkeypatch):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     def fail(*args):
         raise RuntimeError('private diagnostic marker')
     monkeypatch.setattr('src.agent.utils.validators.InputValidator.analyze_molecular_input', fail)
@@ -82,7 +82,7 @@ def test_validator_failure_does_not_echo_exception(monkeypatch):
 
 
 def test_parser_runtime_failure_keeps_unavailable_provenance(monkeypatch):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     from src.agent.utils.validators import InputValidator
     class BrokenChem:
         @staticmethod
@@ -98,7 +98,7 @@ def test_parser_runtime_failure_keeps_unavailable_provenance(monkeypatch):
 
 
 def test_markdown_formatting_ambiguity_is_not_a_structure_diagnosis():
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     from src.agent.utils.validators import InputValidator
     query = 'SMILES: `CCO`'
     assert InputValidator().analyze_molecular_input(query).blocks_execution
@@ -108,13 +108,13 @@ def test_markdown_formatting_ambiguity_is_not_a_structure_diagnosis():
 
 
 def test_formatting_or_valid_fragment_does_not_override_invalid_structure():
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     text = scientific_clarification('SMILES: `CCO`; SMILES: CC(C)((', {'property_calculator'})
     assert 'SMILES 无效' in text
 
 
 def test_nonmolecular_context_does_not_acquire_smiles_requirement(monkeypatch):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     def fail(*args):
         pytest.fail('unrelated context must not run molecular validation')
     monkeypatch.setattr('src.agent.utils.validators.InputValidator.analyze_molecular_input', fail)
@@ -124,7 +124,7 @@ def test_nonmolecular_context_does_not_acquire_smiles_requirement(monkeypatch):
 
 
 def test_oversized_input_does_not_run_unbounded_validation(monkeypatch):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     def fail(*args):
         pytest.fail('oversized input should not be parsed')
     monkeypatch.setattr('src.agent.utils.validators.InputValidator.analyze_molecular_input', fail)
@@ -136,7 +136,7 @@ def test_oversized_input_does_not_run_unbounded_validation(monkeypatch):
                                   'SMILES: ' + 'C' * 16000, '请' * 90],
                          ids=['512_atoms', '8000_atoms', '16000_atoms', 'utf8_bytes'])
 def test_long_clarification_avoids_rdkit_on_async_control_path(monkeypatch, query):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     def fail(*args):
         pytest.fail('long clarification must not invoke synchronous RDKit parsing')
     monkeypatch.setattr('src.agent.utils.validators.InputValidator.analyze_molecular_input', fail)
@@ -145,7 +145,7 @@ def test_long_clarification_avoids_rdkit_on_async_control_path(monkeypatch, quer
 
 
 def test_invalid_input_not_written_to_rdkit_diagnostic_stream(capfd):
-    from src.agent.harness.decision_clarification import scientific_clarification
+    from src.agent.scientific_session.decision_clarification import scientific_clarification
     scientific_clarification('SMILES: CC(C)((', {'property_calculator'})
     captured = capfd.readouterr()
     assert 'CC(C)((' not in captured.out + captured.err

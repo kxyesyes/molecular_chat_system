@@ -1,8 +1,9 @@
 """Offline acceptance of real reference execution, persistence and draining.
 
-Only scientific tools are synthetic; no model, application lifespan or network
-service is started. Passing cases verify existing behavior, not a manufactured
-RED. Every SQLite connection and event-controlled worker owned here is closed.
+Model decisions and unavailable tools are explicit offline fixtures; the shared
+property fixture computes real RDKit descriptors. The real
+Pi child, Web owner, registry, reference service and SQLite store are exercised;
+no live model or network service is used. All owned workers are drained.
 """
 import asyncio
 from contextlib import closing
@@ -15,13 +16,12 @@ from fastapi import FastAPI
 
 from src.agent.persistence import scientific_references as boundary
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
-from src.agent.supervisor import SupervisorAgent
-from src.web.chat_handler import ChatHandler
-from src.web.model_lifecycle import ModelRequestGate
+from src.web.decision_runtime import _Sender, _Turn
 from src.web.routes.scientific_reference_routes import setup_scientific_reference_routes
 from src.web.scientific_references import REFERENCE_CLARIFICATION
 from tests.agent.test_scientific_reference_execution import Socket, Tool, confirmed
 from tests.agent.test_scientific_reference_web import pointer, seed, service
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 
 
 QUERY = "计算刚才第二个分子的属性"
@@ -33,14 +33,24 @@ def _tools():
 
 
 def _handler(store, tools):
-    return ChatHandler(None, None, SupervisorAgent(tools=tools, state_store=store),
-                       {}, scientific_references=service(store))
+    handler = make_web_handler(tools, store)
+    handler.scientific_references = service(store)
+    return handler
 
 
 async def _chat(handler, p, socket=None):
     socket = socket if socket is not None else Socket()
-    await handler._process_message(socket, QUERY, False, True,
-                                   session_id="owner", reference=p)
+    sender = _Sender(socket)
+    runtime = handler.decision_runtime
+    sender._runtime = runtime
+    turn = _Turn(dict(message=QUERY, enable_rag=False, enable_tools=True, reference=p))
+    handler.web_turns.append(turn)
+    turn.task = asyncio.current_task()
+    runtime.active_owners.add(turn)
+    await runtime._execute(handler, sender, turn)
+    assert turn.worker_owner.pending_roots == 0
+    assert runtime.application.model_request_gate._readers == 0
+    assert not handler.model.errors, handler.model.errors
     return socket
 
 
@@ -161,9 +171,7 @@ def test_cancelled_chat_waiter_drains_worker_before_releasing_source_and_lease(
     handler = _handler(store, tools)
 
     async def run():
-        gate = ModelRequestGate()
-        if with_gate:
-            handler.model_request_gate = gate
+        gate = handler.decision_runtime.application.model_request_gate
         writer_entered = asyncio.Event()
         retirement = []
 
@@ -189,8 +197,9 @@ def test_cancelled_chat_waiter_drains_worker_before_releasing_source_and_lease(
             if with_gate:
                 assert gate._readers == 1 and not writer.done()
             release.set()
-            with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(request, 10)
+            socket = await asyncio.wait_for(request, 10)
+            complete = [frame for frame in socket.messages if frame['type'] == 'complete']
+            assert len(complete) == 1 and complete[0]['status'] == 'cancelled'
             if writer is not None:
                 await asyncio.wait_for(writer, 5)
                 assert retirement == [True]
@@ -218,6 +227,7 @@ def test_cancelled_chat_waiter_drains_worker_before_releasing_source_and_lease(
         patcher.setattr(allocation, "_workers", workers)
         patcher.setattr(allocation, "_slots", threading.BoundedSemaphore(allocation.MAX_ALLOCATION_WORKERS))
         asyncio.run(run())
+    handler.agent_system.tool_registry.close()
     assert worker_threads and all(not thread.is_alive() for thread in worker_threads)
     assert tools["property_calculator"].calls == ["CCN"]
     assert _rows(store, "agent_runs", "trace") == source_run
@@ -228,7 +238,10 @@ def test_cancelled_chat_waiter_drains_worker_before_releasing_source_and_lease(
     assert store.get_run(traces[0][0])["status"] not in {"running", "pending"}
     reopened = SQLiteAgentStateStore(store.db_path)
     replay_tools = _tools()
-    asyncio.run(_chat(_handler(reopened, replay_tools), p))
+    replay_socket = asyncio.run(_chat(_handler(reopened, replay_tools), p))
+    replay_complete = [frame for frame in replay_socket.messages if frame['type'] == 'complete']
+    assert len(replay_complete) == 1 and replay_complete[0]['status'] == 'partial'
+    assert replay_tools['drug_likeness_assessment'].calls == ['CCN']
     assert replay_tools["property_calculator"].calls == []
     assert _execution_traces(reopened) == traces
 
@@ -390,7 +403,9 @@ def test_invalid_source_clarifies_in_real_chat_without_dispatch_or_history_delet
     tools = _tools()
     socket = asyncio.run(_chat(_handler(store, tools), p))
     assert all(not tool.calls for tool in tools.values())
-    assert socket.messages == [{"type": "complete", "content": REFERENCE_CLARIFICATION}]
+    complete = [frame for frame in socket.messages if frame['type'] == 'complete']
+    assert len(complete) == 1 and complete[0]['content'] == REFERENCE_CLARIFICATION
+    assert complete[0]['status'] == 'rejected'
     _unavailable(asyncio.run(_post(_api(svc), "restore", p)))
     assert not _execution_traces(store)
     assert _rows(store, "agent_runs", "trace") == before
@@ -404,10 +419,8 @@ def test_partial_generation_restores_after_instance_restart_with_warnings_intact
     store = SQLiteAgentStateStore(tmp_path / "state.db")
     generator = Tool("llm_molecular_generator")
     handler = _handler(store, {generator.name: generator})
-    socket = Socket()
-    asyncio.run(handler._process_message(
-        socket, "生成3个分子", False, True, mol_count=3, session_id="owner"))
-    event = next(message for message in socket.messages if message["type"] == "molecule_candidates")
+    _, frames = run_web_turn(handler, "生成3个分子", [], "owner", mol_count=3)
+    event = next(message for message in frames if message["type"] == "molecule_candidates")
     assert event["source"]["status"] == "partial" and event["warnings"]
     svc = service(store)
     assert svc.confirm(event["reference"], session_id="owner")

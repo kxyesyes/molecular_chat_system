@@ -66,7 +66,7 @@ class OllamaModel:
     """
 
     def __init__(self, base_url: str = "http://localhost:11434",
-                 model_name: str = "gmm-llama:latest"):
+                 model_name: str = "gmm-llama:latest", *, decision_transport=None):
         """
         初始化Ollama模型客户端
 
@@ -76,6 +76,7 @@ class OllamaModel:
         """
         self.base_url = base_url
         self.model_name = model_name
+        self._decision_transport = decision_transport
         # 增加超时时间到150秒
         # 创建同步客户端用于同步调用
         self.sync_client = httpx.Client(timeout=150.0)
@@ -390,6 +391,27 @@ class OllamaModel:
             if ENHANCED_LOGGING:
                 log_error("模型生成异常", e)
             yield f"技术错误: {type(e).__name__}: {str(e)[:100]}"
+
+    async def decide(self, messages, *, mode="native", max_tokens=1500, timeout_seconds=60.0,
+                     temperature=0.0, input_budget=None):
+        """One validated decision proposal; generation clients remain untouched."""
+        from src.system.ollama_decisions import request_ollama_protocol
+        return await request_ollama_protocol(self, 'decide', messages, mode=mode,
+            max_tokens=max_tokens, timeout_seconds=timeout_seconds, temperature=temperature, input_budget=input_budget)
+
+    async def propose_ordinary_intent(self, messages, *, mode="native", max_tokens=256,
+                                      timeout_seconds=30.0, _journal=None):
+        """One injected intent transaction, not admission or execution."""
+        from src.system.ollama_decisions import request_ollama_protocol
+        return await request_ollama_protocol(self, 'propose_ordinary_intent', messages, mode=mode,
+            max_tokens=max_tokens, timeout_seconds=timeout_seconds, _journal=_journal)
+
+    async def propose_docking_preparation(self, messages, *, mode="native", max_tokens=256,
+                                         timeout_seconds=30.0, _journal=None):
+        """One guarded preparation transaction, not docking consent or execution."""
+        from src.system.ollama_decisions import request_ollama_protocol
+        return await request_ollama_protocol(self, 'propose_docking_preparation', messages, mode=mode,
+            max_tokens=max_tokens, timeout_seconds=timeout_seconds, _journal=_journal)
 
     async def close(self):
         """关闭HTTP客户端连接"""

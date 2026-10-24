@@ -7,6 +7,7 @@ actual display manifest and pass the authenticated session from request scope.
 from contextlib import closing
 from hashlib import sha256
 import json
+import re
 import time
 
 from src.agent.contracts import CandidateSet, ObservationStatus, ToolProvenance, ToolResult
@@ -19,6 +20,7 @@ from src.agent.validators.result_validator import AgentResultValidator
 FIELD = "scientific_presentations"
 _ACCEPTED = {"succeeded", "partial"}
 _MAX_METADATA_BYTES = 2 * 1024 * 1024
+_WEB_PROFILE = "medchat-web-v1"
 
 
 def _identity(*values):
@@ -79,17 +81,81 @@ def _source(connection, trace_id, session_id):
     source = {key: row[key] for key in (
         "trace_id", "session_id", "user_id", "status", "workflow_version",
         "query", "skill_name", "idempotency_key", "created_at")}
-    digest = sha256(json.dumps([source, checkpoints], ensure_ascii=False,
-                              sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
     metadata = json.loads(row["metadata_json"])
     if type(metadata) is not dict:
         raise ValueError("invalid run metadata")
+    identity = [source, checkpoints]
+    requirements = metadata.get("task_requirements")
+    if (type(requirements) is dict and requirements.get("profile") == _WEB_PROFILE
+            or metadata.get("binding_profile") == _WEB_PROFILE):
+        # Web proof authority includes the server plan, not only checkpoints.
+        # Changing/removing it must also revoke an already confirmed view.
+        # Legacy sources keep their existing digest and ignore unrelated writes.
+        identity.append({key: metadata[key] for key in (
+            "task_requirements", "binding_profile", "decision_publication_invalidation")
+            if key in metadata})
+    digest = sha256(json.dumps(identity, ensure_ascii=False,
+                              sort_keys=True, allow_nan=False).encode("utf-8")).hexdigest()
     views = _namespace(metadata)
     latest = {item["step_id"]: item for item in checkpoints}
     return row, metadata, views, latest, digest
 
 
-def _candidates(checkpoint, trace_id):
+def _candidate_binding_proof(checkpoint, row, run_metadata, result):
+    """Restore explicit server proof authority, never opt in from tool quality.
+
+    Terminal runs retain the accepted step metadata/record commitment rather
+    than the continuation input journal. This checks that persisted authority;
+    it does not replay a resolver or execute/current-check scientific sources.
+    """
+    from src.agent.contracts.decision import decode_protocol_json
+    from src.agent.contracts.web_requirements import parse_web_requirements
+
+    metadata = decode_protocol_json(checkpoint["metadata_json"], max_bytes=64 * 1024)
+    if type(metadata) is not dict:
+        raise ValueError("invalid candidate checkpoint metadata")
+    raw_requirements = run_metadata.get("task_requirements")
+    if not (type(raw_requirements) is dict and raw_requirements.get("profile") == _WEB_PROFILE):
+        if (any(key in metadata for key in ("binding_proof", "web_step_ref", "web_plan_sha256"))
+                or run_metadata.get("binding_profile") == _WEB_PROFILE):
+            raise ValueError("candidate binding profile mismatch")
+        return None  # Preserve legacy no-proof identities, including raw quality extras.
+    if (run_metadata.get("binding_profile", _WEB_PROFILE) != _WEB_PROFILE
+            or "decision_publication_invalidation" in run_metadata):
+        raise ValueError("candidate binding profile unavailable")
+    requirements = parse_web_requirements(raw_requirements)
+    for request_key, row_key in (("trace_id", "trace_id"), ("session_id", "session_id"),
+                                 ("user_id", "user_id"), ("query", "query"), ("active_skill", "skill_name")):
+        if requirements.request[request_key] != row[row_key]:
+            raise ValueError("candidate plan owner mismatch")
+    proof = EvidenceLedger.validated_binding_proof(
+        metadata.get("binding_proof"), result.quality.get("binding_proof"))
+    steps = {step.name: step for step in requirements.steps}
+    ref = metadata.get("web_step_ref")
+    if (type(ref) is not str or ref not in steps or steps[ref].tool_name != result.tool_name
+            or proof.get("profile") != _WEB_PROFILE or proof.get("step_ref") != ref
+            or metadata.get("web_plan_sha256") != requirements.plan_sha256
+            or proof["plan_sha256"] != requirements.plan_sha256
+            or proof["requirements_sha256"] != EvidenceLedger.output_digest(requirements.model_dump(mode="json"))
+            or proof["own_source"] is not None
+            or [role["step_ref"] for role in proof["roles"]] != list(requirements.dependencies[ref])
+            or result.quality.get("step_id") != checkpoint["step_id"]
+            or result.quality.get("output_key") != checkpoint["step_id"]):
+        raise ValueError("candidate binding plan mismatch")
+    for key in ("binding_record_sha256", "request_input_digest", "operation_key"):
+        value = metadata.get(key)
+        if (type(value) is not str or re.fullmatch(r"[a-f0-9]{64}", value) is None
+                or result.quality.get(key) != value):
+            raise ValueError("candidate binding commitment mismatch")
+    parents = [role["evidence_id"] for role in proof["roles"]]
+    if (metadata.get("input_evidence_ids") != parents or result.quality.get("input_evidence_ids") != parents
+            or metadata["operation_key"] != EvidenceLedger.output_digest(
+                {"action_sha256": proof["action_sha256"], "own_source": None})):
+        raise ValueError("candidate binding input mismatch")
+    return proof
+
+
+def _candidates(checkpoint, trace_id, *, row, run_metadata):
     if (checkpoint["status"] not in _ACCEPTED
             or checkpoint["tool_name"] != "llm_molecular_generator"
             or checkpoint["error_json"] is not None):
@@ -138,8 +204,10 @@ def _candidates(checkpoint, trace_id):
     from src.agent.contracts import WorkflowArtifact
     result.artifacts = [WorkflowArtifact.from_dict(item) for item in value["artifacts"]]
     expected_evidence = result.quality.get("evidence_id")
+    proof = _candidate_binding_proof(checkpoint, row, run_metadata, result)
     if EvidenceLedger(trace_id).register_tool_result(
-            checkpoint["step_id"], checkpoint["input_hash"], result) != expected_evidence:
+            checkpoint["step_id"], checkpoint["input_hash"], result,
+            **({"binding_proof": proof} if proof is not None else {})) != expected_evidence:
         raise ValueError("candidate evidence identity mismatch")
     before_data = reference_json(result.data)
     result = AgentResultValidator().validate_tool_result(result, trusted_checkpoint=True)
@@ -158,7 +226,7 @@ def sources(store, trace_id, *, session_id):
     with closing(store._connect()) as connection, connection:
         connection.execute("BEGIN")
         try:
-            row, _, _, latest, version = _source(connection, trace_id, session_id)
+            row, metadata, _, latest, version = _source(connection, trace_id, session_id)
             output = []
             for checkpoint in latest.values():
                 if checkpoint["tool_name"] != "llm_molecular_generator":
@@ -166,7 +234,7 @@ def sources(store, trace_id, *, session_id):
                 try:
                     if checkpoint["workflow_version"] != row["workflow_version"]:
                         continue
-                    _candidates(checkpoint, trace_id)
+                    _candidates(checkpoint, trace_id, row=row, run_metadata=metadata)
                 except (ValueError, TypeError, KeyError, RecursionError):
                     # A failed independent branch is not evidence for that
                     # branch, but must not erase another accepted observation.
@@ -212,7 +280,10 @@ def report_snapshot(store, trace_id, *, session_id, references):
                     return None
                 ids.add(ref["presentation_id"])
                 selected.append(view)
-            run = {k: row[k] for k in ("trace_id", "status", "workflow_version", "query", "skill_name")}
+            # Internal verifier context only; these owner fields never enter the
+            # closed ScientificReport DTO or the browser reference/restore DTO.
+            run = {k: row[k] for k in ("trace_id", "session_id", "user_id", "status",
+                                      "workflow_version", "query", "skill_name")}
             run["metadata"] = metadata
             return {"run": run, "latest": latest, "source_version": version,
                     "presentations": selected}
@@ -252,7 +323,7 @@ def publish(store, trace_id, *, session_id, selections, target=None):
                     checkpoint = by_id[oid]
                     if checkpoint["workflow_version"] != row["workflow_version"]:
                         raise ValueError("candidate workflow version mismatch")
-                    candidates, result, eid = _candidates(checkpoint, trace_id)
+                    candidates, result, eid = _candidates(checkpoint, trace_id, row=row, run_metadata=metadata)
                     decoded[oid] = {c.candidate_id: c.to_dict() for c in candidates.candidates}
                     warnings.extend(result.warnings)
                     evidence.append({"observation_id": oid, "evidence_id": eid,

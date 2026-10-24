@@ -126,7 +126,7 @@ def test_correction_feedback_applies_only_to_the_retry_not_future_turns(setup_lo
 @pytest.mark.parametrize('cancel', [False, True])
 def test_deadline_or_cancellation_during_correction_never_dispatches_tools(setup_loop, cancel, monkeypatch):
     from types import SimpleNamespace
-    from src.agent.harness import decision_loop
+    from src.agent.scientific_session import controller as decision_loop
     now = [0.0]
     monkeypatch.setattr(decision_loop, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     b = configured(setup_loop, [invalid()], timeout_seconds=5)
@@ -157,7 +157,13 @@ def test_wait_for_timeout_during_correction_is_reported_as_timeout(setup_loop, m
     async def bounded_wait(awaitable, timeout):
         return await real_wait_for(awaitable, timeout=min(timeout, 0.05))
     b.model.decide = decide
-    monkeypatch.setattr(asyncio, 'wait_for', bounded_wait)
+    from types import SimpleNamespace
+    from src.agent.scientific_session import controller
+    # Bound the model transaction under test, not the separate Node startup
+    # handshake (which has its own readiness deadline and no model calls).
+    monkeypatch.setattr(controller, 'asyncio', SimpleNamespace(
+        wait_for=bounded_wait, CancelledError=asyncio.CancelledError,
+        TimeoutError=asyncio.TimeoutError))
     result = run(b)
     assert not result.success and not b.tools[0].inputs
     assert result.metadata['model_requests'] == 2

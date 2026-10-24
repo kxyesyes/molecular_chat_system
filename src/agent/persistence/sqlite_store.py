@@ -7,7 +7,7 @@ import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from .base import RunOwnershipConflict
@@ -103,6 +103,118 @@ def _continuation_json(value: Any) -> tuple[dict[str, Any], str]:
     return detached, encoded
 
 
+def _reference_json(value: Any, *, limit: int = 512 * 1024) -> tuple[dict[str, Any], str]:
+    """Lossless native JSON, bounded before serialization or secret traversal.
+
+    Reference authority must be rejected, never silently redacted/coerced.
+    The combined identity/context envelope has a 512 KiB, 32-level,
+    65536-node budget, with integers capped at 4096 bits.
+    Only the archive boundary raises the byte limit for existing run metadata
+    (2 MiB) and its complete raw-row envelope (4 MiB).
+    """
+    nodes, text_bytes = 0, 0
+
+    def copy(item, depth):
+        nonlocal nodes, text_bytes
+        nodes += 1
+        if depth > 32 or nodes > 65536:
+            raise ValueError("Invalid reference JSON structure")
+        kind = type(item)
+        if kind is str:
+            if len(item) > limit:
+                raise ValueError("Reference JSON exceeds byte budget")
+            text_bytes += len(item.encode("utf-8"))
+            if text_bytes > limit:
+                raise ValueError("Reference JSON exceeds byte budget")
+            return item
+        if item is None or kind is bool:
+            return item
+        if kind is int and item.bit_length() <= 4096:
+            return item
+        if kind is float and math.isfinite(item):
+            return item
+        if kind is list and len(item) + nodes <= 65536:
+            return [copy(child, depth + 1) for child in item]
+        if kind is dict and 2 * len(item) + nodes <= 65536:
+            if any(type(key) is not str for key in item):
+                raise ValueError("Reference JSON keys must be strings")
+            return {copy(key, depth + 1): copy(child, depth + 1) for key, child in item.items()}
+        raise ValueError("Reference requires strict JSON values")
+
+    if type(value) is not dict:
+        raise ValueError("Reference JSON must be an object")
+    try:
+        detached = copy(value, 0)
+        chunks, size = [], 0
+        for chunk in json.JSONEncoder(ensure_ascii=False, sort_keys=True, allow_nan=False).iterencode(detached):
+            size += len(chunk.encode("utf-8"))
+            if size > limit:
+                raise ValueError("Reference JSON exceeds byte budget")
+            chunks.append(chunk)
+    except (UnicodeError, RecursionError):
+        raise ValueError("Invalid reference JSON encoding") from None
+    if contains_secret_material(detached):
+        raise ValueError("Reference JSON contains credential material")
+    return detached, "".join(chunks)
+
+
+def _reference_json_load(raw: str, *, limit: int = 512 * 1024) -> dict[str, Any]:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("Duplicate reference JSON key")
+            result[key] = value
+        return result
+
+    try:
+        if type(raw) is not str or len(raw) > limit or len(raw.encode("utf-8")) > limit:
+            raise ValueError("Invalid stored reference JSON")
+        return _reference_json(json.loads(raw, object_pairs_hook=unique), limit=limit)[0]
+    except (ValueError, TypeError, RecursionError):
+        raise ValueError("Invalid stored reference JSON") from None
+
+
+def _reference_id(value: Any, limit: int = 128) -> None:
+    if (type(value) is not str or not value or len(value) > limit
+            or any(char.isspace() or ord(char) < 32 for char in value)):
+        raise ValueError("Invalid reference identifier")
+    try:
+        if len(value.encode("utf-8")) > limit or contains_secret_material(value):
+            raise ValueError("Invalid reference identifier")
+    except UnicodeError:
+        raise ValueError("Invalid reference identifier") from None
+
+
+def _reference_authority(key, trace_id, user_id, session_id, token, generation):
+    _reference_id(key, 256)
+    for value in (trace_id, user_id, session_id):
+        _reference_id(value)
+    if (type(token) is not str or len(token) != 32
+            or any(char not in "0123456789abcdef" for char in token)
+            or type(generation) is not int or not 1 <= generation < 2**63):
+        raise ValueError("Invalid reference claim authority")
+    return key, trace_id, user_id, session_id, token, generation
+
+
+def _reference_receipt(row) -> dict[str, Any]:
+    _reference_authority(*(row[name] for name in
+        ("key", "trace_id", "user_id", "session_id", "token", "generation")))
+    if (row["state"] not in {"claimed", "ready", "blocked"}
+            or type(row["started_generation"]) is not int
+            or not 0 <= row["started_generation"] <= row["generation"]):
+        raise ValueError("Invalid stored reference state")
+    payload, _ = _reference_json({"identity": _reference_json_load(row["identity_json"]),
+                                  "context": _reference_json_load(row["context_json"])})
+    return {**{name: row[name] for name in
+               ("key", "trace_id", "user_id", "session_id", "token", "generation", "state")}, **payload}
+
+
+def _reference_written(cursor) -> None:
+    if cursor.rowcount != 1:
+        raise sqlite3.OperationalError("Reference authority write unconfirmed")
+
+
 class SQLiteAgentStateStore:
     """SQLite-backed durable state store for Agent execution and curated memory."""
 
@@ -130,6 +242,19 @@ class SQLiteAgentStateStore:
 
     def _initialize(self) -> None:
         schema = """
+        CREATE TABLE IF NOT EXISTS agent_reference_requests (
+            key TEXT PRIMARY KEY NOT NULL,
+            trace_id TEXT NOT NULL UNIQUE,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            identity_json TEXT NOT NULL,
+            context_json TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK(generation >= 1),
+            token TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('claimed', 'ready', 'blocked')),
+            started_generation INTEGER NOT NULL DEFAULT 0
+                CHECK(started_generation >= 0 AND started_generation <= generation)
+        );
         CREATE TABLE IF NOT EXISTS agent_runs (
             trace_id TEXT PRIMARY KEY,
             status TEXT NOT NULL,
@@ -143,6 +268,22 @@ class SQLiteAgentStateStore:
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS agent_reference_run_history (
+            request_key TEXT NOT NULL,
+            generation INTEGER NOT NULL CHECK(generation >= 0),
+            trace_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            prior_run_json TEXT NOT NULL,
+            archived_at REAL NOT NULL,
+            PRIMARY KEY(request_key, generation)
+        );
+        CREATE TRIGGER IF NOT EXISTS reference_history_no_update
+            BEFORE UPDATE ON agent_reference_run_history
+            BEGIN SELECT RAISE(ABORT, 'Reference history is append-only'); END;
+        CREATE TRIGGER IF NOT EXISTS reference_history_no_delete
+            BEFORE DELETE ON agent_reference_run_history
+            BEGIN SELECT RAISE(ABORT, 'Reference history is append-only'); END;
         CREATE TABLE IF NOT EXISTS agent_checkpoints (
             id TEXT PRIMARY KEY,
             trace_id TEXT NOT NULL,
@@ -249,6 +390,204 @@ class SQLiteAgentStateStore:
         """
         with self._lock, self._connect() as connection:
             connection.executescript(schema)
+
+    def claim_reference_request(
+        self, key: str, proposed_trace_id: str, *, user_id: str, session_id: str,
+        identity: dict[str, Any], context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Create authority or reclaim READY, retaining the first context/trace.
+
+        Identity excludes transient request history by caller contract. This
+        method never derives identity, consults a TTL, or writes agent_runs.
+        None means denial; malformed/secret data and database failures raise.
+        A receipt is returned only after the transaction successfully commits.
+        """
+        _reference_id(key, 256)
+        for value in (proposed_trace_id, user_id, session_id):
+            _reference_id(value)
+        if type(identity) is not dict or type(context) is not dict:
+            raise ValueError("Reference identity/context must be objects")
+        payload, _ = _reference_json({"identity": identity, "context": context})
+        identity_json = json.dumps(payload["identity"], ensure_ascii=False, sort_keys=True, allow_nan=False)
+        context_json = json.dumps(payload["context"], ensure_ascii=False, sort_keys=True, allow_nan=False)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM agent_reference_requests WHERE key=?", (key,)).fetchone()
+            token = uuid4().hex
+            if row is None:
+                if connection.execute("SELECT 1 FROM agent_reference_requests WHERE trace_id=?", (proposed_trace_id,)).fetchone():
+                    return None
+                _reference_written(connection.execute(
+                    """INSERT INTO agent_reference_requests
+                    (key, trace_id, user_id, session_id, identity_json, context_json, generation, token, state)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, ?, 'claimed')""",
+                    (key, proposed_trace_id, user_id, session_id, identity_json, context_json, token)))
+            else:
+                if row["user_id"] != user_id or row["session_id"] != session_id or row["state"] != "ready":
+                    return None
+                receipt = _reference_receipt(row)
+                # Compare strict canonical JSON, not Python's True == 1.
+                if json.dumps(receipt["identity"], ensure_ascii=False, sort_keys=True, allow_nan=False) != identity_json:
+                    return None
+                if row["generation"] == 2**63 - 1:
+                    raise ValueError("Reference generation exhausted")
+                _reference_written(connection.execute(
+                    """UPDATE agent_reference_requests SET state='claimed', generation=generation+1, token=?
+                    WHERE key=? AND state='ready' AND generation=? AND token=?""",
+                    (token, key, row["generation"], row["token"])))
+            receipt = _reference_receipt(connection.execute(
+                "SELECT * FROM agent_reference_requests WHERE key=?", (key,)).fetchone())
+        return receipt
+
+    def get_reference_claim(self, trace_id: str, *, user_id: str, session_id: str) -> dict[str, Any] | None:
+        """Read current CLAIMED authority, not permission to start/resume work."""
+        for value in (trace_id, user_id, session_id):
+            _reference_id(value)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT * FROM agent_reference_requests
+                WHERE trace_id=? AND user_id=? AND session_id=? AND state='claimed'""",
+                (trace_id, user_id, session_id)).fetchone()
+            return _reference_receipt(row) if row is not None else None
+
+    def validate_reference_request_claim(
+        self, key: str, *, trace_id: str, user_id: str, session_id: str, token: str, generation: int,
+    ) -> dict[str, Any] | None:
+        """Non-consuming snapshot; start_reference_run provides atomic admission.
+
+        Waiting resumes require the existing continuation nonce CAS first;
+        this read alone must never authorize a running trace or settle a turn.
+        """
+        authority = _reference_authority(key, trace_id, user_id, session_id, token, generation)
+        with self._lock, self._connect() as connection:
+            row = self._reference_claim_row(connection, authority)
+            return _reference_receipt(row) if row is not None else None
+
+    @staticmethod
+    def _reference_claim_row(connection, authority):
+        return connection.execute(
+            """SELECT * FROM agent_reference_requests WHERE key=? AND trace_id=? AND user_id=?
+            AND session_id=? AND token=? AND generation=? AND state='claimed'""", authority).fetchone()
+
+    def settle_reference_request(
+        self, key: str, *, trace_id: str, user_id: str, session_id: str, token: str, generation: int,
+        state: Literal["ready", "blocked"],
+    ) -> bool:
+        """Terminal-only CAS; caller MUST have admitted and physically drained.
+
+        Waiting keeps CLAIMED. A failed initial admission may be BLOCKED by
+        its claimant; a losing continuation must not settle the winner's claim.
+        The store cannot infer physical settlement from agent_runs.status.
+        """
+        authority = _reference_authority(key, trace_id, user_id, session_id, token, generation)
+        if type(state) is not str or state not in {"ready", "blocked"}:
+            raise ValueError("Invalid reference settlement state")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._reference_claim_row(connection, authority)
+            if row is None:
+                return False
+            _reference_receipt(row)
+            updated = connection.execute(
+                """UPDATE agent_reference_requests SET state=? WHERE key=? AND trace_id=? AND user_id=?
+                AND session_id=? AND token=? AND generation=? AND state='claimed'""", (state, *authority))
+            settled = updated.rowcount == 1
+        return settled
+
+    def start_reference_run(
+        self, run: dict[str, Any], claim: dict[str, Any], *, resume_claimed: bool = False,
+    ) -> bool:
+        """Atomically consume this generation's initial start and start the run.
+
+        Does not change legacy start_run/claim_workflow_run contracts. Waiting
+        continuation uses its original nonce CAS, never this method again.
+        The receipt, not a local carrier/admitted flag, supplies authority.
+        Reopening atomically archives the prior row and retires its active
+        presentations; history is never consulted by presentation read/ACK.
+        """
+        if type(resume_claimed) is not bool:
+            raise ValueError("Invalid reference start mode")
+        if resume_claimed:
+            return False
+        names = {"key", "trace_id", "user_id", "session_id", "token", "generation", "state", "identity", "context"}
+        if type(claim) is not dict or not names <= set(claim) or set(claim) - names - {"admitted"}:
+            raise ValueError("Invalid reference receipt")
+        if "admitted" in claim and type(claim["admitted"]) is not bool:
+            raise ValueError("Invalid local admission marker")
+        authority = _reference_authority(*(claim[name] for name in
+            ("key", "trace_id", "user_id", "session_id", "token", "generation")))
+        # Never include the opaque server claim token in credential scanning.
+        _, supplied_json = _reference_json({"identity": claim["identity"], "context": claim["context"]})
+        data, _ = _reference_json(run)
+        if (claim["state"] != "claimed" or data.get("status") != "running"
+                or any(data.get(name) != claim[name] for name in ("trace_id", "user_id", "session_id"))
+                or data.get("idempotency_key") != claim["key"]):
+            return False
+        if _has_scientific_presentations(data.get("metadata")):
+            raise ValueError("scientific presentations require the dedicated boundary")
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = self._reference_claim_row(connection, authority)
+            if row is None or row["started_generation"] == row["generation"]:
+                return False
+            current = _reference_receipt(row)
+            _, current_json = _reference_json({name: current[name] for name in ("identity", "context")})
+            if supplied_json != current_json:
+                return False
+            frozen = current["context"]
+            if (any(frozen.get(name) != current[name] for name in ("trace_id", "user_id", "session_id"))
+                    or data.get("query") != frozen.get("query")
+                    or data.get("skill_name") != frozen.get("active_skill")
+                    or type(data.get("metadata", {})) is not dict
+                    or _reference_json(data.get("metadata", {}))[1] != _reference_json(frozen.get("metadata", {}))[1]):
+                return False
+            prior = connection.execute("SELECT * FROM agent_runs WHERE trace_id=?", (current["trace_id"],)).fetchone()
+            if prior is not None and (
+                    prior["status"] not in {"succeeded", "completed", "partial", "failed", "cancelled", "rejected"}
+                    or any(prior[name] != data.get(name) for name in
+                           ("user_id", "session_id", "idempotency_key", "query", "skill_name"))):
+                return False
+            prior_json = None
+            if prior is not None:
+                # Preserve the entire original row, including the raw metadata
+                # JSON, confirmation state and fixed TTL. Invalid history must
+                # remain in place rather than being coerced, redacted or lost.
+                from .scientific_references import _namespace
+                try:
+                    prior_metadata = _reference_json_load(prior["metadata_json"], limit=2 * 1024 * 1024)
+                    views = _namespace(prior_metadata)
+                    if any(item["presentation"]["source_trace_id"] != prior["trace_id"] for item in views):
+                        return False
+                    _, prior_json = _reference_json(dict(prior), limit=4 * 1024 * 1024)
+                except (ValueError, TypeError, KeyError, RecursionError):
+                    return False
+            now = time.time()
+            metadata_json = json.dumps(data.get("metadata", {}), ensure_ascii=False, sort_keys=True, allow_nan=False)
+            if prior is None:
+                _reference_written(connection.execute(
+                    """INSERT INTO agent_runs (trace_id, status, skill_name, query, workflow_version,
+                    idempotency_key, user_id, session_id, metadata_json, created_at, updated_at)
+                    VALUES (?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (data["trace_id"], data.get("skill_name"), data.get("query"), data.get("workflow_version"),
+                     data["idempotency_key"], data["user_id"], data["session_id"], metadata_json, now, now)))
+            else:
+                # started_generation names the run being retired, not the new
+                # claimant. Zero denotes a pre-claim terminal run. Never upsert:
+                # a duplicate archive is a conflict, not permission to replace.
+                _reference_written(connection.execute(
+                    """INSERT INTO agent_reference_run_history
+                    (request_key, generation, trace_id, user_id, session_id, prior_run_json, archived_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (current["key"], row["started_generation"], current["trace_id"],
+                     current["user_id"], current["session_id"], prior_json, now)))
+                _reference_written(connection.execute(
+                    """UPDATE agent_runs SET status='running', workflow_version=?, metadata_json=?, updated_at=?
+                    WHERE trace_id=?""", (data.get("workflow_version"), metadata_json, now, data["trace_id"])))
+            _reference_written(connection.execute(
+                """UPDATE agent_reference_requests SET started_generation=generation WHERE key=?
+                AND trace_id=? AND user_id=? AND session_id=? AND token=? AND generation=? AND state='claimed'""",
+                authority))
+        return True
 
     def start_run(self, run: dict[str, Any], *, exclusive: bool = False) -> None:
         if type(exclusive) is not bool:

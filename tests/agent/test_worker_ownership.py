@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 
 from src.agent.contracts import AgentContext, AgentErrorCode, ToolResult
-from src.agent.harness.decision_execution import SingleAttemptTool, settle_action
+from src.agent.scientific_session.decision_execution import SingleAttemptTool, settle_action
 from src.agent.orchestrators.base import WorkflowStep
 from src.agent.orchestrators.workflow import WorkflowOrchestrator
 from src.agent.runtime.run_session import WorkflowRunSession

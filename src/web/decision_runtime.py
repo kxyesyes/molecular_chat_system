@@ -14,19 +14,19 @@ from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
 
-from src.agent.contracts import AgentResult, RunOutcome
+from src.agent.contracts import AgentResult, RunOutcome, AgentExecutionError, AgentErrorCode
 from src.agent.contracts.decision import decode_protocol_json, DecisionProtocolError
 from src.agent.contracts.ordinary_admission import (
     AdmissionCarryIn, AdmissionExchange, begin_segment, remaining_credit,
     settled_waiting_credit, binding_digest, validate_carry_in,
 )
 from src.agent.decision_transport import IntentJournal
-from src.agent.harness.decision_loop import ModelDecisionLoop
-from src.agent.harness.decision_history import HistoryUpdate, history_pairs, history_prefix, retain_history_pair
-from src.agent.harness.decision_inputs import (
+from src.agent.pi_runtime.runtime import PiAgentRuntime
+from src.agent.scientific_session.decision_history import HistoryUpdate, history_pairs, history_prefix, retain_history_pair
+from src.agent.scientific_session.decision_inputs import (
     activity_input_target, effective_molecule, has_explicit_molecule, require_current_reference,
 )
-from src.agent.harness.decision_policy import DecisionBoundaryError, encode_observation
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError, encode_observation
 from src.agent.persistence.redaction import REDACTED, contains_secret_material, redact_sensitive
 from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError, retain_until_done
 from .decision_chat import _result_frame, _durable_admission_facts, await_with_deadline, SEND_TIMEOUT_SECONDS
@@ -45,6 +45,23 @@ _WEB_REQUEST_VERSION = 1
 
 def terminal_message_for_reason(reason):
     """Return a user-facing terminal message without exposing internal codes."""
+    if reason == 'web_clarification_changes_request':
+        return '补充输入改变了原任务，请发起新请求；未继续执行旧计划。'
+    if reason == 'molecular_input_required':
+        return '请提供要计算的分子的有效 SMILES（例如 CCO），再提交性质计算请求。当前请求未调用模型或科学工具。'
+    if reason == 'target_clarification_required':
+        return '请明确本次使用的单一靶点标识后重试。'
+    if reason == 'invalid_molecular_input':
+        return '你提供的 SMILES 无效，请检查并更正结构后重试。本次未进行科学计算。'
+    if reason == 'molecular_validation_unavailable':
+        return '当前无法校验 SMILES，请稍后重试。本次未进行科学计算。'
+    if reason == 'input_budget_exceeded':
+        return '当前问题超过输入字符预算或预算配置无效，请缩短问题或检查配置；内容未被截断，未调用模型或科学工具。'
+    if reason == 'decision_input_budget_exceeded':
+        return '当前决策所需的完整上下文超过输入字符预算，已停止后续模型调用；问题和科学证据未被截断，不能声明任务全部完成。'
+    if reason == 'scientific_reference_unavailable':
+        from .scientific_references import REFERENCE_CLARIFICATION
+        return REFERENCE_CLARIFICATION
     if reason == 'request_clarification_required':
         return ('请明确要处理的对象和具体问题；如包含多个任务，请拆分后重试。'
                 '当前请求未执行科学工具。')
@@ -166,6 +183,9 @@ class _Turn:
     admission_carry: object = None
     admission_exchange: object = None
     docking_result: dict | None = None
+    scientific_projection: object = None
+    scientific_update: list | None = None
+    reference_claim: dict | None = None
 
     def cancel(self):
         if self.result_started or self.finishing or self.cancel_event.is_set():
@@ -184,6 +204,7 @@ class _Sender:
         self.lock = asyncio.Lock()
         self.writable = True
         self.memory = []
+        self.scientific_memory = []
         self.waiting = None
         self.close_attempted = False
         self.close_delivered = False
@@ -400,12 +421,26 @@ class _TurnSender:
         if frame['type'] == 'agent_result':
             self.turn.result_started = True
             frame['metadata']['retrieval_performed'] = False
+            if frame['metadata'].get('binding_profile') == 'medchat-web-v1':
+                retrievals = [row for row in frame.get('tool_result_sequence', [])
+                    if row.get('tool_name') == 'rag_search' and row.get('status') != 'not_calculated']
+                if retrievals:
+                    frame['metadata']['retrieval_performed'] = (True if any(
+                        row.get('status') in {'succeeded', 'partial'} and row.get('error') is None
+                        for row in retrievals) else None)
             flag = self.turn.payload.get('enable_rag', True)
             if self.turn.waiting is not None:
                 flag = self.turn.waiting.context.metadata['capabilities']['rag']
             frame['metadata']['rag_requested'] = flag if type(flag) is bool else None
         text = json.dumps(frame, ensure_ascii=False, allow_nan=False)
         if frame['type'] == 'complete':
+            if (getattr(self.sender._runtime, 'full_web', False)
+                    and frame.get('status') == 'rejected'
+                    and (frame.get('error') or {}).get('code') == 'allocation_busy'):
+                # Capacity rejection never entered the segment that replaces
+                # the cached prior snapshot. Do not republish it on delivery.
+                self.turn.scientific_update = [
+                    {'user': self.turn.payload.get('message', ''), 'agent_used': False}]
             if (frame.get('status') == 'timeout'
                     and frame.get('error', {}).get('code') == 'allocation_timeout'):
                 # The allocation latch has barred tool dispatch. Publish now,
@@ -443,6 +478,7 @@ class WebDecisionRuntime:
         self.docking_operations = set()
         self.closing = False
         self.semantic = getattr(application, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1'
+        self.full_web = getattr(application, 'ordinary_chat_policy', 'a1_closed') == 'medchat-web-v1'
         self.timeout_seconds = 300.0
         self.max_model_requests = 16
 
@@ -579,7 +615,7 @@ class WebDecisionRuntime:
         """Persist only the request envelope needed to reconstruct a wait.
 
         The scientific continuation itself is written by the existing CAS in
-        ModelDecisionLoop. This metadata is deliberately separate: it contains
+        PiAgentRuntime. This metadata is deliberately separate: it contains
         no live socket, model object, credential, or tool result.
         """
         record = self.store.get_run(turn.trace_id)
@@ -604,6 +640,12 @@ class WebDecisionRuntime:
                 'selection': payload.get('selection'),
                 'memory': context.memory,
             }
+            if self.full_web:
+                request.update(
+                    mol_count_supplied='requested_count' in context.metadata,
+                    output_limit=context.metadata['decision_output_limit'],
+                    input_max_chars=context.metadata['decision_input_max_chars'],
+                    history_max_chars=context.metadata['decision_history_max_chars'])
             request = self._bounded_json(request)
             if not isinstance(request, dict):
                 raise ValueError('web request is not persistable')
@@ -666,10 +708,25 @@ class WebDecisionRuntime:
                 'reference': web_request.get('reference'),
                 'selection': web_request.get('selection'),
             }
-            prepared = prepare_decision_request(payload,
+            if self.full_web:
+                # A normalized default is not an explicit generation override.
+                # Keep the original omission through durable reconstruction;
+                # ambiguous older experimental records must not be guessed.
+                count_supplied = web_request['mol_count_supplied']
+                if type(count_supplied) is not bool:
+                    return None
+                if not count_supplied:
+                    payload.pop('mol_count')
+            from .web_request import prepare_web_request
+            prepare = prepare_web_request if self.full_web else prepare_decision_request
+            prepared = prepare(payload,
                 session_id=session_id, trace_id=trace_id,
                 references=self.references,
-                config_generation=web_request.get('config_generation'))
+                config_generation=web_request.get('config_generation'),
+                **({'history': web_request.get('memory', []),
+                    'max_output_tokens': web_request['output_limit'],
+                    'input_max_chars': web_request['input_max_chars'],
+                    'history_max_chars': web_request['history_max_chars']} if self.full_web else {}))
             context = prepared.context
             context.memory = history_pairs(web_request.get('memory', []))
             return _Waiting(context, prepared, continuation_id,
@@ -780,6 +837,13 @@ class WebDecisionRuntime:
             if generation != prepared.config_generation or self._clock() >= waiting.expires_at:
                 raise ValueError('stale waiting state')
             require_current_reference(original, self.store)
+            if self.full_web:
+                # Preserve the original compiled obligations. The Web resolver
+                # validates every appended journal input (including revocations)
+                # before dispatch; this layer cannot recompile a changed plan.
+                validate_request_envelope(dict(message=query), session_id=original.session_id,
+                    trace_id=original.trace_id, config_generation=generation)
+                return
             refined = prepare_decision_request(dict(message=query,
                 enable_tools=original.metadata['capabilities']['scientific_tools'],
                 enable_rag=original.metadata['capabilities']['rag'], temperature=original.temperature,
@@ -822,6 +886,12 @@ class WebDecisionRuntime:
             turn.next_waiting = None
         result = AgentResult(turn.trace_id, False, terminal_message_for_reason(reason), outcome=outcome,
                              metadata={'stop_reason': reason})
+        if self.full_web:
+            result.metadata['binding_profile'] = 'medchat-web-v1'
+            if reason in {'input_budget_exceeded', 'molecular_input_required'}:
+                result.error = AgentExecutionError(AgentErrorCode.INVALID_INPUT,
+                    terminal_message_for_reason(reason), {'reason': reason})
+            turn.scientific_update = [{'user': turn.payload.get('message', ''), 'agent_used': False}]
         if self.semantic:
             record = (turn.intent_journal.snapshot() if turn.intent_journal is not None else
                       turn.admission_carry.intent_record() if turn.admission_carry is not None else None)
@@ -845,6 +915,8 @@ class WebDecisionRuntime:
         sender.waiting = None
         turn.next_waiting = None
         turn.history_update = None
+        if self.full_web:
+            turn.scientific_update = [{'user': turn.payload.get('message', ''), 'agent_used': False}]
         turn.pending_complete = None
         await _TurnSender(sender, turn).send_text(json.dumps({
             'type': 'complete', 'trace_id': turn.trace_id, 'status': 'failed',
@@ -865,6 +937,31 @@ class WebDecisionRuntime:
     async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
+        execution_payload = turn.payload
+        if self.full_web and turn.waiting is None:
+            from .web_business import WebTurnProjection
+            from src.agent.scientific_session.decision_execution import settle_owned_call
+            envelope = validate_request_envelope(turn.payload,
+                session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id)
+            from .prompt_budget import InputBudgetExceeded, validate_question, character_limit
+            try:
+                validate_question(envelope.query, handler._input_limit())
+                character_limit(handler.config, section='history')
+            except InputBudgetExceeded:
+                raise DecisionAdmissionError('input_budget_exceeded') from None
+            projection = WebTurnProjection(envelope.query, envelope.session_id,
+                turn.scientific_update or [], reverse_boundary=handler._ranked_reverse_evidence())
+            turn.scientific_projection = projection
+            followup = await settle_owned_call(lambda: projection.followup(enable_tools=envelope.enable_tools),
+                                               worker_owner=turn.worker_owner)
+            if turn.cancel_event.is_set():
+                raise asyncio.CancelledError()
+            if followup is not None:
+                turn.scientific_update = [projection.entry]
+                await (allocation_sender or _TurnSender(sender, turn)).send_text(json.dumps(
+                    dict(type='complete', trace_id=turn.trace_id, **followup), ensure_ascii=False))
+                return
+            execution_payload = {**turn.payload, 'message': projection.execution_query()}
         await self.application._refresh_llm_config_from_env()
         self._credit(turn)
         async with self.application.model_request_gate.request():
@@ -881,9 +978,15 @@ class WebDecisionRuntime:
                         prepared, context = await self._prepare_semantic(
                             sender, turn, model, generation, base, capability_generation)
                     else:
-                        prepared = prepare_decision_request(turn.payload,
+                        from .web_request import prepare_web_request
+                        prepare = prepare_web_request if self.full_web else prepare_decision_request
+                        prepared = prepare(execution_payload,
                             session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id,
-                            references=self.references, config_generation=generation)
+                            references=self.references, config_generation=generation,
+                            **({'history': sender.memory, 'max_output_tokens': handler._model_max_tokens(model),
+                                'input_max_chars': handler._input_limit(),
+                                'history_max_chars': character_limit(handler.config, section='history')}
+                               if self.full_web else {}))
                         context = prepared.context
                         context.memory = history_pairs(sender.memory)
                     sender.waiting = None
@@ -903,11 +1006,33 @@ class WebDecisionRuntime:
                     prepared = turn.waiting.prepared
                     context = deepcopy(turn.waiting.context)
                     queries = (*turn.waiting.input_queries, turn.payload['message'])
-                frozen_context = deepcopy(context)
-                loop = ModelDecisionLoop(model, self.registry, self.store,
+                loop = PiAgentRuntime(model, self.registry, self.store,
                     mode=self.wire_mode, config_generation=generation,
+                    binding_profile=getattr(prepared, 'binding_profile', None),
                     **({'timeout_seconds': self.timeout_seconds, 'max_model_requests': self.max_model_requests}
                        if self.semantic else {}))
+                if self.full_web and context.resolved_molecule is not None:
+                    from .reference_retry import request_identity, frozen_admission, restore_admission
+                    if turn.waiting is None:
+                        key = request_identity(loop, prepared)
+                        receipt = self.store.claim_reference_request(key, context.trace_id,
+                            user_id=context.user_id, session_id=context.session_id,
+                            identity={'schema': 1, 'digest': key}, context=frozen_admission(prepared))
+                        if receipt is None:
+                            raise DecisionAdmissionError('reference_request_in_progress')
+                        turn.reference_claim = dict(receipt=receipt, admitted=False, verified=False, resuming=False)
+                        prepared = restore_admission(receipt['context'], runtime=loop, expected_key=key,
+                            owner=(context.user_id, context.session_id), prepared=prepared)
+                        context = prepared.context
+                        turn.trace_id = context.trace_id
+                    else:
+                        receipt = self.store.get_reference_claim(context.trace_id,
+                            user_id=context.user_id, session_id=context.session_id)
+                        if receipt is not None:
+                            turn.reference_claim = dict(receipt=receipt, admitted=False, verified=False, resuming=True)
+                        elif (self.store.get_run(context.trace_id) or {}).get('idempotency_key') is not None:
+                            raise DecisionAdmissionError('continuation_rejected')
+                frozen_context = deepcopy(context)
                 self._credit(turn)
                 if self.semantic:
                     turn.admission_exchange = AdmissionExchange()
@@ -920,10 +1045,18 @@ class WebDecisionRuntime:
                     continuation_id=turn.waiting.continuation_id if turn.waiting is not None else None,
                     clarified_query=turn.payload['message'] if turn.waiting is not None else None,
                     cancel_event=turn.cancel_event,
+                    **({'web_projection': turn.scientific_projection} if self.full_web else {}),
+                    **({'reference_claim': turn.reference_claim} if turn.reference_claim is not None else {}),
                     **({'admission_carry': turn.admission_carry, 'admission_exchange': turn.admission_exchange}
                        if self.semantic else {}))
                 if turn.allocation_timed_out:
                     return  # Never mutate a newer turn's history/waiting state.
+                if self.full_web:
+                    turn.scientific_update = ([turn.scientific_projection.entry]
+                        if turn.scientific_projection is not None
+                        and result.outcome in {RunOutcome.COMPLETED, RunOutcome.PARTIAL}
+                        and not result.metadata.get('waiting_for_input') else
+                        [{'user': turn.payload.get('message', ''), 'agent_used': False}])
                 if (_enabled_docking_controller(handler, self) is not None
                         and type(result) is AgentResult and result.success is True
                         and result.outcome == RunOutcome.COMPLETED):
@@ -984,6 +1117,13 @@ class WebDecisionRuntime:
 
     async def _execute(self, handler, sender, turn):
         turn.started = True
+        if self.full_web:
+            turn.scientific_update = deepcopy(sender.scientific_memory[-1:])
+            # Keep bounded socket-local records without letting an interrupted
+            # or rejected intervening turn expose older evidence as "previous".
+            # Only this non-authoritative marker is replaced after delivery.
+            sender.scientific_memory.append({'user': turn.payload.get('message', ''), 'agent_used': False})
+            del sender.scientific_memory[:-20]
         try:
             if turn.cancel_event.is_set():
                 raise asyncio.CancelledError()
@@ -1056,6 +1196,15 @@ class WebDecisionRuntime:
         finally:
             # Also seals owners cancelled during refresh or queued admission.
             await turn.worker_owner.settle()
+            if turn.reference_claim is not None:
+                from .reference_retry import settle_reference_turn
+                try:
+                    settle_reference_turn(self.store, turn.reference_claim, physically_settled=True)
+                except Exception:
+                    # No speculative repair or time-based takeover. A failed
+                    # release leaves durable claim authority unavailable; an
+                    # uncertain commit happened only AFTER physical drain.
+                    pass
             self.active_owners.discard(turn)
         if sender.writable and turn.pending_complete is not None:
             try:
@@ -1074,6 +1223,8 @@ class WebDecisionRuntime:
                         capture_delivered = terminal_status == 'completed'
                         if turn.history_update is not None:
                             sender.memory = turn.history_update.memory
+                        if self.full_web and turn.scientific_update is not None:
+                            sender.scientific_memory[-1:] = turn.scientific_update[-1:]
                         if turn.next_waiting is not None:
                             if turn.admission_carry is not None:
                                 checkpoint = turn.admission_exchange.checkpoint
@@ -1128,13 +1279,16 @@ class WebDecisionRuntime:
                 receiver.cancel()
 
         try:
-            await sender.send({'type': 'connection_ready', 'normal_chat_mode': 'decision_a2',
+            from src.agent.contracts.web_requirements import WEB_TOOLS
+            registered = set(self.registry.as_mapping())
+            scientific_tools = (WEB_TOOLS - {'rag_search'} if self.full_web else {
+                'property_calculator', 'drug_likeness_assessment',
+                'activity_predictor', 'target_database_search'})
+            await sender.send({'type': 'connection_ready', 'normal_chat_mode': 'pi',
                 'reconnect_supported': not self.semantic,
                 'run_snapshot_api': True,
-                'capabilities': {'cancel': True, 'rag_retrieval': False,
-                                 'scientific_tools': sorted(set(self.registry.as_mapping()) & {
-                                     'property_calculator', 'drug_likeness_assessment',
-                                     'activity_predictor', 'target_database_search'}),
+                'capabilities': {'cancel': True, 'rag_retrieval': self.full_web and 'rag_search' in registered,
+                                 'scientific_tools': sorted(registered & scientific_tools),
                                  **({'chat_docking': {'preparation_available': True,
                                       'execution_authorized': False}} if controller is not None else {})}})
             while not self.closing:
@@ -1275,6 +1429,7 @@ class WebDecisionRuntime:
             sender.writable = False
             sender.waiting = None
             sender.memory = []
+            sender.scientific_memory.clear()
             sender.receiver_attached = False
             if controller is not None:
                 await controller.disconnect(sender)
@@ -1295,6 +1450,7 @@ class WebDecisionRuntime:
             sender.writable = False
             sender.waiting = None
             sender.memory = []
+            sender.scientific_memory.clear()
             controller = getattr(sender, '_chat_controller', None)
             if controller is not None:
                 await controller.disconnect(sender)

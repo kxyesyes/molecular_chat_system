@@ -59,7 +59,7 @@ def _accepted(cp, run, sequence, ledger):
         records = [e for e in ledger if e.get("evidence_id") == eid]
         _check(len(records) == 1 and reference_json(records[0]) == reference_json(verifier.get(eid)))
     if cp["tool_name"] == "llm_molecular_generator":
-        _candidates(cp, run["trace_id"])
+        _candidates(cp, run["trace_id"], row=run, run_metadata=run["metadata"])
     elif cp["tool_name"] == "property_calculator":
         _AnalysisRawOutput.model_validate(raw, context={"tool_name": "property_calculator"})
     source = dict(observation_id=cp["id"], step_id=cp["step_id"], tool_name=cp["tool_name"],

@@ -88,7 +88,7 @@ def application(rig, monkeypatch):
         base_url='https://example.invalid/v1', client=client)
     app = SimpleNamespace(app=FastAPI(), model=model, model_generation='model-1',
         capability_generation='cap-1', model_request_gate=ModelRequestGate(),
-        normal_chat_mode='legacy', decision_wire_mode='native', decision_runtime=None,
+        normal_chat_mode='pi', decision_wire_mode='native', decision_runtime=None,
         chat_handler=SimpleNamespace(decision_runtime=None),
         _get_agent_state_store=lambda: state, _get_agent_tool_registry=lambda: {},
         _get_scientific_references=lambda: None)
@@ -137,7 +137,7 @@ def test_default_disabled_has_no_feature_construction(application, monkeypatch, 
 
 
 @run_async
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 async def test_actual_assembly_shares_runtime_state_policy_and_routes(application, rig, monkeypatch, mode):
     monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', '1')
     application.normal_chat_mode = mode
@@ -326,7 +326,7 @@ def test_app_disabled_keeps_default_binding_without_feature_import(application, 
 
 
 @run_async
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 async def test_app_shutdown_hook_and_direct_close_order(application, app_class, rig, monkeypatch, mode):
     monkeypatch.setenv('MEDCHAT_CHAT_DOCKING_ENABLED', '1')
     app = app_class.__new__(app_class)
@@ -637,7 +637,7 @@ async def test_no_worker_timeout_shutdown_requires_confirmed_cleanup(
                 assert app.model_request_gate.closed
 
 
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 def test_sync_bootstrap_failure_survives_host_loop_shutdown(bootstrap, monkeypatch, mode):
     monkeypatch.setenv('MEDCHAT_TASK_BACKEND', 'temporal_canary')
     async def main():
@@ -649,7 +649,7 @@ def test_sync_bootstrap_failure_survives_host_loop_shutdown(bootstrap, monkeypat
     assert not bootstrap.cls._failed_assembly_cleanups
 
 
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 @pytest.mark.parametrize('cancellation', ['cooperative', 'noncooperative'])
 def test_sync_bootstrap_host_shutdown_after_closer_entry_keeps_owner(
         bootstrap, monkeypatch, mode, cancellation):
@@ -707,7 +707,7 @@ def test_sync_bootstrap_host_shutdown_after_closer_entry_keeps_owner(
     assert not bootstrap.cls._failed_assembly_cleanups
 
 
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 def test_actual_sync_bootstrap_failure_closes_pre_d6_owners(bootstrap, monkeypatch, mode):
     monkeypatch.setenv('MEDCHAT_TASK_BACKEND', 'temporal_canary')
     with pytest.raises(DockingConsentError, match='^consent_policy_unavailable$'):
@@ -722,7 +722,7 @@ def test_actual_sync_bootstrap_failure_closes_pre_d6_owners(bootstrap, monkeypat
 
 
 @run_async
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 async def test_sync_bootstrap_failure_in_running_loop_retains_cleanup(bootstrap, monkeypatch, mode):
     monkeypatch.setenv('MEDCHAT_TASK_BACKEND', 'temporal_canary')
     bootstrap.entered, bootstrap.release = asyncio.Event(), asyncio.Event()
@@ -769,7 +769,7 @@ async def test_sync_bootstrap_cleanup_cancelled_before_entry_keeps_owners(bootst
     assert not bootstrap.cls._failed_assembly_cleanups
 
 
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 def test_actual_sync_bootstrap_success_transfers_owners(bootstrap, mode):
     app = bootstrap.cls(normal_chat_mode=mode)
     assert not bootstrap.closed
@@ -794,7 +794,7 @@ def test_actual_sync_bootstrap_default_off_has_no_new_ownership(bootstrap, monke
 
 
 @run_async
-@pytest.mark.parametrize('mode', ['legacy', 'decision_a2'])
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
 async def test_async_bootstrap_failure_keeps_existing_cleanup(bootstrap, monkeypatch, mode):
     monkeypatch.setenv('MEDCHAT_TASK_BACKEND', 'temporal_canary')
     with pytest.raises(DockingConsentError, match='^consent_policy_unavailable$'):

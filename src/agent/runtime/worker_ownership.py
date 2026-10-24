@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar
-from threading import Condition
+import math
+from threading import Condition, Event
+import time
 
 
 _binding = ContextVar('agent_worker_ownership', default=None)
@@ -18,7 +20,24 @@ class WorkerCleanupError(RuntimeError):
         super().__init__('Owned worker cleanup remains unresolved')
 
 
-async def retain_until_done(task):
+class OwnedCallStopped(Exception):
+    """Terminal request-local signal, not a retryable provider failure."""
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__('Owned provider dispatch stopped')
+
+
+def provider_call_timeout(max_seconds=30.0):
+    """Check the actual worker's root before dispatch; never mutate a tool.
+
+    A synchronous provider already in flight still has to drain. This is not
+    evidence that a remote request was cancelled or physically stopped.
+    """
+    binding = _binding.get()
+    return max_seconds if binding is None else binding[0].provider_timeout(max_seconds)
+
+
+async def retain_until_done(task, *, on_cancel=None):
     """Repeated cancellation cannot orphan the retained task or its join thread."""
     cancelled = False
     while not task.done():
@@ -26,6 +45,8 @@ async def retain_until_done(task):
             await asyncio.shield(task)
         except asyncio.CancelledError:
             cancelled = True
+            if on_cancel is not None:
+                on_cancel()
     result = task.result()  # Failure takes precedence; never label it settled.
     if cancelled:
         raise asyncio.CancelledError()
@@ -49,10 +70,12 @@ class WorkerOwner:
             return 'unresolved'
         return 'settled' if self._sealed and not self._roots else 'pending'
 
-    def start_action(self):
+    def start_action(self, *, deadline=None):
         if self._sealed:
             raise RuntimeError('Worker turn is sealed')
-        root = _ActionRoot(self)
+        if deadline is not None and (type(deadline) not in (int, float) or not math.isfinite(deadline)):
+            raise ValueError('Invalid worker deadline')
+        root = _ActionRoot(self, deadline=deadline)
         self._roots.add(root)
         return root
 
@@ -69,14 +92,27 @@ class WorkerOwner:
 
 
 class _ActionRoot:
-    def __init__(self, owner):
+    def __init__(self, owner, *, deadline=None):
         self.owner = owner
+        self.deadline = deadline
+        self.cancelled = Event()
         self.condition = Condition()
         self.records = set()
         self.started = False
         self.finished = False
         self.failed = False
         self._settler = None
+
+    def cancel(self):
+        self.cancelled.set()
+
+    def provider_timeout(self, max_seconds):
+        if self.cancelled.is_set():
+            raise OwnedCallStopped('cancelled')
+        remaining = max_seconds if self.deadline is None else min(max_seconds, self.deadline - time.monotonic())
+        if remaining <= 0:
+            raise OwnedCallStopped('deadline_exceeded')
+        return remaining
 
     def run(self, call, *args):
         with self.condition:
@@ -151,7 +187,7 @@ class _ActionRoot:
         if self._settler is None:
             self._settler = asyncio.create_task(asyncio.to_thread(self._drain))
         try:
-            await retain_until_done(self._settler)
+            await retain_until_done(self._settler, on_cancel=self.cancel)
         finally:
             if (self._settler.done() and not self._settler.cancelled()
                     and self._settler.exception() is None):

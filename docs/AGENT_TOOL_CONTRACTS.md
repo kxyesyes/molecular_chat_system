@@ -23,6 +23,8 @@
 
 `rag_database_search` 是 `rag_search` 的旧别名，二者指向同一个注册项，不是两次检索能力。`rxn_chemistry_agent` 在 `NON_WORKFLOW_TOOLS` 中明确排除；未知工具名不能被静默丢弃或自动获得权限。
 
+完整 Web profile 的 RAG 输入新增可选的封闭计数形式：`{"query":{"query":"原始检索文本","k":5}}`，`k` 必须是 1–50 的整数。旧文本输入及 `{"query":"文本"}` 仍保持 `k=3`；B1 的输入/义务不升级。Web 的数量来自服务端冻结的请求参数，不由 Pi 提供；工具和当前来源校验同时核对 receipt 的原始 query 与 requested_k，不修改共享工具状态。该输入扩展不改变输出 schema、来源授权或科学可用性要求。
+
 ## 四个受限兼容 helper
 
 `src/agent/tools/docking_tools.py` 保留 `prepare_receptor`、`prepare_ligand`、`run_docking`、`get_docking_result`。它们的字符串 `execute()` 路径仅返回失败及结构化接口提示，不能执行真实对接服务；因此目前保留 `LegacyQueryInput` / 无独立输出模型这一兼容例外。
@@ -32,7 +34,7 @@
 ## 调用边界
 
 - 注册表负责规范名称、别名、归属、schema、超时及调用生命周期；`available=null` 表示懒加载就绪状态未知，不等于真实工具可用。
-- 模型决策权限还受 `src/agent/harness/decision_policy.py` 的受限集合、请求类型、开关、副作用与幂等策略控制。**十个已注册能力不等于十个已向普通聊天入口开放的动作。**
+- 模型决策权限还受 `src/agent/scientific_session/decision_policy.py` 的受限集合、请求类型、开关、副作用与幂等策略控制。**十个已注册能力不等于十个已向普通聊天入口开放的动作。**
 - 输入完整性、候选校验、活动模型状态、对接文件/能量证据及 RAG 来源等领域检查继续执行；类型通过不能单独支持科学结论。
 - 输出适配不能丢弃错误、warnings、evidence、artifacts、quality 或 provenance；失败、partial、不可用与 demo/fallback 不能变成真实成功。
 - 扩展字段保留不代表可信；下游只能消费通过现有领域校验、所有权检查与版本绑定的结果。不要从自然语言说明中补造科学输入或数值。

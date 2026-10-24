@@ -175,8 +175,14 @@ class HybridSkillRouter:
             "citation",
             "source",
         )
+        knowledge_intent = knowledge_intent or bool(re.search(
+            r'(?:检索|搜索|查找|查询)[^;；。]{0,12}数据库[^;；。]{0,12}(?:分子|化合物)|'
+            r'(?:search|find|look up)[^.;]{0,20}database[^.;]{0,20}(?:molecules?|compounds?)',
+            lower, re.I))
 
-        if has_target and generation:
+        explicit_lead_optimization = has_smiles and self._contains(
+            lower, "优化", "hit-to-lead", "lead optimization", "optimize", "optimise")
+        if has_target and generation and not explicit_lead_optimization:
             add("target_driven_design", 1.0, "target plus design workflow intent")
         if generation:
             add("molecular_design", 0.78, "molecular generation intent")

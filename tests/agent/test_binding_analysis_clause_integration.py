@@ -13,8 +13,8 @@ from src.agent.contracts import AgentContext
 from src.agent.contracts.binding_requirements import required_binding_tools
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
 from src.agent.contracts.target_request import analyze_target_request
-from src.agent.harness.decision_binding_inputs import BindingInputJournal
-from src.agent.harness.decision_bindings import prepare_binding_requirements
+from src.agent.scientific_session.decision_binding_inputs import BindingInputJournal
+from src.agent.scientific_session.decision_bindings import prepare_binding_requirements
 from src.agent.tooling.activity_contract import ActivityToolAdapter
 from src.agent.tooling.analysis_contract import AnalysisToolAdapter
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment

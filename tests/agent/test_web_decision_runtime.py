@@ -1,7 +1,7 @@
 """Actual application /ws contracts; MockTransport is NOT live inference.
 
 Only external construction boundaries are injected. Middleware, admission,
-registry, store, references, adapter, decision loop and Session remain real.
+registry, store, references, adapter, official Pi and scientific session remain real.
 No lifespan, real provider, model asset or RAG index is started/read.
 """
 import asyncio
@@ -62,9 +62,7 @@ def actual_app(tmp_path, monkeypatch):
 
     @asynccontextmanager
     async def build(*, mode=None, wire='native', respond=None, optional_tools=False,
-                    ordinary_policy=None):
-        if mode == 'decision_a2':
-            importlib.import_module('langgraph.graph')
+                    ordinary_policy='a1_closed', async_assembly=False):
         if optional_tools:
             # Constructors are lazy; clarification tests never load a predictor
             # or target service and still use the actual registry/adapters.
@@ -110,10 +108,12 @@ def actual_app(tmp_path, monkeypatch):
                 'https://example.invalid/v1', client=client)
             monkeypatch.setattr(module.MolecularChatApp, '_create_model_from_llm_config',
                                 lambda self, config: model)
-            kwargs = {} if mode is None else dict(normal_chat_mode=mode, decision_wire_mode=wire)
+            kwargs = dict(decision_wire_mode=wire)
+            if mode is not None:
+                kwargs['normal_chat_mode'] = mode
             if ordinary_policy is not None:
                 kwargs['ordinary_chat_policy'] = ordinary_policy
-            if ordinary_policy == 'semantic_v1':
+            if ordinary_policy == 'semantic_v1' or async_assembly:
                 application = await module.MolecularChatApp.create_async(str(tmp_path / 'missing.yaml'), **kwargs)
             else:
                 application = module.MolecularChatApp(str(tmp_path / 'missing.yaml'), **kwargs)
@@ -144,8 +144,13 @@ async def cookie_for(application):
 
 class ActualSocket:
     """In-memory ASGI transport driving the mounted application, not a copied route."""
-    def __init__(self, application, cookie, *, origin='http://127.0.0.1', host='127.0.0.1'):
+    def __init__(self, application, cookie, *, origin='http://127.0.0.1', host='127.0.0.1',
+                 receive_timeout=15):
         self.application = application
+        # Each admitted turn starts a real Pi child. This transport guard is
+        # not a cold-start latency contract; deadline tests separately bound
+        # delivery/cancellation after their provider-entry signals.
+        self.receive_timeout = receive_timeout
         self.incoming, self.outgoing = asyncio.Queue(), asyncio.Queue()
         headers = [(b'host', host.encode()), (b'origin', origin.encode())]
         if cookie is not None:
@@ -166,7 +171,7 @@ class ActualSocket:
         await asyncio.wait_for(self.task, 5)
 
     async def receive(self):
-        event = await asyncio.wait_for(self.outgoing.get(), 3)
+        event = await asyncio.wait_for(self.outgoing.get(), self.receive_timeout)
         if event['type'] == 'websocket.send':
             return json.loads(event.get('text') or event['bytes'])
         return event
@@ -199,16 +204,14 @@ def result_of(frames):
     return results[0]
 
 
-@pytest.mark.parametrize('mode', ['decision_a2', 'legacy'])
-def test_fixture_dependency_readiness_precedes_observer(actual_app, monkeypatch, mode):
+@pytest.mark.parametrize('mode', [None, 'pi', 'decision_a2'])
+def test_fixture_never_imports_optional_langgraph(actual_app, monkeypatch, mode):
     marks = []
     original_import, original_profile = importlib.import_module, sys.setprofile
 
     def observed_import(name, *args, **kwargs):
-        module = original_import(name, *args, **kwargs)
-        if name == 'langgraph.graph':
-            marks.append('graph_ready')
-        return module
+        assert not name.startswith('langgraph'), 'Pi Web must not require LangGraph'
+        return original_import(name, *args, **kwargs)
 
     def observed_profile(callback):
         if getattr(callback, '__name__', '') == 'observe_call':
@@ -221,8 +224,7 @@ def test_fixture_dependency_readiness_precedes_observer(actual_app, monkeypatch,
     async def run():
         previous_profile = sys.getprofile()
         async with actual_app(mode=mode):
-            expected = ['graph_ready', 'observer'] if mode == 'decision_a2' else ['observer']
-            assert marks == expected
+            assert marks == ['observer']
             assert getattr(sys.getprofile(), '__name__', '') == 'observe_call'
         assert sys.getprofile() is previous_profile
     asyncio.run(run())
@@ -246,7 +248,7 @@ def test_actual_first_chat_completes_with_observer(actual_app, send_before_ready
                 if send_before_ready:
                     await socket.send(payload)
                 ready = await socket.ready()
-                assert ready['normal_chat_mode'] == 'decision_a2'
+                assert ready['normal_chat_mode'] == 'pi'
                 if not send_before_ready:
                     await socket.send(payload)
                 frames = []
@@ -400,7 +402,7 @@ def test_actual_app_static_plan_run_contracts_are_unchanged(actual_app, monkeypa
                     assert b.app.model_request_gate._readers == 0
                     assert not b.calls and not b.admission_calls
                     assert '/api/chat' not in {r.path for r in b.app.app.routes}
-                    assert (b.app.decision_runtime is None) == (mode is None)
+                    assert b.app.decision_runtime is not None
         finally:
             await asyncio.to_thread(manager.executor.shutdown, wait=True)
     asyncio.run(run())
@@ -445,37 +447,89 @@ def test_exact_raw_frame_boundary_through_actual_route(actual_app, kind, size):
     asyncio.run(run())
 
 
-def test_default_ws_retains_legacy_and_has_no_decision_admission(actual_app, monkeypatch):
+@pytest.mark.parametrize('async_assembly', [False, True])
+def test_default_ws_uses_actual_pi_without_legacy_dispatch(actual_app, monkeypatch, async_assembly):
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
+    pi_runs = []
+    original_run = PiAgentRuntime.run
+
+    async def observed_run(self, *args, **kwargs):
+        pi_runs.append(self)
+        return await original_run(self, *args, **kwargs)
+
+    monkeypatch.setattr(PiAgentRuntime, 'run', observed_run)
     async def run():
-        async with actual_app() as b:
-            assert getattr(b.app.chat_handler, 'decision_runtime', None) is None
-            legacy = []
-            async def process(socket, message, *args, **kwargs):
-                legacy.append(message)
-                await socket.send_json({'type': 'complete'})
-            monkeypatch.setattr(b.app.chat_handler, '_process_message', process)
+        async with actual_app(async_assembly=async_assembly) as b:
+            assert b.app.normal_chat_mode == 'pi'
+            assert b.app.ordinary_chat_policy == 'a1_closed'
+            assert b.app.chat_handler.decision_runtime is b.app.decision_runtime
+            forbidden = Mock(side_effect=AssertionError('legacy path reached'))
+            assert not hasattr(b.app.chat_handler, '_process_message')
+            monkeypatch.setattr(b.app.agent_system, 'execute', forbidden)
+            monkeypatch.setattr('src.web.models.generate_for_chat', forbidden)
             paths = {route.path for route in b.app.app.routes}
             assert '/api/chat' not in paths
             assert {'/api/agent/workflows/plan', '/api/agent/workflows/run'} <= paths
             async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                 ready = await socket.ready()
-                assert ready.get('normal_chat_mode', 'legacy') == 'legacy'
-                await socket.turn({'message': '你好'})
-            assert legacy == ['你好'] and b.calls == [] and b.admission_calls == []
+                result = result_of(await socket.turn({'message': '你好'}))
+                assert result['success'] is True
+                assert result['final_answer'] == 'Protocol-only explanation'
+            assert len(pi_runs) == len(b.calls) == len(b.admission_calls) == 1
+            assert not forbidden.called and not b.rag.retrieve.called
+            assert ready['normal_chat_mode'] == 'pi'
+    asyncio.run(run())
+
+
+def test_missing_web_runtime_closes_without_legacy_or_science(actual_app, monkeypatch):
+    async def run():
+        async with actual_app() as b:
+            b.app.decision_runtime = None
+            b.app.chat_handler.decision_runtime = None
+            forbidden = Mock(side_effect=AssertionError('legacy path reached'))
+            assert not hasattr(b.app.chat_handler, '_process_message')
+            monkeypatch.setattr(b.app.agent_system, 'execute', forbidden)
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                error = await socket.ready()
+                assert error['type'] == 'error'
+                assert error['code'] == 'pi_runtime_unavailable'
+                closed = await socket.receive()
+                assert closed['type'] == 'websocket.close' and closed['code'] == 1011
+            assert not forbidden.called and not b.calls and not b.admission_calls
+    asyncio.run(run())
+
+
+def test_missing_pi_host_fails_closed_without_model_or_legacy(actual_app, monkeypatch):
+    async def run():
+        # Missing executable is detected on use, not by a startup network probe.
+        monkeypatch.setattr('src.agent.pi_runtime.bridge.shutil.which', lambda name: None)
+        async with actual_app() as b:
+            assert not b.calls
+            forbidden = Mock(side_effect=AssertionError('legacy path reached'))
+            assert not hasattr(b.app.chat_handler, '_process_message')
+            monkeypatch.setattr(b.app.agent_system, 'execute', forbidden)
+            async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
+                await socket.ready()
+                result = result_of(await socket.turn({'message': '计算性质；SMILES: CCO'}))
+                assert result['success'] is False and result['status'] == 'failed'
+                assert not result['tool_result_sequence']
+                assert b.app.agent_state_store.get_tool_executions(result['trace_id']) == []
+            assert not forbidden.called and not b.calls
     asyncio.run(run())
 
 
 @pytest.mark.parametrize('wire', ['native', 'json'])
-def test_enabled_ws_calls_existing_decision_loop_not_supervisor(actual_app, monkeypatch, wire):
+@pytest.mark.parametrize('mode', ['pi', 'decision_a2'])
+def test_explicit_pi_and_deprecated_alias_never_call_supervisor(actual_app, monkeypatch, wire, mode):
     async def run():
-        async with actual_app(mode='decision_a2', wire=wire) as b:
+        async with actual_app(mode=mode, wire=wire) as b:
+            assert b.app.normal_chat_mode == 'pi'
             forbidden = Mock(side_effect=AssertionError('legacy path reached'))
-            monkeypatch.setattr(b.app.chat_handler, '_process_message', forbidden)
+            assert not hasattr(b.app.chat_handler, '_process_message')
             monkeypatch.setattr(b.app.agent_system, 'execute', forbidden)
-            monkeypatch.setattr('src.web.chat_handler.generate_for_chat', forbidden)
+            monkeypatch.setattr('src.web.models.generate_for_chat', forbidden)
             async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                 ready = await socket.ready()
-                assert ready['normal_chat_mode'] == 'decision_a2'
                 assert set(ready['capabilities']['scientific_tools']) <= {
                     'property_calculator', 'drug_likeness_assessment',
                     'activity_predictor', 'target_database_search'}
@@ -489,6 +543,16 @@ def test_enabled_ws_calls_existing_decision_loop_not_supervisor(actual_app, monk
             assert len(b.calls) == 1
             assert len(b.admission_calls) == 1
             assert not forbidden.called and not b.rag.retrieve.called
+            assert ready['normal_chat_mode'] == 'pi'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('async_assembly', [False, True])
+def test_constructor_rejects_obsolete_legacy(actual_app, async_assembly):
+    async def run():
+        with pytest.raises(ValueError, match='obsolete.*pi'):
+            async with actual_app(mode='legacy', async_assembly=async_assembly):
+                pass
     asyncio.run(run())
 
 

@@ -14,6 +14,11 @@
 
 安装命令集中在 [教程第 1 节](../docs/DEPLOYMENT_TUTORIAL.md#1-登录服务器并准备基础软件)，包括系统库、nginx 和证书工具。公网部署使用 HTTPS/WSS。
 
+网页通用 Agent 还要求 Node.js **>=22.19.0**，推荐 **24.15.0**。官方 Pi SDK **1.4.0** 位于
+`runtime/pi/`；在仓库根目录执行 `npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund`。
+发布须携带匹配的 `package.json` 和 `package-lock.json`，服务账号的 PATH 也须能找到符合版本的 Node；
+不使用全局 Pi 或 `npm update` 替代锁文件安装。详见 [Pi 运行手册](../docs/PI_RUNTIME.md)。
+
 ## 3. Python / Conda 环境
 
 按 [教程第 3 节](../docs/DEPLOYMENT_TUTORIAL.md#3-创建-python-环境并安装依赖) 创建 Python 3.10 环境。依赖只选择适用的一套：
@@ -32,6 +37,10 @@ Vina、ADFRsuite 是外部程序，Meeko 是 Python 配体准备工具。版本�
 主聊天模型的用户级配置、服务账号、Key 保留/清除和升级行为统一见 [README](../README.md#主模型接入与一次保存)。不能用旧 `MODELSCOPE_*` 或 `OPENAI_COMPATIBLE_*` 环境变量替代首页配置；独立验收 CLI 的显式环境接口不受影响。
 
 分子生成独立使用 Ollama `gmm-llama:latest`；安装与检查见 [教程第 4.1 节](../docs/DEPLOYMENT_TUTORIAL.md#41-ollama-本地模型)。其他通用聊天模型不能替代它。
+
+`MEDCHAT_CHAT_PROFILE` 默认 `pi`；`semantic_v1` 是同一 Pi 的语义准入配置，`decision_a2` 仅为临时迁移别名。
+已有环境中的 `legacy` 必须移除或改为 `pi`，否则启动会拒绝该配置。Pi 不可用时失败关闭，不回退到旧 harness；
+Supervisor 的确定性工作流仍直接使用工作流执行器。
 
 ## 6. 必须迁移的数据资产
 
@@ -300,6 +309,10 @@ sudo systemctl restart medchat-temporal-worker.service
 
 基础 Web 与科学功能的逐项检查见 [教程第 11 节](../docs/DEPLOYMENT_TUTORIAL.md#11-上线验收)，完成标准见 [第 14 节](../docs/DEPLOYMENT_TUTORIAL.md#14-部署完成标准)。首页可打开不等于科学资产、真实工具或后台任务恢复已通过验收。
 
+Pi 的云端与本地真实模型/科学工具端到端验收均为 **PENDING（待验收）**，不得宣称替换已完整验证。
+`python scripts/health_check.py --strict` 包含 Node/锁定 SDK 导入检查；该离线探针或
+`npm test --prefix runtime/pi` 通过，不替代真实模型、科学工具及断连/取消、排空、续接验收。
+
 ## 15. 常见遗漏项
 
 先查 [教程故障排查](../docs/DEPLOYMENT_TUTORIAL.md#13-常见故障排查)：依赖 profile、工具路径、数据/缓存、服务账号权限、WebSocket 和上传限制。Temporal worker 不得通过递归放宽权限绕过失败，须遵守第 8、11.1 节。
@@ -307,6 +320,10 @@ sudo systemctl restart medchat-temporal-worker.service
 ## 16. 建议上线顺序
 
 基础单机步骤以部署教程为准；更新、备份和回滚见 [部署教程](../docs/DEPLOYMENT_TUTORIAL.md)第 12 节。按实际启用能力再检查以下门禁。
+
+Pi 迁移保留旧 checkpoint 的历史读取，但拒绝其执行续接；不清库、不自动转换，用户需重新发起任务。
+回滚以完整 Git 发布版本为单位，同时恢复匹配的 Python 代码/依赖、Node 版本要求和 npm manifest/锁文件，
+再按目标发布版本执行 `npm ci`。不得只切 profile 或单独降级 SDK；跨版本续接以目标版本校验为准。
 
 如果部署要求进程重启后仍能恢复后台任务，应在生产环境设置：
 

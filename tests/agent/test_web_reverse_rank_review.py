@@ -1,6 +1,5 @@
 """Offline web regressions for PR209; synthetic receipts are not scientific claims."""
 from copy import deepcopy
-import asyncio
 import json
 
 import pytest
@@ -8,8 +7,17 @@ import pytest
 from src.web.chat_handler import ChatHandler
 from src.web.ranked_target_structures import rank_followup_kind, reverse_rank_routing_query
 from src.web.reverse_target_followup import RankedReverseEvidence
-from tests.agent.test_chat_reverse_rank_followup import FIRST, FOLLOWUP, Socket, make_handler, turn
+from tests.agent.test_chat_reverse_rank_followup import FIRST, FOLLOWUP, make_handler, turn
 from tests.agent.test_reverse_target_rank_followup import ranked
+from tests.agent.pi_web_support import cleanup_web_handlers, run_web_turn
+
+
+def _observed_result(result):
+    # Supervisor used to add these audit fields outside to_legacy_dict().
+    # Observe actual Pi results in order, retaining duplicates; never alter
+    # the returned execution result, scientific payload or binding proof.
+    return deepcopy({**result.to_legacy_dict(), 'trace_id': result.trace_id,
+                     'tools_used': [item.tool_name for item in result.tool_results]})
 
 
 @pytest.fixture(autouse=True)
@@ -76,14 +84,14 @@ def test_review_count_scope_parser(message, expected):
 @pytest.mark.parametrize('message, expected', REVIEW_COUNT_SCOPES)
 def test_chat_review_count_scope_keeps_original_query_and_full_evidence(ranked, monkeypatch, message, expected):
     handler, history, calls = make_handler(ranked), [], []
-    original = handler._execute_agent
+    original = handler.process_decision_message
 
     async def execute(*args, **kwargs):
         result = await original(*args, **kwargs)
-        calls.append((args[0], deepcopy(result)))
+        calls.append((kwargs['context'].query, _observed_result(result)))
         return result
 
-    monkeypatch.setattr(handler, '_execute_agent', execute)
+    monkeypatch.setattr(handler, 'process_decision_message', execute)
     result, frames = turn(handler, message, history)
     assert len(calls) == 1 and calls[0][0] == message
     assert history[-1]['user'] == message
@@ -109,14 +117,14 @@ def test_chat_review_count_scope_keeps_original_query_and_full_evidence(ranked, 
 def test_chat_unrelated_negation_truncates_display_not_accepted_evidence(ranked, monkeypatch, message):
     handler, history = make_handler(ranked), []
     calls = []
-    original = handler._execute_agent
+    original = handler.process_decision_message
 
     async def execute(*args, **kwargs):
         result = await original(*args, **kwargs)
-        calls.append(deepcopy(result))
+        calls.append(_observed_result(result))
         return result
 
-    monkeypatch.setattr(handler, '_execute_agent', execute)
+    monkeypatch.setattr(handler, 'process_decision_message', execute)
     result, frames = turn(handler, message, history)
     assert len(calls) == 1
     assert '前 5 行' in result['content'] and '完整证据保留 10' in result['content']
@@ -168,14 +176,14 @@ def test_chat_molecule_bound_reverse_dispatches_new_workflow(ranked, monkeypatch
         turn(handler, FIRST, history)
     previous_trace = history[-1]['reverse_target_evidence']['trace_id'] if history else None
     calls = []
-    original = handler._execute_agent
+    original = handler.process_decision_message
 
     async def execute(*args, **kwargs):
         result = await original(*args, **kwargs)
-        calls.append((args[0], deepcopy(result)))
+        calls.append((kwargs['context'].query, _observed_result(result)))
         return result
 
-    monkeypatch.setattr(handler, '_execute_agent', execute)
+    monkeypatch.setattr(handler, 'process_decision_message', execute)
     result, frames = turn(handler, message, history)
     assert len(calls) == 1 and calls[0][0] == message, (result, frames)
     context = history[-1].get('reverse_target_evidence')
@@ -222,7 +230,8 @@ def test_chat_fresh_rank_request_does_not_bypass_molecular_validation(ranked, mo
     def forbidden(*args, **kwargs):
         pytest.fail('invalid molecule must not execute science')
 
-    monkeypatch.setattr(handler, '_execute_agent', forbidden)
+    monkeypatch.setattr(handler, 'process_decision_message', forbidden)
+    monkeypatch.setattr(handler.model, 'decide', forbidden)
     result, frames = turn(handler, message, [])
     assert 'SMILES 无效' in result['content']
     assert not any(frame['type'] == 'docking_consent' for frame in frames)
@@ -230,24 +239,16 @@ def test_chat_fresh_rank_request_does_not_bypass_molecular_validation(ranked, mo
 
 @pytest.mark.parametrize('message', FRESH_REQUESTS)
 def test_chat_fresh_rank_request_does_not_enable_disabled_tools(ranked, monkeypatch, message):
-    handler, socket, history = make_handler(ranked), Socket(), []
-
-    class LocalModel:
-        async def generate(self, *args, **kwargs):
-            return '工具已关闭。'
-
-    handler.model = LocalModel()
+    handler, history = make_handler(ranked), []
 
     def forbidden(*args, **kwargs):
         pytest.fail('fresh request must not grant tool capabilities')
 
-    monkeypatch.setattr(handler, '_execute_agent', forbidden)
     monkeypatch.setattr(ranked.producer, 'predict_with_receipt', forbidden)
-    asyncio.run(handler._process_message(socket, message, enable_rag=False, enable_tools=False,
-        conversation_history=history, session_id='owner-session'))
-    assert any(frame['type'] == 'complete' for frame in socket.messages)
+    complete, frames = run_web_turn(handler, message, history, 'owner-session', enable_tools=False)
+    assert complete['type'] == 'complete'
     assert not history[-1].get('reverse_target_evidence')
-    assert not any(frame['type'] == 'docking_consent' for frame in socket.messages)
+    assert not any(frame['type'] == 'docking_consent' for frame in frames)
 
 
 FOLLOWUP_REQUESTS = [
@@ -296,11 +297,13 @@ def test_real_rank_followup_or_smiles_dot_is_not_new_reverse(message, expected):
 def test_chat_rank_reference_never_dispatches_new_workflow(ranked, monkeypatch, message):
     handler, history = make_handler(ranked), []
     turn(handler, FIRST, history)
+    assert history[-1].get('reverse_target_evidence'), 'first turn must establish real owned rank authority'
 
     def forbidden(*args, **kwargs):
         pytest.fail('rank reference must not dispatch a new workflow or provider')
 
-    monkeypatch.setattr(handler, '_execute_agent', forbidden)
+    monkeypatch.setattr(handler, 'process_decision_message', forbidden)
+    monkeypatch.setattr(handler.model, 'decide', forbidden)
     monkeypatch.setattr(ranked.producer, 'predict_with_receipt', forbidden)
     monkeypatch.setattr('src.web.ranked_target_structures.BoundedJsonClient', forbidden)
     result, frames = turn(handler, message, history)

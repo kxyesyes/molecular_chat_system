@@ -1,4 +1,4 @@
-"""Two chat turns with real routing/planning/session; tools are offline fixtures."""
+"""Real reference execution with RDKit properties and offline failure fixtures."""
 import asyncio
 import inspect
 import json
@@ -10,8 +10,11 @@ import pytest
 from src.agent.contracts import AgentErrorCode, ObservationStatus, CandidateRecord, CandidateSet, ToolResult
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.supervisor import SupervisorAgent
+from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.tooling.factory import build_tool_registry
 from src.web.chat_handler import ChatHandler
 from tests.agent.test_scientific_reference_web import seed, service, pointer
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 
 
 class Socket:
@@ -29,8 +32,36 @@ class Tool:
                                 for i, s in enumerate(("CCO", "CCN"), 1)), status=ObservationStatus.PARTIAL).to_dict()
             return ToolResult.success_result(self.name, data=data, warnings=["offline fixture; only two candidates"])
         if self.name == "property_calculator":
-            return ToolResult.success_result(self.name, data=[{"smiles": "CCN", "properties": {"molecular_weight": 45.08}}])
-        return ToolResult.error_result(self.name, code=AgentErrorCode.TOOL_EXECUTION_FAILED, message="offline fixture unavailable")
+            return PropertyCalculator().execute(value)
+        return ToolResult.error_result(self.name, code=AgentErrorCode.TOOL_UNAVAILABLE, message="offline fixture unavailable")
+
+
+@pytest.mark.parametrize("smiles", ["CCN", "CCO"])
+def test_property_fixture_preserves_rdkit_output_through_real_adapter(smiles):
+    tool = Tool("property_calculator")
+    expected = PropertyCalculator().execute(smiles)
+    assert expected["success"] is True
+    registry = build_tool_registry([tool])
+    try:
+        observed = registry.resolve(tool.name).execute({"query": smiles})
+        assert tool.calls == [smiles]
+        assert observed.success and observed.status is ObservationStatus.SUCCEEDED
+        assert observed.data == expected["data"]
+    finally:
+        registry.close()
+
+
+def test_unavailable_fixture_preserves_structured_error_through_real_adapter():
+    tool = Tool("drug_likeness_assessment")
+    registry = build_tool_registry([tool])
+    try:
+        observed = registry.resolve(tool.name).execute({"query": "CCN"})
+        assert tool.calls == ["CCN"]
+        assert not observed.success
+        assert observed.error.code is AgentErrorCode.TOOL_UNAVAILABLE
+        assert observed.error.message == "offline fixture unavailable"
+    finally:
+        registry.close()
 
 
 def test_two_chat_turns_capture_canonical_tool_input(tmp_path):
@@ -38,27 +69,24 @@ def test_two_chat_turns_capture_canonical_tool_input(tmp_path):
     store = SQLiteAgentStateStore(tmp_path / "state.db")
     svc = service(store)
     tools = {name: Tool(name) for name in ("llm_molecular_generator", "property_calculator", "drug_likeness_assessment")}
-    agent = SupervisorAgent(tools=tools, state_store=store)
-    handler = ChatHandler(None, None, agent, {}, scientific_references=svc)
-    socket = Socket()
-    async def run():
-        await handler._process_message(socket, "生成3个分子", False, True, mol_count=3, session_id="owner")
-        assert any(m["type"] == "molecule_candidates" for m in socket.messages), json.dumps(socket.messages, ensure_ascii=False)
-        event = next(m for m in socket.messages if m["type"] == "molecule_candidates")
-        assert event["source"]["status"] == "partial"
-        assert event["warnings"]
-        assert "reference" in event, json.dumps({"run": store.get_run(event["trace_id"]),
-            "checkpoint": store.latest_checkpoint(event["trace_id"]),
-            "sources": store.get_scientific_sources(event["trace_id"], session_id="owner")}, ensure_ascii=False)
-        assert svc.confirm(event["reference"], session_id="owner")
-        p = pointer(event)
-        await handler._process_message(socket, "计算刚才第二个分子的属性", False, True,
-                                       session_id="owner", reference=p)
-        assert tools["property_calculator"].calls == ["CCN"]
-        assert tools["drug_likeness_assessment"].calls == ["CCN"]
-        assert handler.conversation_history[-1]["user"] == "计算刚才第二个分子的属性"
-        assert svc.restore(p, session_id="owner"), "new turn must not overwrite source run"
-    asyncio.run(run())
+    handler = make_web_handler(tools, store)
+    handler.scientific_references = svc
+    history = []
+    _, frames = run_web_turn(handler, "生成3个分子", history, "owner", mol_count=3)
+    assert any(m["type"] == "molecule_candidates" for m in frames), frames
+    event = next(m for m in frames if m["type"] == "molecule_candidates")
+    assert event["source"]["status"] == "partial"
+    assert event["warnings"]
+    assert "reference" in event, json.dumps({"run": store.get_run(event["trace_id"]),
+        "checkpoint": store.latest_checkpoint(event["trace_id"]),
+        "sources": store.get_scientific_sources(event["trace_id"], session_id="owner")}, ensure_ascii=False)
+    assert svc.confirm(event["reference"], session_id="owner")
+    p = pointer(event)
+    run_web_turn(handler, "计算刚才第二个分子的属性", history, "owner", reference=p)
+    assert tools["property_calculator"].calls == ["CCN"]
+    assert tools["drug_likeness_assessment"].calls == ["CCN"]
+    assert history[-1]["user"] == "计算刚才第二个分子的属性"
+    assert svc.restore(p, session_id="owner"), "new turn must not overwrite source run"
 
 
 def confirmed(tmp_path):
@@ -129,17 +157,14 @@ def test_docking_missing_parameters_still_rejected(tmp_path):
 @pytest.mark.parametrize("query", ["什么是分子活性", "什么是ADMET", "解释QED是什么意思"])
 def test_knowledge_queries_keep_real_router_chat_path(tmp_path, query):
     store, svc, p = confirmed(tmp_path)
-    class Model:
-        model_name = "offline-main"
-        async def generate(self, *args, **kwargs): return "offline explanation"
     tools = {name: Tool(name) for name in ("property_calculator", "drug_likeness_assessment", "activity_predictor", "admet_predictor")}
-    handler = ChatHandler(Model(), None, SupervisorAgent(tools=tools, state_store=store),
-                          {"inference": {"stream": False}}, scientific_references=svc)
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, query, False, True, session_id="owner",
-                                         reference=p, selection={"ordinal": 1}))
+    handler = make_web_handler(tools, store)
+    handler.scientific_references = svc
+    complete, frames = run_web_turn(handler, query, [], "owner", reference=p, selection={"ordinal":1})
+    assert complete['status'] == 'completed', (complete, handler.web_results[-1].to_legacy_dict() if handler.web_results else None)
+    assert len(handler.model.messages) == 1
     assert all(not t.calls for t in tools.values())
-    assert not any(m["type"] == "agent_event" for m in socket.messages)
+    assert not any(m["type"] == "agent_event" for m in frames)
 
 
 def test_card_ordinal_conflict_and_invalid_explicit_smiles(tmp_path):
@@ -207,14 +232,11 @@ def test_concurrent_reference_submission_has_single_claim_winner(tmp_path):
 
 def test_tools_off_with_valid_selection_does_not_dispatch(tmp_path):
     store, svc, p = confirmed(tmp_path)
-    class Model:
-        model_name = "offline-main"
-        async def generate(self, *args, **kwargs): return "tools disabled"
     tools = {name: Tool(name) for name in ("property_calculator", "drug_likeness_assessment")}
-    handler = ChatHandler(Model(), None, SupervisorAgent(tools=tools, state_store=store),
-                          {"inference": {"stream": False}}, scientific_references=svc)
-    asyncio.run(handler._process_message(Socket(), "计算第二个分子的属性", False, False,
-                                         session_id="owner", reference=p, selection={"ordinal": 2}))
+    handler = make_web_handler(tools, store)
+    handler.scientific_references = svc
+    run_web_turn(handler, "计算第二个分子的属性", [], "owner", enable_tools=False,
+                 reference=p, selection={"ordinal":2})
     assert all(not t.calls for t in tools.values())
 
 
@@ -242,12 +264,11 @@ def test_unrelated_new_task_not_hijacked_by_previous_view(tmp_path, query, selec
 def test_range_and_list_references_never_dispatch_one_molecule(tmp_path, query):
     store, svc, p = confirmed(tmp_path)
     tools = {name: Tool(name) for name in ("property_calculator", "drug_likeness_assessment")}
-    handler = ChatHandler(None, None, SupervisorAgent(tools=tools, state_store=store), {},
-                          scientific_references=svc)
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, query, False, True, session_id="owner", reference=p))
+    handler = make_web_handler(tools, store)
+    handler.scientific_references = svc
+    _, frames = run_web_turn(handler, query, [], "owner", reference=p)
     assert all(not t.calls for t in tools.values())
-    assert any("选择" in m.get("content", "") for m in socket.messages)
+    assert any("选择" in m.get("content", "") for m in frames)
 
 
 @pytest.mark.parametrize("stage", ["routing", "planning", "tool_started"])

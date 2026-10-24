@@ -8,10 +8,10 @@ from types import MappingProxyType, SimpleNamespace
 import pytest
 
 from src.agent.contracts import AgentContext
-from src.agent.harness import decision_bindings as bindings
-from src.agent.harness.decision_bounds import context_value, validate_json
-from src.agent.harness.decision_inputs import seal_observation
-from src.agent.harness.decision_policy import DecisionBoundaryError
+from src.agent.scientific_session import decision_bindings as bindings
+from src.agent.scientific_session.decision_bounds import context_value, validate_json
+from src.agent.scientific_session.decision_inputs import seal_observation
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.agent.runtime.run_session import WorkflowRunSession
 from src.agent.tools.property_calculator import PropertyCalculator
 from test_activity_tool_contract import Recorder, single_row
@@ -20,7 +20,7 @@ from test_current_source_tool_hooks import sources, forbid_work
 
 
 def journal_type():
-    spec = importlib.util.find_spec('src.agent.harness.decision_binding_inputs')
+    spec = importlib.util.find_spec('src.agent.scientific_session.decision_binding_inputs')
     assert spec is not None, 'Task4A explicit input journal is missing'
     return importlib.import_module(spec.name).BindingInputJournal
 
@@ -690,7 +690,7 @@ def test_task4b_same_context_dispatch_allows_incidental_selection(
         build, sources, selections, monkeypatch, kind, invalidity):
     """Actual graph/Session with unchanged raw selection, no disabled guard."""
     import asyncio
-    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.agent.tooling.factory import build_tool_registry
     from src.agent.runtime.worker_ownership import WorkerOwner
     from test_decision_loop import ScriptedModel, tool as choose, finish, last_observation
@@ -716,7 +716,7 @@ def test_task4b_same_context_dispatch_allows_incidental_selection(
     model = ScriptedModel([choose(tool.name), lambda messages: finish([
         last_observation(messages)['quality']['evidence_id']])])
     try:
-        loop = ModelDecisionLoop(model, registry, store, binding_profile=bindings.B1_PROFILE_REVISION)
+        loop = PiAgentRuntime(model, registry, store, binding_profile=bindings.B1_PROFILE_REVISION)
         result = asyncio.run(loop.run(context, request_kind='scientific', allowed_tools={tool.name},
             required_tools={tool.name}, requirements=dict(version='2', profile=bindings.B1_PROFILE_REVISION),
             worker_owner=WorkerOwner()))

@@ -180,7 +180,7 @@ class ReverseTargetTool(BaseMolecularTool):
         calls stay outside the tool lock; borrowed predictors remain borrowed.
         """
         try:
-            from src.agent.harness.decision_bounds import validate_json
+            from src.agent.scientific_session.decision_bounds import validate_json
 
             value = dict(data=data, evidence=evidence, input_data=input_data,
                          expected_source=expected_source)

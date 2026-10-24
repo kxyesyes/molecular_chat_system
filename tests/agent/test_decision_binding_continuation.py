@@ -13,7 +13,7 @@ import pytest
 
 from src.agent.contracts import AgentContext, RunOutcome
 from src.agent.contracts.decision_bindings import B1_PROFILE_REVISION
-from src.agent.harness.decision_loop import ModelDecisionLoop
+from src.agent.pi_runtime.runtime import PiAgentRuntime
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.worker_ownership import WorkerOwner
@@ -40,7 +40,7 @@ def reopen(case, decisions):
     case.store = SQLiteAgentStateStore(case.store.db_path)
     case.bus = AgentEventBus(state_store=case.store)
     case.model = ContinuationModel(decisions)
-    case.loop = ModelDecisionLoop(case.model, previous.registry, case.store,
+    case.loop = PiAgentRuntime(case.model, previous.registry, case.store,
         mode=previous.mode, binding_profile=B1_PROFILE_REVISION,
         max_model_requests=previous.max_model_requests,
         max_tool_attempts=previous.max_tool_attempts,
@@ -80,8 +80,8 @@ def scientific_decisions(*, waiting):
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
-def test_sqlite_revision8_new_loop_reuses_original_scientific_chain(loop_case, sources, mode, monkeypatch):
-    import src.agent.harness.decision_binding_continuation as codec
+def test_sqlite_revision11_new_runtime_reuses_original_scientific_chain(loop_case, sources, mode, monkeypatch):
+    import src.agent.scientific_session.decision_binding_continuation as codec
     replay_errors = []
     original = codec.validate_continuation
     def validate(*args, **kwargs):
@@ -105,12 +105,12 @@ def test_sqlite_revision8_new_loop_reuses_original_scientific_chain(loop_case, s
     assert len(waiting.tool_results) == 6 and all(r.success for r in waiting.tool_results)
     assert all(len(calls) == 1 for calls in case.calls.values())
     assert waiting.metadata['waiting_for_input']
-    assert 'continuation_id' in waiting.metadata, 'B clarification must publish revision8, never revision6/7'
+    assert 'continuation_id' in waiting.metadata, 'B clarification must publish Pi revision11, never legacy checkpoints'
     saved = case.store.get_run(context.trace_id)
     payload = saved['metadata']['decision_continuation']
     assert saved['status'] == 'waiting_for_input'
     assert payload['id'] == waiting.metadata['continuation_id']
-    assert payload['snapshot']['decision_protocol_revision'] == 8
+    assert payload['snapshot']['decision_protocol_revision'] == 11
     before = [deepcopy(result.to_legacy_dict()) for result in waiting.tool_results]
     reopen(case, scientific_decisions(waiting=False))
     resumed = invoke(case, context, required=required,
@@ -129,7 +129,7 @@ def test_sqlite_revision8_new_loop_reuses_original_scientific_chain(loop_case, s
     assert context == original_context
 
 
-def test_revision8_continuation_preserves_checkpoint_warnings(loop_case, monkeypatch):
+def test_revision11_continuation_preserves_checkpoint_warnings(loop_case, monkeypatch):
     monkeypatch.setattr(PropertyCalculator, 'checkpoint_reuse_requires_runtime_identity', True, raising=False)
     case, context, nonce = start_property_waiting(loop_case)
     saved = case.store.get_run(context.trace_id)['metadata']['decision_continuation']['snapshot']
@@ -148,7 +148,7 @@ def test_revision8_continuation_preserves_checkpoint_warnings(loop_case, monkeyp
 
 @pytest.mark.parametrize('audit', [None, False, {}, 'bad', [{'step': 'x'}],
     [{'step': 'x', 'reason': 1}], [{'step': 'x', 'reason': 'y', 'extra': 'z'}]])
-def test_revision8_malformed_checkpoint_audit_rejected_before_claim(loop_case, monkeypatch, audit):
+def test_revision11_malformed_checkpoint_audit_rejected_before_claim(loop_case, monkeypatch, audit):
     case, context, nonce = start_property_waiting(loop_case)
     record = deepcopy(case.store.get_run(context.trace_id))
     payload = record['metadata']['decision_continuation']
@@ -190,7 +190,7 @@ def resign(payload):
     payload['checksum'] = EvidenceLedger.output_digest({k: v for k, v in payload.items() if k != 'checksum'})
 
 
-@pytest.mark.parametrize('mutation', ['revision6', 'revision7', 'revision_bool', 'revision_float',
+@pytest.mark.parametrize('mutation', ['revision6', 'revision7', 'revision8', 'revision_bool', 'revision_float',
     'checksum', 'missing_field', 'unknown_field', 'whole_budget', 'actions13', 'models17', 'models_exhausted',
     'counter_bool', 'credit_bool', 'credit_nan', 'credit_inf', 'reserve_policy', 'credit_arithmetic', 'credit_root',
     'original_owner', 'journal_query', 'record_input', 'record_prefix', 'record_action', 'record_role',
@@ -199,7 +199,7 @@ def resign(payload):
     'proposal_turn', 'proposal_tool', 'model_round', 'reuse_count', 'reserved_count', 'acceptance', 'marker',
     'metadata_calls', 'metadata_acceptance', 'metadata_query', 'call_unknown', 'call_missing', 'call_native',
     'envelope_dict_type', 'observation_dict_type', 'results_tuple'])
-def test_revision8_preclaim_tampering_is_readonly(loop_case, monkeypatch, mutation):
+def test_revision11_preclaim_tampering_is_readonly(loop_case, monkeypatch, mutation):
     case, context, nonce = start_property_waiting(loop_case)
     original_get = case.store.get_run
     before = original_get(context.trace_id)
@@ -212,8 +212,8 @@ def test_revision8_preclaim_tampering_is_readonly(loop_case, monkeypatch, mutati
     action = saved['binding_records'][quality['step_id']]
     proof = quality['binding_proof']
     if mutation.startswith('revision'):
-        saved['decision_protocol_revision'] = {'revision6': 6, 'revision7': 7,
-            'revision_bool': True, 'revision_float': 8.0}[mutation]
+        saved['decision_protocol_revision'] = {'revision6': 6, 'revision7': 7, 'revision8': 8,
+            'revision_bool': True, 'revision_float': 11.0}[mutation]
     elif mutation == 'checksum': payload['checksum'] = '0' * 64
     elif mutation == 'missing_field': del saved['binding_input_journal']
     elif mutation == 'unknown_field': saved['authority'] = 'model'
@@ -287,7 +287,7 @@ def test_revision8_preclaim_tampering_is_readonly(loop_case, monkeypatch, mutati
 
 
 @pytest.mark.parametrize('change', ['owner', 'session', 'nonce', 'config', 'requirements', 'status'])
-def test_revision8_owner_and_current_config_bind_before_claim(loop_case, monkeypatch, change):
+def test_revision11_owner_and_current_config_bind_before_claim(loop_case, monkeypatch, change):
     case, context, nonce = start_property_waiting(loop_case)
     before = case.store.get_run(context.trace_id)
     options = {}
@@ -308,8 +308,8 @@ def test_revision8_owner_and_current_config_bind_before_claim(loop_case, monkeyp
 
 @pytest.mark.parametrize('where', ['read', 'source', 'claim', 'start', 'restore'])
 def test_saved_credit_charges_all_restore_boundaries(loop_case, monkeypatch, where):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     from src.agent.runtime.run_session import WorkflowRunSession
     now = [1000.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
@@ -375,7 +375,7 @@ def test_false_or_uncertain_claim_never_installs_live_projection(loop_case, monk
 def test_preclaim_projection_is_unstarted_and_live_restore_has_fresh_seals(loop_case, monkeypatch):
     from src.agent.runtime.run_session import WorkflowRunSession, SessionLifecycleError
     from src.agent.orchestrators.base import WorkflowStep
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     case, context, nonce = start_property_waiting(loop_case)
     projections, live = [], []
     original_verify, original_restore = B1BindingResolver.verify_binding_closure, WorkflowRunSession.restore_observations
@@ -407,7 +407,7 @@ def test_preclaim_projection_is_unstarted_and_live_restore_has_fresh_seals(loop_
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
 def test_live_restore_warning_mutation_cannot_acquire_fresh_authority(loop_case, monkeypatch, mode):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     from src.agent.runtime.run_session import WorkflowRunSession
     case, context, nonce = start_property_waiting(loop_case, mode=mode)
     original = WorkflowRunSession.restore_observations
@@ -467,7 +467,7 @@ def test_rejected_live_quality_cannot_break_sanitized_failure_correction(loop_ca
 @pytest.mark.parametrize('mode', ['native', 'json'])
 @pytest.mark.parametrize('committed', [False, True])
 def test_failure_fallback_precedes_reentry_and_retries_one_frozen_request(loop_case, monkeypatch, mode, committed):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     from src.agent.contracts import AgentResult
     from src.agent.runtime.run_session import WorkflowRunSession
     case, context, nonce = start_property_waiting(loop_case, mode=mode)
@@ -532,7 +532,7 @@ def test_failure_fallback_precedes_reentry_and_retries_one_frozen_request(loop_c
 @pytest.mark.parametrize('mutation', ['drop', 'duplicate', 'order', 'list_type', 'result_type', 'native_bool'])
 def test_live_restore_complete_sequence_is_compared_before_any_seal(loop_case, monkeypatch, mode, mutation):
     from dataclasses import replace
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     from src.agent.contracts import ToolResult
     from src.agent.runtime.run_session import WorkflowRunSession
     from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
@@ -608,8 +608,8 @@ def test_current_source_change_never_releases_old_science(loop_case, sources, mo
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
 def test_live_comparison_and_fresh_sealing_have_no_scheduling_gap(loop_case, monkeypatch, mode):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_binding_continuation import ValidatedReplay
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_binding_continuation import ValidatedReplay
     from src.agent.runtime.run_session import WorkflowRunSession
     case, context, nonce = start_property_waiting(loop_case, mode=mode)
     restore, compare, seal = WorkflowRunSession.restore_observations, ValidatedReplay.verify_restored, module.seal_observation
@@ -639,7 +639,7 @@ def test_live_comparison_and_fresh_sealing_have_no_scheduling_gap(loop_case, mon
 
 @pytest.mark.parametrize('tail', [20, 30])
 def test_fixed_tail_reservation_charges_next_segment_without_refund(loop_case, monkeypatch, tail):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     now = [1000.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     case = loop_case([], [PropertyCalculator()])
@@ -714,7 +714,7 @@ def test_restore_rechecks_configuration_changed_inside_callback(loop_case, monke
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
 def test_actual_loop_restores_proofless_preparation_diagnostic_without_authority(loop_case, sources, monkeypatch, mode):
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     original = B1BindingResolver.prepare_observation
     preparations = []
     def prepare(self, result, step):
@@ -745,7 +745,7 @@ def test_actual_loop_restores_proofless_preparation_diagnostic_without_authority
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
-def test_revision8_preserves_native_query_content_boundary(loop_case, mode):
+def test_revision11_preserves_native_query_content_boundary(loop_case, mode):
     case = loop_case([], [], mode=mode)
     case.model = case.loop.model = ContinuationModel([clarify()])
     context = AgentContext('"' * 10000, 'b8-content', user_id='owner', session_id='session')
@@ -760,8 +760,8 @@ def test_revision8_preserves_native_query_content_boundary(loop_case, mode):
 @pytest.mark.parametrize('mode', ['native', 'json'])
 @pytest.mark.parametrize('details_kind', ['false', 'zero', 'list', 'dict_subclass', 'none', 'dict'])
 def test_live_diagnostic_error_details_are_native_before_serialization(loop_case, monkeypatch, mode, details_kind):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     from src.agent.runtime.run_session import WorkflowRunSession
     prepare = B1BindingResolver.prepare_observation
     def fail_preparation(self, result, step):
@@ -864,7 +864,7 @@ def test_marker_introduced_inside_claim_or_restore_callback_blocks_dispatch(loop
 
 
 def test_marker_introduced_by_final_preclaim_source_check_leaves_nonce_unchanged(loop_case, monkeypatch):
-    from src.agent.harness.decision_binding_continuation import ValidatedReplay
+    from src.agent.scientific_session.decision_binding_continuation import ValidatedReplay
     case, context, nonce = start_property_waiting(loop_case)
     before = case.store.get_run(context.trace_id)
     update = case.store.update_run_metadata
@@ -883,7 +883,7 @@ def test_marker_introduced_by_final_preclaim_source_check_leaves_nonce_unchanged
 
 
 def test_claim_payload_copy_time_is_charged_immediately_before_cas(loop_case, monkeypatch):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     now = [1000.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     case, context, nonce = start_property_waiting(loop_case)
@@ -907,7 +907,7 @@ def test_claim_payload_copy_time_is_charged_immediately_before_cas(loop_case, mo
 
 
 def test_claim_envelope_byte_limit_includes_claimed_by_before_cas(loop_case, monkeypatch):
-    import src.agent.harness.decision_binding_continuation as codec
+    import src.agent.scientific_session.decision_binding_continuation as codec
     case, context, nonce = start_property_waiting(loop_case)
     before = case.store.get_run(context.trace_id)
     payload = before['metadata']['decision_continuation']
@@ -926,7 +926,7 @@ def test_claim_envelope_byte_limit_includes_claimed_by_before_cas(loop_case, mon
 
 @pytest.mark.parametrize('raises', [False, True])
 def test_waiting_publication_callback_spends_fixed_tail_even_when_commit_raises(loop_case, monkeypatch, raises):
-    import src.agent.harness.decision_loop as module
+    import src.agent.scientific_session.controller as module
     now = [1000.0]
     monkeypatch.setattr(module, 'time', SimpleNamespace(monotonic=lambda: now[0]))
     case = loop_case([], [PropertyCalculator()])
@@ -980,7 +980,7 @@ def test_confirmed_claim_callback_raises_after_install_is_failure_only(loop_case
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
-def test_sqlite_revision8_no_action_smiles_then_target_keeps_original_journal(loop_case, mode):
+def test_sqlite_revision11_no_action_smiles_then_target_keeps_original_journal(loop_case, mode):
     case = loop_case([], [PropertyCalculator(),
         Recorder(dict(success=True, data=[family_row()]))], mode=mode)
     case.model = case.loop.model = ContinuationModel([clarify()])
@@ -999,7 +999,7 @@ def test_sqlite_revision8_no_action_smiles_then_target_keeps_original_journal(lo
     assert second.metadata['waiting_for_input'] and not any(case.calls.values())
     assert second.metadata['continuation_id'] != first.metadata['continuation_id']
     snapshot = case.store.get_run(context.trace_id)['metadata']['decision_continuation']['snapshot']
-    assert snapshot['decision_protocol_revision'] == 8
+    assert snapshot['decision_protocol_revision'] == 11
     assert snapshot['input_queries'] == ['综合评价', 'SMILES: CCO']
     assert snapshot['results'] == [] and snapshot['tool_attempt_count'] == 0
 
@@ -1024,14 +1024,14 @@ def test_sqlite_revision8_no_action_smiles_then_target_keeps_original_journal(lo
 
 # Landed-publication integration additions. These are desired-behavior
 # regressions, not a claim that either known donor defect has been executed.
-def test_revision8_codec_api_contract():
+def test_revision11_codec_api_contract():
     """Explicit feature/API RED, not a reproduction of a donor behavior defect."""
     from importlib import import_module
     from importlib.util import find_spec
-    name = 'src.agent.harness.decision_binding_continuation'
-    assert find_spec(name) is not None, 'revision8 continuation codec API is absent'
+    name = 'src.agent.scientific_session.decision_binding_continuation'
+    assert find_spec(name) is not None, 'Pi revision11 continuation codec API is absent'
     codec = import_module(name)
-    assert codec.REVISION == 8 and codec.LIMIT == 512 * 1024
+    assert codec.REVISION == 11 and codec.LIMIT == 512 * 1024
     assert callable(codec.snapshot_payload) and callable(codec.validate_continuation)
     assert callable(codec.ValidatedReplay.verify_claim)
     assert callable(codec.ValidatedReplay.verify_restored)
@@ -1043,7 +1043,7 @@ def _fresh_registry_reopen(loop_case, previous, tools, decisions):
     fresh.store = SQLiteAgentStateStore(previous.store.db_path)
     fresh.bus = AgentEventBus(state_store=fresh.store)
     fresh.model = ContinuationModel(decisions)
-    fresh.loop = ModelDecisionLoop(fresh.model, fresh.loop.registry, fresh.store,
+    fresh.loop = PiAgentRuntime(fresh.model, fresh.loop.registry, fresh.store,
         mode=previous.loop.mode, binding_profile=B1_PROFILE_REVISION,
         config_generation=previous.loop.config_generation,
         max_model_requests=previous.loop.max_model_requests,
@@ -1057,8 +1057,8 @@ def _fresh_registry_reopen(loop_case, previous, tools, decisions):
 
 def _waiting_cancel_case(loop_case, monkeypatch, mode, stage):
     import threading
-    import src.agent.harness.decision_binding_continuation as codec
-    from src.agent.harness.decision_bindings import B1BindingResolver
+    import src.agent.scientific_session.decision_binding_continuation as codec
+    from src.agent.scientific_session.decision_bindings import B1BindingResolver
     from src.agent.runtime.run_session import WorkflowRunSession
     from test_decision_binding_publication import (
         MARKER, TERMINALS, capture_sessions, assert_ordinary_cancelled,
@@ -1133,7 +1133,9 @@ def _waiting_cancel_case(loop_case, monkeypatch, mode, stage):
             allowed_tools=set(case.calls), required_tools=set(case.calls),
             requirements=requirements(), event_bus=case.bus, worker_owner=owner))
         try:
-            await signalled(entered)
+            # This is setup (Node startup plus real scientific validation), not
+            # the cancellation bound. Keep all post-entry drain checks below.
+            assert await asyncio.to_thread(entered.wait, 15), 'snapshot barrier was not reached'
             assert sessions[0].started and not sessions[0].finished
             assert case.store.get_run(context.trace_id)['status'] == 'running'
             assert publications == []
@@ -1141,7 +1143,7 @@ def _waiting_cancel_case(loop_case, monkeypatch, mode, stage):
                 assert snapshots == [] and finishes == []
             else:
                 assert len(snapshots) == 1
-                assert snapshots[0]['snapshot']['decision_protocol_revision'] == 8
+                assert snapshots[0]['snapshot']['decision_protocol_revision'] == 11
                 if stage == 'postsnapshot':
                     # The first owned closure after codec return is finish's
                     # precheck, after the loop assembled its nonce metadata.
@@ -1218,8 +1220,8 @@ def test_postattempt_continuation_cancel_is_failure_only(loop_case, monkeypatch,
 @pytest.mark.parametrize('started', [False, True])
 def test_postclaim_first_error_survives_start_commit_then_raise(
         loop_case, sources, monkeypatch, mode, failure, started):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     from src.agent.runtime.run_session import WorkflowRunSession
     from test_decision_binding_publication import MARKER
 
@@ -1466,7 +1468,7 @@ def test_sqlite_reopen_new_source_generation_rejects_preclaim(loop_case, sources
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
-def test_two_revision8_claimants_have_one_sqlite_winner(loop_case, monkeypatch, mode):
+def test_two_revision11_claimants_have_one_sqlite_winner(loop_case, monkeypatch, mode):
     import threading
     from concurrent.futures import ThreadPoolExecutor
     from src.agent.runtime.run_session import WorkflowRunSession
@@ -1548,8 +1550,8 @@ def test_two_revision8_claimants_have_one_sqlite_winner(loop_case, monkeypatch, 
 def _unstarted_postclaim_drain_case(loop_case, sources, monkeypatch, *, interrupt):
     """Real failed postclaim/start and owned drain; never grant Session authority."""
     import threading
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     from src.agent.runtime.run_session import WorkflowRunSession
     from test_decision_binding_publication import MARKER, start_real_owned_worker
     from test_worker_ownership import signalled, pending
@@ -1568,7 +1570,7 @@ def _unstarted_postclaim_drain_case(loop_case, sources, monkeypatch, *, interrup
     returns, drains, drain_errors, lifecycle = [], [], [], []
     transition, append = case.store.transition_decision_continuation, case.store.append_event
     start, settle, owned, actual_run = (
-        WorkflowRunSession.start, WorkerOwner.settle, module.settle_owned_call, case.loop._run)
+        WorkflowRunSession.start, WorkerOwner.settle, module.settle_owned_call, module.ScientificSession._run)
     cleanup_error = RuntimeError('synthetic post-drain receipt failure')
 
     def claim(*args, **kwargs):
@@ -1632,7 +1634,7 @@ def _unstarted_postclaim_drain_case(loop_case, sources, monkeypatch, *, interrup
     monkeypatch.setattr(case.store, 'append_event', start_event_then_raise)
     monkeypatch.setattr(module, 'settle_owned_call', observe_owned)
     monkeypatch.setattr(WorkflowRunSession, 'start', starting)
-    monkeypatch.setattr(case.loop, '_run', returned_before_drain)
+    monkeypatch.setattr(module.ScientificSession, '_run', returned_before_drain)
     monkeypatch.setattr(WorkerOwner, 'settle', draining)
     for name in ('restore_observations', 'finish', 'finish_dynamic', 'invalidate_dynamic_publication'):
         original = getattr(WorkflowRunSession, name)
@@ -1706,9 +1708,9 @@ def test_unstarted_postclaim_failure_survives_post_drain_error(loop_case, source
 
 
 def _resumed_source_close_case(loop_case, sources, monkeypatch, *, mode, boundary):
-    import src.agent.harness.decision_loop as module
-    from src.agent.harness.decision_binding_continuation import ValidatedReplay
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    import src.agent.scientific_session.controller as module
+    from src.agent.scientific_session.decision_binding_continuation import ValidatedReplay
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     from src.agent.runtime.run_session import WorkflowRunSession
     from test_decision_binding_publication import MARKER, TERMINALS, assert_sanitized
 
@@ -1858,7 +1860,7 @@ def _resumed_source_close_case(loop_case, sources, monkeypatch, *, mode, boundar
         assert published['expected'] == consumed
         replacement = published['replacement']
         assert replacement['id'] != nonce and 'claimed_by' not in replacement
-        assert replacement['snapshot']['decision_protocol_revision'] == 8
+        assert replacement['snapshot']['decision_protocol_revision'] == 11
         assert replacement['snapshot']['results'] == initial['snapshot']['results']
         assert replacement['snapshot']['input_queries'] == initial['snapshot']['input_queries'] + ['继续']
         assert saved['metadata']['decision_continuation'] == replacement

@@ -59,9 +59,9 @@ def invoke(bundle, context, *, kind='chat', **kwargs):
 
 
 def history_api():
-    assert importlib.util.find_spec('src.agent.harness.decision_history') is not None, (
+    assert importlib.util.find_spec('src.agent.scientific_session.decision_history') is not None, (
         'bounded server history helper is required')
-    return importlib.import_module('src.agent.harness.decision_history')
+    return importlib.import_module('src.agent.scientific_session.decision_history')
 
 
 def context(memory=None):
@@ -209,7 +209,7 @@ def test_retention_marks_omission_without_retaining_value(assistant, reason):
 
 @pytest.mark.parametrize('character', ['x', '药', '\n', '\u0000', '😀'])
 def test_exact_serialized_byte_boundary(character):
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     api = history_api()
     overhead = len(json.dumps([{'user': '', 'assistant': ''}], ensure_ascii=False).encode('utf-8'))
     width = len(json.dumps(character, ensure_ascii=False).encode('utf-8')) - 2
@@ -239,7 +239,7 @@ def test_retention_rejects_nonclosed_facts_without_coercion(options):
 
 
 def test_plain_history_rejects_hostile_types_cycles_and_secrets():
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     class Hostile(dict):
         def __iter__(self):
             raise AssertionError('untrusted conversion invoked')
@@ -255,7 +255,7 @@ def test_plain_history_rejects_hostile_types_cycles_and_secrets():
 
 
 def test_wide_pair_rejected_before_materializing_keys(monkeypatch):
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     api = history_api()
     pair = {str(i): 'value' for i in range(10000)}
     def forbid_set(*args, **kwargs):
@@ -266,7 +266,7 @@ def test_wide_pair_rejected_before_materializing_keys(monkeypatch):
 
 
 def test_pair_keys_rejected_before_equality_hooks():
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     class Key(str):
         __hash__ = str.__hash__
         def __eq__(self, other):
@@ -384,6 +384,29 @@ def test_twenty_pairs_preserve_prefix_until_transport_message_ceiling(adapter_lo
     assert not result.success and result.metadata['stop_reason'] == 'model_decision_unavailable'
     assert result.metadata['model_requests'] == 13 and len(b.requests) == 12
     assert result.metadata['model_calls'][-1]['error_code'] == AgentErrorCode.INVALID_INPUT.value
+    assert result.metadata['model_calls'][-1]['request_attempts'] == 0
+    assert not result.metadata.get('continuation_id')
     prefix = b.requests[0]['messages']
     assert all(request['messages'][:len(prefix)] == prefix for request in b.requests)
     assert ctx == original and not b.tools[0].inputs
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
+def test_schema_feedback_at_history_ceiling_retains_input_failure_journal(setup_loop, mode):
+    from src.agent.contracts import AgentErrorCode
+    from test_decision_protocol_recovery import configured, invalid
+    b = configured(setup_loop, [clarify()] * 11 + [invalid()], mode=mode)
+    ctx = context([{'user': f'past-{i}', 'assistant': 'Safe prior answer'} for i in range(20)])
+    result = invoke(b, ctx)
+    for round_number in range(1, 11):
+        result = invoke(b, ctx, continuation_id=result.metadata['continuation_id'],
+                        clarified_query=f'Explain logP round {round_number}')
+    result = invoke(b, ctx, continuation_id=result.metadata['continuation_id'],
+                    clarified_query='Explain logP at the correction boundary')
+    assert not result.success and result.metadata['stop_reason'] == 'model_decision_unavailable'
+    assert result.metadata['model_requests'] == 13
+    assert result.metadata['protocol_repairs'] == 1
+    assert len(b.model.messages) == 12 and len(b.model.messages[-1]) == 64
+    assert result.metadata['model_calls'][-1]['error_code'] == AgentErrorCode.INVALID_INPUT.value
+    assert result.metadata['model_calls'][-1]['request_attempts'] == 0
+    assert not result.metadata.get('continuation_id') and not b.tools[0].inputs

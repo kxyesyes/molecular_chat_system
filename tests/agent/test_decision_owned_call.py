@@ -5,7 +5,7 @@ import threading
 
 import pytest
 
-from src.agent.harness import decision_execution
+from src.agent.scientific_session import decision_execution
 from src.agent.runtime.worker_ownership import WorkerOwner
 from test_worker_ownership import signalled, pending
 

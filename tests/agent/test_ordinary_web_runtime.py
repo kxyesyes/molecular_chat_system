@@ -245,7 +245,7 @@ def test_known_scientific_uses_real_tool_and_shared_carry_without_intent(actual_
 
 @pytest.mark.parametrize('bound', ['pairs', 'bytes', 'oversized'])
 def test_semantic_history_whole_pair_bounds_and_unchanged_query(actual_app, bound):
-    from src.agent.harness.decision_history import MAX_HISTORY_BYTES
+    from src.agent.scientific_session.decision_history import MAX_HISTORY_BYTES
     async def run():
         queries, answers = [], []
         async def respond(payload):

@@ -17,11 +17,11 @@ from test_web_decision_runtime import actual_app
 @pytest.mark.parametrize('failure', ['run', 'watch_cancel'])
 @pytest.mark.parametrize('with_cancel', [False, True])
 def test_no_owner_bridge_scheduling_rollback(actual_app, monkeypatch, failure, with_cancel):
-    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.web.decision_request import prepare_decision_request
     async def scenario():
         async with actual_app() as b:
-            loop = ModelDecisionLoop(b.model, b.app._get_agent_tool_registry(), b.app.agent_state_store)
+            loop = PiAgentRuntime(b.model, b.app._get_agent_tool_registry(), b.app.agent_state_store)
             prepared = prepare_decision_request({'message': '你好'}, session_id='owner', trace_id='no-owner-create')
             original = asyncio.create_task
             children, unscheduled = [], []
@@ -91,7 +91,7 @@ def test_deadline_scheduling_failure_closes_unsubmitted_coroutine(monkeypatch, e
 def test_real_owned_bridge_preserves_unresolved_cleanup(actual_app, monkeypatch):
     """Supplementary bridge test, NOT actual-route A2 lifecycle acceptance."""
     from concurrent.futures import ThreadPoolExecutor
-    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError
     from src.web.decision_request import prepare_decision_request
     created = []
@@ -114,7 +114,7 @@ def test_real_owned_bridge_preserves_unresolved_cleanup(actual_app, monkeypatch)
     async def run():
         async with actual_app(respond=respond) as b:
             b.app._create_supervisor_agent()  # Existing registry assembly only.
-            loop = ModelDecisionLoop(b.model, b.app.agent_tool_registry, b.app.agent_state_store)
+            loop = PiAgentRuntime(b.model, b.app.agent_tool_registry, b.app.agent_state_store)
             prepared = prepare_decision_request({'message': '计算性质；SMILES: CCO'},
                 session_id='synthetic-owner', trace_id='bridge-unresolved')
             owner, socket = WorkerOwner(), Socket()

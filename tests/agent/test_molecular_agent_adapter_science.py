@@ -107,7 +107,6 @@ def rig(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", no_network)
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", no_network)
-    monkeypatch.setenv("AGENT_HARNESS_MODE", "legacy")
     core = [
         FixtureTool("property_calculator", success([
             {"smiles": "CCO", "properties": {"molecular_weight": 46.069}}

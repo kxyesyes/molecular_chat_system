@@ -475,6 +475,9 @@ class TargetSearchDemoTest(unittest.TestCase):
             "get",
             side_effect=fake_get,
         ), patch.object(
+            downloader_module.socket, "getaddrinfo",
+            return_value=[(2, 1, 6, '', ('1.1.1.1', 443))],
+        ), patch.object(
             downloader_module.StructureDownloader,
             "_mark_downloaded",
         ) as mark_downloaded:
@@ -517,6 +520,9 @@ class TargetSearchDemoTest(unittest.TestCase):
             downloader_module.requests,
             "get",
             return_value=InvalidResponse(),
+        ), patch.object(
+            downloader_module.socket, "getaddrinfo",
+            return_value=[(2, 1, 6, '', ('1.1.1.1', 443))],
         ), patch.object(instance, "_mark_downloaded") as mark_downloaded:
             with self.assertRaisesRegex(
                 downloader_module.StructureDownloadError,
@@ -539,6 +545,9 @@ class TargetSearchDemoTest(unittest.TestCase):
             downloader_module.requests,
             "get",
             return_value=OversizedResponse(),
+        ), patch.object(
+            downloader_module.socket, "getaddrinfo",
+            return_value=[(2, 1, 6, '', ('1.1.1.1', 443))],
         ):
             with self.assertRaisesRegex(
                 downloader_module.StructureDownloadError,

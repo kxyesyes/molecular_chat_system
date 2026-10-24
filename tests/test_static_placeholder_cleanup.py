@@ -76,9 +76,18 @@ def _open_client(directory):
     assert 'src.web.app' not in sys.modules
     assert Path(os.environ['AGENT_STATE_DB']).parent == directory
     with ExitStack() as isolation, ExitStack() as resources:
-        isolation.enter_context(patch('src.agent.tools.get_all_tools', return_value=[]))
+        def registered_core(model, **kwargs):
+            from src.agent.tools import get_core_tools
+            tools = get_core_tools(model)
+            for tool in tools:
+                isolation.enter_context(patch.object(tool, 'execute',
+                    side_effect=AssertionError('Static-page tests must not execute science')))
+            return tools
+
+        isolation.enter_context(patch('src.agent.tools.get_all_tools', side_effect=registered_core))
         isolation.enter_context(patch('src.agent.persistence.SQLiteAgentStateStore', return_value=None))
-        # Import-time construction now has no scientific tools or persistent store.
+        # Pi registration uses lazy core contracts, with no scientific dispatch,
+        # optional-asset discovery or persistent store.
         from src.web.app import app_instance
 
         # The application owns model cleanup; do not close its models a second time.

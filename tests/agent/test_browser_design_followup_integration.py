@@ -1,46 +1,65 @@
 """Offline WebSocket wiring checks, not real model/browser acceptance."""
-import asyncio
+import json
 import pytest
 
-from tests.agent.test_browser_s02_context import make_handler, Socket
-from tests.agent.test_browser_property_constraints import _generation_result
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
+from tests.agent.test_generation_ranking_contract import CountingTool, GEN, output
+from src.agent.contracts import AgentErrorCode, ToolResult
+from src.agent.persistence import SQLiteAgentStateStore
+from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.tools.lead_optimization_verifier import LeadOptimizationVerifier
 from tests.test_scientific_reference_target_context import confirmed, pointer, FOLLOWUP, SOURCE
 
 
 def test_handler_passes_confirmed_source_target_to_optimizer(tmp_path, confirmed):
-    _, service, view, _ = confirmed
-    handler, _, _ = make_handler(tmp_path)
+    store, service, view, _ = confirmed
+    generator = CountingTool(GEN, output(GEN))
+    unavailable = [CountingTool(name, ToolResult.error_result(name,
+        AgentErrorCode.MODEL_UNAVAILABLE, 'offline synthetic unavailable'))
+        for name in ('admet_predictor', 'activity_predictor')]
+    handler = make_web_handler([generator, PropertyCalculator(), *unavailable,
+                                LeadOptimizationVerifier()], store)
     handler.scientific_references = service
     calls = []
-
-    async def capture(query, *args, **kwargs):
-        calls.append((query, kwargs))
-        return {"success": False, "status": "failed", "message": "offline execution capture"}
-
-    handler._execute_agent = capture
-    asyncio.run(handler._process_message(Socket(), FOLLOWUP, enable_rag=False, enable_tools=True,
-        conversation_history=[], session_id="owner", reference=pointer(view)))
+    required = []
+    original = handler.process_decision_message
+    async def capture(*args, **kwargs):
+        calls.append(kwargs['context'])
+        required.append((kwargs['requirements'].workflow_name, kwargs['required_tools']))
+        return await original(*args, **kwargs)
+    handler.process_decision_message = capture
+    run_web_turn(handler, FOLLOWUP, [], 'owner', reference=pointer(view))
     assert len(calls) == 1
-    assert calls[0][0].endswith("\n靶点: PDE")
-    assert calls[0][1]["resolved_molecule"].canonical_smiles == "CCN"
+    assert required[0][1] <= set(handler.agent_system.tools), required
+    assert calls[0].query.endswith("\n靶点: PDE")
+    assert calls[0].resolved_molecule.canonical_smiles == "CCN"
+    assert generator.calls == 1, json.dumps(handler.web_results[-1].to_legacy_dict(), ensure_ascii=False)
+    assert generator.inputs[0]['outputs']['baseline']
+
+
+@pytest.mark.parametrize('query', [FOLLOWUP + '\n靶点: PDE\nSMILES: CCN',
+    '优化 CCN，针对 BuChE 降低 logP', 'Lead optimization for CCN targeting PDE5A'])
+def test_target_hint_does_not_replace_explicit_lead_optimization(query):
+    from src.agent.routing.hybrid import HybridSkillRouter
+    decision = HybridSkillRouter().decide(query)
+    assert decision.selected_skill == 'hit_to_lead_optimization'
+    assert 'target_database_search' not in decision.allowed_tools
 
 
 def test_handler_displays_independent_generation_constraint_summary(tmp_path):
-    handler, _, _ = make_handler(tmp_path)
-
-    async def evidence(*args, **kwargs):
-        return {**_generation_result(), "success": True, "status": "completed",
-                "final_answer": "offline original result retained", "active_skill": "target_driven_design",
-                "workflow_plan": {"workflow_name": "target_driven_design"}}
-
-    handler._execute_agent = evidence
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, SOURCE, enable_rag=False, enable_tools=True,
-        conversation_history=[], session_id="owner"))
-    answer = [frame["content"] for frame in socket.messages if frame["type"] == "complete"][-1]
+    generator = CountingTool(GEN, output(GEN))
+    handler = make_web_handler([generator, PropertyCalculator()],
+                               SQLiteAgentStateStore(tmp_path / 'state.sqlite'))
+    complete, frames = run_web_turn(handler,
+        '生成1个分子，计算理化性质，要求分子量小于450、logP小于-1', [], 'owner', mol_count=1)
+    answer = complete['content']
     assert "用户约束逐项检查" in answer
-    assert "46.07" in answer and "3.1 | 不满足" in answer
-    assert "offline original result retained" in answer
+    assert "46.07" in answer and "-0.001 | 不满足" in answer
+    assert complete['status'] == 'partial'
+    public = next(frame for frame in frames if frame['type'] == 'agent_result')
+    audit = json.loads(public['final_answer'])
+    assert len(audit['observations']) == 2
+    assert public['final_answer'] == handler.web_results[-1].final_answer
 
 
 @pytest.mark.parametrize("target", ["PDE", "BuChE"])

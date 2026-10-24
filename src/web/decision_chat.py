@@ -7,7 +7,7 @@ from contextlib import suppress
 from threading import Lock
 
 from src.agent.contracts import AgentResult, AgentExecutionError, AgentErrorCode, RunOutcome
-from src.agent.harness.decision_bounds import validate_json
+from src.agent.scientific_session.decision_bounds import validate_json
 from src.agent.persistence.redaction import redact_sensitive, sanitize_bounded
 from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.runtime.worker_ownership import WorkerCleanupError
@@ -84,8 +84,51 @@ def scientific_display_answer(results):
         lines.append('工具版本：' + ', '.join(dict.fromkeys(versions)) + '。')
     if evidence_ids:
         lines.append('证据 ID：' + '、'.join(dict.fromkeys(evidence_ids)) + '。')
-    lines.extend(['', '限制：这些是计算描述符，不能据此判断疗效、选择性或实验结果。'])
+    lines.extend(['', '限制：这些是计算描述符，QED 不是成药成功概率，不能据此判断疗效、选择性或实验结果。'])
     return '\n'.join(lines)
+
+
+def web_scientific_display(result):
+    """Project only the runtime's allowlisted cited answer; no raw tool prose."""
+    if (result.metadata.get('binding_profile') != 'medchat-web-v1'
+            or result.metadata.get('waiting_for_input')
+            or result.outcome.value not in {'completed', 'partial'}):
+        return None
+    try:
+        payload = json.loads(result.final_answer)
+    except (TypeError, ValueError):
+        return None  # Ordinary chat has no structured scientific projection.
+    if (type(payload) is not dict or type(payload.get('acceptance')) is not dict
+            or payload['acceptance'].get('profile') != 'medchat-web-v1'
+            or type(payload.get('observations')) is not list):
+        return None
+    from types import SimpleNamespace
+    lines = ['计算、预测和检索结果仅供研究参考，不构成实验验证。']
+    for block in payload['observations']:
+        name, data = block['tool'], block.get('data')
+        if name == 'property_calculator' and data:
+            view = SimpleNamespace(tool_name=name, data=data, error=None,
+                status=SimpleNamespace(value=block['status']),
+                quality={'evidence_id': block['evidence_id']}, provenance=None)
+            lines.append(scientific_display_answer([view]) or '')
+        elif name == 'drug_likeness_assessment' and data:
+            lines.append('## 类药性评估结果')
+            for row in data:
+                assessment = row['assessment']
+                lines.append('SMILES: ' + _display_cell(row['smiles']))
+                lines.append('QED评分: ' + _display_cell(assessment.get('qed_score')))
+                score = assessment.get('overall_assessment', {}).get('score')
+                if score is not None:
+                    lines.append('总体评分: ' + _display_cell(score))
+            lines.append('本结果来自 RDKit 描述符计算与启发式规则判断；综合评分为既有加权规则评分，'
+                         '不是成药成功概率，不能确定口服生物利用度或疗效。')
+        # Always retain every approved observation, including model state,
+        # provenance, missing/unknown evidence and failure reasons. JSON quotes
+        # escape embedded newlines, so data cannot close the fenced block.
+        lines.extend(['### ' + _display_cell(name), '```json',
+                      json.dumps(block, ensure_ascii=False, allow_nan=False).replace('`', r'\u0060'), '```'])
+    lines.extend(['限制：', *payload.get('limitations', [])])
+    return '\n\n'.join(lines)
 
 
 class _DeliveryError(Exception):
@@ -216,7 +259,7 @@ def _event_frame(handler, event):
                        'display_redacted_or_truncated': changed}, ensure_ascii=False, allow_nan=False), changed
 
 
-def _result_frame(handler, result, display_changed):
+def _result_frame(handler, result, display_changed, *, business_view=None):
     if (type(result) is not AgentResult or type(result.metadata) is not dict
             or type(result.warnings) is not list or type(result.success) is not bool):
         raise _DeliveryError('result_display_invalid')
@@ -249,8 +292,43 @@ def _result_frame(handler, result, display_changed):
         envelope['warnings'] = handler._sanitize_agent_warnings(
             envelope.get('warnings'), reject_claims=True,
         )
+        if result.metadata.get('stop_reason') in {'web_clarification_changes_request', 'decision_input_budget_exceeded'}:
+            from .decision_runtime import terminal_message_for_reason
+            envelope['final_answer'] = terminal_message_for_reason(result.metadata['stop_reason'])
     if result.metadata.get('waiting_for_input'):
         envelope['status'] = 'waiting_for_input'
+    if not terminal_failure:
+        display_answer = web_scientific_display(result)
+        if display_answer:
+            envelope['display_answer'] = display_answer
+        if business_view is not None:
+            if business_view.get('final_answer') is not None:
+                envelope['display_answer'] = business_view['final_answer']
+            if business_view.get('prefix'):
+                envelope['display_answer'] = (business_view['prefix'] + '\n\n'
+                    + envelope.get('display_answer', envelope['final_answer']))
+            envelope['warnings'] = [*envelope['warnings'], *business_view.get('warnings', [])]
+            if business_view['status'] == 'partial':
+                envelope.update(status='partial', success=False, partial=True)
+                terminal_status = 'partial'
+    partial_view = None
+    full_web = result.metadata.get('binding_profile') == 'medchat-web-v1'
+    if full_web and terminal_status == 'partial' and not result.metadata.get('waiting_for_input'):
+        from .agent_result_presentation import partial_projection
+        if result.metadata.get('stop_reason') == 'decision_input_budget_exceeded':
+            from .decision_runtime import terminal_message_for_reason
+            envelope['display_answer'] = (terminal_message_for_reason('decision_input_budget_exceeded')
+                + '\n\n' + envelope.get('display_answer', envelope['final_answer']))
+        partial_view = partial_projection({**envelope,
+            'final_answer': envelope.get('display_answer', envelope['final_answer'])})
+        envelope['display_answer'] = partial_view['content']
+        envelope['failed_steps'] = partial_view['failed_steps']
+        display_changed |= envelope['warnings'] != partial_view['warnings']
+        envelope['warnings'] = partial_view['warnings']
+    elif full_web:
+        warnings = handler._sanitize_agent_warnings(envelope['warnings'])
+        display_changed |= warnings != envelope['warnings']
+        envelope['warnings'] = warnings
     # Bound before recursive sanitization/equality; never recurse over raw cycles.
     validate_json(envelope, max_bytes=4 * 1024 * 1024, max_nodes=65536,
                   reason='result_display_invalid')
@@ -261,11 +339,21 @@ def _result_frame(handler, result, display_changed):
     changed = changed or keyed != envelope or public != bounded or display_changed
     public['display_redacted_or_truncated'] = changed
     if changed:
+        if full_web:
+            public['warnings'] = public['warnings'][:19]
         public['warnings'].append(_DISPLAY_WARNING)
     # These top-level fields are always present and retain their contract types.
-    terminal = {'type': 'complete', 'content': public['final_answer'], 'trace_id': public['trace_id'],
+    terminal = {'type': 'complete', 'content': (public.get('display_answer', public['final_answer'])
+                if full_web else public['final_answer']), 'trace_id': public['trace_id'],
                 'status': public['status'], 'continuation_id': public['metadata'].get('continuation_id'),
                 'display_redacted_or_truncated': changed}
+    if partial_view is not None:
+        terminal.update(partial=True, failed_steps=public['failed_steps'],
+                        warnings=public['warnings'], error=public.get('error'))
+    elif full_web and terminal_failure:
+        # The complete frame must retain the same sanitized failure diagnostics
+        # as agent_result; terminal-only consumers must not lose the error.
+        terminal.update(warnings=public['warnings'], error=public.get('error'))
     return [json.dumps(frame, ensure_ascii=False, allow_nan=False) for frame in (public, terminal)]
 
 
@@ -341,6 +429,23 @@ async def _deliver_result(handler, websocket, frames, execution):
         # delivery, and completion is queued only after the projection drains.
         await sender.send_text(frames[0])
         await handler._send_reference_candidate_events(sender, execution, strict_transport=True)
+        if (execution.get('metadata', {}).get('binding_profile') == 'medchat-web-v1'
+                and execution.get('status') in {'completed', 'partial'}):
+            rag_count = execution['metadata'].get('task_requirements', {}).get(
+                'request', {}).get('metadata', {}).get('rag_count')
+            if type(rag_count) is int and 1 <= rag_count <= 20:
+                try:
+                    audit = json.loads(execution['final_answer'])
+                    approved = [block for block in audit['observations']
+                        if block.get('tool') == 'rag_search' and block.get('status') == 'succeeded'
+                        and type(block.get('data')) is list]
+                except (ValueError, TypeError, KeyError):
+                    approved = []
+                cards = {'tool_results': {'rag_search': {'success': True,
+                    'data': [row for block in approved for row in block['data']]}}}
+                _, warnings = await handler._send_agent_rag_results(sender, cards, rag_count)
+                for warning in warnings:
+                    await sender.send_text(json.dumps({'type':'status', 'message':warning}, ensure_ascii=False))
 
     # The loop's worker ledger is already sealed. Retain this separate async
     # child without cancelling it: cancellation of a to_thread wrapper is not
@@ -362,7 +467,8 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
                                    request_kind, allowed_tools, required_tools,
                                    requirements=None, continuation_id=None, clarified_query=None,
                                    worker_owner=None, cancel_event=None,
-                                   admission_carry=None, admission_exchange=None):
+                                   admission_carry=None, admission_exchange=None,
+                                   web_projection=None, reference_claim=None):
     """Server binds identity/permissions; scientific text comes only from harness.
 
     Disconnect/send timeout propagates to the caller after cancellation settles.
@@ -374,6 +480,10 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
     buffer = _EventBuffer()
 
     def on_event(event):
+        if request_kind == 'chat' and getattr(decision_loop, 'binding_profile', None) == 'medchat-web-v1':
+            # Pi lifecycle records remain durable, but an ordinary exchange
+            # must not show the scientific execution widget in the main UI.
+            return
         buffer.publish(lambda: _event_frame(handler, event))
 
     async def run():
@@ -383,6 +493,7 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
                 requirements=requirements, continuation_id=continuation_id,
                 clarified_query=clarified_query,
                 event_bus=AgentEventBus(on_event=on_event, state_store=decision_loop.store),
+                **({'reference_claim': reference_claim} if reference_claim is not None else {}),
                 **({'admission_carry': admission_carry, 'admission_exchange': admission_exchange}
                    if admission_carry is not None else {}),
                 **({'worker_owner': worker_owner} if worker_owner is not None else {}))
@@ -448,7 +559,19 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
                 await _settle(watcher)
 
     try:
-        frames = _result_frame(handler, result, display_changed)
+        business_view = None
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
+        if web_projection is not None:
+            from src.agent.scientific_session.decision_execution import settle_owned_call
+            business_view = await settle_owned_call(lambda: web_projection.capture(
+                result, context=context, reverse_count=handler._reverse_display_count(context.query)))
+        # The Pi-loop watcher is already drained. A cancellation arriving while
+        # a physical business projection settles must still prevent publication.
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
+        frames = _result_frame(handler, result, display_changed,
+            **({'business_view': business_view} if business_view is not None else {}))
     except Exception:
         result = _failure(context, 'result_display_invalid')
         frames = _result_frame(handler, result, True)

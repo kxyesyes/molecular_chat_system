@@ -74,7 +74,7 @@ def invoke(b, *, ctx=None, incoming=None, exchange=None, scientific=False, **kwa
 
 @pytest.fixture
 def clock(monkeypatch):
-    from src.agent.harness import decision_loop, decision_continuation
+    from src.agent.scientific_session import controller as decision_loop, decision_continuation
     now = [10.0]
     monkeypatch.setattr(decision_loop, '_now', lambda: now[0], raising=False)
     monkeypatch.setattr(decision_continuation, '_now', lambda: now[0], raising=False)
@@ -175,7 +175,7 @@ def test_preprocessing_time_and_post_proposal_tool_deadline_are_charged(setup_lo
 
 @pytest.mark.parametrize('dispatch', ['model', 'tool'])
 def test_deadline_is_rechecked_after_callbacks_at_actual_dispatch(setup_loop, clock, monkeypatch, dispatch):
-    from src.agent.harness import decision_loop
+    from src.agent.scientific_session import controller as decision_loop
     if dispatch == 'model':
         b = setup_loop([finish(text='Hello', kind='chat')])
         original = b.bus.emit
@@ -245,7 +245,7 @@ def test_no_false_durable_intent_receipt_after_metadata_failure(setup_loop, cloc
 @pytest.mark.parametrize('action', ['finish', 'clarify'])
 def test_raw_credential_display_is_rejected_not_redacted_into_success(
         setup_loop, clock, monkeypatch, caplog, mode, action):
-    from src.agent.harness.decision_loop import _Run
+    from src.agent.scientific_session.controller import _Run
     text = 'api_key=synthetic-fixture-only'
     decision = (finish(text=text, kind='chat') if action == 'finish' else
                 ClarifyDecision(version='1', action='clarify', question=text, missing_fields=['query']))

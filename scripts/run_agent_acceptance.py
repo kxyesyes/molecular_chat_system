@@ -26,7 +26,6 @@ from src.agent.evaluation import (
     score_workflow,
 )
 from src.agent.openai_compatible_model import OpenAICompatibleModel
-from src.agent.harness import HarnessFactory
 from src.agent.persistence import redact_sensitive
 from src.agent.planning import TaskPlanner
 from src.agent.routing import HybridSkillRouter
@@ -164,26 +163,15 @@ def run_contract() -> dict[str, Any]:
         ],
     }
     report["metrics"]["case_count"] = len(all_results)
-    harness_probe = _run_harness_contract_probe()
-    if harness_probe is not None:
-        if harness_probe.get("backend") in {"legacy", "langgraph"}:
-            report["harness_canary"] = harness_probe
-        else:
-            report["harness_shadow"] = harness_probe
-        requested_canary = (
-            os.getenv("AGENT_HARNESS_MODE", "legacy").strip().lower()
-            == "langgraph_canary"
-        )
-        if harness_probe.get("status") == "failed" or (
-            requested_canary and harness_probe.get("status") == "unavailable"
-        ):
-            report["status"] = "failed"
+    executor_probe = _run_executor_contract_probe()
+    report["executor_contract"] = executor_probe
+    if executor_probe.get("status") != "passed":
+        report["status"] = "failed"
     return report
 
 
-def _run_harness_contract_probe(
-    harness_factory: HarnessFactory | None = None,
-) -> dict[str, Any] | None:
+def _run_executor_contract_probe() -> dict[str, Any]:
+    """Check deterministic dispatch only; this is not a scientific acceptance result."""
     from src.agent.contracts import ToolResult
     from src.agent.orchestrators import WorkflowOrchestrator, WorkflowStep
     from src.agent.planning import WorkflowPlan
@@ -213,60 +201,27 @@ def _run_harness_contract_probe(
             )
         ],
     )
-    factory = harness_factory or HarnessFactory()
-    harness_run = factory.create(
-        WorkflowExecutor(
-            planner=TaskPlanner(),
-            orchestrator=WorkflowOrchestrator(),
-        )
+    execution = WorkflowExecutor(
+        planner=TaskPlanner(),
+        orchestrator=WorkflowOrchestrator(),
     ).execute(
         context=AgentContext(
-            query="harness contract probe",
-            trace_id="HARNESS-CONTRACT",
+            query="deterministic executor contract probe",
+            trace_id="EXECUTOR-CONTRACT",
             active_skill="admet_assessment",
         ),
         policy=WorkflowCatalog().require("admet_assessment"),
         all_tools={tool.name: tool},
         plan=plan,
     )
-    if not harness_run.authoritative.result.success or tool.calls != 1:
+    if (not execution.result.success or tool.calls != 1
+            or execution.tool_attempt_count != tool.calls):
         return {
             "status": "failed",
-            "error_code": "authoritative_contract_failed",
-            "authoritative_tool_calls": tool.calls,
+            "error_code": "executor_contract_failed",
+            "tool_attempt_count": tool.calls,
         }
-    if harness_run.shadow is not None:
-        return {
-            **harness_run.shadow.to_dict(),
-            "authoritative_tool_calls": tool.calls,
-        }
-    if harness_run.execution is not None:
-        execution_metadata = harness_run.execution.to_dict()
-        if (
-            execution_metadata.get("backend") not in {"legacy", "langgraph"}
-            or execution_metadata.get("tool_attempt_count") != tool.calls
-            or len(str(execution_metadata.get("plan_fingerprint") or "")) != 64
-        ):
-            return {
-                "status": "failed",
-                "error_code": "invalid_harness_execution_metadata",
-                "authoritative_tool_calls": tool.calls,
-            }
-        return redact_sensitive(
-            {
-                **execution_metadata,
-                "status": "passed",
-                "authoritative_tool_calls": tool.calls,
-            }
-        )
-    warning = getattr(factory, "last_warning", None)
-    if warning:
-        return {
-            "status": "unavailable",
-            "error_code": warning,
-            "authoritative_tool_calls": tool.calls,
-        }
-    return None
+    return {"status": "passed", "tool_attempt_count": tool.calls}
 
 
 def _run_real_case_contracts(

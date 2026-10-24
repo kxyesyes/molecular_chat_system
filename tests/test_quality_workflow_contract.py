@@ -35,7 +35,6 @@ def test_cpu_ci_profile_contains_collection_dependencies() -> None:
 
     for expected in (
         "-r requirements.txt",
-        "-r requirements-agent-harness.txt",
         "-r requirements-agent-temporal.txt",
         "--extra-index-url https://download.pytorch.org/whl/cpu",
         "torch==2.4.0+cpu",
@@ -59,17 +58,18 @@ def test_quality_workflow_runs_family_dom_selftests_in_static_job() -> None:
     assert "          node tests/activity_family_acceptance_dom.js\n" in static_job
 
 
-def test_quality_workflow_installs_node_for_root_python_chain() -> None:
+def test_quality_workflow_installs_locked_pi_for_all_python_partitions() -> None:
     workflow = (ROOT / ".github/workflows/quality.yml").read_text("utf-8")
     python_job = workflow.split("  python-tests:\n", 1)[1].split("  static-quality:\n", 1)[0]
 
     assert (
-        "        if: matrix.name == 'root' || matrix.name == 'root-activity'\n"
         "        uses: actions/setup-node@v4\n"
         "        with:\n"
-        '          node-version: "20"\n'
+        '          node-version: "24.15.0"\n'
     ) in python_job
     assert python_job.index("uses: actions/setup-node@v4") < python_job.index("- name: Run Python tests")
+    assert 'npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund' in python_job
+    assert "if: matrix.name == 'root' || matrix.name == 'root-activity'" not in python_job
 
 
 def test_quality_workflow_disables_real_family_acceptance_for_all_jobs() -> None:

@@ -18,8 +18,8 @@ _REASON = 'ascii_accounting_boundary'
 
 @pytest.fixture
 def boundary():
-    from src.agent.harness import decision_bounds
-    from src.agent.harness.decision_policy import DecisionBoundaryError
+    from src.agent.scientific_session import decision_bounds
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
     return decision_bounds, DecisionBoundaryError
 
 

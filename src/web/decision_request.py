@@ -14,10 +14,10 @@ from src.agent.contracts import AgentContext
 from src.agent.contracts.task_requirements import MolecularRequirement, TaskRequirements
 from src.agent.contracts.target_request import analyze_target_request
 from src.agent.contracts.generation_request import has_generation_intent, validate_generation_count
-from src.agent.harness.decision_bounds import context_value, validate_json, configuration_generation
-from src.agent.harness.decision_inputs import has_explicit_molecule
-from src.agent.harness.decision_policy import DecisionBoundaryError
-from src.agent.harness.decision_requirements import prepare_requirements
+from src.agent.scientific_session.decision_bounds import context_value, validate_json, configuration_generation
+from src.agent.scientific_session.decision_inputs import has_explicit_molecule
+from src.agent.scientific_session.decision_policy import DecisionBoundaryError
+from src.agent.scientific_session.decision_requirements import prepare_requirements
 from src.agent.persistence.redaction import contains_secret_material
 
 
@@ -690,7 +690,7 @@ def prepare_with_intent(envelope, assessment, intent, *, history, capability_sna
     """
     from src.agent.contracts.ordinary_intent import OrdinaryIntent
     from src.agent.contracts.ordinary_admission import build_admission_binding
-    from src.agent.harness.decision_history import history_pairs
+    from src.agent.scientific_session.decision_history import history_pairs
     try:
         envelope = _validated_envelope(envelope)
         fresh = assess_whole_request(envelope)

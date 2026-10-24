@@ -72,27 +72,30 @@ def resolve_web_chat_profile(
     *,
     wire_mode: str | None = None,
 ) -> tuple[str, str, str]:
-    """Resolve the explicitly selected web chat chain.
+    """Resolve Pi composition and its independently selected admission policy.
 
-    The stable legacy chain remains the default. The decision runtime is
-    opt-in so a deployment cannot switch the production entry point merely by
-    importing this module; operators can enable it with
-    ``MEDCHAT_CHAT_PROFILE=decision_a2`` or ``semantic_v1`` after acceptance.
+    ``decision_a2`` is a deprecated configuration alias for Pi, not another
+    backend. ``semantic_v1`` explicitly opts into semantic admission on Pi;
+    the default retains the existing closed scientific permissions.
     """
     selected = (profile if profile is not None else os.environ.get(
-        "MEDCHAT_CHAT_PROFILE", "legacy"
+        "MEDCHAT_CHAT_PROFILE", "pi"
     )).strip().lower()
     selected_wire = (wire_mode if wire_mode is not None else os.environ.get(
         "MEDCHAT_DECISION_WIRE_MODE", "native"
     )).strip().lower()
+    if selected == "legacy":
+        raise ValueError("MEDCHAT_CHAT_PROFILE legacy is obsolete; use pi")
     profiles = {
-        "legacy": ("legacy", selected_wire, "a1_closed"),
-        "decision_a2": ("decision_a2", selected_wire, "a1_closed"),
-        "semantic_v1": ("decision_a2", selected_wire, "semantic_v1"),
+        "pi": ("pi", selected_wire, "medchat-web-v1"),
+        "medchat-web-v1": ("pi", selected_wire, "medchat-web-v1"),
+        "a1_closed": ("pi", selected_wire, "a1_closed"),
+        "decision_a2": ("pi", selected_wire, "a1_closed"),
+        "semantic_v1": ("pi", selected_wire, "semantic_v1"),
     }
     if selected not in profiles:
         raise ValueError(
-            "MEDCHAT_CHAT_PROFILE must be legacy, decision_a2, or semantic_v1"
+            "MEDCHAT_CHAT_PROFILE must be pi, decision_a2 (deprecated alias), or semantic_v1"
         )
     if selected_wire not in {"native", "json"}:
         raise ValueError("MEDCHAT_DECISION_WIRE_MODE must be native or json")
@@ -141,9 +144,9 @@ class MolecularChatApp:
     """Main application class"""
     
     def __init__(self, config_path: str = "config/ollama_config.yaml", *,
-                 normal_chat_mode='legacy', decision_wire_mode='native',
-                 ordinary_chat_policy='a1_closed'):
-        self._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
+                 normal_chat_mode='pi', decision_wire_mode='native',
+                 ordinary_chat_policy='medchat-web-v1'):
+        normal_chat_mode = self._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
         if ordinary_chat_policy == 'semantic_v1':
             raise ValueError('Semantic assembly requires create_async')
         if os.environ.get('MEDCHAT_CHAT_DOCKING_ENABLED') != '1':
@@ -202,19 +205,21 @@ class MolecularChatApp:
 
     @staticmethod
     def _validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy):
-        if (type(normal_chat_mode) is not str or normal_chat_mode not in {'legacy', 'decision_a2'}
+        if normal_chat_mode == 'legacy':
+            raise ValueError('normal_chat_mode legacy is obsolete; use pi')
+        if (type(normal_chat_mode) is not str or normal_chat_mode not in {'pi', 'decision_a2'}
                 or type(decision_wire_mode) is not str or decision_wire_mode not in {'native', 'json'}
-                or type(ordinary_chat_policy) is not str or ordinary_chat_policy not in {'a1_closed', 'semantic_v1'}):
+                or type(ordinary_chat_policy) is not str or ordinary_chat_policy not in {'a1_closed', 'semantic_v1', 'medchat-web-v1'}):
             raise ValueError('Invalid normal chat or decision wire mode')
-        if ordinary_chat_policy == 'semantic_v1' and normal_chat_mode != 'decision_a2':
-            raise ValueError('Semantic assembly requires decision_a2')
+        # Deprecated spelling only: every accepted mode uses official Pi.
+        return 'pi'
 
     @classmethod
     async def create_async(cls, config_path: str = "config/ollama_config.yaml", *,
-                           normal_chat_mode='legacy', decision_wire_mode='native',
-                           ordinary_chat_policy='a1_closed'):
+                           normal_chat_mode='pi', decision_wire_mode='native',
+                           ordinary_chat_policy='medchat-web-v1'):
         """Assemble only; never start initialize/watcher/index or preload work."""
-        cls._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
+        normal_chat_mode = cls._validate_chat_profile(normal_chat_mode, decision_wire_mode, ordinary_chat_policy)
         instance = cls.__new__(cls)
         stack = AsyncExitStack()
         instance._assembly_stack = stack
@@ -344,20 +349,20 @@ class MolecularChatApp:
             logger.error(f"❌ ChatHandler初始化失败: {e}")
             self.chat_handler = None
         
-        if normal_chat_mode == 'decision_a2':
-            from .decision_runtime import WebDecisionRuntime
-            if self.chat_handler is None:
-                raise ValueError('Decision mode requires a chat handler')
-            self.decision_runtime = WebDecisionRuntime(self, wire_mode=decision_wire_mode)
-            self.chat_handler.decision_runtime = self.decision_runtime
+        # WebDecisionRuntime supplies Web admission/lifecycle around Pi only.
+        # Assembly performs no model-network readiness probe or legacy fallback.
+        from .decision_runtime import WebDecisionRuntime
+        if self.chat_handler is None:
+            raise ValueError('Pi mode requires a chat handler')
+        self.decision_runtime = WebDecisionRuntime(self, wire_mode=decision_wire_mode)
+        self.chat_handler.decision_runtime = self.decision_runtime
 
         if ordinary_chat_policy == 'semantic_v1':
             self.ordinary_capability_base = self._build_ordinary_capability_base(
                 self.active_llm_config, self.model, self.model_generation, self.capability_generation)
-            # Web requests now enter the supervised semantic runtime. The legacy
-            # direct API cannot supply that admission and remains closed; the
-            # decision bridge itself requires server-owned carry and exchange.
-            self.chat_handler._process_message = self._reject_unassembled_ordinary_dispatch
+            # Web requests enter Pi with semantic admission. The decision
+            # bridge requires server-owned carry and exchange; no retired
+            # private handler entry is recreated during assembly.
 
         # Create FastAPI app
         # The public service exposes only the application API and UI.  OpenAPI
@@ -395,10 +400,6 @@ class MolecularChatApp:
             })
         finally:
             await websocket.close(code=1013)
-
-    async def _reject_unassembled_ordinary_dispatch(self, *args, **kwargs):
-        """Also reject server-side direct handler calls before any provider use."""
-        raise HTTPException(status_code=503, detail='ordinary_semantic_not_assembled')
 
     def _build_ordinary_capability_base(self, config, model, model_generation, capability_generation):
         """Reviewed assembly facts only, never runtime readiness or authority."""
@@ -591,9 +592,12 @@ class MolecularChatApp:
     def _create_model_from_llm_config(self, llm_config: Dict[str, Any]):
         config = normalize_llm_config(llm_config)
         if config.get("provider") == "ollama":
+            from src.agent import decision_transport
+
             return OllamaModel(
                 base_url=config.get("base_url") or "http://localhost:11434",
                 model_name=config.get("model_name") or "gmm-llama:latest",
+                decision_transport=decision_transport,
             )
 
         if config.get("provider") == "modelscope":
@@ -791,18 +795,8 @@ class MolecularChatApp:
         @self.app.websocket("/ws")
         async def websocket_endpoint(websocket: WebSocket):
             """WebSocket endpoint for chat - 使用ChatHandler"""
-            if self.decision_runtime is not None:
-                await self.chat_handler.handle_websocket(websocket)
-                return
-            try:
-                await self._refresh_llm_config_from_env()
-            except HTTPException:
-                await websocket.accept()
-                await websocket.send_json({"type": "error", "message": "本机模型配置不可用；请检查配置文件与目录权限。"})
-                await websocket.close(code=1011)
-                return
             if self.chat_handler:
-                # 使用新的ChatHandler（支持Agent工具）
+                # The handler fails closed if Pi composition is unavailable.
                 await self.chat_handler.handle_websocket(websocket)
             else:
                 await self._reject_websocket_without_chat_handler(websocket)
@@ -991,18 +985,15 @@ class MolecularChatApp:
         return task_runtime
 
     async def _reject_websocket_without_chat_handler(self, websocket: WebSocket):
-        """Fail closed when the modern ChatHandler/Agent entrypoint is unavailable.
-
-        Falling back to the legacy websocket handler can bypass SupervisorAgent,
-        WorkflowOrchestrator, ToolResult normalization, and domain validators.
-        """
+        """Fail closed when the Pi Web entrypoint is unavailable."""
         logger.error(
             "ChatHandler unavailable; refusing websocket connection to avoid "
-            "bypassing the SupervisorAgent workflow"
+            "bypassing Pi admission and scientific authorization"
         )
         await websocket.accept()
         await websocket.send_text(json.dumps({
             "type": "error",
+            "code": "pi_runtime_unavailable",
             "message": (
                 "Chat service is unavailable because the modern Agent entrypoint "
                 "was not initialized. Please check server startup logs."

@@ -160,7 +160,7 @@ def test_raw_gate_is_request_local_and_keeps_default_adapter_compatibility(setup
 def test_raw_gate_keeps_input_and_output_schema_validation():
     from test_tool_adapters import make_spec, LegacyValueTool
     from src.agent.tooling.adapters import LegacyPythonToolAdapter
-    from src.agent.harness.decision_bounds import validate_raw_observation
+    from src.agent.scientific_session.decision_bounds import validate_raw_observation
     source = LegacyValueTool()
     adapter = LegacyPythonToolAdapter(make_spec(), source)
     result = adapter.execute({'not_query': 'CCO'}, raw_validator=validate_raw_observation)
@@ -174,7 +174,7 @@ def test_raw_gate_keeps_timed_out_invocation_slot_until_worker_settles():
     import threading
     from test_tool_adapters import make_spec
     from src.agent.tooling.adapters import LegacyPythonToolAdapter
-    from src.agent.harness.decision_bounds import validate_raw_observation
+    from src.agent.scientific_session.decision_bounds import validate_raw_observation
     release = threading.Event()
     calls = []
     class BlockingTool:
@@ -196,7 +196,7 @@ def test_raw_gate_keeps_timed_out_invocation_slot_until_worker_settles():
 
 def test_publication_retry_cannot_replace_original_full_seal(setup_loop, monkeypatch):
     import sqlite3
-    import src.agent.harness.decision_loop as loop
+    import src.agent.scientific_session.controller as loop
     class Retained(CountingTool):
         def execute(self, query):
             self.last = super().execute(query)

@@ -189,7 +189,7 @@ def test_private_snapshot_never_serializes_but_is_still_revalidated(
     assert not result.success and result.data is None and not result.evidence
     assert result.error.to_dict()["details"] == safe
     assert result.to_legacy_dict()["error"]["details"] == safe
-    from src.agent.harness.decision_bounds import observation_value
+    from src.agent.scientific_session.decision_bounds import observation_value
 
     for public in (result.error.to_dict(), result.to_legacy_dict(),
                    vars(result.error), asdict(result), observation_value(result)):

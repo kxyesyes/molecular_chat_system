@@ -94,8 +94,15 @@ class EvidenceLedger:
 
         if type(binding_proof) is not dict or type(quality_proof) is not dict:
             raise ValueError("invalid_binding_proof")
-        proof = parse_binding_proof(binding_proof).model_dump(mode="json")
-        quality = parse_binding_proof(quality_proof).model_dump(mode="json")
+        # Profile selection is syntax dispatch, never authority. Keep B1's
+        # parser closed; the separate Web codec validates both native values
+        # and cannot accept cross-profile metadata from a tool.
+        parser = parse_binding_proof
+        if type(binding_proof.get('profile')) is str and binding_proof['profile'] == 'medchat-web-v1':
+            from src.agent.contracts.web_requirements import parse_web_binding_proof
+            parser = parse_web_binding_proof
+        proof = parser(binding_proof).model_dump(mode="json")
+        quality = parser(quality_proof).model_dump(mode="json")
         if proof != quality:
             raise ValueError("invalid_binding_proof")
         return proof

@@ -103,7 +103,7 @@ def parse_binding_arguments(tool_name, arguments, *, profile_revision=None):
     """
     try:
         # Lazy: harness initialization also imports Web capability contracts.
-        from src.agent.harness.decision_bounds import validate_json
+        from src.agent.scientific_session.decision_bounds import validate_json
         from src.agent.persistence.redaction import contains_secret_material
 
         validate_json(arguments, max_bytes=4096, max_depth=8, max_nodes=64,
@@ -198,7 +198,7 @@ def _bounded_model_payload(value, *, models, max_bytes, reason):
     Depth/work are bounded even for model_construct cycles before any JSON dump.
     The native walk then bounds the complete default-separator representation.
     """
-    from src.agent.harness.decision_bounds import validate_json
+    from src.agent.scientific_session.decision_bounds import validate_json
 
     if type(value) is dict:
         validate_json(value, max_bytes=max_bytes, reason=reason)

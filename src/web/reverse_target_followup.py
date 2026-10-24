@@ -12,7 +12,7 @@ import re
 
 from src.agent.contracts import ObservationStatus, ToolProvenance, ToolResult
 from src.agent.evidence.ledger import EvidenceLedger
-from src.agent.harness.decision_bounds import validate_json
+from src.agent.scientific_session.decision_bounds import validate_json
 from src.agent.persistence.scientific_references import _source
 from src.reverse_target.receipt import validate_prediction_observation
 

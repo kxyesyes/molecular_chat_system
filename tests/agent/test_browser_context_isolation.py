@@ -3,34 +3,22 @@
 RDKit descriptors are real. Activity rows are synthetic contract fixtures; no
 model inference, browser, business API or acceptance database is contacted.
 """
-import asyncio
-import json
 
 import pytest
 
-from src.agent.harness.factory import HarnessFactory
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.routing.hybrid import HybridSkillRouter
-from src.agent.supervisor import SupervisorAgent
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from src.agent.tools.property_calculator import PropertyCalculator
-from src.web.chat_handler import ChatHandler
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 from tests.agent.test_browser_evidence_followup import (
-    ASPIRIN, CAFFEINE, FOLLOWUP, NoScienceModel, SyntheticActivity, prediction,
+    ASPIRIN, CAFFEINE, FOLLOWUP, SyntheticActivity, prediction,
 )
 
 
 FILES = "受体文件 protein.pdb，配体 ligand.sdf，box center=[0,0,0]，size=[20,20,20]。"
 PROPERTY = f"只计算阿司匹林 {ASPIRIN} 的分子量和 logP"
 COMPARE = f"只比较咖啡因 {CAFFEINE} 和刚才阿司匹林的分子量与 logP。"
-
-
-class Socket:
-    def __init__(self):
-        self.scope, self.messages = {}, []
-
-    async def send_text(self, value):
-        self.messages.append(json.loads(value))
 
 
 class RecordingProperties(PropertyCalculator):
@@ -46,21 +34,18 @@ class RecordingProperties(PropertyCalculator):
 def make_handler(tmp_path):
     properties = RecordingProperties()
     activity = SyntheticActivity([prediction(ASPIRIN, 4.8)])
-    agent = SupervisorAgent(tools={properties.name: properties, activity.name: activity,
+    handler = make_web_handler(tools={properties.name: properties, activity.name: activity,
         "drug_likeness_assessment": DrugLikenessAssessment()},
-        harness_factory=HarnessFactory(mode="legacy"),
-        state_store=SQLiteAgentStateStore(tmp_path / "agent.sqlite"))
-    return ChatHandler(NoScienceModel(), None, agent, {}), properties, activity
+        store=SQLiteAgentStateStore(tmp_path / "agent.sqlite"))
+    return handler, properties, activity
 
 
 def turn(handler, query, **context):
-    # Each call is deliberately a different socket on the same handler.
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, query, enable_rag=False,
-        enable_tools=True, **context))
-    complete = [frame for frame in socket.messages if frame["type"] == "complete"]
-    assert complete
-    return complete[-1]["content"]
+    # Missing explicit caller context maps to a fresh authenticated socket;
+    # only an explicit history+session pair identifies a reusable sender.
+    complete, _ = run_web_turn(handler, query, context.get('conversation_history'),
+        context.get('session_id'))
+    return complete['content']
 
 
 @pytest.mark.parametrize("negation", [

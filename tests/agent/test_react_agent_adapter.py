@@ -57,7 +57,6 @@ def offline(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", block)
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", block)
-    monkeypatch.setenv("AGENT_HARNESS_MODE", "legacy")
 
 
 def make_agent(monkeypatch, tools, model=None):

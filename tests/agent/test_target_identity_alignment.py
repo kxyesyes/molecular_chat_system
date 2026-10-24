@@ -1,4 +1,5 @@
 import pytest
+from tests.agent.pi_web_support import cleanup_web_handlers
 
 from src.agent.contracts import AgentContext
 from src.agent.planning.task_planner import TaskPlanner
@@ -110,30 +111,21 @@ def test_forced_design_with_ambiguous_target_fails_in_actual_executor():
     assert result.error.details['reason'] == 'target_clarification_required'
 
 
-def test_chat_returns_target_clarification_without_model_or_tools():
-    import asyncio
-    import json
-    from types import SimpleNamespace
-    from src.agent.router import SkillRouter
-    from src.web.chat_handler import ChatHandler
+def test_chat_returns_target_clarification_without_model_or_tools(tmp_path, monkeypatch):
+    from src.agent.persistence import SQLiteAgentStateStore
+    from tests.agent.pi_web_support import make_web_handler, run_web_turn
 
-    class Model:
-        async def generate(self, *args, **kwargs):
-            raise AssertionError('Ambiguous request must not fall through to model')
-
-    class Socket:
-        messages = []
-        async def send_text(self, text):
-            self.messages.append(json.loads(text))
-
-    handler = ChatHandler(Model(), SimpleNamespace(is_initialized=False),
-                          SimpleNamespace(skill_router=SkillRouter(), llm=None), {})
-    socket = Socket()
-    asyncio.run(handler._process_message(socket, '针对 PDE5A 和 BuChE 生成 5 个候选分子', False, True))
-    terminal = [message for message in socket.messages if message['type'] == 'complete']
-    assert len(terminal) == 1
-    assert '单一靶点' in terminal[0]['content']
-    assert len(handler.conversation_history) == 1
+    handler = make_web_handler({}, SQLiteAgentStateStore(tmp_path / 'clarification.sqlite'))
+    def forbidden(*args, **kwargs):
+        pytest.fail('Ambiguous request must not fall through to model or tools')
+    monkeypatch.setattr(handler.model, 'decide', forbidden)
+    monkeypatch.setattr(handler, 'process_decision_message', forbidden)
+    history = []
+    complete, frames = run_web_turn(handler,
+        '针对 PDE5A 和 BuChE 生成 5 个候选分子', history, 'target-owner')
+    assert len([frame for frame in frames if frame['type'] == 'complete']) == 1
+    assert '单一靶点' in complete['content']
+    assert len(history) == 1
 
 
 @pytest.mark.parametrize('target_status', ['not_found', 'unavailable'])

@@ -72,6 +72,7 @@ def test_websocket_without_chat_handler_fails_closed_instead_of_legacy_fallback(
     assert websocket.messages == [
         {
             "type": "error",
+            "code": "pi_runtime_unavailable",
             "message": (
                 "Chat service is unavailable because the modern Agent entrypoint "
                 "was not initialized. Please check server startup logs."

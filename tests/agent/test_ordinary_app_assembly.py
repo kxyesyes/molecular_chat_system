@@ -241,11 +241,14 @@ def test_ollama_second_client_failure_closes_first(assembly, monkeypatch, caplog
 
 
 @pytest.mark.parametrize('policy', [None, 'a1_closed'])
-@pytest.mark.parametrize('mode', [None, 'decision_a2'])
-def test_sync_fixture_preserves_closed_default(actual_app, policy, mode):
+@pytest.mark.parametrize('mode', [None, 'pi', 'decision_a2'])
+def test_sync_fixture_preserves_explicit_profile_or_full_web_default(actual_app, policy, mode):
     async def run():
         async with actual_app(mode=mode, ordinary_policy=policy) as bundle:
-            assert bundle.app.ordinary_chat_policy == 'a1_closed'
+            # Omitting policy now selects the complete Web profile. An explicit
+            # closed policy must remain closed, including the old mode spelling.
+            assert bundle.app.ordinary_chat_policy == (policy or 'medchat-web-v1')
+            assert bundle.app.normal_chat_mode == 'pi'
             assert bundle.app.ordinary_capability_base is None
             assert bundle.app.capability_generation
     asyncio.run(run())
@@ -527,16 +530,13 @@ def test_capability_facts_never_read_credentials_url_or_health(assembly, monkeyp
     asyncio.run(run())
 
 
-def test_async_closed_profile_retains_legacy_generator_failure_shutdown(assembly, monkeypatch):
+def test_async_pi_profile_rejects_incomplete_registration_and_closes_owners(assembly, monkeypatch):
     def unavailable(**kwargs):
         raise RuntimeError('synthetic generator unavailable')
     monkeypatch.setattr(assembly.module, 'OllamaModel', unavailable)
     async def run():
-        app = await assembly.cls.create_async()
-        try:
-            assert app.agent_system is None and app.ordinary_chat_policy == 'a1_closed'
-        finally:
-            await app.shutdown()
+        with pytest.raises(ValueError, match='Agent registration invalid'):
+            await assembly.cls.create_async()
         assert Counter(assembly.closed) == Counter(['model', 'rag'])
     asyncio.run(run())
 
@@ -599,7 +599,7 @@ def test_closed_profile_route_still_serves_admitted_chat(actual_app, policy):
     async def run():
         async with actual_app(mode='decision_a2', ordinary_policy=policy) as bundle:
             async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
-                assert (await socket.ready())['normal_chat_mode'] == 'decision_a2'
+                assert (await socket.ready())['normal_chat_mode'] == 'pi'
                 result = result_of(await socket.turn({'message': '你好'}))
                 assert result['status'] == 'completed'
                 assert result['final_answer'] == 'Protocol-only explanation'
@@ -647,7 +647,7 @@ def test_assembled_semantic_direct_websocket_entry_uses_gate(actual_app, entry):
 def test_unassembled_semantic_direct_dispatch_rejects(actual_app, entry):
     from fastapi import HTTPException
     from src.web.decision_request import prepare_decision_request
-    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     async def run():
         async with actual_app(mode='decision_a2', ordinary_policy='semantic_v1') as bundle:
             cookie = await cookie_for(bundle.app)
@@ -657,12 +657,14 @@ def test_unassembled_semantic_direct_dispatch_rejects(actual_app, entry):
                 frames.append(json.loads(text))
             websocket = SimpleNamespace(send_text=send)
             if entry == 'legacy_message':
-                operation = bundle.app.chat_handler._process_message(
-                    websocket, '你好', False, False, session_id=session_id)
+                assert not hasattr(bundle.app.chat_handler, '_process_message')
+                assert not bundle.calls and not frames
+                assert bundle.app.model_request_gate._readers == 0
+                return
             else:
                 prepared = prepare_decision_request({'message': '你好'}, session_id=session_id,
                     trace_id='assembly-direct-dispatch', config_generation=bundle.app.model_generation)
-                loop = ModelDecisionLoop(bundle.model, bundle.app.agent_tool_registry,
+                loop = PiAgentRuntime(bundle.model, bundle.app.agent_tool_registry,
                     bundle.app.agent_state_store, mode='native', config_generation=bundle.app.model_generation)
                 operation = bundle.app.chat_handler.process_decision_message(websocket,
                     context=prepared.context, decision_loop=loop, request_kind=prepared.request_kind,

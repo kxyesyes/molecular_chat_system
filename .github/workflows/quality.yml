@@ -77,11 +77,13 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - name: Set up Node.js for family acceptance chain
-        if: matrix.name == 'root' || matrix.name == 'root-activity'
+      - name: Set up Node.js for Pi and family acceptance
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24.15.0"
+
+      - name: Install locked Pi runtime
+        run: npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
 
       - name: Install CPU development dependencies
         run: |
@@ -156,7 +158,7 @@ jobs:
                       env = dict(safe, TEMP=directory, TMP=directory, TMPDIR=directory,
                           HOME=directory, USERPROFILE=directory, PYTHONNOUSERSITE='1',
                           PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8',
-                          PYTHONPATH=str(repo), AGENT_HARNESS_MODE='legacy',
+                          PYTHONPATH=str(repo),
                           MOLECULAR_CHAT_CONFIG=str(root / 'missing.yaml'),
                           MEDCHAT_ENV_FILE=str(root / 'not-loaded.env'),
                           MEDCHAT_USER_CONFIG_DIR=str(root / 'user-config'),
@@ -167,7 +169,7 @@ jobs:
                           TARGET_DB_PATH=str(root / 'targets.sqlite'),
                           TARGET_CACHE_DIR=str(root / 'target-cache'),
                           MEDCHAT_FRAGMENT_DB_PATH=directory, MEDCHAT_TASK_BACKEND='local',
-                          MEDCHAT_TEMPORAL_CANARY_PERCENT='0', AGENT_LANGGRAPH_CANARY_PERCENT='0',
+                          MEDCHAT_TEMPORAL_CANARY_PERCENT='0',
                           MEDCHAT_RUN_FAMILY_REAL_ACCEPTANCE='0', MEDCHAT_RUN_OPENSANDBOX_ACCEPTANCE='0',
                           MEDCHAT_RUN_OPENSANDBOX_STABILITY_SOAK='0', RUN_REAL_TARGET_SEARCH='0')
                       fixtures = root / 'data/agent_evals'
@@ -259,7 +261,10 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "24.15.0"
+
+      - name: Install locked Pi runtime
+        run: npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
 
       - name: Compile Python sources
         run: python -m compileall -q src scripts
@@ -271,6 +276,9 @@ jobs:
             node "$test_file"
           done < <(find tests -maxdepth 1 -type f -name '*_test.js' -print | sort)
           node tests/activity_family_acceptance_dom.js
+
+      - name: Run official Pi host contract tests
+        run: npm test --prefix runtime/pi
 
       - name: Scan tracked non-document files for credential material
         shell: bash

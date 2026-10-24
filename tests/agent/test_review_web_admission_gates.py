@@ -4,27 +4,116 @@ Only temporary stores and in-process provider fixtures are used. These tests
 prove routing, evidence and consent contracts, not scientific predictions.
 """
 import asyncio
+from contextlib import asynccontextmanager
 from copy import deepcopy
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
 from src.agent.routing.hybrid import HybridSkillRouter
-from src.agent.supervisor import SupervisorAgent
-from src.web.chat_handler import ChatHandler, InputBudgetExceeded
+from src.web.chat_handler import ChatHandler
 from src.web.docking_request import OwnedDockingStructureEvidence
 from src.web.ranked_target_structures import rank_followup_kind, reverse_rank_routing_query
 from src.web.reverse_target_followup import RankedReverseEvidence
 from src.web.scientific_references import (
     REFERENCE_CLARIFICATION, ScientificReferenceService, prior_molecule_reference,
 )
-from tests.agent.test_chat_reverse_rank_followup import FIRST, Socket, make_handler, turn
-from tests.agent.test_docking_chat_receivers import source_receiver, settle
+from tests.agent.test_chat_reverse_rank_followup import FIRST, make_handler, turn
+from tests.agent.test_docking_chat_receivers import settle
+from tests.agent.pi_web_support import cleanup_web_handlers, make_web_handler, run_web_turn
 from tests.agent.test_reverse_target_rank_followup import ranked
 from tests.agent.test_scientific_reference_execution import Tool
 from tests.agent.test_scientific_reference_web import pointer, seed
 from tests.agent.test_web_docking_consent import target_case
+
+
+@asynccontextmanager
+async def budget_result_receiver(tmp_path, target, monkeypatch, *, workflow=False,
+                                 owner='owner-session', fail_complete=False,
+                                 result_status='completed'):
+    """Actual sender/capture lifecycle with an explicit settled-result fixture.
+
+    Pi has no model-prose interpretation stage. The historical budget fallback
+    is input to this publication-boundary test, not a fabricated Pi execution.
+    Neither execution nor a budget detector is claimed by this fixture.
+    """
+    from src.agent.contracts import AgentResult, ToolResult, ToolProvenance, RunOutcome
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
+    from src.web import decision_runtime
+    from src.web.decision_chat import _result_frame
+    from src.web.decision_runtime import WebDecisionRuntime
+    from src.web.docking_chat_controller import DockingChatController
+    from tests.agent.test_docking_chat_receivers import Socket as ReceiverSocket
+    from tests.agent.test_web_docking_coordinator import Rig
+    from tests.agent.test_chat_handler_agent_events import FakeModel
+
+    rig = Rig(tmp_path / 'budget-source-rig')
+    rig.state = target.store
+    model = FakeModel()
+    handler = ChatHandler(model, None, None, {'inference': {'stream': False}})
+    async def refresh():
+        pass
+    app = SimpleNamespace(_get_agent_tool_registry=lambda: SimpleNamespace(as_mapping=lambda: {}),
+        _get_agent_state_store=lambda: target.store, _get_scientific_references=lambda: None,
+        model=model, model_generation='budget-publication-fixture', model_request_gate=rig.gate,
+        _refresh_llm_config_from_env=refresh)
+    runtime = WebDecisionRuntime(app, wire_mode='native')
+    handler.decision_runtime = runtime
+    original_turn = decision_runtime._Turn
+    monkeypatch.setattr(decision_runtime, '_Turn',
+        lambda payload, **kwargs: original_turn(payload, trace_id='target-trace'))
+    observation = deepcopy(target.agent['tool_result_sequence'][0])
+    tool = ToolResult.success_result('target_database_search', data=observation['data'],
+        quality=observation['quality'], evidence=observation['evidence'],
+        provenance=ToolProvenance.from_dict(observation['provenance']))
+    result = AgentResult(target.agent['trace_id'], result_status == 'completed',
+        'Synthetic accepted structure result',
+        final_answer='Synthetic accepted structure result' if workflow else '',
+        tool_results=[tool], outcome=RunOutcome(result_status))
+    assert result.to_legacy_dict()['tool_result_sequence'] == target.agent['tool_result_sequence']
+    projections = []
+    async def bridge(sender, **kwargs):
+        assert isinstance(kwargs['decision_loop'], PiAgentRuntime)
+        projections.append(True)
+        for text in _result_frame(handler, result, False):
+            frame = json.loads(text)
+            if frame['type'] == 'complete':
+                frame['error'] = {'code': 'interpretation_budget_exceeded',
+                                  'message': 'synthetic settled fallback'}
+            await sender.send_text(json.dumps(frame, ensure_ascii=False))
+        return result
+    monkeypatch.setattr(handler, 'process_decision_message', bridge)
+    socket = ReceiverSocket(owner)
+    original_send = socket.send_text
+    failed_delivery = asyncio.Event()
+    async def send(text):
+        if fail_complete and json.loads(text)['type'] == 'complete':
+            failed_delivery.set()
+            raise ConnectionError('synthetic terminal delivery failure')
+        await original_send(text)
+    monkeypatch.setattr(socket, 'send_text', send)
+    async with rig.client() as client:
+        controller = DockingChatController(runtime, rig.coordinator(client), enabled=True)
+        handler.docking_controller = controller
+        captures = []
+        accept = controller.accept_result
+        async def captured(sender, value):
+            captures.append((sender, deepcopy(value), deepcopy(socket.frames)))
+            return await accept(sender, value)
+        monkeypatch.setattr(controller, 'accept_result', captured)
+        task = asyncio.create_task(handler.handle_websocket(socket))
+        try:
+            await socket.until(lambda f: f['type'] == 'connection_ready')
+            yield SimpleNamespace(socket=socket, handler=handler, runtime=runtime,
+                controller=controller, captures=captures, task=task, rig=rig,
+                projections=projections, failed_delivery=failed_delivery)
+        finally:
+            await socket.incoming.put(None)
+            await asyncio.wait_for(task, 5)
+            await settle(runtime)
+
 
 
 @pytest.fixture(autouse=True)
@@ -60,14 +149,14 @@ def test_predict_reverse_fresh_actual_chat_keeps_full_evidence(ranked, monkeypat
     if previous:
         turn(handler, FIRST, history)
     old_trace = history[-1]['reverse_target_evidence']['trace_id'] if history else None
-    original = handler._execute_agent
+    original = handler.process_decision_message
 
     async def execute(*args, **kwargs):
         result = await original(*args, **kwargs)
-        calls.append((args[0], deepcopy(result)))
+        calls.append((kwargs['context'].query, deepcopy({**result.to_legacy_dict(), 'trace_id': result.trace_id})))
         return result
 
-    monkeypatch.setattr(handler, '_execute_agent', execute)
+    monkeypatch.setattr(handler, 'process_decision_message', execute)
     complete, frames = turn(handler, message, history)
     assert len(calls) == 1 and calls[0][0] == message, complete
     assert rank_followup_kind(message) is None
@@ -137,25 +226,24 @@ def test_expletive_it_actual_chat_dispatches_fresh_without_resolved_molecule(tmp
     event = svc.project(seed(store), session_id='owner')[0]
     assert svc.confirm(event['reference'], session_id='owner')
     tools = {name: Tool(name) for name in ('llm_molecular_generator', 'property_calculator')}
-    handler = ChatHandler(None, None, SupervisorAgent(tools=tools, state_store=store), {},
-                          scientific_references=svc)
+    handler = make_web_handler(tools, store)
     calls = []
-    original = handler._execute_agent
+    original = handler.process_decision_message
 
     async def execute(*args, **kwargs):
-        calls.append((args[0], kwargs))
+        calls.append((kwargs['context'].query, kwargs['context'].resolved_molecule))
         return await original(*args, **kwargs)
 
-    monkeypatch.setattr(handler, '_execute_agent', execute)
-    socket, history = Socket(), []
+    monkeypatch.setattr(handler, 'process_decision_message', execute)
+    history = []
     query = FRESH_GENERATION[0]
-    asyncio.run(handler._process_message(socket, query, False, True,
-        conversation_history=history, session_id='owner', reference=pointer(event), selection={'ordinal': 2}))
-    assert len(calls) == 1 and calls[0][0] == query, socket.messages
-    assert calls[0][1].get('resolved_molecule') is None
+    complete, frames = run_web_turn(handler, query, history, 'owner',
+        reference=pointer(event), selection={'ordinal': 2})
+    assert len(calls) == 1 and calls[0][0] == query, frames
+    assert calls[0][1] is None
     assert tools['llm_molecular_generator'].calls
-    assert not any(f.get('content') == REFERENCE_CLARIFICATION for f in socket.messages)
-    assert not any(f['type'] == 'docking_consent' for f in socket.messages)
+    assert not any(f.get('content') == REFERENCE_CLARIFICATION for f in frames)
+    assert not any(f['type'] == 'docking_consent' for f in frames)
 
 
 @pytest.mark.parametrize('query', [
@@ -193,15 +281,9 @@ def test_referential_it_still_requires_confirmed_owned_identity(tmp_path, query)
 @pytest.mark.parametrize('workflow', [False, True])
 def test_budget_fallback_actual_receiver_captures_only_after_raw_complete(tmp_path, target_case, monkeypatch, workflow):
     async def run():
-        async with source_receiver(tmp_path, target_case, monkeypatch, 'legacy', workflow=workflow) as case:
-            case.handler.config.setdefault('agent', {})['summarize_workflow_results'] = True
-            budget_calls = []
-
-            def over_budget(*args, **kwargs):
-                budget_calls.append(True)
-                raise InputBudgetExceeded('synthetic interpretation budget')
-
-            monkeypatch.setattr(case.handler, '_build_prompt_with_agent', over_budget)
+        async with budget_result_receiver(tmp_path, target_case, monkeypatch, workflow=workflow) as case:
+            # The retired prose-summary stage is not resurrected. Exercise its
+            # already-settled fallback at the live terminal/capture boundary.
             entered, release = asyncio.Event(), asyncio.Event()
             send = case.socket.send_text
 
@@ -215,7 +297,7 @@ def test_budget_fallback_actual_receiver_captures_only_after_raw_complete(tmp_pa
             try:
                 await case.socket.send({'message': '解释分子量', 'enable_rag': False})
                 await asyncio.wait_for(entered.wait(), 3)
-                assert budget_calls == [True] and not case.captures
+                assert case.projections == [True] and not case.captures
                 assert not any(f['type'] == 'complete' for f in case.socket.frames)
             finally:
                 release.set()
@@ -249,14 +331,11 @@ def test_budget_fallback_does_not_create_or_replay_authority(tmp_path, target_ca
         target_case.agent['trace_id'] = 'unowned-trace'
 
     async def run():
-        async with source_receiver(tmp_path, target_case, monkeypatch, 'legacy',
+        async with budget_result_receiver(tmp_path, target_case, monkeypatch,
                 owner='foreign' if failure == 'foreign' else 'owner-session',
                 fail_complete=failure == 'delivery',
                 result_status='partial' if failure == 'partial' else 'completed') as case:
-            case.handler.config.setdefault('agent', {})['summarize_workflow_results'] = True
-            def over_budget(*args, **kwargs):
-                raise InputBudgetExceeded('synthetic interpretation budget')
-            monkeypatch.setattr(case.handler, '_build_prompt_with_agent', over_budget)
+            assert not case.projections
             if failure == 'owner_changed':
                 send = case.socket.send_text
                 async def changed(text):
@@ -266,7 +345,8 @@ def test_budget_fallback_does_not_create_or_replay_authority(tmp_path, target_ca
                 monkeypatch.setattr(case.socket, 'send_text', changed)
             await case.socket.send({'message': '解释分子量', 'enable_rag': False})
             if failure == 'delivery':
-                await asyncio.wait_for(case.task, 5)
+                await asyncio.wait_for(case.failed_delivery.wait(), 5)
+                await settle(case.runtime)
                 assert not case.captures
             else:
                 await case.socket.until(lambda f: f['type'] == 'complete')

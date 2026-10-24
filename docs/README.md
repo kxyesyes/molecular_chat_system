@@ -16,6 +16,7 @@
 ## 领域与运行手册
 
 - Agent：[架构与维护入口](AGENT_MAINTENANCE.md)、[工具契约](AGENT_TOOL_CONTRACTS.md)。
+- Pi：[安装、配置、checkpoint 迁移与回滚](PI_RUNTIME.md)。当前网页通用运行时为 Pi；云端/本地真实端到端验收仍为 PENDING（待验收）。
 - 科学工具：[对接工具安装](../deployment/docking_tools.md)、[靶点数据库](target_search_local_db.md)、[反向寻靶](../src/reverse_target/README.md)、[ADMET-AI](admet_ai_140.md)。
 - 活性训练：[数据准备](activity_data_preparation.md) → [训练执行](activity_prepared_training.md) → [模型 registry](activity_model_registry.md)。
 - 家族活性模型：[数据准备](activity_family_data.md)、[bundle](activity_family_bundles.md)、[推理](activity_family_inference.md)、[API](activity_family_api.md)。
@@ -28,6 +29,10 @@
 - [专项交接](handoff/)：改动范围、审查和验证证据。
 - [设计](superpowers/specs/)、[执行计划](superpowers/plans/)、[验收记录](superpowers/validation/)与[测试报告](reports/)：保留当时的条件、失败和限制。
 - [早期问题清单](issues_and_improvement_plan.md)、[Agent 化实施记录](agentization_phase2_phase3_implementation.md)：仅用于历史背景，当前代码入口优先查维护文档。
+
+旧架构、计划与交接中的 `legacy` / `shadow` / `langgraph_canary`、`HarnessFactory`、
+`ModelDecisionLoop` 及 `src/agent/harness/` 路径仅供历史追溯，不是当前安装或配置选项；
+当前通用运行时与迁移边界以 [Pi 运行手册](PI_RUNTIME.md) 为准。
 
 ## 文档维护边界
 

@@ -138,7 +138,7 @@ class ForbiddenLegacy:
 def decision_session(work_dir, *, target, query, decisions=None, timeout=120):
     """Spy delegates unchanged to the actual tool; SQLite owns per-call connections."""
     from src.agent.contracts import AgentContext
-    from src.agent.harness.decision_loop import ModelDecisionLoop
+    from src.agent.pi_runtime.runtime import PiAgentRuntime
     from src.agent.persistence.sqlite_store import SQLiteAgentStateStore
     from src.agent.runtime.event_bus import AgentEventBus
     from src.agent.tooling.factory import build_tool_registry
@@ -162,7 +162,7 @@ def decision_session(work_dir, *, target, query, decisions=None, timeout=120):
         model = ScriptedModel(decisions if decisions is not None else [activity_decision(), finish_observed])
         context = AgentContext(query, trace, user_id="acceptance-owner", session_id=trace,
                                metadata={"target": target})
-        yield SimpleNamespace(loop=ModelDecisionLoop(model, registry, store, timeout_seconds=timeout),
+        yield SimpleNamespace(loop=PiAgentRuntime(model, registry, store, timeout_seconds=timeout),
                               store=store, bus=AgentEventBus(state_store=store), context=context,
                               model=model, inputs=inputs, outputs=outputs)
     finally:
@@ -337,7 +337,7 @@ def check_event_sequence(session, result, frames=None):
 def check_rejected_decision(session, result, frames=None):
     """Unknown target rejects pre-dispatch; malformed SMILES yields INVALID_INPUT."""
     require(not result.success and result.to_legacy_dict()["status"] in {"failed", "rejected"})
-    require(result.metadata["backend"] == "model_decision_loop")
+    require(result.metadata["backend"] == "pi")
     require('"predicted_pIC50":' not in result.final_answer and not result.artifacts)
     unknown = session.context.metadata["target"] == "AChE"
     if unknown:
@@ -384,7 +384,7 @@ def decision_record(session, result, frames=None):
 
 def check_decision(session, result, expected, snapshot, target, frames=None):
     review = any(row["classification_regression_consistent"] is False for row in expected)
-    require(result.success is (not review) and result.metadata["backend"] == "model_decision_loop")
+    require(result.success is (not review) and result.metadata["backend"] == "pi")
     require(result.outcome.value == ("partial" if review else "completed"))
     require(result.error is None and result.metadata["task_acceptance"]["satisfied"] is (not review))
     require(len(session.model.messages) == 2 and len(session.inputs) == 1)

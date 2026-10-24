@@ -205,7 +205,7 @@
     if (typeof dockingUI !== "undefined") dockingUI?.configure(ws,
       message.capabilities?.chat_docking?.preparation_available === true &&
       message.capabilities.chat_docking.execution_authorized === false);
-    decisionMode = message.normal_chat_mode === "decision_a2";
+    decisionMode = ["pi", "decision_a2"].includes(message.normal_chat_mode);
     if (decisionMode && !decisionWaiting) decisionWaiting = readStoredDecisionWaiting();
     if (decisionMode && !decisionControls && elements.input?.parentNode) {
       const box = document.createElement("div");

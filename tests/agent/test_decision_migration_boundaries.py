@@ -9,7 +9,7 @@ import pytest
 from test_decision_loop import setup_loop, CountingTool, tool, finish_last, clarify, run
 from test_decision_continuation import start, invoke, fresh, owned_context
 from src.agent.contracts import AgentErrorCode, AgentExecutionError, ToolProvenance
-from src.agent.harness.decision_policy import (
+from src.agent.scientific_session.decision_policy import (
     DecisionBoundaryError, encode_observation, usable, scientific_answer,
 )
 
@@ -39,7 +39,7 @@ KINDS = ['oversized', 'wide', 'deep', 'cycle', 'nonfinite', 'keys', 'surrogate',
 
 @pytest.mark.parametrize('kind', KINDS)
 def test_observation_rejected_before_redaction_or_serialization(monkeypatch, kind):
-    import src.agent.harness.decision_policy as policy
+    import src.agent.scientific_session.decision_policy as policy
     def forbidden(*a, **kw): pytest.fail('serialization or scan before bounds')
     monkeypatch.setattr(policy, 'redact_sensitive', forbidden)
     monkeypatch.setattr(policy.json, 'dumps', forbidden)
@@ -49,7 +49,7 @@ def test_observation_rejected_before_redaction_or_serialization(monkeypatch, kin
 
 @pytest.mark.parametrize('kind', KINDS)
 def test_context_rejected_before_copy_scan_store_model(setup_loop, monkeypatch, kind):
-    import src.agent.harness.decision_loop as loop
+    import src.agent.scientific_session.controller as loop
     b = setup_loop([clarify()])
     context = owned_context()
     context.metadata = {'bad': bad_value(kind, 65536)}
@@ -63,9 +63,9 @@ def test_context_rejected_before_copy_scan_store_model(setup_loop, monkeypatch, 
 
 @pytest.mark.parametrize('kind', KINDS)
 def test_snapshot_rejected_before_checksum_serialization_scan(monkeypatch, kind):
-    import src.agent.harness.decision_continuation as continuation
+    import src.agent.scientific_session.decision_continuation as continuation
     state = SimpleNamespace(counters=lambda: {}, messages=bad_value(kind, 524288),
-                            call_ids=set(), deadline=time.monotonic() + 30)
+                            call_ids=set(), deadline=time.monotonic() + 30, pi_entries=[])
     session = SimpleNamespace(results=[], context=owned_context(), tool_attempt_count=0)
     def forbidden(*a, **kw): pytest.fail('checksum or scan before bounds')
     monkeypatch.setattr(continuation.EvidenceLedger, 'output_digest', forbidden)
@@ -76,7 +76,7 @@ def test_snapshot_rejected_before_checksum_serialization_scan(monkeypatch, kind)
 
 @pytest.mark.parametrize('kind', KINDS)
 def test_claim_rejected_before_checksum_scan_cas(setup_loop, monkeypatch, kind):
-    import src.agent.harness.decision_continuation as continuation
+    import src.agent.scientific_session.decision_continuation as continuation
     b = setup_loop([])
     waiting = start(b, [clarify()])
     record = b.store.get_run('owned-trace')
@@ -205,7 +205,7 @@ def test_mutated_result_is_bounded_before_terminal_copy(setup_loop, kind):
 
 @pytest.mark.parametrize('kind', KINDS)
 def test_integrity_checks_bounds_before_digest(kind, monkeypatch):
-    from src.agent.harness.decision_inputs import verify_observation_integrity
+    from src.agent.scientific_session.decision_inputs import verify_observation_integrity
     from src.agent.evidence import EvidenceLedger
     result = contradictory()
     from dataclasses import replace
@@ -246,7 +246,7 @@ def test_retained_tool_cannot_clear_error_to_promote_science(setup_loop):
 @pytest.mark.parametrize('text', ['<' * 12000, '\x00' * 12000, '请' * 22000],
                          ids=['html', 'escaped_control', 'utf8'])
 def test_expanded_wire_budget_checked_before_json_dumps(monkeypatch, text):
-    import src.agent.harness.decision_policy as policy
+    import src.agent.scientific_session.decision_policy as policy
     def forbidden(*a, **kw): pytest.fail('wire serialization before expanded byte bound')
     monkeypatch.setattr(policy.json, 'dumps', forbidden)
     with pytest.raises(DecisionBoundaryError):
@@ -258,7 +258,7 @@ def test_expanded_wire_budget_checked_before_json_dumps(monkeypatch, text):
     {'nested': [1, 2, {'x': 'a'}]}, ['same', 'same'],
 ])
 def test_plain_json_budget_exact_and_never_truncated(value):
-    from src.agent.harness.decision_bounds import validate_json
+    from src.agent.scientific_session.decision_bounds import validate_json
     size = len(json.dumps(value, ensure_ascii=False).encode('utf-8'))
     validate_json(value, max_bytes=size, reason='test_bound')
     with pytest.raises(DecisionBoundaryError, match='test_bound'):
