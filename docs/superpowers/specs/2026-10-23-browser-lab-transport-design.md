@@ -6,6 +6,10 @@ Repair the intermittent deadline failure in
 `tests/agent/test_scientific_reference_browser_lab.py` by changing only its
 test transport. Keep production code, dependencies, the 10-second receive
 deadline, 60-frame bound, scientific acceptance, and security checks unchanged.
+The shared-helper consumers in `test_scientific_reference_web_binding.py` and
+`test_main_integration_acceptance.py` must migrate with it. Preserve all their
+assertions, including the latter's existing 10-second total receive budget,
+128-frame limit, completion/ping barrier, and 30-second child-process limit.
 Continue PR #216 on `codex/fix-invalid-smiles-decision`; do not merge or deploy.
 The maintainer approved this direction on 2026-10-23.
 
@@ -46,8 +50,14 @@ variable end-to-end benefit and is excluded from this repair.
   fresh timeout per frame. Check the deadline after receives as well. Close,
   unexpected terminal, application failure, and silent timeout must fail.
 - Always send disconnect and join the owned application task before leaving
-  the socket and application lifespan. Bound cleanup and cancel/join on a
-  broken fixture; do not suppress application exceptions or leak tasks.
+  the socket and application lifespan. Allow 10 seconds for graceful cleanup,
+  then cancel and join on a broken fixture; do not suppress application
+  exceptions or leak tasks. Cancellation-resistant applications may extend
+  this final drain: no in-process helper can both force-stop arbitrary work
+  and guarantee physical settlement. The existing outer CI job timeout remains
+  the containment boundary; it is not a relaxed receive deadline. Add a
+  deterministic regression proving the helper waits for that drain rather
+  than abandoning the task or reporting success.
 
 ## Regression and verification
 

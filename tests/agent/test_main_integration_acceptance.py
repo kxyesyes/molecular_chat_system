@@ -1,22 +1,22 @@
 """Bounded offline HTTP/session -> WS acceptance; real RDKit, no model API."""
+import asyncio
 from functools import wraps
 import json
 import os
 from pathlib import Path
-from queue import Empty
 import re
 import subprocess
 import sys
 from tempfile import TemporaryDirectory
 import time
 
+import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 from src.agent.contracts import AgentErrorCode, ToolResult
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from tests.agent.test_scientific_reference_browser_lab import (
-    DeadlineSocket, capture, receive_until,
+    DeadlineSocket, receive_until,
 )
 from tests.scientific_reference_browser_lab import NOTICE, create_lab
 
@@ -31,7 +31,7 @@ NUMERIC_CLAIM = re.compile(
 
 
 def _run_child(code, *args, timeout=30):
-    """Bound imports, execution AND TestClient teardown; run kills/waits on timeout."""
+    """Bound imports, execution AND ASGI teardown; run kills/waits on timeout."""
     with TemporaryDirectory(prefix='medchat-acceptance-') as directory:
         root = Path(directory)
         env = {key: os.environ[key] for key in ('SYSTEMROOT', 'WINDIR', 'PATH', 'COMSPEC') if key in os.environ}
@@ -69,7 +69,7 @@ def test_subprocess_deadline_kills_and_reaps_child(monkeypatch):
     scenarios = [value for name, value in globals().items()
                  if name.startswith('test_') and name != 'test_subprocess_deadline_kills_and_reaps_child']
     assert len(scenarios) == 4 and all(hasattr(case, '__wrapped__') for case in scenarios), (
-        'every TestClient scenario must run behind an external process deadline'
+        'every ASGI scenario must run behind an external process deadline'
     )
     children = []
     original = subprocess.Popen
@@ -94,34 +94,39 @@ def test_subprocess_deadline_kills_and_reaps_child(monkeypatch):
 def exchange(app, query, *, terminal='complete'):
     """Completion then ping is a barrier with Pi's concurrent socket receiver."""
     messages = []
-    with TestClient(app, base_url=BASE) as client:
-        page = client.get('/')
-        assert page.status_code == 200 and NOTICE in page.text
-        assert 'medchat_agent_session' in client.cookies
-        with client.websocket_connect('ws://127.0.0.1:6017/ws', headers={'Origin': BASE}) as transport:
-            ws = DeadlineSocket(transport, app.state.inbox)
-            deadline = time.monotonic() + 10
-            receive_until(ws, 'connection_ready', timeout=deadline - time.monotonic())
-            ws.send_json({'message': query, 'enable_rag': False, 'enable_tools': True})
-            for _ in range(128):
-                remaining = deadline - time.monotonic()
-                assert remaining > 0, 'WS total receive deadline exceeded'
-                try:
-                    message = ws.receive_json(timeout=remaining)
-                except Empty:
-                    pytest.fail('WS total receive deadline exceeded')
-                assert message['type'] != 'error', message
-                if message['type'] == 'pong':
-                    assert message['timestamp'] == 1729
-                    break
-                messages.append(message)
-                if message['type'] == terminal:
-                    ws.send_json({'type': 'ping', 'timestamp': 1729})
-            else:
-                pytest.fail('WS message limit exceeded before processing barrier')
-        stats = client.get('/api/agent/workflows/lab/stats')
-        assert stats.status_code == 200 and stats.json()['offline_fixture'] is True
-        assert stats.json()['calls'] == app.state.calls
+
+    async def exercise():
+        async with app.router.lifespan_context(app), httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url=BASE) as client:
+            page = await client.get('/')
+            assert page.status_code == 200 and NOTICE in page.text
+            assert 'medchat_agent_session' in client.cookies
+            headers = client.build_request('GET', '/ws', headers={'Origin': BASE}).headers.raw
+            async with DeadlineSocket(app, headers=headers) as ws:
+                deadline = time.monotonic() + 10
+                await receive_until(ws, 'connection_ready', timeout=deadline - time.monotonic())
+                ws.send_json({'message': query, 'enable_rag': False, 'enable_tools': True})
+                for _ in range(128):
+                    remaining = deadline - time.monotonic()
+                    assert remaining > 0, 'WS total receive deadline exceeded'
+                    try:
+                        message = await ws.receive_json(timeout=remaining)
+                    except asyncio.TimeoutError:
+                        pytest.fail('WS total receive deadline exceeded')
+                    assert time.monotonic() < deadline, 'WS total receive deadline exceeded'
+                    assert message['type'] != 'error', message
+                    if message['type'] == 'pong':
+                        assert message['timestamp'] == 1729
+                        break
+                    messages.append(message)
+                    if message['type'] == terminal:
+                        ws.send_json({'type': 'ping', 'timestamp': 1729})
+                else:
+                    pytest.fail('WS message limit exceeded before processing barrier')
+            stats = await client.get('/api/agent/workflows/lab/stats')
+            assert stats.status_code == 200 and stats.json()['offline_fixture'] is True
+            assert stats.json()['calls'] == app.state.calls
+    asyncio.run(exercise())
     completed = [m for m in messages if m['type'] in {'complete', 'message'}]
     assert len(completed) == 1, messages
     assert completed[0]['type'] == terminal
@@ -156,7 +161,7 @@ def assert_real_properties(event, body):
 
 @isolated_scenario
 def test_invalid_smiles_is_rejected_without_scientific_execution(tmp_path):
-    app = capture(create_lab(tmp_path))
+    app = create_lab(tmp_path)
     complete, events = exchange(app, '请分析这个 SMILES 的成药性：CC(C)((。')
     body = complete['content']
     assert 'SMILES 无效' in body and '本次未进行科学计算' in body
@@ -169,7 +174,7 @@ def test_invalid_smiles_is_rejected_without_scientific_execution(tmp_path):
 @pytest.mark.parametrize('query', ['你好', 'hello', '什么是药物分子设计'])
 @isolated_scenario
 def test_plain_chat_uses_offline_model_without_scientific_events(tmp_path, query):
-    app = capture(create_lab(tmp_path))
+    app = create_lab(tmp_path)
     answer, events = exchange(app, query, terminal='complete')
     assert answer['content'] == NOTICE
     assert events == []
@@ -178,7 +183,7 @@ def test_plain_chat_uses_offline_model_without_scientific_events(tmp_path, query
 
 @isolated_scenario
 def test_real_ethanol_properties_and_likeness_keep_evidence_boundaries(tmp_path):
-    app = capture(create_lab(tmp_path))
+    app = create_lab(tmp_path)
     complete, events = exchange(app, PROPERTY_QUERY)
     assert app.state.calls == {'llm_molecular_generator': [], 'property_calculator': [PROPERTY_QUERY],
                                'drug_likeness_assessment': [PROPERTY_QUERY]}
@@ -207,7 +212,7 @@ def test_likeness_failure_preserves_actual_rdkit_output_as_partial(tmp_path):
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(DrugLikenessAssessment, 'execute', fail_likeness)
-        app = capture(create_lab(tmp_path))
+        app = create_lab(tmp_path)
         complete, events = exchange(app, PROPERTY_QUERY)
     assert app.state.calls == {'llm_molecular_generator': [], 'property_calculator': [PROPERTY_QUERY],
                                'drug_likeness_assessment': [PROPERTY_QUERY]}

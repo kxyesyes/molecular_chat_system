@@ -211,35 +211,38 @@ def test_web_candidate_cannot_downgrade_to_legacy_identity(candidate):
 
 
 def test_actual_pi_generation_reference_ack_and_reopen_without_followup(tmp_path):
-    from fastapi.testclient import TestClient
+    import httpx
     from tests.agent.test_scientific_reference_browser_lab import lab, DeadlineSocket, receive_until
 
-    app = lab(tmp_path)
-    base = 'http://127.0.0.1:6017'
-    url = '/api/agent/workflows/references/'
-    with TestClient(app, base_url=base) as client:
-        assert client.get('/').status_code == 200
-        with client.websocket_connect('ws://127.0.0.1:6017/ws', headers={'Origin': base}) as transport:
-            ws = DeadlineSocket(transport, app.state.inbox)
-            receive_until(ws, 'connection_ready')
-            ws.send_json({'message': '生成5个分子', 'enable_rag': False,
-                          'enable_tools': True, 'mol_count': 5})
-            event = receive_until(ws, 'molecule_candidates')
-            receive_until(ws, 'complete')
-            assert len(event['candidate_set']['candidates']) == 5
-            ref = event['reference']
-            pointer = {key: ref[key] for key in ('trace_id', 'presentation_id', 'revision')}
-            assert client.post(url + 'restore', json=pointer).status_code == 404
-            assert client.post(url + 'confirm', json=ref).status_code == 200
-            response = client.post(url + 'restore', json=pointer)
+    async def exercise():
+        app = lab(tmp_path)
+        base = 'http://127.0.0.1:6017'
+        url = '/api/agent/workflows/references/'
+        async with app.router.lifespan_context(app), httpx.AsyncClient(
+                transport=httpx.ASGITransport(app), base_url=base) as client:
+            assert (await client.get('/')).status_code == 200
+            headers = client.build_request('GET', '/ws', headers={'Origin': base}).headers.raw
+            async with DeadlineSocket(app, headers=headers) as ws:
+                await receive_until(ws, 'connection_ready')
+                ws.send_json({'message': '生成5个分子', 'enable_rag': False,
+                              'enable_tools': True, 'mol_count': 5})
+                event = await receive_until(ws, 'molecule_candidates')
+                await receive_until(ws, 'complete')
+                assert len(event['candidate_set']['candidates']) == 5
+                ref = event['reference']
+                pointer = {key: ref[key] for key in ('trace_id', 'presentation_id', 'revision')}
+                assert (await client.post(url + 'restore', json=pointer)).status_code == 404
+                assert (await client.post(url + 'confirm', json=ref)).status_code == 200
+                response = await client.post(url + 'restore', json=pointer)
+                assert response.status_code == 200
+                view = response.json()['data']
+            assert len(app.state.calls[GEN]) == 1
+            cookies = dict(client.cookies)
+        reopened = lab(tmp_path)
+        async with reopened.router.lifespan_context(reopened), httpx.AsyncClient(
+                transport=httpx.ASGITransport(reopened), base_url=base, cookies=cookies) as client:
+            response = await client.post(url + 'restore', json=pointer)
             assert response.status_code == 200
-            view = response.json()['data']
-        assert len(app.state.calls[GEN]) == 1
-        cookies = dict(client.cookies)
-    reopened = lab(tmp_path)
-    with TestClient(reopened, base_url=base) as client:
-        client.cookies.update(cookies)
-        response = client.post(url + 'restore', json=pointer)
-        assert response.status_code == 200
-        assert response.json()['data'] == view
-        assert all(not calls for calls in reopened.state.calls.values())
+            assert response.json()['data'] == view
+            assert all(not calls for calls in reopened.state.calls.values())
+    asyncio.run(exercise())
