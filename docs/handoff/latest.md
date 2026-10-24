@@ -7,6 +7,7 @@
 - 浏览器严格终态改为实际 Web completed，保留 partial、科学数值、证据/会话隔离及工具调用断言，补入既有清理夹具。原失败先复现，质量/证据/S02/隔离联合 120 passed。
 - 经维护者批准增加五个有界 Agent 分片，不增加单片时限、不改变生产运行时。工作流契约 49 passed / 2 Windows 平台跳过；实际收集 17754 个 Agent node ID，九分片无重叠无遗漏，收集器原 180/60 秒限制保留。
 - 活性验收在 Pi 入口检查 Node，保留“存在但启动失败”的独立失败分类与原环境/Torch/缓存恢复断言。聚焦 2 failed / 1 passed → 3 passed；完整验收链与 Pi bridge 联合 127 passed。两组独立 SPEC → QUALITY 均 PASS；compileall / diff 检查通过，无生产源码修改。
+- `1f586f47` 新 CI 的九个 Agent 分片全通过（17753 passed / 1 skipped，17754 ID 覆盖检查通过）；root 发现另外两处旧 9 分片快照。先复现 2 failed，再同步精确目标/预算表；部署/Pi 健康/工作流三模块 91 passed / 2 平台跳过，独立复审通过。后续提交仍需自己的完整 CI，不沿用旧 head 的成功结果。
 - 精确修复、复审与后续 CI 见[验收记录](../superpowers/validation/2026-10-23-pi-harness-replacement.md#pr-215-ci-follow-up--baseline-8141b755)及 [PR #215](https://github.com/kxyesyes/molecular_chat_system/pull/215)。此处本地通过不替代新 head 的完整 CI；云端 DNS 拒绝、本地决策协议未通过及健康检查 21/24 仍是发布门禁。
 
 ## 官方 Pi 替换自研通用 Harness（2026-10-23）

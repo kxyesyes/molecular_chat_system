@@ -197,6 +197,8 @@ def test_ci_preserves_partitions_timeout_budgets_and_quality_dependencies():
     rows = workflow['jobs']['python-tests']['strategy']['matrix']['include']
     assert {row['name']: row['command_timeout'] for row in rows} == {
         'agent': 1200, 'agent-web-lifecycle': 600, 'agent-docking': 1200,
+        'agent-browser-chat': 1200, 'agent-decision-bindings': 1200,
+        'agent-decision': 1200, 'agent-pi': 1200, 'agent-web': 1200,
         'agent-docking-publication': 1200, 'sandbox-api': 180, 'sandbox-core': 600,
         'task-runtime': 600, 'root': 600, 'root-activity': 900,
     }
