@@ -233,6 +233,47 @@ def test_json_byte_and_node_limits_are_inclusive():
     assert json.loads(encode([None] * 65535)) == [None] * 65535
 
 
+@pytest.mark.parametrize("text", ["", "plain ASCII", "CCN", "a" * 64, "DEL\x7f"])
+def test_plain_ascii_budget_avoids_python_character_walk(monkeypatch, text):
+    module = _module()
+
+    def forbidden(value):
+        raise AssertionError("plain ASCII entered Python character walk")
+
+    monkeypatch.setattr(module, "ord", forbidden, raising=False)
+    module._check_json_bounds({"text": text})
+
+
+@pytest.mark.parametrize("text", [chr(code) for code in range(128)] + [
+    "分子", "é", "\u07ff\u0800\uffff", "🧬", 'CC/C=C\\C',
+    'mixed 分子\n\t"\\🧬', "a" * 1024,
+])
+def test_reference_preflight_matches_exact_canonical_byte_budget(monkeypatch, text):
+    module = _module()
+    value = {text: [text, None, True, False, 17, -2.5]}
+    exact_size = len(_canonical(value).encode("utf-8"))
+    monkeypatch.setattr(module, "_MAX_BYTES", exact_size)
+    module._check_json_bounds(value)
+    monkeypatch.setattr(module, "_MAX_BYTES", exact_size - 1)
+    with pytest.raises(ValueError, match="byte limit"):
+        module._check_json_bounds(value)
+
+
+@pytest.mark.parametrize("text", ["\ud800", "\udfff", "safe\ud800tail", "\ud83e\uddec"])
+def test_ascii_fast_path_preserves_surrogate_rejection(monkeypatch, text):
+    module = _module()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("invalid Unicode reached serialization or secret scans")
+
+    redaction = importlib.import_module("src.agent.persistence.redaction")
+    monkeypatch.setattr(json, "dumps", forbidden)
+    monkeypatch.setattr(redaction, "contains_secret_material", forbidden)
+    monkeypatch.setattr(redaction, "redact_sensitive", forbidden)
+    with pytest.raises(ValueError, match="valid Unicode"):
+        module.reference_json({"text": text})
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), {1: "key"}, (1,), {1}, object(), "\ud800"])
 def test_json_rejects_non_json_or_invalid_unicode(value):
     with pytest.raises(ValueError):

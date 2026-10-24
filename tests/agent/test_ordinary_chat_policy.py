@@ -297,10 +297,22 @@ def legacy_prompt(kind, required, catalog, requirements):
         + encode_observation(requirements))}
 
 
-@pytest.mark.parametrize('kind', ['chat', 'scientific'])
-def test_legacy_four_argument_prompt_is_byte_identical(kind):
-    expected = legacy_prompt(kind, {'property_calculator'}, [{'name': 'test'}], {'version': '1'})
-    assert decision_system_message(kind, {'property_calculator'}, [{'name': 'test'}], {'version': '1'}) == expected
+def test_legacy_four_argument_chat_prompt_is_byte_identical():
+    expected = legacy_prompt('chat', {'property_calculator'}, [{'name': 'test'}], {'version': '1'})
+    assert decision_system_message('chat', {'property_calculator'}, [{'name': 'test'}], {'version': '1'}) == expected
+
+
+def test_scientific_prompt_changes_only_finish_guidance():
+    args = ('scientific', {'property_calculator'}, [{'name': 'test'}], {'version': '1'})
+    expected = legacy_prompt(*args)['content']
+    actual = decision_system_message(*args)
+    assert actual['role'] == 'system'
+    prefix, _ = expected.split('Use scientific finish with observed evidence IDs', 1)
+    _, suffix = expected.split('Request kind: ', 1)
+    assert actual['content'].startswith(prefix)
+    assert actual['content'].endswith('Request kind: ' + suffix)
+    assert 'If a tool rejects the input and leaves no usable or review-only evidence, choose clarify' in actual['content']
+    assert 'scientific evidence_ids must be nonempty, unique IDs' in actual['content']
 
 
 def test_prompt_canonical_view_and_fail_closed_scientific_combination():
