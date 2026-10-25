@@ -825,7 +825,7 @@ class ScientificSession:
                     question=scientific_clarification(context.query, required_tools),
                     missing_fields=['SMILES'],
                 )
-            if request_kind == 'scientific':
+            if (not binding) and request_kind == 'scientific':
                 completed_tools = {result.tool_name for result in active_results(session) if usable(result)}
                 pending_molecular = sorted(
                     (set(required_tools) - completed_tools) & set(adapters) & MOLECULAR_INPUT_TOOLS)
