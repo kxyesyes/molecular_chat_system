@@ -25,7 +25,7 @@ function harness() {
     AppState: { dockingMode: "single", dockingBoxCenterTouched: true, currentJobId: null },
     setCurrentJobId: (jobId) => { context.AppState.currentJobId = jobId; },
     DOCKING_STEPS: ["prepare_protein", "prepare_ligand", "setup_docking", "run_docking", "parse_results"].map((id) => ({ id, title: id })),
-    stepManager: { reset() {}, startStep() {}, completeStep: (id) => completedSteps.push(id), updateStepProgress() {}, errorStep() {} },
+    stepManager: { reset() {}, hide() {}, startStep() {}, completeStep: (id) => completedSteps.push(id), updateStepProgress() {}, errorStep() {} },
     Utils: { showToast() {} },
     onStyleChange: () => {},
     alert: (message) => { context.lastAlert = message; },
@@ -130,40 +130,86 @@ test("old in-flight read cannot revive a cancelled task", async () => {
   assert.equal(timers.size, 0);
   assert.equal(c.readRememberedDockingTask(), null);
 });
+test("old in-flight read cannot overwrite a newer task", async () => {
+  const { context: c, get } = harness();
+  let resolveGet;
+  c.rememberDockingTask("task-1");
+  c.fetch = async () => new Promise((resolve) => { resolveGet = resolve; });
+  const pending = c.pollDockingTask("task-1");
+  c.rememberDockingTask("task-2");
+  c.setDockingTaskButtonState(true);
+  get("results-content").innerHTML = "task-2 state";
+  resolveGet(response(success()));
+  await pending;
+  assert.equal(c.readRememberedDockingTask(), "task-2");
+  assert.equal(get("results-content").innerHTML, "task-2 state");
+  assert.equal(get("start-btn").disabled, true);
+});
+test("old in-flight cancellation cannot overwrite a newer task", async () => {
+  const { context: c, get } = harness();
+  let resolveCancel;
+  c.rememberDockingTask("task-1");
+  c.fetch = async (url) => url.endsWith("/cancel")
+    ? new Promise((resolve) => { resolveCancel = resolve; })
+    : response(record());
+  const pending = c.cancelDockingTask();
+  c.rememberDockingTask("task-2");
+  c.setDockingTaskButtonState(true);
+  get("results-content").innerHTML = "task-2 state";
+  resolveCancel(response(record("canceled")));
+  await pending;
+  assert.equal(c.readRememberedDockingTask(), "task-2");
+  assert.equal(get("results-content").innerHTML, "task-2 state");
+  assert.equal(get("start-btn").disabled, true);
+});
+test("old cancellation HTTP errors cannot overwrite a newer task", async () => {
+  const { context: c, get } = harness();
+  let resolveCancel;
+  c.rememberDockingTask("task-1");
+  c.fetch = async () => new Promise((resolve) => { resolveCancel = resolve; });
+  const pending = c.cancelDockingTask();
+  c.rememberDockingTask("task-2");
+  c.setDockingTaskButtonState(true);
+  get("results-content").innerHTML = "task-2 state";
+  resolveCancel({ ok: false, json: async () => ({ success: false, message: "old failure" }) });
+  await pending;
+  assert.equal(c.readRememberedDockingTask(), "task-2");
+  assert.equal(get("results-content").innerHTML, "task-2 state");
+  assert.equal(get("start-btn").disabled, true);
+});
+test("old cancellation network errors cannot overwrite a newer task", async () => {
+  const { context: c, get } = harness();
+  let rejectCancel;
+  c.rememberDockingTask("task-1");
+  c.fetch = async () => new Promise((_, reject) => { rejectCancel = reject; });
+  const pending = c.cancelDockingTask();
+  c.rememberDockingTask("task-2");
+  c.setDockingTaskButtonState(true);
+  get("results-content").innerHTML = "task-2 state";
+  rejectCancel(new Error("old network failure"));
+  await pending;
+  assert.equal(c.readRememberedDockingTask(), "task-2");
+  assert.equal(get("results-content").innerHTML, "task-2 state");
+  assert.equal(get("start-btn").disabled, true);
+});
 test("single mode refuses multiple files without posting", () => {
   const { context: c, get } = harness();
   get("protein-file").files = [{}]; get("ligand-file").files = [{}, {}];
   c.startDocking();
   assert.match(c.lastAlert, /单配体|一个|单个/);
 });
-
-for (const staleResult of ["running", "canceled", "failed", "http-error", "network-error"]) {
-  test(`stale ${staleResult} poll cannot mutate a newer task`, async () => {
-    const { context: c, get, timers } = harness();
-    let resolveGet, rejectGet;
-    c.rememberDockingTask("task-1");
-    c.fetch = async (url) => url.endsWith("/cancel")
-      ? response(record("canceled"))
-      : new Promise((resolve, reject) => { resolveGet = resolve; rejectGet = reject; });
-    const pending = c.pollDockingTask("task-1").catch(c.handleDockingTaskError);
-    await c.cancelDockingTask();
-    c.rememberDockingTask("task-2");
-    c.setDockingTaskButtonState(true);
-    get("results-content").innerHTML = "new task";
-    get("docking-progress").style.width = "12%";
-    vm.runInContext("dockingPollTimer = setTimeout(() => {}, 500)", c);
-    if (staleResult === "network-error") rejectGet(new Error("old request failed"));
-    else if (staleResult === "http-error") resolveGet({ ok: false, json: async () => ({ success: false, message: "old error" }) });
-    else resolveGet(response(record(staleResult)));
-    await pending;
-    assert.equal(c.readRememberedDockingTask(), "task-2");
-    assert.equal(get("start-btn").disabled, true);
-    assert.equal(get("cancel-docking-btn").disabled, false);
-    assert.equal(get("results-content").innerHTML, "new task");
-    assert.equal(get("docking-progress").style.width, "12%");
-    assert.equal(timers.size, 1);
-  });
-}
+test("rerun preserves the existing input and submits a fresh task", () => {
+  const { context: c, get } = harness();
+  get("protein-file").files = [{}];
+  get("smiles-input").value = "CCO";
+  c.AppState.currentProteinData = "ATOM      1  C   MOL A   1       0.000   0.000   0.000\n";
+  c.AppState.dockingBoxCenterTouched = true;
+  c.resetDocking({ preserveInputs: true });
+  assert.equal(get("protein-file").files.length, 1);
+  assert.equal(get("smiles-input").value, "CCO");
+  assert.equal(c.AppState.currentProteinData.startsWith("ATOM"), true);
+  assert.equal(typeof c.rerunDocking, "function");
+});
 
 (async () => {
   let failures = 0;

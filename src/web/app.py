@@ -540,17 +540,28 @@ class MolecularChatApp:
     def _llm_env_file_signature(self) -> str | None:
         return user_llm_signature(self.runtime_llm_env_path)
 
+    def _run_llm_config_io(self, operation, *args, **kwargs):
+        # Called only by an I/O worker: retain priority for the physical call,
+        # including errors and cancellation of its awaiting request.
+        tool = getattr(self, '_reverse_preload_tool', None)
+        foreground_io = getattr(tool, 'foreground_io', None)
+        with foreground_io() if callable(foreground_io) else nullcontext():
+            return operation(*args, **kwargs)
+
     async def _refresh_llm_config_from_env(self) -> bool:
         """Observe updates or removal in the authoritative per-user store."""
         try:
-            signature = self._llm_env_file_signature()
+            signature = await finish_on_cancel(asyncio.to_thread(
+                self._run_llm_config_io, self._llm_env_file_signature))
             if signature == self._llm_env_signature:
                 return False
             async with self._llm_config_lock:
-                signature = self._llm_env_file_signature()
+                signature = await finish_on_cancel(asyncio.to_thread(
+                    self._run_llm_config_io, self._llm_env_file_signature))
                 if signature == self._llm_env_signature:
                     return False
-                config = self._load_active_llm_config()
+                config = await finish_on_cancel(asyncio.to_thread(
+                    self._run_llm_config_io, self._load_active_llm_config))
                 await self._replace_llm_config(
                     config, persisted_generation=self._loaded_llm_generation
                 )
@@ -565,16 +576,23 @@ class MolecularChatApp:
             async with gate.exclusive() if gate is not None else nullcontext():
                 if gate is not None and gate.closed:
                     raise HTTPException(status_code=503, detail="Model service is shutting down")
-                try:
-                    config, signature = save_user_llm_config(
-                        self.runtime_llm_env_path, payload,
-                        clear_api_key=payload.get("clear_api_key") is True,
-                    )
-                except (OSError, ValueError, RuntimeError):
-                    raise HTTPException(status_code=503, detail="模型配置未保存；请检查输入、配置文件与目录权限。") from None
-                await self._apply_and_close_llm(config, persisted_generation=signature)
-                self._llm_env_signature = signature
-                return config
+                async def save_and_publish():
+                    try:
+                        config, signature = await asyncio.to_thread(
+                            self._run_llm_config_io, save_user_llm_config,
+                            self.runtime_llm_env_path, payload,
+                            clear_api_key=payload.get("clear_api_key") is True,
+                        )
+                    except (OSError, ValueError, RuntimeError):
+                        raise HTTPException(status_code=503, detail="模型配置未保存；请检查输入、配置文件与目录权限。") from None
+                    await self._apply_and_close_llm(config, persisted_generation=signature)
+                    self._llm_env_signature = signature
+                    return config
+
+                # Once saving starts, cancellation cannot roll back a disk
+                # commit. Drain publication and retirement with both ownership
+                # guards held, then propagate the cancelled acknowledgement.
+                return await finish_on_cancel(save_and_publish())
 
     async def _watch_llm_env_config(self) -> None:
         while True:
@@ -642,6 +660,11 @@ class MolecularChatApp:
         config = normalize_llm_config(config)
         model = self._create_model_from_llm_config(config)
         try:
+            if persisted_generation is not None:
+                await finish_on_cancel(asyncio.to_thread(
+                    self._run_llm_config_io, self._validate_persisted_llm_config,
+                    config, persisted_generation
+                ))
             result = self._publish_llm_config(
                 config, model, persisted_generation=persisted_generation
             )
@@ -657,11 +680,21 @@ class MolecularChatApp:
         self, llm_config: Dict[str, Any], *, persisted_generation=None
     ) -> Dict[str, Any]:
         config = normalize_llm_config(llm_config)
+        if persisted_generation is not None:
+            self._validate_persisted_llm_config(config, persisted_generation)
         return self._publish_llm_config(
             config,
             self._create_model_from_llm_config(config),
             persisted_generation=persisted_generation,
         )
+
+    def _validate_persisted_llm_config(self, config, persisted_generation):
+        path = getattr(self, 'runtime_llm_env_path', None)
+        if path is None:
+            raise RuntimeError('Persisted model revision has no config path')
+        persisted, revision = load_user_llm_runtime_state(path)
+        if persisted != config or revision != persisted_generation:
+            raise RuntimeError('Persisted model revision changed before publication')
 
     def _publish_llm_config(self, config, model, *, persisted_generation=None):
         # The async caller already owns the writer. Validate all semantic values
@@ -670,13 +703,6 @@ class MolecularChatApp:
         # its revision. A direct process-local replacement (including identical
         # config) must always get a fresh epoch and revoke old continuations.
         generation = persisted_generation or uuid4().hex
-        if persisted_generation is not None:
-            path = getattr(self, 'runtime_llm_env_path', None)
-            if path is None:
-                raise RuntimeError('Persisted model revision has no config path')
-            persisted, revision = load_user_llm_runtime_state(path)
-            if persisted != config or revision != persisted_generation:
-                raise RuntimeError('Persisted model revision changed before publication')
         capability_generation = getattr(self, 'capability_generation', None)
         base = getattr(self, 'ordinary_capability_base', None)
         if getattr(self, 'ordinary_chat_policy', 'a1_closed') == 'semantic_v1':
@@ -1051,6 +1077,11 @@ class MolecularChatApp:
                 await runtime.shutdown()
                 closed_runtimes.add(id(runtime))
         preload_tool = getattr(self, '_reverse_preload_tool', None)
+        if preload_tool is not None:
+            # Joining an in-flight native validation must not block the loop.
+            # Retain both this reference and the registry until the join returns.
+            await finish_on_cancel(asyncio.to_thread(preload_tool.close))
+            self._reverse_preload_tool = None
         if self._llm_watch_task is not None:
             self._llm_watch_task.cancel()
             try:
@@ -1069,12 +1100,6 @@ class MolecularChatApp:
                         if model is not None and id(model) not in seen:
                             seen.add(id(model))
                             await finish_on_cancel(close_owned_model(model))
-
-        if preload_tool is not None:
-            # The preloader is also the registered scientific tool. Drain
-            # background workflow consumers before closing its native source.
-            await finish_on_cancel(asyncio.to_thread(preload_tool.close))
-            self._reverse_preload_tool = None
 
         registry = getattr(self, "agent_tool_registry", None)
         self.agent_tool_registry = None

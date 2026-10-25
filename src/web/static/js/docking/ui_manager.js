@@ -726,6 +726,10 @@ function clearDockingPoll() {
   }
 }
 
+function isCurrentDockingTask(taskId) {
+  return activeDockingTaskId === taskId;
+}
+
 function dockingStepForPhase(phase) {
   const normalized = String(phase || "").toLowerCase();
   if (normalized.includes("receptor") || normalized === "staging" || normalized === "environment_check" || normalized === "input_verification") {
@@ -883,7 +887,7 @@ function renderDurableTaskSuccess(record, result) {
     <div class="action-buttons">
       <button class="action-btn btn-primary" onclick="downloadResults('${Safe.escapeInlineJsString(result.task_id)}')">下载已验证 PDBQT</button>
       ${viewBestPoseButton}
-      <button class="action-btn btn-secondary" onclick="resetDocking()">重新对接</button>
+      <button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>
     </div>`;
   setResultsMinHeightToLeft();
   updateButtonStates();
@@ -940,7 +944,7 @@ function applyDockingTaskRecord(record) {
 const DOCKING_POLL_INTERVAL_MS = 500;
 
 async function pollDockingTask(taskId) {
-  if (readRememberedDockingTask() !== taskId) return;
+  if (!isCurrentDockingTask(taskId)) return;
   clearDockingPoll();
   let response;
   let payload;
@@ -948,7 +952,7 @@ async function pollDockingTask(taskId) {
     response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
     payload = await response.json();
   } catch (error) {
-    if (readRememberedDockingTask() === taskId) {
+    if (isCurrentDockingTask(taskId)) {
       renderDockingStepLog("run_docking", "连接中断，等待重连…");
       dockingPollTimer = setTimeout(() => {
         pollDockingTask(taskId).catch(handleDockingTaskError);
@@ -957,9 +961,7 @@ async function pollDockingTask(taskId) {
     }
     return;
   }
-  // A cancellation or a new submission may have replaced this task while
-  // either fetch or JSON decoding was in flight. Check before any mutation.
-  if (readRememberedDockingTask() !== taskId) return;
+  if (!isCurrentDockingTask(taskId)) return;
   if (!response.ok || payload.success === false) {
     throw new Error(payload.message || payload.detail || "无法读取对接任务状态");
   }
@@ -989,7 +991,7 @@ async function cancelDockingTask() {
       body: JSON.stringify({ reason: "user request" }),
     });
     const payload = await response.json();
-    if (readRememberedDockingTask() !== taskId) return;
+    if (!isCurrentDockingTask(taskId)) return;
     if (!response.ok || payload.success === false) {
       throw new Error(payload.message || payload.detail || "取消任务失败");
     }
@@ -999,7 +1001,7 @@ async function cancelDockingTask() {
       pollDockingTask(taskId).catch(handleDockingTaskError);
     }
   } catch (error) {
-    if (readRememberedDockingTask() === taskId) handleDockingTaskError(error);
+    if (isCurrentDockingTask(taskId)) handleDockingTaskError(error);
   }
 }
 
@@ -1213,7 +1215,7 @@ function showRealResults(data) {
     <div class="action-buttons">
       <button class="action-btn btn-primary" onclick="downloadResults('${safeJobIdJs}')">导出结果</button>
       <button class="action-btn btn-secondary" onclick="generateReport('${safeJobIdJs}')">生成报告</button>
-      <button class="action-btn btn-secondary" onclick="resetDocking()">重新对接</button>
+      <button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>
     </div>
   `;
 
@@ -1678,12 +1680,15 @@ function generateReport(jobId) {
 }
 
 // 重置对接
-function resetDocking() {
-  document.getElementById("protein-file").value = "";
-  document.getElementById("ligand-file").value = "";
-  document.getElementById("smiles-input").value = "";
-  document.getElementById("protein-files").innerHTML = "";
-  document.getElementById("ligand-files").innerHTML = "";
+function resetDocking(options = {}) {
+  const preserveInputs = options.preserveInputs === true;
+  if (!preserveInputs) {
+    document.getElementById("protein-file").value = "";
+    document.getElementById("ligand-file").value = "";
+    document.getElementById("smiles-input").value = "";
+    document.getElementById("protein-files").innerHTML = "";
+    document.getElementById("ligand-files").innerHTML = "";
+  }
 
   const statusIndicators = document.querySelectorAll(".status-indicator");
   statusIndicators.forEach((indicator) => {
@@ -1703,18 +1708,20 @@ function resetDocking() {
   if (bar) bar.style.width = "0%";
   if (container) container.style.display = "none";
 
-  currentProteinData = null;
-  AppState.currentProteinFormat = "pdb";
-  currentLigandData = null;
-  originalLigandData = null;
+  if (!preserveInputs) {
+    currentProteinData = null;
+    AppState.currentProteinFormat = "pdb";
+    currentLigandData = null;
+    originalLigandData = null;
+    AppState.dockingBoxCenterTouched = false;
+  }
   dockedLigandData = null;
   currentComplexData = null;
   AppState.currentViewerMode = null;
   AppState.currentJobId = null;
-  AppState.dockingBoxCenterTouched = false;
   AppState.currentBatchResults = [];
   const batchSmilesInput = document.getElementById("batch-smiles-input");
-  if (batchSmilesInput) batchSmilesInput.value = "";
+  if (batchSmilesInput && !preserveInputs) batchSmilesInput.value = "";
 
   const allButtons = document.querySelectorAll(".action-btn");
   allButtons.forEach((btn) => btn.classList.remove("active"));
@@ -1741,6 +1748,22 @@ function resetDocking() {
   const rightCol = document.querySelector(".result-panel");
   if (leftCol) leftCol.style.minHeight = "";
   if (rightCol) rightCol.style.minHeight = "";
+}
+
+// 复用本次对接输入并提交一个新的持久化任务。
+function rerunDocking() {
+  const proteinFile = document.getElementById("protein-file")?.files?.[0];
+  const ligandFile = document.getElementById("ligand-file")?.files?.[0];
+  const smilesInput = document.getElementById("smiles-input")?.value?.trim();
+  if (!proteinFile || (!ligandFile && !smilesInput)) {
+    resetDocking();
+    if (typeof Utils?.showToast === "function") {
+      Utils.showToast("原对接输入已不可用，请重新上传文件或输入 SMILES", "warning");
+    }
+    return;
+  }
+  resetDocking({ preserveInputs: true });
+  startDocking();
 }
 
 // 对接结果卡片高度自适应

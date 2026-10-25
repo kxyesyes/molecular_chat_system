@@ -149,7 +149,7 @@
       return false;
     }
     const allowedTags = new Set([
-      "svg", "g", "path", "line", "circle", "rect", "polygon", "polyline",
+      "svg", "g", "path", "line", "circle", "ellipse", "rect", "polygon", "polyline",
       "text", "tspan", "defs", "title", "desc",
     ]);
     const allowedAttributes = new Set([

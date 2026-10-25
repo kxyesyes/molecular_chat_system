@@ -92,6 +92,10 @@ assert(
   typeof Safe.appendSafeSvg === "function",
   "safe_render.js must expose the DOM-based SVG sanitizer",
 );
+assert(
+  fs.readFileSync(helperPath, "utf8").includes('"ellipse"'),
+  "SVG sanitizer must allow RDKit ellipse highlight elements",
+);
 
 const indexHtml = read("src/web/templates/index.html");
 const designHtml = read("src/web/templates/molecular_design.html");
