@@ -46,7 +46,7 @@ from .decision_inputs import (
     resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest, seal_observation,
     effective_molecule, has_explicit_molecule, MOLECULAR_INPUT_TOOLS, require_current_reference,
 )
-from .decision_clarification import scientific_clarification
+from .decision_clarification import scientific_clarification, has_valid_molecular_input
 from .decision_bounds import context_value, configuration_generation, validate_json
 from .decision_history import history_pairs, history_prefix
 from .decision_requirements import prepare_requirements, evaluate_requirements
@@ -843,6 +843,20 @@ class ScientificSession:
                                 question=scientific_clarification(context.query, required_tools),
                                 missing_fields=['SMILES'],
                             )
+                    elif (not binding and restored is not None
+                          and clarified_query is not None
+                          and isinstance(decision, ClarifyDecision)
+                          and has_valid_molecular_input(context.query, required_tools)):
+                        # Some local models repeat the clarification even after
+                        # the user supplies a valid molecule. The continuation
+                        # is already bound to this pending request, so replan
+                        # the same authorized molecular tool deterministically;
+                        # malformed or missing input stays on clarification.
+                        decision = ToolDecision(
+                            version='1', action='tool', tool_name=pending_tool,
+                            arguments={'input_ref': 'user'},
+                            purpose='use the molecule supplied in the clarification',
+                        )
                     elif (not binding and state.protocol_repairs == 0
                           and all(result.success for result in session.results)
                           and isinstance(decision, FinishDecision)
