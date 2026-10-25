@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import stat
+import httpx
 from pathlib import Path, PureWindowsPath
 import sys
 import tempfile
@@ -28,6 +29,26 @@ unsupported_decision_encoding decision_response_too_large invalid_decision_messa
 unmatched_tool_message missing_tool_observation invalid_decision_options'''.split())
 
 REPORT_SCOPE = 'isolated ChatHandler entry; not production browser acceptance; temporary state removed'
+
+
+def classify_acceptance_failure(error):
+    """Return only fixed public diagnostics for provider setup failures."""
+    if isinstance(error, httpx.HTTPStatusError):
+        response = error.response
+        status = getattr(response, 'status_code', None)
+        result = {'reason': 'decision_http_error'}
+        if type(status) is int and 100 <= status <= 599:
+            result['http_status'] = status
+        return result
+    if isinstance(error, httpx.TimeoutException):
+        return {'reason': 'decision_timeout'}
+    if isinstance(error, httpx.TransportError):
+        return {'reason': 'decision_provider_unavailable'}
+    if isinstance(error, ValueError):
+        public_reason = str(error).partition(':')[0]
+        if public_reason in {'unsafe_endpoint_configuration', 'unsafe_ollama_resolution'}:
+            return {'reason': 'decision_endpoint_rejected'}
+    return {'reason': 'isolated_acceptance_unavailable'}
 
 
 class Capture:
@@ -203,13 +224,14 @@ def validate_provider_endpoint(base, provider='cloud'):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--provider', choices=('cloud', 'ollama'), default='cloud')
-    parser.add_argument('--mode', choices=('native', 'json'), default='native',
-                        help='Wire mode (default: native; json recommended for Ollama)')
+    parser.add_argument('--mode', choices=('native', 'json'), default=None,
+                        help='Wire mode (default: native for cloud, json for Ollama)')
     parser.add_argument('--output', type=Path, default=ROOT / f'outputs/agent_evaluation/decision_chat_{uuid4().hex}.json')
     args = parser.parse_args(argv)
     try:
         with open_report(args.output) as output:
-            report = execute(args.mode, args.provider)
+            mode = args.mode or ('json' if args.provider == 'ollama' else 'native')
+            report = execute(mode, args.provider)
             output.write(json.dumps(report, ensure_ascii=False, indent=2))
     except (OSError, ValueError):
         print(json.dumps({'status': 'failed', 'reason': 'unsafe_report_path'}))
@@ -235,26 +257,29 @@ def execute(mode, provider='cloud'):
     else:
         try:
             validate_provider_endpoint(base, provider)
-            import httpx
-            from src.agent.openai_compatible_model import OpenAICompatibleModel
-            async def request():
-                if provider == 'ollama':
-                    from src.agent import decision_transport
-                    from src.system.ollama_model import OllamaModel
-                    from src.system.model_lifecycle import finish_on_cancel
-                    # Same canonical model and explicit injection as Web. The
-                    # model owns per-transaction local facades and their cleanup.
-                    model = OllamaModel(base_url=base, model_name=name, decision_transport=decision_transport)
-                    try:
+        except ValueError:
+            report = {'status': 'failed', 'reason': 'decision_endpoint_rejected', 'cases': []}
+        else:
+            try:
+                from src.agent.openai_compatible_model import OpenAICompatibleModel
+                async def request():
+                    if provider == 'ollama':
+                        from src.agent import decision_transport
+                        from src.system.ollama_model import OllamaModel
+                        from src.system.model_lifecycle import finish_on_cancel
+                        # Same canonical model and explicit injection as Web. The
+                        # model owns per-transaction local facades and their cleanup.
+                        model = OllamaModel(base_url=base, model_name=name, decision_transport=decision_transport)
+                        try:
+                            return await run_acceptance(model, mode)
+                        finally:
+                            await finish_on_cancel(model.close())
+                    async with httpx.AsyncClient(timeout=90, follow_redirects=False, trust_env=False) as client:
+                        model = OpenAICompatibleModel(key, name, base, client=client)
                         return await run_acceptance(model, mode)
-                    finally:
-                        await finish_on_cancel(model.close())
-                async with httpx.AsyncClient(timeout=90, follow_redirects=False, trust_env=False) as client:
-                    model = OpenAICompatibleModel(key, name, base, client=client)
-                    return await run_acceptance(model, mode)
-            report = asyncio.run(request())
-        except Exception:
-            report = {'status': 'failed', 'reason': 'isolated_acceptance_unavailable', 'cases': []}
+                report = asyncio.run(request())
+            except Exception as exc:
+                report = {'status': 'failed', **classify_acceptance_failure(exc), 'cases': []}
     report.update(provider=provider, mode=mode, scope=REPORT_SCOPE)
     return report
 

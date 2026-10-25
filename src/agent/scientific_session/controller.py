@@ -44,7 +44,7 @@ from .decision_policy import (
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, settle_owned_call, retry_persistence
 from .decision_inputs import (
     resolve_decision_input, active_results, verify_observation_integrity, decision_input_digest, seal_observation,
-    effective_molecule, require_current_reference,
+    effective_molecule, has_explicit_molecule, MOLECULAR_INPUT_TOOLS, require_current_reference,
 )
 from .decision_clarification import scientific_clarification
 from .decision_bounds import context_value, configuration_generation, validate_json
@@ -556,7 +556,6 @@ class ScientificSession:
             context.query = clarified_query
             # Explicit replacement is sticky across later clarifications. The
             # original fingerprint still identifies the owner-selected request.
-            from .decision_inputs import has_explicit_molecule
             if context.resolved_molecule is not None and any(
                     has_explicit_molecule(q) for q in restored['input_queries']):
                 context.resolved_molecule = None
@@ -812,6 +811,52 @@ class ScientificSession:
                     state.waiting_for_input = False
                     state.answer = '本次回复未通过安全校验，未发布未经验证的内容。'
                     raise DecisionBoundaryError(exc.code) from None
+            if (not binding and restored is None and request_kind == 'scientific'
+                    and isinstance(decision, ToolDecision)
+                    and decision.tool_name in MOLECULAR_INPUT_TOOLS
+                    and not has_explicit_molecule(context.query)
+                    and effective_molecule(context) is None):
+                # A model proposal cannot authorize a molecular tool without a
+                # current user structure or an already selected molecule. Turn
+                # the unsafe proposal into a deterministic clarification before
+                # Pi can dispatch it; the original proposal is not executed or
+                # retained as a failed scientific observation.
+                decision = ClarifyDecision(
+                    version='1', action='clarify',
+                    question=scientific_clarification(context.query, required_tools),
+                    missing_fields=['SMILES'],
+                )
+            if (not binding) and request_kind == 'scientific':
+                completed_tools = {result.tool_name for result in active_results(session) if usable(result)}
+                pending_molecular = sorted(
+                    (set(required_tools) - completed_tools) & set(adapters) & MOLECULAR_INPUT_TOOLS)
+                if pending_molecular:
+                    pending_tool = pending_molecular[0]
+                    if not has_explicit_molecule(context.query) and effective_molecule(context) is None:
+                        # A non-tool proposal cannot satisfy a molecular
+                        # obligation without a current structure. Keep the
+                        # deterministic clarification path above for all such
+                        # proposals, including model attempts to finish early.
+                        if not isinstance(decision, ToolDecision):
+                            decision = ClarifyDecision(
+                                version='1', action='clarify',
+                                question=scientific_clarification(context.query, required_tools),
+                                missing_fields=['SMILES'],
+                            )
+                    elif (not binding and state.protocol_repairs == 0
+                          and all(result.success for result in session.results)
+                          and isinstance(decision, FinishDecision)
+                          and pending_tool != 'activity_predictor'):
+                        # Do not accept an unsupported scientific finish or an
+                        # unnecessary clarification when a complete current
+                        # molecular input and a required pure molecular tool
+                        # are already available. The server chooses only the
+                        # required authorized tool; the tool supplies evidence.
+                        decision = ToolDecision(
+                            version='1', action='tool', tool_name=pending_tool,
+                            arguments={'input_ref': 'user'},
+                            purpose='satisfy the pending molecular requirement',
+                        )
             if self.runtime.mode == 'native':
                 call_id = response.tool_call_id
                 if (type(call_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', call_id) is None
@@ -1322,3 +1367,4 @@ class ScientificSession:
         elif state.waiting_for_input:
             retry_persistence(lambda: self.runtime.store.update_run_status(context.trace_id, 'waiting_for_input'))
         return result
+

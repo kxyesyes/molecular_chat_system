@@ -42,6 +42,43 @@ def test_missing_runtime_configuration_is_skip_not_success(tmp_path):
     assert report['reason'] == 'missing_runtime_configuration'
 
 
+def test_ollama_without_mode_defaults_to_json(monkeypatch, tmp_path):
+    m = module()
+    monkeypatch.setenv('OLLAMA_CHAT_MODEL', 'synthetic-chat-model')
+    monkeypatch.setattr(m, 'execute', lambda mode, provider: {
+        'status': 'skipped', 'mode': mode, 'provider': provider, 'cases': [],
+    })
+    target = tmp_path / 'report.json'
+    assert m.main(['--provider', 'ollama', '--output', str(target)]) == 2
+    assert json.loads(target.read_text(encoding='utf-8'))['mode'] == 'json'
+
+
+@pytest.mark.parametrize('error, expected', [
+    ('timeout', {'reason': 'decision_timeout'}),
+    ('transport', {'reason': 'decision_provider_unavailable'}),
+    ('endpoint', {'reason': 'decision_endpoint_rejected'}),
+])
+def test_public_acceptance_failure_classification_is_fixed_and_redacted(error, expected):
+    import httpx
+    errors = {
+        'timeout': httpx.ReadTimeout('private-timeout-body'),
+        'transport': httpx.ConnectError('private-host.invalid'),
+        'endpoint': ValueError('unsafe_endpoint_configuration: private-host.invalid'),
+    }
+    result = module().classify_acceptance_failure(errors[error])
+    assert result == expected
+    assert 'private-' not in json.dumps(result)
+
+
+def test_public_acceptance_failure_keeps_only_allowlisted_http_status():
+    import httpx
+    response = httpx.Response(503, request=httpx.Request('POST', 'https://private.invalid'))
+    result = module().classify_acceptance_failure(httpx.HTTPStatusError(
+        'private-response-body', request=response.request, response=response))
+    assert result == {'reason': 'decision_http_error', 'http_status': 503}
+    assert 'private' not in json.dumps(result)
+
+
 @pytest.mark.parametrize('mode', ['native', 'json'])
 def test_report_checks_real_tools_and_clarification_with_decision_doubles(mode):
     from test_decision_loop import ScriptedModel, finish, tool, finish_last, clarify
@@ -228,7 +265,13 @@ def test_cli_with_stub_http_transport_real_pi_rdkit_and_private_temp_state(tmp_p
             assert payload['tools'][0]['function']['name'] == 'agent_decision'
             assert 'response_format' not in payload
         else:
-            assert payload['response_format'] == {'type': 'json_object'}
+            if provider == 'ollama':
+                response_format = payload['response_format']
+                assert response_format['type'] == 'json_schema'
+                assert response_format['json_schema']['name'] == 'agent_decision'
+                assert response_format['json_schema']['strict'] is True
+            else:
+                assert payload['response_format'] == {'type': 'json_object'}
             assert 'tools' not in payload
         decision = next(decisions)
         if callable(decision):
@@ -368,7 +411,7 @@ def test_local_unsafe_endpoint_never_creates_client(tmp_path, monkeypatch, base)
     assert not calls
     report = json.loads(target.read_text(encoding='utf-8'))
     assert report['status'] == 'failed'
-    assert report['reason'] == 'isolated_acceptance_unavailable'
+    assert report['reason'] == 'decision_endpoint_rejected'
     assert base not in json.dumps(report)
 
 

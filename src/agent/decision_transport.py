@@ -441,11 +441,46 @@ def _payload(model, messages, mode, max_tokens, profile=ProtocolProfile.DECISION
             parallel_tool_calls=False,
         )
     else:
+        field = {
+            ProtocolProfile.DECISION_V1: "decision",
+            ProtocolProfile.ORDINARY_INTENT_V1: "intent",
+            ProtocolProfile.DOCKING_PREPARATION_V1: "proposal",
+        }[profile]
+        if getattr(model, "provider", None) == "ollama":
+            json_instruction = (
+                f'Return exactly one JSON object with the required top-level key "{field}"; '
+                'do not return markdown, prose, or duplicate keys. '
+                f'{field}.version must be the string "1". Use only fields allowed by the schema, '
+                'and omit no required field. Follow the selected action or proposal kind exactly. '
+                'If required scientific input is missing, represent that state in the schema; '
+                'never invent values. Schema: '
+            )
+            response_format = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": _function_name(profile),
+                    "strict": True,
+                    "schema": schema,
+                },
+            }
+            # Detach and bound the provider-facing schema so future schema
+            # changes cannot smuggle non-JSON values or an oversized payload.
+            try:
+                response_format = json.loads(json.dumps(
+                    response_format, ensure_ascii=False, allow_nan=False,
+                ))
+                if len(json.dumps(response_format, ensure_ascii=False,
+                                  allow_nan=False).encode("utf-8")) > _MAX_WIRE_BYTES:
+                    raise DecisionProtocolError("decision_too_large")
+            except (TypeError, ValueError, RecursionError):
+                raise DecisionProtocolError("invalid_decision_schema") from None
+        else:
+            response_format = {"type": "json_object"}
         payload["messages"] = [{
             "role": "system",
             "content": json_instruction + json.dumps(schema, ensure_ascii=False),
         }, *messages]
-        payload["response_format"] = {"type": "json_object"}
+        payload["response_format"] = response_format
     return payload
 
 

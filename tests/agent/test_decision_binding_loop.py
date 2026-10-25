@@ -267,6 +267,16 @@ def test_initial_clarification_never_mints_legacy_nonce(loop_case, mode):
     assert len(case.model.messages) == 1
 
 
+@pytest.mark.parametrize('mode', ['native', 'json'])
+def test_web_binding_does_not_replan_clarification_with_non_web_input_ref(loop_case, mode):
+    case = loop_case([clarify()], [PropertyCalculator()], mode=mode)
+    result = run(case, 'SMILES: CCO', required={'property_calculator'})
+    assert not result.success
+    assert result.metadata['waiting_for_input']
+    assert result.metadata['stop_reason'] == 'clarification_required'
+    assert not any(case.calls.values())
+
+
 @pytest.mark.parametrize('mutation', ['input', 'metadata', 'extra_metadata', 'tool', 'record', 'context'])
 def test_session_owned_copy_is_authenticated_before_physical_dispatch(loop_case, monkeypatch, mutation):
     original = WorkflowRunSession.append_step

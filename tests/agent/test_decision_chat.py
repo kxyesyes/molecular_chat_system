@@ -5,7 +5,7 @@ from dataclasses import replace
 
 import pytest
 
-from test_decision_loop import setup_loop, tool, finish, finish_last, clarify
+from test_decision_loop import setup_loop, tool, finish, finish_last, clarify, CountingTool
 from test_decision_inputs import downstream
 from test_decision_requirements import requirements
 from src.agent.contracts import (
@@ -91,6 +91,31 @@ def test_clarification_can_resume_same_owner_and_trace(setup_loop):
                                clarified_query='SMILES: CCO')
         assert resumed.success and terminal(resumed_ws)['status'] == 'completed'
     asyncio.run(scenario())
+
+
+def test_scientific_tool_proposal_without_smiles_waits_before_dispatch(setup_loop):
+    b = setup_loop([tool()], [CountingTool()])
+    ws = Socket()
+    result = asyncio.run(invoke(
+        b, ws, context('请计算分子性质。我还没有提供 SMILES，请先询问我，不要自行选择分子。'),
+    ))
+    assert not result.success
+    assert result.metadata['waiting_for_input']
+    assert result.metadata['stop_reason'] == 'clarification_required'
+    assert not b.tools[0].inputs
+    assert terminal(ws)['status'] == 'waiting_for_input'
+
+
+def test_scientific_finish_before_required_property_tool_is_replanned(setup_loop):
+    b = setup_loop([finish(['evidence-early']), tool(), finish_last], [CountingTool()])
+    ws = Socket()
+    result = asyncio.run(invoke(
+        b, ws, context('SMILES: CCO'),
+        requirements=requirements(1, expected_smiles=['CCO']),
+    ))
+    assert result.success
+    assert b.tools[0].inputs == ['SMILES: CCO']
+    assert len(b.model.messages) == 3
 
 
 def test_disabled_tools_cannot_be_reenabled_by_entry(setup_loop):
