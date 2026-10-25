@@ -34,6 +34,173 @@ def blocked_loader(monkeypatch):
     return entered, release, calls
 
 
+def test_prewarm_waits_only_for_active_foreground_io_and_counts_overlaps(tmp_path, monkeypatch):
+    producer, _ = write_source(tmp_path / "source")
+    runtime = runtime_type()(producer.data_dir)
+    waits, observations = [], []
+    monkeypatch.setattr(runtime._stop, "wait", waits.append)
+
+    def initialize(*, policy, timeout_seconds, cancelled, progress):
+        assert policy is runtime._policy and timeout_seconds == 1800
+        observations.append(cancelled())
+        with runtime.foreground_io():
+            observations.append(cancelled())
+            try:
+                with runtime.foreground_io():
+                    observations.append(cancelled())
+                    raise OSError("synthetic I/O failure")
+            except OSError:
+                pass
+            observations.append(cancelled())
+        observations.append(cancelled())
+        runtime._stop.set()
+        with runtime.foreground_io():
+            observations.append(cancelled())
+
+    monkeypatch.setattr(runtime._producer, "initialize_compact_strict", initialize)
+    try:
+        runtime.start()
+        runtime._thread.join(10)
+        assert not runtime._thread.is_alive()
+        assert observations == [False, False, False, False, False, True]
+        assert waits == [.001, .001, .001]
+        assert runtime._foreground_io_count == 0
+    finally:
+        runtime.close()
+
+
+def test_tool_foreground_io_is_optional_and_never_calls_runtime_under_tool_lock():
+    from contextlib import nullcontext
+    from src.agent.tools.reverse_target_tool import ReverseTargetTool
+    tool = ReverseTargetTool()
+    calls = []
+
+    def foreground():
+        assert tool._state_lock.acquire(blocking=False)
+        tool._state_lock.release()
+        calls.append(True)
+        return nullcontext()
+
+    with tool.foreground_io():
+        assert tool._source_runtime is None and not tool._prewarm_requested
+    tool._source_runtime = SimpleNamespace(foreground_io=foreground)
+    with tool.foreground_io():
+        pass
+    tool._closed = True
+    with tool.foreground_io():
+        pass
+    assert calls == [True]
+
+
+def test_foreground_wait_still_expires_original_acquisition_deadline(tmp_path, monkeypatch):
+    from src.reverse_target import compact_source
+    producer, _ = write_source(tmp_path / "source")
+    runtime = runtime_type()(producer.data_dir)
+    clock, waits = [1.0], []
+
+    def wait(delay):
+        waits.append(delay)
+        clock[0] += 1800  # Simulate suspension beyond the unchanged acquisition budget.
+
+    monkeypatch.setattr(compact_source, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(runtime._stop, "wait", wait)
+    try:
+        with runtime.foreground_io():
+            runtime.start()
+            runtime._thread.join(10)
+        assert not runtime._thread.is_alive()
+        assert waits == [.001]
+        assert runtime.snapshot()["state"] == "failed"
+        assert runtime.snapshot()["reason"] == "acquisition_timeout"
+        assert runtime.snapshot()["verified_rows"] == 0
+        with pytest.raises(ReverseSourceUnavailable):
+            runtime.ready_predictor()
+    finally:
+        runtime.close()
+
+
+def test_close_during_prewarm_yield_cancels_before_source_acquisition(tmp_path, monkeypatch):
+    producer, _ = write_source(tmp_path / "source")
+    runtime = runtime_type()(producer.data_dir)
+    entered, release = threading.Event(), threading.Event()
+    acquisitions = []
+
+    def yield_thread(delay):
+        assert delay == .001
+        entered.set()
+        assert release.wait(10)
+
+    original = runtime._producer._resolved_source_paths
+
+    def paths():
+        acquisitions.append(True)
+        return original()
+
+    monkeypatch.setattr(runtime._stop, "wait", yield_thread)
+    monkeypatch.setattr(runtime._producer, "_resolved_source_paths", paths)
+    try:
+        with runtime.foreground_io():
+            runtime.start()
+            assert entered.wait(2), 'prewarm never offered a scheduling yield'
+        runtime.request_close()
+        assert runtime.snapshot()["state"] == "closing"
+        assert runtime.snapshot()["cleanup_pending"]
+        with pytest.raises(ReverseSourceUnavailable):
+            runtime.ready_predictor()
+        release.set()
+        runtime._thread.join(10)
+        assert not runtime._thread.is_alive()
+        assert acquisitions == [], 'stop during yield was not rechecked before acquisition'
+        assert runtime.snapshot()["state"] == "closing"
+    finally:
+        release.set()
+        runtime.close()
+    assert runtime.snapshot()["state"] == "closed"
+    assert not runtime.snapshot()["cleanup_pending"]
+
+
+@pytest.mark.parametrize("corrupt_last_row", [False, True])
+def test_cooperative_prewarm_still_validates_every_row_and_array_hash(tmp_path, monkeypatch, corrupt_last_row):
+    import numpy as np
+    from src.reverse_target.owned_source import _array_hash, operation_check
+    producer, arrays = write_source(tmp_path / "source")
+    if corrupt_last_row:
+        damaged = arrays["maccs"].copy()
+        damaged[-1, 7] ^= 1
+        np.save(producer.maccs_fp_path, damaged)
+    runtime = runtime_type()(producer.data_dir)
+    yields, rows = [], []
+
+    original = runtime._producer.compute_query_fingerprints
+
+    def fingerprint(smiles):
+        rows.append(smiles)
+        return original(smiles)
+
+    monkeypatch.setattr(runtime._stop, "wait", yields.append)
+    monkeypatch.setattr(runtime._producer, "compute_query_fingerprints", fingerprint)
+    try:
+        with runtime.foreground_io():
+            runtime.start()
+            runtime._thread.join(10)
+        assert not runtime._thread.is_alive()
+        assert yields and set(yields) == {.001}, 'real acquisition did not cooperate with other threads'
+        assert rows == ["CCO", "CCC", "CCO"]
+        if corrupt_last_row:
+            assert runtime.snapshot()["state"] == "failed"
+            with pytest.raises(ReverseSourceUnavailable):
+                runtime.ready_predictor()
+        else:
+            result = runtime.ready_predictor().predict_with_receipt("CCO")
+            descriptor = result["receipt"]["source"]
+            assert descriptor["row_count"] == 3 and descriptor["row_alignment_verified"]
+            for name, array in arrays.items():
+                assert descriptor[name + "_sha256"] == _array_hash(array, operation_check(30, None))
+            assert runtime.snapshot()["verified_rows"] == runtime.snapshot()["total_rows"] == 3
+    finally:
+        runtime.close()
+
+
 def test_runtime_loads_once_and_only_publishes_after_full_loader_return(tmp_path, monkeypatch, caplog):
     producer, _ = write_source(tmp_path / "source")
     runtime = runtime_type()(producer.data_dir)

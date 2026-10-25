@@ -507,6 +507,22 @@ const RtResults = (() => {
   let similarRequestId = 0;
   let similarAbortController = null;
 
+  function _detailsThreshold() {
+    const configured = Number(window.lastThreshold);
+    const configuredThreshold = Number.isFinite(configured) ? configured : NaN;
+    const fallback = typeof RT_CONFIG !== "undefined"
+      ? Number(RT_CONFIG.DEFAULTS && RT_CONFIG.DEFAULTS.THRESHOLD)
+      : NaN;
+    const baseThreshold = Number.isFinite(configuredThreshold)
+      ? configuredThreshold
+      : (Number.isFinite(fallback) ? fallback : 0.6);
+    const prefilter = Number(window.lastReverseTargetSummary?.prefilter_threshold);
+    if (Number.isFinite(prefilter) && prefilter >= 0 && prefilter <= 1 && prefilter < baseThreshold) {
+      return prefilter;
+    }
+    return baseThreshold;
+  }
+
   async function showSimilarMolecules(targetName, querySmiles) {
     const requestId = ++similarRequestId;
     if (similarAbortController) similarAbortController.abort();
@@ -525,7 +541,7 @@ const RtResults = (() => {
       const data = await RtApi.fetchSimilarMolecules(
         resolvedQuerySmiles,
         targetName,
-        window.lastThreshold || RT_CONFIG.DEFAULTS.THRESHOLD,
+        _detailsThreshold(),
         50,
         similarAbortController.signal,
       );
@@ -694,6 +710,7 @@ const RtResults = (() => {
       escapeHtml,
       escapeJsString,
       singleResultRow: _singleResultRow,
+      detailsThreshold: _detailsThreshold,
     },
   };
 })();
