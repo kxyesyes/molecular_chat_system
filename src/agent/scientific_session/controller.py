@@ -844,6 +844,7 @@ class ScientificSession:
                                 missing_fields=['SMILES'],
                             )
                     elif (not binding and state.protocol_repairs == 0
+                          and all(result.success for result in session.results)
                           and isinstance(decision, FinishDecision)
                           and pending_tool != 'activity_predictor'):
                         # Do not accept an unsupported scientific finish or an
