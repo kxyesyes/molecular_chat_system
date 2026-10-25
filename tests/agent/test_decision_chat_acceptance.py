@@ -42,6 +42,32 @@ def test_missing_runtime_configuration_is_skip_not_success(tmp_path):
     assert report['reason'] == 'missing_runtime_configuration'
 
 
+@pytest.mark.parametrize('error, expected', [
+    ('timeout', {'reason': 'decision_timeout'}),
+    ('transport', {'reason': 'decision_provider_unavailable'}),
+    ('endpoint', {'reason': 'decision_endpoint_rejected'}),
+])
+def test_public_acceptance_failure_classification_is_fixed_and_redacted(error, expected):
+    import httpx
+    errors = {
+        'timeout': httpx.ReadTimeout('private-timeout-body'),
+        'transport': httpx.ConnectError('private-host.invalid'),
+        'endpoint': ValueError('unsafe_endpoint_configuration: private-host.invalid'),
+    }
+    result = module().classify_acceptance_failure(errors[error])
+    assert result == expected
+    assert 'private-' not in json.dumps(result)
+
+
+def test_public_acceptance_failure_keeps_only_allowlisted_http_status():
+    import httpx
+    response = httpx.Response(503, request=httpx.Request('POST', 'https://private.invalid'))
+    result = module().classify_acceptance_failure(httpx.HTTPStatusError(
+        'private-response-body', request=response.request, response=response))
+    assert result == {'reason': 'decision_http_error', 'http_status': 503}
+    assert 'private' not in json.dumps(result)
+
+
 @pytest.mark.parametrize('mode', ['native', 'json'])
 def test_report_checks_real_tools_and_clarification_with_decision_doubles(mode):
     from test_decision_loop import ScriptedModel, finish, tool, finish_last, clarify
@@ -368,7 +394,7 @@ def test_local_unsafe_endpoint_never_creates_client(tmp_path, monkeypatch, base)
     assert not calls
     report = json.loads(target.read_text(encoding='utf-8'))
     assert report['status'] == 'failed'
-    assert report['reason'] == 'isolated_acceptance_unavailable'
+    assert report['reason'] == 'decision_endpoint_rejected'
     assert base not in json.dumps(report)
 
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import stat
+import httpx
 from pathlib import Path, PureWindowsPath
 import sys
 import tempfile
@@ -28,6 +29,26 @@ unsupported_decision_encoding decision_response_too_large invalid_decision_messa
 unmatched_tool_message missing_tool_observation invalid_decision_options'''.split())
 
 REPORT_SCOPE = 'isolated ChatHandler entry; not production browser acceptance; temporary state removed'
+
+
+def classify_acceptance_failure(error):
+    """Return only fixed public diagnostics for provider setup failures."""
+    if isinstance(error, httpx.HTTPStatusError):
+        response = error.response
+        status = getattr(response, 'status_code', None)
+        result = {'reason': 'decision_http_error'}
+        if type(status) is int and 100 <= status <= 599:
+            result['http_status'] = status
+        return result
+    if isinstance(error, httpx.TimeoutException):
+        return {'reason': 'decision_timeout'}
+    if isinstance(error, httpx.TransportError):
+        return {'reason': 'decision_provider_unavailable'}
+    if isinstance(error, ValueError):
+        public_reason = str(error).partition(':')[0]
+        if public_reason in {'unsafe_endpoint_configuration', 'unsafe_ollama_resolution'}:
+            return {'reason': 'decision_endpoint_rejected'}
+    return {'reason': 'isolated_acceptance_unavailable'}
 
 
 class Capture:
@@ -235,26 +256,29 @@ def execute(mode, provider='cloud'):
     else:
         try:
             validate_provider_endpoint(base, provider)
-            import httpx
-            from src.agent.openai_compatible_model import OpenAICompatibleModel
-            async def request():
-                if provider == 'ollama':
-                    from src.agent import decision_transport
-                    from src.system.ollama_model import OllamaModel
-                    from src.system.model_lifecycle import finish_on_cancel
-                    # Same canonical model and explicit injection as Web. The
-                    # model owns per-transaction local facades and their cleanup.
-                    model = OllamaModel(base_url=base, model_name=name, decision_transport=decision_transport)
-                    try:
+        except ValueError:
+            report = {'status': 'failed', 'reason': 'decision_endpoint_rejected', 'cases': []}
+        else:
+            try:
+                from src.agent.openai_compatible_model import OpenAICompatibleModel
+                async def request():
+                    if provider == 'ollama':
+                        from src.agent import decision_transport
+                        from src.system.ollama_model import OllamaModel
+                        from src.system.model_lifecycle import finish_on_cancel
+                        # Same canonical model and explicit injection as Web. The
+                        # model owns per-transaction local facades and their cleanup.
+                        model = OllamaModel(base_url=base, model_name=name, decision_transport=decision_transport)
+                        try:
+                            return await run_acceptance(model, mode)
+                        finally:
+                            await finish_on_cancel(model.close())
+                    async with httpx.AsyncClient(timeout=90, follow_redirects=False, trust_env=False) as client:
+                        model = OpenAICompatibleModel(key, name, base, client=client)
                         return await run_acceptance(model, mode)
-                    finally:
-                        await finish_on_cancel(model.close())
-                async with httpx.AsyncClient(timeout=90, follow_redirects=False, trust_env=False) as client:
-                    model = OpenAICompatibleModel(key, name, base, client=client)
-                    return await run_acceptance(model, mode)
-            report = asyncio.run(request())
-        except Exception:
-            report = {'status': 'failed', 'reason': 'isolated_acceptance_unavailable', 'cases': []}
+                report = asyncio.run(request())
+            except Exception as exc:
+                report = {'status': 'failed', **classify_acceptance_failure(exc), 'cases': []}
     report.update(provider=provider, mode=mode, scope=REPORT_SCOPE)
     return report
 

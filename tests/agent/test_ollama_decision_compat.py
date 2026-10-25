@@ -107,7 +107,14 @@ def test_actual_ollama_single_transaction_preserves_schema_and_owned_clients(mon
         assert payload['tools'][0]['function']['name'] == CASES[method][0]
         assert payload['parallel_tool_calls'] is False
     else:
-        assert payload['response_format'] == {'type': 'json_object'}
+        response_format = payload['response_format']
+        assert response_format['type'] == 'json_schema'
+        assert response_format['json_schema']['name'] == CASES[method][0]
+        assert response_format['json_schema']['strict'] is True
+        assert response_format['json_schema']['schema']['title']
+        instruction = payload['messages'][0]['content']
+        assert 'Return exactly one JSON object' in instruction
+        assert 'decision.version must be the string "1"' in instruction or method != 'decide'
 
 
 @pytest.mark.parametrize('method', list(CASES))
