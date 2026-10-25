@@ -38,3 +38,23 @@ def scientific_clarification(query, required_tools):
     if not analysis.candidates:
         return '未识别到可校验的分子结构；请提供完整的 SMILES。本次任务尚未完成。'
     return GENERIC
+
+
+def has_valid_molecular_input(query, required_tools):
+    """Return whether a continuation supplies a complete validated molecule.
+
+    This is intentionally narrower than ``has_explicit_molecule``: a malformed
+    replacement must remain on the clarification path and must never be sent to
+    a scientific tool just because it has a ``SMILES:`` marker.
+    """
+    if not MOLECULAR_INPUT_TOOLS.intersection(required_tools):
+        return False
+    if not isinstance(query, str) or len(query.encode('utf-8')) > MAX_EXPLANATION_INPUT_BYTES:
+        return False
+    try:
+        from rdkit import rdBase
+        with rdBase.BlockLogs():
+            analysis = InputValidator().analyze_molecular_input(query)
+    except Exception:
+        return False
+    return bool(analysis.validation_available and analysis.candidates and not analysis.blocks_execution)

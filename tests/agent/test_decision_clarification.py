@@ -48,18 +48,29 @@ def test_valid_input_does_not_invent_invalid_diagnosis(setup_loop):
 
 
 def test_corrected_input_resume_uses_current_validation(setup_loop):
-    b = setup_loop([clarify(), clarify(), tool(), finish_last], [PropertyCalculator()])
+    b = setup_loop([clarify(), clarify(), finish_last], [PropertyCalculator()])
     original = 'SMILES: CC(C)(('
     waiting = invoke(b, original)
     assert 'SMILES 无效' in waiting.final_answer
     again = invoke(b, original, continuation_id=waiting.metadata['continuation_id'],
                    clarified_query='SMILES: CCN')
-    assert again.metadata['waiting_for_input']
+    assert again.success
     assert 'SMILES 无效' not in again.final_answer
-    result = invoke(b, original, continuation_id=again.metadata['continuation_id'],
+    assert again.trace_id == waiting.trace_id
+    assert again.tool_results[0].data[0]['smiles'] == 'CCN'
+
+
+def test_valid_continuation_replans_when_model_repeats_clarification(setup_loop):
+    """A valid answer to a prior clarification must not depend on model compliance."""
+    b = setup_loop([clarify(), clarify(), finish_last], [PropertyCalculator()])
+    original = '请计算分子性质，我还没有提供 SMILES，请先询问我。'
+    waiting = invoke(b, original)
+    assert waiting.metadata['waiting_for_input']
+
+    result = invoke(b, original, continuation_id=waiting.metadata['continuation_id'],
                     clarified_query='SMILES: CCN')
+
     assert result.success
-    assert result.trace_id == waiting.trace_id
     assert result.tool_results[0].data[0]['smiles'] == 'CCN'
 
 
