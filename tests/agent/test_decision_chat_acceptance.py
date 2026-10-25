@@ -265,7 +265,13 @@ def test_cli_with_stub_http_transport_real_pi_rdkit_and_private_temp_state(tmp_p
             assert payload['tools'][0]['function']['name'] == 'agent_decision'
             assert 'response_format' not in payload
         else:
-            assert payload['response_format'] == {'type': 'json_object'}
+            if provider == 'ollama':
+                response_format = payload['response_format']
+                assert response_format['type'] == 'json_schema'
+                assert response_format['json_schema']['name'] == 'agent_decision'
+                assert response_format['json_schema']['strict'] is True
+            else:
+                assert payload['response_format'] == {'type': 'json_object'}
             assert 'tools' not in payload
         decision = next(decisions)
         if callable(decision):
