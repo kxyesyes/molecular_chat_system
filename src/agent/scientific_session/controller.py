@@ -842,7 +842,7 @@ class ScientificSession:
                                 question=scientific_clarification(context.query, required_tools),
                                 missing_fields=['SMILES'],
                             )
-                    elif (isinstance(decision, (FinishDecision, ClarifyDecision))
+                    elif (not binding and isinstance(decision, (FinishDecision, ClarifyDecision))
                           and pending_tool != 'activity_predictor'):
                         # Do not accept an unsupported scientific finish or an
                         # unnecessary clarification when a complete current

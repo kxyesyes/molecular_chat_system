@@ -224,13 +224,14 @@ def validate_provider_endpoint(base, provider='cloud'):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--provider', choices=('cloud', 'ollama'), default='cloud')
-    parser.add_argument('--mode', choices=('native', 'json'), default='native',
-                        help='Wire mode (default: native; json recommended for Ollama)')
+    parser.add_argument('--mode', choices=('native', 'json'), default=None,
+                        help='Wire mode (default: native for cloud, json for Ollama)')
     parser.add_argument('--output', type=Path, default=ROOT / f'outputs/agent_evaluation/decision_chat_{uuid4().hex}.json')
     args = parser.parse_args(argv)
     try:
         with open_report(args.output) as output:
-            report = execute(args.mode, args.provider)
+            mode = args.mode or ('json' if args.provider == 'ollama' else 'native')
+            report = execute(mode, args.provider)
             output.write(json.dumps(report, ensure_ascii=False, indent=2))
     except (OSError, ValueError):
         print(json.dumps({'status': 'failed', 'reason': 'unsafe_report_path'}))

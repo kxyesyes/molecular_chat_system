@@ -42,6 +42,17 @@ def test_missing_runtime_configuration_is_skip_not_success(tmp_path):
     assert report['reason'] == 'missing_runtime_configuration'
 
 
+def test_ollama_without_mode_defaults_to_json(monkeypatch, tmp_path):
+    m = module()
+    monkeypatch.setenv('OLLAMA_CHAT_MODEL', 'synthetic-chat-model')
+    monkeypatch.setattr(m, 'execute', lambda mode, provider: {
+        'status': 'skipped', 'mode': mode, 'provider': provider, 'cases': [],
+    })
+    target = tmp_path / 'report.json'
+    assert m.main(['--provider', 'ollama', '--output', str(target)]) == 2
+    assert json.loads(target.read_text(encoding='utf-8'))['mode'] == 'json'
+
+
 @pytest.mark.parametrize('error, expected', [
     ('timeout', {'reason': 'decision_timeout'}),
     ('transport', {'reason': 'decision_provider_unavailable'}),

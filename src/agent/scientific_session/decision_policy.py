@@ -63,13 +63,15 @@ def decision_system_message(request_kind, required_tools, catalog, requirement_p
     routing_instruction = (
         'For a chat request, if the user asks what help you provide, what you can do, or requests a brief '
         'capability overview (including Chinese wording such as "你能提供哪些帮助" or "能做什么"), '
-        'this is a complete request. Return finish_task now with response_kind "chat", evidence_ids [], '
-        'and a concise qualitative answer. Never return clarify_task for this case and never ask the user '
+        'this is a complete request. Return a finish decision with action "finish", response_kind "chat", '
+        'and evidence_ids []. In native Pi wire mode, submit it through finish_task. Never return a clarify '
+        'decision for this case and never ask the user '
         'to pick a topic. Only clarify chat when an explicitly requested task is impossible without a missing '
         'required detail. '
         if request_kind == 'chat' else
         'For a scientific request, if the current user message explicitly says SMILES are not provided, '
-        'says not to choose a molecule, or asks for SMILES first, call clarify_task before any scientific '
+        'says not to choose a molecule, or asks for SMILES first, return a clarify decision with action '
+        '"clarify" before any scientific '
         'tool. Expected SMILES in immutable requirements are acceptance constraints, never user input and '
         'never permission to invent or select a molecule. After clarification, use newly supplied valid '
         'SMILES and do not retain failed pre-clarification tool attempts. ')
