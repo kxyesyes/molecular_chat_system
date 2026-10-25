@@ -9,13 +9,14 @@ UNAVAILABLE = 'SMILES 校验暂不可用，无法判断当前结构是否有效�
 # Clarification is on the control path, not the scientific worker. Avoid expensive
 # parsing here; long inputs keep the neutral prompt and existing tool boundaries.
 MAX_EXPLANATION_INPUT_BYTES = 256
+MAX_CONTINUATION_INPUT_BYTES = 16 * 1024
 
 
 def scientific_clarification(query, required_tools):
     """Explain only validated molecular obligations; never echo query/question/exception."""
     if not MOLECULAR_INPUT_TOOLS.intersection(required_tools):
         return GENERIC
-    if not isinstance(query, str) or len(query.encode('utf-8')) > MAX_EXPLANATION_INPUT_BYTES:
+    if not isinstance(query, str) or len(query.encode('utf-8')) > MAX_CONTINUATION_INPUT_BYTES:
         return GENERIC
     try:
         from rdkit import rdBase
