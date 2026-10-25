@@ -162,15 +162,23 @@ async def test_native_scope_is_reused_and_chat_execution_has_no_allocation_timer
     from src.agent.runtime.allocation import current_allocation
 
     monkeypatch.setattr('src.web.chat_handler.MAX_RETAINED_ALLOCATIONS', 1)
-    scopes = []
+    scientific_scopes = []
+    chat_scopes = []
 
     async def respond(payload):
         scope = current_allocation()
         assert scope is not None
-        scopes.append(scope)
-        if len(scopes) == 2:
+        query = next(
+            (message.get('content') for message in reversed(payload['messages'])
+             if message.get('role') == 'user'),
+            '',
+        )
+        if query == '你好':
+            chat_scopes.append(scope)
             assert scope.phase == 'finished'
             await asyncio.sleep(.16)
+        else:
+            scientific_scopes.append(scope)
         return chat_decision()
 
     async with actual_app(mode='decision_a2', respond=respond) as bundle:
@@ -180,11 +188,12 @@ async def test_native_scope_is_reused_and_chat_execution_has_no_allocation_timer
             await socket.ready()
             scientific = await socket.turn({'message': '计算性质；SMILES: CCO'})
             assert result_of(scientific)['metadata'].get('stop_reason') != 'allocation_busy'
-            assert len(scopes) == 1
+            assert scientific_scopes
+            assert all(scope is scientific_scopes[0] for scope in scientific_scopes)
             app.chat_handler.config['agent']['allocation_timeout_seconds'] = .08
             chat = await socket.turn({'message': '你好'})
             assert result_of(chat)['status'] == 'completed'
-            assert len(scopes) == 2
+            assert len(chat_scopes) == 1
 
 
 # The old test_same_socket_accepts_second_request_before_sync_provider_returns
