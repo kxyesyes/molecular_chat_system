@@ -811,7 +811,7 @@ class ScientificSession:
                     state.waiting_for_input = False
                     state.answer = '本次回复未通过安全校验，未发布未经验证的内容。'
                     raise DecisionBoundaryError(exc.code) from None
-            if (request_kind == 'scientific' and isinstance(decision, ToolDecision)
+            if (not binding and request_kind == 'scientific' and isinstance(decision, ToolDecision)
                     and decision.tool_name in MOLECULAR_INPUT_TOOLS
                     and not has_explicit_molecule(context.query)
                     and effective_molecule(context) is None):
@@ -832,7 +832,7 @@ class ScientificSession:
                 if pending_molecular:
                     pending_tool = pending_molecular[0]
                     if not has_explicit_molecule(context.query) and effective_molecule(context) is None:
-                        # A finish/clarify proposal cannot satisfy a molecular
+                        # A non-tool proposal cannot satisfy a molecular
                         # obligation without a current structure. Keep the
                         # deterministic clarification path above for all such
                         # proposals, including model attempts to finish early.
@@ -842,7 +842,7 @@ class ScientificSession:
                                 question=scientific_clarification(context.query, required_tools),
                                 missing_fields=['SMILES'],
                             )
-                    elif (not binding and isinstance(decision, (FinishDecision, ClarifyDecision))
+                    elif (not binding and isinstance(decision, FinishDecision)
                           and pending_tool != 'activity_predictor'):
                         # Do not accept an unsupported scientific finish or an
                         # unnecessary clarification when a complete current
@@ -1364,3 +1364,4 @@ class ScientificSession:
         elif state.waiting_for_input:
             retry_persistence(lambda: self.runtime.store.update_run_status(context.trace_id, 'waiting_for_input'))
         return result
+
