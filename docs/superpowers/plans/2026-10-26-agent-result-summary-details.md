@@ -1,0 +1,126 @@
+# Agent Result Summary and Details Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use executing-plans for these coupled integration tasks; use requesting-code-review for independent checks. Steps use checkbox syntax for tracking.
+
+**Goal:** Deliver real Agent results as a compact summary with one owner-scoped, immutable, lazily read scientific detail snapshot, while retaining legacy clients.
+
+**Architecture:** A pure presentation projection produces summary and canonical details from verified results. A private file-backed artifact stores details once; the existing owner-scoped HTTP route reads it. Per-turn capability negotiation selects the new delivery shape and a small standalone frontend module mounts the disclosure after final rendering.
+
+**Tech Stack:** Existing Python 3.10 / FastAPI / SQLite, native JavaScript and CSS; no new dependencies.
+
+**Spec:** `docs/superpowers/specs/2026-10-26-agent-result-summary-details-design.md`.
+
+---
+
+## Execution rules
+
+Use the existing task branch `codex/feat/pi-baseline-migrate-worktree`; do not recreate its dirty checkout. Preserve unrelated changes. Use `apply_patch` for edits and stage only task-owned files or reviewed task-owned hunks. A component commit must not sweep earlier uncommitted work into this task.
+
+Use the existing MedChat Conda interpreter for Python checks. Tests needing Windows asyncio/network setup require the normal local execution permission because the restricted sandbox's socketpair stalls; keep TEMP in the ordinary user temporary directory, not under this Git repository. Never print configuration or key values.
+
+After every task: confirm its spec tests, independently review risky security/compatibility edges, fix findings, then proceed. Final acceptance additionally uses the running frontend and real tools. Record actual pass/fail/skip, not planned outcomes.
+
+## Task 1 — Immutable private detail artifacts and owner-scoped route
+
+**Create:** `src/agent/persistence/result_details.py`, `tests/agent/test_result_details_store.py`, `tests/agent/test_result_details_routes.py`.
+
+**Modify:** `src/web/routes/agent_run_routes.py` only for the new endpoint; keep existing routes unchanged.
+
+Public server-only API:
+
+```python
+publish_result_details(store, trace_id, *, session_id, payload) -> dict | None
+read_result_details(store, trace_id, *, session_id, view_id, revision) -> dict | None
+```
+
+The returned reference is exactly `{view_id, revision, byte_length}`. The payload is a JSON mapping with `format: "summary_details_v1"`, `trace_id`, `status`, `tool_result_sequence`, `error`, `warnings`, and `display_redacted`. HTTP data is `{**reference, "payload": payload}`. Runtime envelope fields outside this payload stay in the small WebSocket result.
+
+- [ ] Write the immutable-read and owner-denial failing tests using a real temporary `SQLiteAgentStateStore` and ordinary `create_run` fixtures:
+
+```python
+ref = publish_result_details(store, "trace-one", session_id="owner", payload=payload)
+assert set(ref) == {"view_id", "revision", "byte_length"}
+got = read_result_details(store, "trace-one", session_id="owner", **{k: ref[k] for k in ("view_id", "revision")})
+assert got["payload"] == payload
+assert read_result_details(store, "trace-one", session_id="foreign", **{k: ref[k] for k in ("view_id", "revision")}) is None
+```
+
+- [ ] Run `python -m pytest tests/agent/test_result_details_store.py -q`; verify the failure is the absent feature before implementation.
+- [ ] Implement canonical `json.dumps(..., ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))`, 4 MiB/65,536-node/32-layer validation, SHA-256, server UUID, private sibling `result_details/`, temporary write plus atomic publish, owner-checked `workflow_artifacts` registration. Do not accept client paths. Use fixed artifact kind/media type; metadata freezes both owner fields. `read_result_details` validates bounded input and record metadata, exact derived path, resolved containment, length/hash/schema and both current/frozen owners before returning the decoded payload.
+- [ ] Add red/green cases for ownership mismatch, wrong trace/view/revision, path traversal, symlink escape, byte/hash corruption, orphan file, restart, repeated publication, run updates, oversized/cyclic/nonfinite/deep payloads, read size bounds and write/registration failure cleanup. Do not delete existing artifacts.
+- [ ] Add the endpoint to existing setup with exact route `/api/agent/runs/{trace_id}/result-details/{view_id}`. Read authenticated session from scope. Map absent/foreign/invalid snapshot to the same 404. Return the standard API success envelope with private/no-store headers. Keep model/tool functions out of this path.
+- [ ] Run `python -m pytest tests/agent/test_result_details_store.py tests/agent/test_result_details_routes.py tests/agent/test_web_decision_recovery.py -q`; compile changed Python. Review Task 1's security boundary before integration.
+
+## Task 2 — Pure scientific summary and single-copy details projection
+
+**Create:** `src/web/result_details_projection.py`, `tests/agent/test_result_details_projection.py`.
+
+**Modify:** `src/agent/evidence_followup.py`, `src/web/web_business.py`, `src/web/decision_chat.py` at their existing result rendering boundaries.
+
+Projection API:
+
+```python
+project_result_details(result, *, summary, status, error, warnings) -> dict
+```
+
+`result` is the validated `AgentResult`, not a browser envelope. Return the Task 1 payload. Keep only a single ordered tool-result list; drop no scientific fields, do not copy embedded raw-answer strings into details. Preserve explicit failed/partial state and structured provenance. Perform existing secret/path redaction without old silent per-field truncation. Reject invalid/over-budget data rather than publishing incomplete details.
+
+- [ ] Add failing tests that a three-tool/two-molecule fixture preserves all 140 ADMET endpoints, excluded activity rows, units/errors/provenance, while no `tool_results`, `tool_results_by_id` or raw audit answer exists in the DTO:
+
+```python
+assert projected["tool_result_sequence"] == expected_public_sequence
+assert not {"tool_results", "tool_results_by_id", "final_answer", "message"} & projected.keys()
+assert source.to_legacy_dict() == before
+```
+
+- [ ] Run `python -m pytest tests/agent/test_result_details_projection.py -q` and observe RED, then implement the pure projection and bounds.
+- [ ] In evidence comparison rendering, capture a separate `summary_answer` before source footers and raw JSON. Keep old `final_answer` unchanged. The concise variant keeps accepted ordering, exclusion reasons and concrete issues, omits generic caveats/internal IDs, and uses business tool names. Carry it separately through `WebTurnProjection.capture`.
+- [ ] Extend property/ADMET/target result renderers with explicit concise presentation selection rather than deleting arbitrary lines by regex. Preserve existing default callers. Bound concise tables by row count/UTF-8 bytes; count omitted summary rows and retain their full details.
+- [ ] Add red/green tests for legitimate 32-layer observations, secrets, malformed/cyclic objects, missing scientific acceptance, prediction disagreement, tied rankings, business partial status, tool failures, no tool results and source immutability. Run projection, display, browser evidence-followup and safe render regressions.
+
+## Task 3 — Negotiated per-turn transport and snapshot publication
+
+**Modify:** `src/web/decision_runtime.py`, `src/web/decision_chat.py`.
+
+**Test:** `tests/agent/test_web_decision_runtime.py`, `tests/agent/test_web_decision_recovery.py`, `tests/agent/test_decision_result_display.py`.
+
+- [ ] Write failing full-Web tests for advertised capability, opt-in chat/resume, default legacy shape and invalid format before execution. Assert `result_format` never enters requirements, tool arguments, frozen continuation or request identity.
+- [ ] Implement strict transport-only format extraction, `_Turn.result_format`, and explicit sender wrapper forwarding. Only full-Web `chat`/`resume` accept `summary_details_v1`; no field means legacy. Unknown/type-invalid values fail closed.
+- [ ] Pass the format, trusted session and store to result preparation. On opt-in, obtain concise summary, project/publish details before sending, attach only its reference, preserve minimal error/partial/waiting/control fields. Keep raw `AgentResult` and ordinary history authority separate from this browser DTO.
+- [ ] Enforce 24 KiB summary and 64 KiB serialized-frame bounds. Publish errors produce an explicit details-unavailable state with no giant fallback. Existing 256 KiB frontend limit remains unchanged.
+- [ ] Cover all three `_result_frame` callers and `_ProjectionSender`. Preserve result → business/RAG/reference projections → complete order, existing correlation and cancellation checks, continuation ACK and terminal semantics.
+- [ ] Run runtime/recovery/display/input-budget/Web-Pi tests. Assert the large representative legacy fixture exceeds the old frame size but the opted-in result/complete frames remain below their new bound and the HTTP payload exactly retains the single public sequence.
+
+## Task 4 — Lazy frontend details and clean task labels
+
+**Create:** `src/web/static/js/home/result_details.js`, `tests/home_result_details_test.js`.
+
+**Modify:** `src/web/static/js/home/api_client.js`, `src/web/static/js/home/main.js`, `src/web/static/js/home/task_panel.js`, `src/web/templates/index.html`, relevant existing frontend contract tests. If the homepage uses a differently named API module, extend that existing module rather than creating a duplicate HTTP layer.
+
+Module API:
+
+```javascript
+HomeResultDetails.mount(container, {traceId, reference, load});
+HomeResultDetails.dispose(container);
+```
+
+`load` is the owner-scoped, same-origin API reader. `mount` returns a native details/summary control, initially closed. It must not fetch before user expansion. Attach controls after final message rendering and tie each asynchronous update to its original connected instance.
+
+- [ ] Write Node DOM-contract failing tests for no initial fetch, exactly one concurrent read, successful reuse, read-only retry, dispose abort and hostile text as literal text. Run `node tests/home_result_details_test.js` for RED.
+- [ ] Implement the isolated disclosure using `textContent`, human tool names, nested tables/field lists, safe formatted text for unknown fields, and no remote HTML. Unknown labels can retain original keys only inside details.
+- [ ] Implement streamed bounded response reading and exact format/trace/view/revision checks, including absent/fake Content-Length and maximum 4 MiB + 64 KiB response bytes. API calls use same-origin credentials and AbortController.
+- [ ] Negotiate only when advertised, include opt-in in chat/resume, consume new reference/summary without legacy result-index assumptions, mount after `completeLastMessage`, and invalidate pending instances on re-render/disconnect without corrupting historical-message identity.
+- [ ] Humanize workflow step/tool labels in the task panel; preserve concrete failed/waiting/partial states, accessibility labels and existing event ordering. Remove technical IDs from default displayed labels only, not structured events.
+- [ ] Bump only affected template cache tags; update exact contract expectations. Run `node --check` on all changed JS plus `home_result_details`, `home_decision_runtime`, task-panel, safe-render, comparison-table, reference-controls, tool-toggle and settings tests.
+
+## Task 5 — Real frontend acceptance, review and handoff
+
+**Modify:** `docs/PI_RUNTIME.md` for negotiated presentation and read-only detail lifecycle. No production key/config edits.
+
+- [ ] Run focused and impacted Python/Node regressions, `compileall`, `node --check`, `git diff --check`; run strict health check if runtime-directory changes affect its checks, reporting any environmental failure accurately.
+- [ ] Restart only the identified local test server after checking its live process handle. Keep configured main Agent model and generator separation; open the real existing local frontend.
+- [ ] Run a real two-molecule property + ADMET + activity request, inspect actual result delivery and default-collapsed UI, expand and verify original endpoints, provenance and disagreement/partial status. No mocked browser result is acceptance evidence.
+- [ ] Test a real target query, continuation interaction, same-trace old snapshot behavior and restart/read-only retrieval without rerunning science. Use UI and scoped diagnostics for evidence; no secret/log dump.
+- [ ] Save local ignored screenshots; verify narrow-screen/keyboard operation and task labels. Preserve current scientific source/status in explanations, omit generic disclaimers.
+- [ ] Request independent spec and code review; repair findings with failing tests and repeat affected real frontend checks. Do not mark the broad Agent goal complete based on this component alone.
+- [ ] Stage only task-owned work, report exact validation/results and branch/commit/PR status; no merge without specific authorization. Final handoff states user, developer and Agent experience improvements and remaining verified limitations.
