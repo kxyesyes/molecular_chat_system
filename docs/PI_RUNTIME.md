@@ -1,11 +1,13 @@
 # Pi 运行与故障处理
 
 MedChat 的默认 Agent 循环由官方 Pi 驱动，Python 保留模型事务、领域授权、科学执行与结果校验。
-此文描述本分支的安装与边界，不代表生产部署、云端或本地真实科学闭环已完成验收。
+此文描述当前 main 的安装与边界。PR #217 已记录本地 Ollama 四项隔离 ChatHandler 验收通过；
+这不代表生产部署、云端或完整浏览器科学闭环已完成验收。
 
-**本次交付为 draft，暂不用于替换生产版本。** 跨入口回归曾发现四工具准入遗漏旧 Web 能力；现以独立的
+**当前记录不构成生产替换依据。** 跨入口回归曾发现四工具准入遗漏旧 Web 能力；现以独立的
 `medchat-web-v1` 领域契约恢复完整入口，生成、优化/排序、ADMET、反向寻靶、RAG、引用与审批链已有分组回归。
-维护者已确认保留真实模型未验证项先交付；完整 CI、真实云端/本地模型和部署健康仍须通过发布门禁。
+早期交付保留了真实模型未验证项；后续本地隔离验收结果见文末。完整 CI、真实云端、
+完整 Web 流程及部署健康仍须通过各自发布门禁。
 保留底层工具和确定性 API 本身不构成 Web 验收。详见[验证记录](superpowers/validation/2026-10-23-pi-harness-replacement.md)。
 
 ## 安装与启动
@@ -25,6 +27,8 @@ python main.py --port 6001
 旧 `requirements-agent-harness.txt` 及 `requirements-ci.txt` 中对应的 include 已删除，不再安装旧 Python harness 钉住版本；RAG 依赖未因此删除。
 
 `.env.example` 使用 `MEDCHAT_CHAT_PROFILE=pi`、`MEDCHAT_DECISION_WIRE_MODE=native`。
+这是 Web 配置示例，不是下述隔离验收 CLI 的 provider-aware 默认值；CLI 省略 `--mode`
+时的选择不会自动修改 Web 配置，也不证明 Web 已按同一协议通过验收。
 Web 的 `normal_chat_mode` 默认也是 `pi`；`legacy` 会被拒绝，`decision_a2` 仅为迁移兼容别名，仍执行 Pi。
 Pi 不可用时明确失败，**不自动回退**到旧 harness。分子生成器仍使用独立的 Ollama 模型配置，不被主模型覆盖。
 
@@ -71,16 +75,22 @@ Node 契约测试使用官方 SDK，但离线契约通过也不证明真实模�
 ## 隔离模型验收 CLI（显式运行才会调用模型）
 
 入口为 [run_decision_chat_acceptance.py](../scripts/run_decision_chat_acceptance.py)。
-`--provider` 支持 `cloud`（默认，保留既有云端配置）和 `ollama`；`--mode` 支持 `native`（默认）和 `json`。
+`--provider` 支持 `cloud`（默认，保留既有云端配置）和 `ollama`；`--mode` 支持 `native` 和 `json`。
+未显式指定 `--mode` 时，脚本按 provider 选择：`ollama` 默认 `json`，`cloud` 默认 `native`；
+显式指定时使用指定值。此规则对应脚本 `main()` 的 CLI 参数处理。
 该脚本不加载 `.env` 或用户配置文件，也不修改 Web 或分子生成配置。
 
-本地 Ollama 建议显式使用 JSON 模式；必须通过 `OLLAMA_CHAT_MODEL` 选择本次聊天验收模型，
+本地 Ollama 默认使用 JSON 模式，也可显式传入 `--mode json`；必须通过 `OLLAMA_CHAT_MODEL` 选择本次聊天验收模型，
 不会读取或修改分子生成器的 `OLLAMA_MODEL`，也不会从云端模型名推断本地模型。
-以下 `gmm-llama:latest` 仅是已安装模型的显式测试示例，不保证其支持所需决策协议：
+PR #217 记录 `gmm-llama:latest` 在 JSON 模式下通过四项隔离验收；同一记录中显式 native 模式
+因模型报告不支持 tools 而不可用，不能将 JSON 的结果外推到 native 或其他模型。以下命令省略 `--mode`，
+用于选择 Ollama 默认的 JSON 协议（需本机已有服务与模型）：
 
 ```powershell
 $env:OLLAMA_BASE_URL = 'http://127.0.0.1:11434'
 $env:OLLAMA_CHAT_MODEL = 'gmm-llama:latest'
+python scripts/run_decision_chat_acceptance.py --provider ollama
+# 等价的显式协议选择：
 python scripts/run_decision_chat_acceptance.py --provider ollama --mode json
 ```
 
@@ -105,6 +115,8 @@ OpenAI-compatible facade 使用原模型名/地址及共享回环传输，结束
 `OPENAI_COMPATIBLE_MODEL`，不在文档、命令输出或报告中记录其值：
 
 ```powershell
+python scripts/run_decision_chat_acceptance.py --provider cloud
+# 等价的显式协议选择；这是操作示例，不是云端通过记录：
 python scripts/run_decision_chat_acceptance.py --provider cloud --mode native
 ```
 
@@ -160,9 +172,39 @@ Web profile 使用 revision **13**，B1 保持 **11**；旧实验 Web revision *
 
 ## 实测状态与尚待验收
 
+### 历史失败（保留）
+
 2026-10-23 的有界实测未通过：云端四项在科学执行前被 `decision_endpoint_rejected` 拒绝，
 本地 `gmm-llama:latest` 的 JSON 四项出现超时、不合规决策 schema 和无效输入引用。
 没有绕过网络/领域保护，也没有用 mock 或伪造 RDKit 结果补齐。详见[准确验收记录](superpowers/validation/2026-10-23-pi-harness-replacement.md)。
 
-云端与本地真实模型/科学工具的成功端到端验收仍为 **未验证**，包含部署环境、断连/取消、排空与续接验证。
-健康检查、mock 测试或 SDK 离线契约测试均不替代这些验收，也不证明模型分数或科学结论有效。
+### 后续本地隔离验收（PR #217）
+
+[PR #217](https://github.com/kxyesyes/molecular_chat_system/pull/217) 于 2026-10-25 合并到 main
+（合并提交 `d56143b18619d76cb9f0d599a7f5ce59ddf48d9f`）。其 Validation 记录使用真实本地模型
+`gmm-llama:latest`、Ollama JSON 模式完成 **4/4** 项验收；此后续记录更新了本地隔离测试状态，
+不删除或改写上述历史失败。本节转述已合并 PR 的验证记录，不表示在当前 main 上重新执行了真实模型验收。
+
+| 用例 | PR #217 记录的结果 | 范围 |
+| --- | --- | --- |
+| CHAT-001 普通聊天 | 通过 | 能力介绍完成，未调用科研工具 |
+| CHAT-002 双分子性质 | 通过 | CCO / CCN 的 RDKit 性质计算 |
+| CHAT-003 缺失 SMILES | 通过 | 先澄清，补充 SMILES 后成功续接 |
+| CHAT-004 无效 SMILES | 通过 | 安全拒绝，未返回伪造性质；不代表计算成功 |
+
+当前脚本的报告范围明确为 **isolated ChatHandler entry**，使用临时状态库及仅含
+`property_calculator` 的工具注册表。四项通过不覆盖完整 Web profile 的工具、授权与浏览器流程，
+也不证明云端、服务器部署或生产环境已通过验收。PR #217 同时保留了
+`gmm-llama:latest` 显式 native 模式不支持 tools 的限制。
+
+### 仍待验收与健康检查限制
+
+- 云端真实模型验收仍为 **未验证**；现有记录是上述 `decision_endpoint_rejected` 失败，
+  本地 JSON 成功不能替代云端证据。
+- 完整浏览器科学闭环、服务器/生产部署，以及部署环境中的断连、取消、资源排空和续接仍须独立验收。
+  CHAT-003 仅证明所记录的隔离澄清续接场景，不能覆盖这些完整生命周期场景。
+- [PR #218](https://github.com/kxyesyes/molecular_chat_system/pull/218) 的后续 Validation 记录中，
+  严格健康检查仅 **19/24** 项通过；剩余检查需要 Ollama/Pi 服务、ACL 访问或反向寻靶数据。
+  该记录不是全部健康检查通过，也不构成当前部署可用性保证。
+
+健康检查、mock 测试或 SDK 离线契约测试均不替代真实验收；局部模型/工具成功也不证明模型分数或科学结论有效。
