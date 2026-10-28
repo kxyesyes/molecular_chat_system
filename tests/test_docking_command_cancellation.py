@@ -165,6 +165,27 @@ def test_verified_normal_completion_wins_over_late_cancel(tmp_path):
     assert result.stdout.strip() == "done"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX pipe ownership regression")
+def test_unowned_posix_command_does_not_wait_for_external_pipe_holder(tmp_path):
+    child = "import time; time.sleep(3.0)"
+    parent = (
+        "import subprocess, sys; "
+        "subprocess.Popen([sys.executable, '-c', %r], start_new_session=True); "
+        "print('parent-finished', flush=True)"
+    ) % child
+
+    started = time.monotonic()
+    result = CommandAdapter(sys.executable).run(
+        [sys.executable, "-c", parent],
+        cwd=str(tmp_path),
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert "parent-finished" in result.stdout
+    assert time.monotonic() - started < 2.0
+
+
 def test_cleanup_failure_has_distinct_ownership_error(tmp_path):
     cancel = threading.Event()
     cancel.set()

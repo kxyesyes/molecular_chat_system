@@ -839,7 +839,7 @@ class CommandAdapter:
                     except BaseException:
                         receipt.fail("command_cleanup_failed", uncertain=True)
                 raise
-        self._attach_capture_readers(process)
+        self._attach_nonblocking_capture(process)
         return self._supervise_posix(process, args, timeout, deadline, cancel_event)
 
     def _supervise_posix(self, process, args, timeout, deadline, cancel_event, receipt=None):
@@ -849,6 +849,8 @@ class CommandAdapter:
                 raise self._timeout_error(timeout, *output)
             raise CommandCancelledError()
         while True:
+            if receipt is None:
+                self._drain_nonblocking_capture(process)
             if process.poll() is not None and not self._posix_process_group_active(
                 process.pid
             ):
@@ -886,7 +888,8 @@ class CommandAdapter:
                 receipt.tree_stopped = True
             break
 
-
+        if receipt is None:
+            self._drain_nonblocking_capture(process)
         stdout, stderr = self._take_captured_output(
             process,
             enforce_limit=True,
@@ -1432,6 +1435,51 @@ class CommandAdapter:
         process._medchat_capture_taken = False
 
     @staticmethod
+    def _attach_nonblocking_capture(process) -> None:
+        # Unowned POSIX commands cannot wait for EOF from a descendant that
+        # escaped the root process group; drain the parent ends directly.
+        state = {
+            "mode": "nonblocking",
+            "total": 0,
+            "buffers": {"stdout": bytearray(), "stderr": bytearray()},
+            "exceeded": threading.Event(),
+            "errors": [],
+            "streams": {"stdout": process.stdout, "stderr": process.stderr},
+        }
+        for stream in state["streams"].values():
+            os.set_blocking(stream.fileno(), False)
+        process._medchat_capture_state = state
+        process._medchat_capture_taken = False
+
+    @staticmethod
+    def _drain_nonblocking_capture(process) -> None:
+        state = getattr(process, "_medchat_capture_state", None)
+        if not state or state.get("mode") != "nonblocking":
+            return
+        for name, stream in state["streams"].items():
+            while True:
+                try:
+                    chunk = os.read(stream.fileno(), 64 * 1024)
+                except BlockingIOError:
+                    break
+                except OSError as error:
+                    state["errors"].append(type(error).__name__)
+                    break
+                if not chunk:
+                    break
+                state["total"] += len(chunk)
+                remaining = max(
+                    0,
+                    _COMMAND_OUTPUT_LIMIT_BYTES
+                    - sum(len(value) for value in state["buffers"].values()),
+                )
+                if remaining:
+                    state["buffers"][name].extend(chunk[:remaining])
+                if state["total"] > _COMMAND_OUTPUT_LIMIT_BYTES:
+                    state["exceeded"].set()
+                    return
+
+    @staticmethod
     def _close_process_handle(process) -> None:
         receipt = getattr(process, "_medchat_command_receipt", None)
         if receipt is not None and os.name == "nt":
@@ -1508,6 +1556,25 @@ class CommandAdapter:
         state = getattr(process, "_medchat_capture_state", None)
         if state is None:
             return tuple(value or "" for value in fallback)
+        if state.get("mode") == "nonblocking":
+            CommandAdapter._drain_nonblocking_capture(process)
+            try:
+                if state["errors"]:
+                    raise RuntimeError("Command output capture failed")
+                exceeded = state["exceeded"].is_set()
+                if enforce_limit and exceeded:
+                    raise CommandOutputLimitError()
+                return tuple(
+                    bytes(state["buffers"][name]).decode("utf-8", errors="replace")
+                    for name in ("stdout", "stderr")
+                )
+            finally:
+                for stream in state["streams"].values():
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+                process._medchat_capture_state = None
         for thread in state["threads"]:
             thread.join(timeout=2.0)
         if any(thread.is_alive() for thread in state["threads"]):

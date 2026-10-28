@@ -31,7 +31,7 @@ Add a POSIX-only test that launches a short Python parent command. The parent pr
 def test_unowned_posix_command_does_not_wait_for_external_pipe_holder(tmp_path):
     child = (
         "import time; "
-        "time.sleep(0.6)"
+        "time.sleep(3.0)"
     )
     parent = (
         "import subprocess, sys; "
@@ -108,7 +108,7 @@ Expected: all applicable tests pass; platform-specific tests may be skipped.
 - [ ] **Step 2: Run docking service and adapter compile checks**
 
 ```bash
-python -m pytest -q tests/test_docking_execution.py tests/test_docking_demo_route.py --disable-warnings
+python -m pytest -q tests/task_runtime/test_docking_execution.py tests/test_docking_demo_route.py --disable-warnings
 python -m compileall -q src scripts
 ```
 
