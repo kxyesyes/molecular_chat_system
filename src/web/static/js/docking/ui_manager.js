@@ -281,6 +281,7 @@ function loadSmilesPreview(smiles) {
         setActiveButton("show-ligand-btn");
         updateButtonStates();
         Utils.showToast("SMILES结构加载成功！", "success");
+        return true;
       } else {
         throw new Error(data.error || "生成3D结构失败");
       }
@@ -288,6 +289,7 @@ function loadSmilesPreview(smiles) {
     .catch((error) => {
       console.error("SMILES预览失败:", error);
       Utils.showToast(`加载失败: ${error.message}`, "error");
+      return false;
     });
 }
 
@@ -343,29 +345,37 @@ function showComplex() {
 }
 
 // 文件上传处理
+function renderSelectedFiles(input, display, files) {
+  display.innerHTML = "";
+
+  files.forEach((file, index) => {
+    const fileItem = document.createElement("div");
+    fileItem.className = "file-item";
+    fileItem.innerHTML = `
+      <span class="file-name">${Safe.escapeHtml(file.name)} (${(file.size / 1024).toFixed(1)} KB)</span>
+      <button class="file-remove" onclick="removeFile(${index}, '${Safe.escapeInlineJsString(input.id)}', '${Safe.escapeInlineJsString(display.id)}')">删除</button>
+    `;
+    display.appendChild(fileItem);
+  });
+}
+
 function handleFileUpload(inputId, displayId, fileType) {
   const input = document.getElementById(inputId);
   const display = document.getElementById(displayId);
 
   input.addEventListener("change", function (e) {
     const files = Array.from(e.target.files);
-    display.innerHTML = "";
+    renderSelectedFiles(input, display, files);
 
-    files.forEach((file, index) => {
-      const fileItem = document.createElement("div");
-      fileItem.className = "file-item";
-      fileItem.innerHTML = `
-        <span class="file-name">${Safe.escapeHtml(file.name)} (${(file.size / 1024).toFixed(1)} KB)</span>
-        <button class="file-remove" onclick="removeFile(${index}, '${Safe.escapeInlineJsString(inputId)}', '${Safe.escapeInlineJsString(displayId)}')">删除</button>
-      `;
-      display.appendChild(fileItem);
-
+    files.forEach((file) => {
       if (
         fileType === "protein" &&
         (file.name.toLowerCase().endsWith(".pdb") ||
           file.name.toLowerCase().endsWith(".pdbqt"))
       ) {
-        loadProteinFile(file);
+        void loadProteinFile(file).catch((error) => {
+          Utils.showToast(`受体文件加载失败：${error.message || "未知错误"}`, "warning");
+        });
       }
 
       if (
@@ -387,60 +397,64 @@ function loadProteinFile(file) {
   if (typeof setCurrentJobId === "function") setCurrentJobId(null);
   AppState.currentComplexData = null;
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
-  const reader = new FileReader();
-  reader.onload = function (e) {
-    dockingViewSequence++;
-    loadedDockingProteinFile = file;
-    const pdbData = e.target.result;
-    currentProteinData = pdbData;
-    AppState.currentProteinFormat = file.name.toLowerCase().endsWith(".pdbqt")
-      ? "pdbqt"
-      : "pdb";
-    loadMolecule(pdbData, "protein", file.name);
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = function (e) {
+      dockingViewSequence++;
+      loadedDockingProteinFile = file;
+      const pdbData = e.target.result;
+      currentProteinData = pdbData;
+      AppState.currentProteinFormat = file.name.toLowerCase().endsWith(".pdbqt")
+        ? "pdbqt"
+        : "pdb";
+      loadMolecule(pdbData, "protein", file.name);
 
-    try {
-      const cxEl = document.getElementById("center_x");
-      const cyEl = document.getElementById("center_y");
-      const czEl = document.getElementById("center_z");
-      const sxEl = document.getElementById("size_x");
-      const syEl = document.getElementById("size_y");
-      const szEl = document.getElementById("size_z");
+      try {
+        const cxEl = document.getElementById("center_x");
+        const cyEl = document.getElementById("center_y");
+        const czEl = document.getElementById("center_z");
+        const sxEl = document.getElementById("size_x");
+        const syEl = document.getElementById("size_y");
+        const szEl = document.getElementById("size_z");
 
-      const cx = cxEl ? parseFloat(cxEl.value || "0") : 0;
-      const cy = cyEl ? parseFloat(cyEl.value || "0") : 0;
-      const cz = czEl ? parseFloat(czEl.value || "0") : 0;
-      const sx = sxEl ? parseFloat(sxEl.value || "20") : 20;
-      const sy = syEl ? parseFloat(syEl.value || "20") : 20;
-      const sz = szEl ? parseFloat(szEl.value || "20") : 20;
+        const cx = cxEl ? parseFloat(cxEl.value || "0") : 0;
+        const cy = cyEl ? parseFloat(cyEl.value || "0") : 0;
+        const cz = czEl ? parseFloat(czEl.value || "0") : 0;
+        const sx = sxEl ? parseFloat(sxEl.value || "20") : 20;
+        const sy = syEl ? parseFloat(syEl.value || "20") : 20;
+        const sz = szEl ? parseFloat(szEl.value || "20") : 20;
 
-      const isDefaultCenter =
-        Math.abs(cx) < 1e-6 && Math.abs(cy) < 1e-6 && Math.abs(cz) < 1e-6;
-      const isDefaultSize =
-        Math.abs(sx - 20) < 1e-6 &&
-        Math.abs(sy - 20) < 1e-6 &&
-        Math.abs(sz - 20) < 1e-6;
+        const isDefaultCenter =
+          Math.abs(cx) < 1e-6 && Math.abs(cy) < 1e-6 && Math.abs(cz) < 1e-6;
+        const isDefaultSize =
+          Math.abs(sx - 20) < 1e-6 &&
+          Math.abs(sy - 20) < 1e-6 &&
+          Math.abs(sz - 20) < 1e-6;
 
-      if (isDefaultCenter && isDefaultSize) {
-        setTimeout(() => {
-          autoSetBoxToLigand(true);
-        }, 80);
+        if (isDefaultCenter && isDefaultSize) {
+          setTimeout(() => {
+            autoSetBoxToLigand(true);
+          }, 80);
+        }
+      } catch (e) {
+        console.warn("自动定位默认对接盒失败:", e);
       }
-    } catch (e) {
-      console.warn("自动定位默认对接盒失败:", e);
-    }
 
-    const statusIndicators = document.querySelectorAll(".status-indicator");
-    statusIndicators.forEach((indicator) => {
-      if (indicator.textContent.includes("等待输入")) {
-        indicator.className = "status-indicator status-completed";
-        indicator.textContent = "已加载";
-      }
-    });
+      const statusIndicators = document.querySelectorAll(".status-indicator");
+      statusIndicators.forEach((indicator) => {
+        if (indicator.textContent.includes("等待输入")) {
+          indicator.className = "status-indicator status-completed";
+          indicator.textContent = "已加载";
+        }
+      });
 
-    updateButtonStates();
-    setResultsMinHeightToLeft();
-  };
-  reader.readAsText(file);
+      updateButtonStates();
+      setResultsMinHeightToLeft();
+      resolve(pdbData);
+    };
+    reader.onerror = () => reject(new Error("受体文件读取失败"));
+    reader.readAsText(file);
+  });
 }
 
 // 加载配体文件
