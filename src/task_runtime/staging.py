@@ -23,6 +23,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Iterator, Mapping
@@ -1795,49 +1796,80 @@ def _restrict_directory(path: Path) -> None:
         raise ManifestError("manifest_io_error")
 
 
+def _private_windows_sddl(sid: str, is_directory: bool) -> str:
+    inheritance = "OICI" if is_directory else ""
+    return (
+        f"D:P(A;{inheritance};FA;;;{sid})"
+        f"(A;{inheritance};FA;;;SY)(A;{inheritance};FA;;;BA)"
+    )
+
+
+@lru_cache(maxsize=1)
+def _windows_acl_libraries():
+    """Bind process-static Win32 functions once; never cache any path's ACL.
+
+    Signatures are initialized before publishing the libraries. Descriptors,
+    DACLs, SIDs and read/write verification remain owned by each operation.
+    """
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
+    convert.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.ULONG),
+    ]
+    convert.restype = wintypes.BOOL
+    get_dacl = advapi32.GetSecurityDescriptorDacl
+    get_dacl.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(wintypes.BOOL),
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.BOOL),
+    ]
+    get_dacl.restype = wintypes.BOOL
+    set_named = advapi32.SetNamedSecurityInfoW
+    set_named.argtypes = [
+        wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p,
+    ]
+    set_named.restype = wintypes.DWORD
+    get_named = advapi32.GetNamedSecurityInfoW
+    get_named.argtypes = [
+        wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    get_named.restype = wintypes.DWORD
+    to_sddl = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
+    to_sddl.argtypes = [
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+        ctypes.POINTER(ctypes.c_wchar_p), ctypes.POINTER(wintypes.ULONG),
+    ]
+    to_sddl.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+    return advapi32, kernel32
+
+
 def _harden_windows_acl(path: Path, is_directory: bool) -> bool:
-    """Install a protected SID-based DACL without localized account names."""
+    """Establish the private DACL, avoiding redundant inheritance propagation.
+
+    SetNamedSecurityInfoW propagates directory ACEs to existing descendants.
+    Repeating it on every database access scales with all runtime artifacts,
+    even when the descriptor is unchanged. Read the live descriptor each time;
+    never cache a path's permission authority or skip post-write verification.
+    """
 
     if os.name != "nt":
         return False
     try:
+        if _verify_windows_acl(path, is_directory=is_directory):
+            return True
         sid = _windows_current_process_sid()
-        inheritance = "OICI" if is_directory else ""
-        sddl = (
-            f"D:P(A;{inheritance};FA;;;{sid})"
-            f"(A;{inheritance};FA;;;SY)(A;{inheritance};FA;;;BA)"
-        )
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        sddl = _private_windows_sddl(sid, is_directory)
+        advapi32, kernel32 = _windows_acl_libraries()
         convert = advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW
-        convert.argtypes = [
-            wintypes.LPCWSTR,
-            wintypes.DWORD,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(wintypes.ULONG),
-        ]
-        convert.restype = wintypes.BOOL
         get_dacl = advapi32.GetSecurityDescriptorDacl
-        get_dacl.argtypes = [
-            ctypes.c_void_p,
-            ctypes.POINTER(wintypes.BOOL),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(wintypes.BOOL),
-        ]
-        get_dacl.restype = wintypes.BOOL
         set_named = advapi32.SetNamedSecurityInfoW
-        set_named.argtypes = [
-            wintypes.LPWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-            ctypes.c_void_p,
-        ]
-        set_named.restype = wintypes.DWORD
-        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-        kernel32.LocalFree.restype = ctypes.c_void_p
 
         descriptor = ctypes.c_void_p()
         if not convert(sddl, 1, ctypes.byref(descriptor), None):
@@ -1872,37 +1904,15 @@ def _harden_windows_acl(path: Path, is_directory: bool) -> bool:
 
 
 def _verify_windows_acl(path: Path, is_directory: bool) -> bool:
-    """Verify the DACL is protected and contains only the approved SIDs."""
+    """Verify the complete protected DACL, including access and inheritance."""
 
     if os.name != "nt":
         return False
     try:
         sid = _windows_current_process_sid()
-        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32, kernel32 = _windows_acl_libraries()
         get_named = advapi32.GetNamedSecurityInfoW
-        get_named.argtypes = [
-            wintypes.LPWSTR,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-            ctypes.POINTER(ctypes.c_void_p),
-        ]
-        get_named.restype = wintypes.DWORD
         to_sddl = advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW
-        to_sddl.argtypes = [
-            ctypes.c_void_p,
-            wintypes.DWORD,
-            wintypes.DWORD,
-            ctypes.POINTER(ctypes.c_wchar_p),
-            ctypes.POINTER(wintypes.ULONG),
-        ]
-        to_sddl.restype = wintypes.BOOL
-        kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-        kernel32.LocalFree.restype = ctypes.c_void_p
 
         descriptor = ctypes.c_void_p()
         dacl = ctypes.c_void_p()
@@ -1936,19 +1946,16 @@ def _verify_windows_acl(path: Path, is_directory: bool) -> bool:
         finally:
             kernel32.LocalFree(descriptor)
 
-        if not value.startswith("D:P"):
-            return False
-        if value.count("(A;") != 3:
-            return False
-        if any(token in value for token in (";;;WD)", ";;;AU)", ";;;BU)")):
-            return False
-        if not all(token in value for token in (f";;;{sid})", ";;;SY)", ";;;BA)")):
-            return False
-        if is_directory and value.count("(A;OICI;") != 3:
-            return False
-        if not is_directory and "OICI" in value:
-            return False
-        return True
+        # SID membership alone is insufficient for the no-write path: a DACL
+        # may contain the expected SIDs but read-only grants, additional DENY
+        # entries, or different inheritance. Require exactly what we install.
+        # Windows may reorder equivalent ALLOW entries and retain the AI
+        # (auto-inherited) bookkeeping flag after protecting the DACL. Neither
+        # changes its grants; every ACE, mask and inheritance flag still must
+        # match exactly, with no extra/duplicate entries or inherited ACEs.
+        header, *entries = value.split("(")
+        expected = _private_windows_sddl(sid, is_directory).split("(")[1:]
+        return header in {"D:P", "D:PAI"} and sorted(entries) == sorted(expected)
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         return False
 

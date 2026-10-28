@@ -543,6 +543,9 @@ def test_missing_web_runtime_closes_without_legacy_or_science(actual_app, monkey
 def test_missing_pi_host_fails_closed_without_model_or_legacy(actual_app, monkeypatch):
     async def run():
         # Missing executable is detected on use, not by a startup network probe.
+        # Simulate an unavailable dependency, including any earlier successful
+        # discovery retained by another app instance in this test process.
+        monkeypatch.setattr('src.agent.pi_runtime.bridge._NODE_LOOKUP', None)
         monkeypatch.setattr('src.agent.pi_runtime.bridge.shutil.which', lambda name: None)
         async with actual_app() as b:
             assert not b.calls

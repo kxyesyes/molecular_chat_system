@@ -1154,6 +1154,11 @@ class MolecularChatApp:
 
         if self._llm_watch_task is None or self._llm_watch_task.done():
             self._llm_watch_task = asyncio.create_task(self._watch_llm_env_config())
+
+        # Resolve the isolated Pi dependency before the first chat. This only
+        # warms executable discovery; no child, provider or tool is started.
+        from src.agent.pi_runtime.bridge import resolve_node_executable
+        await asyncio.to_thread(resolve_node_executable)
         
         # Initialize RAG system
         if self.config.get("rag", {}).get("enabled", True):
