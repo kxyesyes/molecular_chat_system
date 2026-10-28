@@ -272,7 +272,12 @@ def build_evidence_report(snapshot, execution, candidate_events):
         _check(execution.get("trace_id") == run["trace_id"]
                and run["skill_name"] in {None, "target_driven_design", "hit_to_lead_optimization"})
         status = "partial" if run["status"] == "partial" else "completed"
-        _check(execution.get("status") == status)
+        # The persisted Web run uses the storage outcome ``succeeded`` while
+        # the legacy delivery envelope uses ``completed``.  Both represent a
+        # successful terminal run; failed/rejected/cancelled values remain
+        # excluded by this exact boundary.
+        _check(execution.get("status") == status or
+               (status == "completed" and execution.get("status") == "succeeded"))
         plan = execution.get("workflow_plan", {})
         _check(plan.get("workflow_name") in {"molecular_design", "target_driven_design", "hit_to_lead_optimization"})
         sequence = execution.get("tool_result_sequence")

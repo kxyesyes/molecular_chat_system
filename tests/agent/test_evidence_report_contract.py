@@ -40,6 +40,7 @@ def test_real_rdkit_static_checkpoint_numbers_and_actual_ranker(tmp_path):
 def test_molecular_design_workflow_projects_candidate_properties(tmp_path):
     store, execution, events = execute(tmp_path)
     execution["workflow_plan"]["workflow_name"] = "molecular_design"
+    execution["status"] = "succeeded"  # persisted Web outcome spelling
 
     value = report_from_execution(store, execution, events)
 
