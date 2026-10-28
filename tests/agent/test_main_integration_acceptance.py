@@ -22,7 +22,7 @@ from tests.scientific_reference_browser_lab import NOTICE, create_lab
 
 
 BASE = 'http://127.0.0.1:6017'
-PROPERTY_QUERY = '计算 CCO 的基础理化性质'
+PROPERTY_QUERY = '计算 CCO 的基础理化性质并评估类药性'
 INJECTED_ERROR = 'OFFLINE TEST INJECTION: drug likeness deliberately unavailable'
 NUMERIC_CLAIM = re.compile(
     r'(?:QED|LogP|pIC50|(?:binding\s+)?energy|结合能)'
@@ -159,7 +159,9 @@ def test_invalid_smiles_is_rejected_without_scientific_execution(tmp_path):
     app = capture(create_lab(tmp_path))
     complete, events = exchange(app, '请分析这个 SMILES 的成药性：CC(C)((。')
     body = complete['content']
-    assert 'SMILES 无效' in body and '本次未进行科学计算' in body
+    assert complete['status'] == 'rejected'
+    assert complete['error']['code'] == 'invalid_input'
+    assert '有效的 SMILES' in body
     assert NOTICE not in body
     assert not any(app.state.calls.values())
     assert not terminal_events(events)
@@ -180,8 +182,8 @@ def test_plain_chat_uses_offline_model_without_scientific_events(tmp_path, query
 def test_real_ethanol_properties_and_likeness_keep_evidence_boundaries(tmp_path):
     app = capture(create_lab(tmp_path))
     complete, events = exchange(app, PROPERTY_QUERY)
-    assert app.state.calls == {'llm_molecular_generator': [], 'property_calculator': [PROPERTY_QUERY],
-                               'drug_likeness_assessment': [PROPERTY_QUERY]}
+    assert app.state.calls == {'llm_molecular_generator': [], 'property_calculator': ['CCO'],
+                               'drug_likeness_assessment': ['CCO']}
     properties, likeness = terminal_events(events)
     body = complete['content']
     assert_real_properties(properties, body)
@@ -200,7 +202,7 @@ def test_real_ethanol_properties_and_likeness_keep_evidence_boundaries(tmp_path)
 @isolated_scenario
 def test_likeness_failure_preserves_actual_rdkit_output_as_partial(tmp_path):
     def fail_likeness(self, query):
-        assert query == PROPERTY_QUERY
+        assert query == 'CCO'
         return ToolResult.error_result(
             self.name, AgentErrorCode.INTERNAL_ERROR, INJECTED_ERROR,
         )
@@ -209,8 +211,8 @@ def test_likeness_failure_preserves_actual_rdkit_output_as_partial(tmp_path):
         patch.setattr(DrugLikenessAssessment, 'execute', fail_likeness)
         app = capture(create_lab(tmp_path))
         complete, events = exchange(app, PROPERTY_QUERY)
-    assert app.state.calls == {'llm_molecular_generator': [], 'property_calculator': [PROPERTY_QUERY],
-                               'drug_likeness_assessment': [PROPERTY_QUERY]}
+    assert app.state.calls == {'llm_molecular_generator': [], 'property_calculator': ['CCO'],
+                               'drug_likeness_assessment': ['CCO']}
     properties, failure = terminal_events(events)
     body = complete['content']
     assert_real_properties(properties, body)

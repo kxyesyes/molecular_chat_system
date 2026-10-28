@@ -12,6 +12,19 @@ from tests.agent.test_reverse_target_rank_followup import ranked
 from tests.agent.pi_web_support import cleanup_web_handlers, run_web_turn
 
 
+@pytest.mark.parametrize('query, expected', [
+    ('Reverse target CCO; not docking', False),
+    ('Reverse target CCO; do not run docking', False),
+    ("Reverse target CCO; don't perform docking", False),
+    ('not docking; run docking with CCO', True),
+    ('do not skip docking', True),
+    ('not only docking', True),
+])
+def test_docking_action_distinguishes_english_prohibition_from_positive_action(query, expected):
+    from src.agent.contracts.docking_intent import explicit_docking_action
+    assert explicit_docking_action(query) is expected
+
+
 def _observed_result(result):
     # Supervisor used to add these audit fields outside to_legacy_dict().
     # Observe actual Pi results in order, retaining duplicates; never alter

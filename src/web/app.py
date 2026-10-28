@@ -466,6 +466,10 @@ class MolecularChatApp:
         from .agent_session_config import setup_agent_sessions
         setup_agent_sessions(self.app)
         self._setup_routes()
+        from .foreground_io import DockingRequestPriorityMiddleware
+        self.app.add_middleware(
+            DockingRequestPriorityMiddleware, foreground_io=self._foreground_io,
+        )
 
     async def _reject_unassembled_ordinary_websocket(self, websocket, *, handler=None):
         """No ready/accepted/answer frames: this profile is assembly-only."""
@@ -630,10 +634,13 @@ class MolecularChatApp:
     def _run_llm_config_io(self, operation, *args, **kwargs):
         # Called only by an I/O worker: retain priority for the physical call,
         # including errors and cancellation of its awaiting request.
+        with self._foreground_io():
+            return operation(*args, **kwargs)
+
+    def _foreground_io(self):
         tool = getattr(self, '_reverse_preload_tool', None)
         foreground_io = getattr(tool, 'foreground_io', None)
-        with foreground_io() if callable(foreground_io) else nullcontext():
-            return operation(*args, **kwargs)
+        return foreground_io() if callable(foreground_io) else nullcontext()
 
     async def _refresh_llm_config_from_env(self) -> bool:
         """Observe updates or removal in the authoritative per-user store."""
@@ -1154,6 +1161,11 @@ class MolecularChatApp:
 
         if self._llm_watch_task is None or self._llm_watch_task.done():
             self._llm_watch_task = asyncio.create_task(self._watch_llm_env_config())
+
+        # Resolve the isolated Pi dependency before the first chat. This only
+        # warms executable discovery; no child, provider or tool is started.
+        from src.agent.pi_runtime.bridge import resolve_node_executable
+        await asyncio.to_thread(resolve_node_executable)
         
         # Initialize RAG system
         if self.config.get("rag", {}).get("enabled", True):

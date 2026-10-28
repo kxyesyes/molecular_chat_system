@@ -280,7 +280,9 @@ def test_scientific_input_overflow_keeps_real_evidence_without_second_http(actua
     from tests.agent.test_web_decision_runtime import result_of
     async def run():
         async with actual_app(ordinary_policy=None, respond=compiled_decision) as bundle:
-            query = '只计算 CCO 的分子量和 logP，不要 ADMET 或活性'
+            # A second required action keeps the next model request necessary;
+            # a single completed property action now finishes automatically.
+            query = '计算 CCO 的理化性质和类药性，不要 ADMET 或活性'
             cookie = await cookie_for(bundle.app)
             async with ActualSocket(bundle.app, cookie) as socket:
                 await socket.ready()
@@ -309,7 +311,8 @@ def test_scientific_input_overflow_keeps_real_evidence_without_second_http(actua
                 assert len(bundle.app.agent_state_store.get_tool_executions(result['trace_id'])) == 1
                 assert [call['request_attempts'] for call in result['metadata']['model_calls']] == [1, 0]
                 assert frames[-1]['status'] == 'partial'
-                assert 'RDKit' in frames[-1]['content'] and '46.07' in frames[-1]['content']
+                assert 'RDKit' in observed['formatted']
+                assert 'CCO' in frames[-1]['content'] and '46.07' in frames[-1]['content']
                 assert '预算' in frames[-1]['content']
                 audit = json.loads(result['final_answer'])
                 assert not audit['acceptance']['satisfied'] and not audit['acceptance']['finish_eligible']

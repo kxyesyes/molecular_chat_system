@@ -942,12 +942,16 @@ class ScientificSession:
                     elif (not binding and restored is not None
                           and clarified_query is not None
                           and isinstance(decision, ClarifyDecision)
+                          and not any(result.tool_name == pending_tool for result in session.results)
+                          and not has_valid_molecular_input(restored['input_queries'][-1], required_tools)
                           and has_valid_molecular_input(context.query, required_tools)):
                         # Some local models repeat the clarification even after
                         # the user supplies a valid molecule. The continuation
                         # is already bound to this pending request, so replan
                         # the same authorized molecular tool deterministically;
                         # malformed or missing input stays on clarification.
+                        # A new clarification after an attempted tool or an
+                        # already valid input does not authorize another run.
                         decision = ToolDecision(
                             version='1', action='tool', tool_name=pending_tool,
                             arguments={'input_ref': 'user'},
@@ -988,7 +992,7 @@ class ScientificSession:
                             arguments={'input_ref': 'user'},
                             purpose='satisfy the pending workflow requirement',
                         )
-            if binding and request_kind == 'scientific' and isinstance(decision, FinishDecision):
+            if binding and policy.is_web and request_kind == 'scientific' and isinstance(decision, FinishDecision):
                 # A Web workflow is compiled into an exact dependency graph.
                 # If the model attempts to finish before the graph is closed,
                 # recover the next ready required step instead of invalidating
@@ -1011,29 +1015,6 @@ class ScientificSession:
                         arguments={'step_ref': next_step.name},
                         purpose='complete the next required step in the compiled scientific plan',
                     )
-                else:
-                    # The compact acceptance schema only serializes molecular
-                    # result requirements; required Web tools such as ADMET
-                    # are still carried by required_tools. Do not let an
-                    # early finish skip one of those authorized obligations.
-                    completed_tools = {
-                        result.tool_name
-                        for result in resolver._observations().values()
-                        if usable(result)
-                    }
-                    pending_tool = next(
-                        (
-                            name for name in sorted(set(required_tools) - completed_tools)
-                            if name in adapters and name != 'activity_predictor'
-                        ),
-                        None,
-                    )
-                    if pending_tool is not None:
-                        decision = ToolDecision(
-                            version='1', action='tool', tool_name=pending_tool,
-                            arguments={'input_ref': 'user'},
-                            purpose='complete the next authorized Web requirement',
-                        )
             if self.runtime.mode == 'native':
                 call_id = response.tool_call_id
                 if (type(call_id) is not str or re.fullmatch(r'[A-Za-z0-9_-]{1,128}', call_id) is None
@@ -1191,18 +1172,13 @@ class ScientificSession:
             state.task_acceptance = await acceptance()
             from .web_requirements import workflow_steps
             completed_refs = set()
-            if binding:
+            if binding and policy.is_web:
                 records = resolver.export_records()
                 for result in resolver._observations().values():
                     step_ref = web_result_step_ref(result, records)
                     if step_ref is not None:
                         completed_refs.add(step_ref)
-            planned_steps = workflow_steps(requirements) if binding else ()
-            completed_tools = {
-                result.tool_name
-                for result in resolver._observations().values()
-                if usable(result)
-            } if binding else set()
+            planned_steps = workflow_steps(requirements) if binding and policy.is_web else ()
             observed_tools = {
                 result.tool_name
                 for result in resolver._observations().values()
@@ -1211,23 +1187,31 @@ class ScientificSession:
                 web_plan_ready_for_terminal(planned_steps, completed=completed_refs)
                 and set(required_tools) <= observed_tools
             )
-            if (binding and request_kind == 'scientific' and terminal_ready):
+            if (self.runtime.binding_profile == 'medchat-web-v1' and planned_steps
+                    and request_kind == 'scientific' and terminal_ready):
                 # Once every required compiled step has an observation, do not
                 # ask the model to keep planning. This is especially important
                 # for an evaluated-but-not-supported optimization: the correct
                 # outcome is a cited partial result, not another model turn.
+                # B1 has no compiled Web plan: an empty step list must not
+                # terminate its evidence-driven decisions or clarification.
                 evidence_ids = [
                     result.quality.get('evidence_id')
                     for result in resolver._observations().values()
-                    if (usable(result) or family_review_observation(result))
-                    and isinstance(result.quality.get('evidence_id'), str)
+                    if isinstance(result.quality.get('evidence_id'), str)
                 ]
+                # Cite every attempted observation. Acceptance still rejects
+                # incomplete/failed work, while its renderer can retain an
+                # authenticated partial subset instead of losing valid rows.
                 if evidence_ids:
                     terminal = FinishDecision(
                         version='1', action='finish', response_kind='scientific',
                         text='已完成计划中的科学计算；请查看结构化结果与复核状态。',
                         evidence_ids=list(dict.fromkeys(evidence_ids)),
                     )
+                    # Final acceptance must recheck the same citations used
+                    # by server-owned completion, not the preceding tool call.
+                    state.decision = terminal
                     return await complete(terminal)
             # Serialize an isolated, verified observation before persistence
             # callbacks can mutate the tool's retained object again.

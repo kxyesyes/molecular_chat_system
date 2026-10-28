@@ -27,6 +27,31 @@ def test_compiles_requested_properties_into_a_typed_ready_plan():
     assert plan.steps[0].capability == "molecular_properties"
 
 
+@pytest.mark.parametrize('query', [
+    '计算乙醇 CCO 的分子量与 logP',
+    '只计算阿司匹林 CC(=O)Oc1ccccc1C(=O)O 的分子量和 logP',
+])
+def test_named_structure_subject_is_not_an_unknown_metric(query):
+    plan = ScientificObligationCompiler().compile(query)
+    assert plan.status == 'ready'
+    assert plan.required_tools == ('property_calculator',)
+    assert set(plan.metrics) == {'mw', 'logp'}
+
+
+def test_named_subject_exclusion_keeps_existing_missing_input_gate():
+    assert not ScientificObligationCompiler.is_profile_candidate(
+        '只计算阿司匹林的分子量，不要 ADMET 或活性')
+
+
+@pytest.mark.parametrize('metric', ['FooMetric', 'LogD', '量子轨道能量'])
+def test_named_subject_does_not_hide_unknown_requested_metrics(metric):
+    plan = ScientificObligationCompiler().compile(
+        f'计算乙醇 CCO 的分子量与 {metric}')
+    assert plan.status == 'rejected'
+    assert plan.missing_capabilities
+    assert not plan.steps
+
+
 def test_compiles_property_and_drug_likeness_in_stable_order():
     plan = ScientificObligationCompiler().compile(
         "请分析 CCO 的分子性质并评估类药性。"

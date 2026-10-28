@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 
 DOMAINS = [
-    ("docking", 11),
+    ("docking", 13),
     ("molecule_utility", 3),
     ("docking_report", 1),
     ("reverse_target", 7),
@@ -46,6 +46,10 @@ NEW_ACTIVITY_TRAINING_PATHS = {
     "/api/activity/train/jobs",
     "/api/activity/train/events/{job_id}",
     "/api/activity/train/cancel/{job_id}",
+}
+NEW_DOCKING_PATHS = {
+    "/api/docking/demo/pde4a-apo",
+    "/api/docking/result/{job_id}/summary",
 }
 
 
@@ -158,6 +162,7 @@ def test_registration_contract():
             row for row in actual["operations"]
             if row["path"] != "/api/admet/predict"
             and row["path"] not in NEW_ACTIVITY_TRAINING_PATHS
+            and row["path"] not in NEW_DOCKING_PATHS
         ],
         "openapi": dict(actual["openapi"]),
     }
@@ -165,6 +170,7 @@ def test_registration_contract():
         path: value for path, value in actual["openapi"]["paths"].items()
         if path != "/api/admet/predict"
         and path not in NEW_ACTIVITY_TRAINING_PATHS
+        and path not in NEW_DOCKING_PATHS
     }
     historic["openapi"]["components"] = dict(actual["openapi"]["components"])
     historic["openapi"]["components"]["schemas"] = {
@@ -178,8 +184,17 @@ def test_registration_contract():
         "POST": 14, "GET": 14, "DELETE": 3,
     }
     assert len(historic["openapi"]["paths"]) == 30
-    assert len(actual["operations"]) == 35
-    assert len(actual["openapi"]["paths"]) == 34
+    assert len(actual["operations"]) == 37
+    assert len(actual["openapi"]["paths"]) == 36
+
+
+def test_docking_demo_and_summary_routes_are_registered_explicitly():
+    actual = registration_contract(registered_app())
+    assert {(row['path'], tuple(row['methods']), row['name'], row['parameters'])
+            for row in actual['operations'] if row['path'] in NEW_DOCKING_PATHS} == {
+        ('/api/docking/demo/pde4a-apo', ('GET',), 'get_pde4a_apo_demo', ''),
+        ('/api/docking/result/{job_id}/summary', ('GET',), 'get_docking_result_summary', 'job_id: str'),
+    }
 
 
 def test_activity_training_management_routes_are_registered_explicitly():

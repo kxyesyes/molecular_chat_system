@@ -34,7 +34,7 @@ def _check_legacy_backup(client):
 
 
 PAGE_SCRIPTS = [
-    ('index.html', 'home', ['config.js', 'state.js', 'theme.js', 'molecule_candidates.js',
+    ('index.html', 'home', ['config.js', 'result_details.js', 'state.js', 'theme.js', 'molecule_candidates.js',
                           'scientific_references.js', 'evidence_report.js', 'formatters.js', 'chat_renderer.js',
                           'connection.js', 'protocol.js', 'task_state.js', 'task_status.js', 'task_panel.js',
                           'advanced_options.js', 'docking_source_selection.js',

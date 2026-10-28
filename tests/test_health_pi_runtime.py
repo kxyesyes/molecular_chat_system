@@ -200,7 +200,8 @@ def test_ci_preserves_partitions_timeout_budgets_and_quality_dependencies():
         'agent-browser-chat': 1200, 'agent-decision-bindings': 1200,
         'agent-decision': 1200, 'agent-pi': 1200, 'agent-web': 1200,
         'agent-docking-publication': 1200, 'sandbox-api': 180, 'sandbox-core': 600,
-        'task-runtime': 600, 'root': 600, 'root-activity': 900,
+        'task-runtime': 600, 'task-runtime-chat': 600,
+        'root': 600, 'root-docking': 600, 'root-activity': 900,
     }
     assert workflow['jobs']['python-tests']['timeout-minutes'] == 30
     assert workflow['jobs']['static-quality']['timeout-minutes'] == 10

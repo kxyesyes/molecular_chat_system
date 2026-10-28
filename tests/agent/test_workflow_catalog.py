@@ -10,6 +10,7 @@ EXPECTED_WORKFLOWS = {
     "activity_prediction",
     "reverse_target_prediction",
     "target_database_search",
+    "target_structure_molecule_analysis",
     "molecular_design",
     "docking_simulation",
     "comprehensive_evaluation",

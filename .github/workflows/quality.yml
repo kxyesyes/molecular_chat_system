@@ -78,11 +78,22 @@ jobs:
             command_timeout: 600
           - name: task-runtime
             pytest_target: "tests/task_runtime"
-            pytest_args: ""
+            pytest_exclude: "tests/task_runtime/test_chat_docking*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 600
+          - name: task-runtime-chat
+            pytest_target: "tests/task_runtime/test_chat_docking*.py"
+            pytest_args: "-vv --durations=25"
             command_timeout: 600
           - name: root
             pytest_target: "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
-            pytest_args: ""
+            pytest_exclude: "tests/test_*docking*.py"
+            pytest_args: "-vv --durations=25"
+            command_timeout: 600
+          - name: root-docking
+            pytest_target: "tests/test_*docking*.py"
+            pytest_exclude: "tests/test_activity*.py"
+            pytest_args: "-vv --durations=25"
             command_timeout: 600
           - name: root-activity
             pytest_target: "tests/test_activity*.py"

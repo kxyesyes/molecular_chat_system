@@ -30,6 +30,7 @@ from src.web.decision_chat import _deliver_result, _result_frame, _DeliveryError
 from src.agent.persistence import SQLiteAgentStateStore
 from src.agent.runtime.task_state import TaskEvent, TaskEventType
 from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from src.agent.contracts.generation_request import GenerationRequestError
 from src.agent.scientific_session.web_requirements import compile_web_requirements
 from tests.agent.pi_web_support import PlannedWebModel
@@ -1721,12 +1722,12 @@ def test_chat_handler_forwards_events_while_pi_is_running(dispatched, tmp_path):
                 entered.set()
                 assert release.wait(15)
             return super().execute(query)
-    handler = make_web_handler([Properties()], SQLiteAgentStateStore(tmp_path / "live.sqlite"), Model())
+    handler = make_web_handler([Properties(), DrugLikenessAssessment()], SQLiteAgentStateStore(tmp_path / "live.sqlite"), Model())
     runtime = handler.decision_runtime
     socket = WebSocket("live-owner")
     sender = _Sender(socket)
     sender._runtime = runtime
-    turn = _Turn({"message": "只计算 CCO 的分子量与 logP", "enable_tools": True, "enable_rag": False})
+    turn = _Turn({"message": "计算 CCO 的理化性质和类药性，不要 ADMET 或活性", "enable_tools": True, "enable_rag": False})
     async def run():
         async def execute():
             turn.task = asyncio.current_task()
@@ -2138,8 +2139,9 @@ def test_chat_handler_uses_compiled_routing_and_awaits_pi_decisions(tmp_path, mo
         calls.append(args[0].query)
         return original(*args, **kwargs)
     monkeypatch.setattr(preparation, "compile_web_requirements", observe)
-    handler = make_web_handler([PropertyCalculator()], SQLiteAgentStateStore(tmp_path / "routing.sqlite"))
-    terminal, _ = run_web_turn(handler, "只计算 CCO 的分子量与 logP")
+    handler = make_web_handler([PropertyCalculator(), DrugLikenessAssessment()], SQLiteAgentStateStore(tmp_path / "routing.sqlite"))
+    query = "计算 CCO 的理化性质和类药性，不要 ADMET 或活性"
+    terminal, _ = run_web_turn(handler, query)
     assert terminal["status"] == "completed"
-    assert calls == ["只计算 CCO 的分子量与 logP"]
+    assert calls == [query]
     assert len(handler.model.messages) == 2

@@ -121,10 +121,11 @@ def test_bound_web_activity_summary_previews_validated_prediction():
         outcome=RunOutcome.COMPLETED, tool_results=[observation], metadata={
             'binding_profile': 'medchat-web-v1'})
     answer = web_scientific_display(result, concise=True)
-    assert '预测 pIC50：4.353786468505859' in answer
+    assert '预测 pIC50：4.354' in answer
     assert '靶点：BuChE' in answer
     full_answer = web_scientific_display(result)
-    assert '预测 pIC50：4.353786468505859' in full_answer
+    assert '预测 pIC50：4.354' in full_answer
+    assert observation.data[0]['predicted_pIC50'] == 4.353786468505859
     assert '活性预测用于研究优先级' in full_answer
 
 

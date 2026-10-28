@@ -1057,6 +1057,7 @@ class WebDecisionRuntime:
         plan: ScientificPlan,
         worker_owner,
         cancel_event,
+        web_projection=None,
     ) -> AgentResult:
         """Run a reviewed property plan through the existing Pi session authority.
 
@@ -1151,8 +1152,16 @@ class WebDecisionRuntime:
                 websocket.send_text(frame), timeout=SEND_TIMEOUT_SECONDS
             )
 
+        business_view = None
+        if web_projection is not None:
+            business_view = await settle_owned_call(
+                lambda: web_projection.capture(result, context=context),
+                worker_owner=worker_owner,
+            )
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
         frames = await _prepare_result_frames(handler, result, False,
-            websocket=websocket, store=self.store)
+            websocket=websocket, store=self.store, business_view=business_view)
         if cancel_event is not None and cancel_event.is_set() and result.outcome != RunOutcome.CANCELLED:
             raise asyncio.CancelledError()
         execution = {**result.to_legacy_dict(), "trace_id": result.trace_id}
@@ -1191,7 +1200,7 @@ class WebDecisionRuntime:
         return context
 
     def _finish_compiled_turn(self, sender, turn, context, result) -> None:
-        """Commit socket-local history after the compiled result was delivered."""
+        """Prepare history for the shared terminal-delivery callback."""
         if self.full_web:
             turn.scientific_update = (
                 [turn.scientific_projection.entry]
@@ -1215,12 +1224,6 @@ class WebDecisionRuntime:
             turn.history_update = HistoryUpdate(
                 history_pairs(history_memory), "history_pair_sensitive"
             )
-        if sender.writable:
-            sender.memory = turn.history_update.memory
-            if self.full_web and turn.scientific_update is not None:
-                sender.scientific_memory[-1:] = turn.scientific_update[-1:]
-        turn.finishing = True
-        turn.terminal_sent = True
 
     async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
@@ -1321,6 +1324,7 @@ class WebDecisionRuntime:
                         plan=turn.scientific_plan,
                         worker_owner=turn.worker_owner,
                         cancel_event=turn.cancel_event,
+                        web_projection=turn.scientific_projection,
                     )
                     if turn.allocation_timed_out:
                         return

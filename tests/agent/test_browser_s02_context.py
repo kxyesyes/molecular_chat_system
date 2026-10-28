@@ -57,10 +57,12 @@ def turn(handler, query, history, session="test-chat"):
 
 
 def executed_result(handler, query):
-    run_web_turn(handler, query, [], 'test-chat')
-    result = handler.web_results[-1]
-    assert result.metadata['backend'] == 'pi'
-    return {**result.to_legacy_dict(), 'trace_id': result.trace_id}
+    _, frames = run_web_turn(handler, query, [], 'test-chat')
+    # Compiled property execution publishes the same result envelope without
+    # passing through the model-driven process_decision_message observer.
+    result = next(frame for frame in frames if frame['type'] == 'agent_result')
+    assert result['metadata']['backend'] == 'pi'
+    return result
 
 
 @pytest.mark.parametrize("query,expected", [

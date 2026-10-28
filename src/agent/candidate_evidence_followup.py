@@ -21,6 +21,11 @@ _MAX_CANDIDATES = 32
 _RANKING_REQUEST = re.compile(r"(?:重新|再次|再)?\s*(?:排序|排名|重排|rank(?:ing)?)", re.I)
 _CANDIDATE_CONTEXT = re.compile(r"候选|分子|compound|candidate|molecule|ADMET|性质|evidence", re.I)
 _GENERATION = re.compile(r"生成|设计|优化|generate|design|optimi[sz]", re.I)
+_OTHER_RANKING_DOMAIN = re.compile(
+    r"反向|寻靶|候选靶点|活性|pIC50|IC50|\b(?:reverse|targets?|activity|potency)\b", re.I)
+_REUSE_REQUEST = re.compile(
+    r"刚才|之前|上一轮|已返回|已有|重新排序|再次排序|重排|"
+    r"\b(?:previous|prior|earlier|existing|returned|rerank|re-rank)\b", re.I)
 
 
 def _canonical(value):
@@ -140,7 +145,9 @@ def ranking_followup_requested(query):
     positive = positive_intent_text(query)
     return bool(_RANKING_REQUEST.search(positive)
                 and _CANDIDATE_CONTEXT.search(positive)
-                and not _GENERATION.search(positive))
+                and _REUSE_REQUEST.search(positive)
+                and not _GENERATION.search(positive)
+                and not _OTHER_RANKING_DOMAIN.search(positive))
 
 
 def _merge(history, session_id):

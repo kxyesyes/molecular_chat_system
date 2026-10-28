@@ -117,7 +117,8 @@ def test_switch_model_rejects_generator_model_for_agent(factory, model_key):
 
     assert response.status_code == 200
     assert response.json()["success"] is False
-    assert "生成器" in response.json()["message"]
+    assert "分子生成" in response.json()["message"]
+    assert "不能作为 Agent 模型" in response.json()["message"]
     assert app.model is original_model
     assert app.active_llm_config == original_config
     assert app.molecular_generator_model is generator

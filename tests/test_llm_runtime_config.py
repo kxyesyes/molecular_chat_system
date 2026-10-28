@@ -482,7 +482,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
                 {
                     "provider": "ollama",
                     "base_url": "http://127.0.0.1:11434",
-                    "model_name": "gmm-llama:latest",
+                    "model_name": "synthetic-chat:latest",
                     "stream": True,
                 },
             )
@@ -493,7 +493,7 @@ class LLMRuntimeConfigTest(unittest.TestCase):
             app.active_llm_config = {
                 "provider": "ollama",
                 "base_url": "http://127.0.0.1:11434",
-                "model_name": "gmm-llama:latest",
+                "model_name": "synthetic-chat:latest",
                 "api_key": "",
                 "stream": True,
             }

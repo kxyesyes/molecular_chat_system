@@ -505,6 +505,8 @@ _METRIC_LIST_FILLER = frozenset(
         "of",
         "five",
         "和",
+        "与",
+        "及",
         "或",
         "以及",
         "并",
@@ -730,6 +732,12 @@ def _metric_list_has_unknown_token(query: str) -> bool:
         if property_after_introducer is not None:
             continue
         clause = query[introducer.end():]
+        # In "计算乙醇 CCO 的分子量", the text before 的 is the
+        # molecular subject. Keep scanning the metrics after it, including
+        # unknown metrics, instead of classifying the name as a metric.
+        subject = re.match(r"\s*([\u4e00-\u9fff]{2,32})(?:\s+[^\s，,；;]+)?\s*的\s*", clause)
+        if subject is not None and '分子' not in subject[1]:
+            clause = clause[subject.end():]
         # The bare subject in "计算分子的分子量" is not a metric. Consume
         # only this complete leading qualifier, so metrics after 的 (including
         # unknown ones) are still scanned rather than hidden by that boundary.
@@ -899,14 +907,23 @@ class ScientificObligationCompiler:
         if property_only_design_request(query):
             return False
         positive = positive_intent_text(query)
+        from src.agent.utils.validators import InputValidator
+        if (_explicit_admet_request(positive)
+                and not _PROPERTY_REQUEST.search(positive)
+                and not _DRUG_LIKENESS_REQUEST.search(positive)
+                and not _requested_metrics(positive)
+                and not re.search(r'分子|\bmolecule\b', positive, re.I)
+                and not InputValidator().extract_potential_smiles_candidates(query)):
+            # Domain prose such as BBB/PPB or CNS/PK is not a molecular
+            # identity. Keep the existing full-Web missing-subject gate;
+            # the strict structure parser alone can accept BBB as boron.
+            return False
         if (looks_like_design(query)
-                and not _PROPERTY_REQUEST.search(query)
                 and not _explicit_admet_request(query)
                 and not _unreviewed_metric_capabilities(query)):
-            # Lipinski/LogP/weight bounds are generation constraints when the
-            # user asks to generate molecules. Do not let the narrow property
-            # compiler reject the request before molecular_design can invoke
-            # the dedicated generator tool.
+            # The molecular-design planner owns generated-property bindings
+            # and verifies numeric bounds. A property noun must not divert
+            # that multi-step request into this single-molecule compiler.
             return False
         from src.agent.evidence_followup import comparison_tools
         if comparison_tools(query):

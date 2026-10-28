@@ -174,18 +174,23 @@ def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, 
     from src.agent.runtime.worker_ownership import WorkerOwner
     from src.agent.scientific_session.web_requirements import compile_web_requirements
     from src.agent.tools.property_calculator import PropertyCalculator
-    from tests.agent.test_decision_loop import tool, finish, clarify, last_observation
+    from src.agent.tools.candidate_ranker import CandidateRanker
+    from tests.agent.test_decision_loop import tool, clarify, last_observation
     from tests.agent.test_decision_protocol_recovery import ProtocolModel, invalid
     from tests.agent.test_generation_ranking_contract import CountingTool, GEN, output
+    from tests.agent.test_target_driven_design_workflow import FakeTool
 
-    context = AgentContext('生成 1 个分子，并计算理化性质', 'web-profile-repair-' + mode,
-        user_id='owner', session_id='session', active_skill='molecular_design',
+    context = AgentContext('针对 PDE5A 生成 1 个候选分子，计算分子性质，并根据性质进行排序。',
+        'web-profile-repair-' + mode,
+        user_id='owner', session_id='session', active_skill='target_driven_design',
         mol_count=1, metadata={'requested_count': 1})
-    allowed = {GEN, 'property_calculator'}
+    allowed = {'target_database_search', GEN, 'property_calculator', 'candidate_ranker'}
     requirements = compile_web_requirements(context, allowed_tools=allowed)
     names = {step.tool_name: step.name for step in requirements.steps}
     generation = tool(GEN, {'step_ref': names[GEN]})
     properties = tool('property_calculator', {'step_ref': names['property_calculator']})
+    target = tool('target_database_search', {'step_ref': names['target_database_search']})
+    ranking = tool('candidate_ranker', {'step_ref': names['candidate_ranker']})
     ids = []
 
     def after_generation(messages):
@@ -196,13 +201,19 @@ def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, 
         observation = last_observation(messages)
         assert observation['quality']['candidate_alignment']
         ids.append(observation['quality']['evidence_id'])
+        # Ranking still needs the aligned property evidence, so this pause is
+        # meaningful even though completed Web plans now finish automatically.
         return clarify()
 
     generator = CountingTool(GEN, output(GEN))
-    bundle = setup_loop([], [generator, PropertyCalculator()], binding_profile=WEB, mode=mode)
+    target_result = FakeTool('target_database_search').execute('PDE5A')
+    target_result['quality'] = {'lookup_status': 'resolved'}
+    target_search = CountingTool('target_database_search', target_result)
+    bundle = setup_loop([], [target_search, generator, PropertyCalculator(), CandidateRanker()],
+                        binding_profile=WEB, mode=mode)
     bundle.model = bundle.loop.model = ProtocolModel([
-        invalid(), generation, after_generation, pause_after_alignment,
-        generation, properties, lambda _: finish(ids)])
+        invalid(), target, generation, after_generation, pause_after_alignment,
+        target, generation, properties, ranking])
     options = dict(request_kind='scientific', allowed_tools=allowed, required_tools=allowed,
                    requirements=requirements, event_bus=bundle.bus)
     waiting = asyncio.run(bundle.loop.run(context, **options, worker_owner=WorkerOwner()))
@@ -212,17 +223,21 @@ def test_web_schema_repair_and_resume_preserve_aligned_observations(setup_loop, 
                 if message['role'] == 'system' and 'invalid_decision_schema' in message['content']]
     assert len(feedback) == 1 and 'input_ref' not in feedback[0]
     before = deepcopy([result.to_legacy_dict() for result in waiting.tool_results])
-    assert len(before) == 2
+    assert len(before) == 3
+    assert [result['quality']['evidence_id'] for result in before[1:]] == ids
     resumed = asyncio.run(bundle.loop.run(context, **options,
         continuation_id=waiting.metadata['continuation_id'], clarified_query='继续',
         worker_owner=WorkerOwner()))
     assert resumed.success, resumed.metadata
-    assert resumed.metadata['reused_decisions'] == 2
+    assert resumed.metadata['reused_decisions'] == 3
     assert resumed.metadata['protocol_repairs'] == 1
-    assert resumed.metadata['tool_attempt_count'] == 2
+    assert resumed.metadata['tool_attempt_count'] == 4
     assert generator.calls == 1
-    assert [result.to_legacy_dict() for result in resumed.tool_results] == before
-    assert len(bundle.model.messages) == 7
+    assert len(target_search.inputs) == 1
+    assert [result.to_legacy_dict() for result in resumed.tool_results[:3]] == before
+    assert resumed.tool_results[-1].tool_name == 'candidate_ranker'
+    assert resumed.tool_results[-1].success
+    assert len(bundle.model.messages) == 9
 
 
 @pytest.mark.parametrize('raw_flag', [True, {'discarded_count': 0}])

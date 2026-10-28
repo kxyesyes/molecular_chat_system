@@ -11,12 +11,40 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
 from uuid import uuid4
 
 
 MAX_FRAME_BYTES = 1024 * 1024
 MAX_FRAME_DEPTH = 32  # Pi envelopes add levels around depth-16 decision DTOs.
 HOST_PATH = Path(__file__).resolve().parents[3] / 'runtime/pi/host.mjs'
+_NODE_LOOKUP = None
+_NODE_LOOKUP_LOCK = threading.Lock()
+
+
+def resolve_node_executable():
+    """Reuse dependency discovery, never a running child or its environment.
+
+    A service keeps its selected executable while the search context is stable.
+    Check availability on every use; environment changes, removal and a failed
+    discovery all trigger another PATH search. Explicit node overrides bypass
+    this process-local selection.
+    """
+    global _NODE_LOOKUP
+    key = (os.environ.get('PATH'), os.environ.get('PATHEXT'), os.getcwd())
+    with _NODE_LOOKUP_LOCK:
+        if _NODE_LOOKUP is not None:
+            previous_key, executable = _NODE_LOOKUP
+            if (previous_key == key and os.path.isfile(executable)
+                    and os.access(executable, os.F_OK | os.X_OK)):
+                return executable
+        executable = shutil.which('node')
+        if executable:
+            executable = os.path.abspath(executable)
+            _NODE_LOOKUP = (key, executable)
+        else:
+            _NODE_LOOKUP = None
+        return executable
 
 
 class PiBridgeError(RuntimeError):
@@ -81,7 +109,7 @@ async def _drain_cleanup(task):
 
 class PiRuntimeBridge:
     def __init__(self, *, node=None, host_path=HOST_PATH):
-        self.node = node or shutil.which('node')
+        self.node = node or resolve_node_executable()
         self.host_path = Path(host_path)
         self.active_pid = None
 

@@ -57,7 +57,8 @@ def test_bounded_plain_plan_binds_properties_to_generated_result(clause):
     assert properties.capability == "molecule.properties"
     assert properties.output_contract == "PropertyAssessmentSet@1"
     assert properties.output_key == "properties"
-    assert properties.required is False and properties.continue_on_error is True
+    # Bounds cannot be verified if the generated candidates skip descriptors.
+    assert properties.required is True and properties.continue_on_error is False
     assert plan.metadata["atomic"] is False
     compiled = PlanCompiler().compile(plan, WorkflowCatalog().require("molecular_design"))
     assert compiled.dependencies[properties.name] == (generator.name,)

@@ -304,7 +304,9 @@ def test_invalid_control_type_preserves_socket_history_and_wait(actual_app, kind
             try:
                 await socket.ready()
                 warm = result_of(await socket.turn({'message': 'Explain logP'}))
-                frames = await socket.turn({'message': '计算 logP'})
+                # Keep model review pending for an already known molecule;
+                # supplying a missing molecule intentionally executes the tool.
+                frames = await socket.turn({'message': '计算 logP；SMILES: CCO'})
                 assert result_of(frames)['status'] == 'waiting_for_input'
                 sender, = b.app.decision_runtime.sockets
                 waiting = sender.waiting
@@ -329,7 +331,7 @@ def test_invalid_control_type_preserves_socket_history_and_wait(actual_app, kind
                 await socket.send({'type': 'ping', 'timestamp': 0})
                 assert await socket.receive() == {'type': 'pong', 'timestamp': 0}
                 resumed = result_of(await socket.turn({'type': 'resume', 'trace_id': frames[-1]['trace_id'],
-                    'continuation_id': frames[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCO'}))
+                    'continuation_id': frames[-1]['continuation_id'], 'message': '计算 logP；SMILES: OCC'}))
                 assert resumed['status'] == 'waiting_for_input' and len(b.claims) == 1 and len(b.calls) == 3
                 assert sender.memory == memory and sender.waiting.context.memory == memory
             finally:
@@ -354,11 +356,11 @@ def test_terminal_resume_before_loop_erases_local_handle(actual_app, monkeypatch
         async with actual_app(mode='decision_a2', wire=wire, respond=respond) as b:
             async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                 await socket.ready()
-                first = await socket.turn({'message': '计算 logP'})
+                first = await socket.turn({'message': '计算 logP；SMILES: CCO'})
                 assert result_of(first)['status'] == 'waiting_for_input'
                 sender, = b.app.decision_runtime.sockets
                 payload = dict(type='resume', trace_id=first[-1]['trace_id'],
-                    continuation_id=first[-1]['continuation_id'], message='计算 logP; SMILES: CCO')
+                    continuation_id=first[-1]['continuation_id'], message='计算 logP; SMILES: OCC')
                 before = deepcopy(b.app.agent_state_store.get_run(payload['trace_id']))
                 if failure == 'cancel-before-lease':
                     async with b.app.model_request_gate.exclusive():
@@ -522,7 +524,7 @@ def test_actual_route_two_wait_cycles_resumed_cancel_then_fresh_chat(actual_app)
             async with ActualSocket(b.app, await cookie_for(b.app)) as socket:
                 await socket.ready()
                 warm = result_of(await socket.turn({'message': 'Explain logP'}))
-                first_frames = await socket.turn({'message': '计算 logP'})
+                first_frames = await socket.turn({'message': '计算 logP；SMILES: CCO'})
                 first = result_of(first_frames)
                 assert first['status'] == 'waiting_for_input' and not first['success']
                 trace, nonce = first['trace_id'], first_frames[-1]['continuation_id']
@@ -530,7 +532,7 @@ def test_actual_route_two_wait_cycles_resumed_cancel_then_fresh_chat(actual_app)
                 assert record['status'] == 'waiting_for_input'
                 assert not b.app.decision_runtime.active_owners and b.app.model_request_gate._readers == 0
                 await socket.send({'type': 'resume', 'trace_id': trace, 'continuation_id': nonce,
-                                   'message': '计算 logP；SMILES: CCO'})
+                                   'message': '计算 logP；SMILES: OCC'})
                 accepted = await socket.receive()
                 assert accepted['type'] == 'request_accepted', accepted
                 assert accepted['trace_id'] == trace
@@ -815,7 +817,9 @@ def test_refined_subject_is_sealed_but_invalid_resume_does_not_consume_handle(ac
         async def respond(payload):
             nonlocal count
             count += 1
-            if count <= 2:
+            # Once the supplied structure executes, explicitly keep one model
+            # review pending so the sealed continuation remains under test.
+            if count <= 3:
                 return clarify().model_dump()
             observations = [json.loads(m['content']) for m in payload['messages'] if m['role'] == 'tool']
             return (finish([o['quality']['evidence_id'] for o in observations]) if observations else tool()).model_dump()
@@ -827,6 +831,7 @@ def test_refined_subject_is_sealed_but_invalid_resume_does_not_consume_handle(ac
                 second = await socket.turn({'type': 'resume', 'trace_id': trace,
                     'continuation_id': first[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCO'})
                 assert result_of(second)['status'] == 'waiting_for_input'
+                assert len(b.app.agent_state_store.get_tool_executions(trace)) == 1
                 sender, = b.app.decision_runtime.sockets
                 frozen = deepcopy(sender.waiting.context)
                 requirements = sender.waiting.prepared.requirements.model_dump(mode='json')
@@ -838,9 +843,11 @@ def test_refined_subject_is_sealed_but_invalid_resume_does_not_consume_handle(ac
                     'continuation_id': second[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCN'})
                 assert result_of(bad)['status'] == 'rejected'
                 assert b.app.agent_state_store.get_run(trace) == record and len(b.claims) == 1
+                # Reuse the exact admitted input so its prior evidence stays
+                # active; equivalent-SMILES admission is covered separately.
                 good = result_of(await socket.turn({'type': 'resume', 'trace_id': trace,
-                    'continuation_id': second[-1]['continuation_id'], 'message': '计算 logP；SMILES: OCC'}))
-                assert good['status'] == 'completed' and good['success']
+                    'continuation_id': second[-1]['continuation_id'], 'message': '计算 logP；SMILES: CCO'}))
+                assert good['status'] == 'completed' and good['success'], good['metadata']['stop_reason']
                 assert len(b.claims) == 2 and len(b.calls) == 4
                 assert len(b.app.agent_state_store.get_tool_executions(trace)) == 1
                 assert frozen.query == '计算 logP' and frozen.resolved_molecule is None
@@ -941,11 +948,11 @@ def test_waiting_handle_is_socket_local_single_use_and_bounded(actual_app, case)
             cookie = await cookie_for(b.app)
             async with ActualSocket(b.app, cookie) as socket:
                 await socket.ready()
-                frames = await socket.turn({'message': '计算 logP'})
+                frames = await socket.turn({'message': '计算 logP；SMILES: CCO'})
                 result_of(frames)
                 trace, nonce = frames[-1]['trace_id'], frames[-1]['continuation_id']
                 payload = {'type': 'resume', 'trace_id': trace, 'continuation_id': nonce,
-                           'message': '计算 logP；SMILES: CCO'}
+                           'message': '计算 logP；SMILES: OCC'}
                 sender, = b.app.decision_runtime.sockets
                 if case == 'expired':
                     sender.waiting = replace(sender.waiting, expires_at=0)
