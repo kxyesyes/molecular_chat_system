@@ -79,7 +79,7 @@ function createSelect(document, options = []) {
 function harness(responses = []) {
   const document = { createElement: () => createDomElement(document) };
   const elements = {};
-  for (const name of ["settingsBtn", "llmProvider", "llmStream", "llmBaseUrl", "llmModelName", "llmApiKey", "llmSettingsStatus", "connectionStatus", "modelSelect", "testLlmConfig", "saveLlmConfig"]) {
+  for (const name of ["settingsBtn", "llmProvider", "llmStream", "llmBaseUrl", "llmModelName", "llmApiKey", "llmSettingsStatus", "connectionStatus", "modelSelect", "testLlmConfig", "saveLlmConfig", "input"]) {
     elements[name] = createDomElement(document);
   }
   elements.agentModelStatus = createDomElement(document);
@@ -119,9 +119,11 @@ function harness(responses = []) {
     sessionStorage: forbiddenStorage,
     window: { localStorage: forbiddenStorage, sessionStorage: forbiddenStorage },
     chatMode: false,
+    decisionActive: () => false,
     document: { ...document, addEventListener() {} },
     HomeChatRenderer: {
       showToast: (...args) => toasts.push(args),
+      showNotification: (...args) => toasts.push(args),
       updateConnectionStatus: status => {
         elements.connectionStatus.textContent = status === "connected" ? "传输已连接" : "传输未连接";
       },
@@ -133,8 +135,8 @@ function harness(responses = []) {
       return { json: async () => result };
     },
   });
-  vm.runInContext("let agentModelStatusRequestVersion = 0; let agentReadinessRequestVersion = 0; let agentConfigInputVersion = 0; let agentConfigSavedInputVersion = null; let agentConfigDraftKeyPresent = false; let agentConfigFingerprint = \"\"; let agentWireMode = \"native\"; let authoritativeAgentConfigFingerprint = \"\"; let llmConfigSaveGeneration = 0; let modelSwitchRequestVersion = 0; let authoritativeAgentModelName = \"\"; let ws = null; const WebSocket = { OPEN: 1 };", context);
-  for (const name of ["openLlmSettings", "closeLlmSettings", "fillLlmSettingsForm", "collectLlmSettingsForm", "markLlmConfigInputChanged", "getAgentConfigFingerprint", "setLlmSettingsStatus", "testLlmConfig", "saveLlmConfig", "applyAgentModelLabel", "setAgentReadiness", "markAgentReadyFromSuccessfulTurn", "refreshAgentModelStatus", "refreshAgentReadiness", "renderTransportStatus", "updateConnectionStatus", "bindEvents", "handleModelChange", "getModelDisplayName"]) {
+  vm.runInContext("let agentModelStatusRequestVersion = 0; let agentReadinessRequestVersion = 0; let agentReadiness = \"unknown\"; let agentConfigInputVersion = 0; let agentConfigSavedInputVersion = null; let agentConfigDraftKeyPresent = false; let agentConfigFingerprint = \"\"; let agentWireMode = \"native\"; let authoritativeAgentConfigFingerprint = \"\"; let llmConfigSaveGeneration = 0; let modelSwitchRequestVersion = 0; let authoritativeAgentModelName = \"\"; let ws = null; let decisionMode = true; let decisionWaiting = null; let decisionTurn = null; let decisionAbandonAwait = null; let protocolDesyncedSocket = null; const WebSocket = { OPEN: 1 };", context);
+  for (const name of ["openLlmSettings", "closeLlmSettings", "fillLlmSettingsForm", "collectLlmSettingsForm", "markLlmConfigInputChanged", "getAgentConfigFingerprint", "setLlmSettingsStatus", "testLlmConfig", "saveLlmConfig", "applyAgentModelLabel", "setAgentReadiness", "markAgentReadyFromSuccessfulTurn", "refreshAgentModelStatus", "refreshAgentReadiness", "ensureAgentReady", "sendDecisionMessage", "renderTransportStatus", "updateConnectionStatus", "bindEvents", "handleModelChange", "getModelDisplayName"]) {
     vm.runInContext(extractFunction(name), context, { filename: `main.js:${name}` });
   }
   return { context, elements, requests, toasts, storageAccess };
@@ -917,6 +919,40 @@ test("settings markup omits verbose persistence and API-key instructions", () =>
     /id="llmApiKeyHint"|id="clearLlmApiKey"|llm-key-clear|本地 Ollama 可留空|外部 API 请填写 Key/,
   );
   assert.doesNotMatch(source, /已保存，无需重复填写|清除本机用户配置目录|配置保存在仓库之外|配置已读取。API Key 不会回传明文/);
+});
+
+test("unready Agent probe blocks a decision chat send", async () => {
+  const { context, elements, requests } = harness([
+    { success: true, config: defaults, agent: { ...defaults, role: "agent", wire_mode: "native" } },
+    { success: false, model: defaults.model_name, message: "Agent 连接测试失败" },
+  ]);
+  let sent = 0;
+  context.ws = { readyState: 1, send: () => { sent += 1; } };
+  elements.input.value = "你好";
+
+  await context.sendDecisionMessage();
+
+  assert.deepEqual(requests.map(request => request.url), ["/api/llm/config", "/api/llm/test"]);
+  assert.equal(sent, 0);
+  assert.equal(elements.agentModelReadiness.textContent, "不可用");
+});
+
+test("send readiness does not overwrite a draft typed before config load", async () => {
+  const { context, elements, requests } = harness([
+    { success: false, model: "draft-model", message: "Agent 连接测试失败" },
+  ]);
+  let sent = 0;
+  context.ws = { readyState: 1, send: () => { sent += 1; } };
+  elements.input.value = "你好";
+  elements.llmModelName.value = "draft-model";
+  context.markLlmConfigInputChanged();
+
+  await context.sendDecisionMessage();
+
+  assert.deepEqual(requests.map(request => request.url), ["/api/llm/test"]);
+  assert.equal(JSON.parse(requests[0].options.body).model_name, "draft-model");
+  assert.equal(sent, 0);
+  assert.equal(elements.llmModelName.value, "draft-model");
 });
 
 test("homepage loads the updated settings script instead of the stale cached version", () => {

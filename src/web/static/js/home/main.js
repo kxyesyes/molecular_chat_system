@@ -19,6 +19,7 @@
   let maxReconnectAttempts = 5;
   let agentModelStatusRequestVersion = 0;
   let agentReadinessRequestVersion = 0;
+  let agentReadiness = "unknown";
   let agentConfigInputVersion = 0;
   let agentConfigSavedInputVersion = null;
   let agentConfigDraftKeyPresent = false;
@@ -290,25 +291,38 @@
     if (typeof dockingUI !== "undefined" && dockingUI?.blocked()) return;
     const message = elements.input.value;
     if (!message.trim() || decisionActive() || decisionAbandonAwait || (resume ? !decisionWaiting : decisionWaiting)) return;
-    const config = HomeAdvancedOptions.getConfig();
-    const payload = resume
-      ? {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message}
-      : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
-        rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
-        ...(scientificReferences?.outgoing() || {})};
-    if (decisionResultFormat) payload.result_format = decisionResultFormat;
-    if (!sendDecisionControl(payload)) return;
-    decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null,
-      resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
-    scientificReferences?.startRequest();
-    moleculeCandidateLifecycle.startRequest();
-    evidenceReportLifecycle?.startRequest();
-    if (!chatMode) enterChatMode();
-    addUserMessage(message);
-    decisionTurn.userMessage = elements.chatContainer.lastChild;
-    elements.input.value = "";
-    showTypingIndicator();
-    updateDecisionControls();
+    const dispatch = () => {
+      const config = HomeAdvancedOptions.getConfig();
+      const payload = resume
+        ? {type: "resume", trace_id: decisionWaiting.traceId, continuation_id: decisionWaiting.nonce, message}
+        : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
+          rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
+          ...(scientificReferences?.outgoing() || {})};
+      if (decisionResultFormat) payload.result_format = decisionResultFormat;
+      if (!sendDecisionControl(payload)) return;
+      decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null,
+        resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
+      scientificReferences?.startRequest();
+      moleculeCandidateLifecycle.startRequest();
+      evidenceReportLifecycle?.startRequest();
+      if (!chatMode) enterChatMode();
+      addUserMessage(message);
+      decisionTurn.userMessage = elements.chatContainer.lastChild;
+      elements.input.value = "";
+      showTypingIndicator();
+      updateDecisionControls();
+    };
+    const readiness = ensureAgentReady();
+    if (readiness === true) {
+      dispatch();
+      return;
+    }
+    if (readiness && typeof readiness.then === "function") {
+      return readiness.then(ready => {
+        if (ready) dispatch();
+        return ready;
+      });
+    }
   }
 
   function handleDecisionMessage(message, socket) {
@@ -1165,6 +1179,7 @@
         pending: "待保存/待重新测试",
       };
       const normalized = labels[readiness] ? readiness : "unknown";
+      agentReadiness = normalized;
       if (elements.agentModelReadiness) {
         elements.agentModelReadiness.textContent = labels[normalized];
       }
@@ -1270,6 +1285,36 @@
         setAgentReadiness("unavailable");
         return { status: "unavailable", success: false, message: error.message };
       }
+    }
+
+    function ensureAgentReady() {
+      // Minimal protocol fixtures may exercise the decision transport without
+      // mounting the homepage readiness indicator. Keep that transport path
+      // synchronous; the real homepage always mounts this element in init().
+      if (!elements.agentModelReadiness) return true;
+      if (agentReadiness === "ready") return true;
+
+      const hasEditedDraft = agentConfigSavedInputVersion === null
+        ? agentConfigInputVersion > 0
+        : agentConfigInputVersion !== agentConfigSavedInputVersion;
+      return (async () => {
+        if (!hasEditedDraft && agentConfigSavedInputVersion === null) {
+          const inputVersionAtStart = agentConfigInputVersion;
+          const metadata = await refreshAgentModelStatus();
+          if (!metadata || agentConfigInputVersion !== inputVersionAtStart) {
+            HomeChatRenderer.showNotification("Agent 当前不可用，请先检查模型配置。", "warning");
+            return false;
+          }
+          fillLlmSettingsForm(metadata);
+        }
+
+        const result = await refreshAgentReadiness();
+        if (result?.status === "ready") return true;
+        if (!result?.stale) {
+          HomeChatRenderer.showNotification("Agent 尚未就绪，请先检查模型连接。", "warning");
+        }
+        return false;
+      })();
     }
 
     async function saveLlmConfig() {
