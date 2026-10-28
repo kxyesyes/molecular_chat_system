@@ -20,6 +20,40 @@ from src.agent.tools import get_core_tools
 from src.web.decision_runtime import terminal_message_for_reason
 
 
+def test_turn_delivery_compacts_json_without_dropping_result_indexes():
+    from src.web.decision_runtime import _TurnSender
+    # Synthetic transport load, not scientific evidence. All duplicate indexes
+    # remain available to existing consumers; only structural spaces disappear.
+    rows = [{f'endpoint_{i:02d}': i for i in range(32)} for _ in range(160)]
+    item = {'tool_name': 'admet_predictor', 'step_id': 'synthetic', 'data': rows,
+            'warnings': ['not an experimental result'], 'status': 'partial'}
+    payload = {'type': 'agent_result', 'status': 'partial', 'final_answer': 'kept',
+        'metadata': {'binding_profile': 'medchat-web-v1'},
+        'tool_result_sequence': [item], 'tool_results': {'admet_predictor': item},
+        'tool_results_by_step': {'synthetic': item}}
+    sent = []
+
+    class Sender:
+        scope = {}
+
+        async def send_text(self, text, *, on_sent=None):
+            sent.append(text)
+            if on_sent:
+                on_sent()
+
+    turn = SimpleNamespace(allocation_timed_out=False, turn_id='a' * 32,
+                           payload={'enable_rag': False}, waiting=None)
+    asyncio.run(_TurnSender(Sender(), turn).send_text(json.dumps(payload)))
+    expected = {**payload, 'turn_id': turn.turn_id,
+                'metadata': {**payload['metadata'], 'retrieval_performed': False, 'rag_requested': False}}
+    assert json.loads(sent[0]) == expected
+    compact_matches = sent[0] == json.dumps(expected, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+    assert compact_matches, 'final transport must not re-expand structural JSON whitespace'
+    assert len(json.dumps(expected)) > 256 * 1024
+    assert len(sent[0]) < 256 * 1024
+    assert turn.result_started and turn.displayed_answer == 'kept'
+
+
 def test_clarification_terminal_message_is_actionable():
     message = terminal_message_for_reason('request_clarification_required')
     assert 'SMILES' not in message
@@ -27,6 +61,13 @@ def test_clarification_terminal_message_is_actionable():
     assert '对象' in message and '具体问题' in message
     assert '拆分' in message
     assert '未执行科学工具' in message
+
+
+def test_disabled_rag_terminal_message_explains_how_to_enable_retrieval():
+    message = terminal_message_for_reason('rag_disabled')
+    assert 'RAG检索' in message
+    assert '开启' in message
+    assert '未执行检索' in message
 
 
 def chat_decision(text='Protocol-only explanation'):

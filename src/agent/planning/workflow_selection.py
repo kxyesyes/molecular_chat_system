@@ -13,6 +13,7 @@ def select_workflow(skill: str, query: str, *, looks_like_design: Callable[[str]
         return "target_driven_design"
     if skill in {
         "hit_to_lead_optimization", "molecular_design", "target_database_search",
+        "target_structure_molecule_analysis",
         "docking_simulation", "activity_prediction", "reverse_target_prediction", "rag_search",
     }:
         return skill

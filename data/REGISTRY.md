@@ -10,6 +10,9 @@
 |---|---|---|---|
 | 示例小分子 | `data/samples/5.sdf` | 分子处理/上传测试样例 | 是 |
 | 示例蛋白结构 | `data/samples/MAGL_5zun.pdb` | 分子对接页面上传测试样例 | 是 |
+| PDE4A apo 示例结构（PDB 6FG5） | `data/samples/PDE4A_apo_6FG5.pdb` | 分子对接一键示例；Schistosoma mansoni PDE4A apo | 是 |
+
+`PDE4A_apo_6FG5.pdb` 来源：RCSB PDB entry 6FG5（下载日期 2026-10-27）；SHA256：`B998745414E398D63F7A7C7036F4C76D4CE3D258272BF50A790B29478A09C50D`。
 
 ## 运行期数据资产
 
@@ -23,6 +26,7 @@
 | 其他活性预测模型/训练产物 | `data/activity/models/` 下其他目录 | 本地训练或搜索输出 | `Activity Models` | 不提交 |
 | RAG FAISS 索引 | `data/molecular_faiss_index.index` | RAG 索引构建流程 | `RAG Index` | 不提交 |
 | 分子设计导出结果 | `data/design_results/` | 用户运行时保存/导出 | 手动检查 | 不提交 |
+| Agent 历史结果展示明细 | Agent 状态库同级的 `result_details/`（默认 `data/result_details/`） | 仅由已验证结果生成的私有不可变 JSON 快照；不是执行或引用授权 | 所属会话、文件摘要、结构和字节预算读取校验；相关 store/routes 测试 | 运行时数据，不提交 |
 
 ## 部署约定
 

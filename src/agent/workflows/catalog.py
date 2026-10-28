@@ -75,6 +75,12 @@ WORKFLOW_POLICIES = (
         ("target_database_search",),
     ),
     WorkflowPolicy(
+        "target_structure_molecule_analysis",
+        "检索单一靶点结构并计算明确分子的性质与 ADMET。",
+        ("target_database_search", "property_calculator", "admet_predictor"),
+        True,
+    ),
+    WorkflowPolicy(
         "admet_assessment",
         "计算性质、类药性和 ADMET。",
         (

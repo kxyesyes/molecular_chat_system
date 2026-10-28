@@ -35,7 +35,8 @@
 
 ## 命令与输出
 
-来源：`scripts/prepare_family_activity_dataset.py`。在仓库根目录、具备 RDKit 的环境执行。
+来源：`scripts/prepare_family_activity_dataset.py`。本机 Windows 在仓库根目录、项目
+Conda 环境 `MedChat`（先运行 `conda activate MedChat`）中执行，并确认环境具备 RDKit。
 下列输入路径是占位符，不是随仓库发布的数据。
 
 ```powershell

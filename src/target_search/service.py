@@ -1357,11 +1357,15 @@ class TargetSearchService:
         }
 
     def send_to_docking(self, structure_db_id: int) -> dict:
-        prepared = self.prepare_structure_file(structure_db_id, requested_format=None)
+        structure = self._get_structure(structure_db_id)
+        prepared = self.downloader.prepare_structure_file(structure, requested_format=None)
         return {
             "status": "success",
-            "message": "结构文件已准备好，后续可接入分子对接模块",
+            "message": "结构文件已准备好，可以进入分子对接页面继续配置",
             "protein_file": prepared["local_file_path"],
+            "structure_db_id": structure_db_id,
+            "structure_id": structure["structure_id"],
+            "file_format": prepared["file_format"],
         }
 
     def get_database_stats(self) -> dict:
@@ -1562,6 +1566,26 @@ class TargetSearchService:
     def _format_structure(self, row: dict) -> dict:
         absolute = absolute_from_project(row.get("local_file_path") or "", self.project_root)
         is_downloaded = as_bool(row["is_downloaded"]) or absolute.exists()
+        file_format = str(row.get("file_format") or "cif").lower()
+        cache_status = "missing"
+        try:
+            verified = self.downloader._verified_cached_structure(row, file_format)
+            if verified is not None:
+                cache_status = "available"
+            elif absolute.exists():
+                cached = self.downloader.cache.get(
+                    self.downloader._coordinate_cache_key(
+                        str(row.get("source") or ""),
+                        str(row.get("structure_id") or ""),
+                        file_format,
+                    ),
+                    allow_stale=True,
+                )
+                cache_status = "stale" if cached is not None and cached.stale else "unverified"
+        except Exception:
+            # Displaying an uncertain cache state must never make a structure
+            # look ready; preflight remains the authoritative readiness check.
+            cache_status = "unverified" if absolute.exists() else "missing"
         payload = {
             "id": row["id"],
             "structure_id": row["structure_id"],
@@ -1577,6 +1601,7 @@ class TargetSearchService:
             "local_file_path": row["local_file_path"],
             "download_url": row["download_url"],
             "is_downloaded": is_downloaded,
+            "cache_status": cache_status,
             "docking_recommended": as_bool(row["docking_recommended"]),
             "is_preferred": as_bool(row["is_preferred"]),
             "quality_note": row["quality_note"],

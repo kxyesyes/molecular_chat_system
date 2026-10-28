@@ -26,6 +26,8 @@ def calculator(request):
     ('CCO\nSMILES: CCN', ['CCO', 'CCN']),
     ('CCO; SMILES: CCN', ['CCO', 'CCN']),
     ('计算 CCO 和 CCN 的性质', ['CCO', 'CCN']),
+    ('请分析乙醇(CCO)的分子性质', ['CCO']),
+    ('请分析乙醇（CCO）的分子性质', ['CCO']),
     ('SMILES: CC(=O)Oc1ccccc1C(=O)O\nSMILES: CCN', ['CC(=O)Oc1ccccc1C(=O)O', 'CCN']),
     ('SMILES：`[Na+].[Cl-]`；SMILES: "N[C@@H](C)C(=O)O"', ['[Na+].[Cl-]', 'N[C@@H](C)C(=O)O']),
     ('SMILES: [13CH3]CO', ['[13CH3]CO']),
@@ -64,6 +66,11 @@ def test_full_batch_is_computed(calculator, query, expected):
     'SMILES: CCO\nSMILES:',
     'SMILES: "CCO',
     'SMILES: CCO |invalid-extension|',
+    'SMILES: CCN预测量子轨道能量',
+    'SMILES: CCN\u200bLogD',
+    'SMILES: CCN😀',
+    'SMILES: CCN\x00LogD',
+    'SMILES: CCN\x01LogD',
 ])
 def test_invalid_input_cannot_be_silently_repaired_or_dropped(calculator, query):
     result = calculator.execute(query)

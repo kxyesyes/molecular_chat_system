@@ -95,6 +95,29 @@ def test_admet_trigger_uses_same_whole_input_contract(query, expected):
     assert module.ADMETPredictor().should_use(query) is expected
 
 
+def test_labeled_smiles_can_be_followed_by_chinese_request_prose():
+    calls = []
+    predictor = recording_predictor(calls)
+
+    result = predictor.execute("请预测 SMILES: CCO 的 ADMET 风险。")
+
+    assert result["success"]
+    assert calls == ["CCO"]
+    assert result["data"][0]["smiles"] == "CCO"
+
+
+def test_labeled_smiles_handles_chinese_prose_without_space_after_de():
+    calls = []
+    predictor = recording_predictor(calls)
+
+    result = predictor.execute(
+        "请分析 SMILES: CCO 的分子性质和 ADMET 风险，分别返回分子量、LogP。"
+    )
+
+    assert result["success"]
+    assert calls == ["CCO"]
+
+
 def test_missing_rdkit_validation_cannot_fall_back_to_lexical_acceptance(monkeypatch):
     monkeypatch.setattr(module, "parse_molecular_smiles", lambda *args, **kwargs: (_ for _ in ()).throw(
         module.MolecularInputUnavailable("RDKit 不可用，无法验证 SMILES。")

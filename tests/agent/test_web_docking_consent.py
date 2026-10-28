@@ -51,6 +51,24 @@ def test_d2_s10_preserves_exact_inputs_without_inventing_selection_or_grid():
                                         'exhaustiveness', 'num_modes']
 
 
+def test_d2_accepts_structure_before_ligand_natural_language_order():
+    result = text_boundary(
+        '使用 EGFR 的实验结构 1M17 与候选分子 CCO 进行一次分子对接；'
+        '使用共晶配体定义口袋；缺少该信息先说明，不要猜坐标。'
+    )
+    assert result['assessed'] is True
+    assert result['inputs'] == {'pdb_id': '1M17', 'smiles': 'CCO'}
+
+
+def test_d2_accepts_explicit_safety_clause_after_natural_action():
+    result = text_boundary(
+        '使用 EGFR 的实验结构 1M17 与候选分子 CCO 进行一次真实分子对接，'
+        '缺少该信息先说明，不要猜坐标'
+    )
+    assert result['assessed'] is True
+    assert result['inputs'] == {'pdb_id': '1M17', 'smiles': 'CCO'}
+
+
 @pytest.mark.parametrize('query', [
     '不要做分子对接。', '能否进行分子对接？', '如何进行分子对接？',
     'Do not run docking.', 'Can you run docking?', '请进行 docking 吗？',

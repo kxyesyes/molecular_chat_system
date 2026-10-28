@@ -141,6 +141,15 @@ def web_observation_reasons(result, record, step, *, request_query):
                     or any(row.get('missing_required_evidence') or
                         required & set(row.get('missing_evidence', [])) for row in rows)):
                 reasons.append('required_ranking_evidence_missing')
+            from src.agent.contracts.property_ranking_request import property_only_design_request
+            if property_only_design_request(request_query):
+                # Recompute only this fixed, deterministic heuristic from the
+                # already bound inputs; type/identity checks alone do not prove
+                # that a producer's scores, weights or ordering are correct.
+                from src.agent.tools.candidate_ranker import CandidateRanker
+                expected_ranking = CandidateRanker().execute(payload)
+                if not expected_ranking.get('success') or data != expected_ranking.get('data'):
+                    reasons.append('ranking_evidence_mismatch')
         elif name == 'lead_optimization_verifier':
             data = result.data
             if (data['status'] != 'supported' or data['supported_candidate_count'] < 1
@@ -321,6 +330,34 @@ def _scientific_data(result):
                     clean[section] = _pick(value[section], fields)
             rows.append(dict(smiles=row['smiles'], admet=clean))
         return rows
+    if result.tool_name == 'target_database_search':
+        # The B1 identity-only view is sufficient for downstream binding, but
+        # Web users also requested structure evidence. Keep only typed public
+        # fields here, never file paths, producer prose or opaque extensions.
+        _typed(result)
+        rows = b1_data(result)
+        if rows is None:
+            return None
+        for row, original in zip(rows, result.data):
+            row.update(_pick(original, (
+                'has_experimental_structure', 'has_alphafold_structure',
+                'experimental_structure_count', 'alphafold_structure_count',
+                'source_url', 'target_stale', 'structures_stale',
+                'target_retrieved_at', 'target_expires_at',
+                'structures_retrieved_at', 'structures_expires_at')))
+            row['recommended_structures'] = [_pick(structure, (
+                'structure_id', 'pdb_id', 'source', 'source_url', 'structure_type',
+                'method', 'resolution', 'organism',
+                'recommendation_level', 'docking_recommended',
+                'retrieved_at', 'expires_at', 'stale'))
+                for structure in original.get('recommended_structures', [])]
+            for clean, structure in zip(row['recommended_structures'],
+                                        original.get('recommended_structures', [])):
+                for field in ('chain_ids', 'ligand_ids'):
+                    if field in structure:
+                        clean[field] = (list(structure[field])
+                                        if structure[field] is not None else None)
+        return rows
     if result.tool_name == 'drug_likeness_assessment':
         # Web exposes the existing heuristic score, not the producer's prose,
         # grades or category. Keep the independent B1 projection unchanged.
@@ -350,6 +387,11 @@ def _scientific_data(result):
                 for field in ('missing_evidence', 'missing_required_evidence'):
                     if field in row:
                         clean[field] = list(row[field])
+                if isinstance(row.get('ranking_evidence'), dict):
+                    evidence = row['ranking_evidence']
+                    clean['ranking_evidence'] = _pick(evidence, ('property_score', 'admet_score', 'activity_score'))
+                    clean['ranking_evidence']['weights_used'] = _pick(evidence.get('weights_used', {}),
+                        ('properties', 'admet', 'activity'))
                 value[key].append(clean)
         return value
     if result.tool_name == 'lead_optimization_verifier':
@@ -374,7 +416,8 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
     # A transport-budget/dependency stop is not a model finish or successful task. The
     # server may still display already authenticated work without inventing a
     # model citation or dropping evidence to squeeze in another model request.
-    interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable')
+    interrupted = interruption_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
+                                         'activity_target_conflict_or_unknown')
     if ((interruption_reason is not None and not interrupted)
             or (interrupted and evidence_ids is not None)
             or (evidence_ids is None and not interrupted)):
@@ -400,7 +443,7 @@ def render_web_scientific_answer(resolver, *, required_tools=(), evidence_ids, i
                 _typed(result)
                 display = not any(code in reasons[identity] for code in (
                     'invalid_scientific_observation', 'subject_mismatch', 'ranking_candidate_mismatch',
-                    'invalid_smiles', 'duplicate_smiles', 'current_source_proof_missing'))
+                    'ranking_evidence_mismatch', 'invalid_smiles', 'duplicate_smiles', 'current_source_proof_missing'))
             except (ValueError, TypeError, KeyError):
                 pass
         block = dict(tool=result.tool_name, evidence_id=identity, status=result.status.value,

@@ -25,19 +25,25 @@ _FOLLOWUP = re.compile(
 def comparison_tools(query):
     """Recognize explicit multi-endpoint comparisons, not open-ended design."""
     from src.agent.planning.request_parsing import positive_intent_text, wants_admet, wants_activity
+    from src.agent.planning.comparison_request import COMPARISON_PROPERTY_TERMS
     positive = positive_intent_text(query)
     if (not re.search(r"比较|对比|\bcompare\b", positive, re.I)
-            or not re.search(r"排序|\brank\b", positive, re.I)
             or not wants_activity(query)
             or re.search(r"生成|设计|优化|对接|反向|寻靶|靶点搜索|靶点检索|"
                          r"\b(?:generate|design|optimi\w*|dock\w*|reverse)\b", positive, re.I)):
         return ()
     tools = []
-    if re.search(r"性质|分子量|logp|tpsa|qed|properties|molecular\s+weight", positive, re.I):
+    if COMPARISON_PROPERTY_TERMS.search(positive):
         tools.append("property_calculator")
     if wants_admet(query):
         tools.append("admet_predictor")
     return tuple(tools + ["activity_predictor"]) if tools else ()
+
+
+def ranking_requested(query):
+    """Share positive evidence-ordering intent between planning and display."""
+    from src.agent.planning.request_parsing import positive_intent_text
+    return bool(re.search(r"排序|\brank\b", positive_intent_text(query), re.I))
 
 
 def _canonical(smiles):
@@ -147,7 +153,7 @@ def _cell(value):
     return escape(str(value)).replace("|", "\\|").replace("`", "&#96;").replace("\n", " ").replace("\r", " ")
 
 
-def _render(smiles, observations, trace_id, tools, *, reused=False, activity_bound=True):
+def _render(smiles, observations, trace_id, tools, *, reused=False, activity_bound=True, ranking=True):
     by_tool, issues, aligned = {}, [], {}
     for tool in tools:
         found = [item for item in observations if item["tool_name"] == tool]
@@ -164,65 +170,103 @@ def _render(smiles, observations, trace_id, tools, *, reused=False, activity_bou
     eligible, excluded = [], []
     for smi in smiles:
         row = activity.get(smi)
-        reason = _exclusion(row) if row is not None else "缺少可对应的已接受活性证据/靶点来源"
+        reason = _exclusion(row) if row is not None else "缺少可对应的已接受活性证据或靶点来源"
         if reason:
             excluded.append((smi, reason))
         else:
             eligible.append(row)
     # Do not compare unrelated model requests, even within the same family.
     identities = {row["provenance"]["request"]["identity"] for row in eligible}
+    operation = "排序" if ranking else "比较"
     if len(identities) > 1:
-        excluded.extend((row["smiles"], "模型请求来源不同，不能直接排序") for row in eligible)
+        excluded.extend((row["smiles"], f"模型请求来源不同，不能直接{operation}") for row in eligible)
         eligible = []
-    eligible.sort(key=lambda row: -row["predicted_pIC50"])
-    lines = ["活性证据排序（复用上一轮）" if reused else "多指标比较与活性证据排序", "",
-        "标准：仅使用状态 passed、分类/回归一致且模型来源与有限 pIC50 通过检查的候选，按预测 pIC50 降序；相同数值并列。",
+    if ranking:
+        eligible.sort(key=lambda row: -row["predicted_pIC50"])
+    title = ("活性证据排序（复用上一轮）" if reused else "多指标比较与活性证据排序") if ranking else "多指标比较"
+    order = "按预测 pIC50 降序；相同数值并列。" if ranking else "按输入顺序展示。"
+    lines = [title, "",
+        "标准：仅使用状态 passed、分类与回归一致且模型来源与有限 pIC50 通过检查的候选，" + order,
         "性质和 ADMET 仅作描述性信息与风险提示，不参与隐藏加权；缺失 ADMET 不删除已验证活性行。模型预测非实验结论。", "",
-        "| 排名 | SMILES | 靶点 | 活性分类 | 活性概率 | 预测 pIC50 |",
-        "|---|---|---|---|---|---|"]
+        ("| 排名 " if ranking else "") + "| SMILES | 靶点 | 活性分类 | 活性概率 | 预测 pIC50 |",
+        ("|---" if ranking else "") + "|---|---|---|---|---|"]
     last, rank = None, 0
     for index, row in enumerate(eligible, 1):
         if row["predicted_pIC50"] != last:
             rank = index
         last = row["predicted_pIC50"]
-        lines.append("| " + " | ".join(_cell(value) for value in (rank, row["smiles"],
-            row.get("requested_target"), row.get("activity_class"), row.get("activity_probability"), last)) + " |")
+        values = (row["smiles"], row.get("requested_target"), row.get("activity_class"),
+                  row.get("activity_probability"), last)
+        if ranking:
+            values = (rank, *values)
+        lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
     if not eligible:
-        lines.append("无可用候选参与活性排序；未推测任何缺失数值。")
+        lines.append(f"无可用候选参与活性{operation}；未推测任何缺失数值。")
     if any(tool != "activity_predictor" for tool in tools):
-        lines.extend(["", "| SMILES | 分子量 (Da) | logP | TPSA | QED | ADMET 风险提示（描述性） |",
-                      "|---|---|---|---|---|---|"])
+        show_properties = "property_calculator" in tools
+        show_admet = "admet_predictor" in tools
+        columns = ["SMILES"]
+        if show_properties:
+            columns.extend(["分子量 (Da)", "logP", "TPSA", "QED"])
+        if show_admet:
+            columns.append("ADMET 风险提示（描述性）")
+        lines.extend(["", "| " + " | ".join(columns) + " |", "|" + "---|" * len(columns)])
         for smi in smiles:
             properties = aligned.get("property_calculator", {}).get(smi, {}).get("properties", {})
             admet_row = aligned.get("admet_predictor", {}).get(smi, {})
             admet = admet_row.get("admet", {})
-            risk = "不可用/未通过检查"
+            risk = "不可用，未通过检查"
             if admet_row.get("status", "succeeded") == "succeeded" and isinstance(admet, dict) and admet:
                 risk = f"风险提示 {admet.get('risk_count', '不可用')}/{admet.get('total_endpoints', '不可用')}；详见原始端点"
-            lines.append("| " + " | ".join(_cell(value) for value in (smi,
-                *(properties.get(key, "不可用") for key in ("molecular_weight", "logp", "tpsa", "qed")), risk)) + " |")
+            values = [smi]
+            if show_properties:
+                values.extend(properties.get(key, "不可用") for key in ("molecular_weight", "logp", "tpsa", "qed"))
+            if show_admet:
+                values.append(risk)
+            lines.append("| " + " | ".join(_cell(value) for value in values) + " |")
     lines.extend(["", "排除原因："])
     lines.extend(f"- `{_cell(smi)}`：{reason}。原始预测保留。" for smi, reason in excluded)
     if not excluded:
         lines.append("无候选被排除：全部候选通过检查；不因用户提到‘另外的候选’而虚构排除。")
     if issues:
         lines.extend(["", "部分完成，并非全部请求的证据可用：", *issues])
+    # Capture the concise view before technical source footers and raw JSON.
+    # The first two policy paragraphs are replaced explicitly, not removed from
+    # arbitrary model/tool prose. Accepted rows, ranking and exclusions are shared.
+    labels = {'property_calculator': '分子性质', 'admet_predictor': 'ADMET 预测',
+              'activity_predictor': '活性预测'}
+    summary_order = ('按通过一致性检查的预测 pIC50 降序排列；相同数值并列。' if ranking
+                     else '按输入顺序展示通过一致性检查的活性预测。')
+    summary_lines = [lines[0], '', summary_order,
+                     *lines[5:]]
+    summary_answer = '\n'.join(summary_lines)
+    for name, label in labels.items():
+        summary_answer = summary_answer.replace(name + '：', label + '：')
     lines.extend(["", "来源：trace `" + _cell(trace_id) + "`。"])
     for tool, item in by_tool.items():
         if item:
             lines.append(f"- {tool} [{_cell(item['status'])}]；证据 `{_cell((item.get('quality') or {}).get('evidence_id'))}`。")
     if reused:
         lines.append("仅复用当前聊天紧邻上一轮结构化工具证据，未重新运行科学工具。")
-    lines.extend(["", "所有原始结构化结果（含未参与排序的行、阶段错误、靶点及模型来源；未更改预测或阈值）：",
+    lines.extend(["", f"所有原始结构化结果（含未参与{operation}的行、阶段错误、靶点及模型来源；未更改预测或阈值）：",
         "```json", json.dumps(observations, ensure_ascii=False, indent=2).replace("`", "\\u0060").replace("<", "\\u003c"), "```"])
     partial = bool(issues or excluded)
-    return {"final_answer": "\n".join(lines), "success": not partial,
+    return {"final_answer": "\n".join(lines), "summary_answer": summary_answer, "success": not partial,
             "status": "partial" if partial else "completed", "partial": partial}
 
 
 def followup_answer(query, history, session_id):
     """Return None outside the deliberately closed follow-up grammar."""
-    if not _FOLLOWUP.fullmatch(query):
+    from .activity_evidence_inspection import inspection_request, inspection_answer, valid_inspection_evidence
+    from .contracts.concept_request import is_concept_explanation
+    inspection = inspection_request(query)
+    concept = is_concept_explanation(query)
+    if inspection is False and not concept:
+        return {'final_answer': '本次只读追问包含无法对应到已有活性记录的要求；未重新计算。'
+                '可查看上一轮的原始活性概率、pIC50、分类、一致性和排除原因；'
+                '新增指标或其他靶点没有可对应证据，请拆分请求。',
+                'status': 'not_calculated', 'success': False}
+    if inspection is None and not _FOLLOWUP.fullmatch(query):
         return None
     previous = history[-1].get("activity_evidence") if history else None
     if isinstance(previous, dict) and previous.get("session_id") == session_id and session_id:
@@ -230,8 +274,28 @@ def followup_answer(query, history, session_id):
         result = {"trace_id": previous.get("trace_id"), "tool_result_sequence": previous.get("observations")}
         evidence = accepted_activity_evidence(result, previous.get("query", ""), session_id)
         if evidence is not None:
-            return _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
+            if inspection is False and concept:
+                # Multiple supported concept clauses may fall outside the
+                # inspection grammar. Validate the source before falling through.
+                if valid_inspection_evidence(evidence):
+                    return None
+                return inspection_answer(evidence, {'selectors': (), 'all': True})
+            if inspection is not None:
+                return inspection_answer(evidence, inspection)
+            view = _render(evidence["smiles"], evidence["observations"], evidence["trace_id"],
                            ("activity_predictor",), reused=True)
+            if valid_inspection_evidence(evidence):
+                view['activity_evidence'] = evidence
+            return view
+        if concept:
+            # A present but corrupt source is not the same as absent context.
+            # Do not conceal its integrity failure behind an ordinary answer.
+            return {'final_answer': '上一轮活性记录未通过完整性复核，无法安全解读原始预测；未重新计算，也未沿用该证据。',
+                    'status': 'not_calculated', 'success': False}
+    if concept:
+        # No source is needed to explain a concept. Web admission uses the same
+        # complete grammar and seals an ordinary-chat plan with no science.
+        return None
     return {"final_answer": "缺少当前聊天紧邻上一轮可对应的已接受活性证据。请提供明确候选 SMILES 和靶点，或先完成预测；未从助手文字猜测数值。",
             "status": "not_calculated", "success": False}
 
@@ -246,4 +310,5 @@ def comparison_answer(query, result, session_id):
         return {"final_answer": "比较未完成：候选超过边界或结构化证据无法安全完整展示，请缩小请求范围。",
                 "success": False, "status": "partial", "partial": True}
     evidence = accepted_activity_evidence(result, query, session_id)
-    return _render(smiles, observations, result.get("trace_id"), tools, activity_bound=evidence is not None)
+    return _render(smiles, observations, result.get("trace_id"), tools,
+                   activity_bound=evidence is not None, ranking=ranking_requested(query))

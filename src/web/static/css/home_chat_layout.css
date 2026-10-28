@@ -1,0 +1,101 @@
+/* Shrink the flex chain, not the scientific contents. Table overflow is local. */
+.index_con .right {
+  min-width: 0;
+}
+
+.chat-messages {
+  min-width: 0;
+}
+
+.chat-messages .message-wrapper {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-messages .message-container {
+  min-width: 0;
+  max-width: 70%;
+}
+
+.chat-messages .message-container > .message-box {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.chat-messages .message-container > .rag-info-container {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.home-comparison-table-scroll {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.home-comparison-table-scroll th,
+.home-comparison-table-scroll td {
+  min-width: 5rem;
+}
+
+.home-comparison-table-scroll:focus-visible {
+  outline: 2px solid var(--theme-primary-text, #23304f);
+  outline-offset: 3px;
+}
+
+.chat-composer .fill,
+.chat-composer .fill input {
+  min-width: 0;
+}
+
+.chat-composer .decision-runtime-controls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.chat-composer .decision-runtime-controls[hidden] {
+  display: none;
+}
+
+.chat-composer .decision-runtime-controls button {
+  min-height: 44px;
+  padding: 8px 14px;
+  border: 1px solid var(--theme-primary-border, #c6cfe2);
+  border-radius: 12px;
+  background: var(--theme-primary-soft, #f1f5f9);
+  color: var(--theme-primary-text, #23304f);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-composer .decision-runtime-controls button:hover:not(:disabled) {
+  background: var(--theme-primary, #e2e8f0);
+}
+
+.chat-composer .decision-runtime-controls button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.chat-composer .decision-runtime-controls button:focus-visible {
+  outline: 2px solid var(--theme-primary-text, #23304f);
+  outline-offset: 3px;
+}
+
+@media (max-width: 768px) {
+  .chat-messages .message-container {
+    max-width: 100%;
+  }
+
+  /* Fixed composer: input, tools, decision row, gaps and safe-area clearance. */
+  .index_con .right {
+    padding-bottom: calc(208px + env(safe-area-inset-bottom));
+  }
+}

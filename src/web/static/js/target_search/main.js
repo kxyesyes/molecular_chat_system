@@ -276,7 +276,7 @@ const TargetSearchApp = (() => {
         <div class="target-result-meta">
           <div><span>UniProt</span><strong>${escapeHtml(item.uniprot_id || "-")}</strong></div>
           <div><span>Type</span><strong>${escapeHtml(item.target_type || "-")}</strong></div>
-          <div><span>Structures</span><strong>${item.structure_count || 0}</strong><em>已缓存 ${item.downloaded_structure_count || 0}</em></div>
+          <div><span>Structures</span><strong>${item.structure_count || 0}</strong><em>本地文件 ${item.downloaded_structure_count || 0}</em></div>
         </div>
 
         <div class="target-result-flags">
@@ -477,6 +477,14 @@ const TargetSearchApp = (() => {
     const warnings = item.warnings || [];
     const titleText = item.title || "暂无结构标题";
     const downloadText = item.download_url || "-";
+    const cacheStatus = item.cache_status || (item.is_downloaded ? "unverified" : "missing");
+    const cacheLabel = {
+      available: "已验证缓存",
+      unverified: "本地文件未验证",
+      stale: "缓存已过期",
+      missing: "未缓存",
+    }[cacheStatus] || "缓存状态未知";
+    const cacheClass = cacheStatus === "available" ? "ok" : "";
 
     return `
       <article class="structure-item">
@@ -485,7 +493,7 @@ const TargetSearchApp = (() => {
             <span class="structure-id">${escapeHtml(item.structure_id)}</span>
             <span class="grade-badge grade-${escapeHtml(item.docking_grade || "C")}">${escapeHtml(item.docking_grade_label || "参考结构")}</span>
             <span class="badge">${escapeHtml(item.file_format || "-")}</span>
-            <span class="badge ${item.is_downloaded ? "ok" : ""}">${item.is_downloaded ? "已缓存" : "未缓存"}</span>
+            <span class="badge ${cacheClass}">${cacheLabel}</span>
             ${item.docking_recommended ? "<span class=\"badge ok\">Docking</span>" : "<span class=\"badge\">不优先 Docking</span>"}
             ${item.is_preferred ? "<span class=\"badge warn\">推荐</span>" : ""}
           </div>
@@ -522,7 +530,7 @@ const TargetSearchApp = (() => {
           <span class="level-pill">${escapeHtml(item.recommendation_level || "Reference")}</span>
           <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'pdb')">下载 PDB</button>
           <button class="small-btn secondary" type="button" onclick="TargetSearchApp.downloadStructure(${inlineJsArg(item.id)}, 'cif')">下载 mmCIF</button>
-          <button class="small-btn primary" type="button" onclick="TargetSearchApp.sendToDocking(${inlineJsArg(item.id)})">发送到分子对接</button>
+          <button class="small-btn primary" type="button" onclick="TargetSearchApp.sendToDocking(${inlineJsArg(item.id)})">准备并打开分子对接</button>
         </div>
       </article>
     `;
@@ -588,7 +596,7 @@ const TargetSearchApp = (() => {
 
       await downloadStructure(preferred.id, preferred.file_format || "cif");
     } catch (error) {
-      showMessage(error.message, "error");
+      showMessage(formatStructureActionError(error), "error");
     }
   }
 
@@ -609,7 +617,7 @@ const TargetSearchApp = (() => {
       URL.revokeObjectURL(url);
       showMessage(`结构文件已开始下载：${filename}。${formatPreflightMessage(preflight, "download")}`, "success");
     } catch (error) {
-      showMessage(error.message, "error");
+      showMessage(formatStructureActionError(error), "error");
     }
   }
 
@@ -623,15 +631,20 @@ const TargetSearchApp = (() => {
         throw new Error(data.message || "结构文件准备失败");
       }
       showMessage(`${data.message}：${data.protein_file}。${formatPreflightMessage(preflight, "docking")}`, "success");
+      const targetId = data.structure_db_id || structureId;
+      window.location.href = `/molecular-docking?target_structure=${encodeURIComponent(targetId)}&target_structure_id=${encodeURIComponent(targetId)}`;
     } catch (error) {
-      showMessage(error.message, "error");
+      showMessage(formatStructureActionError(error), "error");
     }
   }
 
   function formatPreflightMessage(preflight, intent) {
-    const cacheText = preflight.cache_status === "available"
-      ? `本地缓存可用${preflight.file_size_bytes ? `，${formatBytes(preflight.file_size_bytes)}` : ""}`
-      : "本地缓存缺失，将尝试远程下载并缓存";
+    const cacheText = {
+      available: `本地缓存已验证${preflight.file_size_bytes ? `，${formatBytes(preflight.file_size_bytes)}` : ""}`,
+      unverified: "本地文件存在但未通过完整性验证，不会直接用于 docking",
+      stale: "本地缓存已过期，不会直接用于 docking",
+      missing: "本地缓存缺失，将尝试远程下载并缓存",
+    }[preflight.cache_status] || "本地结构缓存状态未知，需要重新检查";
     const dockingText = preflight.suitable_for_direct_docking
       ? `${preflight.docking_grade} 级结构，适合作为 docking 输入`
       : `${preflight.docking_grade} 级结构，建议谨慎用于 docking`;
@@ -648,6 +661,14 @@ const TargetSearchApp = (() => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / 1024 / 1024).toFixed(2)} MB`;
+  }
+
+  function formatStructureActionError(error) {
+    const message = String(error?.message || "");
+    if (/restricted network|could not be resolved|returned no addresses|download failed/i.test(message)) {
+      return "当前网络无法访问结构来源，结构未进入对接流程。请检查网络，或选择已验证缓存的结构后重试。";
+    }
+    return message || "结构文件准备失败，未进入对接流程。";
   }
 
   function setLoading(isLoading) {

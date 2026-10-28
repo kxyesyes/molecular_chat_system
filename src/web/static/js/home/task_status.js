@@ -34,6 +34,7 @@ window.HomeTaskStatus = (() => {
     reverse_target_predictor: "反向寻靶",
     target_database_search: "靶点库检索",
     llm_molecular_generator: "分子生成",
+    candidate_ranker: "候选排序",
     molecular_docking: "分子对接",
   });
 
@@ -52,10 +53,7 @@ window.HomeTaskStatus = (() => {
       const details = payload.error && payload.error.details;
       for (const source of [details, payload.quality]) {
         if (!source || source.reason !== "dependency_blocked" || source.executed !== false) continue;
-        const ids = Array.isArray(source.blocked_by) ? source.blocked_by.slice(0, 20).filter(
-          id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(id),
-        ) : [];
-        return `未执行（依赖：${ids.join("、") || "上游步骤"}）`;
+        return "未执行（依赖未完成）";
       }
     }
     return "尚未计算";
@@ -92,7 +90,67 @@ window.HomeTaskStatus = (() => {
   }
 
   function formatToolName(toolName) {
-    return toolNames[toolName] || toolName;
+    return toolNames[toolName] || "计算步骤";
+  }
+
+  function optionalFailureMessage(text, toolName) {
+    const match = /^Optional step [A-Za-z0-9_:.-]{1,128} \(([^()\s]+)\) failed: ([\s\S]*)$/.exec(text);
+    return match && match[1] === toolName && Object.prototype.hasOwnProperty.call(toolNames, toolName)
+      ? `${toolNames[toolName]}：失败。${match[2]}` : text;
+  }
+
+  function rankWarning(text) {
+    let match = /^ADMET evidence was absent or unusable for (\d+) ranked candidate\(s\)$/.exec(text);
+    if (match) return `${match[1]} 个候选缺少可用的 ADMET 证据。`;
+    match = /^Activity evidence was absent, demo, fallback, or unusable for (\d+) ranked candidate\(s\)$/.exec(text);
+    return match ? `${match[1]} 个候选缺少可用的活性证据。` : text;
+  }
+
+  function message(event) {
+    const type = displayEventType(event?.event || event?.type, event?.payload);
+    // Lifecycle labels already communicate progress; keep concrete problems,
+    // not the executor's internal "Running <step-id>" chatter.
+    if (!["tool_partial", "tool_not_calculated", "tool_failed", "task_partial", "task_failed",
+      "task_rejected", "task_cancelled", "validation_warning"].includes(type)) return "";
+    if (type === "tool_not_calculated") return notCalculatedLabel(event?.payload);
+    let text = typeof event?.message === "string" ? event.message : "";
+    const toolName = event?.tool || event?.tool_name;
+    if (text === "Decision terminal attempt pending verification") return "";
+    if (text === 'Observation preparation failed') text = '结果准备或校验失败，无法采用该结果。';
+    if (text === 'Decision publication invalidated') text = '结果校验未通过，无法交付本次任务结果。';
+    if (type === "validation_warning" && text === "Tool result has validation warnings") {
+      const informational = new Set([
+        "ADMET-AI outputs are model predictions; they are not experimental results.",
+        "Physicochemical endpoints are calculated by RDKit inside ADMET-AI.",
+        "Risk summary is a screening heuristic, not a safety conclusion.",
+      ]);
+      const warnings = Array.isArray(event?.payload?.warnings)
+        ? event.payload.warnings.filter(item => typeof item === "string" && !informational.has(item))
+        : [];
+      const optionalFailures = warnings.filter(item => optionalFailureMessage(item, toolName) !== item);
+      const optionalFailureDetails = optionalFailures
+        .map(item => /^Optional step [A-Za-z0-9_:.-]{1,128} \(([^()\s]+)\) failed: ([\s\S]*)$/.exec(item))
+        .filter(match => match && match[1] === toolName);
+      const hasDuplicateFailureReason = optionalFailureDetails.length === 1
+        && warnings.includes(optionalFailureDetails[0][2]);
+      if (optionalFailureDetails.length === 1
+          && (warnings.length === 1 || hasDuplicateFailureReason)) {
+        return `${toolNames[toolName] || "计算步骤"}：结果校验未通过；具体原因见失败步骤。`;
+      }
+      text = warnings.map(item => rankWarning(optionalFailureMessage(item, toolName))).join("；");
+    }
+    text = optionalFailureMessage(text, toolName);
+    for (const label of Object.values(toolNames)) {
+      if (text === `${label}：失败。Observation preparation failed`) {
+        text = `${label}：失败。结果准备或校验失败，无法采用该结果。`;
+      }
+    }
+    const disclaimer = "；模型预测不等同于实验结论。";
+    if ((event?.tool || event?.tool_name) === "activity_predictor" && text.endsWith(disclaimer)) {
+      text = text.slice(0, -disclaimer.length) + "。";
+    }
+    for (const [name, label] of Object.entries(toolNames)) text = text.split(name).join(label);
+    return text;
   }
 
   function label(type, toolName, payload) {
@@ -119,5 +177,5 @@ window.HomeTaskStatus = (() => {
     return "is-running";
   }
 
-  return Object.freeze({resolve, label, className, formatToolName});
+  return Object.freeze({resolve, label, className, formatToolName, message});
 })();

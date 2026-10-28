@@ -2,6 +2,7 @@
 
 window.HomeConfig = {
   scientificReferences: {baseUrl: "/api/agent/workflows/references"},
+  resultDetails: {baseUrl: "/api/agent/runs"},
   themes: ["low", "medium", "high"],
   storageKeys: {
     theme: "medchat-theme-level",

@@ -153,6 +153,7 @@ function renderInteractionEvidence(kind, interactions) {
 // 相互作用只展示后端成熟分析器的结构化证据；浏览器端不再自行猜测化学作用。
 async function requestInteractionAnalysis(kind) {
   const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
+  const viewSequence = typeof getDockingViewSequence === "function" ? getDockingViewSequence() : null;
   const poseSelect = document.getElementById("pose-select");
   const pose = poseSelect ? parseInt(poseSelect.value || "1", 10) : 1;
   if (!jobId || !Number.isInteger(pose) || pose <= 0) {
@@ -161,6 +162,7 @@ async function requestInteractionAnalysis(kind) {
   }
   try {
     const analysis = await fetchInteractionAnalysis(jobId, pose);
+    if ((typeof getDockingViewSequence === "function" && getDockingViewSequence() !== viewSequence) || getCurrentJobId() !== jobId || parseInt(poseSelect?.value || "1", 10) !== pose) return;
     if (analysis.status === "failed") {
       const detail = analysis.warnings?.[0] || analysis.detail;
       Utils.showToast(
@@ -191,6 +193,7 @@ async function requestInteractionAnalysis(kind) {
       Utils.showToast(`已显示 ${rendered} 条${kind}相互作用证据`, "success");
     }
   } catch (error) {
+    if ((typeof getDockingViewSequence === "function" && getDockingViewSequence() !== viewSequence) || getCurrentJobId() !== jobId) return;
     console.warn("后端相互作用分析不可用:", error);
     Utils.showToast("相互作用分析服务不可用，未显示推测结果", "warning");
   }

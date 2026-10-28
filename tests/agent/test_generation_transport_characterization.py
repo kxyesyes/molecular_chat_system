@@ -335,7 +335,11 @@ def assert_attempts(probe, mode, script, *, optimizing=False, invocations=1):
         assert set(payload) == {"model", "prompt", "stream", "options"}
         assert payload["model"] == "gmm-llama:latest"
         assert payload["stream"] is False
-        assert payload["options"] == {"temperature": TEMPERATURE, "num_predict": 1000}
+        assert payload["options"] == {
+            "temperature": TEMPERATURE,
+            "num_predict": 1000,
+            "num_ctx": 512,
+        }
         if optimizing:
             expected_prompt = probe.tool.optimization_prompt_template.format(
                 smiles="CCO", objectives="improve drug-likeness", count=10,
@@ -403,6 +407,36 @@ def test_real_generation_chain_counts_strict_transport_attempts(production, mode
                       failed_rounds=any(kind != "ok" for kind, _ in script))
 
 
+def test_molecular_generator_bounds_ollama_context_for_gpu_headroom(production):
+    class RecordingClient:
+        def __init__(self):
+            self.payload = None
+
+        def post(self, url, *, json):
+            self.payload = json
+            return httpx.Response(200, json={
+                "response": "\n".join(TEN),
+                "done": True,
+            })
+
+    model = object.__new__(production.model)
+    model.base_url = BASE_URL
+    model.model_name = "gmm-llama:latest"
+    model.sync_client = RecordingClient()
+    tool = production.generator(model)
+    intent = {
+        "requirements": QUERY,
+        "count": 10,
+        "temperature": TEMPERATURE,
+        "target_evidence": None,
+    }
+
+    assert tool._generate_with_llm(intent) == list(TEN)
+
+    payload = model.sync_client.payload
+    assert payload["options"]["num_ctx"] == 512
+
+
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("failure", ["http-error", "disconnect"])
 def test_optimization_transport_failure_never_adds_seed_or_apology(production, mode, failure):
@@ -458,7 +492,8 @@ def test_invalid_count_makes_zero_helper_or_transport_calls(production, mode):
 def test_client_strict_error_seam_is_explicit_opt_in_not_invocation_control(production):
     for name in ("generate", "generate_async"):
         signature = inspect.signature(getattr(production.model, name))
-        assert tuple(signature.parameters) == ("self", "prompt", "temperature", "max_tokens", "strict_errors")
+        assert tuple(signature.parameters) == (
+            "self", "prompt", "temperature", "max_tokens", "strict_errors", "num_ctx")
         assert signature.parameters["max_tokens"].default == 1500
         assert signature.parameters["strict_errors"].kind is inspect.Parameter.KEYWORD_ONLY
         assert signature.parameters["strict_errors"].default is False
@@ -1084,7 +1119,11 @@ def test_capability_loss_between_rounds_discards_valid_partial_batch(
     assert event["channel"] == ("sync" if mode == "native-sync" else "async")
     assert event["has_loop"] is (mode != "native-sync")
     assert (event["thread"] == probe.worker_thread) is (mode != "coroutine-running-loop")
-    assert event["payload"]["options"] == {"temperature": TEMPERATURE, "num_predict": 1000}
+    assert event["payload"]["options"] == {
+        "temperature": TEMPERATURE,
+        "num_predict": 1000,
+        "num_ctx": 512,
+    }
     template = (probe.tool.optimization_prompt_template.format(
         smiles="CCO", objectives="improve drug-likeness", count=10,
         requirements="optimize 10 molecules; SMILES: CCO") if optimizing else
@@ -1137,8 +1176,12 @@ def test_running_loop_bridge_uses_captured_method_without_rereading_binding(prod
     event = probe.calls[0]
     assert event["channel"] == "async" and event["has_loop"]
     assert event["thread"] != probe.worker_thread
-    assert event["payload"] == {"model": "gmm-llama:latest", "prompt": QUERY,
-        "stream": False, "options": {"temperature": TEMPERATURE, "num_predict": 1000}}
+    assert event["payload"] == {
+        "model": "gmm-llama:latest",
+        "prompt": QUERY,
+        "stream": False,
+        "options": {"temperature": TEMPERATURE, "num_predict": 1000, "num_ctx": 512},
+    }
 
 
 @pytest.mark.parametrize("mode", MODES)

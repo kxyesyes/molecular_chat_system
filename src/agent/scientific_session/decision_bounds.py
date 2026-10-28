@@ -125,11 +125,21 @@ def validate_raw_observation(raw):
             raise DecisionBoundaryError('conflicting_tool_result')
 
 
-def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, html_safe=False):
+def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, html_safe=False,
+                  compact=False, capacity_reason=None):
+    """Fail fast; optionally distinguish a budget limit from invalid JSON.
+
+    A capacity error is not proof that unvisited values are valid. Callers that
+    recover from aggregate overflow must first validate its bounded components.
+    Existing callers retain the same reason for every failure.
+    """
     from .decision_policy import DecisionBoundaryError
 
     def reject():
         raise DecisionBoundaryError(reason)
+
+    def capacity():
+        raise DecisionBoundaryError(reason if capacity_reason is None else capacity_reason)
 
     remaining = max_bytes
     nodes = 0
@@ -142,11 +152,11 @@ def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, ht
             continue
         nodes += 1
         if nodes > max_nodes or depth > max_depth:
-            reject()
+            capacity()
         kind = type(item)
         if kind is str:
             if len(item) + 2 > remaining:
-                reject()
+                capacity()
             if (type(html_safe) is bool and type(remaining) is int
                     and item.isascii() and _ASCII_ESCAPE.search(item) is None
                     and (not html_safe or _HTML_ESCAPE.search(item) is None)):
@@ -163,7 +173,7 @@ def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, ht
                                   1 if code < 128 else 2 if code < 2048 else
                                   3 if code < 65536 else 4)
                     if remaining < 0:
-                        reject()
+                        capacity()
         elif item is None:
             remaining -= 4
         elif kind is bool:
@@ -178,14 +188,18 @@ def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, ht
             remaining -= len(str(item))
         elif kind in (dict, list):
             identity = id(item)
-            if identity in active or len(item) > max_nodes - nodes:
+            if identity in active:
                 reject()
-            # Default json.dumps separators: comma-space and colon-space.
-            remaining -= 2 + max(0, len(item) - 1) * 2
+            if len(item) > max_nodes - nodes:
+                capacity()
+            # Existing callers retain json.dumps' comma/colon-space budget;
+            # canonical display snapshots explicitly use compact separators.
+            separator_bytes = 1 if compact else 2
+            remaining -= 2 + max(0, len(item) - 1) * separator_bytes
             if kind is dict:
-                remaining -= len(item) * 2
+                remaining -= len(item) * separator_bytes
             if remaining < 0:
-                reject()
+                capacity()
             active.add(identity)
             stack.append(('exit', identity, depth))
             if kind is dict:
@@ -199,4 +213,4 @@ def validate_json(value, *, max_bytes, reason, max_depth=32, max_nodes=16384, ht
         else:
             reject()
         if remaining < 0:
-            reject()
+            capacity()

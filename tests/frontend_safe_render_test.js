@@ -112,7 +112,7 @@ assert(
 );
 assert(
   indexHtml.includes("/static/js/shared/safe_render.js?v=20261016-uniprot-entry-v1") &&
-    indexHtml.includes("/static/js/home/formatters.js?v=20261015-comparison-table-v1"),
+    indexHtml.includes("/static/js/home/formatters.js?v=20261026-scientific-notation-v9"),
   "Homepage must invalidate cached chat URL policy scripts",
 );
 assert(
@@ -144,7 +144,7 @@ assert(
   "Target search external links must use DOM APIs and the trusted URL policy",
 );
 assert(
-  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261007-safe-dom-v4'),
+  targetSearchHtml.includes('/static/js/target_search/main.js?v=20261027-cache-state-v4'),
   "Target search must invalidate the cached script after safety changes",
 );
 assert(
@@ -719,7 +719,7 @@ assert(
   );
 });
 [
-  "Safe.escapeInlineJsString(data.job_id",
+  "Safe.escapeInlineJsString(data && data.job_id ? data.job_id : \"\")",
   "Safe.escapeInlineJsString(item.job_id",
   "Safe.escapeCssIdent(jobId",
 ].forEach((snippet) => {

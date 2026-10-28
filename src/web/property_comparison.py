@@ -162,6 +162,7 @@ def descriptor_result(query, current, history, session_id):
              "|---|---:|---:|"]
     for label, evidence in rows:
         lines.append(f"| {label} `{evidence['smiles']}` | {evidence['molecular_weight']:.2f} | {evidence['logp']:.3f} |")
+    summary_answer = '\n'.join(issues + ([""] if issues else []) + lines)
     lines.extend(["", "来源：RDKit 计算描述符，非实测值；logP 为结构估算，不是 ADMET 模型预测。"])
     for label, evidence in rows:
         lines.append(f"- {label}：property_calculator v{evidence['tool_version']}；"
@@ -169,5 +170,6 @@ def descriptor_result(query, current, history, session_id):
     if compare:
         lines.append("上轮数值仅复用上述成功且通过验证的工具结果，未重新计算或继承上轮工具请求。")
     return {"final_answer": "\n".join(issues + ([""] if issues else []) + lines),
+            "summary_answer": summary_answer,
             "success": not issues, "status": "partial" if issues else "completed",
             "partial": bool(issues), "warnings": issues}

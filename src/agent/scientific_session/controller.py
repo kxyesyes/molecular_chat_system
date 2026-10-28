@@ -39,7 +39,7 @@ from src.agent.persistence.redaction import contains_secret_material
 from .decision_policy import (
     DecisionBoundaryError, authorized_catalog, encode_observation,
     scientific_answer, usable, verify_finish, family_review_observation,
-    model_call_metadata, schema_correction, decision_system_message,
+    model_call_metadata, schema_correction, decision_system_message, model_observation,
 )
 from .decision_execution import DecisionEvents, SingleAttemptTool, settle_action, settle_owned_call, retry_persistence
 from .decision_inputs import (
@@ -63,6 +63,85 @@ from .binding_policy import get_binding_policy
 
 
 _now = time.monotonic
+
+
+def next_required_web_step(steps, dependencies, *, completed):
+    """Return the next plan step that is ready after an early finish.
+
+    This is a narrow recovery path for the Web binding: it advances only a
+    required compiled step whose dependencies are already complete (or are
+    optional steps that the resolver explicitly permits to be absent). It
+    never invents a step or changes the compiled plan.
+    """
+    by_name = {step.name: step for step in steps}
+    completed = set(completed)
+    for step in steps:
+        if not step.required or step.name in completed:
+            continue
+        if all(dependency in completed
+               or (dependency in by_name and not by_name[dependency].required)
+               for dependency in dependencies.get(step.name, ())):
+            return step
+    return None
+
+
+def web_plan_ready_for_terminal(steps, *, completed):
+    """Whether every required compiled Web step has an observation."""
+    completed = set(completed)
+    return all(not step.required or step.name in completed for step in steps)
+
+
+def web_result_step_ref(result, records):
+    """Resolve an observed result to its immutable compiled Web step."""
+    quality = getattr(result, 'quality', {})
+    step_id = quality.get('step_id')
+    record = records.get(step_id) if isinstance(step_id, str) else None
+    if isinstance(record, dict):
+        ref = record.get('arguments', {}).get('step_ref')
+        if isinstance(ref, str):
+            return ref
+    proof = quality.get('binding_proof')
+    proof = proof if isinstance(proof, dict) else {}
+    action_hash = proof.get('action_sha256') or quality.get('action_sha256')
+    if isinstance(action_hash, str):
+        for record in records.values():
+            if isinstance(record, dict) and record.get('action_hash') == action_hash:
+                ref = record.get('arguments', {}).get('step_ref')
+                if isinstance(ref, str):
+                    return ref
+    ref = quality.get('web_step_ref')
+    return ref if isinstance(ref, str) else None
+
+
+def _decision_failure_message(reason: str) -> str:
+    """Expose only safe, actionable guidance for model-loop failures."""
+    messages = {
+        'decision_runtime_failed': (
+            '智能体决策未完成；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
+        ),
+        'model_decision_unavailable': (
+            '模型未能完成 Agent 决策；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。'
+        ),
+        'invalid_decision_schema': (
+            '模型返回的决策格式不符合 MedChat 协议；请更换支持工具调用或结构化输出的模型。'
+        ),
+        'pi_terminal_missing': (
+            '模型未返回可验证的终止决策；请在模型设置中确认 Agent 协议兼容性。'
+        ),
+        'decision_request_failed': (
+            '智能体决策接口不可用；请检查模型服务是否运行，以及模型地址和名称是否正确。'
+        ),
+        'model_budget_exhausted': (
+            '模型未在请求预算内完成智能体决策；请缩短请求或调整模型上下文设置。'
+        ),
+        'task_deadline_exceeded': (
+            '模型决策超时；请检查本地模型服务是否运行，或稍后重试。'
+        ),
+        'activity_target_conflict_or_unknown': (
+            '活性预测的靶点不受支持或存在冲突；本次未进行活性预测。'
+        ),
+    }
+    return messages.get(reason, 'Decision run did not complete')
 
 
 class _AdmissionTool(SingleAttemptTool):
@@ -751,6 +830,7 @@ class ScientificSession:
                         payload['messages'], timeout_seconds=min(60, remaining),
                         system_message=system_message,
                         **({'temperature': context.temperature,
+                            'compact_observations': True,
                             'max_tokens': context.metadata.get('decision_output_limit', 1500),
                             'input_budget': {
                                 'max_chars': context.metadata.get('decision_input_max_chars', 24000),
@@ -801,6 +881,22 @@ class ScientificSession:
                 decision = parse_decision_json(json.dumps(proposal, ensure_ascii=False, allow_nan=False))
             else:
                 decision = parse_decision_json(encode_observation(proposal))
+            if (binding and policy.is_web and request_kind == 'scientific'
+                    and context.metadata.get('allow_molecular_clarification') is True):
+                # Compiler-admitted missing-input requests retain their frozen
+                # Web obligations. Model preference cannot dispatch without a
+                # structure, nor ignore a valid subject supplied on resume.
+                if not has_explicit_molecule(context.query) and effective_molecule(context) is None:
+                    decision = ClarifyDecision(version='1', action='clarify',
+                        question=scientific_clarification(context.query, required_tools),
+                        missing_fields=['SMILES'])
+                elif (restored is not None and has_valid_molecular_input(context.query, required_tools)
+                      and isinstance(decision, (ClarifyDecision, FinishDecision))):
+                    pending = state.task_acceptance.get('missing_required_steps', [])
+                    step = next((step for step in requirements.steps if step.name in pending), None)
+                    if step is not None and all(usable(result) for result in session.results):
+                        decision = ToolDecision(version='1', action='tool', tool_name=step.tool_name,
+                            arguments={'step_ref': step.name}, purpose='use the supplied molecular input')
             if admission_carry is not None and request_kind == 'chat' and not isinstance(decision, ToolDecision):
                 try:
                     validate_ordinary_display(
@@ -870,6 +966,73 @@ class ScientificSession:
                             version='1', action='tool', tool_name=pending_tool,
                             arguments={'input_ref': 'user'},
                             purpose='satisfy the pending molecular requirement',
+                        )
+                else:
+                    # Compound workflows can have a required non-molecular
+                    # step (for example ADMET) after the property tool. A
+                    # model finish is not permission to skip that compiled
+                    # obligation; continue the authorized sequence while
+                    # leaving optional activity review model-driven.
+                    pending_required = sorted(
+                        (set(required_tools) - completed_tools) & set(adapters)
+                    )
+                    pending_tool = next(
+                        (name for name in pending_required if name != 'activity_predictor'),
+                        None,
+                    )
+                    if (pending_tool is not None and state.protocol_repairs == 0
+                            and all(result.success for result in session.results)
+                            and isinstance(decision, FinishDecision)):
+                        decision = ToolDecision(
+                            version='1', action='tool', tool_name=pending_tool,
+                            arguments={'input_ref': 'user'},
+                            purpose='satisfy the pending workflow requirement',
+                        )
+            if binding and request_kind == 'scientific' and isinstance(decision, FinishDecision):
+                # A Web workflow is compiled into an exact dependency graph.
+                # If the model attempts to finish before the graph is closed,
+                # recover the next ready required step instead of invalidating
+                # the whole publication. Optional prediction steps remain
+                # optional; resolver dependency checks still authorize the
+                # actual action and evidence closure remains unchanged.
+                from .web_requirements import workflow_steps
+                records = resolver.export_records()
+                completed_refs = set()
+                for result in resolver._observations().values():
+                    step_ref = web_result_step_ref(result, records)
+                    if step_ref is not None:
+                        completed_refs.add(step_ref)
+                next_step = next_required_web_step(
+                    workflow_steps(requirements), requirements.dependencies,
+                    completed=completed_refs)
+                if next_step is not None:
+                    decision = ToolDecision(
+                        version='1', action='tool', tool_name=next_step.tool_name,
+                        arguments={'step_ref': next_step.name},
+                        purpose='complete the next required step in the compiled scientific plan',
+                    )
+                else:
+                    # The compact acceptance schema only serializes molecular
+                    # result requirements; required Web tools such as ADMET
+                    # are still carried by required_tools. Do not let an
+                    # early finish skip one of those authorized obligations.
+                    completed_tools = {
+                        result.tool_name
+                        for result in resolver._observations().values()
+                        if usable(result)
+                    }
+                    pending_tool = next(
+                        (
+                            name for name in sorted(set(required_tools) - completed_tools)
+                            if name in adapters and name != 'activity_predictor'
+                        ),
+                        None,
+                    )
+                    if pending_tool is not None:
+                        decision = ToolDecision(
+                            version='1', action='tool', tool_name=pending_tool,
+                            arguments={'input_ref': 'user'},
+                            purpose='complete the next authorized Web requirement',
                         )
             if self.runtime.mode == 'native':
                 call_id = response.tool_call_id
@@ -948,20 +1111,24 @@ class ScientificSession:
             if binding:
                 def resolve_action():
                     try:
-                        return resolver.resolve(decision)
+                        return resolver.resolve(decision), None
                     except DecisionBoundaryError as exc:
-                        if not policy.is_web or str(exc) != 'web_dependency_unusable':
+                        reason = str(exc)
+                        expected = reason == 'web_dependency_unusable' or (
+                            reason == 'activity_target_conflict_or_unknown'
+                            and decision.tool_name == 'activity_predictor')
+                        if not policy.is_web or not expected:
                             raise
                         # An unmet dependency is an action rejection, not a
                         # corrupt observation. Authenticate the entire closure
                         # again before allowing a display-only terminal path.
                         # Configuration/deadline/source errors still latch.
                         resolver.verify_binding_closure()
-                        return None
+                        return None, reason
 
-                action = await owned(resolve_action)
+                action, rejected_reason = await owned(resolve_action)
                 if action is None:
-                    raise DecisionBoundaryError('web_dependency_unusable')
+                    raise DecisionBoundaryError(rejected_reason)
                 input_data = action.input_data
                 evidence_ids = [role['evidence_id'] for role in json.loads(action.record_json)['proof']['roles']]
             else:
@@ -1022,6 +1189,46 @@ class ScientificSession:
                 verify_observation_integrity(observed, session)
                 state.observed[key] = observed
             state.task_acceptance = await acceptance()
+            from .web_requirements import workflow_steps
+            completed_refs = set()
+            if binding:
+                records = resolver.export_records()
+                for result in resolver._observations().values():
+                    step_ref = web_result_step_ref(result, records)
+                    if step_ref is not None:
+                        completed_refs.add(step_ref)
+            planned_steps = workflow_steps(requirements) if binding else ()
+            completed_tools = {
+                result.tool_name
+                for result in resolver._observations().values()
+                if usable(result)
+            } if binding else set()
+            observed_tools = {
+                result.tool_name
+                for result in resolver._observations().values()
+            } if binding else set()
+            terminal_ready = (
+                web_plan_ready_for_terminal(planned_steps, completed=completed_refs)
+                and set(required_tools) <= observed_tools
+            )
+            if (binding and request_kind == 'scientific' and terminal_ready):
+                # Once every required compiled step has an observation, do not
+                # ask the model to keep planning. This is especially important
+                # for an evaluated-but-not-supported optimization: the correct
+                # outcome is a cited partial result, not another model turn.
+                evidence_ids = [
+                    result.quality.get('evidence_id')
+                    for result in resolver._observations().values()
+                    if (usable(result) or family_review_observation(result))
+                    and isinstance(result.quality.get('evidence_id'), str)
+                ]
+                if evidence_ids:
+                    terminal = FinishDecision(
+                        version='1', action='finish', response_kind='scientific',
+                        text='已完成计划中的科学计算；请查看结构化结果与复核状态。',
+                        evidence_ids=list(dict.fromkeys(evidence_ids)),
+                    )
+                    return await complete(terminal)
             # Serialize an isolated, verified observation before persistence
             # callbacks can mutate the tool's retained object again.
             verify_observation_integrity(observed, session)
@@ -1029,9 +1236,12 @@ class ScientificSession:
             verify_observation_integrity(outgoing, session)
             descriptors = (await owned(lambda: resolver.record_descriptors(outgoing.quality['evidence_id']))
                 if binding and outgoing.tool_name == 'reverse_target_predictor' and usable(outgoing) else None)
-            content = encode_observation({**outgoing.to_legacy_dict(), 'task_acceptance': state.task_acceptance,
-                **({'tool_name': outgoing.tool_name} if binding else {}),
-                **({'record_references': descriptors} if descriptors is not None else {})})
+            # Legacy sessions replay the full legacy observation contract;
+            # bound profiles authenticate their own dedicated model view.
+            observation = (model_observation(
+                outgoing, state.task_acceptance, record_references=descriptors) if binding else
+                {**outgoing.to_legacy_dict(), 'task_acceptance': state.task_acceptance})
+            content = encode_observation(observation)
             persist('observed')
             if binding:
                 await boundary()
@@ -1093,7 +1303,8 @@ class ScientificSession:
             if state.stop_reason in {'chat_claim_not_grounded', 'chat_capability_conflict', 'chat_output_unsafe'}:
                 state.waiting_for_input = False
                 state.outcome = RunOutcome.FAILED
-            error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR, 'Decision run did not complete',
+            error = AgentExecutionError(AgentErrorCode.VALIDATION_ERROR,
+                                        _decision_failure_message(state.stop_reason),
                                         {'reason': state.stop_reason})
             if not binding and state.stop_reason == 'task_requirements_unfulfilled':
                 if any(map(family_review_observation, active_results(session))):
@@ -1188,7 +1399,8 @@ class ScientificSession:
                 and request_kind == 'scientific' else None)
             if (self.runtime.binding_profile == 'medchat-web-v1' and request_kind == 'scientific'
                     and state.outcome in (RunOutcome.PARTIAL, RunOutcome.FAILED)
-                    and state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable')):
+                    and state.stop_reason in ('decision_input_budget_exceeded', 'web_dependency_unusable',
+                                              'activity_target_conflict_or_unknown')):
                 state.answer = await owned(lambda: render_bound(resolver,
                     required_tools=required_tools, evidence_ids=None,
                     interruption_reason=state.stop_reason))

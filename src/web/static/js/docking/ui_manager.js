@@ -1,5 +1,11 @@
 // ==================== UI状态管理 ====================
 const Safe = window.MedChatSafeRender;
+let dockingViewSequence = 0;
+let submittedDockingProtein;
+let boundDockingProtein = null;
+let loadedDockingProteinFile = null;
+const batchDockingProteins = new Map();
+function getDockingViewSequence() { return dockingViewSequence; }
 
 const UIManager = {
   // 更新按钮状态
@@ -65,12 +71,13 @@ function onPoseSelectChange(sel) {
 
 // 保存当前样式和相互作用状态
 function saveCurrentViewState() {
+  const state = typeof interactionsState === "undefined" ? {} : interactionsState;
   return {
     style: AppState.currentStyle,
     interactions: {
-      hydrogenBonds: interactionsState.hydrogenBonds,
-      piPiInteractions: interactionsState.piPiInteractions,
-      hydrophobicInteractions: interactionsState.hydrophobicInteractions,
+      hydrogenBonds: !!state.hydrogenBonds,
+      piPiInteractions: !!state.piPiInteractions,
+      hydrophobicInteractions: !!state.hydrophobicInteractions,
     },
   };
 }
@@ -93,10 +100,12 @@ async function fetchDockedPoseSdf(jobId, poseNumber = 1) {
 // 恢复样式和相互作用状态
 function restoreViewState(state) {
   if (!state) return;
+  const viewSequence = dockingViewSequence;
   if (state.style) {
     StyleManager.apply(state.style, false);
   }
   setTimeout(() => {
+    if (viewSequence !== dockingViewSequence) return;
     if (state.interactions.hydrogenBonds) displayHydrogenBonds();
     if (state.interactions.piPiInteractions) displayPiPiInteractions();
     if (state.interactions.hydrophobicInteractions)
@@ -106,24 +115,25 @@ function restoreViewState(state) {
 
 function prevPose() {
   const sel = document.getElementById("pose-select");
-  if (!sel || sel.options.length === 0) return;
+  if (!sel || sel.disabled || sel.options.length === 0) return;
   sel.selectedIndex = Math.max(0, sel.selectedIndex - 1);
   onPoseSelectChange(sel);
 }
 
 function nextPose() {
   const sel = document.getElementById("pose-select");
-  if (!sel || sel.options.length === 0) return;
+  if (!sel || sel.disabled || sel.options.length === 0) return;
   sel.selectedIndex = Math.min(sel.options.length - 1, sel.selectedIndex + 1);
   onPoseSelectChange(sel);
 }
 
 function overlayTopN() {
+  const viewSequence = ++dockingViewSequence;
   const nInput = document.getElementById("overlay-count");
   let n = parseInt(nInput && nInput.value ? nInput.value : "1");
   if (isNaN(n) || n < 1) n = 1;
 
-  const jobId = getCurrentJobId && getCurrentJobId();
+  const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
   if (!jobId) return;
 
   if (!viewer) initViewer();
@@ -138,6 +148,7 @@ function overlayTopN() {
 
   Promise.all(posePromises)
     .then((poseSdfs) => {
+      if (viewSequence !== dockingViewSequence) return;
       try {
         viewer.clear();
 
@@ -211,6 +222,7 @@ function overlayTopN() {
 }
 
 function showProtein() {
+  dockingViewSequence++;
   if (AppState.currentProteinData) {
     loadMolecule(AppState.currentProteinData, "protein");
     setActiveButton("show-protein-btn");
@@ -220,6 +232,7 @@ function showProtein() {
 }
 
 function showLigand() {
+  dockingViewSequence++;
   const ligandToShow =
     AppState.originalLigandData || AppState.currentLigandData;
 
@@ -244,7 +257,7 @@ function showLigand() {
 function loadSmilesPreview(smiles) {
   Utils.showToast("正在生成SMILES 3D结构预览...", "info");
 
-  fetch("/api/docking/smiles_to_3d", {
+  return fetch("/api/docking/smiles_to_3d", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ smiles: smiles }),
@@ -308,7 +321,7 @@ function showNotification(message, type) {
 }
 
 function showComplex() {
-  const jobId = getCurrentJobId && getCurrentJobId();
+  const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
 
   if (jobId) {
     loadComplexStructure(jobId);
@@ -370,8 +383,14 @@ function handleFileUpload(inputId, displayId, fileType) {
 
 // 加载蛋白质文件
 function loadProteinFile(file) {
+  dockingViewSequence++;
+  if (typeof setCurrentJobId === "function") setCurrentJobId(null);
+  AppState.currentComplexData = null;
+  if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
   const reader = new FileReader();
   reader.onload = function (e) {
+    dockingViewSequence++;
+    loadedDockingProteinFile = file;
     const pdbData = e.target.result;
     currentProteinData = pdbData;
     AppState.currentProteinFormat = file.name.toLowerCase().endsWith(".pdbqt")
@@ -566,6 +585,7 @@ function startBatchDocking() {
     alert("批量模式只能选择配体文件或多行 SMILES，不能同时提供");
     return;
   }
+  const batchProtein = loadedDockingProteinFile === proteinFile ? (AppState.currentProteinData || null) : null;
 
   const startBtn = document.getElementById("start-btn");
   if (startBtn && !startBtn.disabled) {
@@ -613,9 +633,11 @@ function startBatchDocking() {
       if (!data.results || data.results.length === 0) {
         throw new Error("批量任务没有返回有效结果");
       }
+      dockingViewSequence++;
+      for (const item of data.results) if (item && item.success && item.job_id) batchDockingProteins.set(item.job_id, batchProtein);
       showBatchResults(data);
       const firstSuccess = data.results.find((item) => item.success && item.job_id);
-      if (firstSuccess) {
+      if (firstSuccess && batchProtein && batchProtein === AppState.currentProteinData) {
         setCurrentJobId(firstSuccess.job_id);
       }
       statusIndicators.forEach((indicator) => {
@@ -848,12 +870,16 @@ function durableDockingResult(record) {
   };
 }
 
-function renderDurableTaskSuccess(record, result) {
+function renderDurableTaskSuccess(record, result, options = {}) {
+  dockingViewSequence++;
+  if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
+  AppState.currentComplexData = null;
+  const restored = options.restored === true;
   renderDockingProgress(100);
   renderDockingStepLog("parse_results", "完成 · 100%");
   populatePoseSelector(result.total_poses, result.best_pose_index || 1);
   if (typeof setCurrentJobId === "function") {
-    setCurrentJobId(result.result_job_id || null);
+    setCurrentJobId(restored ? null : (result.result_job_id || null));
   }
   const warnings = Array.isArray(record.warnings) ? record.warnings : [];
   const artifacts = Array.isArray(record.artifacts) ? record.artifacts : [];
@@ -866,12 +892,14 @@ function renderDurableTaskSuccess(record, result) {
   const resultsContent = document.getElementById("results-content");
   if (!resultsContent) return;
   const canViewBestPose =
-    typeof result.result_job_id === "string" &&
+    !restored && typeof result.result_job_id === "string" &&
     Number.isInteger(result.best_pose_index) &&
     result.best_pose_index > 0;
   const poseMappingText = canViewBestPose
     ? `最佳构象：Pose ${result.best_pose_index}（已由后端验证）`
-    : "当前任务记录没有提供可验证的最佳构象编号，不会把结果强行映射为 Pose 1。";
+    : restored
+      ? "任务蛋白结构未恢复或与当前输入不一致，暂不展示复合物。"
+      : "当前任务记录没有提供可验证的最佳构象编号，不会把结果强行映射为 Pose 1。";
   const viewBestPoseButton = canViewBestPose
     ? `<button class="action-btn btn-secondary" onclick="loadComplexStructure('${Safe.escapeInlineJsString(result.result_job_id)}', ${result.best_pose_index})">查看最佳构象</button>`
     : "";
@@ -887,14 +915,95 @@ function renderDurableTaskSuccess(record, result) {
     <div class="action-buttons">
       <button class="action-btn btn-primary" onclick="downloadResults('${Safe.escapeInlineJsString(result.task_id)}')">下载已验证 PDBQT</button>
       ${viewBestPoseButton}
-      <button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>
+      ${restored ? "" : '<button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>'}
     </div>`;
   setResultsMinHeightToLeft();
   updateButtonStates();
+  for (const id of ["pose-select", "show-hbonds-btn", "show-pi-btn", "show-hydrophobic-btn"]) {
+    const control = document.getElementById(id);
+    if (control) control.disabled = restored;
+  }
+  if (restored) {
+    AppState.currentComplexData = null;
+    if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
+    const complex = document.getElementById("show-complex-btn");
+    if (complex) complex.disabled = true;
+    document.querySelectorAll(".status-indicator").forEach((indicator, index) => {
+      indicator.className = index === 0 ? "status-indicator status-waiting" : "status-indicator status-completed";
+      indicator.textContent = index === 0 ? "结构未恢复" : "已完成";
+    });
+  }
+  const detailJobId = result.result_job_id || result.task_id;
+  if (detailJobId) {
+    return loadDurableResultDetails(result, { restored, jobId: detailJobId });
+  }
+  return Promise.resolve();
+}
+
+async function loadDurableResultDetails(result, options = {}) {
+  const restored = options.restored === true;
+  const sequence = dockingViewSequence;
+  const jobId = typeof options.jobId === "string" && options.jobId.trim()
+    ? options.jobId
+    : result && typeof result.result_job_id === "string"
+      ? result.result_job_id
+      : result && typeof result.task_id === "string"
+        ? result.task_id
+    : "";
+  if (!jobId) return;
+  try {
+    const response = await fetch(`/api/docking/result/${encodeURIComponent(jobId)}/summary`);
+    const payload = await response.json();
+    if (!response.ok || payload.success === false) {
+      throw new Error(payload.detail || payload.message || "结果明细暂不可用");
+    }
+    const detail = payload.data && typeof payload.data === "object" ? payload.data : payload;
+    if (!Array.isArray(detail.results) || detail.results.length === 0) {
+      throw new Error("结果明细暂不可用");
+    }
+    if (sequence !== dockingViewSequence) return;
+    renderDockingResultsTable({
+      job_id: jobId,
+      total_poses: detail.total_poses,
+      results: detail.results,
+      best_pose: Number.isInteger(result.best_pose_index)
+        ? { pose: result.best_pose_index }
+        : null,
+    }, { restored });
+    if (!restored && result.result_job_id && typeof currentProteinData !== "undefined" && currentProteinData) {
+      const bestPose = Number.isInteger(result.best_pose_index) && result.best_pose_index > 0
+        ? result.best_pose_index
+        : 1;
+      loadComplexStructure(jobId, bestPose);
+    }
+  } catch (error) {
+    if (sequence !== dockingViewSequence) return;
+    const resultsContent = document.getElementById("results-content");
+    if (!resultsContent) return;
+    resultsContent.innerHTML += `
+      <div class="docking-result-unavailable">
+        <div class="docking-result-unavailable-title">结果明细暂不可用</div>
+        <div>${Safe.escapeHtml(error.message || "无法读取逐 Pose 结果")}</div>
+      </div>`;
+  }
+}
+
+function userFacingDockingFailure(record) {
+  const raw = String(record && (record.error || (record.result && record.result.error)) || "");
+  if (raw === "Docking process failed") {
+    return "对接工具未能完成计算，未生成可验证结果。请检查受体结构准备工具、受体格式和对接盒参数后重试。";
+  }
+  if (raw === "Docking environment unavailable") {
+    return "对接环境当前不可用，未生成可验证结果。请检查 Vina、受体/配体准备工具及其运行环境。";
+  }
+  if (raw === "Docking process ownership uncertain") {
+    return "对接进程状态无法确认，未显示任何科学结果。请先检查后台任务状态后再重试。";
+  }
+  return raw || "持久化对接任务未完成";
 }
 
 function renderDurableTaskFailure(record) {
-  const message = (record && (record.error || (record.result && record.result.error))) || "持久化对接任务未完成";
+  const message = userFacingDockingFailure(record);
   const resultsContent = document.getElementById("results-content");
   if (resultsContent) {
     resultsContent.innerHTML = `
@@ -926,8 +1035,12 @@ function applyDockingTaskRecord(record) {
       throw new Error("任务已结束，但未得到经过校验的对接结果");
     }
     DOCKING_STEPS.slice(0, 5).forEach((step) => stepManager.completeStep(step.id, "后端已完成"));
-    renderDurableTaskSuccess(record, result);
-    document.querySelectorAll(".status-indicator").forEach((indicator) => {
+    const restored = historicalDockingTaskId === record.task_id ||
+      (submittedDockingProtein !== undefined && (!submittedDockingProtein || submittedDockingProtein !== AppState.currentProteinData));
+    boundDockingProtein = restored ? null : {jobId: result.result_job_id, protein: submittedDockingProtein};
+    renderDurableTaskSuccess(record, result, { restored });
+    historicalDockingTaskId = null;
+    if (!restored) document.querySelectorAll(".status-indicator").forEach((indicator) => {
       indicator.className = "status-indicator status-completed";
       indicator.textContent = "已完成";
     });
@@ -937,6 +1050,7 @@ function applyDockingTaskRecord(record) {
   renderDockingProgress(Math.min(dockingProgressPercent(record.progress), 99));
   if (stepManager) stepManager.errorStep(dockingStepForPhase(record.phase) || "run_docking", record.error || status);
   renderDurableTaskFailure(record);
+  historicalDockingTaskId = null;
   rememberDockingTask(null);
   return true;
 }
@@ -1008,6 +1122,7 @@ async function cancelDockingTask() {
 function resumeDockingTaskIfPresent() {
   const taskId = readRememberedDockingTask();
   if (!taskId) return;
+  markHistoricalDockingTask(taskId);
   activeDockingTaskId = taskId;
   window.showStepLog = renderDockingStepLog;
   if (!stepManager) stepManager = new DockingStepManager();
@@ -1031,6 +1146,9 @@ function resumeDockingTaskIfPresent() {
 
 // 开始对接分析
 function startDocking() {
+  durableHistoryRestoreSequence++;
+  dockingViewSequence++;
+  historicalDockingTaskId = null;
   if (AppState.dockingMode === "batch") {
     startBatchDocking();
     return;
@@ -1098,6 +1216,7 @@ function startDocking() {
   if (smilesInput) formData.append("smiles", smilesInput);
 
   const params = getDockingParams();
+  submittedDockingProtein = loadedDockingProteinFile === proteinFile ? (AppState.currentProteinData || null) : null;
 
   Object.entries(params).forEach(([k, v]) => formData.append(k, v));
 
@@ -1132,94 +1251,107 @@ function startDocking() {
     });
 }
 
-// 显示真实的对接结果
-function showRealResults(data) {
+function dockingResultNumber(value, digits) {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value.toFixed(digits)
+    : "未计算";
+}
+
+function renderDockingResultsTable(data, options = {}) {
   const resultsContent = document.getElementById("results-content");
-  const safeJobIdJs = Safe.escapeInlineJsString(data.job_id || "");
+  if (!resultsContent) return false;
+  const restored = options.restored === true;
+  const results = Array.isArray(data && data.results)
+    ? data.results.filter((item) => item && Number.isInteger(item.pose) && item.pose > 0)
+    : [];
+  if (results.length === 0) {
+    resultsContent.innerHTML = `
+      <div class="docking-result-unavailable">
+        <div class="docking-result-unavailable-title">结果明细暂不可用</div>
+        <div>未找到通过验证的 Vina 构象，系统不会补填默认分数。</div>
+      </div>`;
+    return false;
+  }
+
+  const safeJobId = Safe.escapeInlineJsString(data && data.job_id ? data.job_id : "");
+  const canViewPose = !restored && !!safeJobId;
+  const totalPoses = results.length;
+  const rows = results.map((result) => {
+    const bindingEnergy = dockingResultNumber(result.binding_energy, 1);
+    const energyValue = typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
+      ? result.binding_energy
+      : null;
+    const energyClass = energyValue !== null && energyValue <= -8
+      ? "score-high"
+      : energyValue !== null && energyValue <= -6
+        ? "score-medium"
+        : "score-low";
+    const viewButton = canViewPose
+      ? `<button class="action-btn btn-primary docking-pose-view-btn" aria-label="查看 Pose ${result.pose}" onclick="viewPose(${result.pose})">查看</button>`
+      : "<span class=\"docking-pose-view-disabled\">—</span>";
+    return `
+      <tr>
+        <td>Pose ${result.pose}</td>
+        <td><span class="${energyClass}">${bindingEnergy}</span></td>
+        <td>${dockingResultNumber(result.ligand_efficiency, 3)}</td>
+        <td>${dockingResultNumber(result.rmsd_lb, 1)}</td>
+        <td>${dockingResultNumber(result.rmsd_ub, 1)}</td>
+        <td>${viewButton}</td>
+      </tr>`;
+  }).join("");
+
+  const actionButtons = safeJobId
+    ? `<div class="action-buttons docking-result-actions">
+        <button class="action-btn btn-primary" aria-label="下载已验证对接结果" onclick="downloadResults('${safeJobId}')">下载已验证 PDBQT</button>
+        <button class="action-btn btn-secondary" aria-label="生成对接报告" onclick="generateReport('${safeJobId}')">生成报告</button>
+        ${restored ? "" : '<button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>'}
+      </div>`
+    : "";
+  resultsContent.innerHTML = `
+    <div class="docking-result-summary-strip">
+      <div class="docking-result-summary-title">对接计算完成</div>
+      <div class="docking-result-summary-meta">已验证构象数：${totalPoses}</div>
+      ${restored ? '<div class="docking-result-summary-note">历史任务的蛋白结构未恢复，当前仅展示结果数据。</div>' : ""}
+    </div>
+    <div class="results-table-wrapper">
+      <table class="results-table docking-pose-results-table">
+        <thead>
+          <tr>
+            <th>结构编号</th>
+            <th>结合能 (kcal/mol)</th>
+            <th>配体效率</th>
+            <th>RMSD下限 (Å)</th>
+            <th>RMSD上限 (Å)</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${actionButtons}`;
+  const tableWrapper = resultsContent.querySelector?.(".results-table-wrapper");
+  if (tableWrapper) tableWrapper.scrollLeft = 0;
+  return true;
+}
+
+// 显示真实的对接结果
+function showRealResults(data, options = {}) {
+  const restored = options.restored === true;
+  const resultsContent = document.getElementById("results-content");
 
   if (!data.results || data.results.length === 0) {
-    resultsContent.innerHTML = `
-      <div style="text-align: center; color: #718096; padding: 40px;">
-        <div style="font-size: 48px; margin-bottom: 16px;">🤔</div>
-        <div>未找到有效的对接结果</div>
-      </div>
-    `;
+    renderDockingResultsTable(data, { restored });
     return;
   }
 
-  if (data.job_id && currentProteinData) {
+  if (!restored && data.job_id && currentProteinData) {
     stepManager.startStep("visualize");
-    loadComplexStructure(data.job_id);
+    const bestPose = data.best_pose && Number.isInteger(data.best_pose.pose) && data.best_pose.pose > 0
+      ? data.best_pose.pose
+      : 1;
+    loadComplexStructure(data.job_id, bestPose);
   }
-
-  let tableHTML = `
-    <div style="margin-bottom: 20px; padding: 16px; background: #f0f9ff; border-radius: 8px; border-left: 4px solid #0284c7;">
-      <div style="font-weight: bold; color: #0c4a6e;">对接计算完成</div>
-      <div style="font-size: 14px; color: #075985; margin-top: 4px;">
-        任务ID: ${data.job_id} | 共找到 ${data.total_poses} 个结构
-      </div>
-    </div>
-    <table class="results-table">
-      <thead>
-        <tr>
-          <th>结构编号</th>
-          <th>结合能 (kcal/mol)</th>
-          <th>配体效率</th>
-          <th>RMSD下限 (Å)</th>
-          <th>RMSD上限 (Å)</th>
-          <th>操作</th>
-        </tr>
-      </thead>
-      <tbody>
-  `;
-
-  data.results.forEach((result) => {
-    const bindingEnergy =
-      typeof result.binding_energy === "number" && Number.isFinite(result.binding_energy)
-        ? result.binding_energy
-        : null;
-    const ligandEfficiency =
-      typeof result.ligand_efficiency === "number" && Number.isFinite(result.ligand_efficiency)
-        ? result.ligand_efficiency.toFixed(3)
-        : "未计算";
-    const rmsdLower =
-      typeof result.rmsd_lb === "number" && Number.isFinite(result.rmsd_lb)
-        ? result.rmsd_lb.toFixed(1)
-        : "未计算";
-    const rmsdUpper =
-      typeof result.rmsd_ub === "number" && Number.isFinite(result.rmsd_ub)
-        ? result.rmsd_ub.toFixed(1)
-        : "未计算";
-    const energyClass =
-      bindingEnergy !== null && bindingEnergy <= -8
-        ? "score-high"
-        : bindingEnergy !== null && bindingEnergy <= -6
-          ? "score-medium"
-          : "score-low";
-
-    tableHTML += `
-      <tr>
-        <td>Pose ${result.pose}</td>
-        <td><span class="${energyClass}">${bindingEnergy === null ? "未计算" : bindingEnergy.toFixed(1)}</span></td>
-        <td>${ligandEfficiency}</td>
-        <td>${rmsdLower}</td>
-        <td>${rmsdUpper}</td>
-        <td><button class="action-btn btn-primary" style="padding: 5px 10px; font-size: 12px;" onclick="viewPose(${result.pose})">查看</button></td>
-      </tr>
-    `;
-  });
-
-  tableHTML += `
-      </tbody>
-    </table>
-    <div class="action-buttons">
-      <button class="action-btn btn-primary" onclick="downloadResults('${safeJobIdJs}')">导出结果</button>
-      <button class="action-btn btn-secondary" onclick="generateReport('${safeJobIdJs}')">生成报告</button>
-      <button class="action-btn btn-secondary" onclick="rerunDocking()">重新对接</button>
-    </div>
-  `;
-
-  resultsContent.innerHTML = tableHTML;
+  renderDockingResultsTable(data, { restored });
 
   adjustDockingResultsHeight();
   const wrapper = document.querySelector(".results-content-wrapper");
@@ -1246,8 +1378,16 @@ function showRealResults(data) {
     indicator.textContent = "已完成";
   });
 
-  setCurrentJobId(data.job_id);
+  setCurrentJobId(restored ? null : data.job_id);
   updateButtonStates();
+  if (restored) {
+    AppState.currentComplexData = null;
+    if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
+    for (const id of ["show-complex-btn", "pose-select", "show-hbonds-btn", "show-pi-btn", "show-hydrophobic-btn"]) {
+      const control = document.getElementById(id);
+      if (control) control.disabled = true;
+    }
+  }
 
   const container = document.querySelector(".progress-container");
   const bar = document.getElementById("docking-progress");
@@ -1260,6 +1400,9 @@ function showRealResults(data) {
 }
 
 function showBatchResults(data) {
+  dockingViewSequence++;
+  if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
+  AppState.currentComplexData = null;
   AppState.currentBatchResults = data.results || [];
   const resultsContent = document.getElementById("results-content");
   const rows = AppState.currentBatchResults
@@ -1329,6 +1472,11 @@ function showBatchResults(data) {
 
 function viewBatchLigand(jobId) {
   if (!jobId) return;
+  const protein = batchDockingProteins.get(jobId);
+  if (!protein || protein !== AppState.currentProteinData) {
+    Utils.showToast("任务蛋白未恢复或与当前输入不一致，无法显示复合物", "warning");
+    return;
+  }
   setCurrentJobId(jobId);
   loadComplexStructure(jobId);
   setActiveButton("show-complex-btn");
@@ -1378,6 +1526,18 @@ function exportBatchResultsCsv() {
 
 // 加载复合物结构（叠加蛋白+配体）
 function loadComplexStructure(jobId, poseNumber = 1) {
+  const start = document.getElementById("start-btn");
+  if (start && start.disabled) return;
+  if (boundDockingProtein && boundDockingProtein.jobId === jobId && boundDockingProtein.protein !== AppState.currentProteinData) {
+    Utils.showToast("当前蛋白与该任务的输入不一致，无法显示复合物", "warning");
+    return;
+  }
+  const batchProtein = batchDockingProteins.get(jobId);
+  if (batchProtein !== undefined && (!batchProtein || batchProtein !== AppState.currentProteinData)) {
+    Utils.showToast("任务蛋白未恢复或与当前输入不一致，无法显示复合物", "warning");
+    return;
+  }
+  const viewSequence = ++dockingViewSequence;
   if (!viewer) initViewer();
   const selectedPoseNumber =
     Number.isInteger(poseNumber) && poseNumber > 0 ? poseNumber : 1;
@@ -1390,6 +1550,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
     fetchDockedPoseSdf(jobId, selectedPoseNumber),
   ])
     .then(([ligandPdbqt, ligandSdf]) => {
+      if (viewSequence !== dockingViewSequence) return;
       try {
         viewer.clear();
 
@@ -1476,10 +1637,12 @@ function loadComplexStructure(jobId, poseNumber = 1) {
         if (stepManager) stepManager.completeStep("visualize", "复合物已加载");
 
         setTimeout(() => {
+          if (viewSequence !== dockingViewSequence) return;
           autoFocusToLigand();
         }, 500);
 
         setTimeout(() => {
+          if (viewSequence !== dockingViewSequence) return;
           if (interactionsState.hydrogenBonds) displayHydrogenBonds();
           if (interactionsState.piPiInteractions) displayPiPiInteractions();
           if (interactionsState.hydrophobicInteractions)
@@ -1493,6 +1656,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
       }
     })
     .catch((error) => {
+      if (viewSequence !== dockingViewSequence) return;
       console.warn("无法加载复合物结构:", error);
       if (typeof Utils?.showToast === "function") {
         Utils.showToast("复合物结构加载失败，请重试", "error");
@@ -1502,6 +1666,9 @@ function loadComplexStructure(jobId, poseNumber = 1) {
 
 // 查看特定结构
 function viewPose(poseNumber) {
+  const viewSequence = ++dockingViewSequence;
+  const poseSelect = document.getElementById("pose-select");
+  if (poseSelect) poseSelect.value = String(poseNumber);
   if (!viewer) initViewer();
 
   const savedState = saveCurrentViewState();
@@ -1565,6 +1732,7 @@ function viewPose(poseNumber) {
         // restoreViewState 内部会 setStyle({},{}) 清除所有样式，
         // 而 SDF 加载的配体原子没有 hetflag 属性，导致配体样式无法重新识别，配体隐形。
         setTimeout(() => {
+          if (viewSequence !== dockingViewSequence) return;
           if (interactionsState.hydrogenBonds) displayHydrogenBonds();
           if (interactionsState.piPiInteractions) displayPiPiInteractions();
           if (interactionsState.hydrophobicInteractions)
@@ -1578,9 +1746,14 @@ function viewPose(poseNumber) {
     }
   };
 
-  const jobId = getCurrentJobId && getCurrentJobId();
+  const jobId = typeof getCurrentJobId === "function" ? getCurrentJobId() : null;
   if (!jobId) {
     alert(`查看结构 ${poseNumber} 的详细信息\n(缺少任务ID，无法加载对接结果)`);
+    return;
+  }
+  const batchProtein = batchDockingProteins.get(jobId);
+  if (batchProtein !== undefined && (!batchProtein || batchProtein !== AppState.currentProteinData)) {
+    alert("当前蛋白与该批量任务不一致，无法加载构象");
     return;
   }
 
@@ -1591,11 +1764,13 @@ function viewPose(poseNumber) {
     fetchDockedPoseSdf(jobId, poseNumber),
   ])
     .then(([pdbqt, poseSdf]) => {
+      if (viewSequence !== dockingViewSequence) return;
       currentComplexData = pdbqt;
       dockedLigandData = poseSdf;
       renderPose(poseSdf);
     })
     .catch((err) => {
+      if (viewSequence !== dockingViewSequence) return;
       console.warn("加载对接结果失败:", err);
       alert(`查看结构 ${poseNumber} 的详细信息\n(无法加载对接结果)`);
     });
@@ -1805,13 +1980,32 @@ function closeHistoryPanel() {
 function loadDockingHistory() {
   const listEl = document.getElementById("history-list");
   if (!listEl) return;
-  listEl.innerHTML = '<div class="history-empty">加载中...</div>';
+  listEl.innerHTML = '<div id="durable-history-list" class="history-empty">加载中...</div><div id="legacy-history-list" class="history-empty">加载中...</div>';
+  const durableEl = document.getElementById("durable-history-list");
+  const legacyEl = document.getElementById("legacy-history-list");
+  fetch("/api/tasks?task_type=docking&limit=50")
+    .then(async (r) => {
+      const payload = await r.json();
+      if (!r.ok || payload.success === false || !Array.isArray(payload.data)) throw new Error("任务历史不可用");
+      return payload.data;
+    })
+    .then((records) => {
+      if (!durableEl.isConnected && typeof durableEl.isConnected === "boolean") return;
+      const items = records.filter((record) => record && record.task_type === "docking" && typeof record.task_id === "string" && record.task_id);
+      durableEl.innerHTML = items.length ? items.map((record) => {
+        const taskId = Safe.escapeHtml(record.task_id);
+        const taskIdJs = Safe.escapeInlineJsString(record.task_id);
+        const status = ({succeeded: "已完成", running: "进行中", pending: "等待中", failed: "失败", canceled: "已取消", timed_out: "已超时"})[record.status] || "状态未知";
+        return `<div class="history-card"><div class="history-card-top"><span class="history-job-id">${taskId}</span><span>${status}</span></div><div class="history-card-actions"><button class="history-action-btn history-load-btn" onclick="restoreDurableDockingTask('${taskIdJs}')">恢复结果</button></div></div>`;
+      }).join("") : '<div class="history-empty">暂无持久化对接任务</div>';
+    })
+    .catch(() => { durableEl.innerHTML = '<div class="history-empty">持久化任务加载失败，请重试</div>'; });
   fetch("/api/docking/history")
-    .then((r) => r.json())
+    .then(async (r) => { const data = await r.json(); if (!r.ok || !data.success || !Array.isArray(data.history)) throw new Error("历史不可用"); return data; })
     .then((data) => {
       if (!data.success || !data.history || data.history.length === 0) {
-        listEl.innerHTML =
-          '<div class="history-empty">暂无对接历史记录</div>';
+        legacyEl.innerHTML =
+          '<div class="history-empty">暂无旧版对接记录</div>';
         return;
       }
 
@@ -1863,16 +2057,65 @@ function loadDockingHistory() {
         `;
       });
 
-      listEl.innerHTML = html;
+      legacyEl.innerHTML = html;
     })
     .catch((err) => {
       console.error("加载对接历史失败:", err);
-      listEl.innerHTML = '<div class="history-empty">⚠️ 加载失败，请重试</div>';
+      legacyEl.innerHTML = '<div class="history-empty">旧版记录加载失败，请重试</div>';
     });
 }
 
+let durableHistoryRestoreSequence = 0;
+let historicalDockingTaskId = null;
+function markHistoricalDockingTask(taskId) { historicalDockingTaskId = taskId; }
+async function restoreDurableDockingTask(taskId) {
+  const start = document.getElementById("start-btn");
+  const remembered = readRememberedDockingTask();
+  if ((remembered && remembered !== taskId) || (start && start.disabled)) {
+    Utils.showToast("请等待当前对接任务结束后再恢复历史", "error");
+    return;
+  }
+  const sequence = ++durableHistoryRestoreSequence;
+  dockingViewSequence++;
+  try {
+    const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
+    const payload = await response.json();
+    const currentTask = readRememberedDockingTask();
+    if (sequence !== durableHistoryRestoreSequence || (currentTask && currentTask !== taskId) || (start && start.disabled)) return;
+    if (!response.ok || payload.success === false) throw new Error("无法读取该任务");
+    const record = unwrapApiData(payload);
+    if (!record || record.task_id !== taskId || record.task_type !== "docking") throw new Error("任务记录不匹配");
+    const status = String(record.status || "").toLowerCase();
+    if (!TERMINAL_DOCKING_TASK_STATUSES.has(status)) {
+      markHistoricalDockingTask(taskId);
+      if (!stepManager) stepManager = new DockingStepManager();
+      stepManager.reset();
+      stepManager.show();
+      activeDockingTaskId = taskId;
+      rememberDockingTask(taskId);
+      setDockingTaskButtonState(true);
+      await pollDockingTask(taskId);
+    } else if (status === "succeeded") {
+      const result = durableDockingResult(record);
+      if (!result) throw new Error("任务结果未通过校验");
+      renderDurableTaskSuccess(record, result, { restored: true });
+      if (currentTask === taskId) rememberDockingTask(null);
+    } else {
+      renderDurableTaskFailure(record);
+      if (currentTask === taskId) rememberDockingTask(null);
+    }
+    closeHistoryPanel();
+  } catch (error) {
+    if (sequence === durableHistoryRestoreSequence && readRememberedDockingTask() === taskId) {
+      handleDockingTaskError(error);
+    } else if (sequence === durableHistoryRestoreSequence && !readRememberedDockingTask() && !(start && start.disabled)) {
+      Utils.showToast(error.message || "恢复任务失败", "error");
+    }
+  }
+}
+
 function clearAllHistory() {
-  if (!confirm("确定要清除所有对接历史记录？\n此操作不可撤销！")) return;
+  if (!confirm("确定要清除旧版对接记录？持久化任务不会删除。\n此操作不可撤销！")) return;
   fetch("/api/docking/history", { method: "DELETE" })
     .then((r) => r.json())
     .then((data) => {
@@ -1938,14 +2181,20 @@ function selectBestHistoryPose(results, recordedPoseIndex) {
 }
 
 function loadHistoryJob(jobId, poseIndex) {
-  if (!viewer) initViewer();
-
+  const start = document.getElementById("start-btn");
+  if (readRememberedDockingTask() || (start && start.disabled)) {
+    Utils.showToast("请等待当前对接任务结束后再恢复历史", "error");
+    return;
+  }
+  const sequence = ++durableHistoryRestoreSequence;
+  const viewSequence = ++dockingViewSequence;
   fetch(`/api/docking/result/${jobId}`)
     .then((r) => {
       if (!r.ok) throw new Error("无法获取对接结果");
       return r.text();
     })
     .then((pdbqtText) => {
+      if (sequence !== durableHistoryRestoreSequence || viewSequence !== dockingViewSequence || readRememberedDockingTask() || (start && start.disabled)) return;
       // 解析结果
       const lines = pdbqtText.split(/\r?\n/);
       const results = [];
@@ -1968,44 +2217,6 @@ function loadHistoryJob(jobId, poseIndex) {
 
       const selectedPoseNumber = selectBestHistoryPose(results, poseIndex);
 
-      // 设置全局状态
-      currentComplexData = pdbqtText;
-      setCurrentJobId(jobId);
-
-      if (selectedPoseNumber !== null) {
-        fetchDockedPoseSdf(jobId, selectedPoseNumber)
-          .then((ligandSdf) => {
-            dockedLigandData = ligandSdf;
-
-            viewer.clear();
-            if (currentProteinData) {
-              const prot = viewer.addModel(
-                currentProteinData,
-                AppState.currentProteinFormat || "pdb",
-              );
-              if (prot && prot.setStyle) {
-                prot.setStyle({}, { cartoon: { color: "spectrum" } });
-              }
-            }
-            if (ligandSdf) {
-              const lig = viewer.addModel(ligandSdf, "sdf");
-              if (lig && lig.setStyle) {
-                lig.setStyle(
-                  {},
-                  { stick: { radius: 0.25, colorscheme: "greenCarbon" } },
-                );
-              }
-            }
-            viewer.zoomTo();
-            viewer.render();
-          })
-          .catch((err) => {
-            console.warn("加载最佳 pose 结构失败:", err);
-          });
-      } else {
-        console.warn("历史结果没有可验证的最佳 pose，跳过结构加载");
-      }
-
       // 填充结果表格
       if (results.length > 0) {
         const bestPose =
@@ -2018,7 +2229,7 @@ function loadHistoryJob(jobId, poseIndex) {
           results: results,
           best_pose: bestPose,
           total_poses: results.length,
-        });
+        }, { restored: true });
       }
 
       // 关闭面板
@@ -2027,6 +2238,7 @@ function loadHistoryJob(jobId, poseIndex) {
       updateButtonStates();
     })
     .catch((err) => {
+      if (sequence !== durableHistoryRestoreSequence || viewSequence !== dockingViewSequence) return;
       console.error("加载历史任务失败:", err);
       Utils.showToast("加载失败: " + err.message, "error");
     });

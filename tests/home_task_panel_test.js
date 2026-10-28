@@ -66,6 +66,10 @@ const panel = panelApi.create(container);
 assert(panel);
 assert.strictEqual(panel.className, "agent-task-panel");
 assert.strictEqual(panelApi.create(container), panel, "panel creation must be idempotent");
+const fresh = panelApi.create(container, sandbox.window.document, {reuse: false});
+assert.notStrictEqual(fresh, panel, "explicit fresh creation must not borrow a historical panel");
+assert.strictEqual(container.children.length, 2);
+assert.strictEqual(panelApi.create(container), panel, "legacy default reuse remains unchanged");
 
 panelApi.reset(panel);
 assert(panel.className.includes("is-active"));

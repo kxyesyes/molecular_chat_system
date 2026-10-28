@@ -80,6 +80,20 @@ def test_actual_hashes_closed_config_and_detached_public_descriptor(rig):
         binding.digest = "0" * 64
 
 
+def test_current_interpreter_hardlink_is_allowed_but_other_tool_hardlinks_are_not(rig, monkeypatch):
+    module = api()
+    hardlink = rig.root / "python-hardlink.exe"
+    os.link(rig.paths["python"], hardlink)
+    monkeypatch.setattr(module.sys, "executable", str(hardlink))
+    budget = [module.MAX_TOOL_FILE_BYTES]
+    accepted = module._file_identity(
+        str(hardlink), required=True, budget=budget, allow_current_interpreter=True,
+    )
+    assert accepted["present"] is True
+    with pytest.raises(DockingConsentError):
+        module._file_identity(str(hardlink), required=True, budget=budget)
+
+
 @pytest.mark.parametrize("key", ["vina_exe", "prepare_receptor_cmd", "prepare_ligand_cmd", "python"])
 def test_file_tamper_fails_closed_without_reseal(rig, key):
     binding = capture(rig)

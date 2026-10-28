@@ -74,6 +74,9 @@ _CHILD_ENV_ALLOWLIST = frozenset({
     # The activity worker must resolve the same explicitly configured model
     # registry as the request process; this is a path, not a credential.
     "ACTIVITY_MODEL_DIR",
+    # The ADMET worker is launched from this explicitly configured Python
+    # path; it is a runtime location, not a credential or model output.
+    "ADMET_AI_PYTHON",
 })
 
 

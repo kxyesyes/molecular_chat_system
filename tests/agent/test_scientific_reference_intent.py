@@ -11,6 +11,7 @@ from tests.agent.test_scientific_reference_web import pointer, seed
 
 
 NEW_GENERATION_QUERIES = [
+    "请使用分子生成工具生成 2 个候选小分子，返回有效 SMILES，并说明生成模型来源",
     "以 PDE 为靶点设计三个候选分子，要求分子量小于 450、logP 小于 3，返回 SMILES 并逐项检查约束。",
     "设计 3 个候选分子，计算 logP。",
     "生成两个候选，要求分子量小于 450。",
@@ -94,6 +95,20 @@ def test_ordinal_references_require_owner_confirmed_view(reference_view, query):
     resolved = svc.resolve(query, p, session_id="owner", enable_tools=True)
     assert resolved.canonical_smiles == "CCN"
     assert resolved.candidate_id == event["candidate_set"]["candidates"][1]["candidate_id"]
+
+
+def test_property_provenance_wording_keeps_confirmed_candidate_selection(reference_view):
+    _, svc, event = reference_view
+    assert svc.confirm(event["reference"], session_id="owner")
+    key = event["reference"]["ordered_keys"][1]
+    selection = {"observation_id": key[0], "candidate_id": key[1]}
+    query = "请分析当前选中的候选分子的分子性质，并说明真实工具来源"
+
+    resolved = svc.resolve(query, pointer(event), selection,
+                           session_id="owner", enable_tools=True)
+
+    assert resolved.canonical_smiles == "CCN"
+    assert resolved.candidate_id == key[1]
 
 
 @pytest.mark.parametrize("query", [

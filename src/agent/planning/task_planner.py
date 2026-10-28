@@ -14,7 +14,7 @@ from src.agent.contracts.generation_request import (
     generation_request_error_details,
 )
 from src.agent.orchestrators.base import WorkflowStep
-from src.agent.evidence_followup import comparison_tools, _requested_smiles
+from src.agent.evidence_followup import comparison_tools, ranking_requested, _requested_smiles
 from src.agent.property_constraints import requested_property_bounds
 
 from . import request_parsing, step_templates, workflow_selection
@@ -113,6 +113,9 @@ class TaskPlanner:
                 metadata={"input_type": "target_hint", "atomic": True},
             )
 
+        if selected == "target_structure_molecule_analysis":
+            return self._target_structure_molecule_analysis_plan(query)
+
         if selected == "docking_simulation" and self._looks_like_unauthorized_tool_request(query):
             return WorkflowPlan(
                 workflow_name="docking_simulation",
@@ -191,9 +194,10 @@ class TaskPlanner:
                 input_data=({"smiles": list(smiles), "query": query}
                             if step.tool_name == "activity_predictor" else batch))
                 for step in step_templates.comprehensive_steps(query) if step.tool_name in requested_tools]
-            return WorkflowPlan("comprehensive_evaluation", steps,
-                {"input_type": "explicit_comparison", "requested_tools": list(requested_tools),
-                 "ranking_criterion": "consistent_valid_pIC50_descending"})
+            metadata = {"input_type": "explicit_comparison", "requested_tools": list(requested_tools)}
+            if ranking_requested(query):
+                metadata["ranking_criterion"] = "consistent_valid_pIC50_descending"
+            return WorkflowPlan("comprehensive_evaluation", steps, metadata)
         return WorkflowPlan(
             workflow_name="comprehensive_evaluation",
             steps=step_templates.comprehensive_steps(query),
@@ -241,6 +245,50 @@ class TaskPlanner:
                 "target_hint": target_hint,
                 "requested_count": requested_count,
                 "docking_top_n": docking_top_n,
+            },
+        )
+
+    @staticmethod
+    def _target_structure_molecule_analysis_plan(query: str) -> WorkflowPlan:
+        from src.agent.planning.composite_request import (
+            parse_target_structure_molecule_request,
+        )
+
+        request = parse_target_structure_molecule_request(query)
+        if request is None:
+            return WorkflowPlan(
+                workflow_name="target_structure_molecule_analysis",
+                steps=[],
+                metadata={
+                    "input_type": "invalid_composite_request",
+                    "reason": "request_clarification_required",
+                },
+            )
+        smiles = "\n".join(request.smiles)
+        return WorkflowPlan(
+            workflow_name="target_structure_molecule_analysis",
+            steps=[
+                WorkflowStep(
+                    "target_search", "target_database_search", request.target,
+                    output_key="target", capability="target.structure.search",
+                    output_contract="TargetStructureSet@1",
+                ),
+                WorkflowStep(
+                    "properties", "property_calculator", smiles,
+                    output_key="properties", capability="molecule.properties",
+                    output_contract="PropertyAssessmentSet@1",
+                ),
+                WorkflowStep(
+                    "admet", "admet_predictor", smiles,
+                    output_key="admet", required=False, continue_on_error=True,
+                    capability="molecule.admet",
+                    output_contract="AdmetAssessmentSet@1",
+                ),
+            ],
+            metadata={
+                "input_type": "explicit_composite_request",
+                "target": request.target,
+                "smiles": list(request.smiles),
             },
         )
 

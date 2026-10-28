@@ -13,6 +13,7 @@ MedChat 是面向药物设计与药物化学研究的 Web 平台，整合自然�
 
 ### 环境要求
 
+- Conda 环境 `MedChat`（推荐 Python 3.10）
 - Python 3.10+
 - Node.js >=22.19.0，推荐 24.15.0（Pi 运行时；不是前端构建工具）
 - Ollama 本地服务
@@ -21,6 +22,8 @@ MedChat 是面向药物设计与药物化学研究的 Web 平台，整合自然�
 ### 安装依赖
 
 ```bash
+# Windows PowerShell；项目 Python 依赖安装到 Conda 环境 MedChat
+conda activate MedChat
 python -m pip install -r requirements.txt
 npm ci --prefix runtime/pi --ignore-scripts --no-audit --no-fund
 ```

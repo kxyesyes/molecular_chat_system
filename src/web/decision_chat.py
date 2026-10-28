@@ -2,11 +2,12 @@
 import asyncio
 import inspect
 import json
+import math
 from collections import deque
 from contextlib import suppress
 from threading import Lock
 
-from src.agent.contracts import AgentResult, AgentExecutionError, AgentErrorCode, RunOutcome
+from src.agent.contracts import AgentResult, AgentExecutionError, AgentErrorCode, RunOutcome, ToolResult, ToolProvenance
 from src.agent.scientific_session.decision_bounds import validate_json
 from src.agent.persistence.redaction import redact_sensitive, sanitize_bounded
 from src.agent.runtime.event_bus import AgentEventBus
@@ -28,7 +29,16 @@ def _display_cell(value):
     return str(value).replace('|', r'\|').replace('`', r'\`').replace('\r', ' ').replace('\n', ' ')
 
 
-def scientific_display_answer(results):
+def _display_prediction_value(value):
+    """Format numeric prediction cells without changing stored evidence."""
+    if isinstance(value, bool):
+        return _display_cell(value)
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return _display_cell(format(float(value), '.4g'))
+    return _display_cell(value)
+
+
+def scientific_display_answer(results, *, concise=False):
     """Render verified property observations for people while retaining JSON audit data.
 
     The decision policy deliberately stores scientific answers as allowlisted JSON.
@@ -62,8 +72,6 @@ def scientific_display_answer(results):
     lines = [
         '## 分子性质计算结果',
         '',
-        '以下数值由 RDKit 根据输入结构计算，仅供研究参考，不构成实验验证。',
-        '',
         '| SMILES | 分子式 | 分子量 (Da) | logP | TPSA (Å²) | HBD | HBA | QED | 可旋转键数 |',
         '|---|---|---:|---:|---:|---:|---:|---:|---:|',
     ]
@@ -79,17 +87,263 @@ def scientific_display_answer(results):
             props.get('qed'),
             props.get('rotatable_bonds'),
         )) + ' |')
-    lines.extend(['', '来源：property_calculator（结构化工具结果）。'])
-    if versions:
-        lines.append('工具版本：' + ', '.join(dict.fromkeys(versions)) + '。')
-    if evidence_ids:
-        lines.append('证据 ID：' + '、'.join(dict.fromkeys(evidence_ids)) + '。')
-    lines.extend(['', '限制：这些是计算描述符，QED 不是成药成功概率，不能据此判断疗效、选择性或实验结果。'])
+    if not concise:
+        lines.extend(['', '来源：property_calculator（结构化工具结果）。'])
+        if versions:
+            lines.append('工具版本：' + ', '.join(dict.fromkeys(versions)) + '。')
+        if evidence_ids:
+            lines.append('证据 ID：' + '、'.join(dict.fromkeys(evidence_ids)) + '。')
     return '\n'.join(lines)
 
 
-def web_scientific_display(result):
-    """Project only the runtime's allowlisted cited answer; no raw tool prose."""
+def _admet_display_answer(data, evidence_id=None, *, concise=False):
+    """Render only validated ADMET-AI fields for the Web result card."""
+    rows = []
+    for row in data or ():
+        if (not isinstance(row, dict)
+                or row.get('status', 'succeeded') not in {'succeeded', 'passed'}):
+            continue
+        admet = row.get('admet')
+        if not isinstance(admet, dict) or admet.get('prediction_method') != 'admet_ai':
+            continue
+        endpoints = admet.get('endpoints')
+        if not isinstance(endpoints, dict) or not endpoints:
+            continue
+        rows.append((row, admet, endpoints))
+    if not rows:
+        return ''
+
+    first = rows[0][1]
+    model_name = _display_cell(first.get('model_name'))
+    model_version = _display_cell(first.get('model_version'))
+    lines = ['## ADMET 预测结果' if concise else '## ADMET-AI 预测结果', '']
+    if not concise:
+        lines.extend([f'模型：{model_name} {model_version}',
+                      '结果来自本地 ADMET-AI 模型；模型预测不等于实验结果。'])
+    for row, admet, endpoints in rows:
+        lines.extend([
+            '',
+            f"SMILES：{_display_cell(row.get('smiles'))}",
+            f"返回端点：{sum(isinstance(endpoint, dict) for endpoint in endpoints.values())}；"
+            f"风险筛查分类端点：{_display_cell(admet.get('total_endpoints'))}；"
+            f"阈值命中项：{_display_cell(admet.get('risk_count'))}",
+        ])
+        risk_ids = admet.get('risk_endpoint_ids')
+        if isinstance(risk_ids, list) and all(isinstance(value, str) and value for value in risk_ids):
+            hit_names = []
+            for endpoint_id in risk_ids:
+                endpoint = endpoints.get(endpoint_id)
+                name = endpoint.get('name') if isinstance(endpoint, dict) else None
+                hit_names.append(_display_cell(name or endpoint_id))
+            if hit_names:
+                lines.append('阈值命中端点：' + '、'.join(hit_names))
+        elif admet.get('risk_count'):
+            lines.append('阈值命中端点：请展开完整端点明细')
+        lines.extend([
+            '',
+            '| 端点 | 数值 | 单位 |' if concise else '| 端点 | 预测值 | 单位 | 类别 | 来源 |',
+            '|---|---:|---|' if concise else '|---|---:|---|---|---|',
+        ])
+        endpoint_rows = [(name, endpoint) for name, endpoint in endpoints.items()
+                         if isinstance(endpoint, dict)]
+        if concise:
+            # The backend places calculated RDKit descriptors first. Preview
+            # actual model endpoints when present, retaining every original
+            # endpoint and its method in the immutable details snapshot.
+            predicted_rows = [(name, endpoint) for name, endpoint in endpoint_rows
+                              if endpoint.get('source') == 'admet_ai_model']
+            endpoint_rows = predicted_rows or endpoint_rows
+        shown = 0
+        for endpoint_id, endpoint in endpoint_rows:
+            if concise and shown == 8:
+                break
+            values = (endpoint_id, _display_prediction_value(endpoint.get('value')), endpoint.get('unit'))
+            if not concise:
+                values += (endpoint.get('category'), endpoint.get('source'))
+            lines.append('| ' + ' | '.join(
+                value if index == 1 else _display_cell(value)
+                for index, value in enumerate(values)
+            ) + ' |')
+            shown += 1
+        if concise and sum(isinstance(endpoint, dict) for endpoint in endpoints.values()) > shown:
+            lines.extend(['', '完整端点请展开“查看明细”。'])
+    if evidence_id and not concise:
+        lines.extend(['', f'证据 ID：{_display_cell(evidence_id)}。'])
+    if not concise:
+        lines.append('风险汇总是筛查启发式，不是安全性结论；端点需要结合研究目标和实验验证解释。')
+    return '\n'.join(lines)
+
+
+def _activity_display_answer(data, *, concise=False):
+    """Render allowlisted activity observations for the result summary."""
+    rows = []
+    for row in data or ():
+        if not isinstance(row, dict):
+            continue
+        status = row.get('status', 'succeeded')
+        execution_status = row.get('execution_status', status)
+        if status not in {'succeeded', 'passed', 'partial'} or execution_status == 'failed':
+            continue
+        if not any(row.get(key) is not None for key in (
+                'predicted_pIC50', 'activity_probability', 'value', 'probability')):
+            continue
+        rows.append(row)
+    if not rows:
+        return ''
+    lines = ['## 活性预测结果', '']
+    for row in rows:
+        lines.append(f"SMILES：{_display_cell(row.get('smiles'))}")
+        target = row.get('requested_target') or row.get('target')
+        if target is not None:
+            lines.append(f"靶点：{_display_cell(target)}")
+        if row.get('predicted_pIC50') is not None:
+            lines.append(f"预测 pIC50：{_display_prediction_value(row.get('predicted_pIC50'))}")
+        if row.get('activity_probability') is not None:
+            lines.append(f"活性概率：{_display_prediction_value(row.get('activity_probability'))}")
+        if row.get('activity_class') is not None:
+            lines.append(f"分类：{_display_cell(row.get('activity_class'))}")
+        if row.get('label_threshold') is not None:
+            lines.append(f"pIC50 分类阈值：{_display_prediction_value(row.get('label_threshold'))}")
+        if row.get('probability_threshold') is not None:
+            lines.append(f"概率分类阈值：{_display_prediction_value(row.get('probability_threshold'))}")
+        if row.get('classification_regression_consistent') is not None:
+            state = '一致' if row.get('classification_regression_consistent') else '不一致'
+            lines.append(f"分类与回归结果：{state}")
+            if not row.get('classification_regression_consistent'):
+                lines.append('状态：需复核（已保留分类与回归两项原始预测）')
+        lines.append('')
+    if not concise:
+        lines.append('活性预测用于研究优先级，不等同于实验活性或疗效结论。')
+    return '\n'.join(lines).rstrip()
+
+
+def _target_display_answer(data, evidence_id=None, *, concise=False):
+    """Render the bounded target lookup rows without exposing audit JSON."""
+    if not isinstance(data, list):
+        return ''
+
+    def availability(value):
+        if value is True:
+            return '是'
+        if value is False:
+            return '否'
+        return '未知'
+
+    rows = [row for row in data[:20] if isinstance(row, dict)]
+    if not rows:
+        return ''
+
+    lines = [
+        '## 靶点数据库检索结果',
+        '',
+        '| 靶点 | 蛋白名称 | 物种 | UniProt | 结构记录数 | 实验结构 | AlphaFold |',
+        '|---|---|---|---|---:|---|---|',
+    ]
+    for row in rows:
+        structure_status = row.get('structure_evidence_status')
+        structure_count = (
+            '未知' if structure_status == 'unavailable'
+            else row.get('structure_count', '未知')
+        )
+        lines.append('| ' + ' | '.join(_display_cell(value) for value in (
+            row.get('gene_symbol', row.get('target_name', '不可用')),
+            row.get('protein_name', '不可用'),
+            row.get('organism', '不可用'),
+            row.get('uniprot_id', '不可用'),
+            structure_count,
+            '未知' if structure_status == 'unavailable' else availability(
+                row.get('has_experimental_structure')
+            ),
+            '未知' if structure_status == 'unavailable' else availability(
+                row.get('has_alphafold_structure')
+            ),
+        )) + ' |')
+
+    for row in rows:
+        structures = row.get('recommended_structures')
+        if not isinstance(structures, list) or not structures:
+            continue
+        target = _display_cell(row.get('gene_symbol', row.get('target_name', '靶点')))
+        lines.extend(['', f'**{target} 推荐结构预览**'])
+        for structure in structures[:3]:
+            if not isinstance(structure, dict):
+                continue
+            structure_id = _display_cell(structure.get('structure_id'))
+            source = _display_cell(structure.get('source'))
+            level = _display_cell(structure.get('recommendation_level'))
+            ligand_ids = structure.get('ligand_ids')
+            if isinstance(ligand_ids, list) and all(isinstance(value, str) for value in ligand_ids):
+                ligand_text = ', '.join(ligand_ids) if ligand_ids else '无记录'
+            else:
+                ligand_text = '不可用'
+            lines.append(
+                f'- 结构 ID：{structure_id}；' + ('' if concise else f'来源：{source}；')
+                + f'推荐级别：{level}；'
+                f'配体 ID：{_display_cell(ligand_text)}。'
+            )
+        lines.append('配体角色和对接口袋尚未核实，不能仅凭配体记录确认结构适合对接。')
+
+    return '\n'.join(lines)
+
+
+def _compiled_display_observations(result):
+    """Read accepted compiled-ADMET observations, without manufacturing an audit.
+
+    Compiled workflows retain ordinary tool prose rather than the Pi cited-answer
+    JSON. This presentation-only adapter uses their existing validated records;
+    it never rewrites the result, evidence ledger, or execution authority.
+    """
+    metadata = result.metadata
+    required = metadata.get('required_tools')
+    allowed = {'property_calculator', 'drug_likeness_assessment', 'admet_predictor'}
+    if (metadata.get('scientific_plan_status') != 'ready'
+            or metadata.get('workflow_version') != 'web-admet-v1'
+            or type(required) is not list or not required
+            or any(type(name) is not str or name not in allowed for name in required)
+            or 'admet_predictor' not in required
+            or any(type(item) is not ToolResult or item.tool_name not in required
+                   for item in result.tool_results)):
+        return None
+    blocks = []
+    for item in result.tool_results:
+        provenance = item.provenance
+        if (item.status.value not in {'succeeded', 'partial'} or item.success is not True
+                or item.error is not None or item.quality.get('validated') is not True
+                or type(item.quality.get('evidence_id')) is not str or not item.quality['evidence_id']
+                or type(provenance) is not ToolProvenance
+                or provenance.tool_name != item.tool_name or not provenance.input_digest
+                or provenance.demo_mode or provenance.fallback_used):
+            continue
+        blocks.append({'tool': item.tool_name, 'data': item.data,
+                       'status': item.status.value, 'evidence_id': item.quality['evidence_id']})
+    return blocks or None
+
+
+def _bound_activity_display_observations(result):
+    """Project a validated Web activity observation when no cited answer exists."""
+    if result.metadata.get('binding_profile') != 'medchat-web-v1':
+        return None
+    required_tools = result.metadata.get('required_tools')
+    if isinstance(required_tools, list) and 'activity_predictor' not in required_tools:
+        return None
+    blocks = []
+    for item in result.tool_results:
+        if (item.tool_name != 'activity_predictor' or item.status.value not in {'succeeded', 'partial'}
+                or item.error is not None or item.quality.get('validated') is not True
+                or not isinstance(item.quality.get('evidence_id'), str)
+                or not item.quality['evidence_id'] or item.provenance is None
+                or item.provenance.demo_mode or item.provenance.fallback_used):
+            continue
+        proof = item.quality.get('binding_proof')
+        if not isinstance(proof, dict) or proof.get('profile') != 'medchat-web-v1':
+            continue
+        blocks.append({'tool': item.tool_name, 'data': item.data,
+                       'status': item.status.value, 'evidence_id': item.quality['evidence_id']})
+    return blocks or None
+
+
+def web_scientific_display(result, *, concise=False):
+    """Project cited answers or reviewed compiled records, never raw tool prose."""
     if (result.metadata.get('binding_profile') != 'medchat-web-v1'
             or result.metadata.get('waiting_for_input')
             or result.outcome.value not in {'completed', 'partial'}):
@@ -97,20 +351,27 @@ def web_scientific_display(result):
     try:
         payload = json.loads(result.final_answer)
     except (TypeError, ValueError):
-        return None  # Ordinary chat has no structured scientific projection.
-    if (type(payload) is not dict or type(payload.get('acceptance')) is not dict
-            or payload['acceptance'].get('profile') != 'medchat-web-v1'
-            or type(payload.get('observations')) is not list):
+        payload = None
+    if (type(payload) is dict and type(payload.get('acceptance')) is dict
+            and payload['acceptance'].get('profile') == 'medchat-web-v1'
+            and type(payload.get('observations')) is list):
+        observations = payload['observations']
+    else:
+        # The default/legacy rendering contract stays unchanged.
+        observations = _compiled_display_observations(result) if concise else None
+        if observations is None:
+            observations = _bound_activity_display_observations(result)
+    if observations is None:
         return None
     from types import SimpleNamespace
-    lines = ['计算、预测和检索结果仅供研究参考，不构成实验验证。']
-    for block in payload['observations']:
+    lines = []
+    for block in observations:
         name, data = block['tool'], block.get('data')
         if name == 'property_calculator' and data:
             view = SimpleNamespace(tool_name=name, data=data, error=None,
                 status=SimpleNamespace(value=block['status']),
                 quality={'evidence_id': block['evidence_id']}, provenance=None)
-            lines.append(scientific_display_answer([view]) or '')
+            lines.append(scientific_display_answer([view], concise=concise) or '')
         elif name == 'drug_likeness_assessment' and data:
             lines.append('## 类药性评估结果')
             for row in data:
@@ -120,15 +381,37 @@ def web_scientific_display(result):
                 score = assessment.get('overall_assessment', {}).get('score')
                 if score is not None:
                     lines.append('总体评分: ' + _display_cell(score))
-            lines.append('本结果来自 RDKit 描述符计算与启发式规则判断；综合评分为既有加权规则评分，'
-                         '不是成药成功概率，不能确定口服生物利用度或疗效。')
-        # Always retain every approved observation, including model state,
-        # provenance, missing/unknown evidence and failure reasons. JSON quotes
-        # escape embedded newlines, so data cannot close the fenced block.
-        lines.extend(['### ' + _display_cell(name), '```json',
-                      json.dumps(block, ensure_ascii=False, allow_nan=False).replace('`', r'\u0060'), '```'])
-    lines.extend(['限制：', *payload.get('limitations', [])])
-    return '\n\n'.join(lines)
+            if not concise:
+                lines.append('本结果来自 RDKit 描述符计算与启发式规则判断；综合评分为既有加权规则评分，'
+                             '不是成药成功概率，不能确定口服生物利用度或疗效。')
+        elif name == 'admet_predictor' and data:
+            lines.append(_admet_display_answer(data, block.get('evidence_id'), concise=concise))
+        elif name == 'activity_predictor' and data:
+            lines.append(_activity_display_answer(data, concise=concise))
+        elif name == 'candidate_ranker' and any(reason in block.get('reason_codes', []) for reason in
+                ('ranking_evidence_mismatch', 'ranking_candidate_mismatch', 'invalid_scientific_observation')):
+            lines.append('候选排序结果未通过校验，未展示排名。')
+        elif name == 'candidate_ranker' and isinstance(data, dict):
+            rows = data.get('top_candidates', [])
+            if rows:
+                section = ['## 候选排序', '', '| 排名 | SMILES | 优先级分数 |', '|---:|---|---:|']
+                for row in rows:
+                    section.append('| ' + ' | '.join(_display_cell(row.get(key)) for key in
+                        ('rank', 'canonical_smiles', 'score')) + ' |')
+                evidence = [row.get('ranking_evidence', {}) for row in rows]
+                if all(e.get('weights_used') == {'properties': .5, 'admet': None, 'activity': None}
+                       and e.get('admet_score') is None and e.get('activity_score') is None for e in evidence):
+                    section.append('排序依据：0.5 ×（0.7 × QED + 0.3 × LogP 区间评分）；仅使用分子性质。')
+                lines.append('\n'.join(section))
+        elif name == 'target_database_search' and data:
+            lines.append(_target_display_answer(data, block.get('evidence_id'), concise=concise))
+        elif (name == 'target_database_search' and (data is None or data == [])
+              and block.get('lookup_status') == 'not_found'
+              and block.get('status') == 'succeeded'
+              and block.get('scientific_usable') is True and block.get('error') is None):
+            lines.append('## 靶点数据库检索结果\n\n本次已查询来源中未找到匹配靶点。'
+                         '请核对名称、物种或 UniProt accession。')
+    return '\n\n'.join(line for line in lines if line)
 
 
 class _DeliveryError(Exception):
@@ -259,11 +542,47 @@ def _event_frame(handler, event):
                        'display_redacted_or_truncated': changed}, ensure_ascii=False, allow_nan=False), changed
 
 
-def _result_frame(handler, result, display_changed, *, business_view=None):
+def _result_frame(handler, result, display_changed, *, business_view=None,
+                  result_format=None, details_reference=None, details_error=None):
+    if result_format == 'summary_details_v1':
+        from .result_summary import summary_frames
+        return summary_frames(handler, result, business_view=business_view,
+                              details_reference=details_reference, details_error=details_error)
     if (type(result) is not AgentResult or type(result.metadata) is not dict
             or type(result.warnings) is not list or type(result.success) is not bool):
         raise _DeliveryError('result_display_invalid')
     envelope = result.to_legacy_dict()
+    from .result_details_projection import (accepted_ranking_ids, hide_unaccepted_ranking,
+                                            scrub_unaccepted_ranking_failure, scrub_run_error)
+    accepted = accepted_ranking_ids(result)
+    if accepted is not None:
+        rejected_aggregate = {'evidence': [], 'artifacts': []}
+        for value in envelope.get('tool_result_sequence', []):
+            quality = value.get('quality') if isinstance(value, dict) else None
+            unaccepted = (value.get('tool_name') == 'candidate_ranker' and
+                          (not isinstance(quality, dict) or quality.get('evidence_id') not in accepted))
+            for key in rejected_aggregate:
+                if unaccepted and isinstance(value.get(key), list):
+                    rejected_aggregate[key].extend(value[key])
+        def filter_ranking(value, name):
+            if (name == 'candidate_ranker' and isinstance(value, dict)
+                    and (not isinstance(value.get('quality'), dict)
+                         or value['quality'].get('evidence_id') not in accepted)):
+                if value.get('data') is not None or value.get('success') is True:
+                    hide_unaccepted_ranking(value)
+                else:
+                    scrub_unaccepted_ranking_failure(value)
+        for value in envelope.get('tool_result_sequence', []):
+            filter_ranking(value, value.get('tool_name'))
+        for value in envelope.get('tool_results_by_step', {}).values():
+            filter_ranking(value, value.get('tool_name'))
+        for name, value in envelope.get('tool_results', {}).items():
+            filter_ranking(value, name)
+        for key in rejected_aggregate:
+            if isinstance(envelope.get(key), list):
+                envelope[key] = [item for item in envelope[key]
+                    if item not in rejected_aggregate[key]]
+        envelope['error'] = scrub_run_error(result, envelope.get('error'))
     envelope.update(type='agent_result', trace_id=result.trace_id,
                     final_answer=result.final_answer or result.message)
     terminal_status = envelope.get('status')
@@ -295,6 +614,9 @@ def _result_frame(handler, result, display_changed, *, business_view=None):
         if result.metadata.get('stop_reason') in {'web_clarification_changes_request', 'decision_input_budget_exceeded'}:
             from .decision_runtime import terminal_message_for_reason
             envelope['final_answer'] = terminal_message_for_reason(result.metadata['stop_reason'])
+        if (business_view is not None and business_view.get('mixed_history_failure') is True
+                and type(business_view.get('final_answer')) is str):
+            envelope['final_answer'] = business_view['final_answer'] + '\n\n' + envelope['final_answer']
     if result.metadata.get('waiting_for_input'):
         envelope['status'] = 'waiting_for_input'
     if not terminal_failure:
@@ -304,6 +626,8 @@ def _result_frame(handler, result, display_changed, *, business_view=None):
         if business_view is not None:
             if business_view.get('final_answer') is not None:
                 envelope['display_answer'] = business_view['final_answer']
+                if business_view.get('suppress_raw_answer') is True:
+                    envelope['final_answer'] = business_view['final_answer']
             if business_view.get('prefix'):
                 envelope['display_answer'] = (business_view['prefix'] + '\n\n'
                     + envelope.get('display_answer', envelope['final_answer']))
@@ -412,10 +736,54 @@ class _ProjectionSender:
         self.scope = getattr(websocket, 'scope', {})
         self.stopped = False
 
+    @property
+    def result_format(self):
+        return getattr(self.websocket, 'result_format', None)
+
     async def send_text(self, text):
         if self.stopped:
             raise ConnectionError('Decision projection delivery stopped')
         await await_with_deadline(self.websocket.send_text(text), timeout=SEND_TIMEOUT_SECONDS)
+
+
+async def _prepare_result_frames(handler, result, display_changed, *, websocket, store,
+                                 business_view=None):
+    """Freeze presentation once and settle private snapshot I/O before sending.
+
+    This uses a separate settled call: the scientific worker ledger is already
+    sealed, and a display snapshot never acquires tool/continuation authority.
+    """
+    if getattr(websocket, 'result_format', None) != 'summary_details_v1':
+        return _result_frame(handler, result, display_changed,
+            **({'business_view': business_view} if business_view is not None else {}))
+    from dataclasses import replace
+    from src.agent.persistence.result_details import publish_result_details
+    from src.agent.scientific_session.decision_execution import settle_owned_call
+    from .result_summary import prepare_summary, encode_summary
+
+    def prepare():
+        projected_result = result
+        # Runtime-generated failures may predate entry to the full-Web loop.
+        # Add only a presentation binding; do not mutate durable runtime state.
+        if not result.tool_results and 'binding_profile' not in result.metadata:
+            projected_result = replace(result, metadata={**result.metadata,
+                'binding_profile': 'medchat-web-v1'})
+        frame, payload = prepare_summary(handler, projected_result, business_view=business_view)
+        frame['display_redacted_or_truncated'] |= display_changed
+        reference = None
+        if payload is not None:
+            try:
+                reference = publish_result_details(store, result.trace_id,
+                    session_id=websocket.scope.get('agent_session_id'), payload=payload)
+            except Exception:
+                # No exception text, paths or partial snapshot enter the UI.
+                reference = None
+        return encode_summary(frame, details_reference=reference,
+                              details_error=frame.pop('_details_error', None))
+
+    # Empty control/ordinary results have no snapshot I/O. In particular, a
+    # capacity rejection must not queue behind the workers it is rejecting.
+    return await settle_owned_call(prepare) if result.tool_results else prepare()
 
 
 async def _deliver_result(handler, websocket, frames, execution):
@@ -565,18 +933,26 @@ async def process_decision_message(handler, websocket, *, context, decision_loop
         if web_projection is not None:
             from src.agent.scientific_session.decision_execution import settle_owned_call
             business_view = await settle_owned_call(lambda: web_projection.capture(
-                result, context=context, reverse_count=handler._reverse_display_count(context.query)))
+                result, context=context, reverse_count=handler._reverse_display_count(context.query),
+                reverse_restricted=handler._reverse_display_restricted(context.query)))
         # The Pi-loop watcher is already drained. A cancellation arriving while
         # a physical business projection settles must still prevent publication.
         if cancel_event is not None and cancel_event.is_set():
             raise asyncio.CancelledError()
-        frames = _result_frame(handler, result, display_changed,
-            **({'business_view': business_view} if business_view is not None else {}))
+        frames = await _prepare_result_frames(handler, result, display_changed,
+            websocket=websocket, store=decision_loop.store, business_view=business_view)
+        if cancel_event is not None and cancel_event.is_set():
+            raise asyncio.CancelledError()
     except Exception:
         result = _failure(context, 'result_display_invalid')
-        frames = _result_frame(handler, result, True)
+        frames = await _prepare_result_frames(handler, result, True,
+            websocket=websocket, store=decision_loop.store)
     execution = {**result.to_legacy_dict(), 'trace_id': result.trace_id}
-    validate_json(execution, max_bytes=4 * 1024 * 1024, max_nodes=65536,
-                  reason='result_display_invalid')
+    if getattr(websocket, 'result_format', None) != 'summary_details_v1':
+        validate_json(execution, max_bytes=4 * 1024 * 1024, max_nodes=65536,
+                      reason='result_display_invalid')
+    # Opt-in preparation already validates each observation and its envelope,
+    # including capacity fallback. This duplicated legacy index is internal:
+    # reference/candidate/RAG projection must still receive the complete result.
     await _deliver_result(handler, websocket, frames, _presentation_admission(execution))
     return result

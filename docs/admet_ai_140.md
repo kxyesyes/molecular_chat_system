@@ -4,7 +4,10 @@ MedChat 的 `admet_predictor` 现在只把真实 ADMET-AI 1.4.0 本地权重的�
 
 ## 为什么使用独立 worker
 
-ADMET-AI 1.4.0 的官方包固定 `torch==2.5.0`。MedChat 的 RG-MPNN/部署环境有自己的 Torch/CUDA 约束，直接在同一个环境升级 Torch 可能破坏既有活性预测。因此推荐使用独立 Python 3.10 worker，让主 Agent 通过 JSON-lines 调用；模型会在 worker 进程内加载一次并缓存。
+ADMET-AI 1.4.0 的官方包固定 `torch==2.5.0`。MedChat 主进程使用项目 Conda
+环境 `MedChat`；该环境的 RG-MPNN/部署栈有自己的 Torch/CUDA 约束，直接在同一个环境升级
+Torch 可能破坏既有活性预测。因此推荐使用独立 Python 3.10 worker，让主 Agent 通过
+JSON-lines 调用；模型会在 worker 进程内加载一次并缓存。这里的独立 worker 不代表项目主环境改用 venv。
 
 ## 安装
 
@@ -39,9 +42,10 @@ worker 请求受单批 100 个分子和调用超时约束；超时会终止并�
 
 ## 验证
 
-使用项目的 Python 3.10 环境运行契约测试：
+使用项目 Conda 环境 `MedChat` 运行契约测试：
 
 ```powershell
+conda activate MedChat
 python -m pytest tests\agent\test_admet_ai_integration.py -q -p no:cacheprovider
 ```
 

@@ -21,6 +21,7 @@ from .docking_consent_guard import DockingConsentGuard
 _SAFE_JOB_ID = re.compile(r"[A-Za-z0-9_-]+")
 _HISTORY_PAGE_SIZE = 200
 _HISTORY_SCAN_LIMIT = 10_000
+DEMO_PDE4A_APO_PATH = Path(__file__).resolve().parents[3] / "data" / "samples" / "PDE4A_apo_6FG5.pdb"
 
 
 def _normalize_warning_strings(values) -> list[str]:
@@ -216,6 +217,81 @@ def _owned_history(request: Request, work_dir: str, job_id: str) -> dict:
     if record is None:
         raise HTTPException(status_code=404, detail="对接任务不存在")
     return record
+
+
+def _legacy_pose_efficiency_rows(rows, work_dir: str | Path, job_id: str) -> list[dict]:
+    """Add LE only when the saved ligand and Vina energy support it."""
+    from src.docking.history_index import _heavy_atom_count
+    from src.docking.molecular_docking_service import _ligand_efficiency
+
+    ligand_path = Path(work_dir) / f"docking_{job_id}" / "ligand.pdbqt"
+    heavy_atom_count = _heavy_atom_count(ligand_path)
+    return _pose_efficiency_rows(rows, heavy_atom_count)
+
+
+def _pose_efficiency_rows(rows, heavy_atom_count: int) -> list[dict]:
+    from src.docking.molecular_docking_service import _ligand_efficiency
+
+    return [
+        {
+            **row,
+            "ligand_efficiency": _ligand_efficiency(
+                row.get("binding_energy"), heavy_atom_count
+            ),
+        }
+        for row in rows
+    ]
+
+
+def _verified_ligand_heavy_atom_count(verified_input: dict) -> int:
+    """Count ligand heavy atoms from the integrity-checked durable input."""
+    manifest = verified_input.get("manifest") if isinstance(verified_input, dict) else None
+    if not isinstance(manifest, dict):
+        return 0
+    ligand_record = manifest.get("ligand")
+    ligand_bytes = verified_input.get("ligand_bytes")
+    if not isinstance(ligand_record, dict) or not isinstance(ligand_bytes, bytes):
+        return 0
+
+    ligand_mode = manifest.get("ligand_mode")
+    ligand_name = str(ligand_record.get("name") or "ligand").lower()
+    try:
+        text = ligand_bytes.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return 0
+
+    if ligand_mode == "smiles":
+        try:
+            from rdkit import Chem
+
+            molecule = Chem.MolFromSmiles(text.strip())
+            return molecule.GetNumHeavyAtoms() if molecule is not None else 0
+        except Exception:
+            return 0
+
+    if ligand_name.endswith((".pdb", ".pdbqt")):
+        return sum(
+            1
+            for line in text.splitlines()
+            if line.startswith(("ATOM  ", "HETATM"))
+            and not line[12:16].strip().upper().startswith("H")
+        )
+
+    try:
+        from rdkit import Chem
+
+        molecule = Chem.MolFromMolBlock(text, sanitize=False, removeHs=False)
+        return molecule.GetNumHeavyAtoms() if molecule is not None else 0
+    except Exception:
+        return 0
+
+
+def _durable_pose_efficiency_rows(rows, verified_input: dict) -> list[dict]:
+    """Add LE using the task's verified staged ligand input when available."""
+    return _pose_efficiency_rows(
+        rows,
+        _verified_ligand_heavy_atom_count(verified_input),
+    )
 
 
 def _legacy_history_records(work_dir, owner_session_id, guard):
@@ -724,6 +800,25 @@ def setup_docking_routes(
             resolve(logger, "logger").exception("环境自检失败")
             return api_error("DOCKING_ENVIRONMENT_CHECK_FAILED", "环境自检失败", status_code=500)
 
+    @app.get("/api/docking/demo/pde4a-apo")
+    def get_pde4a_apo_demo(request: Request):
+        """Return the registered local PDE4A apo demo asset, never a fallback."""
+        _session_id(request)
+        path = DEMO_PDE4A_APO_PATH
+        if not path.is_file():
+            raise HTTPException(status_code=404, detail="本地 PDE4A apo 示例文件不存在，请检查示例资产登记。")
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise HTTPException(status_code=503, detail="无法读取本地 PDE4A apo 示例文件。") from exc
+        if b"HEADER" not in content[:4096] or b"ATOM  " not in content:
+            raise HTTPException(status_code=503, detail="本地 PDE4A apo 示例文件未通过 PDB 格式检查。")
+        return Response(
+            content=content,
+            media_type="chemical/x-pdb",
+            headers={"Cache-Control": "private, no-store"},
+        )
+
     @app.post("/api/docking/batch_submit")
     async def submit_batch_docking_job(
         request: Request,
@@ -925,6 +1020,64 @@ def setup_docking_routes(
         except Exception:
             resolve(logger, "logger").exception("获取对接结果失败")
             return api_error("DOCKING_RESULT_READ_FAILED", "获取结果失败", status_code=500)
+
+    @app.get("/api/docking/result/{job_id}/summary")
+    async def get_docking_result_summary(job_id: str, request: Request):
+        """Return owned, parser-derived Pose rows without exposing raw paths."""
+        _validate_job_id(job_id)
+        try:
+            content = await read_owned_docking_pose(job_id, request)
+            text = content.decode("utf-8", errors="strict")
+            from src.docking.molecular_docking_service import MolecularDockingService
+
+            rows = await asyncio.to_thread(
+                MolecularDockingService.parse_vina_results_text,
+                text,
+            )
+            if not rows:
+                raise HTTPException(status_code=422, detail="对接结果明细无法通过验证")
+            # Legacy jobs retain the prepared ligand PDBQT alongside the
+            # result. Use it to calculate LE = -ΔG/Nheavy; durable tasks may
+            # not expose a ligand file here, so they remain honestly unknown.
+            legacy_record = None
+            if docking_service is not None:
+                try:
+                    legacy_record = _owned_history(request, docking_service.work_dir, job_id)
+                except HTTPException as exc:
+                    if exc.status_code != 404:
+                        raise
+            if legacy_record is not None:
+                rows = _legacy_pose_efficiency_rows(rows, docking_service.work_dir, job_id)
+            else:
+                durable_task = await resolve_owned_durable_docking_task(job_id, request)
+                if durable_task is not None:
+                    _, staging_root, manifest_path = durable_task
+                    try:
+                        from src.task_runtime.staging import DockingInputStager
+
+                        verified_input = await asyncio.to_thread(
+                            DockingInputStager(staging_root).read_verified_input_bytes,
+                            job_id,
+                            Path(manifest_path).name,
+                        )
+                        rows = _durable_pose_efficiency_rows(rows, verified_input)
+                    except Exception:
+                        # A missing or unreadable staged ligand leaves LE unknown;
+                        # never infer it from an unverified source.
+                        pass
+            return {
+                "success": True,
+                "job_id": job_id,
+                "total_poses": len(rows),
+                "results": rows,
+            }
+        except UnicodeDecodeError:
+            raise HTTPException(status_code=422, detail="对接结果文件不是有效的 UTF-8 文本") from None
+        except HTTPException:
+            raise
+        except Exception:
+            resolve(logger, "logger").exception("解析对接结果明细失败")
+            return api_error("DOCKING_RESULT_SUMMARY_FAILED", "结果明细暂不可用", status_code=500)
 
     @app.get("/api/docking/interactions/{job_id}")
     async def get_docking_interactions(job_id: str, request: Request, pose: int = 1):

@@ -3,6 +3,7 @@ import re
 from collections.abc import Mapping
 
 from src.activity.family_contract import resolve_activity_family
+from src.agent.contracts.comparison_presentation import without_comparison_presentation
 from src.agent.contracts.target_request import _TARGET_ROLE, analyze_target_request
 from .molecular_input import (
     _FIELD_END, _MARKER, _looks_like_structure, _unquote, parse_molecular_smiles,
@@ -139,6 +140,19 @@ def _context_clauses(text):
 
 def activity_target(text, validate_smiles):
     """Resolve bounded target positions; never infer arbitrary biomedical intent."""
+    # Target extraction must use only positive operation clauses.  Otherwise a
+    # prohibition such as “不要做对接” is misread by the single-character
+    # Chinese target label “对” as an additional target named “接”.
+    text = re.sub(
+        r"(?:不要|无需|不需要|不做|不运行|不执行|禁止|跳过|避免|勿|"
+        r"do\s+not|don't|without|skip|exclude)\s*"
+        r"(?:做|进行|运行|执行|开始)?\s*(?:对接|docking)"
+        r"(?=\s|$|[。.!?！？；;，,])",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = _prose_sentence_periods(text, validate_smiles)
     if _TARGET_ROLE.search(text):
         request = analyze_target_request(text)
         if request.needs_clarification:
@@ -239,6 +253,30 @@ def _molecular_context(clause, tool):
     return clause
 
 
+def _prose_sentence_periods(text, validate_smiles):
+    """Disambiguate one sentence period only after a complete prose molecule."""
+    if re.match(r'\s*(?:(?:请\s*)?(?:比较|对比)|(?:please\s+)?compare\b)', text, re.I):
+        # Admission, binding and tool parsing must see the same complete
+        # comparison operands. This local view never replaces the raw query.
+        text = without_comparison_presentation(text)
+    clauses = re.split(r"([\r\n；。;])", text)
+    for index in range(0, len(clauses), 2):
+        clause = clauses[index]
+        # An explicit field or a structure-leading batch is authoritative. Only
+        # a bounded English request may give its final period prose meaning.
+        if _MARKER.search(clause) or not re.match(
+                r"\s*(?:please\s+)?(?:compare|predict|assess|evaluate|calculate|analyze)\b",
+                clause, re.I):
+            continue
+        ending = re.search(r"(?<=\s)([^\s]+)\.([ \t]*)$", clause)
+        if ending and validate_smiles(ending[1]):
+            # Validate the entire remainder: internal salt/disconnection dots,
+            # malformed suffixes and repeated trailing dots must not be sliced.
+            period = ending.end(1)
+            clauses[index] = clause[:period] + clause[period + 1:]
+    return "".join(clauses)
+
+
 def parse_activity_input(payload, tool):
     data = payload if isinstance(payload, Mapping) else {}
     text = data.get("query", "") if isinstance(payload, Mapping) else payload
@@ -268,7 +306,8 @@ def parse_activity_input(payload, tool):
 
     # Only context is adapted. Labelled SMILES fields (including quoted suffixes)
     # go byte-for-byte to the stronger shared parser; no lexical truncation.
-    clauses = re.split(r"([\r\n；。;])", text)
+    context = _prose_sentence_periods(text, tool.validate_smiles)
+    clauses = re.split(r"([\r\n；。;])", context)
     for index in range(0, len(clauses), 2):
         clause = clauses[index]
         marker = _MARKER.search(clause)

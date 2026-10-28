@@ -578,6 +578,21 @@ class TargetSearchDemoTest(unittest.TestCase):
         self.assertEqual(cached["file_size_bytes"], cached_path.stat().st_size)
         self.assertIn(cached["docking_grade"], {"A", "B", "C"})
 
+    def test_structure_listing_does_not_call_unverified_file_a_verified_cache(self):
+        service = self._seeded_service()
+        target = service.search_targets("WDR5")["results"][0]
+        structure = service.get_target_structures(target["target_id"])["structures"][0]
+
+        listed = service.get_target_structures(target["target_id"])["structures"][0]
+        self.assertEqual(listed["cache_status"], "missing")
+
+        cached_path = self.root / structure["local_file_path"]
+        cached_path.parent.mkdir(parents=True, exist_ok=True)
+        cached_path.write_text("data_unverified\n", encoding="utf-8")
+        listed = service.get_target_structures(target["target_id"])["structures"][0]
+        self.assertEqual(listed["cache_status"], "unverified")
+        self.assertTrue(listed["is_downloaded"])
+
     def test_structure_preflight_does_not_treat_unverified_file_as_docking_ready(self):
         service = self._seeded_service()
         target = service.search_targets("WDR5")["results"][0]
@@ -673,7 +688,9 @@ class TargetSearchDemoTest(unittest.TestCase):
         request.assert_not_called()
 
         self.assertEqual(payload["status"], "success")
-        self.assertEqual(payload["message"], "结构文件已准备好，后续可接入分子对接模块")
+        self.assertEqual(payload["message"], "结构文件已准备好，可以进入分子对接页面继续配置")
+        self.assertEqual(payload["structure_db_id"], structure["id"])
+        self.assertEqual(payload["structure_id"], structure["structure_id"])
         self.assertIn("coordinates", payload["protein_file"])
 
     def test_route_returns_404_for_missing_structure(self):

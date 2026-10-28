@@ -46,6 +46,9 @@ def smiles_to_3d(smiles: str) -> dict[str, Any]:
     if AllChem.MMFFHasAllMoleculeParams(mol):
         force_field = "MMFF"
         optimization_status = AllChem.MMFFOptimizeMolecule(mol)
+        if optimization_status != 0 and AllChem.UFFHasAllMoleculeParams(mol):
+            force_field = "UFF"
+            optimization_status = AllChem.UFFOptimizeMolecule(mol)
     elif AllChem.UFFHasAllMoleculeParams(mol):
         force_field = "UFF"
         optimization_status = AllChem.UFFOptimizeMolecule(mol)

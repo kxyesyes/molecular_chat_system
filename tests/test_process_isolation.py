@@ -111,6 +111,16 @@ def test_child_inherits_activity_model_registry_path(monkeypatch, tmp_path):
     process.close()
 
 
+def test_child_inherits_admet_worker_interpreter_path(monkeypatch, tmp_path):
+    worker_python = str(tmp_path / "medchat-admet-ai" / "python.exe")
+    monkeypatch.setenv("ADMET_AI_PYTHON", worker_python)
+    process = IsolatedProcess(_read_environment, args=("ADMET_AI_PYTHON",))
+    process.start()
+
+    assert process.wait(timeout=2.0) == worker_python
+    process.close()
+
+
 def test_termination_requested_before_start_is_honored(tmp_path):
     marker = tmp_path / "marker.txt"
     process = IsolatedProcess(_write_after_delay, args=(str(marker), 0.05))

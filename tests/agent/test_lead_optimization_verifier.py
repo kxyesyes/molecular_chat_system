@@ -77,6 +77,18 @@ def test_verifier_distinguishes_evaluated_candidate_that_misses_goal():
     assert candidate["comparisons"][0]["satisfied"] is False
 
 
+def test_verifier_warning_names_failed_metric_and_values():
+    payload = _payload("降低 LogP")
+    payload["outputs"]["candidate_properties"][0]["properties"]["logp"] = 2.5
+
+    result = LeadOptimizationVerifier().execute(payload)
+
+    assert any(
+        "logp" in warning and "基线 2" in warning and "候选 2.5" in warning
+        for warning in result["warnings"]
+    )
+
+
 def test_verifier_does_not_invent_goal_when_request_has_no_explicit_metric():
     result = LeadOptimizationVerifier().execute(_payload("优化这个分子"))
 

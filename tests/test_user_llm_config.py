@@ -3,6 +3,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 
@@ -218,6 +219,49 @@ def test_explicit_legacy_retirement_preserves_unrelated_settings(tmp_path):
     assert "OLLAMA_MODEL=gmm-llama:latest" in content
     assert json.loads(cache.read_text()) == {}
     assert not list(tmp_path.glob("*.bak"))
+
+
+@pytest.mark.parametrize("raw", [
+    {"provider": "ollama"},
+    {"provider": "ollama", "model_name": ""},
+    {"provider": "ollama", "model": "   "},
+])
+def test_ollama_agent_request_requires_an_explicit_model_name(store, raw):
+    with pytest.raises(ValueError):
+        store.resolve_user_llm_request(raw, store.default_user_llm_config())
+
+
+def test_ollama_generator_name_is_not_an_agent_default(store):
+    with pytest.raises(ValueError):
+        store.resolve_user_llm_request(
+            {"provider": "ollama", "model_name": "gmm-llama:latest"},
+            store.default_user_llm_config(),
+        )
+
+
+def test_saved_agent_config_can_replace_legacy_generator_only_config(store, monkeypatch, request):
+    trusted_root = (
+        Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
+        / "MedChat" / "config" / f"test-agent-migration-{os.getpid()}"
+    )
+    path = trusted_root / "llm.env"
+    monkeypatch.setenv("MEDCHAT_USER_CONFIG_DIR", str(trusted_root))
+    request.addfinalizer(lambda: shutil.rmtree(trusted_root, ignore_errors=True))
+    # Create the private file through the store first, then model the old
+    # release's generator-only contents without weakening its ACL boundary.
+    store.save_user_llm_config(path, store.default_user_llm_config())
+    path.write_text(
+        "MEDCHAT_LLM_PROVIDER=ollama\n"
+        "MEDCHAT_LLM_STREAM=true\n"
+        "OLLAMA_BASE_URL=http://127.0.0.1:11434\n"
+        "OLLAMA_MODEL=gmm-llama:latest\n",
+        encoding="utf-8",
+    )
+
+    saved, _ = store.save_user_llm_config(path, store.default_user_llm_config())
+
+    assert saved == store.default_user_llm_config()
+    assert store.load_user_llm_config(path) == store.default_user_llm_config()
 @pytest.mark.parametrize("field,value", [
     ("model_name", "   "),
     ("model_name", "abc\u2028def"),

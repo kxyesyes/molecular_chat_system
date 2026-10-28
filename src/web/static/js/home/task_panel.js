@@ -3,9 +3,9 @@
 // DOM-only Agent task panel renderer. Runtime state and event ownership stay
 // in home/main.js; this module never decides whether a task succeeded.
 window.HomeTaskPanel = {
-  create(container, ownerDocument = window.document) {
+  create(container, ownerDocument = window.document, {reuse = true} = {}) {
     if (!container) return null;
-    const existing = container.querySelector?.(".agent-task-panel");
+    const existing = reuse && container.querySelector?.(".agent-task-panel");
     if (existing) return existing;
 
     const panel = ownerDocument.createElement("div");
@@ -13,13 +13,9 @@ window.HomeTaskPanel = {
     const header = ownerDocument.createElement("div");
     header.className = "agent-task-header";
     const copy = ownerDocument.createElement("div");
-    const kicker = ownerDocument.createElement("div");
-    kicker.className = "agent-task-kicker";
-    kicker.textContent = "AGENT WORKFLOW";
     const title = ownerDocument.createElement("div");
     title.className = "agent-task-title";
     title.textContent = "智能任务执行";
-    copy.appendChild(kicker);
     copy.appendChild(title);
     const progress = ownerDocument.createElement("div");
     progress.className = "agent-task-progress";
@@ -46,6 +42,21 @@ window.HomeTaskPanel = {
     }
   },
 
+  showWaiting(panel) {
+    if (!panel) return;
+    const progress = panel.querySelector?.(".agent-task-progress");
+    if (progress) progress.textContent = "等待补充输入";
+    // The caller owns the trace and verified that the last lifecycle event
+    // was a provisional rejection, now superseded by a valid continuation.
+    const item = panel.querySelector?.(".agent-task-list")?.lastChild;
+    if (!item) return;
+    item.className = "agent-task-item is-warning";
+    const heading = item.querySelector("strong");
+    const detail = item.querySelector(".agent-task-copy span");
+    if (heading) heading.textContent = "等待补充输入";
+    if (detail) detail.textContent = "请补充所需信息后继续当前任务。";
+  },
+
   appendEvent(panel, {label, message, itemClass, progressText}, ownerDocument = window.document) {
     if (!panel) return false;
     const list = panel.querySelector?.(".agent-task-list");
@@ -60,10 +71,12 @@ window.HomeTaskPanel = {
     copy.className = "agent-task-copy";
     const heading = ownerDocument.createElement("strong");
     heading.textContent = label;
-    const detail = ownerDocument.createElement("span");
-    detail.textContent = message;
     copy.appendChild(heading);
-    copy.appendChild(detail);
+    if (message && message !== label) {
+      const detail = ownerDocument.createElement("span");
+      detail.textContent = message;
+      copy.appendChild(detail);
+    }
     item.appendChild(dot);
     item.appendChild(copy);
     list.appendChild(item);

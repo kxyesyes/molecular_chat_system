@@ -57,6 +57,96 @@ def history():
 
 
 @pytest.mark.parametrize('mode', ['native', 'json'])
+def test_web_outbound_compaction_preserves_every_json_token_and_audit(adapter, mode):
+    observation = r'{ "score": -0.000, "label": "a b \"x\"", "source": "\u003csource\u003e", "missing": null, "warnings": ["not validated"] }'
+    assert json.loads(observation)['label'] == 'a b "x"'
+    # A normal JSON-looking user input must not be mistaken for an observation.
+    user = '{ "ordinary": "keep this spacing" }'
+    messages = history()
+    messages[1]['content'] = user
+    messages[-1]['content'][0]['text'] = observation
+    before = deepcopy(messages)
+    seen = []
+
+    class Model:
+        async def decide(self, projected, **kwargs):
+            seen.append(projected)
+            return DecisionResponse(decision(), None, 'next-call', {'request_attempts': 1})
+
+    response = asyncio.run(adapter.ModelProviderAdapter(Model(), mode).request(
+        messages, 2, compact_observations=True))
+    assert response.success
+    outbound = seen[0][-1]['content']
+    assert len(outbound) < len(observation)
+    assert json.loads(outbound) == json.loads(observation)
+    assert '-0.000' in outbound and r'\u003csource\u003e' in outbound
+    assert 'a b ' in outbound and 'not validated' in outbound
+    assert seen[0][1]['content'] == user
+    assert messages == before
+    assert adapter.project_messages(messages, mode=mode)[-1]['content'] == observation
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
+@pytest.mark.parametrize('observation', ['not JSON', '{"value":1,"value":2}', '{"value":NaN}'])
+def test_web_compaction_rejects_invalid_observation_without_dispatch(adapter, mode, observation):
+    messages = history()
+    messages[-1]['content'][0]['text'] = observation
+
+    class Model:
+        async def decide(self, *args, **kwargs):
+            pytest.fail('invalid observation must not reach the model')
+
+    response = asyncio.run(adapter.ModelProviderAdapter(Model(), mode).request(
+        messages, 2, compact_observations=True))
+    assert response.error.code is AgentErrorCode.INVALID_INPUT
+    assert response.metadata['request_attempts'] == 0
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
+def test_compaction_does_not_omit_observations_to_fit_budget(adapter, mode):
+    from src.agent.decision_transport import _budget_messages
+    messages = history()
+    messages[-1]['content'][0]['text'] = json.dumps({
+        'source': 'synthetic contract fixture', 'values': list(range(120)),
+        'warning': 'not an experimental result'})
+    before = deepcopy(messages)
+    compact = adapter.project_messages(messages, mode=mode, compact_observations=True)
+    cost = sum(len(m.get('content') or '') + sum(len(c['function']['arguments'])
+        for c in m.get('tool_calls', [])) for m in compact)
+    budget = {'max_chars': cost, 'history_max_chars': 0, 'history': []}
+    assert _budget_messages(compact, budget) == compact
+    with pytest.raises(DecisionProtocolError, match='decision_input_budget_exceeded'):
+        _budget_messages(compact, {**budget, 'max_chars': cost - 1})
+    assert messages == before
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
+@pytest.mark.parametrize('depth', [17, 32])
+def test_compaction_keeps_observation_encoder_depth_contract(adapter, mode, depth):
+    from src.agent.scientific_session.decision_policy import encode_observation
+    value = 0
+    for _ in range(depth):
+        value = {'nested': value}
+    observation = encode_observation(value)
+    messages = history()
+    messages[-1]['content'][0]['text'] = observation
+    assert adapter.project_messages(messages, mode=mode)[-1]['content'] == observation
+    projected = adapter.project_messages(messages, mode=mode, compact_observations=True)
+    assert json.loads(projected[-1]['content']) == value
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
+def test_compaction_keeps_observation_depth_bound(adapter, mode):
+    value = 0
+    for _ in range(33):
+        value = {'nested': value}
+    messages = history()
+    messages[-1]['content'][0]['text'] = json.dumps(value)
+    with pytest.raises(DecisionProtocolError, match='decision_too_deep'):
+        adapter.project_messages(messages, mode=mode, compact_observations=True)
+
+
+@pytest.mark.parametrize('mode', ['native', 'json'])
 def test_pi_internal_entries_do_not_consume_domain_message_budget(adapter, mode):
     trusted = {'role': 'system', 'content': 'Trusted'}
     messages = []

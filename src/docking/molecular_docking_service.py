@@ -11,6 +11,7 @@ import inspect
 import re
 import hashlib
 import json
+import tempfile
 from typing import Dict, List, Any, Tuple, Optional
 import shutil
 from dataclasses import dataclass
@@ -512,6 +513,12 @@ class MolecularDockingService:
             if AllChem.MMFFHasAllMoleculeParams(mol):
                 force_field = "MMFF"
                 optimization_status = AllChem.MMFFOptimizeMolecule(mol)
+                if optimization_status != 0 and AllChem.UFFHasAllMoleculeParams(mol):
+                    logger.warning(
+                        "RDKit MMFF optimization did not converge; retrying with UFF"
+                    )
+                    force_field = "UFF"
+                    optimization_status = AllChem.UFFOptimizeMolecule(mol)
             elif AllChem.UFFHasAllMoleculeParams(mol):
                 force_field = "UFF"
                 optimization_status = AllChem.UFFOptimizeMolecule(mol)
@@ -728,6 +735,14 @@ class MolecularDockingService:
                     trace["receptor_method"] = "pdbqt_passthrough"
                 return True
 
+            adfr_input = protein_path
+            if toolchain is None:
+                adfr_input, removed_unknown = self._sanitize_adfr_receptor_input(
+                    protein_path, output_path)
+                if trace is not None and removed_unknown:
+                    trace["receptor_input_sanitization"] = "removed_unknown_atoms"
+                    trace["receptor_input_removed_atoms"] = removed_unknown
+
             # 使用 ADFRsuite 的 prepare_receptor（支持 .bat / 无扩展 / .py）
             adfr_candidates = self._prepare_receptor_candidates()
             prepare_receptor_cmd = next((p for p in adfr_candidates if os.path.exists(p)), None)
@@ -744,13 +759,13 @@ class MolecularDockingService:
                     # to the explicitly approved C receptor. No heavy-atom repair.
                     result = self.receptor_adapter.run(
                         self.receptor_adapter.wrap_command(
-                            "-r", protein_path, "-o", output_path,
+                            "-r", adfr_input, "-o", output_path,
                             "-A", "None", "-U", "nphs",
                         ), cwd=self.work_dir, **adapter_control,
                     )
                 else:
                     result = self.receptor_adapter.prepare_receptor(
-                        protein_path, output_path, self.work_dir, **adapter_control,
+                        adfr_input, output_path, self.work_dir, **adapter_control,
                     )
 
                 if result.returncode == 0:
@@ -779,6 +794,36 @@ class MolecularDockingService:
         except Exception as e:
             logger.error(f"蛋白质准备异常: {e}")
             return False
+
+    @staticmethod
+    def _sanitize_adfr_receptor_input(protein_path: str, output_path: str) -> Tuple[str, int]:
+        """Remove only PDB atoms that ADFR cannot parameterize.
+
+        Some experimental PDB exports contain ``UNX`` records whose element is
+        ``X``. Passing those records to ADFR makes charge assignment fail before
+        receptor preparation. They are not a validated protein atom or a
+        parameterized cofactor, so they must be excluded rather than guessed.
+        The original receptor remains unchanged; chat-docking's strict source
+        path does not use this compatibility cleanup.
+        """
+        source = Path(protein_path)
+        if source.suffix.lower() != ".pdb":
+            return protein_path, 0
+        raw_lines = source.read_bytes().splitlines(keepends=True)
+        kept, removed = [], 0
+        for line in raw_lines:
+            if line.startswith((b"ATOM  ", b"HETATM")) and len(line) >= 78:
+                residue = line[17:20].strip().upper()
+                element = line[76:78].strip().upper()
+                if residue == b"UNX" or element == b"X":
+                    removed += 1
+                    continue
+            kept.append(line)
+        if removed == 0:
+            return protein_path, 0
+        destination = Path(output_path).with_name("receptor_adfr_input.pdb")
+        destination.write_bytes(b"".join(kept))
+        return str(destination), removed
 
     def prepare_ligand_from_smiles(
         self,
@@ -1108,6 +1153,46 @@ class MolecularDockingService:
         except Exception as e:
             logger.error(f"Vina对接计算异常: {e}")
             return False
+
+    @staticmethod
+    def parse_vina_results_text(output_text: str) -> List[Dict[str, Any]]:
+        """Project one verified Vina text artifact into safe pose rows.
+
+        The file-based parser remains the single scientific parser. This text
+        adapter is used by owned HTTP projections after the artifact has been
+        read through its integrity boundary.
+        """
+        if not isinstance(output_text, str):
+            return []
+        temporary_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".pdbqt",
+                delete=False,
+                newline="\n",
+            ) as stream:
+                stream.write(output_text)
+                temporary_path = stream.name
+            parsed = MolecularDockingService.parse_vina_results(temporary_path)
+            return [
+                {
+                    "pose": item.pose_index,
+                    "binding_energy": item.binding_energy,
+                    "rmsd_lb": item.rmsd_lb,
+                    "rmsd_ub": item.rmsd_ub,
+                }
+                for item in parsed
+            ]
+        except (OSError, UnicodeError):
+            return []
+        finally:
+            if temporary_path:
+                try:
+                    os.unlink(temporary_path)
+                except OSError:
+                    pass
 
     @staticmethod
     def parse_vina_results(

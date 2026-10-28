@@ -66,6 +66,27 @@ def test_router_requires_confirmation_for_under_specified_docking():
     assert decision.requires_confirmation is True
 
 
+@pytest.mark.parametrize('query', [
+    '查询 BuChE 的靶点信息',
+    '查询人源 BuChE 靶点的基础信息和可用实验结构，不要运行对接。',
+    'Lookup BuChE target information',
+])
+def test_target_lookup_query_synonyms_select_the_target_tool(query):
+    decision = HybridSkillRouter().decide(query)
+    assert decision.selected_skill == 'target_database_search'
+    assert decision.requires_confirmation is False
+
+
+@pytest.mark.parametrize('query', [
+    'What does BuChE lookup mean?',
+    'Explain BuChE lookup',
+    '解释 BuChE 靶点查询是什么意思',
+    'BuChE 靶点查询是什么意思？',
+])
+def test_target_lookup_noun_is_not_an_execution_request(query):
+    assert HybridSkillRouter().decide(query).selected_skill != 'target_database_search'
+
+
 def test_target_plus_design_routes_to_target_driven_workflow_without_screening_word():
     decision = HybridSkillRouter().decide(
         "针对 PDE5A 设计 5 个候选分子"
@@ -86,6 +107,25 @@ def test_router_uses_canonical_generation_grammar_for_supported_verbs():
     ):
         decision = HybridSkillRouter().decide(query)
         assert decision.selected_skill == "molecular_design", query
+
+
+def test_generation_model_provenance_stays_with_generation_workflow():
+    decision = HybridSkillRouter().decide(
+        "请使用分子生成工具生成 2 个候选小分子，返回有效 SMILES，并说明生成模型来源"
+    )
+
+    assert decision.selected_skill == "molecular_design"
+    assert decision.allowed_tools == ["llm_molecular_generator"]
+
+
+def test_property_tool_provenance_stays_with_property_workflow():
+    decision = HybridSkillRouter().decide(
+        "请分析当前选中的候选分子的分子性质，并说明真实工具来源"
+    )
+
+    assert decision.selected_skill == "admet_assessment"
+    assert "rag_search" not in decision.allowed_tools
+    assert "property_calculator" in decision.allowed_tools
 
 
 @pytest.mark.parametrize(

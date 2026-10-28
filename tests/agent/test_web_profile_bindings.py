@@ -268,6 +268,38 @@ def test_target_design_preserves_target_evidence_and_real_ranking(make):
     assert len(case.resolver.verify_binding_closure([ranking.quality['evidence_id']])) == 6
 
 
+@pytest.mark.parametrize(('endpoint_count', 'fits'), [(300, True), (1000, False)])
+def test_target_design_large_admet_preserves_all_endpoints_within_observation_budget(make, endpoint_count, fits):
+    """Synthetic endpoints exercise duplicated presentation, not scientific predictions."""
+    from src.agent.tools.candidate_ranker import CandidateRanker
+    from tests.agent.test_target_driven_design_workflow import FakeTool
+    from tests.agent.test_admet_ai_integration import _prediction
+    row = _prediction('CCO', molecule_id='fixture-1')
+    endpoints = {f'fixture_endpoint_{i:03d}': {
+        'value': i / endpoint_count, 'unit': '-', 'task_type': 'classification', 'source': 'admet_ai_model',
+    } for i in range(endpoint_count)}
+    row['admet']['endpoints'] = endpoints
+    row['admet']['units'] = {key: '-' for key in endpoints}
+    row['admet']['total_endpoints'] = len(endpoints)
+    admet = CountingTool('admet_predictor', ToolResult.success_result('admet_predictor', [row]))
+    activity = CountingTool('activity_predictor', ToolResult.error_result(
+        'activity_predictor', AgentErrorCode.MODEL_UNAVAILABLE, 'Synthetic fixture unavailable'))
+    case = make(query='针对 PDE5A 设计 1 个候选分子并筛选前 1 个', skill='target_driven_design',
+        custom_tools=[FakeTool('target_database_search'), CountingTool(GEN, output(GEN)),
+                      PropertyCalculator(), admet, activity, CandidateRanker()])
+    results = {step.name: execute(case, step) for step in case.steps}
+    result = next(results[step.name] for step in case.steps if step.tool_name == 'admet_predictor')
+    if not fits:
+        assert not result.success and result.data is None
+        assert result.error is not None
+        return
+    assert result.success, (result.to_legacy_dict(), case.preparation_errors)
+    assert result.formatted == '候选结果已记录；完整字段需要支持结果明细的客户端。'
+    assert result.data[0]['admet']['endpoints'] == endpoints
+    assert result.provenance.output_digest == EvidenceLedger.output_digest(result.data)
+    assert case.resolver.verify_binding_closure([result.quality['evidence_id']])
+
+
 def test_alignment_cannot_rehash_a_mismatched_producer_payload(make):
     case = make(generate=True, query='生成 1 个分子，logP < 3，并计算理化性质')
     generation = next(s for s in case.steps if s.tool_name == GEN)

@@ -282,6 +282,13 @@ class WebBindingResolver:
         optional = set(step.metadata.get('workflow_optional_output_keys', ()))
         for dependency in self.requirements.dependencies[step.name]:
             if dependency not in completed:
+                dependency_step = steps.get(dependency)
+                if dependency_step is not None and not dependency_step.required:
+                    # Optional assessments are allowed to be absent. The
+                    # downstream verifier receives the remaining authenticated
+                    # workflow outputs and must report missing evidence rather
+                    # than being blocked before it can evaluate the result.
+                    continue
                 raise DecisionBoundaryError('web_dependency_not_ready')
             identity, source = completed[dependency]
             output_key = steps[dependency].output_key
@@ -554,6 +561,13 @@ class WebBindingResolver:
             if aligned is not result:
                 raise DecisionBoundaryError(_ERROR)
             result.provenance = replace(result.provenance, output_digest=_digest(result.data))
+            # Candidate alignment renders the entire structured data a second
+            # time as indented JSON. Keep the authoritative data untouched, but
+            # avoid letting that redundant presentation copy exhaust the Web
+            # observation budget. The normal bound below still validates all
+            # data, warnings, provenance and binding fields without truncation.
+            if len(result.formatted.encode('utf-8')) > 16 * 1024:
+                result.formatted = '候选结果已记录；完整字段需要支持结果明细的客户端。'
         observation_value(result)
         proof = deepcopy(record['proof'])
         proof['own_source'] = self._source(result, record)

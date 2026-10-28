@@ -272,7 +272,7 @@ _CLAUSE_TERMINATED_COUNT_PATTERNS = (
 _COUNT_SLOT_PATTERNS = (
     re.compile(
         rf"{_CHINESE_REPEAT_PREFIX}"
-        rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
+        rf"(?P<count>(?:[^\s个种份,，。；、！？\"']|,\s*(?=[,A-Za-z0-9+\-.\u2212∞负零〇一二两三四五六七八九十百点]))+)\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_TARGET_PREFIX}"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
@@ -282,7 +282,7 @@ _COUNT_SLOT_PATTERNS = (
     ),
     re.compile(
         rf"{_CHINESE_GENERATION_VERB}\s*"
-        rf"(?P<count>[^\s个种份，。；、！？\"']+)\s*(?:个|种|份)?\s*"
+        rf"(?P<count>(?:[^\s个种份,，。；、！？\"']|,\s*(?=[,A-Za-z0-9+\-.\u2212∞负零〇一二两三四五六七八九十百点]))+)\s*(?:个|种|份)?\s*"
         rf"{_CHINESE_COUNT_OBJECT_FOLLOW}"
     ),
 )
@@ -958,10 +958,35 @@ def _mask_non_actionable_generation_occurrences(
             _has_generation_negation(prefix_window)
             or _has_generation_example_prefix(prefix_window)
             or _has_generation_example_suffix(suffix_window)
+            or _is_target_structure_lookup_reference(clause, start, end)
         ):
             masked[start:end] = " " * (end - start)
         previous_end = end
     return "".join(masked)
+
+
+def _is_target_structure_lookup_reference(value: str, start: int, end: int) -> bool:
+    """Do not treat an anaphoric protein-structure lookup as generation."""
+    prefix = value[max(0, start - 180):start]
+    explicit_structure = re.search(
+        r'(?:查找|搜索|检索|查询|找一下)[^。；;!?！？\n]{0,120}'
+        r'(?:靶点结构|蛋白(?:质)?结构|实验结构|晶体结构)', prefix, re.I
+    )
+    from src.target_identifiers import TARGET_PATTERN
+    identified_structure = (TARGET_PATTERN.search(prefix) and re.search(
+        r'(?:查找|搜索|检索|查询|找一下)[^。；;!?！？\n]{0,120}'
+        r'(?:的)?\s*(?:三维|3D)?\s*结构', prefix, re.I))
+    if not (explicit_structure or identified_structure):
+        return False
+    suffix = value[start:min(len(value), end + 100)]
+    match = re.match(
+        r'(?:给我|提供|返回)\s*(?P<purpose>[^,，。；;!?！？\n]{0,30}?)对接的'
+        r'(?P<qualifier>[^,，。；;!?！？\n]{0,30}?)结构(?:文件)?'
+        r'(?=\s*(?:$|[,，。；;!?！？\n(（]|(?:及|和|以及)(?:其)?|并(?:生成|设计|创建)))',
+        suffix, re.I)
+    return bool(match and re.search(r'适合|用于|可用于|用作|可用来', match.group('purpose'))
+        and not re.search(r'生成|设计|创建|合成', match.group('purpose'))
+        and not re.search(r'分子|候选|配体|SMILES|生成|设计|创建', match.group('qualifier'), re.I))
 
 
 def _has_generation_negation(value: str) -> bool:

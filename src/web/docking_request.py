@@ -36,6 +36,17 @@ _NATURAL_DOCKING = re.compile(
     + r'(?:与|和)' + _SPACE + r'(?:上述' + _SPACE + r')?(?:PDB[ \t]+)?'
     + r'(?P<pdb_id>[1-9][A-Z0-9]{3})' + _SPACE + _ACTION + _DOCK
 )
+_NATURAL_DOCKING_REVERSED = re.compile(
+    r'(?:请)?' + _SPACE + r'(?:用|使用)' + _SPACE
+    # Keep the free-form structure label bounded; only the exact PDB token is
+    # promoted to an input identity and no label text is interpreted as I/O.
+    + r'[^，,。；;!?！？\n]{0,96}?(?:PDB[ \t]+)?'
+    + r'(?P<pdb_id>[1-9][A-Z0-9]{3})' + _SPACE
+    + r'(?:与|和)' + _SPACE + r'(?:上述' + _SPACE + r')?'
+    + r'(?:(?:候选(?:分子)?|配体|分子)' + _SPACE + r')?'
+    + r'(?P<smiles>[A-Za-z0-9@+\-\[\]()=#\\/%.:]{1,8192})' + _SPACE
+    + _ACTION + _DOCK
+)
 _BARE_DOCKING = re.compile(
     r'(?:(?:请)' + _SPACE + _ACTION + _DOCK
     + r'|(?:Please[ \t]+)?(?:run|perform)[ \t]+(?:real[ \t]+)?'
@@ -43,6 +54,10 @@ _BARE_DOCKING = re.compile(
 )
 _POCKET_CLAUSE = '使用共晶配体定义口袋'
 _NO_GUESS_CLAUSE = '缺少该信息先说明，不要猜坐标'
+_NO_GUESS_TAIL = re.compile(
+    r'[，,]' + _SPACE + re.escape(_NO_GUESS_CLAUSE) + _SPACE +
+    r'(?:[。.!！?？]' + _SPACE + r')?\Z'
+)
 _TEXT_REF = re.compile(r'[A-Za-z0-9_-]{1,128}\Z', re.ASCII)
 _SMILES_TOKENS = re.compile(
     r'(?:Cl|Br|[BCNOPSFIbcnops*]|[0-9@+\-()=#\\/%:.]|\[[A-Za-z0-9@+\-:*]+\])+',
@@ -100,7 +115,9 @@ def assess_docking_request_text(query, *, enabled, enable_tools):
         # Only explicit whitespace is padding; no Unicode normalization or
         # invisible-character deletion can turn a different request into this one.
         leading = re.match(_SPACE, query).end()
-        match = _NATURAL_DOCKING.match(query, leading) or _BARE_DOCKING.match(query, leading)
+        match = (_NATURAL_DOCKING.match(query, leading)
+                 or _NATURAL_DOCKING_REVERSED.match(query, leading)
+                 or _BARE_DOCKING.match(query, leading))
         if match is None:
             return _text_rejection()
         inputs = {k: v for k, v in match.groupdict().items() if v is not None}
@@ -119,6 +136,12 @@ def assess_docking_request_text(query, *, enabled, enable_tools):
         pocket = no_guess = False
         clauses = 0
         while position < len(query):
+            # The safety instruction is an explicit user constraint, not a
+            # second scientific operation. Accept its common comma-tail form
+            # without weakening the closed grammar for any other prose.
+            if _NO_GUESS_TAIL.fullmatch(query[position:]):
+                position = len(query)
+                break
             whitespace = re.match(_SPACE, query[position:])
             position += whitespace.end()
             if position == len(query):

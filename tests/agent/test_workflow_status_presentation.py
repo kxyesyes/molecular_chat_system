@@ -6,6 +6,25 @@ import pytest
 from src.web.agent_result_presentation import failure_content, partial_projection
 
 
+def test_failure_content_translates_internal_decision_reason_to_actionable_message():
+    result = {
+        "success": False,
+        "status": "failed",
+        "final_answer": "Decision run did not complete",
+        "error": {
+            "code": "validation_error",
+            "message": "Decision run did not complete",
+            "details": {"reason": "decision_runtime_failed", "internal": "omit"},
+        },
+    }
+
+    message = failure_content(result)
+
+    assert "模型设置中运行连接测试" in message
+    assert "decision_runtime_failed" not in message
+    assert "internal" not in message
+
+
 def test_partial_projection_keeps_dependency_non_execution_and_cause():
     value = {"status": "partial", "success": False, "tool_result_sequence": [
         {"step_id": "reverse", "tool_name": "reverse_target_predictor", "status": "failed",

@@ -68,6 +68,19 @@ def test_real_core_outputs_match_existing_scientific_contract():
         assert "#33B2E5" in result[f"{prefix}_svg"]
 
 
+def test_roflumilast_demo_smiles_uses_a_converged_3d_fallback():
+    from rdkit import Chem
+    from src.molecular_design import visualization
+
+    result = visualization.smiles_to_3d(
+        "C1CC1COC2=C(C=CC(=C2)C(=O)NC3=C(C=NC=C3Cl)Cl)OC(F)F"
+    )
+    assert result["success"] is True
+    molecule = Chem.MolFromPDBBlock(result["pdb_data"])
+    assert molecule is not None
+    assert molecule.GetNumConformers() == 1
+
+
 @pytest.mark.parametrize("operation,args,detail", [
     ("smiles_to_3d", ("CC(C)((",), "无效的SMILES字符串"),
     ("smiles_to_image", ("CC(C)((", 300, 200), "Invalid SMILES"),

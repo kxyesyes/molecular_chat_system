@@ -94,6 +94,10 @@ def prior_molecule_reference(query):
     # verb into its output noun, or confuse a target source with a molecule.
     chinese_source = (
         r"(?:基于|根据|参照|参考|使用|利用|沿用|以|从)"
+        # "使用分子生成工具" names the requested tool, not a prior molecule
+        # reference.  Keep that noun phrase out of the source relation before
+        # looking for a later candidate/molecule token.
+        r"(?!(?:分子)?(?:生成|设计|创建|制作|构建|合成)(?:工具|模型|模块)?)"
         r"(?:(?!(?:生成|创建|设计|制作|构建|合成))[^，。；;\r\n]){0,64}?"
         r"(?:候选|分子(?!量))"
     )

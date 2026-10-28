@@ -37,6 +37,10 @@ class CandidateRanker:
 
         try:
             required_evidence = self._required_evidence(metadata)
+            scope = metadata.get('ranking_scope')
+            if scope is not None and (scope != 'properties_only' or required_evidence != ('properties',)
+                    or outputs.get('admet') is not None or outputs.get('activity') is not None):
+                raise _RankingInputError('invalid_ranking_scope', 'Property-only ranking cannot include other evidence')
             candidates = self._validated_candidates(outputs.get("molecules"))
             properties = self._evidence_by_candidate(
                 outputs.get("properties"), candidates, "properties"
@@ -159,12 +163,12 @@ class CandidateRanker:
                 f"Excluded {missing_property_count} candidate(s) without complete "
                 "RDKit property evidence"
             )
-        if ignored_admet_count:
+        if ignored_admet_count and scope != 'properties_only':
             warnings.append(
                 f"ADMET evidence was absent or unusable for {ignored_admet_count} "
                 "ranked candidate(s)"
             )
-        if ignored_activity_count:
+        if ignored_activity_count and scope != 'properties_only':
             warnings.append(
                 "Activity evidence was absent, demo, fallback, or unusable for "
                 f"{ignored_activity_count} ranked candidate(s)"

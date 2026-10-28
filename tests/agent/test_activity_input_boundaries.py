@@ -68,6 +68,20 @@ def test_target_labels_do_not_become_molecules(boundary, payload, target):
     assert calls == [(["CCO", "CCN"] if isinstance(payload, dict) else ["CCO"], target)]
 
 
+def test_negated_docking_clause_does_not_conflict_with_activity_target(boundary):
+    tool, calls, _ = boundary
+    query = "请使用分子生成工具，针对 PDE4A 生成 2 个候选小分子；不要做对接。"
+
+    result = execute_tool_compat(tool, {
+        "query": query,
+        "target": "PDE4A",
+        "smiles": ["CCO"],
+    })
+
+    assert result.success
+    assert calls == [(["CCO"], "PDE4A")]
+
+
 @pytest.mark.parametrize("metric", ["IC50", "pIC50", "PIC50", "EC50", "pEC50", "Ki", "pKi", "Kd", "pKd"])
 def test_metric_words_are_context_only_outside_explicit_fields(boundary, metric):
     tool, calls, _ = boundary

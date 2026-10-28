@@ -157,10 +157,10 @@ window.HomeChatRenderer = (function () {
     if (!elements.connectionStatus) return;
 
     const statusConfig = {
-      connecting: { text: "连接中...", bg: "#fbbf24", icon: "●" },
-      connected: { text: "已连接", bg: "#10b981", icon: "●" },
-      disconnected: { text: "已断开", bg: "#94a3b8", icon: "●" },
-      error: { text: "连接失败", bg: "#ef4444", icon: "●" },
+      connecting: { text: "传输连接中...", bg: "#fbbf24", icon: "●" },
+      connected: { text: "传输已连接", bg: "#10b981", icon: "●" },
+      disconnected: { text: "传输未连接", bg: "#94a3b8", icon: "●" },
+      error: { text: "传输未连接", bg: "#ef4444", icon: "●" },
     };
 
     const config = statusConfig[status] || statusConfig.connecting;

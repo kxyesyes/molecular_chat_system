@@ -30,6 +30,8 @@ assert(!source.includes('["failed", "rejected", "cancelled", "timeout", "unavail
   "homepage must not duplicate the shared non-success status list");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
+assert(template.includes("/static/js/home/task_status.js?v=20261027-task-status-dedupe-v2"),
+  "optional-failure presentation changes require a refreshed task-status cache key");
 assert(template.includes("/static/js/home/task_panel.js"),
   "homepage must load the Agent task panel renderer before the entrypoint");
 
@@ -71,7 +73,7 @@ if (missing.length) {
 
 const completionSnippets = [
   "completeLastMessage(message.content);",
-  "function completeLastMessage(content)",
+  "function completeLastMessage(content, displayOptions)",
   "resolveCompletionAction({",
   "removeTypingIndicator();",
 ];
@@ -87,7 +89,7 @@ if (missingCompletionSnippets.length) {
   process.exit(1);
 }
 
-const completionStart = source.indexOf("function completeLastMessage(content)");
+const completionStart = source.indexOf("function completeLastMessage(content, displayOptions)");
 const completionEnd = source.indexOf("// 显示状态消息", completionStart);
 const completionBody =
   completionStart >= 0 && completionEnd > completionStart
@@ -96,7 +98,7 @@ const completionBody =
 const requiredCompletionBodySnippets = [
   "removeTypingIndicator();",
   "appendToLastMessage(content);",
-  "HomeFormatters.formatContent(content)",
+  "HomeFormatters.formatContent(content, displayOptions)",
 ];
 const missingCompletionBodySnippets = requiredCompletionBodySnippets.filter(
   (snippet) => !completionBody.includes(snippet)
@@ -267,7 +269,8 @@ vm.runInContext(taskStateSource, taskStatusSandbox, {filename: "task_state.js"})
 const HomeTaskState = taskStatusSandbox.window.HomeTaskState;
 
 for (const [terminal, label] of Object.entries(terminalLabels)) {
-  const panel = {rows: [], progress: "", resets: 0};
+  const panel = {rows: [], progress: "", resets: 0, attributes: {},
+    setAttribute(name, value) { this.attributes[name] = value; }};
   let mounted = true;
   let renderSucceeds = true;
   let scrolls = 0;
@@ -283,6 +286,7 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
     }},
     document: {},
     agentTaskState: HomeTaskState.create(),
+    decisionMode: false,
     createAgentTaskPanel: () => mounted ? panel : null,
     resolveAgentEventPresentation,
     getAgentEventLabel,
@@ -298,6 +302,9 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
   assert.strictEqual(panel.resets, 1);
   assert.strictEqual(panel.rows.length, 2);
   assert.strictEqual(panel.progress, "100%");
+  context.handleAgentEvent({event: "validation_warning", message: "Tool result has validation warnings",
+    payload: {warnings: ["Risk summary is a screening heuristic, not a safety conclusion."]}});
+  assert.strictEqual(panel.rows.length, 2, "informational-only notices do not add empty warning rows");
 
   context.handleAgentEvent({event: terminal, progress: 1});
   assert.strictEqual(context.agentTaskState.active, false, terminal);
@@ -321,7 +328,7 @@ for (const [terminal, label] of Object.entries(terminalLabels)) {
   assert.strictEqual(scrolls, 4);
 }
 
-for (const [status, label] of [["partial", "部分完成"], ["not_calculated", "未执行（依赖：reverse）"]]) {
+for (const [status, label] of [["partial", "部分完成"], ["not_calculated", "未执行（依赖未完成）"]]) {
   const payload = {status, success: false, error: status === "partial" ? null : {
     details: {reason: "dependency_blocked", blocked_by: ["reverse"], executed: false},
   }};
@@ -353,11 +360,45 @@ for (const metadata of ["details", "quality"]) {
   if (metadata === "details") payload.error = {details: cause};
   else payload.quality = cause;
   const result = resolveAgentEventPresentation({event: "tool_completed", message: "Generic message", payload});
-  assert.strictEqual(result.progressText, "未执行（依赖：reverse）");
-  assert.strictEqual(getAgentEventLabel(result.eventType, "molecular_docking", payload), "分子对接 未执行（依赖：reverse）");
+  assert.strictEqual(result.progressText, "未执行（依赖未完成）");
+  assert.strictEqual(getAgentEventLabel(result.eventType, "molecular_docking", payload), "分子对接 未执行（依赖未完成）");
   assert.strictEqual(getAgentEventLabel("tool_failed", "molecular_docking", payload), "分子对接 失败");
 }
 assert.strictEqual(getAgentEventLabel("tool_completed", "molecular_docking", {status: "not_calculated"}),
   "分子对接 尚未计算");
+
+const informationalWarnings = [
+  "ADMET-AI outputs are model predictions; they are not experimental results.",
+  "Physicochemical endpoints are calculated by RDKit inside ADMET-AI.",
+  "Risk summary is a screening heuristic, not a safety conclusion.",
+];
+assert.strictEqual(HomeTaskStatus.message({event: "validation_warning",
+  message: "Tool result has validation warnings", payload: {warnings: informationalWarnings}}), "");
+assert.strictEqual(HomeTaskStatus.message({event: "validation_warning",
+  message: "Tool result has validation warnings", payload: {warnings: [...informationalWarnings,
+    "分类与回归预测不一致，需复核；已保留两项原始结果。"]}}),
+  "分类与回归预测不一致，需复核；已保留两项原始结果。");
+assert.strictEqual(HomeTaskStatus.message({event: "tool_completed", tool: "activity_predictor",
+  payload: {status: "partial"}, message: "家族活性预测部分完成；含需复核结果；模型预测不等同于实验结论。"}),
+  "家族活性预测部分完成；含需复核结果。");
+assert.strictEqual(HomeTaskStatus.message({event: "tool_failed", message: "缺少所选靶点的模型权重"}),
+  "缺少所选靶点的模型权重");
+const optionalStep = "web-" + "a".repeat(64);
+const optionalReason = "缺少所选靶点的模型权重；该候选未参与排序。";
+const optionalWarning = `Optional step ${optionalStep} (activity_predictor) failed: ${optionalReason}`;
+assert.strictEqual(HomeTaskStatus.message({event: "validation_warning", tool: "activity_predictor",
+  message: "Tool result has validation warnings", payload: {warnings: [optionalWarning, "端点 X 缺失。"]}}),
+  `活性预测：失败。${optionalReason}；端点 X 缺失。`);
+assert.strictEqual(HomeTaskStatus.message({event: "validation_warning", tool: "activity_predictor",
+  message: "Tool result has validation warnings", payload: {warnings: [optionalWarning]}}),
+  "活性预测：结果校验未通过；具体原因见失败步骤。");
+assert.strictEqual(HomeTaskStatus.message({event: "validation_warning", tool: "activity_predictor",
+  message: "Tool result has validation warnings", payload: {warnings: [optionalReason, optionalWarning]}}),
+  "活性预测：结果校验未通过；具体原因见失败步骤。");
+assert.strictEqual(HomeTaskStatus.message({event: "tool_failed", tool: "activity_predictor",
+  message: optionalWarning}), `活性预测：失败。${optionalReason}`);
+assert(HomeTaskStatus.message({event: "validation_warning", tool: "admet_predictor",
+  message: "Tool result has validation warnings", payload: {warnings: [optionalWarning]}}).includes(optionalStep),
+  "a warning for a different tool must not be reinterpreted as this event's wrapper");
 
 console.log("Homepage agent task panel static and lifecycle checks passed");

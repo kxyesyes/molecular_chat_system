@@ -68,7 +68,7 @@ REVIEW_COUNT_SCOPES = [
     ('Reverse target CCO; top five targets should not be docked', 5),
     ('对 CCO 做反向寻靶，不要对接但不要列出前五个候选靶点', 10),
     ('Reverse target prediction for CCO and show rank 1 target, show top five, not docking', 5),
-    ('Reverse target prediction for CCO and show top 1 target, do not show top five', 10),
+    ('Reverse target prediction for CCO and show top 1 target, do not show top five', 1),
     ('反向寻靶 CCO，列出排名第一的候选靶点，列出前五个候选靶点，不要对接', 5),
     ('反向预测靶点 CCO，列出排名第一的候选靶点，不要列出前五个候选靶点', 10),
     ('对 CCO 做反向寻靶并列出排名第一的候选靶点，列出前五个候选靶点，不要对接', 5),
@@ -95,8 +95,12 @@ def test_chat_review_count_scope_keeps_original_query_and_full_evidence(ranked, 
     result, frames = turn(handler, message, history)
     assert len(calls) == 1 and calls[0][0] == message
     assert history[-1]['user'] == message
-    assert f'前 {expected} 行' in result['content'] and '完整证据保留 10' in result['content']
-    assert ('Synthetic J' in result['content']) == (expected == 10)
+    if ChatHandler._reverse_display_restricted(message):
+        assert '明确希望查看的排名范围' in result['content']
+        assert not any('Synthetic ' + letter in result['content'] for letter in 'ABCDEFGHIJ')
+    else:
+        assert f'前 {expected} 行' in result['content'] and '完整证据保留 10' in result['content']
+        assert ('Synthetic J' in result['content']) == (expected == 10)
     context = history[-1]['reverse_target_evidence']
     assert RankedReverseEvidence(ranked.store, ranked.tool).resolve(
         context, session_id='owner-session', rank=10)['record'] == ranked.data[9]
@@ -194,7 +198,9 @@ def test_chat_molecule_bound_reverse_dispatches_new_workflow(ranked, monkeypatch
     assert history[-1]['agent_used'] is True
     assert 'Synthetic A' in result['content']
     # This repair admits a fresh workflow; it does not add a display cap of 1.
-    assert '前 10 行' in result['content'] and '完整证据保留 10' in result['content']
+    # Explicit top-1 now constrains presentation, not the retained evidence.
+    expected_count = 1 if 'top 1' in message.lower() else 10
+    assert f'前 {expected_count} 行' in result['content'] and '完整证据保留 10' in result['content']
     assert calls[0][1]['tools_used'] == [ranked.tool.name]
     observation = next(item for item in calls[0][1]['tool_result_sequence']
                        if item['tool_name'] == ranked.tool.name)

@@ -81,6 +81,28 @@ async function run() {
   }
   {
     const r = rig();
+    r.ui.handle(view(), r.socket);
+    assert(r.ui.handle({type: "error", code: "docking_unavailable", trace_id: root, turn_id: turn,
+      docking_source_unavailable: true,
+      message: "结构来源或实验结构身份未通过对接认证；本次未启动对接。"}, r.socket));
+    assert(r.host.textContent.includes("结构未认证 / 对接未启动"));
+    assert(r.host.textContent.includes("本次未启动对接"));
+    assert(!r.host.textContent.includes("结果未确认 / 本次确认已失效"));
+    assert.strictEqual(r.segments.length, 2);
+    assert(!r.ui.blocked());
+  }
+  {
+    const r = rig();
+    r.ui.handle(view(), r.socket);
+    assert(r.ui.handle({type: "error", code: "docking_unavailable", trace_id: root, turn_id: turn,
+      docking_preflight_unavailable: true,
+      message: "结构文件无法获取或验证；本次未启动对接。"}, r.socket));
+    assert(r.host.textContent.includes("结构预处理未完成 / 对接未启动"));
+    assert(r.host.textContent.includes("结构文件无法获取或验证"));
+    assert(!r.host.textContent.includes("结构未认证 / 对接未启动"));
+  }
+  {
+    const r = rig();
     assert(r.ui.handle(view(), r.socket));
     assert(r.host.textContent.includes("等待补充输入"));
     assert.strictEqual(r.segments.length, 1);
