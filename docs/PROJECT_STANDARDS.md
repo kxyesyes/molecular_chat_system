@@ -119,6 +119,7 @@ src/web/static/js/<feature>/main.js
 10. 修改 JS 后运行 `node --check`；修改静态契约时增加或更新 `tests/*_test.js`。
 11. 大型遗留文件允许渐进拆分，但不得在无关任务中整体重写。
 12. 可访问性、移动端和加载失败状态应与现有 `mobile_baseline.css`、子页头部组件保持一致。
+13. 按 [AGENTS 第 7 节](../AGENTS.md#7-aicodex-工作规则) 的界面精简原则，删除多余标语、说明文字和次要标签。若删除后用户无法理解界面，应重新设计布局、信息层级与操作入口，不以堆叠文案弥补结构问题。泛化免责声明不主动展示；内部工具名、证据 ID 和技术来源说明保留在结构化记录及按需展开的明细中。必要的操作标签、可访问性信息，以及具体失败、缺失数据、预测分歧和影响判断的风险状态必须保留。
 
 ## 5. 后端开发规范
 
@@ -305,9 +306,11 @@ src/web/static/js/<feature>/main.js
 
 ### 11.2 命令
 
-以下命令从仓库根目录执行；涉及 RDKit/PyTorch 的测试须使用具备相应依赖的环境。
+以下命令从仓库根目录执行；本机默认使用 Conda 环境 `MedChat`（先运行
+`conda activate MedChat`）；涉及 RDKit/PyTorch 的测试须使用具备相应依赖的环境。
 
 ```powershell
+conda activate MedChat
 # Python 全量、Agent 与靶点聚焦测试（来源：tests/）
 python -m pytest tests -q
 python -m pytest tests/agent -q
@@ -363,6 +366,7 @@ Get-ChildItem src/web/static/js -Recurse -Filter *.js -File |
 - 时间、随机数和外部服务必须可控；
 - 测试不得写入正式数据目录；
 - 真实测试必须明确依赖、超时和是否跳过；
+- 每次修改按 [AGENTS 第 7 节](../AGENTS.md#7-aicodex-工作规则) 同时验收用户体验、开发体验和 AI Agent 使用体验，三者都要变好且不能破坏现有功能；在变更说明中记录三个维度的改进点，并用相关回归验证支撑结论；
 - 不能用“测试通过”替代源码编译、健康检查和安全扫描。
 
 `.github/workflows/quality.yml` 在 Python 3.10 上运行完整 Python 测试、源码编译、全部受支持的 Node 契约测试和跟踪文件密钥扫描。该离线 CI 不读取真实 API key，也不把缺失 Ollama、RG-MPNN 权重或 Vina 包装成真实通过。覆盖率阈值和分支必需检查仍为“待确认”。

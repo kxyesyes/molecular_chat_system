@@ -19,7 +19,7 @@ assert.doesNotMatch(source, /InteractionGeometry/);
 assert.doesNotMatch(source, /selectedAtoms\(\{\}\)/);
 assert.doesNotMatch(source, /selectedAtoms\(/);
 assert.doesNotMatch(template, /docking\/interaction_geometry\.js/);
-assert.match(template, /docking\/interactions\.js\?v=20261012-interaction-analysis-v2/);
+assert.match(template, /docking\/interactions\.js\?v=20261027-interaction-scope-v1/);
 assert.match(source, /interactionAnalysisCache/);
 
 const shapes = [];
@@ -87,6 +87,23 @@ async function main() {
   await requestContext.requestInteractionAnalysis("hydrogen_bond");
   await requestContext.requestInteractionAnalysis("hydrogen_bond");
   assert.equal(requests.length, 1);
+  let finish;
+  let viewSequence = 1;
+  let drawn = 0;
+  const late = vm.createContext({
+    viewer: {addCylinder() { drawn++; }, render() {}}, console, setTimeout,
+    getCurrentJobId: () => "job-A",
+    getDockingViewSequence: () => viewSequence,
+    document: {getElementById: () => ({value: "1"})},
+    Utils: {showToast() {}},
+    fetch: () => new Promise((resolve) => { finish = resolve; }),
+  });
+  vm.runInContext(source, late);
+  const pending = late.requestInteractionAnalysis("hydrogen_bond");
+  viewSequence++;
+  finish({ok: true, json: async () => ({status: "success", interactions: [{type: "hydrogen_bond", display_geometry: {protein: {x: 1,y: 2,z: 3}, ligand: {x: 4,y: 5,z: 6}}}]})});
+  await pending;
+  assert.equal(drawn, 0, "stale interaction cannot be drawn on a new view");
   console.log("docking interaction fail-closed checks passed");
 }
 

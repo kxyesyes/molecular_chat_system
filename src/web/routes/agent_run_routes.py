@@ -4,8 +4,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from src.agent.persistence.redaction import redact_sensitive
+from src.agent.persistence.result_details import read_result_details
 from src.web.api_response import api_error, api_success
 
 
@@ -50,6 +52,21 @@ def _public_events(events: Any) -> list[dict[str, Any]]:
 
 
 def setup_agent_run_routes(app: FastAPI, store) -> None:
+    @app.get("/api/agent/runs/{trace_id}/result-details/{view_id}")
+    def get_agent_result_details(trace_id: str, view_id: str, request: Request,
+                                 revision: str | None = None):
+        # Sync endpoint: FastAPI executes bounded disk/SQLite work in its worker
+        # pool, not on the event loop. Missing revision deliberately shares 404.
+        session_id = _session(request)
+        details = read_result_details(store, trace_id, session_id=session_id,
+            view_id=view_id, revision=revision) if session_id else None
+        if details is None:
+            response = api_error("RESULT_DETAILS_NOT_FOUND", "结果详情不存在", status_code=404)
+        else:
+            response = JSONResponse(api_success(details, message="Agent 结果详情"))
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+
     @app.get("/api/agent/runs/{trace_id}")
     async def get_agent_run(trace_id: str, request: Request):
         session_id = _session(request)

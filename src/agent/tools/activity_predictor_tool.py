@@ -253,6 +253,19 @@ class ActivityPredictorTool(BaseMolecularTool):
         service_warnings = summary.get("warnings", [])
         warnings = [warning for warning in service_warnings if isinstance(warning, str)] \
             if isinstance(service_warnings, list) else []
+        model_stage_failed = any(
+            isinstance(row.get("errors"), dict)
+            and any(stage in row["errors"] for stage in ("bundle", "classification", "regression"))
+            and row.get("activity_probability") is None
+            and row.get("predicted_pIC50") is None
+            for row in rows
+            if isinstance(row, dict)
+        )
+        if model_stage_failed:
+            warnings.append(
+                "活性预测模型不可用：请确认 PyTorch 与已登记 RG-MPNN 模型权重已安装；"
+                "本次未生成 pIC50 数值。"
+            )
         # Reuse the shared warning contract without altering original observations.
         warnings = list(dict.fromkeys(warnings + expected["warnings"]))
         request_identities = {
@@ -280,6 +293,9 @@ class ActivityPredictorTool(BaseMolecularTool):
         needs_review = any(row.get("classification_regression_consistent") is False for row in rows)
         review_message = "计算已完成，分类与回归不一致，需复核"
         summary_label = labels[status] + ("；含需复核结果" if needs_review else "")
+        message = f"家族活性预测{summary_label}；模型预测不等同于实验结论。"
+        if status != "passed" and warnings:
+            message += " " + " ".join(warnings)
         lines = ["## 分子活性模型预测（非实验结论）",
                  f"状态：{summary_label}",
                  "| SMILES | 活性分类 | 活性概率 | 预测 pIC50 | 状态/阶段错误 |",
@@ -303,7 +319,7 @@ class ActivityPredictorTool(BaseMolecularTool):
         lines.extend(cell(warning) for warning in warnings)
         return ToolResult(
             tool_name=self.name, success=summary["success"] is True and status == "passed",
-            message=f"家族活性预测{summary_label}；模型预测不等同于实验结论。",
+            message=message,
             data=rows, formatted="\n".join(lines), warnings=warnings,
             status={"passed": ObservationStatus.SUCCEEDED, "partial": ObservationStatus.PARTIAL,
                     "failed": ObservationStatus.FAILED}[status],

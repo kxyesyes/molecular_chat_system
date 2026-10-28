@@ -8,12 +8,26 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass
 import json
+import logging
 from uuid import uuid4
 
 from src.system.model_lifecycle import finish_on_cancel
 from .docking_consent import DockingControlError, validate_docking_control
 from .docking_coordinator import DockingRequestCoordinator, _owner_label
 from .docking_request import OwnedDockingStructureEvidence, assess_docking_request_text
+
+
+logger = logging.getLogger(__name__)
+
+
+_PREFLIGHT_MESSAGES = {
+    'source_preparation_unavailable': (
+        '结构来源已通过认证，但无法获取并验证实验结构文件；本次未启动对接。'
+        '请检查网络，或在分子对接页面选择已缓存且通过完整性检查的结构。'),
+    'source_inspection_unavailable': (
+        '实验结构文件已获取，但无法完成蛋白结构与口袋检查；本次未启动对接。'
+        '请在分子对接页面选择另一条已验证的实验结构。'),
+}
 
 
 @dataclass
@@ -47,10 +61,15 @@ class DockingChatController:
     async def accept_result(self, sender, result):
         """Called after an actual accepted chat result, never from model prose."""
         if not self.enabled or not self._live(sender):
+            logger.info("chat docking source capture skipped enabled=%s live=%s",
+                        self.enabled, self._live(sender))
             return False
         owner = sender.websocket.scope['agent_session_id']
         pointer = await finish_on_cancel(asyncio.to_thread(
             OwnedDockingStructureEvidence(self.runtime.store).capture, result, session_id=owner))
+        sequence = result.get('tool_result_sequence') if type(result) is dict else None
+        logger.info("chat docking source capture sequence_items=%s pointer=%s",
+                    len(sequence) if type(sequence) is list else -1, pointer is not None)
         if (pointer is None or not self._live(sender)
                 or sender.websocket.scope.get('agent_session_id') != owner):
             return False
@@ -74,14 +93,19 @@ class DockingChatController:
         task.add_done_callback(finished)
         return task
 
-    async def _error(self, sender, code, *, rejected=False, settled_attachment=None):
+    async def _error(self, sender, code, *, rejected=False, settled_attachment=None,
+                     message=None, source_unavailable=False, preflight_unavailable=False):
         owner = sender.websocket.scope.get('agent_session_id')
         def capture():
             if (not self._live(sender, settled_attachment)
                     or sender.websocket.scope.get('agent_session_id') != owner):
                 return None
             event = {'type': 'error', 'code': code,
-                'message': '对接请求不可用；未获得新的执行授权。'}
+                'message': message or '对接请求不可用；未获得新的执行授权。'}
+            if source_unavailable:
+                event['docking_source_unavailable'] = True
+            if preflight_unavailable:
+                event['docking_preflight_unavailable'] = True
             if rejected:
                 event['docking_request_rejected'] = True
             if settled_attachment is not None:
@@ -106,7 +130,9 @@ class DockingChatController:
             except asyncio.CancelledError:
                 await self._close(attachment)
                 raise
-            except Exception:
+            except Exception as exc:
+                logger.warning("chat docking operation failed error_type=%s",
+                               type(exc).__name__)
                 await self._close(attachment)
                 if self._live(sender, attachment):
                     await self._error(sender, 'docking_unavailable', settled_attachment=attachment)
@@ -141,6 +167,17 @@ class DockingChatController:
         attachment = getattr(sender, '_chat_docking', None)
         if attachment is not None and attachment.work is not None and not attachment.work.done():
             root = attachment.root
+            # The browser starts a bounded watch as soon as it receives the
+            # initial live view. During this same attachment's begin phase,
+            # that watch is a coalesced read, not a competing request. A
+            # synthetic in-progress error would make the consent UI mark its
+            # own poll as an unconfirmed failure.
+            watch_task_id = (attachment.identity[0] if attachment.identity is not None
+                             else getattr(root, 'task_id', None))
+            if (kind == 'docking_watch' and attachment.active
+                    and payload.get('task_id') == watch_task_id
+                    and self._live(sender, attachment)):
+                return True
             if (kind == 'docking_refine' and not attachment.read_only
                     and self._live(sender, attachment) and root is not None
                     and payload['request_id'] == attachment.root_id
@@ -160,6 +197,21 @@ class DockingChatController:
             matches = [root for root in self.coordinator._roots.values()
                 if root.owner == owner and root.task_id == payload['task_id']]
             if len(matches) != 1:
+                # A refresh for the original attachment may arrive after its
+                # root has been removed. Keep that owner-bound tombstone on
+                # the correlated path so confirmed cleanup can publish a
+                # terminal UNKNOWN view, while uncertain cleanup remains a
+                # bounded non-success receipt instead of an unrelated control
+                # error. Neither branch restores execution authority.
+                if (attachment is not None and attachment.active
+                        and attachment.identity is not None
+                        and payload.get('task_id') == attachment.identity[0]
+                        and self._live(sender, attachment)
+                        and attachment.root is not None):
+                    if await self._released_failure(sender, attachment):
+                        return True
+                    await self._error(sender, 'docking_unavailable', settled_attachment=attachment)
+                    return True
                 await self._error(sender, 'docking_unavailable')
                 return True
             root = matches[0]
@@ -248,9 +300,25 @@ class DockingChatController:
 
     async def _show(self, sender, attachment):
         if not self._live(sender, attachment) or attachment.root is None:
+            logger.warning("chat docking view unavailable root_present=%s",
+                           attachment.root is not None)
             await self._error(sender, 'docking_unavailable', settled_attachment=attachment)
             return
         if self.coordinator._owned(attachment.root_id, attachment.owner) is not attachment.root:
+            root = attachment.root
+            reason = getattr(root, 'reason', None)
+            logger.warning("chat docking root no longer owned closed=%s phase=%s reason=%s close_state=%s",
+                           getattr(root, 'closed', None), getattr(root, 'phase', None),
+                           reason, getattr(root, 'close_state', None))
+            if reason == 'source_unavailable':
+                await self._error(sender, 'docking_unavailable', settled_attachment=attachment,
+                    message='已检索到结构，但其来源或实验结构身份未通过对接认证；本次未启动对接。请在分子对接页面重新选择并确认结构。',
+                    source_unavailable=True)
+                return
+            if reason in _PREFLIGHT_MESSAGES:
+                await self._error(sender, 'docking_unavailable', settled_attachment=attachment,
+                    message=_PREFLIGHT_MESSAGES[reason], preflight_unavailable=True)
+                return
             if not await self._released_failure(sender, attachment):
                 await self._error(sender, 'docking_unavailable', settled_attachment=attachment)
             return

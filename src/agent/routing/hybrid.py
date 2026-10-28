@@ -116,9 +116,14 @@ class HybridSkillRouter:
             r"(?:实验|晶体|冷冻电镜)结构|"
             r"\b(?:protein|experimental|crystal|cryo[- ]?em)\s+structures?\b", lookup_text
         ))
-        target_lookup = bool(re.search(
-            r"(?:查找|搜索|检索)(?!结果)|找一下|列出|查(?=\s)|\b(?:find|search|list|look\s+up)\b", lookup_text
-        ) and lookup_subject)
+        target_lookup = bool(lookup_subject and (
+            re.search(r"(?:查找|搜索|检索)(?!结果)|找一下|列出|查(?=\s)|"
+                      r"\b(?:find|search|list|look\s+up)\b", lookup_text)
+            or re.search(r"(?:^|[，,;；。.!?！？])\s*"
+                         r"(?:(?:请(?:你)?|帮我|为我|我想)\s*)*查询(?!结果)", lookup_text)
+            or re.search(r"(?:^|[;；。.!?！？])\s*"
+                         r"(?:(?:can|could)\s+you\s+)?(?:please\s+)?lookup\b", lookup_text)
+        ))
         if (self._contains(lookup_text, "反向寻靶", "反向预测靶点", "reverse target")
                 and not re.search(r"排名第|排行第|第[一二三四五六七八九十0-9]+(?:名|个)|previous|ranked|top\s*1\b", lookup_text)
                 and not re.search(r"结构|蛋白|uniprot|pdb|structures?|protein", lookup_text)):
@@ -179,6 +184,19 @@ class HybridSkillRouter:
             r'(?:检索|搜索|查找|查询)[^;；。]{0,12}数据库[^;；。]{0,12}(?:分子|化合物)|'
             r'(?:search|find|look up)[^.;]{0,20}database[^.;]{0,20}(?:molecules?|compounds?)',
             lower, re.I))
+        tool_provenance_request = bool(re.search(
+            r'(?:真实|实际|所用|使用的)?\s*'
+            r'(?:工具|模型|模块|计算器|预测器)(?:的)?\s*'
+            r'(?:来源|出处|版本|信息|provenance)|'
+            r'(?:real|actual|used)?\s*'
+            r'(?:tool|model|module|calculator|predictor)\s*'
+            r'(?:source|provenance|version)',
+            lower, re.I))
+        generation_model_provenance = generation and tool_provenance_request
+        explicit_knowledge_lookup = bool(re.search(
+            r'(?:检索|搜索|查找|查询|文献|知识库|'
+            r'\b(?:retrieve|search|find|look\s+up|literature|knowledge\s+base)\b)',
+            lower, re.I))
 
         explicit_lead_optimization = has_smiles and self._contains(
             lower, "优化", "hit-to-lead", "lead optimization", "optimize", "optimise")
@@ -186,7 +204,8 @@ class HybridSkillRouter:
             add("target_driven_design", 1.0, "target plus design workflow intent")
         if generation:
             add("molecular_design", 0.78, "molecular generation intent")
-        if knowledge_intent:
+        workflow_provenance = tool_provenance_request and not explicit_knowledge_lookup
+        if knowledge_intent and not workflow_provenance:
             add("rag_search", 1.0, "local knowledge or sourced explanation intent")
         if self._contains(lower, "完整工作流", "完整流程", "全流程", "full workflow"):
             add("comprehensive_evaluation", 1.0, "explicit full workflow intent")
@@ -217,11 +236,8 @@ class HybridSkillRouter:
             "属性",
         ) or (molecular_subject and "的性质" in lower)):
             add("admet_assessment", 0.88, "property or ADMET endpoint requested")
-        docking_action = re.sub(
-            r"(?:可?用于|适合|能否(?:继续)?|是否(?:可以)?)(?:\s*(?:分子)?对接|\s*docking)|"
-            r"(?:suitable\s+for|for\s+use\s+in)\s+docking", "", lower,
-        )
-        if self._contains(docking_action, "docking", "对接", "结合能", "binding affinity"):
+        from src.agent.contracts.docking_intent import explicit_docking_action
+        if explicit_docking_action(lower) or self._contains(lower, "结合能", "binding affinity"):
             add("docking_simulation", 0.82, "docking intent")
         # Files may survive in a later clause after an explicitly negated
         # docking operation. They must not restore that removed authorization.

@@ -84,6 +84,46 @@ def test_malformed_optional_warning_container_preserves_observations(boundary, w
     assert result.warnings == ["服务边界提示"]
 
 
+def test_unavailable_family_bundle_exposes_runtime_dependency_hint(boundary):
+    tool, _, state = boundary
+    state.update(rows=[family_row(
+        success=False,
+        status="failed",
+        execution_status="failed",
+        activity_probability=None,
+        activity_class=None,
+        predicted_pIC50=None,
+        classification_regression_consistent=None,
+        errors={"bundle": "family_model_bundle_unavailable_or_invalid"},
+    )], status="failed")
+
+    result = tool.execute({"smiles": "CCO", "target": "PDE5A"})
+
+    assert not result.success
+    assert any("PyTorch" in warning and "RG-MPNN" in warning for warning in result.warnings)
+    assert "PyTorch" in result.message and "RG-MPNN" in result.message
+
+
+def test_failed_family_stage_exposes_runtime_dependency_hint(boundary):
+    tool, _, state = boundary
+    state.update(rows=[family_row(
+        success=False,
+        status="failed",
+        execution_status="failed",
+        activity_probability=None,
+        activity_class=None,
+        predicted_pIC50=None,
+        classification_regression_consistent=None,
+        errors={"classification": "classification_failed_or_invalid_output"},
+    )], status="failed")
+
+    result = tool.execute({"smiles": "CCO", "target": "PDE5A"})
+
+    assert not result.success
+    assert any("PyTorch" in warning and "RG-MPNN" in warning for warning in result.warnings)
+    assert "PyTorch" in result.message and "RG-MPNN" in result.message
+
+
 @pytest.mark.parametrize("changes", [
     {"units": "nM"}, {"units": None}, {"label_threshold": 7.0}, {"label_threshold": None},
 ])
@@ -344,7 +384,11 @@ def test_compat_preserves_rows_status_provenance_and_honest_format(boundary, sta
     assert result.quality["prediction_status"] == status
     assert result.quality["model_provenance"] == [row["provenance"]]
     assert result.evidence[0]["prediction"] == row
-    assert result.warnings == ["服务边界提示", *row["warnings"]]
+    assert result.warnings[:1] == ["服务边界提示"]
+    assert result.warnings[-1:] == row["warnings"]
+    if status == "failed":
+        assert any("PyTorch" in warning and "RG-MPNN" in warning
+                   for warning in result.warnings)
     assert ToolProvenance.from_dict(result.provenance.to_dict()) == result.provenance
     assert not result.provenance.fallback_used
     assert "预测" in result.formatted

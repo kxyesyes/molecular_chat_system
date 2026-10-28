@@ -105,6 +105,18 @@ def test_explicit_forbidden_clause_does_not_authorize_optional_defaults():
     assert [s.tool_name for s in req.steps] == ['property_calculator']
 
 
+@pytest.mark.parametrize('query', [
+    '查询 BuChE 的靶点信息',
+    '查询人源 BuChE 靶点的基础信息和可用实验结构，不要运行对接。',
+    'Lookup BuChE target information',
+])
+def test_target_query_synonyms_compile_without_unrelated_tool_steps(query):
+    c, a = api()
+    req = a.compile_web_requirements(context(query, None), allowed_tools=c.WEB_TOOLS)
+    assert [step.tool_name for step in req.steps] == ['target_database_search']
+    assert req.steps[0].input_data == 'BCHE'
+
+
 def test_wire_rejects_tampering_unknown_fields_native_objects_and_weakening():
     c, a = api()
     ctx = context('计算 CCO 的基础理化性质', 'admet_assessment')

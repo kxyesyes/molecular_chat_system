@@ -175,6 +175,21 @@ def test_target_ranking_carries_explicit_admet_and_activity_requirements():
     assert ranking.metadata["required_evidence"] == ("properties", "admet", "activity")
 
 
+def test_target_structure_molecule_analysis_has_fixed_three_step_plan():
+    query = "请分析 CCO 的分子性质和 ADMET，并检索 PDE4A 的可用 PDB 结构。"
+    plan = TaskPlanner().plan(_context("target_structure_molecule_analysis", query))
+
+    assert plan.workflow_name == "target_structure_molecule_analysis"
+    assert [step.tool_name for step in plan.steps] == [
+        "target_database_search", "property_calculator", "admet_predictor",
+    ]
+    assert plan.steps[0].input_data == "PDE4A"
+    assert plan.steps[1].input_data == "CCO"
+    assert plan.steps[2].input_data == "CCO"
+    assert plan.steps[2].required is False
+    assert plan.steps[2].continue_on_error is True
+
+
 @pytest.mark.parametrize("skill,query", [
     ("molecular_design", GENERATION_QUERY), ("target_driven_design", TARGET_QUERY),
     ("hit_to_lead_optimization", LEAD_QUERY),
@@ -311,6 +326,18 @@ def test_unauthorized_and_no_match_branches_stay_empty():
     assert asdict(planner.plan(_context(None, "hello"))) == {
         "workflow_name": "single_step", "steps": [], "metadata": {"reason": "no deterministic workflow matched"},
     }
+
+
+def test_generation_property_bounds_require_independent_property_evidence():
+    query = "请生成符合Lipinski五规则的类药分子，分子量小于500，LogP小于5"
+    plan = TaskPlanner().plan(_context("molecular_design", query))
+
+    assert [step.tool_name for step in plan.steps] == [
+        "llm_molecular_generator", "property_calculator"
+    ]
+    property_step = plan.steps[-1]
+    assert property_step.required is True
+    assert property_step.continue_on_error is False
 
 
 def _templates():

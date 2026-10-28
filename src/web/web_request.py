@@ -32,13 +32,18 @@ class PreparedWebDecision:
 
 def prepare_web_request(payload, *, session_id, trace_id, references=None,
                         config_generation=None, history=(), max_output_tokens=1500,
-                        input_max_chars=24000, history_max_chars=2000):
+                        input_max_chars=24000, history_max_chars=2000,
+                        scientific_input_max_chars=None,
+                        allow_molecular_clarification=False):
     envelope = validate_request_envelope(payload, session_id=session_id, trace_id=trace_id,
                                         config_generation=config_generation)
     try:
         if type(max_output_tokens) is not int or not 1 <= max_output_tokens <= 8192:
             raise DecisionAdmissionError('invalid_decision_model_options')
         if any(type(value) is not int or value < 0 for value in (input_max_chars, history_max_chars)):
+            raise DecisionAdmissionError('invalid_decision_model_options')
+        if scientific_input_max_chars is not None and (
+                type(scientific_input_max_chars) is not int or scientific_input_max_chars < 0):
             raise DecisionAdmissionError('invalid_decision_model_options')
         selected = None
         query = envelope.query
@@ -52,7 +57,9 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
         if molecular_input.blocks_execution:
             raise DecisionAdmissionError('invalid_molecular_input' if molecular_input.validation_available
                                          else 'molecular_validation_unavailable')
-        if references is not None:
+        missing_subject = (allow_molecular_clarification is True
+                           and envelope.reference is None and envelope.selection is None)
+        if references is not None and not missing_subject:
             try:
                 selected = references.resolve(query, envelope.reference, envelope.selection,
                     session_id=session_id, enable_tools=envelope.enable_tools)
@@ -72,6 +79,13 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
                       'decision_history_max_chars': history_max_chars})
         if count_supplied:
             context.metadata['requested_count'] = requested_count
+        # Server-only admission from the reviewed compiler, never a wire flag.
+        # The resolver still forbids tool dispatch until a valid subject exists.
+        if allow_molecular_clarification is True:
+            from .scientific_obligations import ScientificObligationCompiler
+            context.metadata['allow_molecular_clarification'] = True
+            context.metadata['molecular_clarification_tools'] = list(
+                ScientificObligationCompiler().clarification_tools(query))
         allowed = WEB_TOOLS
         if not envelope.enable_tools:
             allowed &= {'rag_search'}
@@ -79,6 +93,12 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
             allowed -= {'rag_search'}
         requirements = compile_web_requirements(context, allowed_tools=allowed)
         required = required_web_tools(requirements)
+        if required and scientific_input_max_chars is not None and scientific_input_max_chars != input_max_chars:
+            # Classification is server-owned. Freeze the chosen budget into
+            # both the context and its compiled request before any execution;
+            # never change a prepared plan or lift a limit after overflow.
+            context.metadata['decision_input_max_chars'] = scientific_input_max_chars
+            requirements = compile_web_requirements(context, allowed_tools=allowed)
         # The model may select only actions compiled from this original request.
         return PreparedWebDecision(json.dumps(context_value(context), ensure_ascii=False,
             allow_nan=False), 'scientific' if required else 'chat', required, required,
@@ -89,6 +109,7 @@ def prepare_web_request(payload, *, session_id, trace_id, references=None,
         # Forward only this closed admission reason, never exception text or
         # diagnostics from validators, generation preflight or dependencies.
         if type(exc) is ValueError and exc.args in (
-                ('molecular_input_required',), ('target_clarification_required',)):
+                ('molecular_input_required',), ('target_clarification_required',),
+                ('rag_disabled',)):
             raise DecisionAdmissionError(exc.args[0]) from None
         raise DecisionAdmissionError('request_clarification_required') from None

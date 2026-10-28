@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from enum import Enum
 import json
+import logging
 import re
 import time
 from typing import Any
@@ -34,12 +35,16 @@ from src.system.llm_transport import (
     pin_supplied_async_client,
 )
 _FUNCTION = "agent_decision"
+logger = logging.getLogger(__name__)
 _NATIVE_INSTRUCTION = (
-    'The only callable function is agent_decision. For every tool, clarify, or finish action, '
-    'call agent_decision and place exactly one {"decision": {...}} envelope in its arguments. '
+    'The only callable function is agent_decision. Emit exactly one agent_decision call per response, '
+    'with exactly one {"decision": {...}} envelope in its arguments. '
+    'Never issue multiple calls, even when the user requests several tools: choose the next single '
+    'action and wait for its tool observation before choosing another. Do not include assistant prose. '
     'Scientific tool names in the catalog are NOT callable API functions. '
     'To request a scientific tool, put its authorized name in decision.tool_name, '
-    'set decision.action to "tool", and use decision.arguments with input_ref. '
+    'set decision.action to "tool", and follow the active profile for decision.arguments: '
+    'step_ref for immutable compiled Web actions; input_ref only for profiles that authorize it. '
     'Never put a scientific tool name in function.name or call it directly. '
     'Include decision.version as the string "1" and all fields required by the schema. '
     'For clarify and finish, still call agent_decision rather than returning free text. '
@@ -576,6 +581,15 @@ def _parse_response(body, mode, previous_calls, metadata, profile=ProtocolProfil
         raise DecisionProtocolError("ambiguous_decision_response")
     if mode == "native":
         calls, content = message.get("tool_calls"), message.get("content")
+        # Public shape only: never retain provider text, names, IDs or arguments.
+        first = calls[0] if type(calls) is list and calls and type(calls[0]) is dict else {}
+        function = first.get('function')
+        metadata['native_response_shape'] = {
+            'call_count': min(len(calls), 65) if type(calls) is list else -1,
+            'content_present': content is not None and (type(content) is not str or bool(content.strip())),
+            'function_name_valid': type(function) is dict and function.get('name') == _function_name(profile),
+            'call_id_valid': type(first.get('id')) is str and bool(_CALL_ID.fullmatch(first['id'])),
+        }
         if (
             type(calls) is not list or len(calls) != 1
             or (content is not None and (type(content) is not str or content.strip()))
@@ -806,6 +820,23 @@ async def _request_protocol(model, messages, *, mode, max_tokens, timeout_second
             details["http_status"] = http_status
         if schema_issues:
             details["schema_issues"] = schema_issues
+        diagnostic = {
+            "code": code.value,
+            "reason": reason,
+            "mode": metadata.get("mode"),
+            "http_status": http_status,
+            "finish_reason": metadata.get("finish_reason"),
+        }
+        shape = metadata.get("native_response_shape")
+        if isinstance(shape, dict):
+            diagnostic["native_response_shape"] = {
+                key: shape[key] for key in (
+                    "call_count", "content_present", "function_name_valid", "call_id_valid",
+                ) if key in shape
+            }
+        logger.warning("Agent decision transport failed: %s", json.dumps(
+            diagnostic, ensure_ascii=True, sort_keys=True,
+        ))
         return response_type(None, AgentExecutionError(
             code, error_message, details,
         ), None, dict(metadata))

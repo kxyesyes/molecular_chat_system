@@ -60,6 +60,85 @@ def model_factory():
         asyncio.run(client.aclose())
 
 
+@pytest.mark.parametrize('fault', ['content', 'multiple', 'function_name', 'call_id'])
+@run_async
+async def test_native_shape_diagnostics_are_public_and_survive_model_metadata(model_factory, fault):
+    from src.agent.scientific_session.decision_policy import model_call_metadata
+
+    body = wire()
+    message = body['choices'][0]['message']
+    if fault == 'content':
+        message['content'] = 'private-provider-marker'
+    elif fault == 'multiple':
+        message['tool_calls'] *= 2
+    elif fault == 'function_name':
+        message['tool_calls'][0]['function']['name'] = 'private-provider-marker'
+    else:
+        message['tool_calls'][0]['id'] = 'private-provider-marker!'
+    result = await model_factory(lambda _: httpx.Response(200, json=body)).decide(MESSAGES)
+    assert not result.success
+    clean = model_call_metadata(result)
+    assert clean.get('reason') == ('ambiguous_decision_response' if fault in {'content', 'multiple'}
+                                   else 'invalid_function_call')
+    assert clean.get('native_response_shape') == {
+        'call_count': 2 if fault == 'multiple' else 1,
+        'content_present': fault == 'content',
+        'function_name_valid': fault != 'function_name',
+        'call_id_valid': fault != 'call_id',
+    }
+    assert 'private-provider-marker' not in repr(result) + repr(clean)
+
+
+def test_model_metadata_never_copies_unrecognized_diagnostic_values():
+    from src.agent.contracts import AgentExecutionError
+    from src.agent.scientific_session.decision_policy import model_call_metadata
+
+    result = DecisionResponse(None, AgentExecutionError(AgentErrorCode.INVALID_OUTPUT, 'private',
+        {'reason': 'private-provider-marker'}), None, {'native_response_shape': {
+            'call_count': True, 'content_present': 'private-provider-marker',
+            'function_name_valid': {}, 'call_id_valid': None, 'raw': 'private-provider-marker'}})
+    clean = model_call_metadata(result)
+    assert 'reason' not in clean
+    assert 'native_response_shape' not in clean
+    assert 'private-provider-marker' not in repr(clean)
+
+
+@pytest.mark.parametrize('schema_failure', [False, True])
+@run_async
+async def test_native_shape_is_not_added_to_resumable_model_history(model_factory, schema_failure):
+    from src.agent.scientific_session.decision_policy import model_call_metadata
+
+    decision = dict(HELLO)
+    if schema_failure:
+        decision.pop('version')
+    result = await model_factory(lambda _: httpx.Response(200, json=wire(decision=decision))).decide(MESSAGES)
+    assert result.success is (not schema_failure)
+    assert 'native_response_shape' not in model_call_metadata(result)
+
+
+@pytest.mark.parametrize('fault,expected_count', [('null', -1), ('mapping', -1), ('many', 65), ('type', 1)])
+@run_async
+async def test_native_shape_counts_are_bounded_and_not_response_authority(model_factory, fault, expected_count):
+    from src.agent.scientific_session.decision_policy import model_call_metadata
+
+    body = wire()
+    message = body['choices'][0]['message']
+    if fault == 'null':
+        message['tool_calls'] = None
+    elif fault == 'mapping':
+        message['tool_calls'] = {'private-shape-marker': 'private-provider-text'}
+    elif fault == 'many':
+        message['tool_calls'] *= 66
+    else:
+        message['tool_calls'][0]['type'] = 'private-provider-text'
+    result = await model_factory(lambda _: httpx.Response(200, json=body)).decide(MESSAGES)
+    assert not result.success and result.decision is None
+    clean = model_call_metadata(result)
+    assert clean['native_response_shape']['call_count'] == expected_count
+    assert clean['native_response_shape']['function_name_valid'] is (fault in {'many', 'type'})
+    assert 'private-' not in repr(clean) + repr(result)
+
+
 @pytest.mark.parametrize("mode", ["native", "json"])
 @pytest.mark.parametrize("error", [{"message": "private-provider-marker"}, {}, [], False, 0, ""])
 @run_async
@@ -80,6 +159,21 @@ async def test_error_bearing_success_envelope_is_rejected(model_factory, mode, e
     assert result.error.details == {"reason": "ambiguous_decision_response"}
     assert len(requests) == result.metadata["request_attempts"] == 1
     assert "private-provider-marker" not in repr(result) + caplog.text
+
+
+@run_async
+async def test_failed_decision_emits_only_bounded_transport_diagnostics(model_factory, caplog):
+    body = wire()
+    body["choices"][0]["message"]["content"] = "private-provider-marker"
+    caplog.set_level(logging.WARNING, logger="src.agent.decision_transport")
+
+    result = await model_factory(lambda _: httpx.Response(200, json=body)).decide(MESSAGES)
+
+    assert not result.success
+    assert '"reason": "ambiguous_decision_response"' in caplog.text
+    assert '"mode": "native"' in caplog.text
+    assert "private-provider-marker" not in caplog.text
+    assert "https://example.invalid" not in caplog.text
 
 
 @pytest.mark.parametrize("mode", ["native", "json"])
@@ -283,6 +377,11 @@ async def test_payload_has_constrained_schema_and_proposals_never_dispatch(model
         assert len(payload["tools"]) == 1
         assert payload["tools"][0]["function"]["parameters"] == decision_json_schema()
         assert payload["tool_choice"] == {"type": "function", "function": {"name": "agent_decision"}}
+        instruction = payload['messages'][0]['content']
+        assert 'exactly one agent_decision call per response' in instruction
+        assert 'Never issue multiple calls' in instruction
+        assert 'step_ref' in instruction
+        assert 'use decision.arguments with input_ref' not in instruction
     else:
         assert "tools" not in payload
         instruction = payload["messages"][0]["content"]

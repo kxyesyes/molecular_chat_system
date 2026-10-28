@@ -12,7 +12,7 @@
   <script src="/static/vendor/3dmol/3Dmol-min.js?v=2.5.4"></script>
 
   <!-- 页面样式 -->
-  <link rel="stylesheet" href="/static/css/molecular_docking.css?v=20261012-ligand-layout-v1" />
+  <link rel="stylesheet" href="/static/css/molecular_docking.css?v=20261027-result-table-v2" />
   <link rel="stylesheet" href="/static/css/mobile_baseline.css?v=20260511a" />
   <link rel="stylesheet" href="/static/css/subpage_header.css?v=20260525a" />
 </head>
@@ -51,6 +51,9 @@
           <div class="upload-icon"></div>
           <div class="upload-text">点击或拖拽上传蛋白质PDB文件</div>
         </div>
+        <button type="button" class="demo-load-btn" id="docking-demo-btn" onclick="loadDockingDemo()">
+          载入示例：PDE4A apo（6FG5）+ 罗氟司特
+        </button>
         <input type="file" id="protein-file" class="file-input" accept=".pdb,.pdbqt" />
         <div id="protein-files" class="file-list"></div>
       </div>
@@ -332,7 +335,7 @@
         <span class="history-action-icon history-refresh-icon" aria-hidden="true"></span>刷新
       </button>
       <button class="history-clear-btn" onclick="clearAllHistory()">
-        <span class="history-action-icon history-clear-icon" aria-hidden="true"></span>清除全部
+        <span class="history-action-icon history-clear-icon" aria-hidden="true"></span>清除旧版记录
       </button>
     </div>
     <div class="history-panel-body" id="history-list">
@@ -382,10 +385,10 @@
   <script src="/static/js/docking/ligand_recognizer.js"></script>
   <script src="/static/js/docking/step_manager.js"></script>
   <script src="/static/js/docking/viewer_manager.js?v=20261007-safe-dom-v1"></script>
-  <script src="/static/js/docking/interactions.js?v=20261012-interaction-analysis-v2"></script>
+  <script src="/static/js/docking/interactions.js?v=20261027-interaction-scope-v1"></script>
   <script src="/static/js/docking/docking_box.js?v=20261012-box-confirmation-v1"></script>
-  <script src="/static/js/docking/ui_manager.js?v=20261018-rerun-inputs-v1"></script>
-  <script src="/static/js/docking/main.js?v=20260428b"></script>
+    <script src="/static/js/docking/ui_manager.js?v=20261027-result-table-v3"></script>
+  <script src="/static/js/docking/main.js?v=20261027-demo-6fg5-v1"></script>
 </body>
 
 </html>

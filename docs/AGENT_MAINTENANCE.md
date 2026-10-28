@@ -114,7 +114,9 @@ T09 科研对象跨轮引用已通过 PR #60 合并，具体有界能力见下�
 
 ## 5. 验证入口与常见误判
 
-在安装项目依赖的 Python/Conda 环境执行，先查看 [tests/conftest.py](../tests/conftest.py) 的用户配置隔离。涉及数据库的独立探针必须用临时路径，禁止读写用户运行库或真实 Key。
+在本机 Windows 使用项目 Conda 环境 `MedChat` 执行（先运行
+`conda activate MedChat`），再查看 [tests/conftest.py](../tests/conftest.py) 的用户配置隔离。
+涉及数据库的独立探针必须用临时路径，禁止读写用户运行库或真实 Key。
 
 Pi 的安装、健康检查与 SDK 离线契约见 [Pi 运行手册](PI_RUNTIME.md)；通用命令见[项目规范第 11 节](PROJECT_STANDARDS.md#11-测试规范)。Python 边界回归定位到 `tests/agent/test_pi_*.py`、`tests/test_web_chat_profile.py`、`tests/test_health_pi_runtime.py` 和 `tests/agent/test_supervisor_direct_execution.py`，不再使用已删除的旧 harness 测试作为当前验收入口。
 

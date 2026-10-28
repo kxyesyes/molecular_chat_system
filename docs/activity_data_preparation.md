@@ -31,7 +31,8 @@ label_transform, source, license
 
 ## 运行
 
-在具备 RDKit、Pandas 的项目 Python 环境中执行：
+在本机 Windows 的项目 Conda 环境 `MedChat` 中执行（先运行
+`conda activate MedChat`）；该环境应具备 RDKit、Pandas：
 
 ```powershell
 python scripts/prepare_activity_dataset.py --input data/activity/raw/input.csv --manifest data/activity/raw/manifest.json --output-dir data/activity/prepared --validate-only

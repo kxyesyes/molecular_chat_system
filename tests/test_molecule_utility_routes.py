@@ -17,16 +17,19 @@ def test_smiles_to_3d_rejects_missing_force_field_parameters(monkeypatch):
     assert "力场参数" in error.value.detail
 
 
-def test_smiles_to_3d_rejects_non_converged_force_field(monkeypatch):
+def test_smiles_to_3d_falls_back_to_uff_when_mmff_does_not_converge(monkeypatch):
     from rdkit.Chem import AllChem
     from src.web.routes import molecule_utility_routes
 
+    calls = []
     monkeypatch.setattr(AllChem, "MMFFHasAllMoleculeParams", lambda _mol: True)
     monkeypatch.setattr(AllChem, "MMFFOptimizeMolecule", lambda _mol: 1)
+    monkeypatch.setattr(AllChem, "UFFHasAllMoleculeParams", lambda _mol: True)
+    monkeypatch.setattr(AllChem, "UFFOptimizeMolecule", lambda _mol: calls.append("UFF") or 0)
 
-    with pytest.raises(HTTPException) as error:
-        molecule_utility_routes._smiles_to_3d_sync("CCO")
-    assert "未收敛" in error.value.detail
+    result = molecule_utility_routes._smiles_to_3d_sync("CCO")
+    assert result["success"] is True
+    assert calls == ["UFF"]
 
 
 def test_smiles_to_3d_uses_uff_when_mmff_is_unavailable(monkeypatch):

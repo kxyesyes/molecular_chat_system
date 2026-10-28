@@ -121,6 +121,25 @@ def test_smiles_preparation_rejects_nonconverged_force_field(monkeypatch, tmp_pa
     assert called is False
 
 
+def test_roflumilast_smiles_uses_uff_after_mmff_nonconvergence():
+    pytest.importorskip("rdkit")
+    from rdkit import Chem
+    from src.docking.molecular_docking_service import MolecularDockingService
+
+    mol = Chem.AddHs(
+        Chem.MolFromSmiles(
+            "C1CC1COC2=C(C=CC(=C2)C(=O)NC3=C(C=NC=C3Cl)Cl)OC(F)F"
+        )
+    )
+    trace = {}
+    prepared = MolecularDockingService._prepare_3d_molecule(mol, trace=trace)
+
+    assert prepared is not None
+    assert trace["force_field"] == "UFF"
+    assert trace["optimization_status"] == 0
+    assert trace["converged"] is True
+
+
 def test_smiles_preparation_rejects_when_primary_and_fallback_embedding_fail(
     monkeypatch, tmp_path: Path
 ):

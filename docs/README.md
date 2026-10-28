@@ -4,6 +4,10 @@
 
 ## 开始使用与协作
 
+本机 Windows 开发与验证统一使用 Conda 环境 `MedChat`（推荐 Python 3.10）。
+先执行 `conda activate MedChat`，再运行文档中的 Python、pytest 和 `compileall` 命令；
+不要把仓库外的临时 `.venv` 当作项目科学依赖环境。
+
 | 需要做什么 | 入口 |
 |---|---|
 | 了解项目、本机启动、保存主聊天模型配置 | [项目 README](../README.md) |

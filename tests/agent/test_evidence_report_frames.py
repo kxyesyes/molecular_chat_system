@@ -117,6 +117,70 @@ def test_no_store_or_snapshot_failure_preserves_completion(tmp_path, monkeypatch
     assert frames[-1] == baseline[-1]
 
 
+def test_report_uses_bound_workflow_when_persisted_skill_name_is_empty(tmp_path):
+    """Web runs may leave the legacy skill column empty after planning.
+
+    The persisted web plan is the workflow authority here; the report must
+    still be emitted without weakening its checkpoint/source binding checks.
+    """
+    store, execution, _ = execute(tmp_path)
+    with closing(store._connect()) as connection, connection:
+        connection.execute("UPDATE agent_runs SET skill_name=NULL WHERE trace_id=?",
+                           (execution["trace_id"],))
+    frames, _ = capture(store, execution)
+    report = next((frame for frame in frames if frame["type"] == "scientific_report"), None)
+    assert report is not None
+    assert all(row["state"] == "available" for row in report["property_rows"])
+
+
+def test_web_report_resolves_output_keys_from_persisted_plan():
+    from src.agent.presentation.evidence_report import _property_input_key, _workflow_output_key
+
+    run = {"metadata": {"task_requirements": {
+        "profile": "medchat-web-v1",
+        "steps": [
+            {"name": "molecule_generation", "tool_name": "llm_molecular_generator",
+             "output_key": "molecules"},
+            {"name": "properties", "tool_name": "property_calculator",
+             "output_key": "properties", "input_from": "molecules", "metadata": {}},
+        ],
+    }}}
+    generator = {"source": {"tool_name": "llm_molecular_generator"},
+                 "metadata": {"web_step_ref": "molecule_generation"},
+                 "raw": {"quality": {"output_key": "web-generator-step"}}}
+    properties = {"source": {"tool_name": "property_calculator"},
+                  "metadata": {"web_step_ref": "properties"},
+                  "raw": {"quality": {"output_key": "web-property-step"}}}
+    assert _workflow_output_key(generator, run) == "molecules"
+    assert _workflow_output_key(properties, run) == "properties"
+    assert _property_input_key(properties, run) == "molecules"
+
+
+def test_report_derives_workflow_plan_from_bound_web_requirements(tmp_path):
+    store, execution, _ = execute(tmp_path)
+    execution = {key: value for key, value in execution.items() if key != "workflow_plan"}
+    execution["metadata"]["task_requirements"] = {
+        "profile": "medchat-web-v1",
+        "workflow_name": "target_driven_design",
+        "metadata": {"target_hint": "PDE5A"},
+    }
+    frames, _ = capture(store, execution)
+    assert any(frame["type"] == "scientific_report" for frame in frames)
+
+
+def test_report_retries_transient_snapshot_unavailability(tmp_path, monkeypatch):
+    from src.web.scientific_report import prepare_report_event
+    store, execution, events = execute(tmp_path)
+    read = store.get_scientific_report_snapshot
+    calls = []
+    def transient(*args, **kwargs):
+        calls.append(True)
+        return None if len(calls) == 1 else read(*args, **kwargs)
+    monkeypatch.setattr(store, "get_scientific_report_snapshot", transient)
+    assert asyncio.run(prepare_report_event(store, execution, events, session_id="owner")) is not None
+    assert len(calls) == 3  # one retry plus the immutable source-version recheck
+
+
 def test_report_send_failure_stops_completion_without_changing_scientific_result(tmp_path):
     store, execution, _ = execute(tmp_path)
     baseline, _ = capture(None, execution)

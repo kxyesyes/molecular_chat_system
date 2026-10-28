@@ -31,6 +31,65 @@ async def compiled_decision(payload):
             'text':'Protocol-only scientific finish, not scientific narrative.', 'evidence_ids':evidence}
 
 
+@pytest.mark.parametrize('external,config,expected', [
+    (True, {}, 48000),
+    (False, {}, 12000),
+    (True, {'inference': {'external_input_max_chars': 7000}}, 7000),
+    (True, {'inference': {'external_input_max_chars': 7000,
+                         'external_scientific_input_max_chars': 40000}}, 40000),
+    (False, {'inference': {'scientific_input_max_chars': 16000}}, 16000),
+])
+def test_scientific_budget_defaults_and_explicit_overrides(external, config, expected):
+    from src.web.prompt_budget import scientific_character_limit, character_limit
+    assert scientific_character_limit(config, external=external) == expected
+    if not config:
+        assert character_limit(config, external=external) == (24000 if external else 12000)
+
+
+@pytest.mark.parametrize('value', [True, None, '48000', -1])
+def test_scientific_budget_rejects_invalid_configuration(value):
+    from src.web.prompt_budget import scientific_character_limit, InputBudgetExceeded
+    with pytest.raises(InputBudgetExceeded):
+        scientific_character_limit({'inference': {'external_scientific_input_max_chars': value}}, external=True)
+
+
+@pytest.mark.parametrize('query,expected', [('你好', 24000), ('计算 CCO 的分子量', 48000)])
+def test_preparation_seals_budget_selected_from_compiled_request_kind(query, expected):
+    from src.web.web_request import prepare_web_request
+    prepared = prepare_web_request({'message': query, 'enable_rag': False},
+        session_id='owner', trace_id='budget', input_max_chars=24000,
+        scientific_input_max_chars=48000)
+    assert prepared.context.metadata['decision_input_max_chars'] == expected
+    assert prepared.requirements.request['metadata']['decision_input_max_chars'] == expected
+
+
+def test_actual_web_scientific_default_and_durable_budget_are_pinned(actual_app):
+    async def run():
+        async with actual_app(ordinary_policy=None, respond=compiled_decision) as bundle:
+            bundle.app.chat_handler.config = {'inference': {}}
+            cookie = await cookie_for(bundle.app)
+            async with ActualSocket(bundle.app, cookie) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message': '请计算这个分子的 LogP', 'enable_rag': False})
+                assert frames[-1]['status'] == 'waiting_for_input'
+                sender, = bundle.app.decision_runtime.sockets
+                waiting = sender.waiting
+                assert waiting.context.metadata['decision_input_max_chars'] == 48000
+            bundle.app.chat_handler.config = {'inference': {'external_scientific_input_max_chars': 7000}}
+            async with ActualSocket(bundle.app, cookie) as socket:
+                await socket.ready()
+                restored = bundle.app.decision_runtime._restore_durable_waiting(
+                    next(iter(bundle.app.decision_runtime.sockets)), waiting.context.trace_id,
+                    waiting.continuation_id)
+                assert restored is not None
+                assert restored.context.metadata['decision_input_max_chars'] == 48000
+                assert restored.prepared.requirements == waiting.prepared.requirements
+                frames = await socket.turn({'type': 'resume', 'trace_id': waiting.context.trace_id,
+                    'continuation_id': waiting.continuation_id, 'message': 'CCO'})
+                assert frames[-1]['status'] == 'completed'
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('history_cap', [0, 400, 4000])
 def test_outbound_budget_keeps_whole_question_and_atomic_recent_history(actual_app, history_cap):
     async def run():

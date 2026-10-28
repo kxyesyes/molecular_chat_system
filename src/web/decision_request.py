@@ -28,6 +28,22 @@ _EXPLAIN = re.compile(r'^\s*(?:请)?(?:解释|介绍|什么是|讲解)|^\s*(?:pl
 _UNSUPPORTED = re.compile(r'生成|设计|优化|筛选|排序|反向|寻靶|对接|文献|知识库|溶解度|毒性|'
     r'\b(?:generat\w*|design|optimi[sz]\w*|screen\w*|rank\w*|admet|reverse|rag|dock\w*|'
     r'solubility|toxicity|prepare_receptor|prepare_ligand|run_docking|get_docking_result)\b', re.I)
+_TARGET_LOOKUP_ACTION = re.compile(
+    r'查(?:询|找)|搜索|检索|列出|找一下|'
+    r'\b(?:find|search|lookup|list)\b', re.I)
+_TARGET_LOOKUP_OBJECT = re.compile(
+    r'靶点|蛋白(?:质)?|结构|pdb|uniprot|target|protein|structures?', re.I)
+_TARGET_DOCKING_PURPOSE = re.compile(
+    r'(?:适合|可用于|后续|继续|能否|是否|suitable|appropriate|future|continue|'
+    r'for\s+docking|docking)', re.I)
+_TARGET_DOCKING_ACTION = re.compile(
+    r'(?:运行|执行|开始|进行|计算|模拟|run|start|perform|calculate|simulate)'
+    r'.{0,20}(?:对接|docking|binding|结合能)|'
+    r'(?:并|and)\s*(?:对接|docking)|'
+    r'(?:对接|docking).{0,20}(?:运行|执行|开始|进行|计算|simulate|run|start)', re.I)
+_TARGET_GENERATION_ACTION = re.compile(
+    r'生成|设计|创建|合成|制作|构建|'
+    r'\b(?:generate|design|create|synthesi[sz]e|produce|make|build)\b', re.I)
 _QUALIFIED = re.compile(r'不要|不使用|不用|不能|排除|但是|但不要|改为|换成|'
     r'\b(?:except|exclude|without|instead|not|never)\b', re.I)
 _METRICS = {
@@ -119,7 +135,8 @@ class PreparedDecision:
 
 
 def _classify(query):
-    if has_generation_intent(query):
+    target_lookup_purpose = _is_target_lookup_docking_purpose(query)
+    if has_generation_intent(query) and not target_lookup_purpose:
         raise DecisionAdmissionError('unsupported_scientific_request')
     explanation = _EXPLAIN.match(query)
     if explanation:
@@ -142,7 +159,14 @@ def _classify(query):
         if re.fullmatch(topic + r'(?:\s*(?:和|及|、|\band\b)\s*' + topic + r'){0,7}', rest, re.I):
             return 'chat', frozenset(), ()
         raise DecisionAdmissionError('request_clarification_required')
-    if _UNSUPPORTED.search(query):
+    from src.agent.planning.composite_request import (
+        parse_target_structure_molecule_request,
+    )
+    if parse_target_structure_molecule_request(query) is not None:
+        return 'scientific', frozenset({
+            'target_database_search', 'property_calculator', 'admet_predictor',
+        }), ()
+    if _UNSUPPORTED.search(query) and not target_lookup_purpose:
         raise DecisionAdmissionError('unsupported_scientific_request')
     metrics = tuple(name for name, pattern in _METRICS.items() if re.search(pattern, query, re.I))
     tools = set()
@@ -152,7 +176,7 @@ def _classify(query):
         tools.add('drug_likeness_assessment')
     if re.search(r'活性|\b(?:activity|potency|pic50|ic50)\b', query, re.I):
         tools.add('activity_predictor')
-    if re.search(r'靶点|\btarget\b', query, re.I) and re.search(r'查询|搜索|查找|\b(?:search|find|lookup)\b', query, re.I):
+    if re.search(r'靶点|蛋白(?:质)?|pdb|结构|\btarget\b|\bprotein\b', query, re.I) and re.search(r'查询|搜索|查找|\b(?:search|find|lookup)\b', query, re.I):
         tools.add('target_database_search')
     if tools:
         if _QUALIFIED.search(query):
@@ -161,12 +185,33 @@ def _classify(query):
         # A1 cannot silently infer which target/molecule each action consumes.
         if 'target_database_search' in tools and len(tools) > 1:
             raise DecisionAdmissionError('request_clarification_required')
-        _require_complete_coverage(query, tools, metrics)
+        if not target_lookup_purpose:
+            _require_complete_coverage(query, tools, metrics)
         return 'scientific', frozenset(tools), metrics
     if re.fullmatch(r'\s*(?:你好|您好|谢谢|再见|hi|hello|thanks|thank\s+you)[!！。.\s]*', query, re.I):
         return 'chat', frozenset(), ()
     # A1 has no reliable general intent classifier. Unknown does not mean chat.
     raise DecisionAdmissionError('request_clarification_required')
+
+
+def _is_target_lookup_docking_purpose(query: str) -> bool:
+    """Recognize a target-lookup annotation, not a request to run docking.
+
+    Users commonly ask for structures that may be useful *later* for docking.
+    This wording belongs to target lookup and its suitability annotation. It
+    must not activate the docking workflow, while explicit execution verbs
+    remain unsupported at this admission boundary.
+    """
+    if not (
+        _TARGET_LOOKUP_ACTION.search(query)
+        and _TARGET_LOOKUP_OBJECT.search(query)
+        and _TARGET_DOCKING_PURPOSE.search(query)
+    ):
+        return False
+    return not (
+        _TARGET_DOCKING_ACTION.search(query)
+        or _TARGET_GENERATION_ACTION.search(query)
+    )
 
 
 def _subjects(query, *, activity):

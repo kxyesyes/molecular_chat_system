@@ -25,9 +25,10 @@ MedChat 是面向药物设计与计算药物化学的 Web 平台，整合聊天/
 
 ## 4. 本地启动命令
 
-在具备科学依赖的环境中，从仓库根目录执行（来源：[requirements.txt](requirements.txt)、[main.py](main.py)）：
+在 Conda 环境 `MedChat` 中、从仓库根目录执行（来源：[requirements.txt](requirements.txt)、[main.py](main.py)）：
 
 ```powershell
+conda activate MedChat
 python -m pip install -r requirements.txt
 python main.py --port 6001
 ```
@@ -63,6 +64,8 @@ python main.py --port 6001
 3. 诊断任务只分析；除非用户明确要求，不自动实施修复。
 4. 禁止 `git reset --hard`、`git clean` 或覆盖式 checkout 回退用户改动。
 5. 完成时报告准确文件、验证命令及结果、分支、commit 和 PR；未提交或未建 PR 也应说明。
+6. 界面应删掉多余的标语、说明文字和次要标签。如果删完后界面就看不懂，说明布局本身有问题，应重新设计布局，而不是继续堆叠解释文字。不主动显示泛化免责声明、内部工具名、证据 ID 和技术来源说明；溯源与审计信息保留在结构化记录及按需展开的明细中，不占用结果正文。必要的操作标签、可访问性信息，以及具体失败、缺失数据、预测分歧和影响判断的风险状态必须保留。
+7. 每次修改都要兼顾用户体验、开发体验和 AI Agent 的使用体验：三者都要变好，而且不能破坏现有功能。验收时说明这三个维度的改进，并验证相关功能没有回归。
 
 ## 8. Git 分支与 PR 规则
 
@@ -97,4 +100,5 @@ python main.py --port 6001
 - [ ] 新行为有测试；聚焦/相关回归、compileall 及适用的 JS/部署检查已执行，未执行项已说明。
 - [ ] API、事件、schema、路径兼容，或已记录破坏性变更。
 - [ ] 文档命令有真实文件依据，不确定内容标记“待确认”。
+- [ ] 已检查界面文字与布局，并说明用户、开发者和 AI Agent 三方体验的改进；现有功能无相关回归。
 - [ ] Commit 范围单一；PR 指向 main，未经明确授权未合并。

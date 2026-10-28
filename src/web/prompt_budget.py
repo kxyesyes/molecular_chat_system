@@ -100,6 +100,22 @@ def character_limit(config, external=False, section=None):
     return value
 
 
+def scientific_character_limit(config, external=False):
+    """A separately configurable scientific default, never an overflow retry.
+
+    An explicit general limit still wins over the scientific default. Only a
+    separately supplied scientific setting overrides that general limit.
+    """
+    inference = config.get('inference', {})
+    key = 'external_scientific_input_max_chars' if external else 'scientific_input_max_chars'
+    general_key = 'external_input_max_chars' if external else 'input_max_chars'
+    default = 48000 if external else 12000
+    value = inference.get(key, inference.get(general_key, default))
+    if type(value) is not int or value < 0:
+        raise InputBudgetExceeded('科学任务输入字符预算配置必须为非负整数')
+    return value
+
+
 def required_prompt(question):
     return DRUG_DESIGN_SYSTEM_PROMPT + "\n\n" + RULES + "\n\n## 当前用户问题\n" + question
 

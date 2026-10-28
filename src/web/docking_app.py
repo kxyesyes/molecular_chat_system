@@ -128,6 +128,8 @@ def assemble_docking_app(application, docking_service, *, logger=None):
         application.chat_handler.docking_controller = controller
         return assembly
     except Exception:
+        if logger is not None:
+            logger.exception("Chat docking assembly failed; details redacted from client")
         application.app.router.routes[:] = routes
         application.app.user_middleware[:] = middleware
         application.app.router.on_startup[:] = startup

@@ -15,7 +15,8 @@
 
 ## 内部调用
 
-在仓库根目录、已安装 RDKit/PyTorch/PyG 的环境使用：
+在本机 Windows 的项目 Conda 环境 `MedChat` 中使用（先运行
+`conda activate MedChat`）；该环境应已安装 RDKit/PyTorch/PyG：
 
 ```python
 from src.activity.trainer import submit_training_job, get_job_status

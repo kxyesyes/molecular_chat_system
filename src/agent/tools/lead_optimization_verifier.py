@@ -8,6 +8,14 @@ from typing import Any
 from src.agent.property_constraints import requested_property_bounds, check_property_bounds
 
 
+def _warning_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+        return format(float(value), ".4g")
+    return "不可用" if value is None else str(value)
+
+
 class LeadOptimizationVerifier:
     """Compare a lead and generated candidates on the same requested metrics.
 
@@ -157,6 +165,25 @@ class LeadOptimizationVerifier:
         warnings: list[str] = []
         if not has_goals:
             warnings.append("未识别到明确的优化指标，未验证目标是否改善")
+        failed_checks = []
+        for candidate in results:
+            candidate_id = candidate.get("candidate_id", "候选")
+            for comparison in candidate.get("comparisons", []):
+                if comparison.get("satisfied") is False:
+                    failed_checks.append(
+                        f"{candidate_id} 的 {comparison.get('metric', '指标')} 未满足"
+                        f"（基线 {_warning_value(comparison.get('baseline_value'))}"
+                        f" → 候选 {_warning_value(comparison.get('candidate_value'))}）"
+                    )
+            for check in candidate.get("constraint_checks", []):
+                if check.get("satisfied") is False:
+                    failed_checks.append(
+                        f"{candidate_id} 的 {check.get('metric', '约束')} 约束未满足"
+                        f"（值 {_warning_value(check.get('value'))}"
+                        f"，要求 {check.get('operator', '')} {check.get('threshold', '')}）"
+                    )
+        if failed_checks:
+            warnings.append("未满足的优化目标：" + "；".join(failed_checks[:8]))
         if any(item["status"] == "unverified" for item in results):
             warnings.append("部分候选缺少与基线对应的真实端点证据，结果未验证")
         if unverifiable_constraints:

@@ -19,11 +19,8 @@ assert.match(
   /function loadHistoryJob\(jobId,\s*poseIndex\)/,
   "history loader should accept the recorded best pose index",
 );
-assert.match(
-  historyBlock,
-  /fetchDockedPoseSdf\(jobId,\s*selectedPoseNumber\)/,
-  "history loader should request the selected best pose",
-);
+assert.match(historyBlock, /selectBestHistoryPose\(results,\s*poseIndex\)/, "history loader should retain the recorded best pose");
+assert.match(historyBlock, /restored:\s*true/, "history loader must not attach an unverified receptor");
 assert.doesNotMatch(
   historyBlock,
   /fetchDockedPoseSdf\(jobId,\s*1\)/,

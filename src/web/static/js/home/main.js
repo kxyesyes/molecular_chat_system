@@ -17,9 +17,21 @@
   let currentMessages = [];
   let reconnectAttempts = 0;
   let maxReconnectAttempts = 5;
+  let agentModelStatusRequestVersion = 0;
+  let agentReadinessRequestVersion = 0;
+  let agentConfigInputVersion = 0;
+  let agentConfigSavedInputVersion = null;
+  let agentConfigDraftKeyPresent = false;
+  let agentConfigFingerprint = "";
+  let agentWireMode = "native";
+  let authoritativeAgentConfigFingerprint = "";
+  let llmConfigSaveGeneration = 0;
+  let modelSwitchRequestVersion = 0;
+  let authoritativeAgentModelName = "";
   let agentTaskState = window.HomeTaskState.create();
   let protocolDesyncedSocket = null;
   let decisionMode = false;
+  let decisionResultFormat = null;
   let decisionAwaitingReady = false;
   let decisionTurn = null;
   let decisionWaiting = null;
@@ -59,6 +71,22 @@
   }
 
   decisionWaiting = readStoredDecisionWaiting();
+
+  function updateScientificReferenceSelection(outgoing) {
+    const selected = outgoing?.selection || null;
+    document.querySelectorAll(".molecule-selection-button").forEach(button => {
+      const isSelected = Boolean(selected
+        && button.getAttribute("data-observation-id") === selected.observation_id
+        && button.getAttribute("data-candidate-id") === selected.candidate_id);
+      button.textContent = isSelected ? "已选择" : "选择此分子";
+      button.setAttribute("aria-pressed", String(isSelected));
+      button.style.background = isSelected ? "#ecfdf5" : "#fff";
+      button.style.color = isSelected ? "#047857" : "#475569";
+      button.style.border = isSelected ? "1px solid #10b981" : "1px solid #cbd5e1";
+      button.style.fontWeight = isSelected ? "600" : "500";
+    });
+  }
+
   const scientificReferences = window.HomeScientificReferences?.createController({
     storage: tabStorage,
     request: async (action, body) => {
@@ -70,18 +98,26 @@
       return envelope.data;
     },
     onStatus: message => HomeChatRenderer.showNotification(message, "warning"),
+    onChange: updateScientificReferenceSelection,
   });
 
   function displayCandidateCollections(element, payloads) {
     const report = evidenceReportLifecycle?.take(payloads[0]?.traceId);
     if (report) {
       evidenceReportViews.set(element, report);
-      try { window.HomeEvidenceReport.renderReport(element, report); } catch (_) { /* Optional display only. */ }
     }
     if (scientificReferences) {
       void scientificReferences.present(payloads, payload => renderMoleculeCandidates(element, payload));
     } else {
       payloads.forEach(payload => renderMoleculeCandidates(element, payload));
+    }
+    if (report) {
+      try { window.HomeEvidenceReport.renderReport(element, report, payloads); } catch (_) {
+        const warning = document.createElement('p');
+        warning.setAttribute('role', 'alert');
+        warning.textContent = '分析信息暂无法显示，请重试。';
+        element.appendChild(warning);
+      }
     }
   }
 
@@ -111,6 +147,9 @@
     llmSettingsStatus: null,
     testLlmConfig: null,
     saveLlmConfig: null,
+    agentModelStatus: null,
+    agentModelRole: null,
+    agentModelReadiness: null,
     agentTaskPanel: null,
   };
 
@@ -181,6 +220,8 @@
   }
 
   function clearDecisionConnection() {
+    window.HomeResultDetails?.abortAll?.();
+    decisionResultFormat = null;
     if (typeof dockingUI !== "undefined") dockingUI?.disconnect(ws);
     decisionAwaitingReady = true; // every new socket must announce its own mode
     if (decisionMode) {
@@ -206,8 +247,12 @@
       message.capabilities?.chat_docking?.preparation_available === true &&
       message.capabilities.chat_docking.execution_authorized === false);
     decisionMode = ["pi", "decision_a2"].includes(message.normal_chat_mode);
+    decisionResultFormat = decisionMode && window.HomeResultDetails &&
+      Array.isArray(message.capabilities?.result_formats) &&
+      message.capabilities.result_formats.includes("summary_details_v1") ? "summary_details_v1" : null;
     if (decisionMode && !decisionWaiting) decisionWaiting = readStoredDecisionWaiting();
-    if (decisionMode && !decisionControls && elements.input?.parentNode) {
+    const composer = elements.input?.closest(".chat-composer");
+    if (decisionMode && !decisionControls && composer) {
       const box = document.createElement("div");
       box.className = "decision-runtime-controls";
       const button = (label, action) => {
@@ -230,7 +275,7 @@
           }
           updateDecisionControls();
         })};
-      elements.input.parentNode.appendChild(box);
+      composer.insertBefore(box, composer.querySelector(".fill"));
     }
     updateDecisionControls();
   }
@@ -251,6 +296,7 @@
       : {type: "chat", message, enable_rag: ragEnabled, enable_tools: toolsEnabled,
         rag_count: config.ragCount, temperature: config.temperature, mol_count: config.molCount,
         ...(scientificReferences?.outgoing() || {})};
+    if (decisionResultFormat) payload.result_format = decisionResultFormat;
     if (!sendDecisionControl(payload)) return;
     decisionTurn = {socket: ws, phase: "pending", turnId: null, traceId: null,
       resume: resume ? decisionWaiting : null, cancelSent: false, result: null};
@@ -259,6 +305,7 @@
     evidenceReportLifecycle?.startRequest();
     if (!chatMode) enterChatMode();
     addUserMessage(message);
+    decisionTurn.userMessage = elements.chatContainer.lastChild;
     elements.input.value = "";
     showTypingIndicator();
     updateDecisionControls();
@@ -306,6 +353,7 @@
         !/^[a-f0-9]{32}$/.test(message.trace_id || "") || decisionSeenTurns.has(message.turn_id) ||
         (turn.resume && message.trace_id !== turn.resume.traceId)) return true;
       turn.turnId = message.turn_id; turn.traceId = message.trace_id; turn.phase = "active";
+      agentTaskState = window.HomeTaskState.create();
       decisionSeenTurns.add(turn.turnId);
       if (decisionSeenTurns.size > 64) decisionSeenTurns.delete(decisionSeenTurns.values().next().value);
       updateDecisionControls(); return true;
@@ -319,27 +367,44 @@
     if (message.trace_id !== turn.traceId) return true;
     if (message.type === "agent_result") {
       if (turn.result || !Object.prototype.hasOwnProperty.call(decisionStatuses, message.status)) return true;
-      const baseText = typeof message.display_answer === "string" ? message.display_answer :
+      let baseText = typeof message.display_answer === "string" ? message.display_answer :
         (typeof message.final_answer === "string" ? message.final_answer : message.message || "");
-      const structuredReason = message.error && typeof message.error.message === "string"
+      let structuredReason = message.error && typeof message.error.message === "string"
         ? message.error.message : typeof message.metadata?.failure_reason === "string"
           ? message.metadata.failure_reason : "";
+      if (window.MedChatStatus.isNonSuccess(message.status)) {
+        const diagnostic = 'Decision publication invalidated';
+        const explanation = '结果校验未通过，无法交付本次任务结果。';
+        if (baseText === diagnostic) baseText = explanation;
+        if (structuredReason === diagnostic) structuredReason = explanation;
+      }
       const text = window.MedChatStatus.isNonSuccess(message.status) && structuredReason &&
         !baseText.includes(structuredReason)
         ? `${baseText}\n\n失败原因：${structuredReason}` : baseText;
-      turn.result = {status: message.status, text, metadata: message.metadata || {}};
+      turn.result = {status: message.status, text, metadata: message.metadata || {},
+        details: message.result_format === "summary_details_v1" && message.details_state === "available"
+          ? message.details : null};
       if (message.status === "waiting_for_input" && message.metadata?.waiting_for_input === true
           && /^[a-f0-9]{32}$/.test(message.metadata.continuation_id || "")) {
         // Cache the opaque pointer before complete can be lost. The active
         // turn still disables controls; reconnect never dispatches by itself,
         // and only the server's durable owner-bound CAS authorizes a resume.
         setDecisionWaiting({traceId: turn.traceId, nonce: message.metadata.continuation_id});
+        const panel = turn.taskPanel;
+        if (panel?.getAttribute("data-trace-id") === turn.traceId &&
+            agentTaskState.lastEventType === "task_rejected") {
+          window.HomeTaskPanel.showWaiting(panel);
+          agentTaskState = window.HomeTaskState.record(agentTaskState, {
+            terminal: true, eventType: "waiting_for_input", progressText: "等待补充输入",
+          });
+        }
       }
-      const rag = message.metadata?.retrieval_performed === false
-        ? (message.metadata.rag_requested === true ? " RAG已开启，本轮未执行检索。" : " 本轮未执行检索。") : "";
+      const rag = message.metadata?.retrieval_performed === false && message.metadata.rag_requested === true
+        ? " 本轮未执行知识库检索。" : "";
       decisionStatus(turn, decisionStatuses[message.status] + rag);
       turn.box.setAttribute("data-content", text);
-      turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text);
+      turn.box.querySelector(".message-content").innerHTML = HomeFormatters.formatContent(text,
+        {displayKind: message.metadata?.display_kind});
       updateDecisionControls(); return true;
     }
     if (message.type === "complete") {
@@ -347,6 +412,8 @@
       const {status, text, metadata} = turn.result;
       const isNonSuccess = window.MedChatStatus.isNonSuccess(status);
       const projectionFailed = message.status === "failed" && message.error?.code === "result_projection_failed";
+      if (turn.statusElement) turn.statusElement.hidden = status === "completed" && !projectionFailed &&
+        !(metadata.rag_requested === true && metadata.retrieval_performed === false);
       let finalText = text;
       if (projectionFailed) {
         // Delivery failure does not rewrite the scientific workflow result.
@@ -358,7 +425,18 @@
       if (isNonSuccess || projectionFailed) {
         moleculeCandidateLifecycle.clear(); evidenceReportLifecycle?.clear();
       }
-      completeLastMessage(finalText); clearToolStatus();
+      completeLastMessage(finalText, {displayKind: metadata.display_kind}); clearToolStatus();
+      if (status === "completed") markAgentReadyFromSuccessfulTurn();
+      if (turn.result.details && window.HomeResultDetails) {
+        try {
+          window.HomeResultDetails.mount(turn.box, {traceId: turn.traceId, reference: turn.result.details});
+        } catch (_) {
+          const notice = document.createElement("div");
+          notice.className = "result-details-error";
+          notice.textContent = "明细暂不可用。";
+          turn.box.appendChild(notice);
+        }
+      }
       turn.phase = "ended";
       if (projectionFailed) {
         setDecisionWaiting(null);
@@ -402,6 +480,9 @@
     elements.llmSettingsStatus = document.getElementById("llmSettingsStatus");
     elements.testLlmConfig = document.getElementById("testLlmConfig");
     elements.saveLlmConfig = document.getElementById("saveLlmConfig");
+    elements.agentModelStatus = document.getElementById("agentModelStatus");
+    elements.agentModelRole = document.getElementById("agentModelRole");
+    elements.agentModelReadiness = document.getElementById("agentModelReadiness");
 
     // 获取主要容器
     const rightPanel = document.querySelector(".index_con .right");
@@ -423,6 +504,7 @@
 
     // 初始化UI状态
     updateToggleStates();
+    void refreshAgentModelStatus();
 
     // 添加增强样式
     addEnhancedStyles();
@@ -608,7 +690,11 @@
       socket.readyState !== WebSocket.CLOSING &&
       socket.readyState !== WebSocket.CLOSED
     ) {
-      socket.close(code, reason);
+      // Browsers may send only 1000 or application codes 3000–4999.
+      // Keep the protocol classification, but translate reserved wire codes.
+      const browserCode = code === 1000 || (code >= 3000 && code <= 4999)
+        ? code : ({1002: 4002, 1009: 4009, 1011: 4011}[code] || 4002);
+      socket.close(browserCode, reason);
     }
   }
 
@@ -658,7 +744,6 @@
         case "connection_ready":
           console.log("WebSocket ready");
           HomeChatRenderer.updateConnectionStatus("connected");
-          HomeChatRenderer.showNotification("模型已就绪", "success");
           if (!moleculeCandidateLifecycle.isRequestInFlight()) {
             void scientificReferences?.restore(payload => {
               if (!chatMode) enterChatMode();
@@ -736,7 +821,7 @@
         }
 
         case "scientific_report":
-          if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.enqueue(message);
+          if (typeof evidenceReportLifecycle !== "undefined") evidenceReportLifecycle?.enqueue(message, {buffer: true});
           break;
 
         case "complete":
@@ -746,6 +831,7 @@
             moleculeCandidateLifecycle.clear();
           }
           completeLastMessage(message.content);
+          if (message.status === "completed") markAgentReadyFromSuccessfulTurn();
           clearToolStatus(); // 清除工具状态显示
           break;
 
@@ -867,6 +953,12 @@
       if (elements.saveLlmConfig) {
         elements.saveLlmConfig.addEventListener("click", saveLlmConfig);
       }
+      for (const field of [elements.llmProvider, elements.llmStream, elements.llmBaseUrl,
+        elements.llmModelName, elements.llmApiKey]) {
+        if (!field?.addEventListener) continue;
+        field.addEventListener("input", markLlmConfigInputChanged);
+        field.addEventListener("change", markLlmConfigInputChanged);
+      }
 
       // 侧边栏控制
       if (elements.closeSidebarBtn) {
@@ -894,19 +986,30 @@
 
     async function openLlmSettings() {
       if (!elements.llmSettingsOverlay) return;
+      const requestVersion = ++agentModelStatusRequestVersion;
+      const inputVersionAtStart = agentConfigInputVersion;
+      const isCurrentRequest = () => requestVersion === agentModelStatusRequestVersion &&
+        inputVersionAtStart === agentConfigInputVersion;
       elements.llmSettingsOverlay.classList.add("is-open");
       elements.llmSettingsOverlay.setAttribute("aria-hidden", "false");
+      invalidateAgentReadinessRequests();
+      setAgentReadiness("unknown");
       setLlmSettingsStatus("正在读取当前模型配置...");
       try {
         const response = await fetch("/api/llm/config");
         const result = await response.json();
+        if (!isCurrentRequest()) return;
         if (!result.success) {
           throw new Error(result.message || "读取配置失败");
         }
+        if (result.agent) applyAgentModelLabel(getAgentMetadata(result));
+        else if (result.config) applyAgentModelLabel(result.config);
+        setAgentReadiness(result.agent?.readiness || "unknown");
         fillLlmSettingsForm(result.config || {});
         setLlmSettingsStatus("");
       } catch (error) {
         console.error("读取 LLM 配置失败:", error);
+        if (!isCurrentRequest()) return;
         setLlmSettingsStatus(`读取配置失败：${error.message}`, true);
       }
     }
@@ -925,6 +1028,16 @@
       if (elements.llmBaseUrl) elements.llmBaseUrl.value = config.base_url ?? (useDeepSeekDefaults ? "https://api.deepseek.com/chat/completions" : "");
       if (elements.llmModelName) elements.llmModelName.value = config.model_name ?? (useDeepSeekDefaults ? "deepseek-v4-pro" : "");
       if (elements.llmApiKey) elements.llmApiKey.value = "";
+      agentConfigDraftKeyPresent = false;
+      if (config.wire_mode || config.decision_wire_mode) {
+        agentWireMode = String(config.wire_mode || config.decision_wire_mode).trim().toLowerCase();
+      }
+      const fingerprint = getAgentConfigFingerprint({ ...config, wire_mode: agentWireMode });
+      if (fingerprint !== agentConfigFingerprint) {
+        agentConfigFingerprint = fingerprint;
+        agentConfigInputVersion += 1;
+      }
+      agentConfigSavedInputVersion = agentConfigInputVersion;
     }
 
     function collectLlmSettingsForm() {
@@ -937,6 +1050,54 @@
       };
     }
 
+    function markLlmConfigInputChanged() {
+      agentConfigInputVersion += 1;
+    }
+
+    function getAgentConfigFingerprint(config) {
+      const source = config || {};
+      const wireMode = String(
+        source.wire_mode || source.decision_wire_mode || agentWireMode || "native"
+      ).trim().toLowerCase();
+      return JSON.stringify({
+        provider: String(source.provider || "").trim().toLowerCase(),
+        base_url: String(source.base_url || "").trim(),
+        model_name: String(source.model_name || source.model || "").trim(),
+        wire_mode: wireMode,
+        stream: source.stream !== false,
+      });
+    }
+
+    function getLlmSettingsSnapshot() {
+      const payload = collectLlmSettingsForm();
+      const keyPresent = Boolean(payload.api_key);
+      if (keyPresent !== agentConfigDraftKeyPresent) {
+        agentConfigDraftKeyPresent = keyPresent;
+        agentConfigInputVersion += 1;
+      }
+      const fingerprint = getAgentConfigFingerprint({ ...payload, wire_mode: agentWireMode });
+      if (fingerprint !== agentConfigFingerprint) {
+        agentConfigFingerprint = fingerprint;
+        agentConfigInputVersion += 1;
+      }
+      if (agentConfigSavedInputVersion === null) {
+        agentConfigSavedInputVersion = agentConfigInputVersion;
+      }
+      return {
+        payload,
+        fingerprint,
+        inputVersion: agentConfigInputVersion,
+      };
+    }
+
+    function getAgentMetadata(result) {
+      return {
+        ...(result?.config || {}),
+        ...(result?.agent || {}),
+        ...(result?.wire_mode ? { wire_mode: result.wire_mode } : {}),
+      };
+    }
+
     function setLlmSettingsStatus(message, isError = false) {
       if (!elements.llmSettingsStatus) return;
       elements.llmSettingsStatus.textContent = message || "";
@@ -944,18 +1105,18 @@
     }
 
     async function testLlmConfig() {
-      const payload = collectLlmSettingsForm();
       setLlmSettingsStatus("正在测试连接...");
       try {
-        const response = await fetch("/api/llm/test", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const result = await response.json();
+        const result = await refreshAgentReadiness();
+        if (result?.stale) return;
+        if (result?.status === "pending") {
+          setLlmSettingsStatus(result.message, true);
+          return;
+        }
+        const ready = result?.status === "ready";
         setLlmSettingsStatus(
-          result.message || (result.success ? "连接测试成功" : "连接测试失败"),
-          !result.success
+          ready ? "连接测试成功" : (result?.message || "连接测试失败"),
+          !ready,
         );
       } catch (error) {
         console.error("测试 LLM 连接失败:", error);
@@ -963,9 +1124,166 @@
       }
     }
 
+    function applyAgentModelLabel(configOrModelName) {
+      const config = typeof configOrModelName === "string"
+        ? { model_name: configOrModelName }
+        : (configOrModelName || {});
+      const modelName = String(config.model_name || "未配置").trim() || "未配置";
+      authoritativeAgentModelName = modelName === "未配置" ? "" : modelName;
+      if (typeof configOrModelName === "string") {
+        authoritativeAgentConfigFingerprint = "";
+      } else if (config.model_name || config.provider || config.base_url ||
+                 config.wire_mode || config.decision_wire_mode ||
+                 Object.prototype.hasOwnProperty.call(config, "stream")) {
+        if (config.wire_mode || config.decision_wire_mode) {
+          agentWireMode = String(config.wire_mode || config.decision_wire_mode).trim().toLowerCase();
+        }
+        authoritativeAgentConfigFingerprint = getAgentConfigFingerprint(config);
+      } else {
+        authoritativeAgentConfigFingerprint = "";
+      }
+      if (elements.modelSelect) {
+        elements.modelSelect.value = modelName;
+        elements.modelSelect.setAttribute?.("aria-label", `Agent 模型：${modelName}`);
+        if (elements.modelSelect.value !== modelName && elements.modelSelect.ownerDocument?.createElement) {
+          const option = elements.modelSelect.ownerDocument.createElement("option");
+          option.value = modelName;
+          option.textContent = modelName;
+          elements.modelSelect.appendChild(option);
+          elements.modelSelect.value = modelName;
+        }
+      }
+      if (elements.agentModelRole) elements.agentModelRole.textContent = "Agent";
+    }
+
+    function setAgentReadiness(readiness) {
+      const labels = {
+        unknown: "待测试",
+        testing: "检测中",
+        ready: "已就绪",
+        unavailable: "不可用",
+        pending: "待保存/待重新测试",
+      };
+      const normalized = labels[readiness] ? readiness : "unknown";
+      if (elements.agentModelReadiness) {
+        elements.agentModelReadiness.textContent = labels[normalized];
+      }
+      return normalized;
+    }
+
+    function markAgentReadyFromSuccessfulTurn() {
+      if (!authoritativeAgentModelName) return false;
+      if ((agentConfigSavedInputVersion !== null
+           && agentConfigInputVersion !== agentConfigSavedInputVersion)
+          || (agentConfigSavedInputVersion === null && agentConfigInputVersion > 0)) {
+        return false;
+      }
+      setAgentReadiness("ready");
+      return true;
+    }
+
+    function invalidateAgentReadinessRequests() {
+      agentReadinessRequestVersion += 1;
+      return agentReadinessRequestVersion;
+    }
+
+    async function refreshAgentModelStatus() {
+      const requestVersion = ++agentModelStatusRequestVersion;
+      const readinessVersionAtStart = invalidateAgentReadinessRequests();
+      const isCurrentRequest = () => requestVersion === agentModelStatusRequestVersion;
+      try {
+        const response = await fetch("/api/llm/config");
+        const result = await response.json();
+        if (!result.success) throw new Error(result.message || "读取 Agent 配置失败");
+        if (!isCurrentRequest()) return null;
+        applyAgentModelLabel(getAgentMetadata(result));
+        if (agentReadinessRequestVersion === readinessVersionAtStart) setAgentReadiness("unknown");
+        return getAgentMetadata(result);
+      } catch (error) {
+        console.error("读取 Agent 模型状态失败:", error);
+        if (!isCurrentRequest()) return null;
+        if (agentReadinessRequestVersion === readinessVersionAtStart) setAgentReadiness("unavailable");
+        return null;
+      }
+    }
+
+    async function refreshAgentReadiness() {
+      const snapshot = getLlmSettingsSnapshot();
+      const payload = snapshot.payload;
+      agentModelStatusRequestVersion += 1;
+      const requestVersion = ++agentReadinessRequestVersion;
+      const inputVersionAtStart = snapshot.inputVersion;
+      const fingerprintAtStart = snapshot.fingerprint;
+      const testedModelName = String(payload.model_name || "").trim();
+      const isCurrentRequest = () => requestVersion === agentReadinessRequestVersion;
+      setAgentReadiness("testing");
+      try {
+        const response = await fetch("/api/llm/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+        const result = await response.json();
+        if (!isCurrentRequest()) return { status: "stale", stale: true, success: false };
+        const currentSnapshot = getLlmSettingsSnapshot();
+        if (currentSnapshot.inputVersion !== inputVersionAtStart ||
+            currentSnapshot.fingerprint !== fingerprintAtStart) {
+          setAgentReadiness("pending");
+          return { status: "pending", success: false, message: "配置已修改，请保存后重新测试" };
+        }
+        if (agentConfigSavedInputVersion !== null &&
+            inputVersionAtStart !== agentConfigSavedInputVersion) {
+          setAgentReadiness("pending");
+          return { status: "pending", success: false, message: "配置已修改，请保存后重新测试" };
+        }
+        const resultModelName = String(result.model || testedModelName).trim();
+        const configMatchesAgent = authoritativeAgentConfigFingerprint
+          ? authoritativeAgentConfigFingerprint === fingerprintAtStart
+          : testedModelName === authoritativeAgentModelName;
+        const modelMatchesAgent = configMatchesAgent &&
+          (!resultModelName || resultModelName === testedModelName);
+        if (!modelMatchesAgent) {
+          const message = "测试模型尚未保存为当前 Agent 模型，请保存后重新测试";
+          setAgentReadiness("pending");
+          return { status: "pending", success: false, message };
+        }
+        if (!result.success) {
+          setAgentReadiness("unavailable");
+          return { status: "unavailable", success: false, message: result.message || "连接测试失败" };
+        }
+        setAgentReadiness("ready");
+        return { status: "ready", success: true, message: result.message || "连接测试成功" };
+      } catch (error) {
+        console.error("检测 Agent 模型状态失败:", error);
+        if (!isCurrentRequest()) return { status: "stale", stale: true, success: false };
+        const currentSnapshot = getLlmSettingsSnapshot();
+        if (currentSnapshot.inputVersion !== inputVersionAtStart ||
+            currentSnapshot.fingerprint !== fingerprintAtStart) {
+          setAgentReadiness("pending");
+          return { status: "pending", success: false, message: "配置已修改，请保存后重新测试" };
+        }
+        if (agentConfigSavedInputVersion !== null &&
+            inputVersionAtStart !== agentConfigSavedInputVersion) {
+          setAgentReadiness("pending");
+          return { status: "pending", success: false, message: "配置已修改，请保存后重新测试" };
+        }
+        setAgentReadiness("unavailable");
+        return { status: "unavailable", success: false, message: error.message };
+      }
+    }
+
     async function saveLlmConfig() {
-      const payload = collectLlmSettingsForm();
+      const saveGeneration = ++llmConfigSaveGeneration;
+      const snapshotAtStart = getLlmSettingsSnapshot();
+      const payload = snapshotAtStart.payload;
+      const inputVersionAtStart = snapshotAtStart.inputVersion;
+      const fingerprintAtStart = snapshotAtStart.fingerprint;
+      invalidateAgentReadinessRequests();
+      setAgentReadiness("unknown");
       setLlmSettingsStatus("正在保存并启用配置...");
+      const isCurrentSave = () => {
+        return saveGeneration === llmConfigSaveGeneration;
+      };
       try {
         const response = await fetch("/api/llm/config", {
           method: "POST",
@@ -973,14 +1291,33 @@
           body: JSON.stringify(payload),
         });
         const result = await response.json();
+        if (!isCurrentSave()) {
+          return { status: "stale", stale: true };
+        }
         if (!result.success) {
           throw new Error(result.message || "保存失败");
         }
-        fillLlmSettingsForm(result.config || {});
+        const currentSnapshot = getLlmSettingsSnapshot();
+        const formStillMatchesSave = currentSnapshot.inputVersion === inputVersionAtStart &&
+          currentSnapshot.fingerprint === fingerprintAtStart;
+        agentModelStatusRequestVersion += 1;
+        invalidateAgentReadinessRequests();
+        applyAgentModelLabel(getAgentMetadata(result));
+        if (formStillMatchesSave) {
+          fillLlmSettingsForm(result.config || {});
+        } else {
+          // The response is authoritative for Agent state, but a newer draft
+          // must remain visible and be saved explicitly by the user.
+          agentConfigSavedInputVersion = inputVersionAtStart;
+        }
+        setAgentReadiness("unknown");
         setLlmSettingsStatus("配置已保存并启用");
         HomeChatRenderer.showToast("模型接入配置已保存", "success");
       } catch (error) {
         console.error("保存 LLM 配置失败:", error);
+        if (!isCurrentSave()) {
+          return { status: "stale", stale: true };
+        }
         setLlmSettingsStatus(`保存失败：${error.message}`, true);
         HomeChatRenderer.showToast("模型接入配置保存失败", "error");
       }
@@ -988,6 +1325,11 @@
 
     // 处理模型切换
     function bindToolbarControls() {}
+
+  function renderTransportStatus() {
+    const socketIsOpen = Boolean(ws) && typeof WebSocket !== "undefined" && ws.readyState === WebSocket.OPEN;
+    HomeChatRenderer.updateConnectionStatus(socketIsOpen ? "connected" : "disconnected");
+  }
 
   function toggleSidebar() {
     const isClosing = elements.sidebarPanel.classList.contains("is-closing");
@@ -1273,13 +1615,12 @@
   async function handleModelChange(e) {
     const selectedModel = e.target.value;
     console.log(`🔄 切换模型: ${selectedModel}`);
-
-    // 更新连接状态
-    if (elements.connectionStatus) {
-      elements.connectionStatus.textContent = "切换中...";
-      elements.connectionStatus.style.backgroundColor = "#fef3c7";
-      elements.connectionStatus.style.color = "#92400e";
-    }
+    const switchRequestVersion = ++modelSwitchRequestVersion;
+    const isCurrentSwitch = () => switchRequestVersion === modelSwitchRequestVersion;
+    agentModelStatusRequestVersion += 1;
+    invalidateAgentReadinessRequests();
+    setAgentReadiness("unknown");
+    renderTransportStatus();
 
     try {
       const response = await fetch("/api/switch_model", {
@@ -1291,16 +1632,17 @@
       });
 
       const result = await response.json();
+      if (!isCurrentSwitch()) return;
 
       if (result.success) {
         console.log("✅ 模型切换成功:", result.message);
 
-        // 更新状态显示
-        if (elements.connectionStatus) {
-          elements.connectionStatus.textContent = "已连接";
-          elements.connectionStatus.style.backgroundColor = "#d1fae5";
-          elements.connectionStatus.style.color = "#065f46";
-        }
+        // The switch response is not the authoritative Agent status. Re-read
+        // the active configuration so the label and readiness cannot remain stale.
+        await refreshAgentModelStatus();
+        if (!isCurrentSwitch()) return;
+
+        renderTransportStatus();
 
         // 显示Toast通知
         HomeChatRenderer.showToast(
@@ -1317,11 +1659,7 @@
       } else {
         console.error("❌ 模型切换失败:", result.message);
 
-        if (elements.connectionStatus) {
-          elements.connectionStatus.textContent = "切换失败";
-          elements.connectionStatus.style.backgroundColor = "#fee2e2";
-          elements.connectionStatus.style.color = "#991b1b";
-        }
+        renderTransportStatus();
 
         // 显示错误Toast
         HomeChatRenderer.showToast(
@@ -1339,12 +1677,9 @@
       }
     } catch (error) {
       console.error("❌ 模型切换请求失败:", error);
+      if (!isCurrentSwitch()) return;
 
-      if (elements.connectionStatus) {
-        elements.connectionStatus.textContent = "切换失败";
-        elements.connectionStatus.style.backgroundColor = "#fee2e2";
-        elements.connectionStatus.style.color = "#991b1b";
-      }
+      renderTransportStatus();
 
       // 显示错误Toast
       HomeChatRenderer.showToast("模型切换失败，请检查网络连接", "error");
@@ -1646,10 +1981,10 @@
         `;
 
     const messageContainer = document.createElement("div");
+    messageContainer.className = "message-container";
     messageContainer.style.cssText = `
             display: flex;
             align-items: flex-start;
-            max-width: 70%;
             gap: 12px;
         `;
 
@@ -1723,10 +2058,10 @@
         `;
 
     const messageContainer = document.createElement("div");
+    messageContainer.className = "message-container";
     messageContainer.style.cssText = `
             display: flex;
             align-items: flex-start;
-            max-width: 70%;
             gap: 12px;
         `;
 
@@ -1813,10 +2148,10 @@
             `;
 
       const messageContainer = document.createElement("div");
+      messageContainer.className = "message-container";
       messageContainer.style.cssText = `
                 display: flex;
                 align-items: flex-start;
-                max-width: 70%;
                 gap: 12px;
             `;
 
@@ -1931,7 +2266,7 @@
   }
 
   // 完成最后一条消息
-  function completeLastMessage(content) {
+  function completeLastMessage(content, displayOptions) {
     const candidatePayloads = moleculeCandidateLifecycle.drain();
     try {
       const hadTypingIndicator = Boolean(
@@ -1967,7 +2302,7 @@
           lastMessage.querySelector(".message-content") ||
           lastMessage.querySelector("div:last-child");
         if (messageContent) {
-          messageContent.innerHTML = HomeFormatters.formatContent(content);
+          messageContent.innerHTML = HomeFormatters.formatContent(content, displayOptions);
         }
       }
 
@@ -2068,6 +2403,22 @@
 
   function createAgentTaskPanel() {
     if (!elements.chatContainer) return null;
+    if (decisionMode) {
+      const turn = decisionTurn;
+      if (!turn?.turnId || turn.phase !== "active") return null;
+      if (!turn.taskPanel) {
+        const panel = window.HomeTaskPanel.create(elements.chatContainer, document, {reuse: false});
+        if (!panel) return null;
+        panel.setAttribute("data-turn-id", turn.turnId);
+        // Keep the result wrapper last: streaming/result rendering owns it.
+        const siblings = Array.from(elements.chatContainer.children);
+        const anchor = siblings.indexOf(turn.userMessage);
+        if (anchor >= 0) elements.chatContainer.insertBefore(panel, siblings[anchor + 1] || null);
+        turn.taskPanel = panel;
+      }
+      elements.agentTaskPanel = turn.taskPanel;
+      return turn.taskPanel;
+    }
     const panel = window.HomeTaskPanel.create(elements.chatContainer, document);
     if (!panel) return null;
     elements.agentTaskPanel = panel;
@@ -2093,15 +2444,17 @@
   function handleAgentEvent(event) {
     const presentation = resolveAgentEventPresentation(event);
     const eventType = presentation.eventType;
-    if (!agentTaskState.active) {
+    const message = window.HomeTaskStatus.message(event);
+    if (eventType === "validation_warning" && !message) return;
+    if (!agentTaskState.active && !(decisionMode && decisionTurn?.taskPanel)) {
       resetAgentTaskPanel();
     }
 
     const panel = createAgentTaskPanel();
     if (!panel) return;
 
+    panel.setAttribute("data-trace-id", event.trace_id || "");
     const toolName = event.tool_name || event.tool || "";
-    const message = event.message || getAgentEventLabel(eventType, toolName);
     const rendered = window.HomeTaskPanel.appendEvent(panel, {
       label: getAgentEventLabel(eventType, toolName, event.payload),
       message,
@@ -2284,13 +2637,10 @@
       return;
     }
 
-    if (action === "admet") {
-      return;
-    }
-
     const quickMessages = {
-      "analyze-ethanol": "请分析乙醇(CCO)的分子性质和ADMET特征",
+      "analyze-ethanol": "请分析乙醇(CCO)的分子性质",
       "generate-molecule": "请生成符合Lipinski五规则的类药分子，分子量小于500，LogP小于5",
+      "admet": "请对乙醇(CCO)进行 ADMET 预测，返回真实计算结果、证据来源和未计算项目",
     };
 
     const message = quickMessages[action];
@@ -2801,10 +3151,10 @@
     `;
 
     const messageContainer = document.createElement("div");
+    messageContainer.className = "message-container";
     messageContainer.style.cssText = `
       display: flex;
       align-items: flex-start;
-      max-width: 70%;
       gap: 12px;
       width: 100%;
     `;
@@ -2944,10 +3294,10 @@
     if (!elements.connectionStatus) return;
 
     const statusConfig = {
-      connecting: { text: "连接中...", bg: "#fbbf24", icon: "🟡" },
-      connected: { text: "已连接", bg: "#10b981", icon: "🟢" },
-      disconnected: { text: "已断开", bg: "#94a3b8", icon: "⚪" },
-      error: { text: "连接失败", bg: "#ef4444", icon: "🔴" },
+      connecting: { text: "传输连接中...", bg: "#fbbf24", icon: "🟡" },
+      connected: { text: "传输已连接", bg: "#10b981", icon: "🟢" },
+      disconnected: { text: "传输未连接", bg: "#94a3b8", icon: "⚪" },
+      error: { text: "传输未连接", bg: "#ef4444", icon: "🔴" },
     };
 
     const config = statusConfig[status] || statusConfig.connecting;
@@ -3638,6 +3988,7 @@
     if (!messageElement || !payload || payload.candidates.length === 0) return {mounted: false};
     const moleculesArray = payload.candidates.slice(0, 32);
     const moleculeCount = moleculesArray.length;
+    const candidateOffset = messageElement.querySelectorAll?.('.molecule-card').length || 0;
 
     // 创建分子结构容器
     const moleculeContainer = document.createElement("div");
@@ -3679,7 +4030,7 @@
     const titleCount = document.createElement("div");
     titleCount.style.cssText =
       "font-size: 12px; color: #64748b; font-weight: normal; margin-top: 2px;";
-    titleCount.textContent = `已验证 ${moleculeCount} 个候选分子`;
+    titleCount.textContent = `${moleculeCount} 个候选分子`;
     titleText.appendChild(titleHeading);
     titleText.appendChild(titleCount);
     title.appendChild(titleIcon);
@@ -3690,11 +4041,31 @@
       const warnings = document.createElement("div");
       warnings.style.cssText =
         "margin: -8px 0 18px; padding: 10px 12px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; font-size: 12px;";
-      payload.warnings.forEach((warning) => {
-        const warningText = document.createElement("div");
-        warningText.textContent = warning;
+      payload.warnings.forEach(warning => {
+        const warningText = document.createElement('div');
+        let display = warning;
+        payload.candidates.forEach((candidate, i) => {
+          // Replace only an explicit leading candidate reference, not free-text
+          // substrings that might be measurements or molecular structures.
+          const prefix = `${candidate.candidate_id} 的`;
+          if (candidate.candidate_id !== candidate.canonical_smiles &&
+              !/^[+\-\d.eE]+(?:\s*\w+)?$/.test(candidate.candidate_id) && display.startsWith(prefix)) {
+            display = `候选 ${candidateOffset + i + 1} 的${display.slice(prefix.length)}`;
+          }
+        });
+        warningText.textContent = display;
         warnings.appendChild(warningText);
       });
+      const details = document.createElement('details');
+      const summary = document.createElement('summary');
+      summary.textContent = '查看提示详情';
+      details.appendChild(summary);
+      payload.warnings.forEach(warning => {
+        const item = document.createElement('div');
+        item.textContent = warning;
+        details.appendChild(item);
+      });
+      warnings.appendChild(details);
       moleculeContainer.appendChild(warnings);
     }
 
@@ -3734,10 +4105,12 @@
       const endIdx = Math.min(startIdx + itemsPerPage, moleculeCount);
       const pageMolecules = moleculesArray.slice(startIdx, endIdx);
 
-      pageMolecules.forEach((candidate) => {
+      pageMolecules.forEach((candidate, index) => {
         const smiles = candidate.canonical_smiles;
         const molCard = document.createElement("div");
         molCard.setAttribute("data-candidate-id", candidate.candidate_id);
+        const referenceKey = payload.reference?.ordered_keys?.[startIdx + index];
+        if (referenceKey && referenceKey[1] === candidate.candidate_id) molCard.setAttribute('data-observation-id', referenceKey[0]);
         molCard.className = "molecule-card";
         molCard.style.cssText = `
         flex: 0 0 ${minCardWidth};
@@ -3779,15 +4152,8 @@
         const candidateId = document.createElement("div");
         candidateId.style.cssText =
           "font-weight: 700; color: #4f46e5; font-size: 13px; overflow-wrap: anywhere;";
-        candidateId.textContent = candidate.candidate_id;
-        const provenanceLabel = document.createElement("div");
-        provenanceLabel.style.cssText =
-          "background: #e0e7ff; color: #4338ca; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 20px;";
-        provenanceLabel.textContent =
-          [payload.source.tool, payload.source.model].filter(Boolean).join(" · ") ||
-          "来源未标注";
+        candidateId.textContent = `候选 ${candidateOffset + startIdx + index + 1}`;
         cardHeader.appendChild(candidateId);
-        cardHeader.appendChild(provenanceLabel);
         molCard.appendChild(cardHeader);
 
         // 分子图片区域 - 使用后端API生成图片（动态高度）
@@ -3841,18 +4207,22 @@
         const unavailable = document.createElement("div");
         unavailable.style.cssText =
           "text-align: center; color: #64748b; padding: 12px; font-size: 11px;";
-        unavailable.textContent =
-          "当前候选事件未携带经独立性质工具验证的属性";
+        unavailable.textContent = "该卡片未关联性质结果";
         propertiesContainer.appendChild(unavailable);
         try {
           const report = typeof evidenceReportViews !== "undefined" ? evidenceReportViews.get(messageElement) : null;
-          const collection = report?.collections.find(c => c.reference.presentation_id === payload.reference?.presentation_id);
+          const collection = report && window.HomeEvidenceReport.findCollection(report, payload.reference);
           if (collection) {
-            const row = window.HomeEvidenceReport.findPropertyRow(report, payload.reference, collection.generator_observation_id, candidate);
+            const row = window.HomeEvidenceReport.findPropertyRow(report, collection.reference, collection.generator_observation_id, candidate);
             const source = report.sources.find(s => s.observation_id === row?.source_observation_id);
-            window.HomeEvidenceReport.renderProperties(propertiesContainer, row, source);
+            if (!window.HomeEvidenceReport.renderProperties(propertiesContainer, row, source) && row) {
+              unavailable.textContent = window.HomeEvidenceReport.propertyUnavailableLabel(row);
+            }
           }
-        } catch (_) { /* Enrichment failure cannot suppress card mounting or ACK. */ }
+        } catch (_) {
+          unavailable.textContent = '性质暂无法显示，请重试。';
+          unavailable.setAttribute('role', 'alert');
+        }
         infoSection.appendChild(propertiesContainer);
 
         // SMILES 折叠区域
@@ -3924,9 +4294,26 @@
         if (payload.reference && scientificReferences) {
           const selectBtn = document.createElement("button");
           selectBtn.type = "button";
+          selectBtn.className = "molecule-selection-button";
+          selectBtn.style.cssText = `
+            flex: 1;
+            background: #fff;
+            color: #475569;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            padding: 8px 12px;
+            font-size: 12px;
+            cursor: pointer;
+            font-weight: 500;
+          `;
+          const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);
+          if (compoundKey) {
+            selectBtn.setAttribute("data-observation-id", compoundKey[0]);
+            selectBtn.setAttribute("data-candidate-id", compoundKey[1]);
+          }
+          selectBtn.setAttribute("aria-pressed", "false");
           selectBtn.textContent = "选择此分子";
           selectBtn.addEventListener("click", () => {
-            const compoundKey = payload.reference.ordered_keys.find(k => k[1] === candidate.candidate_id);
             scientificReferences.select(payload.reference.presentation_id, compoundKey);
           });
           actionsSection.appendChild(selectBtn);

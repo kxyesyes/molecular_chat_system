@@ -19,7 +19,9 @@ from tests.agent.pi_web_support import make_web_handler, PlannedWebModel, cleanu
 
 
 QUERY = "请全面分析 CCO 的成药性并预测活性"
-PROPERTY_QUERY = "只计算 CCO 的分子量和 logP"
+# Exercise the model-planned path. Explicit descriptor requests are intentionally
+# handled by the deterministic compiler and do not enter provider allocation.
+PROPERTY_QUERY = "只计算 CCO 的分子量和 logP，不要 ADMET"
 PI_STARTUP_TIMEOUT = 10
 
 

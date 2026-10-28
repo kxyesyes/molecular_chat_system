@@ -62,7 +62,7 @@ def _stamp(status):
             status.st_size, status.st_mtime_ns, status.st_ctime_ns)
 
 
-def _file_identity(value, *, required, budget):
+def _file_identity(value, *, required, budget, allow_current_interpreter=False):
     resolved = _path(value)
     if not resolved:
         if required:
@@ -75,7 +75,12 @@ def _file_identity(value, *, required, budget):
         if required:
             raise _unavailable() from None
         return {"present": False, "path": resolved}
-    if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1
+    current_interpreter = (
+        allow_current_interpreter
+        and resolved == _path(sys.executable)
+    )
+    if (not stat.S_ISREG(before.st_mode)
+            or (before.st_nlink != 1 and not current_interpreter)
             or before.st_size > min(MAX_TOOL_FILE_BYTES, budget[0])):
         raise _unavailable()
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -159,7 +164,12 @@ def _descriptor(config):
         ("reduce", config["paths"]["reduce_cmd"], False),
         ("openbabel", config["adapters"]["openbabel"], False),
     ):
-        tools[name] = _file_identity(value, required=required, budget=budget)
+        tools[name] = _file_identity(
+            value,
+            required=required,
+            budget=budget,
+            allow_current_interpreter=name == "python",
+        )
     return {"schema": "chat-docking-toolchain-v1",
             "adapter_contract_version": MOLECULAR_DOCKING_ADAPTER_VERSION,
             "config": config, "tools": tools}

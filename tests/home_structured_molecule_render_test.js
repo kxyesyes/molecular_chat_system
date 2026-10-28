@@ -730,8 +730,8 @@ assert(
 assert(
   rendererSource.includes("candidateId.textContent") &&
     rendererSource.includes("smilesText.textContent") &&
-    rendererSource.includes("provenanceLabel.textContent"),
-  "Candidate IDs, SMILES, and provenance must render through textContent",
+    !rendererSource.includes("provenanceLabel.textContent"),
+  "Candidate labels and SMILES use textContent; technical provenance is not shown on cards",
 );
 assert(
   !rendererSource.includes(".innerHTML"),
@@ -748,7 +748,7 @@ assert(
   "Candidate metadata properties must never be rendered as verified science",
 );
 assert(
-  rendererSource.includes("当前候选事件未携带经独立性质工具验证的属性"),
+  rendererSource.includes("该卡片未关联性质结果"),
   "Candidate cards must explicitly explain that independent property evidence is absent",
 );
 assert(
@@ -1009,7 +1009,7 @@ behaviorHooks.renderMoleculeCandidatesOriginal(
 );
 assert(
   metadataTrustContainer.textContent.includes(
-    "当前候选事件未携带经独立性质工具验证的属性",
+    "该卡片未关联性质结果",
   ),
   "Renderer must show the independent-property-evidence notice",
 );
@@ -1090,9 +1090,9 @@ behaviorSocket.readyState = FakeWebSocket.OPEN;
 behaviorHooks.lifecycle.startRequest();
 behaviorSocket.onmessage({ data: "{" });
 assert(
-  behaviorSocket.closeCalls.at(-1)?.code === 1002 &&
+  behaviorSocket.closeCalls.at(-1)?.code === 4002 &&
     behaviorHooks.lifecycle.isRequestInFlight(),
-  "Malformed frames must close with 1002 without reopening request sending",
+  "Malformed frames must use browser-allowed 4002 without reopening request sending",
 );
 behaviorSocket.onerror({ type: "error" });
 assert(
@@ -1105,7 +1105,7 @@ assert(
   behaviorSocket.sent.length === malformedSentCount,
   "A second send must remain blocked during malformed-frame desync",
 );
-behaviorSocket.onclose({ code: 1002, reason: "invalid", wasClean: true });
+behaviorSocket.onclose({ code: 4002, reason: "invalid", wasClean: true });
 assert(
   !behaviorHooks.lifecycle.isRequestInFlight(),
   "Closing the desynchronized socket must release its request state",
@@ -1117,9 +1117,9 @@ behaviorSocket.readyState = FakeWebSocket.OPEN;
 behaviorHooks.lifecycle.startRequest();
 behaviorSocket.onmessage({ data: "x".repeat(256 * 1024 + 1) });
 assert(
-  behaviorSocket.closeCalls.at(-1)?.code === 1009 &&
+  behaviorSocket.closeCalls.at(-1)?.code === 4009 &&
     behaviorHooks.lifecycle.isRequestInFlight(),
-  "Oversized frames must close with 1009 and retain the active-request block",
+  "Oversized frames must use browser-allowed 4009 and retain the active-request block",
 );
 const oversizedSentCount = behaviorSocket.sent.length;
 behaviorHooks.sendMessage();
@@ -1127,7 +1127,7 @@ assert(
   behaviorSocket.sent.length === oversizedSentCount,
   "A second send must remain blocked during oversized-frame desync",
 );
-behaviorSocket.onclose({ code: 1009, reason: "large", wasClean: true });
+behaviorSocket.onclose({ code: 4009, reason: "large", wasClean: true });
 
 FakeWebSocket.instances.length = 0;
 behaviorHooks.connectWebSocket();

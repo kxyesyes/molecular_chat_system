@@ -230,6 +230,8 @@ last_run.log
 *.faiss
 
 # Project data artifacts that should be provisioned separately
+# Owner-scoped scientific result display snapshots (runtime data, not source).
+result_details/
 data/activity/models/
 !data/activity/
 !data/activity/models/

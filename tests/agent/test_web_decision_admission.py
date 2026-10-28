@@ -110,6 +110,25 @@ def test_targeted_initial_capabilities(query, tool):
         'property_calculator', 'drug_likeness_assessment', 'activity_predictor', 'target_database_search'}
 
 
+def test_target_lookup_can_describe_future_docking_use_without_running_docking():
+    request = prepare(
+        '请搜索 EGFR 的可用 PDB 结构，返回结构编号和是否适合后续分子对接。'
+    )
+
+    assert request.request_kind == 'scientific'
+    assert request.required_tools == {'target_database_search'}
+    assert request.allowed_tools == {'target_database_search'}
+
+
+@pytest.mark.parametrize('query', [
+    '请搜索 EGFR 的可用 PDB 结构，然后开始分子对接。',
+    '请搜索 EGFR 的结构并运行 docking。',
+])
+def test_target_lookup_does_not_hide_explicit_docking_execution(query):
+    with pytest.raises(api().DecisionAdmissionError):
+        prepare(query)
+
+
 @pytest.mark.parametrize('query', [
     '生成5个分子并排序前三个', '计算 CCO 的 ADMET 和性质', '反向寻靶 CCO',
     '对接这个分子', '检索 RAG 知识库', '运行 run_docking',

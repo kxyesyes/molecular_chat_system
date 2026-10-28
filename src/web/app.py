@@ -29,7 +29,7 @@ from .user_llm_config import (
     load_user_llm_config, load_user_llm_runtime_state, save_user_llm_config,
     user_llm_config_path, user_llm_signature,
     resolve_user_llm_request,
-    default_user_llm_config,
+    default_user_llm_config, is_generator_model_name,
 )
 from .models import generate_for_chat
 from .model_lifecycle import ModelRequestGate, close_owned_model, finish_on_cancel
@@ -57,6 +57,83 @@ logger = logging.getLogger(__name__)
 _ENV_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}")
 DEFAULT_WEB_HOST = "127.0.0.1"
 DEFAULT_WEB_PORT = 6000
+_GENERATOR_AGENT_MODEL_MESSAGE = "gmm-llama 仅用于分子生成，不能作为 Agent 模型。"
+
+
+_AGENT_CONNECTION_PROBE_MESSAGES = [{
+    "role": "user",
+    "content": (
+        "This is a connection check only. Return one finish decision with "
+        "response_kind=chat, text=CONNECTION_OK, and an empty evidence_ids list. "
+        "Do not call a scientific tool."
+    ),
+}]
+
+
+async def _probe_model_for_agent(model, *, wire_mode=None) -> tuple[bool, str]:
+    """Check the same decision contract used by the Web Agent when available."""
+    decide = getattr(model, "decide", None)
+    if callable(decide):
+        selected_wire_mode = (
+            wire_mode
+            or getattr(model, "decision_wire_mode", None)
+            or getattr(model, "wire_mode", None)
+        )
+        if selected_wire_mode not in {"native", "json"}:
+            return False, "Agent 决策协议模式不可用；请检查模型配置。"
+        try:
+            response = await finish_on_cancel(decide(
+                list(_AGENT_CONNECTION_PROBE_MESSAGES),
+                mode=selected_wire_mode,
+                max_tokens=256,
+                timeout_seconds=30.0,
+                temperature=0.0,
+            ))
+        except Exception:
+            return False, "决策接口不可用；请检查模型服务地址、模型名称和凭据。"
+        if getattr(response, "success", False):
+            return True, ""
+        error = getattr(response, "error", None)
+        raw_code = getattr(error, "code", None)
+        code = getattr(raw_code, "value", raw_code)
+        details = getattr(error, "details", None)
+        reason = details.get("reason") if isinstance(details, dict) else None
+        if code == "model_unavailable" and reason == "decision_endpoint_rejected":
+            return False, (
+                "Agent 模型服务地址被本机网络策略拒绝；请检查 DNS/代理设置，"
+                "或改用可解析到公网地址的 HTTPS endpoint。"
+            )
+        if code == "provider_error" and reason == "decision_http_error":
+            status = details.get("http_status") if isinstance(details, dict) else None
+            if type(status) is int:
+                return False, f"Agent 模型服务返回 HTTP {status}；请检查 endpoint、模型名称和凭据。"
+        if code == "provider_error" and reason == "decision_timeout":
+            return False, "Agent 模型服务响应超时；请检查网络、endpoint 和模型服务状态。"
+        if code == "invalid_output":
+            return False, "连接可用，但模型未返回 MedChat 所需的 Agent 决策协议；请更换支持工具调用的模型。"
+        if code == "provider_error":
+            return False, "决策接口不可用；请检查模型服务地址、模型名称和凭据。"
+        return False, "模型未通过 Agent 决策协议检查；请检查模型名称和服务配置。"
+
+    model_type = type(model)
+    model_module = str(getattr(model_type, "__module__", ""))
+    legacy_probe_allowed = (
+        getattr(model, "__medchat_legacy_agent_probe__", False) is True
+        or getattr(model_type, "__medchat_legacy_agent_probe__", False) is True
+        or model_module.startswith("tests.")
+    )
+    if not legacy_probe_allowed:
+        return False, "Agent 决策接口不可用；请使用支持 Agent 决策协议的模型。"
+
+    # Keep explicitly marked legacy adapters and test doubles usable without
+    # allowing a production model to claim Agent readiness from plain text.
+    response = await finish_on_cancel(generate_for_chat(
+        model, "Reply with exactly: CONNECTION_OK", temperature=0.1, max_tokens=64,
+    ))
+    failure_markers = ("失败", "未配置", "HTTP ", "API Key", "Base URL", "模型名称")
+    if response and not any(marker in response for marker in failure_markers):
+        return True, ""
+    return False, "连接测试失败；请检查服务地址、模型名称和凭据。"
 
 
 def load_env_file(env_path: str | Path = ".env") -> None:
@@ -534,8 +611,18 @@ class MolecularChatApp:
 
     def _load_active_llm_config(self) -> Dict[str, Any]:
         config, generation = load_user_llm_runtime_state(self.runtime_llm_env_path)
+        self._validate_effective_agent_config(config)
         self._loaded_llm_generation = generation
         return config
+
+    @staticmethod
+    def _validate_effective_agent_config(config: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = normalize_llm_config(config)
+        model_name = normalized.get("model_name", "")
+        if not model_name or is_generator_model_name(model_name):
+            raise ValueError(_GENERATOR_AGENT_MODEL_MESSAGE if is_generator_model_name(model_name)
+                             else "Agent 模型名称不能为空。")
+        return normalized
 
     def _llm_env_file_signature(self) -> str | None:
         return user_llm_signature(self.runtime_llm_env_path)
@@ -609,12 +696,17 @@ class MolecularChatApp:
 
     def _create_model_from_llm_config(self, llm_config: Dict[str, Any]):
         config = normalize_llm_config(llm_config)
+        model_name = config.get("model_name", "")
+        if is_generator_model_name(model_name):
+            raise ValueError(_GENERATOR_AGENT_MODEL_MESSAGE)
         if config.get("provider") == "ollama":
+            if not model_name:
+                raise ValueError("Agent 模型名称不能为空。")
             from src.agent import decision_transport
 
             return OllamaModel(
                 base_url=config.get("base_url") or "http://localhost:11434",
-                model_name=config.get("model_name") or "gmm-llama:latest",
+                model_name=model_name,
                 decision_transport=decision_transport,
             )
 
@@ -844,6 +936,20 @@ class MolecularChatApp:
                 raise HTTPException(status_code=401, detail="Browser session required")
             return session_id
 
+        def agent_llm_metadata(config):
+            model = getattr(self, "model", None)
+            generator = getattr(self, "molecular_generator_model", None)
+            return {
+                "provider": config.get("provider", ""),
+                "base_url": config.get("base_url", ""),
+                "model_name": getattr(model, "model_name", None) or config.get("model_name", ""),
+                "stream": config.get("stream", True),
+                "wire_mode": getattr(self, "decision_wire_mode", "native"),
+                "role": "agent",
+                "generator_model_name": getattr(generator, "model_name", ""),
+                "readiness": "unknown",
+            }
+
         @self.app.get("/api/llm/config")
         async def get_llm_config(request: Request):
             """Return public LLM connection configuration without leaking API keys."""
@@ -852,6 +958,7 @@ class MolecularChatApp:
             return {
                 "success": True,
                 "config": public_llm_config(self.active_llm_config),
+                "agent": agent_llm_metadata(self.active_llm_config),
             }
 
         @self.app.post("/api/llm/config")
@@ -861,11 +968,14 @@ class MolecularChatApp:
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise HTTPException(status_code=422, detail="模型配置必须为对象。")
+            if is_generator_model_name(payload.get("model_name") or payload.get("model")):
+                raise HTTPException(status_code=422, detail=_GENERATOR_AGENT_MODEL_MESSAGE)
             saved = await self._persist_user_llm_config(payload)
             return {
                 "success": True,
                 "message": "模型配置已保存并生效。",
                 "config": public_llm_config(saved),
+                "agent": agent_llm_metadata(saved),
                 "warnings": [],
             }
 
@@ -876,6 +986,8 @@ class MolecularChatApp:
             payload = await request.json()
             if not isinstance(payload, dict):
                 raise HTTPException(status_code=422, detail="模型配置必须为对象。")
+            if is_generator_model_name(payload.get("model_name") or payload.get("model")):
+                return {"success": False, "message": _GENERATOR_AGENT_MODEL_MESSAGE}
             await self._refresh_llm_config_from_env()
             test_model = None
             try:
@@ -884,15 +996,18 @@ class MolecularChatApp:
                     clear_api_key=payload.get("clear_api_key") is True,
                 )
                 test_model = self._create_model_from_llm_config(test_config)
-                response = await finish_on_cancel(generate_for_chat(
-                    test_model, "Reply with exactly: CONNECTION_OK",
-                    temperature=0.1, max_tokens=64,
-                ))
-                failure_markers = ("失败", "未配置", "HTTP ", "API Key", "Base URL", "模型名称")
-                is_success = bool(response and not any(marker in response for marker in failure_markers))
+                probe_wire_mode = (
+                    getattr(test_model, "decision_wire_mode", None)
+                    or getattr(test_model, "wire_mode", None)
+                    or test_config.get("decision_wire_mode")
+                    or getattr(self, "decision_wire_mode", None)
+                )
+                is_success, message = await _probe_model_for_agent(
+                    test_model, wire_mode=probe_wire_mode
+                )
                 return {
                     "success": is_success,
-                    "message": "连接测试成功" if is_success else "连接测试失败；请检查服务地址、模型名称和凭据。",
+                    "message": message if not is_success else "连接测试成功",
                     "model": test_model.model_name,
                 }
             except Exception as exc:
@@ -911,8 +1026,14 @@ class MolecularChatApp:
             model_key = str(payload.get("model") or "").strip()
             model_map = {
                 "deepseek": "deepseek-v4-pro",
-                "gmm-llama": "gmm-llama:latest",
             }
+            if is_generator_model_name(model_key):
+                return {
+                    "success": False,
+                    "message": _GENERATOR_AGENT_MODEL_MESSAGE,
+                    "config": public_llm_config(self.active_llm_config),
+                    "warnings": [],
+                }
             next_config = dict(self.active_llm_config)
             if model_key == "deepseek":
                 current_key = next_config.get("api_key", "")

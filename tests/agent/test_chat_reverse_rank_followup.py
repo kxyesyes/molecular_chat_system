@@ -1,5 +1,7 @@
 """Offline chat integration over real receipts from a tiny synthetic corpus."""
+from copy import deepcopy
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -49,6 +51,38 @@ def test_chat_without_five_request_preserves_ten_row_display(ranked):
     result, _ = turn(make_handler(ranked), '对 CCO 做反向寻靶，列出候选靶点。', history)
     assert history[-1].get('reverse_target_evidence')
     assert 'Synthetic J' in result['content'] and '前 10' in result['content']
+
+
+def test_reverse_rank_projection_does_not_depend_on_model_citing_evidence_id(ranked):
+    """The server-owned receipt remains usable when model prose omits its ID."""
+    from src.agent.contracts import RunOutcome
+    from src.web.reverse_target_followup import RankedReverseEvidence
+    from src.web.web_business import WebTurnProjection
+
+    payload = deepcopy(ranked.agent)
+    payload['final_answer'] = json.dumps({'observations': []})
+
+    class Result:
+        metadata = {'binding_profile': 'medchat-web-v1'}
+        outcome = RunOutcome.COMPLETED
+        success = True
+        trace_id = payload['trace_id']
+        final_answer = payload['final_answer']
+        tool_results = [object()]
+
+        @staticmethod
+        def to_legacy_dict():
+            return deepcopy(payload)
+
+    projection = WebTurnProjection(
+        FIRST, 'owner-session', [],
+        reverse_boundary=RankedReverseEvidence(ranked.store, ranked.tool),
+    )
+    context = SimpleNamespace(query=FIRST, resolved_molecule=None)
+    view = projection.capture(Result(), context=context, reverse_count=5)
+
+    assert view and projection.entry.get('reverse_target_evidence')
+    assert '前 5 行' in view['final_answer']
 
 
 @pytest.mark.parametrize('count_phrase', ['前 50 个', '不是前五个，而是前十个', 'top 50', '前五十个'])

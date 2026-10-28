@@ -137,6 +137,18 @@ def test_five_row_display_does_not_crop_or_renumber_proof(ranked):
     assert boundary.resolve(context, session_id='owner-session', rank=10)['record'] == ranked.data[9]
 
 
+@pytest.mark.parametrize('ranked', [{'count': 0}], indirect=True)
+def test_empty_reverse_result_is_valid_and_renders_no_match(ranked):
+    boundary = service(ranked)
+    context = boundary.capture(ranked.agent, session_id='owner-session')
+
+    assert context is not None
+    display = boundary.render_prefix(context, session_id='owner-session', count=5)
+    assert display is not None
+    assert '未找到满足阈值的靶点匹配' in display
+    assert boundary.resolve(context, session_id='owner-session', rank=1) is None
+
+
 @pytest.mark.parametrize('mutation', ['owner', 'run_status', 'checkpoint_status', 'workflow',
     'input_hash', 'tool_version', 'error', 'score', 'evidence_id', 'validated', 'provenance_demo',
     'provenance_tool', 'provenance_input', 'provenance_output', 'raw_count', 'artifact'])

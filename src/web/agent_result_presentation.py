@@ -28,6 +28,34 @@ _AGENT_FAILURE_FALLBACK = "科学计算未成功完成，请检查输入或工�
 _AGENT_FAILURE_CONTENT_MAX_CHARS = 1024
 _AGENT_FAILURE_WARNING_MAX_CHARS = 256
 _AGENT_FAILURE_WARNING_LIMIT = 20
+_DECISION_FAILURE_MESSAGES = {
+    "rag_disabled": (
+        "本次请求需要知识库检索，请先开启页面上的“RAG检索”开关后重试。当前请求未执行检索。"
+    ),
+    "decision_runtime_failed": (
+        "智能体决策未完成；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。"
+    ),
+    "model_decision_unavailable": (
+        "模型未能完成 Agent 决策；请先在模型设置中运行连接测试，并确认模型支持工具调用或结构化输出。"
+    ),
+    "invalid_decision_schema": (
+        "模型返回的决策格式不符合 MedChat 协议；请更换支持工具调用或结构化输出的模型。"
+    ),
+    "pi_terminal_missing": (
+        "模型未返回可验证的终止决策；请在模型设置中确认 Agent 协议兼容性。"
+    ),
+    "decision_request_failed": (
+        "智能体决策接口不可用；请检查模型服务是否运行，以及模型地址和名称是否正确。"
+    ),
+    "model_budget_exhausted": (
+        "模型未在请求预算内完成智能体决策；请缩短请求或调整模型上下文设置。"
+    ),
+    "task_deadline_exceeded": (
+        "模型决策超时；请检查本地模型服务是否运行，或稍后重试。"
+    ),
+}
+
+
 def failure_envelope() -> Dict[str, Any]:
     return {
         "success": False,
@@ -382,6 +410,20 @@ def failure_content(
         # ordinary-chat vocabulary intentionally does not classify.
         return failure_claim_risk(value)
 
+    def decision_failure_message(value: Any) -> str:
+        if isinstance(value, Mapping):
+            details = value.get("details")
+            if isinstance(details, Mapping):
+                reason = details.get("reason")
+                if isinstance(reason, str):
+                    return _DECISION_FAILURE_MESSAGES.get(reason, "")
+        metadata = agent_result.get("metadata")
+        if isinstance(metadata, Mapping):
+            reason = metadata.get("stop_reason")
+            if isinstance(reason, str):
+                return _DECISION_FAILURE_MESSAGES.get(reason, "")
+        return ""
+
     raw_final_answer = agent_result.get("final_answer")
     final_answer, sensitive = safe_content(raw_final_answer)
     if sensitive:
@@ -390,6 +432,9 @@ def failure_content(
         agent_result.get("status") in {"failed", "rejected", "cancelled"}
         or agent_result.get("success") is False
     )
+    protocol_message = decision_failure_message(agent_result.get("error"))
+    if protocol_message:
+        return finish(protocol_message)
     if terminal and claim_risk(raw_final_answer):
         # A terminal scientific failure is not an authorization to publish a
         # model-generated claim.  Discard only the untrusted prose and keep
@@ -402,6 +447,9 @@ def failure_content(
 
     error = agent_result.get("error")
     if isinstance(error, Mapping):
+        protocol_message = decision_failure_message(error)
+        if protocol_message:
+            return finish(protocol_message)
         raw_error_message = error.get("message")
         error_message, sensitive = safe_content(raw_error_message)
         if sensitive:

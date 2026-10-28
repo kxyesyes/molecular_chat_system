@@ -14,6 +14,10 @@
 
 本页保留逐步操作；部署模板、资产要求、生产门禁和 Temporal worker 权限见 [部署环境说明](../deployment/README.md)。两者的服务账号和目录示例不同，不要混用。
 
+说明：本机 Windows 开发与验证使用项目 Conda 环境 `MedChat`（先运行
+`conda activate MedChat`）。本页面向 Ubuntu 生产部署，文中的 Linux 示例环境名
+`medchat`、路径和服务账号是部署占位约定，不应替换或覆盖本机的 `MedChat` 环境配置。
+
 ## 0. 部署边界和约定
 
 - 本服务器项目目录固定为：/home/user/XIAOKX/molecular_chat_system。

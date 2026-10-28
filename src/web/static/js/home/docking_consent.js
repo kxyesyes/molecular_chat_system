@@ -113,8 +113,8 @@
       return enabled && state.socket === socket && !state.readOnly && !state.stopped && state.event.revision === revision && !state.event.terminal;
     }
     function forget(state) { state.proof = null; clear(state, "expiryTimer"); }
-    function stop(state, message) {
-      state.stopped = true; state.notice = message; forget(state); clear(state, "pollTimer"); clear(state, "workTimer");
+    function stop(state, message, heading = null) {
+      state.stopped = true; state.notice = message; state.stopHeading = heading; forget(state); clear(state, "pollTimer"); clear(state, "workTimer");
       state.source?.dispose(); state.source = null; render(state); notify();
     }
     function watch(state, readOnly = false) {
@@ -157,7 +157,7 @@
       box.replaceChildren(); box.className = "docking-consent-card"; box.setAttribute("data-task-id", event.task_id);
       const header = node("div", undefined, box); header.className = "docking-card-heading";
       node("span", "MOLECULAR DOCKING", header).className = "docking-eyebrow";
-      const heading = node("h3", state.stopped ? "结果未确认 / 本次确认已失效" : statuses[event.view_status][1], header);
+      const heading = node("h3", state.stopped ? (state.stopHeading || "结果未确认 / 本次确认已失效") : statuses[event.view_status][1], header);
       heading.setAttribute("role", "status");
       node("p", `任务 ${event.task_id} · 修订 ${event.revision}`, box).className = "docking-identity";
       if (state.notice) node("p", state.notice, box).className = "docking-notice";
@@ -314,6 +314,23 @@
           const attached = state?.socket === socket && !state.readOnly && state.event.origin_turn_id === message.turn_id;
           const awaiting = pending?.socket === socket && pending.accepted &&
             message.turn_id === pending.accepted.turn && message.trace_id === pending.accepted.root;
+          const preflightUnavailable = message.docking_preflight_unavailable === true;
+          const sourceUnavailable = message.docking_source_unavailable === true;
+          if ((sourceUnavailable || preflightUnavailable) && (attached || awaiting)) {
+            const notice = message.message || "结构来源或实验身份未通过对接认证；本次未启动对接。请重新选择并确认结构。";
+            const heading = preflightUnavailable ? "结构预处理未完成 / 对接未启动" : "结构未认证 / 对接未启动";
+            if (attached) {
+              state.blocked = false; state.ownsComposer = false; state.drainedFailure = true;
+              stop(state, notice, heading);
+              options.onSegment?.({origin_turn_id: message.turn_id, request_id: message.trace_id});
+            } else {
+              pending.failureBox ||= node("p", undefined, pending.host);
+              pending.failureBox.textContent = notice;
+              pending = null;
+            }
+            notify();
+            return true;
+          }
           const failure = message.code === "docking_unavailable" && typeof message.docking_segment_complete === "boolean" && (attached || awaiting);
           if (rejected) {
             node("p", "对接请求未完成；未获得新的执行授权。请检查状态后重新发起。", pending.host);

@@ -122,19 +122,63 @@ class ChatHandler:
 
     @staticmethod
     def _reverse_display_count(message):
-        counts = list(re.finditer(r'前\s*([0-9一二三四五六七八九十百]+)|\btop\s*(five|[0-9]+)\b', message, re.I))
-        if len(counts) != 1 or ''.join(value or '' for value in counts[0].groups()).casefold() not in {'5', '五', 'five'}:
+        counts = list(re.finditer(
+            r'前\s*([0-9一二三四五六七八九十百]+)'
+            r'(?=\s*(?:个\s*)?(?:(?:最相似的?)?(?:候选)?靶点|目标|排名|结果|行|名|$|[，,。！？;；]))|'
+            r'\btop\s*(one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)\b'
+            r'(?=\s*(?:targets?|candidates?|results?|ranks?|$|[,;.!?]))', message, re.I))
+        def forbidden(match):
+            prefix = re.split(r'[，,;；。.!?！？\n]|\b(?:and|but|then)\b|并且|然后|但是?',
+                              message[:match.start()], flags=re.I)[-1]
+            negated = re.search(r"不要|不用|不是|不只|不仅|别|勿|无需|\binstead\s+of\b|\b(?:not|never|don['’]t)\b", prefix, re.I)
+            postfix_negated = re.match(
+                r'\s*(?:个)?\s*(?:最相似的?)?(?:候选)?(?:靶点)?\s*(?:不要|不用|无需|别|勿)\s*(?:列出|展示|显示)|'
+                r'\s*(?:targets?\s*)?(?:(?:are|is|should|must)\s*)?not\s+(?:be\s+)?(?:requested|wanted|shown|displayed)\b',
+                message[match.end():], re.I)
+            return bool(negated or postfix_negated)
+        counts = [match for match in counts if not forbidden(match)]
+        target_counts = [match for match in counts if re.match(
+            r'\s*(?:个\s*)?(?:(?:最相似的?)?(?:候选)?靶点|目标|targets?)',
+            message[match.end():], re.I)]
+        if target_counts:
+            counts = target_counts
+        if len(counts) != 1:
             return 10
-        # Only a negation governing the count phrase can veto its display cap.
-        # "not docking" in another clause is not a negated ranking request.
-        prefix = re.split(r'[，,;；。.!?！？\n]|\b(?:and|but|then)\b|并且|然后|但是?',
-                          message[:counts[0].start()], flags=re.I)[-1]
-        negated = re.search(r"不要|不用|不是|而是|不只|不仅|别|勿|无需|\b(?:not|never|instead|don['’]t)\b", prefix, re.I)
-        postfix_negated = re.match(
-            r'\s*(?:个)?\s*(?:候选)?(?:靶点)?\s*(?:不要|不用|无需|别|勿)\s*(?:列出|展示|显示)|'
-            r'\s*(?:targets?\s*)?(?:(?:are|is|should|must)\s*)?not\s+(?:be\s+)?(?:requested|wanted|shown|displayed)\b',
-            message[counts[0].end():], re.I)
-        return 10 if negated or postfix_negated else 5
+        word = ''.join(value or '' for value in counts[0].groups()).casefold()
+        names = ('一', '二', '三', '四', '五', '六', '七', '八', '九', '十')
+        english = ('one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten')
+        number = int(word) if word.isascii() and word.isdigit() else (
+            names.index(word) + 1 if word in names else english.index(word) + 1 if word in english else 0)
+        if not 1 <= number <= 10:
+            return 10
+        return number
+
+    @staticmethod
+    def _reverse_display_restricted(message):
+        """Distinguish an explicit no-display command from no count limit."""
+        amount = r'(?:前\s*[0-9一二三四五六七八九十百]+|\btop\s*(?:one|two|three|four|five|six|seven|eight|nine|ten|[0-9]+)\b)'
+        subject = r'\s*(?:个\s*)?(?:最相似的?)?(?:候选)?(?:靶点|目标|结果|行|名|targets?|results?)?'
+        negative = r'(?:不要|不用|无需|别|勿|不(?=列出|显示|展示)|\bdo\s+not\b|\bdon[’\x27]t\b|\bnever\b)'
+        action = r'(?:列出|显示|展示|show|list|display)'
+        boundary = r'(?=\s*(?:$|[，,。.!?！？;；]|以及|并|但|\band\b|\bbut\b))'
+        return bool(re.search(rf'{negative}\s*{action}\s*(?:the\s+)?{amount}{subject}{boundary}|'
+            rf'{amount}{subject}\s*{negative}\s*{action}|'
+            rf'{amount}{subject}\s*(?:should|must|are|is)\s+not\s+(?:be\s+)?(?:shown|displayed|requested|wanted)',
+            message, re.I))
+
+    async def _send_summary_allocation_terminal(self, websocket, result, code, message):
+        if result is None or getattr(websocket, 'result_format', None) != 'summary_details_v1':
+            return False
+        from .decision_chat import _prepare_result_frames
+        frames = await _prepare_result_frames(self, result, False, websocket=websocket, store=None)
+        terminal = json.loads(frames[1])
+        # These transport control reasons drive allocation cleanup/handoff; do
+        # not replace them with the scientific error enum in the typed result.
+        terminal['error'] = {'code': code, 'message': message}
+        await websocket.send_text(frames[0])
+        await websocket.send_text(json.dumps(terminal, ensure_ascii=False, allow_nan=False,
+                                              separators=(',', ':')))
+        return True
 
     async def _with_allocation(self, websocket, operation, *, cancel_event=None,
                                timeout_result=None, handoff_timeout=False,
@@ -155,6 +199,9 @@ class ChatHandler:
             if timeout_result is not None:
                 result = AgentResult(timeout_result.trace_id, False, message, final_answer=message,
                     outcome=RunOutcome.REJECTED, metadata={"stop_reason": "allocation_busy"})
+                if await self._send_summary_allocation_terminal(websocket, result,
+                        'allocation_busy', '任务分配资源已达到有界容量。'):
+                    return result
                 await websocket.send_text(json.dumps({**result.to_legacy_dict(),
                     "type": "agent_result", "trace_id": result.trace_id,
                     "final_answer": message}, ensure_ascii=False))
@@ -193,6 +240,9 @@ class ChatHandler:
                     if scope.reason != "timeout":
                         raise asyncio.CancelledError()
                     if timeout_result is not None:
+                        if await self._send_summary_allocation_terminal(websocket, timeout_result,
+                                'allocation_timeout', '工具执行前的任务分配超过时限。'):
+                            return timeout_result
                         await websocket.send_text(json.dumps({
                             **timeout_result.to_legacy_dict(), "type": "agent_result",
                             "trace_id": timeout_result.trace_id,
@@ -644,10 +694,15 @@ class ChatHandler:
         }
 
     async def _send_reference_candidate_events(self, websocket, agent_result, *, strict_transport=False):
+        logger.info("Scientific reference candidate projection enabled=%s session_bound=%s",
+                    self.scientific_references is not None,
+                    bool(getattr(websocket, "scope", {}).get("agent_session_id")))
         if self.scientific_references is None:
             return await self._send_molecule_candidate_events(websocket, agent_result)
         events = await asyncio.to_thread(self.scientific_references.project, agent_result,
             session_id=getattr(websocket, "scope", {}).get("agent_session_id"))
+        logger.info("Scientific reference candidate projection events=%s references=%s",
+                    len(events), sum(1 for event in events if "reference" in event))
         for event in events:
             await websocket.send_text(json.dumps(event, ensure_ascii=False))
         # Additive live-only presentation; never republish candidates or change ACK.

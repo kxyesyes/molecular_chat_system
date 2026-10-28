@@ -20,6 +20,13 @@ class Element {
     };
   }
   appendChild(child) {child.remove(); this.children.push(child); child.parentNode = this; return child;}
+  insertBefore(child, reference) {
+    if (reference === null) return this.appendChild(child);
+    assert(this.children.includes(reference), "insertBefore reference must be a direct child");
+    if (child === reference) return child;
+    child.remove(); this.children.splice(this.children.indexOf(reference), 0, child);
+    child.parentNode = this; return child;
+  }
   removeChild(child) {this.children = this.children.filter(c => c !== child); child.parentNode = null;}
   remove() {this.parentNode?.removeChild(this);}
   replaceChildren(...children) {this.children.slice().forEach(c => c.remove()); children.forEach(c => this.appendChild(c));}
@@ -65,9 +72,13 @@ class Element {
 
 function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   const body = new Element("body"); body.root = true;
-  const input = body.appendChild(new Element("input")), send = body.appendChild(new Element("button"));
+  const composer = body.appendChild(new Element("div")); composer.className = "chat-composer";
+  const fill = composer.appendChild(new Element("div")); fill.className = "fill";
+  const input = fill.appendChild(new Element("input")), send = fill.appendChild(new Element("button"));
+  const toolbar = composer.appendChild(new Element("div")); toolbar.className = "tool";
   const chat = body.appendChild(new Element("div"));
-  const timers = new Map(), sockets = [], logs = [], requests = [];
+  const timers = new Map(), sockets = [], logs = [], requests = [], detailsMounts = [], formatCalls = [];
+  let detailsAborts = 0;
   let timer = 0, stored = storedPointer;
   const storage = new Map(storedWaiting ? [["medchat.decision.waiting.v1", storedWaiting]] : []);
   class Socket {
@@ -88,10 +99,17 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
       setItem: (key, value) => {if (key === "medchat.decision.waiting.v1") storage.set(key, value); else stored = value;},
       removeItem: key => {if (key === "medchat.decision.waiting.v1") storage.delete(key); else stored = null;},
     },
-    HomeChatRenderer: renderer, WebSocket: Socket};
+    HomeChatRenderer: renderer, WebSocket: Socket,
+    HomeResultDetails: {
+      mount(container, options) {detailsMounts.push({container, options});
+        const node = new Element("details"); node.className = "result-details"; node.open = false;
+        node.textContent = "查看明细"; container.appendChild(node); return node;},
+      dispose(container) {container.querySelector(".result-details")?.remove();},
+      abortAll() {detailsAborts++;},
+    }};
   const context = vm.createContext({window, document, WebSocket: Socket, TextEncoder, AbortController, console: Object.fromEntries(
     ["log", "warn", "error"].map(k => [k, (...args) => logs.push([k, ...args])])),
-    HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: s => String(s)},
+    HomeChatRenderer: renderer, HomeState: {}, HomeFormatters: {formatContent: (s, options) => {formatCalls.push(options); return String(s);}},
     HomeAdvancedOptions: {getConfig: () => ({ragCount: 3, temperature: 0.7, molCount: 1})},
     setTimeout: (fn, ms) => {timers.set(++timer, {fn, ms}); return timer;}, clearTimeout: id => timers.delete(id),
     fetch: async (url, options) => {requests.push([url, JSON.parse(options.body)]);
@@ -105,16 +123,19 @@ function loadHome({request, storedPointer = null, storedWaiting = null} = {}) {
   let source = fs.readFileSync(path.join(home, "main.js"), "utf8");
   // Expose lexical entry points only in this VM; run the complete real script.
   source = source.replace(/\}\)\(\);\s*$/, `window.testHome = {connectWebSocket, sendMessage, elements, scientificReferences,
+    addUserMessage, addAssistantMessage, appendToLastMessage, displayRAGInfo,
     prepare() {chatMode = true; elements.input = window.testInput; elements.sendBtn = window.testSend;
       elements.chatContainer = window.testChat;}};})();`);
   Object.assign(window, {testInput: input, testSend: send, testChat: chat});
   vm.runInContext(source, context, {filename: "main.js"});
   window.testHome.prepare(); window.testHome.connectWebSocket(); sockets[0].open();
-  return {body, chat, input, logs, requests, timers, sockets, storage, socket: sockets[0], refs: window.testHome.scientificReferences,
+  return {body, chat, input, composer, fill, render: window.testHome, logs, requests, timers, sockets, storage, formatCalls, socket: sockets[0], refs: window.testHome.scientificReferences,
+    detailsMounts, detailsAborts: () => detailsAborts,
     send: () => window.testHome.sendMessage(), reconnect: () => window.testHome.connectWebSocket(),
     button: name => body.querySelectorAll("button").find(b => b.textContent === name),
-    ready: (mode, docking = false) => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
+    ready: (mode, docking = false, details = false) => sockets.at(-1).emit({type: "connection_ready", normal_chat_mode: mode,
       capabilities: {cancel: true, rag_retrieval: false, scientific_tools: ["property_calculator"],
+        ...(details ? {result_formats: ["summary_details_v1"]} : {}),
         ...(docking ? {chat_docking: {preparation_available: true, execution_authorized: false}} : {})}}),
     flushTimers: () => {const pending = [...timers.values()]; timers.clear(); pending.forEach(t => t.fn());},
   };
@@ -149,6 +170,202 @@ async function test(name, fn) {
   catch (error) {failed++; console.error("FAIL " + name, error.stack);}
 }
 async function run() {
+  const lifecycle = (h, event, t = turn, tr = trace, message = event) => h.sockets.at(-1).emit({
+    type: "agent_event", turn_id: t, event: {trace_id: tr, event, message},
+  });
+  for (const status of ["completed", "cancelled"]) await test(`${status} task history belongs to its request after the next request`, () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    lifecycle(h, "task_started"); lifecycle(h, status === "completed" ? "task_completed" : "task_cancelled");
+    h.socket.emit(result(status)); h.socket.emit(complete(status));
+    const first = h.chat.querySelector(".agent-task-panel"), before = first.textContent;
+    const t2 = "4".repeat(32), tr2 = "5".repeat(32);
+    start(h, t2, tr2); lifecycle(h, "task_started", t2, tr2, "second request");
+    const panels = h.chat.querySelectorAll(".agent-task-panel");
+    assert.equal(panels.length, 2, "each accepted request must own a separate panel");
+    assert.equal(first.textContent, before, "new events must not rewrite historical steps");
+    assert.equal(panels[1].getAttribute("data-turn-id"), t2);
+    const users = h.chat.querySelectorAll(".user-wrapper");
+    assert.strictEqual(h.chat.children[h.chat.children.indexOf(users[1]) + 1], panels[1]);
+    lifecycle(h, "task_failed", turn, trace, "stale turn");
+    lifecycle(h, "task_failed", t2, trace, "foreign trace");
+    assert(!panels[1].textContent.includes("stale turn"));
+    assert(!panels[1].textContent.includes("foreign trace"));
+    lifecycle(h, "task_completed", t2, tr2);
+    h.socket.emit(result("completed", t2, tr2)); h.socket.emit(complete("completed", t2, tr2));
+    const secondBefore = panels[1].textContent;
+    lifecycle(h, "task_failed", t2, tr2, "after result");
+    assert.equal(panels[1].textContent, secondBefore);
+    assert.equal(first.textContent, before);
+    assert.equal(h.chat.querySelectorAll(".assistant-wrapper").length, 2);
+  });
+  await test("same-trace resume retains the old waiting panel and creates a new turn panel", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    lifecycle(h, "task_rejected");
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    const first = h.chat.querySelector(".agent-task-panel"), before = first.textContent;
+    const t2 = "4".repeat(32);
+    h.input.value = "CCO"; h.button("继续").click(); h.socket.emit(accepted(t2));
+    lifecycle(h, "task_started", t2); lifecycle(h, "task_completed", t2);
+    h.socket.emit(result("completed", t2)); h.socket.emit(complete("completed", t2));
+    assert.equal(h.chat.querySelectorAll(".agent-task-panel").length, 2);
+    assert.equal(first.textContent, before);
+    assert.equal(first.querySelector(".agent-task-progress").textContent, "等待补充输入");
+  });
+  await test("a reconnected request cannot mutate the disconnected turn panel", () => {
+    const h = loadHome(); h.ready("pi"); start(h); lifecycle(h, "task_started");
+    const first = h.chat.querySelector(".agent-task-panel"), before = first.textContent;
+    h.socket.close(); h.reconnect(); const current = h.sockets.at(-1); current.open(); h.ready("pi");
+    h.input.value = "CCN"; h.send();
+    const t2 = "4".repeat(32), tr2 = "5".repeat(32);
+    current.emit(accepted(t2, tr2)); lifecycle(h, "task_started", t2, tr2);
+    h.socket.emit({type: "agent_event", turn_id: turn, event: {trace_id: trace, event: "task_completed"}});
+    assert.equal(h.chat.querySelectorAll(".agent-task-panel").length, 2);
+    assert.equal(first.textContent, before);
+    current.emit(result("completed", t2, tr2)); current.emit(complete("completed", t2, tr2));
+    assert.equal(h.chat.querySelectorAll(".assistant-wrapper").length, 2);
+  });
+  await test("same-turn provisional terminal does not erase earlier execution steps", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    lifecycle(h, "task_started", turn, trace, "first planning pass");
+    const firstStep = h.chat.querySelector(".agent-task-item");
+    lifecycle(h, "task_rejected"); lifecycle(h, "task_started", turn, trace, "verified retry");
+    const panel = h.chat.querySelector(".agent-task-panel");
+    assert.strictEqual(panel.querySelector(".agent-task-item"), firstStep);
+    assert.equal(panel.querySelectorAll(".agent-task-item").length, 3);
+  });
+  await test("a no-event resumed waiting result never borrows the historical panel", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    lifecycle(h, "task_rejected");
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    const first = h.chat.querySelector(".agent-task-panel");
+    first.querySelector(".agent-task-progress").textContent = "historical marker";
+    const before = first.textContent, t2 = "4".repeat(32);
+    h.input.value = "still missing"; h.button("继续").click(); h.socket.emit(accepted(t2));
+    h.socket.emit(result("waiting_for_input", t2)); h.socket.emit(complete("waiting_for_input", t2));
+    assert.equal(first.textContent, before);
+    assert.equal(h.chat.querySelectorAll(".agent-task-panel").length, 1);
+  });
+  await test("decision controls precede the input row in DOM order, including after reconnect", () => {
+    const h = loadHome(); h.ready("pi");
+    const expectedOrder = ["decision-runtime-controls", "fill", "tool"];
+    assert.deepEqual(h.composer.children.map(node => node.className), expectedOrder,
+      "controls must be above .fill in DOM order, not merely reordered by CSS");
+    h.socket.close(); h.reconnect(); h.sockets.at(-1).open(); h.ready("pi");
+    assert.deepEqual(h.composer.children.map(node => node.className), expectedOrder);
+    assert.strictEqual(h.input.parentNode, h.fill);
+  });
+  await test("decision controls occupy their own composer row without changing authority gates", () => {
+    const h = loadHome(); h.ready("pi");
+    const controls = h.body.querySelector(".decision-runtime-controls");
+    assert(controls.parentNode === h.composer, "controls must be a direct composer row, not inside .fill");
+    assert(!h.fill.contains(controls));
+    assert.strictEqual(h.input.parentNode, h.fill);
+    assert(!controls.hidden);
+    assert(h.button("停止").disabled && h.button("继续").disabled && h.button("开始新请求").disabled);
+    start(h); h.button("停止").click();
+    assert.deepEqual(h.socket.sent.at(-1), {type: "cancel", turn_id: turn});
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    assert(!h.button("继续").disabled && !h.button("开始新请求").disabled);
+    h.input.value = "CCO"; h.button("继续").click();
+    assert.deepEqual(h.socket.sent.at(-1), {type: "resume", trace_id: trace, continuation_id: nonce, message: "CCO"});
+    h.socket.close(); assert(controls.hidden);
+    h.reconnect(); h.sockets.at(-1).open(); h.ready("pi");
+    assert(!controls.hidden);
+    assert.equal(h.composer.querySelectorAll(".decision-runtime-controls").length, 1);
+  });
+  for (const [kind, render] of [
+    ["user", h => h.render.addUserMessage("CCO")],
+    ["assistant", h => h.render.addAssistantMessage("value 0")],
+    ["streaming", h => h.render.appendToLastMessage("value 0")],
+    ["RAG", h => h.render.displayRAGInfo([{smiles: "CCO", properties: {logp: 0}}], "fixture")],
+  ]) await test(`${kind} message uses a shared responsive shell without inline width limits`, () => {
+    const h = loadHome(); render(h);
+    const shell = h.chat.querySelector(".message-wrapper").children[0];
+    assert(shell.classList.contains("message-container"), `${kind} needs the shared containment class`);
+    assert(!/max-width\s*:/.test(shell.style.cssText), "stylesheet must own desktop/mobile width limits");
+  });
+  await test("lazy details component and styles load before the opt-in main script", () => {
+    const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
+    const scripts = [...template.matchAll(/<script[^>]+src="([^"]+)"/g)].map(match => match[1]);
+    assert(scripts.some(src => src.startsWith("/static/js/home/result_details.js?v=")));
+    assert(scripts.findIndex(src => src.includes("/result_details.js")) <
+      scripts.findIndex(src => src.includes("/home/main.js")));
+    assert(template.includes('/static/css/result_details.css?v='));
+  });
+  await test("summary format is negotiated per socket for chat and resume, never control actions", () => {
+    const h = loadHome(); h.ready("pi", false, true); start(h);
+    assert.equal(h.socket.sent.at(-1).result_format, "summary_details_v1");
+    h.button("停止").click();
+    assert(!("result_format" in h.socket.sent.at(-1)));
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    h.input.value = "CCO"; h.button("继续").click();
+    assert.equal(h.socket.sent.at(-1).result_format, "summary_details_v1");
+    h.socket.close(); h.reconnect(); const socket = h.sockets.at(-1); socket.open(); h.ready("pi");
+    h.input.value = "CCN"; h.button("继续").click();
+    assert(!("result_format" in socket.sent.at(-1)));
+  });
+  await test("details mount after final rendering and remain bound to the original message", () => {
+    const h = loadHome(); h.ready("pi", false, true); start(h);
+    const reference = {view_id: "00000000000040008000000000000001", revision: "a".repeat(64), byte_length: 100};
+    const frame = {...result("completed"), result_format: "summary_details_v1", details_state: "available", details: reference};
+    h.socket.emit(frame); assert.equal(h.detailsMounts.length, 0);
+    h.socket.emit(complete("completed"));
+    assert.equal(h.detailsMounts.length, 1);
+    assert.equal(h.detailsMounts[0].options.traceId, trace);
+    assert.equal(JSON.stringify(h.detailsMounts[0].options.reference), JSON.stringify(reference));
+    assert(h.detailsMounts[0].container.isConnected);
+    assert(h.chat.textContent.includes("查看明细"));
+    const originalBox = h.detailsMounts[0].container;
+    h.input.value = "next request"; h.send();
+    assert(originalBox.isConnected && originalBox.textContent.includes("查看明细"));
+    assert.equal(h.detailsMounts.length, 1);
+    const aborts = h.detailsAborts();
+    h.socket.close(); assert.equal(h.detailsAborts(), aborts + 1);
+  });
+  await test("typed reverse summary reaches its scoped renderer", () => {
+    const h = loadHome(); h.ready("pi", false, true); start(h);
+    h.socket.emit({...result("completed"), result_format: "summary_details_v1",
+      metadata: {display_kind: "reverse_target_rank_v1"}});
+    assert.equal(h.formatCalls.at(-1).displayKind, "reverse_target_rank_v1");
+    h.socket.emit(complete("completed"));
+  });
+  await test("technical lifecycle chatter stays out of progress while specific failures stay visible", () => {
+    const h = loadHome(); h.ready("pi", false, true); start(h);
+    h.socket.emit({type: "agent_event", turn_id: turn, trace_id: trace,
+      event: {event: "tool_started", trace_id: trace, tool_name: "property_calculator",
+        message: "Running web-property:fixture-internal-step"}});
+    assert(!h.chat.textContent.includes("web-property"));
+    assert(!h.chat.textContent.includes("AGENT WORKFLOW"));
+    assert(h.chat.textContent.includes("属性计算"));
+    h.socket.emit({type: "agent_event", turn_id: turn, trace_id: trace,
+      event: {event: "tool_failed", trace_id: trace, tool_name: "property_calculator",
+        message: "输入 SMILES 无效，请检查环闭合编号。"}});
+    assert(h.chat.textContent.includes("输入 SMILES 无效，请检查环闭合编号。"));
+    h.socket.emit({type: "agent_event", turn_id: turn, trace_id: trace,
+      event: {event: "tool_completed", trace_id: trace, tool_name: "molecular_docking",
+        payload: {status: "not_calculated", quality: {reason: "dependency_blocked", executed: false,
+          blocked_by: ["web-reverse:fixture-private-id"]}}}});
+    assert(h.chat.textContent.includes("依赖未完成"));
+    assert(!h.chat.textContent.includes("fixture-private-id"));
+  });
+  for (const [label, message, expectedCode] of [
+    ["malformed", "{broken", 4002],
+    ["oversized", "x".repeat(256 * 1024 + 1), 4009],
+  ]) {
+    await test(`${label} frame closes with a browser-permitted application code`, () => {
+      const h = loadHome(); h.ready("pi"); start(h);
+      const originalClose = h.socket.close.bind(h.socket);
+      const closed = [];
+      h.socket.close = (code, reason) => {
+        assert(code === 1000 || (code >= 3000 && code <= 4999), "browser rejects reserved close codes");
+        closed.push(code); originalClose(code, reason);
+      };
+      assert.doesNotThrow(() => h.socket.emit(message));
+      assert.deepEqual(closed, [expectedCode]);
+      assert(h.chat.textContent.includes("执行结果未确认"));
+      assert(!h.chat.textContent.includes("Measured value"));
+    });
+  }
   for (const mode of ["legacy", "pi"]) {
     for (const status of ["FAILED", "CANCELLED", "TIMED_OUT", "UNKNOWN"]) {
       await test(`${mode} terminal ${status} keeps cleanup status refresh until drained`, () => {
@@ -321,7 +538,7 @@ async function run() {
         h.ready(previous); h.socket.close(); h.reconnect(); h.sockets.at(-1).open();
       }
       const socket = h.sockets.at(-1);
-      const sendButton = h.body.children.find(c => c.tagName === "BUTTON");
+      const sendButton = h.fill.querySelector("button");
       h.input.value = "Explain logP"; h.send();
       assert(socket.sent.every(f => f.type === "ping"), "unknown connection mode must not dispatch legacy input");
       assert.equal(h.input.value, "Explain logP", "unsent input remains available");
@@ -369,7 +586,8 @@ async function run() {
       const state = h.chat.querySelector('.decision-runtime-status');
       assert(state, "missing per-message persistent status");
       assert.equal(state.getAttribute("role"), "status");
-      assert(state.textContent.includes(label) && state.textContent.includes("未执行检索"));
+      assert(state.textContent.includes(label) && state.textContent.includes("未执行知识库检索"),
+        'RAG metadata must not imply that target or other database searches did not run');
       const before = state.textContent;
       h.flushTimers(); h.socket.emit(result("completed")); h.socket.emit(complete("completed"));
       assert.equal(state.textContent, before);
@@ -381,6 +599,26 @@ async function run() {
       }
     });
   }
+  await test("completed scientific result hides the redundant success status", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    const frame = result('completed'); frame.metadata.rag_requested = false;
+    h.socket.emit(frame); h.socket.emit(complete("completed"));
+    const state = h.chat.querySelector(".decision-runtime-status");
+    assert(state, "status remains available to assistive technology and diagnostics");
+    assert(state.hidden, "successful completion should not add a second visible answer");
+  });
+  await test('completed result retains a visible unperformed requested RAG warning', () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    h.socket.emit(result('completed')); h.socket.emit(complete('completed'));
+    const state = h.chat.querySelector('.decision-runtime-status');
+    assert(!state.hidden && state.textContent.includes('未执行知识库检索'));
+  });
+  await test('unrequested RAG does not imply target retrieval was skipped', () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    const frame = result('failed'); frame.metadata.rag_requested = false;
+    h.socket.emit(frame); h.socket.emit(complete('failed'));
+    assert(!h.chat.querySelector('.decision-runtime-status').textContent.includes('检索'));
+  });
   await test("Continue has exact socket-local nonce and full input; Start new abandons", () => {
     const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
@@ -394,6 +632,18 @@ async function run() {
     fresh.click(); assert.deepEqual(h.socket.sent.at(-1), {type: "abandon", trace_id: trace, continuation_id: nonce});
     h.socket.emit({type: "continuation_abandoned", trace_id: trace});
     h.input.value = "Explain logP"; h.send(); assert.equal(h.socket.sent.at(-1).type, "chat");
+  });
+  await test("validated waiting result replaces provisional rejected task presentation", () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    h.socket.emit({type: "agent_event", turn_id: turn,
+      event: {trace_id: trace, event: "task_rejected", message: "Decision terminal attempt pending verification"}});
+    h.socket.emit(result("waiting_for_input")); h.socket.emit(complete("waiting_for_input"));
+    const panel = h.chat.querySelector(".agent-task-panel");
+    assert(panel);
+    assert.equal(panel.querySelector(".agent-task-progress").textContent, "等待补充输入");
+    assert(!panel.textContent.includes("已拒绝"));
+    assert(!panel.querySelector(".is-error"));
+    assert(!h.button("继续").disabled);
   });
   await test("waiting continuation is restored from the tab session cache after refresh", () => {
     const h = loadHome({storedWaiting: JSON.stringify({traceId: trace, nonce})}); h.ready("pi");
@@ -412,7 +662,7 @@ async function run() {
     h.input.value = "Explain logP"; h.send();
     assert.equal(h.socket.sent.length, sent, "nonempty new input must not race abandon response");
     assert(h.button("继续").disabled && h.button("开始新请求").disabled);
-    assert(h.body.children.find(c => c.tagName === "BUTTON").disabled);
+    assert(h.fill.querySelector("button").disabled);
     h.button("继续").click(); h.button("开始新请求").click();
     assert.equal(h.socket.sent.length, sent, "no repeat abandon or queued resume");
     h.socket.emit({type: "continuation_abandoned", trace_id: "9".repeat(32)});
@@ -587,7 +837,7 @@ async function run() {
   await test("active main script cache version includes scientific result display", () => {
     const template = fs.readFileSync(path.join(root, "src/web/templates/index.html"), "utf8");
     const scripts = [...template.matchAll(/<script\s+src="([^\"]*\/home\/main\.js[^\"]*)"/g)].map(m => m[1]);
-    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261023-pi-runtime-v1"]);
+    assert.deepEqual(scripts, ["/static/js/home/main.js?v=20261028-quick-actions-v1"]);
   });
   await test("WebSocket transport follows the page protocol", () => {
     const source = fs.readFileSync(path.join(home, "main.js"), "utf8");
@@ -605,6 +855,15 @@ async function run() {
     assert(h.chat.textContent.includes("AutoDock Vina 在截止时间内未完成"),
       "the UI must expose the structured server failure reason");
   });
+  await test('publication invalidation is explained without exposing internal diagnostics', () => {
+    const h = loadHome(); h.ready('pi'); start(h);
+    const failure = result('failed');
+    failure.final_answer = 'Decision publication invalidated';
+    failure.error = {code:'invalid_output', message:'Decision publication invalidated'};
+    h.socket.emit(failure); h.socket.emit(complete('failed'));
+    assert(h.chat.textContent.includes('结果校验未通过，无法交付本次任务结果'));
+    assert(!h.chat.textContent.includes('Decision publication invalidated'));
+  });
   await test("strict candidate trace is socket-bound and receive is not mounted ACK", async () => {
     const h = loadHome(); h.ready("pi"); start(h);
     h.socket.emit(result("partial"));
@@ -620,6 +879,25 @@ async function run() {
     h.input.value = "计算 logP"; h.send();
     assert.equal(h.socket.sent.at(-1).selection.candidate_id, event.reference.ordered_keys[0][1]);
     assert(!("turn_id" in event));
+  });
+  await test("candidate selection has visible accessible state and switches cards exclusively", async () => {
+    const h = loadHome(); h.ready("pi"); start(h);
+    h.socket.emit(result("partial"));
+    const event = candidateEvent(); h.socket.emit(event);
+    h.socket.emit(complete("partial")); await tick();
+    const buttons = h.body.querySelectorAll(".molecule-selection-button");
+    assert.equal(buttons.length, 2);
+    assert.equal(buttons[0].textContent, "选择此分子");
+    assert.equal(buttons[0].getAttribute("aria-pressed"), "false");
+    buttons[0].click();
+    assert.equal(buttons[0].textContent, "已选择");
+    assert.equal(buttons[0].getAttribute("aria-pressed"), "true");
+    assert.equal(buttons[1].textContent, "选择此分子");
+    buttons[1].click();
+    assert.equal(buttons[0].textContent, "选择此分子");
+    assert.equal(buttons[0].getAttribute("aria-pressed"), "false");
+    assert.equal(buttons[1].textContent, "已选择");
+    assert.equal(buttons[1].getAttribute("aria-pressed"), "true");
   });
   for (const fault of ["detached", "partial"]) await test(`${fault} candidate mount cannot ACK`, async () => {
     const h = loadHome(); h.ready("pi"); start(h); h.socket.emit(result("partial"));

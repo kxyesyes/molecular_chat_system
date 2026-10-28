@@ -46,7 +46,7 @@ window.HomeFormatters = (function () {
   }
 
   // Input is already escaped; only complete, rectangular pipe tables are promoted.
-  function renderComparisonTables(escaped) {
+  function renderComparisonTables(escaped, rankedSummary) {
     const lines = escaped.split(/\r?\n/);
     function cells(line) {
       const value = line.trim();
@@ -55,11 +55,21 @@ window.HomeFormatters = (function () {
     }
     const output = [];
     let plain = [];
+    let inFence = false;
     function flushPlain() {
       if (plain.length) output.push(renderEscapedMarkdown(plain.join("\n")));
       plain = [];
     }
     for (let i = 0; i < lines.length; i++) {
+      if (/^\s*```/.test(lines[i])) {
+        inFence = !inFence;
+        plain.push(lines[i]);
+        continue;
+      }
+      if (inFence) {
+        plain.push(lines[i]);
+        continue;
+      }
       const header = cells(lines[i]);
       const divider = i + 1 < lines.length ? cells(lines[i + 1]) : null;
       if (!header || !divider || header.length !== divider.length ||
@@ -82,11 +92,22 @@ window.HomeFormatters = (function () {
       } else {
         flushPlain();
         const cellStyle = ' style="padding: 8px 12px; border: 1px solid #e2e8f0; text-align: left;"';
-        const heading = header.map(function (cell) { return '<th scope="col"' + cellStyle + '>' + renderEscapedMarkdown(cell) + '</th>'; }).join("");
+        // Server-produced ranking cells escape markup before entering Markdown.
+        // Undo only the extra ampersand introduced by the page-wide escape;
+        // the resulting entity is still HTML-escaped, including < and quotes.
+        const isRankedTable = rankedSummary && header.join('|') ===
+          '排名|靶点|物种|综合相似度|Morgan|MACCS|匹配分子数';
+        function renderCell(cell) {
+          const once = isRankedTable
+            ? cell.replace(/&amp;((?:amp|lt|gt|quot|#x27|#(?:124|96|42|95|91|92|93));)/g, '&$1')
+            : cell;
+          return renderEscapedMarkdown(once);
+        }
+        const heading = header.map(function (cell) { return '<th scope="col"' + cellStyle + '>' + renderCell(cell) + '</th>'; }).join("");
         const body = rows.map(function (row) {
-          return '<tr>' + row.map(function (cell) { return '<td' + cellStyle + '>' + renderEscapedMarkdown(cell) + '</td>'; }).join("") + '</tr>';
+          return '<tr>' + row.map(function (cell) { return '<td' + cellStyle + '>' + renderCell(cell) + '</td>'; }).join("") + '</tr>';
         }).join("");
-        output.push('<div style="overflow-x: auto; margin: 12px 0;"><table style="border-collapse: collapse; width: 100%;"><thead><tr>' + heading + '</tr></thead><tbody>' + body + '</tbody></table></div>');
+        output.push('<div class="home-comparison-table-scroll" tabindex="0" role="region" aria-label="比较结果表格" style="overflow-x: auto; margin: 12px 0;"><table style="border-collapse: collapse; width: 100%;"><thead><tr>' + heading + '</tr></thead><tbody>' + body + '</tbody></table></div>');
       }
       i = end - 1;
     }
@@ -94,22 +115,43 @@ window.HomeFormatters = (function () {
     return output.join("<br>");
   }
 
-  function renderMarkdownLike(content) {
-    return renderComparisonTables(escapeHtml(content));
+  function renderMarkdownLike(content, options) {
+    return renderComparisonTables(escapeHtml(content), options?.displayKind === 'reverse_target_rank_v1');
+  }
+
+  // Display-only typography. Protect literal code and complete Markdown links
+  // before adding generated tags; stored responses and scientific data stay intact.
+  function formatScientificNotation(escaped) {
+    return escaped.split(/(```[^\n]*(?:\n[\s\S]*?(?:```|$)|$)|`[^`\n]*(?:`|$)|\[[^\]]+\]\([^)]+\)|https?:\/\/[^\s]+|&quot;(?:(?!&quot;)[\s\S])*?&quot;|(?<![A-Za-z0-9])&#039;(?:(?!&#039;)[\s\S])*?&#039;(?![A-Za-z0-9]))/g)
+      .map(function (part, index) {
+        return index % 2 ? part : part.replace(
+          /(^|[^A-Za-z0-9_-])((?:p)?IC)50(?![A-Za-z0-9_-])/g,
+          '$1$2<sub>50</sub>',
+        );
+      }).join("");
   }
 
   // Format each cell independently so inline syntax cannot consume HTML
   // boundaries or combine the scientific values of neighboring cells.
   function renderEscapedMarkdown(escaped) {
-    return escaped
-      .replace(
-        /```(.*?)\n([\s\S]*?)```/g,
-        '<pre style="background: #f7fafc; padding: 12px; border-radius: 8px; overflow-x: auto; margin: 12px 0;"><code class="language-$1">$2</code></pre>',
-      )
-      .replace(
-        /`([^`]+)`/g,
-        '<code style="background: #edf2f7; padding: 3px 6px; border-radius: 4px; font-size: 0.9em; color: #e53e3e;">$1</code>',
-      )
+    return escaped.split(/(```[^\n]*(?:\n[\s\S]*?(?:```|$)|$)|\[[^\]]+\]\([^)]+\)|`[^`\n]*(?:`|$))/g)
+      .map(function (part, index) {
+        if (index % 2) {
+          const link = part.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+          if (link) {
+            if (link[2].includes('`')) return part;
+            const label = link[1].split(/(`[^`]+`)/g).map(function (item, i) {
+              return i % 2 ? '<code>' + item.slice(1, -1) + '</code>' : escapeHtml(item);
+            }).join('');
+            return '<a href="' + Safe.safeChatUrl(link[2]) + '" target="_blank" rel="noopener noreferrer" style="color: #4299e1; text-decoration: underline;">' + label + '</a>';
+          }
+          const block = part.match(/^```([^\n]*)\n([\s\S]*?)```$/);
+          if (block) return '<pre style="background: #f7fafc; padding: 12px; border-radius: 8px; overflow-x: auto; max-width: 100%; box-sizing: border-box; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; margin: 12px 0;"><code class="language-' + block[1] + '" style="white-space: inherit; overflow-wrap: inherit; word-break: inherit;">' + block[2] + '</code></pre>';
+          if (part.startsWith('`') && !part.startsWith('```') && part.endsWith('`') && part.length > 1)
+            return '<code style="background: #edf2f7; padding: 3px 6px; border-radius: 4px; font-size: 0.9em; color: #e53e3e;">' + part.slice(1, -1) + '</code>';
+          return part.replace(/\n/g, "<br>");
+        }
+        return formatScientificNotation(part)
       .replace(
         /\*\*(.*?)\*\*/g,
         '<strong style="color: #2d3748; font-weight: 600;">$1</strong>',
@@ -127,7 +169,8 @@ window.HomeFormatters = (function () {
           );
         },
       )
-      .replace(/\n/g, "<br>");
+          .replace(/\n/g, "<br>");
+      }).join("");
   }
 
   function formatSynthesisRoute(content) {
@@ -400,14 +443,19 @@ window.HomeFormatters = (function () {
     );
   }
 
-  function formatContent(content) {
+  function formatContent(content, options) {
     if (typeof content === "string" && content) {
-      content = content
-        .replace(/```/g, "")
-        .replace(/\*\*/g, "")
-        .replace(/^\s*#{1,6}\s*/gm, "");
+      content = content.split(/(```[^\n]*(?:\n[\s\S]*?(?:```|$)|$)|`[^`\n]*(?:`|$))/g)
+        .map(function (part, index, parts) {
+          if (index % 2) return part;
+          // A segment after inline code is not necessarily at a line start.
+          const prefix = index && !parts[index - 1].endsWith("\n") ? "\u200B" : "";
+          return (prefix + part).replace(/\*\*/g, "")
+            .replace(/^\s*#{1,6}\s*/gm, "").slice(prefix.length);
+        }).join("");
     }
 
+    if (options?.displayKind === 'reverse_target_rank_v1') return renderMarkdownLike(content, options);
     if (
       content.includes("逆合成分析结果") ||
       content.includes("合成路线") ||

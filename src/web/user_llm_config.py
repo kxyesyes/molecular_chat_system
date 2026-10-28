@@ -31,6 +31,12 @@ _DEFAULTS = {
 }
 
 
+def is_generator_model_name(value) -> bool:
+    """Return whether a model name belongs to the generator-only family."""
+    normalized = re.sub(r"\s+", "", str(value or "")).casefold()
+    return normalized.partition(":")[0] == "gmm-llama"
+
+
 def default_user_llm_config() -> dict:
     url, model = _DEFAULTS["openai_compatible"]
     return dict(provider="openai_compatible", base_url=url, model_name=model, api_key="", stream=True)
@@ -180,7 +186,7 @@ def user_llm_signature(path: Path | str) -> str | None:
         raise ValueError(_ERROR) from None
 
 
-def _request_config(raw: dict) -> dict:
+def _request_config(raw: dict, *, allow_generator_model: bool = False) -> dict:
     if not isinstance(raw, dict):
         raise ValueError(_ERROR)
     # Validate before strip/normalization, using every separator splitlines reads.
@@ -192,8 +198,13 @@ def _request_config(raw: dict) -> dict:
     if provider not in _DEFAULTS or not isinstance(raw.get("stream", True), bool):
         raise ValueError(_ERROR)
     url, model = _DEFAULTS[provider]
+    requested_model = raw.get("model_name") or raw.get("model")
+    if provider == "ollama" and not str(requested_model or "").strip():
+        raise ValueError(_ERROR)
+    if is_generator_model_name(requested_model) and not allow_generator_model:
+        raise ValueError(_ERROR)
     config = normalize_llm_config(dict(raw, provider=provider,
-        base_url=raw.get("base_url") or url, model_name=raw.get("model_name") or raw.get("model") or model))
+        base_url=raw.get("base_url") or url, model_name=requested_model or model))
     if not config["base_url"] or not config["model_name"]:
         raise ValueError(_ERROR)
     for value in config.values():
@@ -229,11 +240,11 @@ def resolve_user_llm_request(raw: dict, current: dict, *, clear_api_key: bool = 
         raise ValueError(_ERROR) from None
 
 
-def _load_user_llm_config_unlocked(path: Path | str) -> dict:
-    return _parse_user_llm_config(_read(Path(path)))
+def _load_user_llm_config_unlocked(path: Path | str, *, allow_generator_model: bool = False) -> dict:
+    return _parse_user_llm_config(_read(Path(path)), allow_generator_model=allow_generator_model)
 
 
-def _parse_user_llm_config(content: bytes | None) -> dict:
+def _parse_user_llm_config(content: bytes | None, *, allow_generator_model: bool = False) -> dict:
     try:
         if content is None:
             return default_user_llm_config()
@@ -255,7 +266,10 @@ def _parse_user_llm_config(content: bytes | None) -> dict:
         raw = {field: values[name] for field, name in fields.items()}
         if not raw["base_url"] or not raw["model_name"]:
             raise ValueError(_ERROR)
-        return _request_config(dict(raw, provider=provider, stream=values["MEDCHAT_LLM_STREAM"] == "true"))
+        return _request_config(
+            dict(raw, provider=provider, stream=values["MEDCHAT_LLM_STREAM"] == "true"),
+            allow_generator_model=allow_generator_model,
+        )
     except (OSError, ValueError, RuntimeError, KeyError, TypeError):
         raise ValueError(_ERROR) from None
 
@@ -283,7 +297,21 @@ def save_user_llm_config(path: Path | str, raw: dict, *, clear_api_key: bool = F
         path = _safe_path(path)
         _check_boundary(path, create=True)
         with _exclusive_file_lock(path):
-            current = _load_user_llm_config_unlocked(path)
+            try:
+                current = _load_user_llm_config_unlocked(path)
+            except ValueError:
+                # A prior release could persist the generator-only Ollama
+                # model in the Agent store. Permit one strict replacement
+                # with a valid non-generator Agent config, but never make
+                # that legacy value loadable as the active Agent model.
+                current = _load_user_llm_config_unlocked(
+                    path, allow_generator_model=True,
+                )
+                if (
+                    current.get("provider") != "ollama"
+                    or not is_generator_model_name(current.get("model_name"))
+                ):
+                    raise ValueError(_ERROR)
             config = resolve_user_llm_request(raw, current, clear_api_key=clear_api_key)
             fields = PROVIDER_ENV_FIELDS[config["provider"]]
             values = {"MEDCHAT_LLM_PROVIDER": config["provider"], "MEDCHAT_LLM_STREAM": "true" if config["stream"] else "false"}

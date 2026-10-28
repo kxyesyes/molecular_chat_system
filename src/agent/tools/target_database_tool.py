@@ -3,6 +3,7 @@
 """Agent wrapper for target database search."""
 
 from typing import Any, Dict
+import json
 import logging
 import re
 import threading
@@ -10,6 +11,7 @@ from src.target_identifiers import canonical_target_identifier, target_mentions
 from src.target_search.exact_pdb import requested_pdb_id, target_text_without_pdb
 
 from .base_tool import BaseMolecularTool
+from .target_observation import target_planning_data
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,13 @@ _EXPLICIT_ACCESSION_QUERY = re.compile(
     r"|[，,。]\s*列出(?:可用于对接的)?实验结构(?:编号与配体信息|，说明物种、结构编号和共晶配体信息)?)?"
     r"[。.！!]?\s*", re.I,
 )
+
+# Full evidence and model input have distinct limits. Leave envelope headroom
+# below the 64 KiB tool boundary while reserving half the 24 KiB model budget
+# for protocol and requirements. Structure details are not sent to the model.
+_TARGET_EVIDENCE_BUDGET = 48 * 1024
+_TARGET_PARTIAL_EVIDENCE_BUDGET = 24 * 1024
+_TARGET_OBSERVATION_BUDGET = 12 * 1024
 
 
 class TargetDatabaseTool(BaseMolecularTool):
@@ -426,6 +435,94 @@ class TargetDatabaseTool(BaseMolecularTool):
                 "code": "provider_error",
                 "message": result["message"],
             }
+
+        return self._bound_observation(result)
+
+    @staticmethod
+    def _bound_observation(result: dict[str, Any]) -> dict[str, Any]:
+        """Keep large family lookups usable without claiming completeness.
+
+        Broad queries can legitimately return many target rows and structure
+        previews. If the serialized producer envelope is too large for the
+        decision boundary, retain target identities without structure previews,
+        mark the result partial, and explain the projection.
+        A later exact-subtype lookup can retrieve the full evidence set.
+        """
+        def size(value: dict[str, Any]) -> int:
+            return len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8"))
+
+        planning = {key: value for key, value in result.items()
+                    if key not in {'formatted', 'evidence'}}
+        planning['data'] = target_planning_data(result.get('data'))
+        # Compatibility normalization retains an additional raw diagnostic
+        # snapshot for failures/partial results. Reserve that space before
+        # normalization rather than turning valid partial evidence invalid.
+        evidence_budget = (_TARGET_EVIDENCE_BUDGET if result.get('success') is True
+                           else _TARGET_PARTIAL_EVIDENCE_BUDGET)
+        if (size(result) <= evidence_budget
+                and size(planning) <= _TARGET_OBSERVATION_BUDGET):
+            return result
+
+        targets = result.get("data")
+        if not isinstance(targets, list):
+            targets = []
+
+        def bounded_text(value: Any) -> Any:
+            if isinstance(value, str) and len(value) > 256:
+                return value[:253] + "..."
+            return value
+
+        compacted: list[dict[str, Any]] = []
+        for target in targets[:5]:
+            if not isinstance(target, dict):
+                continue
+            compacted.append({
+                field: bounded_text(target[field])
+                for field in (
+                    "gene_symbol", "target_name", "protein_name", "uniprot_id",
+                    "organism", "source", "source_record_id", "match_reason",
+                )
+                if field in target
+            })
+
+        result["data"] = compacted
+        result["formatted"] = (
+            "## Target database search results\n\n"
+            f"Query keywords: `{', '.join(str(result.get('query', '')).splitlines())}`\n\n"
+            f"Matched targets: {len(compacted)}\n\n"
+            "The family lookup returned a bounded partial view. One compact "
+            "target summary is shown per target; structure details are omitted. "
+            "Specify an exact subtype "
+            "for the complete structure evidence."
+        )
+        warnings = result.setdefault("warnings", [])
+        if "target_search_output_bounded" not in warnings:
+            warnings.append("target_search_output_bounded")
+        quality = result.setdefault("quality", {})
+        quality["status"] = "partial"
+        quality["bounded_output"] = True
+        quality["matched_target_count"] = len(targets)
+        quality["truncated_target_count"] = max(0, len(targets) - len(compacted))
+        quality["requires_exact_subtype"] = len(targets) > len(compacted)
+        quality["structure_preview_limit"] = 0
+        quality["target_text_limit"] = 256
+        source_ids = {
+            target.get("source_record_id")
+            for target in compacted
+            if target.get("source_record_id")
+        }
+        evidence = result.get("evidence")
+        if isinstance(evidence, list):
+            selected = [entry for entry in evidence
+                        if isinstance(entry, dict) and entry.get("id") in source_ids]
+            result["evidence"] = (selected or evidence)[:len(compacted)]
+            quality["evidence_preview_limit"] = 1
+        result["success"] = False
+        result["status"] = "partial"
+        result["message"] = (
+            f"Found {len(compacted)} matching targets; results are partial "
+            "because the family lookup exceeded the response boundary."
+        )
 
         return result
 

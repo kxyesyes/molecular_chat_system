@@ -89,8 +89,21 @@ class OllamaModel:
                 logger.warning('Ollama partial client cleanup failed; exception details omitted')
             raise
 
+    @staticmethod
+    def _request_options(temperature, max_tokens, num_ctx=None):
+        if num_ctx is not None and (type(num_ctx) is not int or num_ctx <= 0):
+            raise ValueError("invalid_num_ctx")
+        options = {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        }
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
+        return options
+
     def generate(self, prompt: str, temperature: float = 0.7,
-                 max_tokens: int = 1500, *, strict_errors: bool = False) -> str:
+                 max_tokens: int = 1500, *, strict_errors: bool = False,
+                 num_ctx: int = None) -> str:
         """
         同步生成响应（用于工具调用）
 
@@ -104,6 +117,7 @@ class OllamaModel:
         """
         if type(strict_errors) is not bool:
             raise ValueError("invalid_strict_errors")
+        options = self._request_options(temperature, max_tokens, num_ctx)
         try:
             response = self.sync_client.post(
                 f"{self.base_url}/api/generate",
@@ -111,10 +125,7 @@ class OllamaModel:
                     "model": self.model_name,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
+                    "options": options,
                 }
             )
 
@@ -144,7 +155,8 @@ class OllamaModel:
         raise OllamaGenerationError(reason)
 
     async def generate_async(self, prompt: str, temperature: float = 0.7,
-                            max_tokens: int = 1500, *, strict_errors: bool = False) -> str:
+                            max_tokens: int = 1500, *, strict_errors: bool = False,
+                            num_ctx: int = None) -> str:
         """
         异步生成响应（用于主聊天）
 
@@ -158,6 +170,7 @@ class OllamaModel:
         """
         if type(strict_errors) is not bool:
             raise ValueError("invalid_strict_errors")
+        options = self._request_options(temperature, max_tokens, num_ctx)
         try:
             response = await self.client.post(
                 f"{self.base_url}/api/generate",
@@ -165,10 +178,7 @@ class OllamaModel:
                     "model": self.model_name,
                     "prompt": prompt,
                     "stream": False,
-                    "options": {
-                        "temperature": temperature,
-                        "num_predict": max_tokens
-                    }
+                    "options": options,
                 }
             )
 

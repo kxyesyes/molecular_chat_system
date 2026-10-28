@@ -1,0 +1,93 @@
+/* Native, theme-inheriting detail disclosure; no global element overrides. */
+.home-result-details {
+  margin-block: 0.75rem;
+  max-width: 100%;
+  min-width: 0;
+  color: inherit;
+  font: inherit;
+  line-height: 1.6;
+}
+.home-result-details summary {
+  display: list-item;
+  cursor: pointer;
+  padding-block: 0.3rem;
+  overflow-wrap: anywhere;
+}
+.home-result-details > summary {
+  font-weight: 600;
+}
+.home-result-details__body,
+.home-result-details__section {
+  padding-block: 0.5rem;
+  padding-inline-start: 0.75rem;
+  border-inline-start: 1px solid currentColor;
+  min-width: 0;
+}
+.home-result-details__fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
+  gap: 0.35rem 0.75rem;
+  margin: 0;
+}
+/* Deep unknown structures must not multiply indentation or shrink columns. */
+.home-result-details__section .home-result-details__fields {
+  display: block;
+}
+.home-result-details__section .home-result-details__section {
+  padding-inline-start: 0;
+  border-inline-start: 0;
+}
+.home-result-details__section dd {
+  margin-block-end: 0.5rem;
+}
+.home-result-details dt {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.home-result-details dd {
+  margin: 0;
+  min-width: 0;
+}
+.home-result-details__value {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  margin: 0;
+  padding: 0;
+}
+.home-result-details__table {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.home-result-details table {
+  border-collapse: collapse;
+  width: 100%;
+  font: inherit;
+}
+.home-result-details th,
+.home-result-details td {
+  padding: 0.35rem 0.5rem;
+  text-align: start;
+  vertical-align: top;
+  border-bottom: 1px solid currentColor;
+  min-width: 5rem;
+}
+.home-result-details button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: 0.25rem;
+  padding: 0.3rem 0.6rem;
+  margin-block: 0.4rem;
+  cursor: pointer;
+}
+.home-result-details summary:focus-visible,
+.home-result-details button:focus-visible,
+.home-result-details__table:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 3px;
+}

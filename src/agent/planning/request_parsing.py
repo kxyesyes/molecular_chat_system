@@ -88,7 +88,35 @@ def parse_structured_docking_input(query: str) -> dict[str, Any] | None:
 
 
 def looks_like_design(query: str) -> bool:
-    return has_generation_intent(query)
+    return has_generation_intent(query) and not target_lookup_result_annotation(query)
+
+
+def target_lookup_result_annotation(query: str) -> bool:
+    """Recognize target-search result wording, not a design request.
+
+    ``返回`` is also part of the generation grammar for requests returning new
+    SMILES. In a target lookup, ``返回结构编号`` or ``是否适合后续对接`` is a
+    presentation requirement and must not switch planning to target-driven
+    design or molecule generation.
+    """
+    lookup = re.search(
+        r'(?:查找|检索|搜索|查询|find|search|lookup|look\s+up).{0,120}'
+        r'(?:靶点|蛋白(?:质)?|结构|pdb|uniprot|target|protein|structures?)',
+        query, re.I,
+    )
+    annotation = re.search(
+        r'返回|给出|列出|说明|编号|是否|适合|可用于|后续|继续|'
+        r'\bsuitable\b|\bappropriate\b|\bfor\s+docking\b|\bdocking\b',
+        query, re.I,
+    )
+    if not lookup or not annotation:
+        return False
+    return not re.search(
+        r'生成|设计|创建|合成|制作|构建|开始.*(?:对接|docking)|'
+        r'运行.*(?:对接|docking)|执行.*(?:对接|docking)|'
+        r'\b(?:generate|design|create|synthesi[sz]e|produce|make|build)\b',
+        query, re.I,
+    )
 
 
 def extract_target_hint(query: str) -> str:
@@ -111,6 +139,15 @@ def target_lookup_text(query: str) -> str:
     Leave the caller's original query/audit and global design target collection
     untouched. Preserve all remaining qualifications for tool validation.
     """
+    # In a complete short lookup, "target information" is the lookup object,
+    # not a forward target label whose identifier is the word "information".
+    # Do not normalize partial matches, unknown members or qualified requests.
+    short = re.fullmatch(
+        rf"\s*(?:please\s+)?(?:lookup|look\s+up|find|search)\s+"
+        rf"({TARGET_PATTERN.pattern})\s+target\s+information[.!?]?\s*", query, re.I,
+    )
+    if short:
+        return 'lookup ' + short[1]
     return _STRUCTURE_METHOD_OBJECT.sub("", query)
 
 

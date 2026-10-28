@@ -19,5 +19,16 @@ assert.match(source, /data-structure-page/);
 assert.match(source, /structure-page-status/);
 assert.match(source, /structure-page-btn/);
 assert.match(styles, /\.structure-pagination\s*\{/);
+assert.match(source, /window\.location\.href\s*=\s*`\/molecular-docking\?target_structure=/);
+assert.match(source, /target_structure_id/);
+
+const dockingSource = fs.readFileSync(
+  path.join(projectRoot, "src", "web", "static", "js", "docking", "main.js"),
+  "utf8",
+);
+assert.match(dockingSource, /loadTargetStructureFromQuery/);
+assert.match(dockingSource, /target_structure/);
+assert.match(dockingSource, /download\?format=pdb/);
+assert.match(dockingSource, /请提供配体并确认对接盒后再提交任务/);
 
 console.log("target search structure pagination checks passed");

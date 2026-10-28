@@ -29,7 +29,7 @@ from .decision_bindings import B1BindingResolver
 from .decision_binding_acceptance import evaluate_binding_acceptance
 from .decision_bounds import validate_json, observation_value
 from .decision_inputs import seal_observation, verify_observation_integrity
-from .decision_policy import DecisionBoundaryError, encode_observation, usable
+from .decision_policy import DecisionBoundaryError, encode_observation, model_observation, usable
 from .binding_policy import get_binding_policy
 
 
@@ -410,8 +410,8 @@ def _replay(saved, loop, projection, resolver, historical, journal, adapters, re
         acceptance = policy.acceptance(resolver, required_tools=required_tools)
         descriptors = (resolver.record_descriptors(result.quality['evidence_id'])
             if result.tool_name == 'reverse_target_predictor' and usable(result) else None)
-        content = encode_observation({**result.to_legacy_dict(), 'tool_name': result.tool_name,
-            'task_acceptance': acceptance, **({'record_references': descriptors} if descriptors is not None else {})})
+        content = encode_observation(model_observation(
+            result, acceptance, record_references=descriptors))
         arguments = encode_observation({'decision': decision.model_dump()})
         if loop.mode == 'native':
             pair = [{'role': 'assistant', 'content': None, 'tool_calls': [{'id': call_id,

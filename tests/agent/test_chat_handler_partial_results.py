@@ -582,11 +582,61 @@ def test_real_pi_blocked_dependency_keeps_only_authenticated_prior_work(tmp_path
         assert report['displayed_closure_ids']
         generated = next(b for b in audit['observations'] if b['tool'] == 'llm_molecular_generator')
         assert generated['data']['valid_count'] == 10
-        assert 'CCO' in complete['content']
+        assert any(frame.get('type') == 'molecule_candidates'
+                   and any(candidate.get('canonical_smiles') == 'CCO'
+                           for candidate in frame['candidate_set']['candidates'])
+                   for frame in frames), 'verified candidate must be delivered through its card event'
         assert not result.metadata.get('publication_invalidated')
     assert not tools["candidate_ranker"].inputs
     assert not any(m["type"] == "agent_event" and m["event"].get("tool") == "candidate_ranker"
                    for m in frames)
+
+
+@pytest.mark.parametrize('mutate', [False, True])
+def test_unknown_activity_target_keeps_only_authenticated_prior_work(tmp_path, monkeypatch, mutate):
+    """EGFR is a test target, not a claim that an activity model supports it."""
+    from src.agent.scientific_session.web_bindings import WebBindingResolver
+    from src.agent.scientific_session.decision_policy import DecisionBoundaryError
+
+    class EGFRTarget(FakeTool):
+        def execute(self, query):
+            value = super().execute(query)
+            value['data'][0].update(gene_symbol='EGFR', source_record_id='LOCAL_EGFR')
+            return value
+
+    if mutate:
+        resolve = WebBindingResolver.resolve
+        def corrupt_on_target_rejection(resolver, decision):
+            try:
+                return resolve(resolver, decision)
+            except DecisionBoundaryError as exc:
+                if str(exc) == 'activity_target_conflict_or_unknown':
+                    next(r for r in resolver.session.results if r.tool_name == 'llm_molecular_generator').data['valid_count'] = 999
+                raise
+        monkeypatch.setattr(WebBindingResolver, 'resolve', corrupt_on_target_rejection)
+    names = ['target_database_search', 'llm_molecular_generator', 'property_calculator',
+             'admet_predictor', 'activity_predictor', 'candidate_ranker']
+    tools = {name: FakeTool(name) for name in names}
+    tools['target_database_search'] = EGFRTarget('target_database_search')
+    tools['property_calculator'] = PropertyCalculator()
+    tools['admet_predictor'] = UnavailablePrediction('admet_predictor')
+    handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'unknown-target.sqlite'))
+    complete, frames = run_web_turn(handler, '针对 EGFR 设计 1 个候选分子')
+    result = handler.web_results[-1]
+    if mutate:
+        assert complete['status'] == 'failed' and result.metadata.get('publication_invalidated') is True
+        assert '999' not in complete['content']
+    else:
+        assert complete['status'] == 'partial' and result.partial is True, {
+            'status': complete['status'], 'reason': result.metadata.get('stop_reason'),
+            'boundary': result.metadata.get('failed_boundary'), 'error': str(result.error)}
+        assert not result.metadata.get('publication_invalidated')
+        assert '活性' in complete['content'] and ('不支持' in complete['content'] or '冲突' in complete['content'])
+        audit = json.loads(result.final_answer)
+        assert audit['acceptance']['interruption_reason'] == 'activity_target_conflict_or_unknown'
+        assert not audit['acceptance']['finish_eligible']
+        assert any(block['tool'] == 'llm_molecular_generator' and 'data' in block for block in audit['observations'])
+    assert not tools['activity_predictor'].inputs
 
 def test_real_pi_session_blocks_missing_target_source_without_fabricated_tool_events(tmp_path):
     class TargetWithoutIdentifier(FakeTool):

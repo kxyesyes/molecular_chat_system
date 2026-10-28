@@ -14,7 +14,16 @@ from uuid import uuid4
 
 from fastapi import WebSocketDisconnect
 
-from src.agent.contracts import AgentResult, RunOutcome, AgentExecutionError, AgentErrorCode
+from src.agent.contracts import (
+    AgentContext,
+    AgentResult,
+    AgentExecutionError,
+    AgentErrorCode,
+    RunOutcome,
+    ToolResult,
+)
+from src.agent.orchestrators import WorkflowOrchestrator
+from src.agent.runtime.event_bus import AgentEventBus
 from src.agent.contracts.decision import decode_protocol_json, DecisionProtocolError
 from src.agent.contracts.ordinary_admission import (
     AdmissionCarryIn, AdmissionExchange, begin_segment, remaining_credit,
@@ -29,18 +38,49 @@ from src.agent.scientific_session.decision_inputs import (
 from src.agent.scientific_session.decision_policy import DecisionBoundaryError, encode_observation
 from src.agent.persistence.redaction import REDACTED, contains_secret_material, redact_sensitive
 from src.agent.runtime.worker_ownership import WorkerOwner, WorkerCleanupError, retain_until_done
-from .decision_chat import _result_frame, _durable_admission_facts, await_with_deadline, SEND_TIMEOUT_SECONDS
+from .decision_chat import (
+    _deliver_result,
+    _event_frame,
+    _presentation_admission,
+    _prepare_result_frames,
+    _durable_admission_facts,
+    await_with_deadline,
+    SEND_TIMEOUT_SECONDS,
+)
 from .decision_request import (
     prepare_decision_request, DecisionAdmissionError, validate_request_envelope,
     assess_whole_request, prepare_with_intent, ASSESSMENT_REVISION,
 )
 from .ordinary_capabilities import ORIGINAL_FOUR
 from . import docking_consent as _docking
+from .scientific_obligations import ScientificObligationCompiler, ScientificPlan
 
 
 _now = time.monotonic
 _WEB_WAITING_TTL_SECONDS = 15 * 60
 _WEB_REQUEST_VERSION = 1
+
+
+def _should_compile_scientific_plan(envelope):
+    """Compile only after the normal Web path has no browser reference hints."""
+    return (
+        envelope.enable_tools
+        and envelope.reference is None
+        and envelope.selection is None
+        and ScientificObligationCompiler.is_profile_candidate(envelope.query)
+    )
+
+
+def _resumable_scientific_clarification(plan):
+    if plan is None or plan.status != 'clarification':
+        return False
+    if re.match(r'^\s*(?:请\s*)?计算\s*分子\s*的', plan.original_query) is not None:
+        # Validate the entire bare request before considering any later deictic
+        # word; a trailing "这个分子为阿司匹林" is still an explicit subject.
+        return (plan.missing_fields == ('smiles',)
+                and ScientificObligationCompiler.is_bare_generic_molecule_request(plan.original_query))
+    return any(marker in plan.original_query.casefold()
+               for marker in ('这个分子', '该分子', 'this molecule', 'the molecule'))
 
 
 def terminal_message_for_reason(reason):
@@ -62,6 +102,8 @@ def terminal_message_for_reason(reason):
     if reason == 'scientific_reference_unavailable':
         from .scientific_references import REFERENCE_CLARIFICATION
         return REFERENCE_CLARIFICATION
+    if reason == 'rag_disabled':
+        return '本次请求需要知识库检索，请先开启页面上的“RAG检索”开关后重试。当前请求未执行检索。'
     if reason == 'request_clarification_required':
         return ('请明确要处理的对象和具体问题；如包含多个任务，请拆分后重试。'
                 '当前请求未执行科学工具。')
@@ -184,8 +226,10 @@ class _Turn:
     admission_exchange: object = None
     docking_result: dict | None = None
     scientific_projection: object = None
+    scientific_plan: ScientificPlan | None = None
     scientific_update: list | None = None
     reference_claim: dict | None = None
+    result_format: str | None = None
 
     def cancel(self):
         if self.result_started or self.finishing or self.cancel_event.is_set():
@@ -412,6 +456,10 @@ class _TurnSender:
         self.sender, self.turn = sender, turn
         self.scope = sender.scope
 
+    @property
+    def result_format(self):
+        return getattr(self.turn, 'result_format', None)
+
     async def send_text(self, text):
         if self.turn.allocation_timed_out:
             return  # A retained old owner has no further presentation authority.
@@ -420,8 +468,10 @@ class _TurnSender:
             frame['turn_id'] = self.turn.turn_id
         if frame['type'] == 'agent_result':
             self.turn.result_started = True
-            frame['metadata']['retrieval_performed'] = False
-            if frame['metadata'].get('binding_profile') == 'medchat-web-v1':
+            if frame.get('result_format') != 'summary_details_v1':
+                frame['metadata']['retrieval_performed'] = False
+            if (frame.get('result_format') != 'summary_details_v1'
+                    and frame['metadata'].get('binding_profile') == 'medchat-web-v1'):
                 retrievals = [row for row in frame.get('tool_result_sequence', [])
                     if row.get('tool_name') == 'rag_search' and row.get('status') != 'not_calculated']
                 if retrievals:
@@ -432,7 +482,9 @@ class _TurnSender:
             if self.turn.waiting is not None:
                 flag = self.turn.waiting.context.metadata['capabilities']['rag']
             frame['metadata']['rag_requested'] = flag if type(flag) is bool else None
-        text = json.dumps(frame, ensure_ascii=False, allow_nan=False)
+        # The browser's frame limit applies after these correlation fields are
+        # added. Retain every result/index; do not spend it on JSON whitespace.
+        text = json.dumps(frame, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
         if frame['type'] == 'complete':
             if (getattr(self.sender._runtime, 'full_web', False)
                     and frame.get('status') == 'rejected'
@@ -643,6 +695,7 @@ class WebDecisionRuntime:
             if self.full_web:
                 request.update(
                     mol_count_supplied='requested_count' in context.metadata,
+                    allow_molecular_clarification=context.metadata.get('allow_molecular_clarification') is True,
                     output_limit=context.metadata['decision_output_limit'],
                     input_max_chars=context.metadata['decision_input_max_chars'],
                     history_max_chars=context.metadata['decision_history_max_chars'])
@@ -726,7 +779,9 @@ class WebDecisionRuntime:
                 **({'history': web_request.get('memory', []),
                     'max_output_tokens': web_request['output_limit'],
                     'input_max_chars': web_request['input_max_chars'],
-                    'history_max_chars': web_request['history_max_chars']} if self.full_web else {}))
+                    'history_max_chars': web_request['history_max_chars'],
+                    'allow_molecular_clarification': web_request.get('allow_molecular_clarification') is True}
+                   if self.full_web else {}))
             context = prepared.context
             context.memory = history_pairs(web_request.get('memory', []))
             return _Waiting(context, prepared, continuation_id,
@@ -906,8 +961,10 @@ class WebDecisionRuntime:
                 result.metadata['ordinary_admission'].pop('total_model_requests', None)
                 result.metadata.update(_durable_admission_facts(self.store, turn.trace_id, turn.admission_carry))
                 result.metadata['ordinary_admission'].update(stage='loop', reason=reason)
-        for frame in _result_frame(handler, result, False):
-            await _TurnSender(sender, turn).send_text(frame)
+        turn_sender = _TurnSender(sender, turn)
+        for frame in await _prepare_result_frames(handler, result, False,
+                websocket=turn_sender, store=self.store):
+            await turn_sender.send_text(frame)
 
     async def _projection_failed(self, sender, turn):
         if turn.terminal_sent or not sender.writable:
@@ -934,6 +991,237 @@ class WebDecisionRuntime:
             except asyncio.CancelledError:
                 pass
 
+    @staticmethod
+    def _compiled_plan_metadata(plan: ScientificPlan) -> dict:
+        """Return the bounded, non-secret fields a Web result may expose."""
+        payload = plan.model_dump(mode="json")
+        return {
+            "scientific_plan_status": plan.status,
+            "workflow_version": plan.workflow_version,
+            "required_tools": list(plan.required_tools),
+            "metrics": list(plan.metrics),
+            "missing_fields": list(plan.missing_fields),
+            "missing_capabilities": list(plan.missing_capabilities),
+            "scientific_plan": payload,
+        }
+
+    def _compiled_terminal_result(self, context: AgentContext, plan: ScientificPlan) -> AgentResult:
+        """Build a clarification/rejection without opening a workflow run."""
+        metadata = {
+            "backend": "pi",
+            "binding_profile": "medchat-web-v1",
+            "stop_reason": "scientific_input_missing"
+            if plan.status == "clarification" else "scientific_capability_unsupported",
+            **self._compiled_plan_metadata(plan),
+        }
+        if plan.status == "clarification":
+            message = (
+                "请提供要计算的分子的有效 SMILES（例如 CCO），"
+                "再提交性质计算请求；当前未调用模型或科学工具。"
+            )
+            # Resumable requests go through Pi's authenticated continuation
+            # path. A terminal admission result must not advertise a fake wait.
+            metadata["stop_reason"] = "molecular_input_required"
+            error = AgentExecutionError(
+                AgentErrorCode.INVALID_INPUT,
+                message,
+                {"reason": "molecular_input_required"},
+            )
+        else:
+            message = plan.message or (
+                "当前请求包含尚未接入的科学能力；本次未运行部分性质计算，"
+                "请拆分请求或使用已支持的性质分析。"
+            )
+            error = AgentExecutionError(
+                AgentErrorCode.INVALID_INPUT,
+                message,
+                {"reason": "scientific_capability_unsupported"},
+            )
+        return AgentResult(
+            trace_id=context.trace_id,
+            success=False,
+            message=message,
+            skill_name=context.active_skill,
+            final_answer=message,
+            outcome=RunOutcome.REJECTED,
+            error=error,
+            metadata=metadata,
+        )
+
+    async def _execute_compiled_scientific_plan(
+        self,
+        handler,
+        websocket,
+        *,
+        context: AgentContext,
+        plan: ScientificPlan,
+        worker_owner,
+        cancel_event,
+    ) -> AgentResult:
+        """Run a reviewed property plan through the existing Pi session authority.
+
+        This is deliberately a small server-owned bridge: the compiler owns the
+        exact steps, WorkflowOrchestrator/WorkflowRunSession owns tool execution
+        and provenance, and the configured Agent model is not asked to authorize
+        or rewrite an already-valid scientific obligation.
+        """
+        from src.agent.orchestrators.workflow import WorkflowOrchestrator
+        from src.agent.scientific_session.decision_execution import settle_owned_call
+
+        events = []
+        if plan.status != "ready":
+            result = self._compiled_terminal_result(context, plan)
+        else:
+            bus = AgentEventBus(on_event=events.append, state_store=self.store)
+            orchestrator = WorkflowOrchestrator(
+                event_bus=bus,
+                state_store=self.store,
+                workflow_version=plan.workflow_version,
+            )
+            tools = {}
+            unavailable = []
+            for tool_name in plan.required_tools:
+                try:
+                    tools[tool_name] = self.registry.resolve(
+                        tool_name, require_available=False
+                    )
+                except (KeyError, PermissionError, RuntimeError):
+                    unavailable.append(tool_name)
+
+            if unavailable:
+                observations = [
+                    ToolResult.error_result(
+                        tool_name,
+                        AgentErrorCode.TOOL_UNAVAILABLE,
+                        "Reviewed scientific tool is unavailable",
+                        details={"reason": "tool_unavailable"},
+                    )
+                    for tool_name in unavailable
+                ]
+                result = AgentResult.from_tool_results(
+                    trace_id=context.trace_id,
+                    skill_name=context.active_skill,
+                    tool_results=observations,
+                    message="科学工具当前不可用；未产生可验证结果。",
+                    metadata={},
+                )
+            else:
+                try:
+                    result = await settle_owned_call(
+                        lambda: orchestrator.run(
+                            context,
+                            list(plan.steps),
+                            tools,
+                            idempotency_key=(
+                                "web-property:" + context.trace_id
+                            ),
+                            cancel_event=cancel_event,
+                        ),
+                        worker_owner=worker_owner,
+                    )
+                except WorkerCleanupError:
+                    raise
+                except (Exception, asyncio.CancelledError):
+                    result = AgentResult(
+                        trace_id=context.trace_id,
+                        success=False,
+                        message="科学工具执行未完成；未发布未经验证的结果。",
+                        skill_name=context.active_skill,
+                        final_answer="",
+                        outcome=RunOutcome.FAILED,
+                        error=AgentExecutionError(
+                            AgentErrorCode.INTERNAL_ERROR,
+                            "Scientific execution failed",
+                        ),
+                        metadata={"stop_reason": "scientific_execution_failed"},
+                    )
+
+            result.metadata.update(self._compiled_plan_metadata(plan))
+            result.metadata.update(
+                binding_profile="medchat-web-v1",
+                backend="pi",
+            )
+
+        # Events are produced by the same durable AgentEventBus as ordinary Pi
+        # sessions. Serialize only after the session has settled so no event
+        # callback can outlive the worker owner or race terminal delivery.
+        for event in events:
+            frame, _ = _event_frame(handler, event)
+            await await_with_deadline(
+                websocket.send_text(frame), timeout=SEND_TIMEOUT_SECONDS
+            )
+
+        frames = await _prepare_result_frames(handler, result, False,
+            websocket=websocket, store=self.store)
+        if cancel_event is not None and cancel_event.is_set() and result.outcome != RunOutcome.CANCELLED:
+            raise asyncio.CancelledError()
+        execution = {**result.to_legacy_dict(), "trace_id": result.trace_id}
+        await _deliver_result(
+            handler,
+            websocket,
+            frames,
+            _presentation_admission(execution),
+        )
+        return result
+
+    def _compiled_context(self, sender, turn, envelope, plan: ScientificPlan) -> AgentContext:
+        """Bind the validated plan to the authenticated Web session."""
+        model_name = getattr(self.application.model, "model_name", None)
+        context = AgentContext(
+            query=plan.original_query,
+            trace_id=turn.trace_id,
+            user_id=sender.scope["agent_session_id"],
+            session_id=sender.scope["agent_session_id"],
+            active_skill="property_analysis",
+            workflow_name=plan.workflow_version,
+            model_name=model_name if isinstance(model_name, str) else None,
+            stream=True,
+            temperature=envelope.temperature,
+            mol_count=1,
+            memory=history_pairs(sender.memory),
+            metadata={
+                "capabilities": {
+                    "scientific_tools": envelope.enable_tools,
+                    "rag": envelope.enable_rag,
+                },
+                "rag_count": envelope.rag_count,
+                **self._compiled_plan_metadata(plan),
+            },
+        )
+        return context
+
+    def _finish_compiled_turn(self, sender, turn, context, result) -> None:
+        """Commit socket-local history after the compiled result was delivered."""
+        if self.full_web:
+            turn.scientific_update = (
+                [turn.scientific_projection.entry]
+                if turn.scientific_projection is not None
+                and result.outcome in {RunOutcome.COMPLETED, RunOutcome.PARTIAL}
+                and not result.metadata.get("waiting_for_input")
+                else [{"user": turn.payload.get("message", ""), "agent_used": False}]
+            )
+        history_memory = sender.memory
+        turn.history_update = retain_history_pair(
+            history_memory,
+            user=turn.payload.get("message", context.query),
+            assistant=result.final_answer or result.message,
+            request_kind="scientific",
+            outcome=result.outcome,
+            safely_displayed=bool(result.final_answer or result.message),
+            waiting_for_input=result.metadata.get("waiting_for_input") is True,
+            has_tool_content=bool(result.tool_results or result.evidence or result.artifacts),
+        )
+        if contains_secret_material(result.final_answer or result.message):
+            turn.history_update = HistoryUpdate(
+                history_pairs(history_memory), "history_pair_sensitive"
+            )
+        if sender.writable:
+            sender.memory = turn.history_update.memory
+            if self.full_web and turn.scientific_update is not None:
+                sender.scientific_memory[-1:] = turn.scientific_update[-1:]
+        turn.finishing = True
+        turn.terminal_sent = True
+
     async def _execute_segment(self, handler, sender, turn, *, allocation_sender=None):
         """The lease and all physical settlement stay inside the supervised child."""
         self._credit(turn)
@@ -943,24 +1231,67 @@ class WebDecisionRuntime:
             from src.agent.scientific_session.decision_execution import settle_owned_call
             envelope = validate_request_envelope(turn.payload,
                 session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id)
-            from .prompt_budget import InputBudgetExceeded, validate_question, character_limit
+            from .prompt_budget import InputBudgetExceeded, validate_question, character_limit, scientific_character_limit
             try:
                 validate_question(envelope.query, handler._input_limit())
                 character_limit(handler.config, section='history')
+                scientific_character_limit(handler.config, bool(getattr(handler.model, 'provider_name', None)))
             except InputBudgetExceeded:
                 raise DecisionAdmissionError('input_budget_exceeded') from None
             projection = WebTurnProjection(envelope.query, envelope.session_id,
                 turn.scientific_update or [], reverse_boundary=handler._ranked_reverse_evidence())
             turn.scientific_projection = projection
-            followup = await settle_owned_call(lambda: projection.followup(enable_tools=envelope.enable_tools),
+            followup = await settle_owned_call(lambda: projection.followup(
+                enable_tools=envelope.enable_tools, enable_rag=envelope.enable_rag),
                                                worker_owner=turn.worker_owner)
             if turn.cancel_event.is_set():
                 raise asyncio.CancelledError()
             if followup is not None:
                 turn.scientific_update = [projection.entry]
-                await (allocation_sender or _TurnSender(sender, turn)).send_text(json.dumps(
-                    dict(type='complete', trace_id=turn.trace_id, **followup), ensure_ascii=False))
+                destination = allocation_sender or _TurnSender(sender, turn)
+                # Read-only projections may return either the historical
+                # ``content`` field or the newer ``final_answer`` field. Do
+                # not evaluate a missing dict default eagerly: a valid
+                # evidence view must never fall into provider-unavailable.
+                content = followup.get('summary_content') if turn.result_format == 'summary_details_v1' else None
+                if content is None:
+                    content = followup.get('content') or followup.get('final_answer')
+                if not isinstance(content, str) or not content:
+                    raise ValueError('read-only follow-up content missing')
+                # Read-only evidence views still need a result before completion
+                # for the browser's turn state machine. They do not represent a
+                # new scientific execution or mint a second evidence snapshot.
+                outcome = RunOutcome(followup['status'])
+                result = AgentResult(turn.trace_id, outcome == RunOutcome.COMPLETED, content,
+                    final_answer=content, outcome=outcome, partial=outcome == RunOutcome.PARTIAL,
+                    metadata={'binding_profile': 'medchat-web-v1'})
+                if turn.result_format == 'summary_details_v1':
+                    frames = await _prepare_result_frames(handler, result, False,
+                        websocket=destination, store=self.store)
+                else:
+                    # Preserve the existing deterministic follow-up text. The
+                    # legacy general-answer sanitizer mistakes public URLs for
+                    # local paths; this public-science boundary does not.
+                    from src.system.scientific_public_data import public_scientific_data
+                    public, changed = public_scientific_data(result.to_legacy_dict())
+                    public.update(type='agent_result', trace_id=turn.trace_id, display_answer=public['final_answer'],
+                                  display_redacted_or_truncated=changed)
+                    complete = dict(type='complete', trace_id=turn.trace_id,
+                        content=public['final_answer'], status=followup['status'])
+                    frames = [json.dumps(frame, ensure_ascii=False, allow_nan=False,
+                        separators=(',', ':')) for frame in (public, complete)]
+                if turn.cancel_event.is_set():
+                    raise asyncio.CancelledError()
+                for frame in frames:
+                    await destination.send_text(frame)
                 return
+            if _should_compile_scientific_plan(envelope):
+                # This compiler is intentionally consulted only for an
+                # explicit property/drug-likeness profile. Conceptual chat
+                # such as "解释 LogP 是什么" remains ordinary Pi chat.
+                turn.scientific_plan = ScientificObligationCompiler().compile(
+                    envelope.query
+                )
             execution_payload = {**turn.payload, 'message': projection.execution_query()}
         await self.application._refresh_llm_config_from_env()
         self._credit(turn)
@@ -973,6 +1304,28 @@ class WebDecisionRuntime:
                 generation = self.application.model_generation
                 base = self.application.ordinary_capability_base if self.semantic else None
                 capability_generation = self.application.capability_generation if self.semantic else None
+                if (
+                    self.full_web
+                    and turn.waiting is None
+                    and turn.scientific_plan is not None
+                    and not _resumable_scientific_clarification(turn.scientific_plan)
+                ):
+                    context = self._compiled_context(
+                        sender, turn, envelope, turn.scientific_plan
+                    )
+                    turn.dispatching = True
+                    result = await self._execute_compiled_scientific_plan(
+                        handler,
+                        allocation_sender or _TurnSender(sender, turn),
+                        context=context,
+                        plan=turn.scientific_plan,
+                        worker_owner=turn.worker_owner,
+                        cancel_event=turn.cancel_event,
+                    )
+                    if turn.allocation_timed_out:
+                        return
+                    self._finish_compiled_turn(sender, turn, context, result)
+                    return
                 if turn.waiting is None:
                     if self.semantic:
                         prepared, context = await self._prepare_semantic(
@@ -983,12 +1336,23 @@ class WebDecisionRuntime:
                         prepared = prepare(execution_payload,
                             session_id=sender.scope['agent_session_id'], trace_id=turn.trace_id,
                             references=self.references, config_generation=generation,
-                            **({'history': sender.memory, 'max_output_tokens': handler._model_max_tokens(model),
+                            **({'history': ([] if turn.scientific_projection is not None
+                                            and turn.scientific_projection.concept_history is not None
+                                            else sender.memory),
+                                'max_output_tokens': handler._model_max_tokens(model),
+                                'allow_molecular_clarification': _resumable_scientific_clarification(turn.scientific_plan),
                                 'input_max_chars': handler._input_limit(),
+                                'scientific_input_max_chars': scientific_character_limit(
+                                    handler.config, bool(getattr(handler.model, 'provider_name', None))),
                                 'history_max_chars': character_limit(handler.config, section='history')}
                                if self.full_web else {}))
                         context = prepared.context
                         context.memory = history_pairs(sender.memory)
+                        if (self.full_web and turn.scientific_projection is not None
+                                and turn.scientific_projection.concept_history is not None):
+                            # The model answers a standalone concept; validated
+                            # session evidence is rendered separately, never as chat history.
+                            context.memory = []
                     sender.waiting = None
                     queries = (context.query,)
                 else:
@@ -1100,8 +1464,14 @@ class WebDecisionRuntime:
                 # normal terminal delivery; never overwrite a newer live one.
                 history_memory = sender.memory or (context.memory if turn.waiting is not None else [])
                 turn.history_update = retain_history_pair(history_memory,
-                    user=turn.payload['message'] if turn.waiting is not None else context.query,
-                    assistant=turn.displayed_answer or '',
+                    user=(turn.payload['message'] if turn.waiting is not None or
+                          (turn.scientific_projection is not None and
+                           turn.scientific_projection.concept_history is not None)
+                          else context.query),
+                    assistant=(turn.scientific_projection.safe_concept_history
+                        if turn.scientific_projection is not None
+                        and turn.scientific_projection.safe_concept_history is not None
+                        else turn.displayed_answer or ''),
                     request_kind=prepared.request_kind, outcome=result.outcome,
                     safely_displayed=turn.displayed_answer is not None,
                     waiting_for_input=result.metadata.get('waiting_for_input') is True,
@@ -1289,6 +1659,7 @@ class WebDecisionRuntime:
                 'run_snapshot_api': True,
                 'capabilities': {'cancel': True, 'rag_retrieval': self.full_web and 'rag_search' in registered,
                                  'scientific_tools': sorted(registered & scientific_tools),
+                                 **({'result_formats': ['summary_details_v1']} if self.full_web else {}),
                                  **({'chat_docking': {'preparation_available': True,
                                       'execution_authorized': False}} if controller is not None else {})}})
             while not self.closing:
@@ -1302,6 +1673,15 @@ class WebDecisionRuntime:
                     if any(name in payload and type(payload[name]) is not bool
                            for name in ('enable_tools', 'enable_rag')):
                         raise DecisionProtocolError('invalid_frame')
+                    result_format = None
+                    if 'result_format' in payload:
+                        if (not self.full_web or payload.get('type', 'chat') not in ('chat', 'resume')
+                                or type(payload['result_format']) is not str
+                                or payload['result_format'] != 'summary_details_v1'):
+                            raise DecisionProtocolError('invalid_frame')
+                        # Transport-only capability, stripped before any domain
+                        # admission, request identity, or frozen resume binding.
+                        result_format = payload.pop('result_format')
                 except DecisionProtocolError:
                     await sender.send({'type': 'error', 'code': 'invalid_frame'})
                     continue
@@ -1397,6 +1777,7 @@ class WebDecisionRuntime:
                     sender.waiting = waiting
                 turn = (_Turn(payload, trace_id=waiting.context.trace_id, waiting=waiting)
                         if waiting is not None else _Turn(payload))
+                turn.result_format = result_format
                 await sender.send({'type': 'request_accepted', 'turn_id': turn.turn_id,
                                    'trace_id': turn.trace_id})
                 if self.closing:

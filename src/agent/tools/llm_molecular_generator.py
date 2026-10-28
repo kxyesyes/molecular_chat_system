@@ -48,6 +48,11 @@ from src.agent.contracts.generation_request import (
 
 logger = logging.getLogger(__name__)
 
+# gmm-llama is an 8B Q4 model and its default 4096-token context nearly fills
+# an 8GB laptop GPU. Generation prompts and validated SMILES batches fit well
+# within 512 tokens, leaving headroom for other desktop GPU allocations.
+GENERATOR_CONTEXT_TOKENS = 512
+
 
 class _StrictGenerationUnavailable(Exception):
     def __init__(self):
@@ -655,7 +660,8 @@ class LLMMolecularGenerator(BaseMolecularTool):
                 strict = signature.parameters.get('strict_errors')
                 if (strict is not None and strict.kind is inspect.Parameter.KEYWORD_ONLY
                         and strict.default is False):
-                    signature.bind('', temperature=0.7, max_tokens=1000, strict_errors=True)
+                    signature.bind('', temperature=0.7, max_tokens=1000,
+                                   strict_errors=True, num_ctx=GENERATOR_CONTEXT_TOKENS)
                     return method
         except Exception:
             pass
@@ -709,7 +715,13 @@ class LLMMolecularGenerator(BaseMolecularTool):
                         executor.shutdown(wait=False, cancel_futures=True)
                 return self._run_async_in_new_loop(prompt, temperature, generate_method=method)
             provider_call_timeout()
-            return method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True)
+            return method(
+                prompt,
+                temperature=temperature,
+                max_tokens=1000,
+                strict_errors=True,
+                num_ctx=GENERATOR_CONTEXT_TOKENS,
+            )
         except (OllamaGenerationError, _StrictGenerationUnavailable, OwnedCallStopped):
             raise
         except (FutureTimeout, asyncio.TimeoutError):
@@ -727,7 +739,13 @@ class LLMMolecularGenerator(BaseMolecularTool):
             timeout = provider_call_timeout()
             return loop.run_until_complete(
                 asyncio.wait_for(
-                    generate_method(prompt, temperature=temperature, max_tokens=1000, strict_errors=True),
+                    generate_method(
+                        prompt,
+                        temperature=temperature,
+                        max_tokens=1000,
+                        strict_errors=True,
+                        num_ctx=GENERATOR_CONTEXT_TOKENS,
+                    ),
                     timeout=timeout
                 )
             )

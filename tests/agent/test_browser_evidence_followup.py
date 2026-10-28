@@ -165,6 +165,8 @@ def test_s11_native_workflow_keeps_activity_when_admet_unavailable(tmp_path):
     assert len(activity.calls) == len(admet.calls) == 1
     assert complete.get("status") == "partial"
     assert "pIC50" in complete["content"] and "降序" in complete["content"]
+    assert "分类与回归一致" in complete['content']
+    assert "不可用，未通过检查" in complete['content']
     assert "4.8" in complete["content"] and "4.5" in complete["content"]
     assert "| 1 | " + ASPIRIN in complete["content"]
     assert "ADMET" in complete["content"] and "原始" in complete["content"]

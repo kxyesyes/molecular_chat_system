@@ -2,6 +2,7 @@
 import asyncio
 from copy import deepcopy
 from dataclasses import replace
+import json
 
 import pytest
 
@@ -66,6 +67,37 @@ def test_actual_target_wrapper_matches_direct_typed_adapter(boundary, monkeypatc
     assert actual.quality['service_statuses'] == [status]
     assert actual.quality['lookup_path'] == ['fixture-local', 'fixture-authoritative']
     assert tool._service.calls == ['EGFR', 'EGFR']
+
+
+@pytest.mark.parametrize('title_size', [900, 3000])
+def test_partial_target_budget_accounts_for_canonical_diagnostic_copy(boundary, title_size):
+    from src.agent.scientific_session.decision_policy import model_observation
+    make, call = boundary
+
+    class LargePartialService(Service):
+        def search_targets(self, query):
+            result = super().search_targets(query)
+            row = result['results'][0]
+            row['recommended_structures'] = [{
+                'structure_id': f'S{i:03}', 'source': 'fixture',
+                'title': 'synthetic ' + 'x' * title_size,
+                'ligand_ids': ['SYN'],
+            } for i in range(10)]
+            return result
+
+    tool = TargetDatabaseTool()
+    tool._service = LargePartialService('partial')
+    result = call(lambda: SingleAttemptTool(make(tool)).execute({'query': 'EGFR'}))
+    assert result.status is ObservationStatus.PARTIAL
+    assert result.success is False
+    assert result.quality['lookup_status'] == 'partial'
+    assert len(json.dumps(result.to_legacy_dict()).encode()) < 64 * 1024
+    before = deepcopy(result.to_legacy_dict())
+    projected = model_observation(result, {'profile': 'medchat-web-v1'})
+    assert len(json.dumps(projected).encode()) < 12 * 1024
+    assert 'raw_result' not in projected['error']['details']
+    assert result.to_legacy_dict() == before
+    assert 'raw_result' in result.error.details
 
 
 @pytest.mark.parametrize('mode', ['not_found_rows', 'resolved_empty', 'bool_one',

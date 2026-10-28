@@ -33,6 +33,15 @@ def test_web_prompt_never_instructs_input_ref():
     prompt = decision_system_message('scientific', (), [], {}, binding_profile=WEB)['content']
     assert 'step_ref' in prompt and 'input_ref' not in prompt
 
+
+def test_web_prompt_separates_agent_and_generator_roles_and_evidence():
+    prompt = decision_system_message('scientific', (), [], {}, binding_profile=WEB)['content']
+    assert 'configured user-facing Agent model is separate' in prompt
+    assert 'llm_molecular_generator tool model' in prompt
+    assert 'unvalidated output as a scientific fact' in prompt
+    assert 'ordinary conversation history is not scientific evidence' in prompt
+    assert 'gmm-llama' not in prompt
+
 def test_web_catalog_only_lists_compiled_actions_with_step_arguments():
     class Registry:
         def resolve(self, name, **kwargs):

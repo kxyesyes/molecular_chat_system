@@ -172,7 +172,8 @@ def _proposal(call):
     return decision
 
 
-def project_messages(pi_messages, *, mode, system_message=None, include_feedback=False):
+def project_messages(pi_messages, *, mode, system_message=None, include_feedback=False,
+                     compact_observations=False):
     """Project a trusted Pi transcript without mutation or lossy science rewrites.
 
     All calls (including terminals and internal feedback) require an immediately
@@ -188,6 +189,8 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
     _mode(mode)
     if type(include_feedback) is not bool:
         raise DecisionProtocolError('invalid_pi_feedback_option')
+    if type(compact_observations) is not bool:
+        raise DecisionProtocolError('invalid_pi_compaction_option')
     # Raw Pi history includes system declaration deltas and terminal tool pairs.
     # Bound that envelope separately; _snapshot_messages below still enforces
     # the existing 64-message/128-KiB domain-model contract after projection.
@@ -261,6 +264,13 @@ def project_messages(pi_messages, *, mode, system_message=None, include_feedback
                     raise DecisionProtocolError('invalid_pi_clarification_history')
                 output.append({'role': 'assistant', 'content': _CLARIFY_HISTORY})
         else:
+            if compact_observations:
+                # Only a validated, paired tool result is compacted for outbound
+                # Web requests. Keep every token (including numeric spelling and
+                # HTML escapes) intact; audit/checkpoint projections stay exact.
+                decode_protocol_json(observation, max_bytes=64 * 1024, max_depth=32)
+                observation = re.sub(r'("(?:\\.|[^"\\])*")|[ \t\r\n]+',
+                                     lambda match: match.group(1) or '', observation)
             envelope = json.dumps({'decision': decision.model_dump()}, ensure_ascii=False)
             if mode == 'native':
                 output.extend([
@@ -287,10 +297,11 @@ class ModelProviderAdapter:
         self.mode = mode
 
     async def request(self, messages, timeout_seconds, *, system_message=None,
-                      temperature=None, max_tokens=None, input_budget=None):
+                      temperature=None, max_tokens=None, input_budget=None,
+                      compact_observations=False):
         try:
             projected = project_messages(messages, mode=self.mode, system_message=system_message,
-                                         include_feedback=True)
+                                         include_feedback=True, compact_observations=compact_observations)
         except DecisionProtocolError:
             # Feedback contributes to the actual model-input limit even when
             # omitted from the audit projection. Do not dispatch or classify
