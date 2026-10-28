@@ -3,6 +3,7 @@
 import logging
 import math
 import os
+import select
 import signal
 import subprocess
 import threading
@@ -877,6 +878,14 @@ class CommandAdapter:
             wait_for = _COMMAND_POLL_INTERVAL_SECONDS
             if remaining is not None:
                 wait_for = min(wait_for, remaining)
+            if receipt is None:
+                # Waiting only for child exit throttles a pipe-blocked writer
+                # to one pipe buffer per poll. Wake when output can be drained.
+                capture = process._medchat_capture_state
+                readers = [stream for name, stream in capture["streams"].items()
+                           if name not in capture["eof"]]
+                select.select(readers, [], [], wait_for)
+                continue
             try:
                 process.wait(timeout=wait_for)
             except subprocess.TimeoutExpired:
@@ -1440,6 +1449,7 @@ class CommandAdapter:
         # escaped the root process group; drain the parent ends directly.
         state = {
             "mode": "nonblocking",
+            "eof": set(),
             "total": 0,
             "buffers": {"stdout": bytearray(), "stderr": bytearray()},
             "exceeded": threading.Event(),
@@ -1457,6 +1467,8 @@ class CommandAdapter:
         if not state or state.get("mode") != "nonblocking":
             return
         for name, stream in state["streams"].items():
+            if name in state["eof"]:
+                continue
             while True:
                 try:
                     chunk = os.read(stream.fileno(), 64 * 1024)
@@ -1466,6 +1478,7 @@ class CommandAdapter:
                     state["errors"].append(type(error).__name__)
                     break
                 if not chunk:
+                    state["eof"].add(name)
                     break
                 state["total"] += len(chunk)
                 remaining = max(

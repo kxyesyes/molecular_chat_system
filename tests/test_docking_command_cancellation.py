@@ -766,6 +766,36 @@ def test_command_adapter_stops_output_flood_at_fixed_limit(tmp_path):
     assert "xxxxxxxx" not in repr(caught.value)
 
 
+def test_posix_output_supervisor_waits_for_pipe_data_not_child_exit(monkeypatch):
+    from types import SimpleNamespace
+    import select
+
+    adapter = CommandAdapter(sys.executable)
+    stdout, stderr = object(), object()
+    exceeded = threading.Event()
+    process = SimpleNamespace(pid=123, poll=lambda: None,
+        _medchat_capture_state={"mode": "nonblocking", "streams": {
+            "stdout": stdout, "stderr": stderr}, "eof": {"stderr"}})
+    def blocked_child_wait(**kwargs):
+        raise AssertionError("A pipe-blocked child cannot exit until output is drained")
+    process.wait = blocked_child_wait
+    waited = []
+    def readable(readers, writers, errors, timeout):
+        waited.append((readers, timeout))
+        exceeded.set()
+        return readers, [], []
+    cleaned = []
+    monkeypatch.setattr(select, "select", readable)
+    monkeypatch.setattr(adapter, "_drain_nonblocking_capture", lambda _: None)
+    monkeypatch.setattr(adapter, "_captured_output_exceeded", lambda _: exceeded.is_set())
+    monkeypatch.setattr(adapter, "_cleanup_posix_or_uncertain", lambda p: cleaned.append(p))
+    with pytest.raises(CommandOutputLimitError):
+        adapter._supervise_posix(process, [], 10, time.monotonic() + 10, None)
+    assert len(waited) == 1 and waited[0][0] == [stdout]
+    assert 0 < waited[0][1] <= 0.2
+    assert cleaned == [process]
+
+
 def test_failed_workflow_removes_partial_directory_and_allows_retry(tmp_path):
     service, calls = _successful_service(tmp_path)
     service.prepare_protein = lambda *_args, **_kwargs: False

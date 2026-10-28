@@ -132,14 +132,18 @@ async function actualMain(frames, {failReport = false, failProperties = false, f
   const resolve = section("function resolveCompletionAction(", "  // 完成最后一条消息");
   const complete = section("function completeLastMessage(", "  // 显示状态消息");
   const cases = section('case "molecule_candidates":', 'case "rag_info":');
+  const readiness = section('function setAgentReadiness(readiness)', '    function invalidateAgentReadinessRequests()');
   const handler = new Function("window", "document", "moleculeCandidateLifecycle", "evidenceReportLifecycle", "evidenceReportViews", "scientificReferences", "box", `
     const elements = {chatContainer: {querySelector: selector => selector.includes("typing") ? null : box}};
     const HomeFormatters = {formatContent: v => v}; const HomeState = {}; const currentMessages = [];
     const HomeChatRenderer = {showNotification() {}};
+    const authoritativeAgentModelName = 'offline-frame-fixture';
+    const agentConfigInputVersion = 0, agentConfigSavedInputVersion = 0;
+    let agentReadiness = 'unknown';
     function removeTypingIndicator() {} function updateToolbarControlStates() {} function clearToolStatus() {} function showToolStatus() {}
     function appendToLastMessage(content) {box.setAttribute("data-content", content);}
     function addAssistantMessage(content) {box.setAttribute("data-content", content); return box;}
-    ${display}\n${resolve}\n${complete}\n${renderer}
+    ${readiness}\n${display}\n${resolve}\n${complete}\n${renderer}
     return message => {switch(message.type) {${cases}}};
   `)(window, document, moleculeCandidateLifecycle, evidenceReportLifecycle, evidenceReportViews, scientificReferences, box);
   const originalReport = api.renderReport, originalProps = api.renderProperties;

@@ -331,12 +331,12 @@ def test_uncited_property_evidence_cannot_establish_bounds(make):
     assert report['property_constraints']['candidates'][0]['checks'][0]['value'] is None
 
 
-def test_optional_failure_is_attempted_visible_and_never_completion(make, monkeypatch):
+def test_required_property_failure_is_attempted_visible_and_never_completion(make, monkeypatch):
     a = api()
     raw = {'success': True, 'data': [{'smiles': 'CCO', 'model': 'offline-fixture', 'source': 'llm'}],
         'quality': {'requested_count': 1, 'actual_count': 1, 'partial_generation': False}}
     case = make('生成 1 个分子，并计算理化性质', 'molecular_design', generated=raw)
-    assert case.steps[1].required is False
+    assert case.steps[1].required is True
     monkeypatch.setattr(case.tools[0], 'execute', lambda _: {'success': False, 'error': 'Offline test unavailable'})
     first = execute(case, 0)
     failed = execute(case, 1)

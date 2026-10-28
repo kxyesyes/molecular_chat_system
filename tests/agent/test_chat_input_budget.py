@@ -451,15 +451,20 @@ def test_shared_retrieval_and_ui_provenance_survive_prompt_budget(
                                                 'enable_tools':entry != 'legacy', 'rag_count':1})
                     result = result_of(frames)
                     assert result['status'] == 'completed', result
-                    assert len(bundle.calls) == 2
+                    assert len(bundle.calls) == 1
                     for payload in bundle.calls:
                         assert query in json.dumps(payload['messages'], ensure_ascii=False)
                         assert sum(len(m.get('content') or '') for m in payload['messages']) <= 24000
-                    # Tool evidence/receipt is mandatory scientific input, not
-                    # the old optional RAG prose block; rag_cap=0 cannot erase it.
-                    observation = next(m for m in bundle.calls[-1]['messages'] if m['role'] == 'tool')
-                    assert rag.manifest.source_sha256 in observation['content']
-                    assert rag.manifest.index_sha256 in observation['content']
+                    # Completed retrieval closes the plan without another
+                    # model request. Its full authenticated receipt remains
+                    # scientific output even when the optional prose cap is 0.
+                    observation, = result['tool_result_sequence']
+                    published = json.dumps(observation)
+                    assert rag.manifest.source_sha256 in published
+                    assert rag.manifest.index_sha256 in published
+                    acceptance = result['metadata']['task_acceptance']
+                    assert acceptance['finish_eligible'] and acceptance['citation_checked']
+                    assert observation['quality']['evidence_id'] in acceptance['cited_closure_ids']
                     assert not bundle.rag.retrieve.called
                     return frames
             finally:
@@ -535,23 +540,40 @@ def test_actual_model_history_selection_and_chronology(actual_app, stream, case)
         question += "问" * 1200
     async def run():
         async with actual_app(ordinary_policy=None) as bundle:
+            limit = total_cap
             bundle.app.chat_handler.config = {'inference': {
-                'stream':stream, 'external_input_max_chars':total_cap, 'history_input_max_chars':history_cap}}
+                'stream':stream, 'external_input_max_chars':limit, 'history_input_max_chars':history_cap}}
             async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
                 await socket.ready()
                 sender, = bundle.app.decision_runtime.sockets
+                if case == 'total_limited':
+                    from src.agent.decision_transport import _HISTORY_OMITTED
+                    # Size the fixture from the real mandatory protocol rather
+                    # than depending on the current system prompt's wording.
+                    baseline = await socket.turn({'message':question, 'enable_tools':False, 'enable_rag':False})
+                    assert baseline[-1]['status'] == 'completed'
+                    payload, = bundle.calls
+                    mandatory = sum(len(m.get('content') or '') for m in payload['messages'])
+                    limit = mandatory + sum(map(len, latest.values())) + len(_HISTORY_OMITTED) + 16
+                    bundle.app.chat_handler.config['inference']['external_input_max_chars'] = limit
+                    bundle.calls.clear()
                 sender.memory[:] = history
                 frames = await socket.turn({'message':question, 'enable_tools':False, 'enable_rag':False})
                 assert frames[-1]['status'] == 'completed', frames[-1]
                 payload, = bundle.calls
                 messages = payload['messages']
                 assert messages[-1] == {'role':'user', 'content':question}
-                assert sum(len(m.get('content') or '') for m in messages) <= total_cap
+                assert sum(len(m.get('content') or '') for m in messages) <= limit
                 selected = [m for m in messages if m['role'] != 'system'][:-1]
                 latest_pair = [{'role':role, 'content':latest[role]} for role in ('user', 'assistant')]
                 assert selected[-2:] == latest_pair
                 assert sum(len(m['content']) for m in selected) <= history_cap
                 assert sender.memory[:2] == history == [old, latest]
+                if case == 'total_limited':
+                    mandatory = sum(len(m['content']) for m in messages if m['role'] == 'system') + len(question)
+                    history_size = sum(len(value) for pair in history for value in pair.values())
+                    assert history_size <= history_cap
+                    assert mandatory + sum(map(len, latest.values())) <= limit < mandatory + history_size
                 if case == 'both':
                     assert selected == [{'role':role, 'content':pair[role]}
                                         for pair in (old, latest) for role in ('user', 'assistant')]

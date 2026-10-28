@@ -638,8 +638,11 @@ async def test_cancelled_agent_waits_for_worker_before_releasing_request():
 
 @pytest.mark.anyio
 @pytest.mark.parametrize('cancel_request', [False, True])
-@pytest.mark.parametrize('first_decision_delay', [0, 3.2])
-async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path, monkeypatch, cancel_request, first_decision_delay):
+@pytest.mark.parametrize('execution_path,first_decision_delay', [
+    ('pi', 0), ('pi', 3.2), ('compiled', 0),
+])
+async def test_assembled_agent_and_inference_remain_stable_until_switch(
+        tmp_path, monkeypatch, cancel_request, execution_path, first_decision_delay):
     from src.web.app import MolecularChatApp
     from src.web.routes import design_routes
     from src.web.decision_runtime import _Sender, _Turn
@@ -699,7 +702,9 @@ async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path
     socket = Socket()
     sender = _Sender(socket)
     sender._runtime = app.decision_runtime
-    turn = _Turn({'message':'只计算 CCO 的分子量与 logP', 'enable_tools':True, 'enable_rag':False})
+    query = ('计算 CCO 的理化性质和类药性，不要 ADMET 或活性' if execution_path == 'pi'
+             else '只计算 CCO 的分子量与 logP')
+    turn = _Turn({'message':query, 'enable_tools':True, 'enable_rag':False})
     async def request():
         turn.task = asyncio.current_task()
         app.decision_runtime.active_owners.add(turn)
@@ -710,7 +715,10 @@ async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path
         # This tests ownership during a running tool, not end-to-end latency.
         # Pi startup and the first provider response have their own guard;
         # dispatch/physical tool entry must still meet the original 3 seconds.
-        await asyncio.wait_for(protocol_ready.wait(), 15)
+        # Bounded property requests now dispatch directly from the compiled
+        # plan. The compound case still exercises Pi and provider latency.
+        if execution_path == 'pi':
+            await asyncio.wait_for(protocol_ready.wait(), 15)
         assert await asyncio.to_thread(started.wait, 3), {
             'chat_done': chat.done(),
             'decision_calls': len(original.messages),
@@ -738,6 +746,7 @@ async def test_assembled_agent_and_inference_remain_stable_until_switch(tmp_path
         assert app.agent_state_store.get_run(turn.trace_id)['session_id'] == 'server-owner'
         assert not app.decision_runtime.active_owners and app.model_request_gate._readers == 0
         assert observations == [(original, original_stream)] * 2
+        assert bool(original.messages) is (execution_path == 'pi')
         assert app.agent_system.llm is app.model
         assert app.model.model_name == 'B'
         assert original.closed

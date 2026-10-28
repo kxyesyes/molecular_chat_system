@@ -1,6 +1,7 @@
 """Read-only follow-up over target-design candidate evidence."""
 
 from src.agent.candidate_evidence_followup import accepted_candidate_evidence, followup_answer
+import pytest
 
 
 SESSION = "candidate-evidence-session"
@@ -8,6 +9,16 @@ QUERY = (
     "请根据刚才两个候选的分子性质和已返回的 ADMET 结果重新排序，"
     "说明使用了哪些证据、哪些证据仍缺失；不要重新生成分子。"
 )
+
+
+@pytest.mark.parametrize('query', [
+    '对 CCO 做反向寻靶，列出排名第一的候选靶点',
+    'Reverse target prediction for CCO and show rank 1 target, show top five',
+    '只保留通过一致性检查的候选，按活性证据排序；解释另外的候选为何没有参与排序，不要改动原始预测。',
+    '比较 CCO 和 CCN 的性质、ADMET 和 BuChE 活性，按可用证据排序',
+])
+def test_candidate_review_does_not_intercept_other_scientific_domains(query):
+    assert followup_answer(query, [], SESSION) is None
 
 
 def observation(tool_name, data, evidence_id):

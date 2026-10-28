@@ -141,6 +141,20 @@ class WebTurnProjection:
                     len(candidate_evidence.get('candidates', [])) if candidate_evidence else 0)
         if candidate_evidence is not None:
             self.entry['candidate_evidence'] = candidate_evidence
+        if (getattr(context, 'metadata', {}).get('scientific_plan_status') == 'ready'
+                and context.workflow_name in {'web-property-v1', 'web-admet-v1'}
+                and result.metadata.get('workflow_version') == context.workflow_name):
+            # Reviewed compiler workflows do not produce a model-cited JSON
+            # answer. Reuse their validated observations through the same
+            # molecular identity/provenance gate as the ordinary Pi path.
+            properties = property_comparison.accepted_property_evidence(raw, query, self.session_id)
+            self.entry['agent_used'] = True
+            if properties is not None:
+                self.entry['property_evidence'] = properties
+            if {item['tool_name'] for item in raw['tool_result_sequence']} == {'property_calculator'}:
+                return property_comparison.descriptor_result(
+                    self.query, properties, self.history, self.session_id)
+            return None
         try:
             audit = json.loads(result.final_answer)
             cited = {block['evidence_id'] for block in audit['observations'] if 'data' in block}

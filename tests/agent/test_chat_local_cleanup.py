@@ -80,6 +80,12 @@ class Properties(PropertyCalculator):
 def local_case(tmp_path, *, tools=(), model=None, scientific=None, plain=(), owner='local-owner'):
     handler = make_web_handler(tools, SQLiteAgentStateStore(tmp_path / 'local.sqlite'),
                                model=model or Model())
+    compiled = handler.decision_runtime._execute_compiled_scientific_plan
+    async def observe_compiled(*args, **kwargs):
+        result = await compiled(*args, **kwargs)
+        handler.web_results.append(result)
+        return result
+    handler.decision_runtime._execute_compiled_scientific_plan = observe_compiled
     sender = _Sender(WebSocket(owner))
     sender._runtime = handler.decision_runtime
     sender.scientific_memory = scientific if scientific is not None else History()
@@ -141,21 +147,20 @@ def test_each_terminal_path_appends_one_scientific_marker_and_only_eligible_plai
         assert sender.memory == plain, 'scientific/rejected/failed content is not a plain chat pair'
     if mode == 'scientific':
         assert complete['status'] == 'completed'
-        assert properties.calls == [query] and len(model.messages) == 2
+        assert properties.calls == ['CCO'] and model.messages == []
         assert history[-1]['agent_used'] is True and history[-1]['property_evidence']
         assert '分子量' in complete['content']
     if mode == 'tool_failure':
-        # Pi can settle a scientific request as partial with an explicit failed
-        # observation. This is not the failed AgentResult injected by the old
-        # generic executor; provider failure below covers the failed terminal.
-        assert complete['status'] == 'partial'
+        # A compiled one-step plan with no usable output is a failed request.
+        assert complete['status'] == 'failed'
         assert len(properties.calls) == 1
-        assert history[-1] == {'user': query, 'agent_used': True}
+        assert history[-1] == {'user': query, 'agent_used': False}
         result, = handler.web_results
-        assert not result.success and result.partial
+        assert not result.success and not result.partial
         assert result.tool_results[0].error.code is AgentErrorCode.TOOL_UNAVAILABLE
         assert 'property_evidence' not in history[-1]
-        assert complete['failed_steps'] and complete['partial'] is True
+        public, = [frame for frame in frames if frame['type'] == 'agent_result']
+        assert public['tool_result_sequence'][0]['error']['code'] == 'tool_unavailable'
     if mode == 'model_failure':
         assert complete['status'] == 'failed' and len(model.messages) == 1
         assert properties.calls == [] and history[-1]['agent_used'] is False
@@ -223,7 +228,7 @@ def test_rag_capability_paths_preserve_raw_receipt_and_cap_accepted_cards(tmp_pa
     assert public['metadata']['retrieval_performed'] is True
     assert len(sender.scientific_memory) == len(sender.scientific_memory.appended) == 1
     assert sender.memory == [] and handler.conversation_history == []
-    assert len(handler.model.messages) == 2
+    assert len(handler.model.messages) == 1
     checkpoint = handler.decision_runtime.store.latest_checkpoint(result.trace_id)
     assert checkpoint['output']['data'] == before[:count]
 
@@ -278,7 +283,7 @@ def test_scientific_terminal_never_invokes_retired_prose_summary_or_stream(tmp_p
     assert all(after is old for after, old in zip(history[:-1], before[4:]))
     assert history[-1]['property_evidence'] and history[-1]['agent_used'] is True
     assert sender.memory == [] and handler.conversation_history == []
-    assert properties.calls == ['只计算 CCO 的分子量和 logP'] and len(handler.model.messages) == 2
+    assert properties.calls == ['CCO'] and handler.model.messages == []
     assert not any(frame['type'] == 'stream' for frame in frames)
     public, = [frame for frame in frames if frame['type'] == 'agent_result']
     assert public['display_answer'] == complete['content']

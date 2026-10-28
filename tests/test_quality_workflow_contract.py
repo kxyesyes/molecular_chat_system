@@ -118,7 +118,7 @@ def test_quality_workflow_shards_python_suite_and_preserves_final_gate() -> None
         "${{ matrix.pytest_target }} -q -p no:cacheprovider "
         "${{ matrix.pytest_args }}"
     ) in workflow
-    assert workflow.count("command_timeout:") == 14
+    assert workflow.count("command_timeout:") == 16
     assert "command_timeout: 180" in workflow
     for target in (
         AGENT_CORE_TARGET,
@@ -167,7 +167,8 @@ def test_agent_timeout_diagnostics_only_add_named_progress_and_durations():
     assert {name: row["pytest_args"] for name, row in matrix.items()
             if not name.startswith('agent')} == {
         "sandbox-api": "--timeout=60", "sandbox-core": "--timeout=60",
-        "task-runtime": "", "root": "", "root-activity": "",
+        "task-runtime": "-vv --durations=25", "task-runtime-chat": "-vv --durations=25",
+        "root": "-vv --durations=25", "root-docking": "-vv --durations=25", "root-activity": "",
     }
 
 
@@ -196,10 +197,10 @@ def test_root_partition_preserves_deadlines_and_all_jobs_gate():
     jobs = _quality_jobs()
     python = jobs["python-tests"]
     matrix = {row["name"]: row for row in python["strategy"]["matrix"]["include"]}
-    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "root", "root-activity"} | set(AGENT_PI_PARTITIONS)
+    assert set(matrix) == {"agent", "agent-web-lifecycle", "agent-docking", "agent-docking-publication", "sandbox-api", "sandbox-core", "task-runtime", "task-runtime-chat", "root", "root-docking", "root-activity"} | set(AGENT_PI_PARTITIONS)
     assert python["strategy"]["fail-fast"] is False
     assert matrix["root"]["pytest_target"] == "tests --ignore=tests/agent --ignore=tests/sandbox_broker --ignore=tests/task_runtime"
-    assert matrix["root"]["pytest_args"] == ""
+    assert matrix["root"]["pytest_args"] == "-vv --durations=25"
     assert matrix["root-activity"]["pytest_target"] == "tests/test_activity*.py"
     assert matrix["root-activity"]["pytest_args"] == ""
     assert all(row["command_timeout"] == (
@@ -505,6 +506,40 @@ raise SystemExit(pytest.main(sys.argv[1:], plugins=[Capture()]))
     ids = json.loads(captures[0])
     assert ids and len(ids) == len(set(ids))
     return set(ids)
+
+
+@pytest.mark.parametrize('domain,names', [
+    ('root', ('root', 'root-docking', 'root-activity')),
+    ('task-runtime', ('task-runtime', 'task-runtime-chat')),
+])
+def test_expensive_root_and_task_families_remain_complete_under_actual_shell(tmp_path, domain, names):
+    files = (
+        'tests/test_future.py', 'tests/test_activity_future.py', 'tests/test_activity_docking_future.py',
+        'tests/test_docking_future.py', 'tests/test_chat_docking_future.py',
+        'tests/nested/test_activity_nested.py', 'tests/nested/test_docking_nested.py',
+        'tests/agent/test_agent.py', 'tests/sandbox_broker/test_sandbox.py',
+        'tests/task_runtime/test_future.py', 'tests/task_runtime/test_chat_docking_future.py',
+        'tests/task_runtime/nested/test_chat_docking_nested.py',
+    )
+    for name in files:
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("import pytest\n@pytest.mark.parametrize('value', [1, 2])\ndef test_case(value):\n    assert value\n", encoding='utf-8')
+    (tmp_path / 'pytest.ini').write_text('[pytest]\n', encoding='utf-8')
+    matrix = {row['name']: row for row in _quality_jobs()['python-tests']['strategy']['matrix']['include']}
+    assert all(name in matrix for name in names), 'expensive file families need independent bounded jobs'
+    environment = {key: os.environ[key] for key in ('SYSTEMROOT', 'WINDIR', 'PATH', 'TEMP', 'TMP', 'COMSPEC')
+                   if key in os.environ}
+    environment.update(PYTHONDONTWRITEBYTECODE='1', PYTHONIOENCODING='utf-8')
+    baseline = dict(matrix[domain], name='baseline', pytest_exclude='', pytest_args='')
+    original = _collect_agent_with_actual_bash(tmp_path, baseline, environment)
+    partitions = [_collect_agent_with_actual_bash(tmp_path, matrix[name], environment) for name in names]
+    assert all(partitions)
+    assert all(left.isdisjoint(right) for i, left in enumerate(partitions) for right in partitions[i + 1:])
+    assert set.union(*partitions) == original
+    assert any('/nested/' in item for item in partitions[0]), 'nested future tests stay in the base job'
+    assert all(matrix[name]['command_timeout'] == 600 for name in names if name != 'root-activity')
+    assert all(matrix[name]['pytest_args'] == '-vv --durations=25' for name in names if name != 'root-activity')
 
 
 @pytest.mark.parametrize('fault', [None, 'overlap', 'omission', 'docking_overlap', 'docking_omission', 'docking_empty',

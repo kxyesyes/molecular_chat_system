@@ -139,7 +139,8 @@ def test_actual_pi_bare_structure_retrieves_once_with_original_query(tmp_path, t
     cards = [frame for frame in frames if frame['type'] == 'rag_info']
     assert len(cards) == 1 and cards[0]['molecules'][0]['smiles'] == 'CCO'
     assert cards[0]['molecules'][0]['provenance']['source_sha256'] == 'a' * 64
-    assert len(handler.model.messages) == 2
+    assert len(handler.model.messages) == 1
+    assert result['metadata']['task_acceptance']['finish_eligible'] is True
 
 
 @pytest.mark.parametrize('rag', [False, True])

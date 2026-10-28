@@ -20,6 +20,7 @@ from src.agent.scientific_session.decision_policy import DecisionBoundaryError
 from src.agent.scientific_session.web_bindings import WebBindingResolver
 from src.agent.scientific_session.web_requirements import compile_web_requirements
 from src.agent.tools.property_calculator import PropertyCalculator
+from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from tests.agent.test_decision_loop import setup_loop, tool, clarify, finish_last
 
 
@@ -28,27 +29,33 @@ ALLOWED = {'property_calculator'}
 
 
 def make_case(setup_loop, profile, *, mode='native'):
+    allowed = ALLOWED | {'drug_likeness_assessment'} if profile == WEB else ALLOWED
+    tools = [PropertyCalculator()]
     context = AgentContext(
-        '只计算 CCO 的分子量和 logP，不要 ADMET 或活性' if profile == WEB else 'SMILES: CCO',
+        '计算 CCO 的理化性质和类药性，不要 ADMET 或活性' if profile == WEB else 'SMILES: CCO',
         'stable-action-context', user_id='owner', session_id='session',
         active_skill='admet_assessment' if profile == WEB else None,
     )
     if profile == WEB:
-        requirements = compile_web_requirements(context, allowed_tools=ALLOWED)
-        step, = requirements.steps
+        requirements = compile_web_requirements(context, allowed_tools=allowed)
+        step, pending = requirements.steps
         proposal = tool(arguments={'step_ref': step.name})
+        # Pause while the compiled drug-likeness obligation is still pending.
+        final = tool(pending.tool_name, {'step_ref': pending.name})
+        tools.append(DrugLikenessAssessment())
     else:
         requirements = (dict(version='2', profile=profile,
             molecular_results=[dict(tool_name='property_calculator', required_metrics=['logp'])])
             if profile is not None else None)
         proposal = tool()
-    case = setup_loop([proposal, clarify(), proposal, finish_last],
-                      [PropertyCalculator()], binding_profile=profile, mode=mode)
+        final = finish_last
+    case = setup_loop([proposal, clarify(), proposal, final],
+                      tools, binding_profile=profile, mode=mode)
 
     def run(**kwargs):
         owner = WorkerOwner()
         result = asyncio.run(controller.ScientificSession(case.loop).run(
-            context, request_kind='scientific', allowed_tools=ALLOWED, required_tools=ALLOWED,
+            context, request_kind='scientific', allowed_tools=allowed, required_tools=allowed,
             requirements=requirements, event_bus=case.bus, worker_owner=owner, **kwargs))
         assert owner.status == 'settled' and owner.pending_roots == 0
         return result
@@ -109,7 +116,9 @@ def test_waiting_replay_uses_profile_step_identity(setup_loop, profile, revision
     assert resumed.success, resumed.metadata
     assert resumed.metadata['reused_decisions'] == 1
     assert resumed.tool_results[0].to_legacy_dict() == before
-    assert len(case.store.get_tool_executions(context.trace_id)) == 1
+    executions = case.store.get_tool_executions(context.trace_id)
+    assert len(executions) == (2 if profile == WEB else 1)
+    assert sum(item['tool_name'] == 'property_calculator' for item in executions) == 1
     assert len(case.model.messages) == 4
 
 

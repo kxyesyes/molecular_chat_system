@@ -86,7 +86,8 @@ def test_official_pi_full_web_generation_feedback_and_real_properties(setup_loop
     assert result.metadata['backend'] == 'pi'
     assert result.success is (not failed), result.metadata
     assert len(result.tool_results) == (1 if failed else 2)
-    assert len(bundle.model.messages) == (2 if failed else 3)
+    # The compiled Web plan completes as soon as its observations are ready.
+    assert len(bundle.model.messages) == 2
     if failed:
         assert result.metadata['waiting_for_input']
         assert result.tool_results[0].error.code is AgentErrorCode.MODEL_UNAVAILABLE
@@ -113,7 +114,7 @@ def test_official_pi_full_web_resume_reuses_generated_candidates(setup_loop):
     assert result.success, result.metadata
     assert generator.calls == 1
     assert result.metadata['reused_decisions'] == 1
-    assert len(bundle.model.messages) == 5
+    assert len(bundle.model.messages) == 4
     assert result.tool_results[0].to_legacy_dict() == before.to_legacy_dict()
     assert result.tool_results[1].data[0]['candidate_id'] == before.data['candidates'][0]['candidate_id']
 
@@ -150,7 +151,7 @@ def test_official_pi_full_composite_keeps_optional_failures_visible(setup_loop, 
     assert result.metadata['stop_reason'] == 'task_requirements_unfulfilled', result.metadata
     assert result.outcome.value == 'partial' and not result.success
     assert len(result.tool_results) == (6 if target_design else 8)
-    assert len(bundle.model.messages) == len(result.tool_results) + 1
+    assert len(bundle.model.messages) == len(result.tool_results)
     assert generator.calls == 1
     assert all(item.error.code is AgentErrorCode.MODEL_UNAVAILABLE
                for item in result.tool_results if item.tool_name in {'admet_predictor', 'activity_predictor'})

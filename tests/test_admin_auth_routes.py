@@ -318,7 +318,7 @@ def test_llm_runtime_save_route_switches_provider_without_borrowing_keys(
 
 
 @pytest.mark.parametrize("provider, base_url, model_name", [
-    ("ollama", "http://127.0.0.1:11434", "gmm-llama:latest"),
+    ("ollama", "http://127.0.0.1:11434", "synthetic-chat:latest"),
     ("openai_compatible", "https://api.example.com/v1/chat/completions", "example-model"),
 ])
 def test_llm_runtime_save_route_clear_removes_previous_external_key(

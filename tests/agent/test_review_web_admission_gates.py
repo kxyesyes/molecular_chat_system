@@ -163,7 +163,9 @@ def test_predict_reverse_fresh_actual_chat_keeps_full_evidence(ranked, monkeypat
     context = history[-1].get('reverse_target_evidence')
     assert context, calls[0][1]
     assert context['trace_id'] == calls[0][1]['trace_id'] != old_trace
-    count = 5 if 'top five' in message else 10
+    # Explicit top-1 limits display only; the receipt below still retains all
+    # ten records, as required by the reverse-ranking presentation contract.
+    count = 5 if 'top five' in message else 1
     assert f'前 {count} 行' in complete['content'] and '完整证据保留 10' in complete['content']
     assert history[-1]['user'] == message
     observation = calls[0][1]['tool_result_sequence'][0]

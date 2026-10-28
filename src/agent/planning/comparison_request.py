@@ -64,7 +64,7 @@ def comparison_request(query):
     text = without_comparison_presentation(positive_intent_text(query))
     # Chinese subject names may accompany structures. Only a grammatical
     # subject before 的 is separate from obligations; later 的 stays visible.
-    subject = re.match(r'^\s*请?\s*(?:比较|对比)([^的。；;]+)的', text)
+    subject = re.match(r'^\s*请?\s*(?:只|仅)?(?:比较|对比)([^的。；;]+)的', text)
     if subject and _whole_subject_list(subject[1]):
         text = text[subject.end():]
 
