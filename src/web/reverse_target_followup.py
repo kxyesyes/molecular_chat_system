@@ -73,7 +73,7 @@ def _checkpoint_value(checkpoint, run, trace):
         raise ValueError('rank_source_unavailable')
     # The complete raw/normalized receipt codec rejects edits before rank reuse.
     digest = validate_prediction_observation(value['data'], value['evidence'])
-    if digest is None or not value['data']:
+    if digest is None:
         raise ValueError('rank_source_unavailable')
     receipt_entry = next(v for v in value['evidence'] if 'prediction_receipt' in v)
     return value, digest, receipt_entry['input_smiles']
@@ -154,12 +154,26 @@ class RankedReverseEvidence:
         except Exception:
             return None
 
-    def render_prefix(self, context, *, session_id, count):
+    def render_prefix(self, context, *, session_id, count, concise=False):
         try:
             if type(count) is not int or not 1 <= count <= 10:
                 return None
             pointer, value = self._current(context, session_id)
             rows = value['data']
+            if not rows:
+                lines = [
+                    '反向寻靶：未找到满足阈值的靶点匹配。',
+                    '',
+                    '来源：ChEMBL 本地完整指纹来源，Morgan/MACCS 二维结构相似度。',
+                    '这表示本次检索没有命中当前阈值，不代表分子没有生物学靶点；可尝试调整相似度阈值或补充其他证据。',
+                ]
+                if not concise:
+                    lines.extend(['', '来源 trace：' + escape(pointer['trace_id']),
+                                  '证据摘要：' + escape(pointer['result_digest'])])
+                rendered = '\n'.join(lines)
+                if self._current(context, session_id)[0] != pointer:
+                    return None
+                return rendered
             shown = min(count, len(rows))
             def cell(item):
                 # Escape HTML and Markdown controls before a chat Markdown sink.
@@ -174,8 +188,12 @@ class RankedReverseEvidence:
             for rank, row in enumerate(rows[:shown], 1):
                 lines.append('| ' + ' | '.join(cell(v) for v in (rank, row['target_name'], row['organism'],
                     row['final_similarity'], row['morgan_similarity'], row['maccs_similarity'], row['similar_count'])) + ' |')
-            lines.extend(['', '来源 trace：' + cell(pointer['trace_id']),
-                          '证据摘要：' + cell(pointer['result_digest'])])
+            if concise:
+                lines[0] = f'反向寻靶：前 {shown} 个候选靶点'
+                lines[2] = '结果是结构相似性线索，不能视为已确认靶点、结合能或活性预测；仍需实验验证。'
+            else:
+                lines.extend(['', '来源 trace：' + cell(pointer['trace_id']),
+                              '证据摘要：' + cell(pointer['result_digest'])])
             rendered = '\n'.join(lines)
             if self._current(context, session_id)[0] != pointer:
                 return None
