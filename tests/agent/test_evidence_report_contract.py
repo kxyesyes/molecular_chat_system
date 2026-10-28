@@ -37,6 +37,22 @@ def test_real_rdkit_static_checkpoint_numbers_and_actual_ranker(tmp_path):
     assert all(s["output_digest_origin"] == "checkpoint_snapshot" for s in value["sources"])
 
 
+def test_molecular_design_workflow_projects_candidate_properties(tmp_path):
+    store, execution, events = execute(tmp_path)
+    execution["workflow_plan"]["workflow_name"] = "molecular_design"
+
+    value = report_from_execution(store, execution, events)
+
+    assert value["collections"]
+    assert value["property_rows"][0]["state"] == "available"
+
+
+def report_from_execution(store, execution, events):
+    from src.agent.presentation.evidence_report import build_evidence_report
+
+    return build_evidence_report(snapshot(store, execution, events), execution, events)
+
+
 def test_ranking_diagnostics_do_not_expand_legacy_report_schema(tmp_path):
     from src.agent.presentation.evidence_report import build_evidence_report
     store, execution, events = execute(tmp_path, partial=True)

@@ -162,11 +162,18 @@
   }
   function createLifecycle() {
     let active = false, trace = null, value = null, conflicted = false;
-    const clear = () => {active = false; trace = value = null; conflicted = false;};
+    const pending = new Map();
+    const clear = () => {active = false; trace = value = null; conflicted = false; pending.clear();};
     return {clear, startRequest() {clear(); active = true;},
       observeTrace(id) {if (!active || typeof id !== "string" || !id || id.length > 128) return false;
-        if (trace && trace !== id) {value = null; conflicted = true; return false;} trace = id; return true;},
-      enqueue(raw) {const p = normalize(raw); if (!active || conflicted || !p || p.trace_id !== trace) return false;
+        if (trace && trace !== id) {value = null; conflicted = true; return false;} trace = id;
+        if (!value && pending.has(id)) {value = pending.get(id); pending.clear();} return true;},
+      enqueue(raw, options = {}) {const p = normalize(raw); if (!active || conflicted || !p) return false;
+        if (!trace) {
+          if (options.buffer === true && pending.size < 2) {pending.set(p.trace_id, p); return true;}
+          return false;
+        }
+        if (p.trace_id !== trace) return false;
         if (value) {if (value.projection_id !== p.projection_id || JSON.stringify(value) !== JSON.stringify(p)) {value = null; conflicted = true;} return false;}
         value = p; return true;},
       take(id) {const p = active && !conflicted && id === trace ? value : null; clear(); return p;}};
@@ -174,8 +181,67 @@
   const labels = {completed:"已完成", succeeded:"成功", partial:"部分完成／证据不完整", failed:"失败", rejected:"已拒绝", cancelled:"已取消", skipped:"已跳过", unknown:"未知",
     available:"已验证来源", not_provided:"未提供独立证据", unavailable:"不可用", invalid:"证据无效", ambiguous:"来源不唯一"};
   function line(parent, tag, text) {const el = document.createElement(tag); el.textContent = text; parent.appendChild(el); return el;}
-  function renderReport(container, report) {
+  function renderReport(container, report, payloads = []) {
     if (!container || !trusted.has(report)) return {mounted:false};
+    const candidateLabels = new Map();
+    const validKeys = new Set(report.collections.flatMap(c => c.reference.ordered_keys.map(k => pairKey(...k))));
+    Array.from(container.querySelectorAll?.('.molecule-card') || []).forEach((card, i) => {
+      const key = pairKey(card.getAttribute('data-observation-id'), card.getAttribute('data-candidate-id'));
+      if (validKeys.has(key)) candidateLabels.set(key, `候选 ${i + 1}`);
+    });
+    const candidateName = row => candidateLabels.get(pairKey(report.ranking.generator_observation_id, row.candidate_id)) || `SMILES：${row.canonical_smiles}`;
+    const names = {target_database_search:'靶点检索', llm_molecular_generator:'分子生成',
+      property_calculator:'分子性质', admet_predictor:'ADMET 预测', activity_predictor:'活性预测',
+      candidate_ranker:'候选排序', molecular_docking:'分子对接'};
+    function humanize(value, toolName = '') {
+      // Only remove an explicit step prefix; identifiers can also be legitimate
+      // scientific values or SMILES, so never replace them in arbitrary prose.
+      if (toolName && value.startsWith(toolName)) {
+        const suffix = value.slice(toolName.length);
+        const match = suffix.match(/^\s*(?:failed|error|失败|错误)\s*[:：]\s*/i);
+        if (match) value = suffix.slice(match[0].length);
+      }
+      for (const row of report.property_rows) {
+        const label = candidateLabels.get(pairKey(row.generator_observation_id, row.candidate_id));
+        if (!label || row.candidate_id === row.canonical_smiles || /^[+\-\d.eE]+(?:\s*\w+)?$/.test(row.candidate_id)) continue;
+        for (const [prefix, suffix] of [['处理 ', ' 时'], ['', ' 的']]) {
+          const reference = `${prefix}${row.candidate_id}${suffix}`;
+          if (value.startsWith(reference)) {
+            value = `${prefix}${label}${suffix}${value.slice(reference.length)}`;
+            break;
+          }
+        }
+      }
+      return value;
+    }
+    const overview = document.createElement('div');
+    overview.className = 'scientific-evidence-summary';
+    if (report.run_status === 'partial') line(overview, 'p', '部分完成');
+    for (const step of report.steps.filter(s => s.status !== 'succeeded')) {
+      line(overview, 'p', `${names[step.tool_name] || '计算步骤'}：${labels[step.status]}；${humanize(step.message, step.tool_name)}`);
+    }
+    const visibleRank = report.ranking;
+    if (positive(visibleRank.state)) {
+      line(overview, 'h4', `实际 Top-${visibleRank.requested_top_n} 排序`);
+      for (const row of visibleRank.top_candidates) {
+        const missing = row.missing_evidence.map(x => x === 'admet' ? 'ADMET' : '活性').join('、');
+        line(overview, 'p', `${candidateName(row)} · 优先级分数 ${row.score}${missing ? `；缺少${missing}证据` : ''}`);
+      }
+      for (const row of visibleRank.unrankable_candidates) line(overview, 'p', `${candidateName(row)}：不可排序（${humanize(row.reason)}）`);
+      if (visibleRank.state === 'partial') line(overview, 'p', '排序证据不完整。');
+    } else if (visibleRank.state !== 'not_provided') {
+      line(overview, 'p', `候选排序：${labels[visibleRank.state]}；${REASONS[visibleRank.reason_code]}`);
+    }
+    const genericWarnings = new Set([
+      '计算描述符及候选优先级不代表实验验证、活性、疗效或对接结合能。',
+      '性质数字仅对本次实时证据展示有效；刷新后不恢复数字。',
+    ]);
+    report.warnings.filter(w => !genericWarnings.has(w)).forEach(w => line(overview, 'p', humanize(w)));
+    if (Object.values(report.omitted).some(v => v > 0)) line(overview, 'p', '部分结果未完整展示。');
+    if (overview.children.length) container.appendChild(overview);
+    const details = document.createElement('details');
+    details.className = 'scientific-evidence-details';
+    line(details, 'summary', '查看分析依据');
     const box = document.createElement("section"); box.className = "scientific-evidence-report";
     box.style.cssText = "margin:16px 0;padding:16px;border:1px solid #cbd5e1;border-radius:8px;overflow-wrap:anywhere";
     line(box, "h3", `靶点候选设计报告 · ${report.target.label || "未提供靶点"} · ${labels[report.run_status]}`);
@@ -207,21 +273,34 @@
     if (Object.values(report.omitted).some(v => v > 0)) line(box, "p", `展示已截断：${JSON.stringify(report.omitted)}`);
     line(box, "h4", "科学解释边界");
     line(box, "p", "计算生成与描述符/排序仅用于候选研究优先级，不代表已验证抑制剂、实验活性或临床结论；对接是否执行以实际工具证据为准。");
-    container.appendChild(box); return {mounted:true};
+    details.appendChild(box); container.appendChild(details); return {mounted:true};
   }
   function findPropertyRow(report, reference, generatorId, candidate) {
     if (!trusted.has(report) || !report.collections.some(c => c.generator_observation_id === generatorId && sameReference(c.reference, reference))) return null;
-    return report.property_rows.find(r => r.generator_observation_id === generatorId && r.candidate_id === candidate.candidate_id && r.canonical_smiles === candidate.canonical_smiles) || null;
+    const rows = report.property_rows.filter(r => r.generator_observation_id === generatorId && r.canonical_smiles === candidate.canonical_smiles);
+    return rows.find(r => r.candidate_id === candidate.candidate_id) || (rows.length === 1 ? rows[0] : null);
+  }
+  function findCollection(report, reference) {
+    if (!trusted.has(report) || !reference) return null;
+    const exact = report.collections.find(c => sameReference(c.reference, reference));
+    if (exact) return exact;
+    const fallback = report.collections.filter(c => c.reference.trace_id === reference.trace_id &&
+      c.reference.ordered_keys.length === reference.ordered_keys.length &&
+      JSON.stringify(c.reference.ordered_keys) === JSON.stringify(reference.ordered_keys));
+    return fallback.length === 1 ? fallback[0] : null;
   }
   function renderProperties(container, row, source) {
     if (!container || !trustedRows.has(row) || !trustedSources.has(source) || !positive(row.state) || source.observation_id !== row.source_observation_id || source.tool_name !== "property_calculator") return false;
     const box = document.createElement("div");
-    line(box, "strong", `独立 RDKit 描述符 · ${labels[row.state]}`);
+    line(box, "strong", `分子性质${row.state === 'partial' ? ' · 部分完成' : ''}`);
     const names = ["分子量", "LogP", "TPSA", "QED"];
     const units = [" Da", "", " Å²", ""];
     descriptors.forEach((k, i) => line(box, "div", `${names[i]}：${row.values[k]}${units[i]}`));
-    line(box, "small", `来源 ${source.evidence_id} · 行 ${row.source_row_index} · 非实验验证`);
     container.replaceChildren(box); return true;
   }
-  root.HomeEvidenceReport = {normalize, createLifecycle, renderReport, findPropertyRow, renderProperties};
+  function propertyUnavailableLabel(row) {
+    return trustedRows.has(row) && !positive(row.state)
+      ? `性质不可用：${REASONS[row.reason_code]}` : '该卡片未关联性质结果';
+  }
+  root.HomeEvidenceReport = {normalize, createLifecycle, renderReport, findCollection, findPropertyRow, renderProperties, propertyUnavailableLabel};
 })(window);

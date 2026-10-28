@@ -32,10 +32,18 @@ class Element {
   contains(c) {return this.children.includes(c) || this.children.some(x => x.contains(c));}
   get isConnected() {return this.root === true || Boolean(this.parentNode?.isConnected);}
   querySelector() {return null;}
+  querySelectorAll(selector) {
+    if (selector !== ".molecule-card") return [];
+    return allElements(this).slice(1).filter(e => e.className === "molecule-card");
+  }
   closest() {return {querySelector: () => this};}
 }
 function allText(el) {return [el.textContent, ...el.children.map(allText)].join("\n");}
 function allElements(el) {return [el, ...el.children.flatMap(allElements)];}
+function visibleText(el) {
+  if (el.tag === "details" && !el.open) return el.children.filter(c => c.tag === "summary").map(visibleText).join("\n");
+  return [el.textContent, ...el.children.map(visibleText)].join("\n");
+}
 
 function validateCases(report, event) {
   const p = api.normalize(report); assert(p, "same Python-produced DTO must normalize");
@@ -62,6 +70,9 @@ function validateCases(report, event) {
   const row = p.property_rows[0], ref = event.reference;
   const candidate = event.candidate_set.candidates[0];
   assert(api.findPropertyRow(p, ref, row.generator_observation_id, candidate));
+  const presentationVariant = clone(ref);
+  presentationVariant.presentation_id = "different-presentation";
+  assert(api.findCollection(p, presentationVariant), "same trace and ordered keys may recover a collection");
   for (const mutate of [r => r.trace_id = "other", r => r.presentation_id = "other", r => r.revision = "a".repeat(64), r => r.ordered_keys.reverse()]) {
     const r = clone(ref); mutate(r); assert.equal(api.findPropertyRow(p, r, row.generator_observation_id, candidate), null);
   }
@@ -71,6 +82,34 @@ function validateCases(report, event) {
   const box = new Element("div"); api.renderReport(box, api.normalize(hostile));
   assert(allText(box).includes(hostile.target.label));
   assert(!allElements(box).some(e => ["img", "script"].includes(e.tag)), "report content is inert text");
+  const overlap = clone(report); overlap.sources[0].model_name = '1e-10 nM'; overlap.warnings.push('IC50=1e-10 nM');
+  const overlapBox = new Element('div'); api.renderReport(overlapBox, api.normalize(overlap));
+  assert(visibleText(overlapBox).includes('IC50=1e-10 nM'), 'source names must not corrupt measurements');
+  const actualCards = new Element('div');
+  const prior = new Element('div'); prior.className = 'molecule-card'; prior.setAttribute('data-candidate-id', 'other'); prior.setAttribute('data-observation-id', 'other'); actualCards.appendChild(prior);
+  const card = new Element('div'); card.className = 'molecule-card'; card.setAttribute('data-candidate-id', candidate.candidate_id); card.setAttribute('data-observation-id', row.generator_observation_id); actualCards.appendChild(card);
+  api.renderReport(actualCards, p, [{reference: ref, candidates: event.candidate_set.candidates}]);
+  const ranked = p.ranking.top_candidates.find(x => x.candidate_id === candidate.candidate_id);
+  if (ranked) assert(visibleText(actualCards).includes(`候选 2 · 优先级分数 ${ranked.score}`), 'rank labels must follow actually mounted cards');
+  const warningReport = clone(report);
+  warningReport.warnings.push(`处理 ${candidate.candidate_id} 时预测结果存在明显毒性风险`);
+  const warningCards = new Element('div');
+  const warningCard = new Element('div'); warningCard.className = 'molecule-card';
+  warningCard.setAttribute('data-candidate-id', candidate.candidate_id);
+  warningCard.setAttribute('data-observation-id', row.generator_observation_id);
+  warningCards.appendChild(warningCard);
+  api.renderReport(warningCards, api.normalize(warningReport));
+  assert(visibleText(warningCards).includes('处理 候选 1 时预测结果存在明显毒性风险'));
+  assert(!visibleText(warningCards).includes(candidate.candidate_id));
+}
+
+// The server may publish the report before the candidate payload. The report
+// is buffered only through the explicit UI path and adopted once the candidate
+// trace arrives; an untrusted caller cannot self-adopt a trace.
+{
+  const life = api.createLifecycle();
+  life.startRequest();
+  assert(life.enqueue({type: "scientific_report"}, {buffer: true}) === false);
 }
 
 async function actualMain(frames, {failReport = false, failProperties = false, failAck = false} = {}) {
@@ -91,7 +130,7 @@ async function actualMain(frames, {failReport = false, failProperties = false, f
   const renderer = section("function renderMoleculeCandidates(messageElement, payload)", "  window.HomeMain =");
   const display = section("function displayCandidateCollections(element, payloads)", "  // DOM元素缓存");
   const resolve = section("function resolveCompletionAction(", "  // 完成最后一条消息");
-  const complete = section("function completeLastMessage(content)", "  // 显示状态消息");
+  const complete = section("function completeLastMessage(", "  // 显示状态消息");
   const cases = section('case "molecule_candidates":', 'case "rag_info":');
   const handler = new Function("window", "document", "moleculeCandidateLifecycle", "evidenceReportLifecycle", "evidenceReportViews", "scientificReferences", "box", `
     const elements = {chatContainer: {querySelector: selector => selector.includes("typing") ? null : box}};
@@ -120,6 +159,33 @@ async function frameTests(frames) {
   validateCases(report, event);
   const result = await actualMain(frames);
   const text = allText(result.box);
+  const visible = visibleText(result.box);
+  assert(visible.includes('候选 1'), 'cards need readable candidate labels');
+  assert(!visible.includes(event.candidate_set.candidates[0].candidate_id), 'internal candidate ID must not be in the default view');
+  for (const source of report.sources) {
+    assert(!visible.includes(source.tool_name), 'internal tool names belong in audit details');
+    assert(!visible.includes(source.evidence_id), 'evidence IDs belong in audit details');
+    if (source.model_name) assert(!visible.includes(source.model_name), 'model identity belongs in audit details');
+    assert(text.includes(source.evidence_id), 'audit information must remain available');
+  }
+  assert(visible.includes('实际 Top-') && visible.includes(String(report.ranking.top_candidates[0].score)), 'ranking must remain in default view');
+  assert(!visible.includes('计算描述符及候选优先级不代表实验验证、活性、疗效或对接结合能。'), 'generic disclaimer belongs in details');
+  assert(!visible.includes('性质数字仅对本次实时证据展示有效；刷新后不恢复数字。'), 'generic technical explanation belongs in details');
+  const firstRank = report.ranking.top_candidates[0];
+  const cardIndex = event.reference.ordered_keys.findIndex(k => k[0] === report.ranking.generator_observation_id && k[1] === firstRank.candidate_id);
+  assert(cardIndex >= 0 && visible.includes(`候选 ${cardIndex + 1} · 优先级分数 ${firstRank.score}`), 'ranking label must match the actual card');
+  assert(allElements(result.box).some(e => e.tag === 'details' && e.className === 'scientific-evidence-details' && !e.open), 'audit details must be closed by default');
+  assert(visible.includes('选择此分子') && visible.includes('复制') && visible.includes('显示 SMILES'));
+  const warnedEvent = clone(event);
+  warnedEvent.warnings.push(`${warnedEvent.candidate_set.candidates[0].candidate_id} 的预测结果存在明显毒性风险`);
+  const warned = await actualMain(frames.map(f => f.type === 'molecule_candidates' ? warnedEvent : f));
+  assert(visibleText(warned.box).includes('候选 1 的预测结果存在明显毒性风险'));
+  const numericEvent = clone(event);
+  numericEvent.source.model_name = '1e-9';
+  numericEvent.warnings.push('1e-9 nM 时观察到毒性风险');
+  const numericWarning = await actualMain(frames.map(f => f.type === 'molecule_candidates' ? numericEvent : f));
+  assert(visibleText(numericWarning.box).includes('1e-9 nM 时观察到毒性风险'));
+  if (report.run_status === 'partial') assert(visible.includes('部分完成'), 'partial status must remain visible');
   assert(text.includes("靶点候选设计报告") && text.includes(report.target.label));
   assert(text.includes("46.07") && text.includes("-0.001") && text.includes("20.23") && text.includes("0.407"));
   assert(text.includes(`实际 Top-${report.ranking.requested_top_n}`));
@@ -133,13 +199,26 @@ async function frameTests(frames) {
   assert.deepEqual(allElements(result.box).filter(e => e.className === "molecule-card").map(e => e.getAttribute("data-candidate-id")), event.reference.ordered_keys.map(k => k[1]));
   assert(result.stored && !result.stored.includes("46.07") && !result.stored.includes("property"));
   const reportFailure = await actualMain(frames, {failReport:true}); assert.deepEqual(reportFailure.acks, result.acks);
+  assert(visibleText(reportFailure.box).includes('分析信息暂无法显示'));
   const propFailure = await actualMain(frames, {failProperties:true}); assert.deepEqual(propFailure.acks, result.acks);
-  assert(allText(propFailure.box).includes("当前候选事件未携带经独立性质工具验证的属性"));
+  assert(visibleText(propFailure.box).includes('性质暂无法显示'));
   const failedAck = await actualMain(frames, {failAck:true}); assert.deepEqual(failedAck.outgoing, {});
   assert(allText(failedAck.box).includes("46.07"), "ACK failure changes selection, not accepted property evidence");
   const noReport = await actualMain(frames.filter(f => f.type !== "scientific_report"));
-  assert(allText(noReport.box).includes("当前候选事件未携带经独立性质工具验证的属性"));
+  assert(allText(noReport.box).includes("该卡片未关联性质结果"));
   assert(!allText(noReport.box).includes("46.07"));
+  const failedReport = clone(report);
+  failedReport.steps.push({step_id:'failed-step-private', tool_name:'unknown_private_tool', status:'failed',
+    source_observation_id:null, reason_code:'source_failed', message:'unknown_private_tool failed: 连接超时'});
+  const failed = await actualMain(frames.map(f => f.type === 'scientific_report' ? failedReport : f));
+  const failedVisible = visibleText(failed.box);
+  assert(failedVisible.includes('失败') && failedVisible.includes('连接超时'), 'concrete failures remain visible');
+  assert(!failedVisible.includes('unknown_private_tool') && !failedVisible.includes('failed-step-private'));
+  const shortIdReport = clone(failedReport);
+  shortIdReport.sources[0].evidence_id = '1';
+  shortIdReport.steps[shortIdReport.steps.length - 1].message = 'unknown_private_tool failed: IC50=10.5 nM';
+  const shortId = await actualMain(frames.map(f => f.type === 'scientific_report' ? shortIdReport : f));
+  assert(visibleText(shortId.box).includes('IC50=10.5 nM'), 'identifier cleanup must never alter scientific numbers');
   const late = await actualMain([...frames.filter(f => f.type !== "scientific_report"), report]);
   assert(!allText(late.box).includes("46.07"));
   const failedTerminal = await actualMain(frames.map(f => f.type === "complete" ? {...f, status:"failed"} : f));
@@ -180,12 +259,12 @@ async function specRowTests({frames, rejected}) {
     assert(!allText(mounted.box).includes("46.07") && !allText(mounted.box).includes("0.407"), "incomplete four-descriptor row must not leak remaining numbers");
     assert.equal(api.normalize(bad), null, "reject malformed partial row, not silently repair it");
     assert.deepEqual(mounted.acks, [event.reference]);
-    assert(allText(mounted.box).includes("当前候选事件未携带经独立性质工具验证的属性"));
+    assert(allText(mounted.box).includes("该卡片未关联性质结果"));
   }
   const mounted = await actualMain(frames);
   assert(api.normalize(report));
   assert(allText(mounted.box).includes("46.07") && allText(mounted.box).includes("0.407"));
-  if (report.property_rows[0].state === "partial") assert(allText(mounted.box).includes("独立 RDKit 描述符 · 部分完成"));
+  if (report.property_rows[0].state === "partial") assert(allText(mounted.box).includes("分子性质 · 部分完成"));
   assert.equal(JSON.stringify(frames), before);
   return {four_or_none:true};
 }

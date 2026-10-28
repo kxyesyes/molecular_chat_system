@@ -8,6 +8,7 @@
   <meta name="description" content="" />
   <meta name="keywords" content="" />
   <link rel="stylesheet" href="/static/css/docking_consent.css?v=20261017-docking-v1" />
+  <link rel="stylesheet" href="/static/css/result_details.css?v=20261026-summary-details-v1" />
   <style>
     * {
       font-family: "微软雅黑";
@@ -123,6 +124,33 @@
       color: #f1f5f9;
       font-weight: 600;
       white-space: nowrap;
+    }
+
+    .agent-model-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      color: #e2e8f0;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .settings-btn {
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 0;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    .settings-btn img {
+      display: block;
+      width: 20px;
+      height: 20px;
     }
 
     header .right select {
@@ -2106,6 +2134,7 @@
       }
     }
   </style>
+  <link rel="stylesheet" href="/static/css/home_chat_layout.css?v=20261026-responsive-v1" />
   <!-- SMILES分子可视化库 -->
   <script src="/static/js/lib/smiles-drawer.min.js"></script>
 </head>
@@ -2132,9 +2161,15 @@
       <div class="model-control">
         <img src="/static/images/top1.png" alt="" />
         <span>模型</span>
-        <select id="modelSelect">
+        <select id="modelSelect" aria-label="Agent 模型">
           <option value="deepseek" selected>DeepSeek</option>
         </select>
+      </div>
+
+      <div class="agent-model-status" id="agentModelStatus" role="status" aria-live="polite" aria-label="Agent 模型状态">
+        <span id="agentModelRole" aria-label="模型角色">Agent</span>
+        <span aria-hidden="true">·</span>
+        <span id="agentModelReadiness" aria-label="Agent 就绪状态">待测试</span>
       </div>
 
       <div class="link" id="connectionStatus" style="
@@ -2146,10 +2181,12 @@
             font-weight: 500;
             white-space: nowrap;
           ">
-        连接中...
+        传输连接中...
       </div>
 
-      <img style="width: 20px; cursor: pointer" src="/static/images/top2.png" alt="" id="settingsBtn" />
+      <button class="settings-btn" type="button" id="settingsBtn" aria-label="模型接入设置" title="模型接入设置">
+        <img src="/static/images/top2.png" alt="" aria-hidden="true" />
+      </button>
     </div>
   </header>
 
@@ -2228,7 +2265,7 @@
           <img src="/static/images/l1.png" alt="" />
           <span>数据库</span>
         </div>
-        <div class="item" onclick="window.location.href='http://software.tdd-lab.com'">
+        <div class="item" onclick="window.location.href='http://software.tdd-lab.com/molmod'">
           <img src="/static/images/l2.png" alt="" />
           <span>Lead优化</span>
         </div>
@@ -2306,7 +2343,7 @@
             <img src="/static/images/r5.png" alt="" />
             <span>生成类药分子</span>
           </div>
-          <div class="item" data-action="admet" onclick="window.location.href='/admet'">
+          <div class="item" data-action="admet">
             <img src="/static/images/r4.png" alt="" />
             <span>ADMET预测</span>
           </div>
@@ -2520,28 +2557,29 @@
       </div>
     </div>
   </footer>
-  <script src="/static/js/home/config.js?v=20260422-toolbar-fix"></script>
+  <script src="/static/js/home/config.js?v=20261026-summary-details-v1"></script>
+  <script src="/static/js/home/result_details.js?v=20261026-summary-details-v2"></script>
   <script src="/static/js/home/state.js?v=20260422-toolbar-fix"></script>
   <script src="/static/js/home/theme.js"></script>
   <script src="/static/js/shared/status.js?v=20261008-status-v1"></script>
   <script src="/static/js/shared/safe_render.js?v=20261016-uniprot-entry-v1"></script>
   <script src="/static/js/home/molecule_candidates.js?v=20260902-candidate-correlation-v5"></script>
   <script src="/static/js/home/scientific_references.js?v=20260924-reference-v1"></script>
-  <script src="/static/js/home/evidence_report.js?v=20260925-evidence-report-v1"></script>
-  <script src="/static/js/home/formatters.js?v=20261015-comparison-table-v1"></script>
+  <script src="/static/js/home/evidence_report.js?v=20261028-candidate-property-collection-v2"></script>
+   <script src="/static/js/home/formatters.js?v=20261026-scientific-notation-v9"></script>
   <script src="/static/js/home/chat_renderer.js"></script>
   <script src="/static/js/home/connection.js?v=20261008-home-connection-v1"></script>
   <script src="/static/js/home/protocol.js?v=20261008-home-protocol-v1"></script>
   <script src="/static/js/home/task_state.js?v=20261008-home-task-state-v1"></script>
-  <script src="/static/js/home/task_status.js?v=20261008-home-task-status-v1"></script>
-  <script src="/static/js/home/task_panel.js?v=20261008-home-task-panel-v1"></script>
+  <script src="/static/js/home/task_status.js?v=20261027-task-status-dedupe-v2"></script>
+  <script src="/static/js/home/task_panel.js?v=20261026-turn-panels-v1"></script>
   <script src="/static/js/home/advanced_options.js?v=20261001-explicit-count-v1"></script>
   <script src="/static/js/home/docking_source_selection.js?v=20261017-reference-empty-v2"></script>
   <script src="/static/js/home/docking_consent.js?v=20261017-docking-v1"></script>
   <!-- Cache lineage: /static/js/home/main.js?v=20260713-workflow-complete-v2 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20260925-terminal-labels-v1 -->
   <!-- Cache lineage: /static/js/home/main.js?v=20261017-docking-v1 -->
-  <script src="/static/js/home/main.js?v=20261023-pi-runtime-v1"></script>
+  <script src="/static/js/home/main.js?v=20261028-candidate-property-collection-v3"></script>
 </body>
 
 </html>

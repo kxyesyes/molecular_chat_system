@@ -16,6 +16,7 @@ from src.agent.planning.bindings import BindingResolver
 from src.agent.tooling.analysis_contract import _AnalysisRawOutput
 
 
+
 def _check(condition):
     if not condition:
         raise ValueError("report source proof unavailable")
@@ -28,6 +29,8 @@ def _safe(text, limit=128):
 
 def _accepted(cp, run, sequence, ledger):
     raw = json.loads(cp["output_json"])
+    checkpoint_metadata = json.loads(cp["metadata_json"])
+    _check(type(checkpoint_metadata) is dict)
     reference_json(raw)
     _check(cp["trace_id"] == run["trace_id"] and cp["workflow_version"] == run["workflow_version"])
     _check(cp["status"] in {"succeeded", "partial"} and cp["error_json"] is None
@@ -52,7 +55,14 @@ def _accepted(cp, run, sequence, ledger):
     digest = EvidenceLedger.output_digest(raw["data"])
     _check(p.output_digest is None or p.output_digest == digest)
     verifier = EvidenceLedger(run["trace_id"])
-    eid = verifier.register_tool_result(cp["step_id"], cp["input_hash"], result)
+    # Web checkpoints commit a binding proof into both the checkpoint metadata
+    # and the tool quality payload. Reuse that proof when replaying the
+    # evidence identity; otherwise the verifier computes a legacy ID and
+    # incorrectly rejects an otherwise valid persisted web observation.
+    binding_proof = checkpoint_metadata.get("binding_proof")
+    eid = verifier.register_tool_result(cp["step_id"], cp["input_hash"], result,
+                                        **({"binding_proof": binding_proof}
+                                           if binding_proof is not None else {}))
     _check(eid == raw["quality"]["evidence_id"])
     if ledger is not None:
         _check(type(ledger) is list)
@@ -72,16 +82,76 @@ def _accepted(cp, run, sequence, ledger):
         backend_version=None)
     _check(all(_safe(source[k]) == source[k] for k in
                ("observation_id", "step_id", "tool_name", "tool_version", "evidence_id")))
-    return {"checkpoint": cp, "raw": raw, "source": source, "metadata": json.loads(cp["metadata_json"])}
+    return {"checkpoint": cp, "raw": raw, "source": source, "metadata": checkpoint_metadata}
+
+
+def _planned_step(observation, run):
+    requirements = run.get("metadata", {}).get("task_requirements")
+    if not isinstance(requirements, dict) or requirements.get("profile") != "medchat-web-v1":
+        return None
+    ref = observation.get("metadata", {}).get("web_step_ref")
+    if not isinstance(ref, str):
+        return None
+    source_tool = observation["source"]["tool_name"]
+    matches = [step for step in requirements.get("steps", [])
+               if isinstance(step, dict) and step.get("name") == ref
+               and step.get("tool_name") == source_tool]
+    _check(len(matches) == 1)
+    return matches[0]
+
+
+def _workflow_output_key(observation, run):
+    step = _planned_step(observation, run)
+    if step is not None:
+        key = step.get("output_key")
+        _check(type(key) is str and key)
+        return key
+    key = observation["raw"]["quality"].get("output_key")
+    _check(type(key) is str and key)
+    return key
+
+
+def _property_input_key(observation, run):
+    step = _planned_step(observation, run)
+    if step is not None:
+        metadata = step.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("candidate_source"), str):
+            return metadata["candidate_source"]
+        input_from = step.get("input_from")
+        if isinstance(input_from, str) and input_from:
+            return input_from
+    key = observation["metadata"].get("candidate_source")
+    return key if isinstance(key, str) and key else None
+
+
+def _check_web_dependencies(observation, dependencies, run):
+    """Check persisted Web dependency commitments without replaying input data."""
+    if _planned_step(observation, run) is None:
+        return False
+    expected_ids = [item["raw"]["quality"].get("evidence_id") for item in dependencies]
+    _check(all(type(value) is str and value for value in expected_ids))
+    quality = observation["raw"]["quality"]
+    _check(quality.get("input_evidence_ids") == expected_ids)
+    proof = quality.get("binding_proof")
+    roles = proof.get("roles") if isinstance(proof, dict) else None
+    _check(isinstance(roles, list) and len(roles) == len(dependencies))
+    for role, dependency in zip(roles, dependencies):
+        _check(role.get("role") == "dependency"
+               and role.get("evidence_id") == dependency["raw"]["quality"].get("evidence_id")
+               and role.get("step_ref") == dependency["metadata"].get("web_step_ref")
+               and role.get("output_sha256") == EvidenceLedger.output_digest(
+                   dependency["raw"]["data"]))
+    return True
 
 
 def _property_rows(prop, generator, run):
     cp, raw = prop["checkpoint"], prop["raw"]
-    key = generator["raw"]["quality"]["output_key"]
-    _check(prop["metadata"].get("candidate_source") == key)
+    key = _workflow_output_key(generator, run)
+    _check(_property_input_key(prop, run) == key)
     data = generator["raw"]["data"]
-    bound = BindingResolver().resolve(f"$.outputs.{key}", "smiles_text", {}, {key: data})
-    _check(WorkflowOrchestrator._input_hash(bound) == cp["input_hash"])
+    if not _check_web_dependencies(prop, [generator], run):
+        bound = BindingResolver().resolve(f"$.outputs.{key}", "smiles_text", {}, {key: data})
+        _check(WorkflowOrchestrator._input_hash(bound) == cp["input_hash"])
     from rdkit import Chem
     candidates = {c["candidate_id"]: c for c in data["candidates"]}
     rows = {}
@@ -118,21 +188,31 @@ def _ranking(accepted, outputs, generators, run, displayed):
         return _empty_ranking("ambiguous_source")
     rank = ranks[0]
     try:
-        meta = rank["metadata"]
+        planned_rank = _planned_step(rank, run)
+        meta = planned_rank.get("metadata", {}) if planned_rank is not None else rank["metadata"]
         workflow_metadata_keys = meta.get("workflow_metadata_keys")
-        _check(meta.get("workflow_output_keys") == ["molecules", "properties", "admet", "activity"]
-               and meta.get("workflow_optional_output_keys") == ["admet", "activity"]
+        output_keys = meta.get("workflow_output_keys")
+        optional_keys = meta.get("workflow_optional_output_keys")
+        _check(isinstance(output_keys, list) and isinstance(optional_keys, list)
+               and all(isinstance(key, str) and key for key in output_keys + optional_keys)
+               and len(set(output_keys)) == len(output_keys)
+               and len(set(optional_keys)) == len(optional_keys)
+               and set(output_keys + optional_keys).issubset({"molecules", "properties", "admet", "activity"})
+               and {"molecules", "properties"}.issubset(output_keys)
                and isinstance(workflow_metadata_keys, list)
                and workflow_metadata_keys[:1] == ["docking_top_n"]
-               and set(workflow_metadata_keys).issubset({"docking_top_n", "target", "endpoint", "units"})
+               and set(workflow_metadata_keys).issubset({"docking_top_n", "target", "endpoint", "units",
+                                                        "required_evidence", "ranking_scope"})
                and len(workflow_metadata_keys) == len(set(workflow_metadata_keys)))
-        generators = [g for g in generators if g["raw"]["quality"].get("output_key") == "molecules"]
+        generators = [g for g in generators if _workflow_output_key(g, run) == "molecules"]
         _check(len(generators) == 1)
         generator = generators[0]
         # Refuse ranking unless the required properties are independently aligned too.
-        props = [s for s in accepted.values() if s["raw"]["quality"].get("output_key") == "properties"]
+        props = [s for s in accepted.values() if _workflow_output_key(s, run) == "properties"]
         _check(len(props) == 1 and props[0]["source"]["tool_name"] == "property_calculator")
         _property_rows(props[0], generator, run)
+        if planned_rank is not None:
+            _check_web_dependencies(rank, [generator, props[0]], run)
         request = {
             "query": run["query"],
             "metadata": {
@@ -141,11 +221,12 @@ def _ranking(accepted, outputs, generators, run, displayed):
                 if key in meta
             },
         }
-        bound = BindingResolver().resolve("$.workflow", "identity", request, outputs,
-            workflow_output_keys=meta["workflow_output_keys"],
-            workflow_optional_output_keys=meta["workflow_optional_output_keys"],
-            workflow_metadata_keys=workflow_metadata_keys)
-        _check(WorkflowOrchestrator._input_hash(bound) == rank["checkpoint"]["input_hash"])
+        if planned_rank is None:
+            bound = BindingResolver().resolve("$.workflow", "identity", request, outputs,
+                workflow_output_keys=output_keys,
+                workflow_optional_output_keys=optional_keys,
+                workflow_metadata_keys=workflow_metadata_keys)
+            _check(WorkflowOrchestrator._input_hash(bound) == rank["checkpoint"]["input_hash"])
         raw = rank["raw"]["data"]
         _check(rank["raw"]["quality"].get("output_contract") == "CandidateRanking@1")
         ranked = raw["ranked_candidates"]
@@ -184,11 +265,16 @@ def build_evidence_report(snapshot, execution, candidate_events):
         if snapshot is None:
             return None
         run = snapshot["run"]
-        _check(execution.get("trace_id") == run["trace_id"] and run["skill_name"] == "target_driven_design")
+        # The web planner is the authority for the active workflow.  Some
+        # terminal web runs leave the legacy agent_runs.skill_name column
+        # empty; accepting that only alongside the exact bound plan preserves
+        # the workflow boundary without trusting a browser-supplied label.
+        _check(execution.get("trace_id") == run["trace_id"]
+               and run["skill_name"] in {None, "target_driven_design", "hit_to_lead_optimization"})
         status = "partial" if run["status"] == "partial" else "completed"
         _check(execution.get("status") == status)
         plan = execution.get("workflow_plan", {})
-        _check(plan.get("workflow_name") == "target_driven_design")
+        _check(plan.get("workflow_name") in {"molecular_design", "target_driven_design", "hit_to_lead_optimization"})
         sequence = execution.get("tool_result_sequence")
         reference_json(sequence)
         _check(type(sequence) is list and len(sequence) <= 256)
@@ -205,8 +291,11 @@ def build_evidence_report(snapshot, execution, candidate_events):
         # No output-key collapse: duplicate providers invalidate that binding.
         keys = {}
         for s in accepted.values():
-            key = s["raw"]["quality"].get("output_key")
-            if type(key) is str:
+            try:
+                key = _workflow_output_key(s, run)
+            except (ValueError, TypeError, KeyError, AttributeError):
+                key = None
+            if key is not None:
                 keys.setdefault(key, []).append(s)
         outputs = {k: items[0]["raw"]["data"] for k, items in keys.items() if len(items) == 1}
         collections, generations, rows, generators = [], [], [], []
@@ -231,14 +320,11 @@ def build_evidence_report(snapshot, execution, candidate_events):
             generations.append(dict(source_observation_id=oid, status=generator["raw"]["status"],
                 **{k: data[k] for k in ("requested_count", "valid_count", "unique_count", "invalid_count", "duplicate_count")},
                 displayed_count=len(ref["ordered_keys"])))
-            key = generator["raw"]["quality"].get("output_key")
-            dynamic = any(s["raw"]["quality"].get("request_input_digest") is not None for s in accepted.values())
+            key = _workflow_output_key(generator, run)
             props = [s for s in accepted.values() if s["source"]["tool_name"] == "property_calculator"
-                     and s["metadata"].get("candidate_source") == key]
+                     and _property_input_key(s, run) == key]
             reason, mapped, prop = "missing_source", {}, None
-            if dynamic:
-                reason = "unsupported_binding"
-            elif len(props) > 1 or len(keys.get(key, [])) != 1:
+            if len(props) > 1 or len(keys.get(key, [])) != 1:
                 reason = "ambiguous_source"
             elif props:
                 try:
@@ -283,7 +369,7 @@ def build_evidence_report(snapshot, execution, candidate_events):
             text = _safe(warning, 256)
             if text:
                 warnings.append(text)
-        ranking = _empty_ranking("unsupported_binding") if dynamic else _ranking(accepted, outputs, generators, run, displayed)
+        ranking = _ranking(accepted, outputs, generators, run, displayed)
         report = dict(type="scientific_report", schema_version="1", trace_id=run["trace_id"],
             source_version=snapshot["source_version"], run_status=status,
             target={"label": target, "origin": "workflow_plan" if target else "not_provided"},
