@@ -150,11 +150,15 @@ def test_successful_preprocessing_updates_aggregate_state(run_inputs):
 
 
 def test_file_ligand_direct_preparation_records_direct_method(run_inputs, monkeypatch):
+    Chem = pytest.importorskip("rdkit.Chem")
     service, _, _, _, output = run_inputs
+    source = output.parent / 'input.sdf'
+    with Chem.SDWriter(str(source)) as writer:
+        writer.write(Chem.AddHs(Chem.MolFromSmiles('CCO')))
     trace = {}
     monkeypatch.setattr(service, '_run_prepare_ligand', lambda *a, **kw: (True, ''))
     assert service.prepare_ligand_from_file(
-        'input.sdf', str(output.parent / 'prepared.pdbqt'), trace=trace
+        str(source), str(output.parent / 'prepared.pdbqt'), trace=trace
     )
     assert trace['ligand_method'] == 'meeko_direct'
 

@@ -86,7 +86,7 @@ class SourceRuntime:
             with self._lock:
                 foreground_pending = self._foreground_io_count > 0
             if foreground_pending:
-                # Briefly release the GIL only while actual config I/O needs it.
+                # Briefly release the GIL while foreground I/O needs it.
                 # Existing acquisition checks still account for this wait in
                 # their deadline; closing interrupts the wait immediately.
                 self._stop.wait(0.001)
@@ -121,7 +121,7 @@ class SourceRuntime:
 
     @contextmanager
     def foreground_io(self):
-        """Give concurrent config I/O workers room until physical I/O returns."""
+        """Give foreground I/O room while its owning context is active."""
         with self._lock:
             active = not self._stop.is_set()
             if active:

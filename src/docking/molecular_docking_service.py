@@ -913,6 +913,30 @@ class MolecularDockingService:
                     trace["ligand_method"] = "pdbqt_passthrough"
                 return True
 
+            # Meeko rejects atom-bound hydrogens missing from the explicit
+            # graph. Use the existing normalization before paying for a known
+            # failed CLI launch. Keep other preparers/formats and multi-record
+            # files on their original path (their parser semantics can differ).
+            command_name = os.path.basename(self.ligand_adapter.executable).lower()
+            if command_name.startswith("mk_prepare_ligand") and src_ext in {".sdf", ".mol"}:
+                from rdkit import Chem
+
+                supplier = Chem.SDMolSupplier(ligand_path, removeHs=False)
+                molecule = supplier[0] if len(supplier) == 1 else None
+                needs_hydrogens = molecule is not None and any(
+                    atom.GetTotalNumHs(includeNeighbors=False)
+                    > sum(neighbor.GetAtomicNum() == 1 for neighbor in atom.GetNeighbors())
+                    for atom in molecule.GetAtoms()
+                )
+                if needs_hydrogens:
+                    prepared = self._prepare_ligand_file_with_explicit_hs(
+                        ligand_path, output_path, job_dir,
+                        cancel_event=cancel_event, trace=trace,
+                    )
+                    if prepared and trace is not None:
+                        trace["ligand_method"] = "rdkit_explicit_h_then_meeko"
+                    return prepared
+
             success, error_output = self._run_prepare_ligand(
                 ligand_path,
                 output_path,
