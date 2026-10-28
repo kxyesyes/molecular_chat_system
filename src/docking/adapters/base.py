@@ -882,9 +882,11 @@ class CommandAdapter:
                 # Waiting only for child exit throttles a pipe-blocked writer
                 # to one pipe buffer per poll. Wake when output can be drained.
                 capture = process._medchat_capture_state
-                readers = [stream for name, stream in capture["streams"].items()
-                           if name not in capture["eof"]]
-                select.select(readers, [], [], wait_for)
+                poller = select.poll()
+                for name, stream in capture["streams"].items():
+                    if name not in capture["eof"]:
+                        poller.register(stream, select.POLLIN)
+                poller.poll(math.ceil(wait_for * 1000))
                 continue
             try:
                 process.wait(timeout=wait_for)

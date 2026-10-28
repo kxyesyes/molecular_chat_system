@@ -771,7 +771,7 @@ def test_posix_output_supervisor_waits_for_pipe_data_not_child_exit(monkeypatch)
     import select
 
     adapter = CommandAdapter(sys.executable)
-    stdout, stderr = object(), object()
+    stdout, stderr = 2048, 2049  # Valid POSIX descriptors beyond select's fd_set.
     exceeded = threading.Event()
     process = SimpleNamespace(pid=123, poll=lambda: None,
         _medchat_capture_state={"mode": "nonblocking", "streams": {
@@ -780,19 +780,28 @@ def test_posix_output_supervisor_waits_for_pipe_data_not_child_exit(monkeypatch)
         raise AssertionError("A pipe-blocked child cannot exit until output is drained")
     process.wait = blocked_child_wait
     waited = []
-    def readable(readers, writers, errors, timeout):
-        waited.append((readers, timeout))
-        exceeded.set()
-        return readers, [], []
+    class Poll:
+        def __init__(self):
+            self.readers = []
+        def register(self, stream, event):
+            self.readers.append(stream)
+        def poll(self, timeout):
+            waited.append((self.readers, timeout))
+            exceeded.set()
+            return [(stdout, 1)]
+    def limited_select(*args):
+        raise ValueError('filedescriptor out of range in select()')
     cleaned = []
-    monkeypatch.setattr(select, "select", readable)
+    monkeypatch.setattr(select, "select", limited_select)
+    monkeypatch.setattr(select, "poll", Poll, raising=False)
+    monkeypatch.setattr(select, "POLLIN", 1, raising=False)
     monkeypatch.setattr(adapter, "_drain_nonblocking_capture", lambda _: None)
     monkeypatch.setattr(adapter, "_captured_output_exceeded", lambda _: exceeded.is_set())
     monkeypatch.setattr(adapter, "_cleanup_posix_or_uncertain", lambda p: cleaned.append(p))
     with pytest.raises(CommandOutputLimitError):
         adapter._supervise_posix(process, [], 10, time.monotonic() + 10, None)
     assert len(waited) == 1 and waited[0][0] == [stdout]
-    assert 0 < waited[0][1] <= 0.2
+    assert 0 < waited[0][1] <= 200
     assert cleaned == [process]
 
 
