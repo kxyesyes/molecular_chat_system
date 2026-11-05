@@ -159,6 +159,14 @@ class _CredentialFreeAuth(requests.auth.AuthBase):
 _CREDENTIAL_FREE_AUTH = _CredentialFreeAuth()
 
 
+def discard_redirect_location(response, **kwargs):
+    # Even with redirects disabled, Requests consumes the entire redirect body
+    # to build Response.next. Keep the status for the caller's error handling.
+    if response.is_redirect:
+        response.headers.pop("Location")
+    return response
+
+
 class RemoteSourceError(RuntimeError):
     """A sanitized, stable failure contract for authoritative source calls."""
 
@@ -399,6 +407,7 @@ class BoundedJsonClient:
             },
             "auth": _CREDENTIAL_FREE_AUTH,
             "allow_redirects": False,
+            "hooks": {"response": discard_redirect_location},
             "stream": True,
         }
         if params is not None:

@@ -3035,7 +3035,7 @@ def _rcsb_graphql_entry(
 
 
 def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
-    from src.target_search.remote_clients import STABLE_USER_AGENT, UniProtClient
+    from src.target_search.remote_clients import STABLE_USER_AGENT, UniProtClient, discard_redirect_location
 
     response = _FakeRemoteResponse(
         payload={
@@ -3095,6 +3095,7 @@ def test_uniprot_resolve_constructs_exact_human_query_and_normalizes_record():
                 },
                 "auth": session.calls[0][2]["auth"],
                 "allow_redirects": False,
+                "hooks": {"response": discard_redirect_location},
                 "timeout": (1.0, 2.0),
                 "stream": True,
             },
