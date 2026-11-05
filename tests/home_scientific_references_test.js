@@ -154,7 +154,7 @@ async function restoredVisibilityTest(payload) {
 
 function rendererTest(payload) {
   const source = fs.readFileSync(path.join(root, "src/web/static/js/home/main.js"), "utf8");
-  const renderer = source.slice(source.indexOf("function renderMoleculeCandidates(messageElement, payload)"), source.indexOf("  window.HomeMain ="));
+  const renderer = source.slice(source.indexOf("function renderMoleculeCandidates("), source.indexOf("  window.HomeMain ="));
   class Element {
     constructor(tag) {this.tag = tag; this.children = []; this.style = {}; this.attributes = {}; this.classList = {add() {}};}
     appendChild(child) {this.children.push(child); child.parentNode = this; return child;}

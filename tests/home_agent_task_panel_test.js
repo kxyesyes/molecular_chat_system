@@ -30,7 +30,7 @@ assert(!source.includes('["failed", "rejected", "cancelled", "timeout", "unavail
   "homepage must not duplicate the shared non-success status list");
 assert(template.includes("/static/js/home/task_status.js"),
   "homepage must load the Agent task status module before the entrypoint");
-assert(template.includes("/static/js/home/task_status.js?v=20261027-task-status-dedupe-v2"),
+assert(template.includes("/static/js/home/task_status.js?v=20261101-step-failure-v3"),
   "optional-failure presentation changes require a refreshed task-status cache key");
 assert(template.includes("/static/js/home/task_panel.js"),
   "homepage must load the Agent task panel renderer before the entrypoint");
@@ -388,13 +388,13 @@ const optionalReason = "缺少所选靶点的模型权重；该候选未参与�
 const optionalWarning = `Optional step ${optionalStep} (activity_predictor) failed: ${optionalReason}`;
 assert.strictEqual(HomeTaskStatus.message({event: "validation_warning", tool: "activity_predictor",
   message: "Tool result has validation warnings", payload: {warnings: [optionalWarning, "端点 X 缺失。"]}}),
-  `活性预测：失败。${optionalReason}；端点 X 缺失。`);
+  "端点 X 缺失。");
 assert.strictEqual(HomeTaskStatus.message({event: "validation_warning", tool: "activity_predictor",
   message: "Tool result has validation warnings", payload: {warnings: [optionalWarning]}}),
-  "活性预测：结果校验未通过；具体原因见失败步骤。");
+  "活性预测：步骤未完成；具体原因见失败步骤。");
 assert.strictEqual(HomeTaskStatus.message({event: "validation_warning", tool: "activity_predictor",
   message: "Tool result has validation warnings", payload: {warnings: [optionalReason, optionalWarning]}}),
-  "活性预测：结果校验未通过；具体原因见失败步骤。");
+  "活性预测：步骤未完成；具体原因见失败步骤。");
 assert.strictEqual(HomeTaskStatus.message({event: "tool_failed", tool: "activity_predictor",
   message: optionalWarning}), `活性预测：失败。${optionalReason}`);
 assert(HomeTaskStatus.message({event: "validation_warning", tool: "admet_predictor",

@@ -290,7 +290,9 @@ test("history restoration rechecks the owned record and avoids another receptor"
   const { context: c, get } = harness();
   const r = success(); r.task_type = "docking"; r.result.data.result_job_id = "task-1"; r.result.data.best_pose.pose = 1;
   c.fetch = async (url) => { assert.equal(url, "/api/tasks/task-1"); return response(r); };
+  get("interaction-status").textContent = "Pose 1：上一受体缺少显式氢";
   await c.restoreDurableDockingTask("task-1");
+  assert.equal(get("interaction-status").textContent, "", "a new result must clear the prior receptor's diagnosis");
   assert.match(get("results-content").innerHTML, /-8\.400/);
   assert.doesNotMatch(get("results-content").innerHTML, /loadComplexStructure/);
   assert.match(get("results-content").innerHTML, /蛋白/);
