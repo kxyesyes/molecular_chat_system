@@ -462,7 +462,8 @@ def test_ic50_ki_assumed_competition_context_supports_later_unit_conversion():
 
 def test_chat_model_guidance_qualifies_ic50_to_ki_conversion():
     from src.agent.scientific_session.decision_policy import decision_system_message
-    prompt = decision_system_message('chat', (), [], {}, binding_profile='medchat-web-v1')['content']
+    prompt = decision_system_message('chat', (), [], {'request': {'query': '能把IC50换算成Ki吗？'}},
+                                     binding_profile='medchat-web-v1')['content']
     assert 'Cheng-Prusoff' in prompt and 'substrate concentration' in prompt
     assert 'tight-binding' in prompt and 'equilibrium' in prompt
 
@@ -551,7 +552,8 @@ def test_concept_question_then_calculation_preserves_both_obligations():
 
 def test_chat_model_receives_pharmacokinetic_concept_guidance():
     from src.agent.scientific_session.decision_policy import decision_system_message
-    prompt = decision_system_message('chat', (), [], {}, binding_profile='medchat-web-v1')['content']
+    prompt = decision_system_message('chat', (), [], {'request': {'query': 'LogD 与吸收有什么关系？'}},
+                                     binding_profile='medchat-web-v1')['content']
     assert 'first-pass metabolism' in prompt
     assert 'ionized' in prompt and 'permeability' in prompt
     assert 'LogD alone' in prompt
@@ -561,7 +563,8 @@ def test_chat_model_receives_pharmacokinetic_concept_guidance():
 
 def test_chat_model_receives_binding_method_and_identity_guidance():
     from src.agent.scientific_session.decision_policy import decision_system_message
-    prompt = decision_system_message('chat', (), [], {}, binding_profile='medchat-web-v1')['content']
+    prompt = decision_system_message('chat', (), [], {'request': {'query': 'How do SPR and ITC differ?'}},
+                                     binding_profile='medchat-web-v1')['content']
     assert 'standard ITC' in prompt and 'kinetic ITC' in prompt
     assert 'SPR' in prompt and 'association' in prompt and 'dissociation' in prompt
     assert 'structure-to-name' in prompt and 'unverified' in prompt
@@ -569,7 +572,8 @@ def test_chat_model_receives_binding_method_and_identity_guidance():
 
 def test_chat_model_distinguishes_competition_from_direct_affinity():
     from src.agent.scientific_session.decision_policy import decision_system_message
-    prompt = decision_system_message('chat', (), [], {}, binding_profile='medchat-web-v1')['content']
+    prompt = decision_system_message('chat', (), [], {'request': {'query': 'ATP competition and affinity?'}},
+                                     binding_profile='medchat-web-v1')['content']
     assert 'ATP competition' in prompt and 'direct binding affinity' in prompt
     assert 'steric' in prompt and 'experimental evidence' in prompt
     assert 'ATP concentration' in prompt and 'mutation background' in prompt
@@ -577,7 +581,8 @@ def test_chat_model_distinguishes_competition_from_direct_affinity():
 
 def test_chat_model_distinguishes_candidate_selection_from_trial_authorization():
     from src.agent.scientific_session.decision_policy import decision_system_message
-    prompt = decision_system_message('chat', (), [], {}, binding_profile='medchat-web-v1')['content']
+    prompt = decision_system_message('chat', (), [], {'request': {'query': '选出候选药就能进入临床了吗？'}},
+                                     binding_profile='medchat-web-v1')['content']
     assert 'candidate selection does not itself authorize human trials' in prompt
     assert 'human efficacy is not established by candidate selection' in prompt
     assert '30 days after FDA receipt' in prompt
