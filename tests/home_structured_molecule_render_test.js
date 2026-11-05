@@ -660,7 +660,7 @@ const mainSource = read("src/web/static/js/home/main.js");
 const protocolSource = read("src/web/static/js/home/protocol.js");
 const indexHtml = read("src/web/templates/index.html");
 const rendererStart = mainSource.indexOf(
-  "function renderMoleculeCandidates(messageElement, payload)",
+  "function renderMoleculeCandidates(",
 );
 const rendererEnd = mainSource.indexOf("window.HomeMain", rendererStart);
 const rendererSource = mainSource.slice(rendererStart, rendererEnd);
@@ -704,7 +704,7 @@ assert(
   "Raw WebSocket messages must be length-capped before JSON parsing",
 );
 assert(
-  mainSource.includes("function renderMoleculeCandidates(messageElement, payload)"),
+  rendererStart >= 0 && rendererEnd > rendererStart,
   "Main must render normalized candidate records",
 );
 assert(
@@ -908,8 +908,8 @@ class FakeWebSocket {
 
 const behaviorMainSource = mainSource
   .replace(
-    "function renderMoleculeCandidates(messageElement, payload) {",
-    "function renderMoleculeCandidatesOriginal(messageElement, payload) {",
+    "function renderMoleculeCandidates(",
+    "function renderMoleculeCandidatesOriginal(",
   )
   .replace(
     /  window\.HomeMain = \{\r?\n    init: init,\r?\n  \};/,

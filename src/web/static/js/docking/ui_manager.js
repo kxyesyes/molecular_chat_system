@@ -5,6 +5,11 @@ let submittedDockingProtein;
 let boundDockingProtein = null;
 let loadedDockingProteinFile = null;
 const batchDockingProteins = new Map();
+function beginDockingView() {
+  const status = document.getElementById("interaction-status");
+  if (status) status.textContent = "";
+  return ++dockingViewSequence;
+}
 function getDockingViewSequence() { return dockingViewSequence; }
 
 const UIManager = {
@@ -128,7 +133,7 @@ function nextPose() {
 }
 
 function overlayTopN() {
-  const viewSequence = ++dockingViewSequence;
+  const viewSequence = beginDockingView();
   const nInput = document.getElementById("overlay-count");
   let n = parseInt(nInput && nInput.value ? nInput.value : "1");
   if (isNaN(n) || n < 1) n = 1;
@@ -222,7 +227,7 @@ function overlayTopN() {
 }
 
 function showProtein() {
-  dockingViewSequence++;
+  beginDockingView();
   if (AppState.currentProteinData) {
     loadMolecule(AppState.currentProteinData, "protein");
     setActiveButton("show-protein-btn");
@@ -232,7 +237,7 @@ function showProtein() {
 }
 
 function showLigand() {
-  dockingViewSequence++;
+  beginDockingView();
   const ligandToShow =
     AppState.originalLigandData || AppState.currentLigandData;
 
@@ -393,14 +398,14 @@ function handleFileUpload(inputId, displayId, fileType) {
 
 // 加载蛋白质文件
 function loadProteinFile(file) {
-  dockingViewSequence++;
+  beginDockingView();
   if (typeof setCurrentJobId === "function") setCurrentJobId(null);
   AppState.currentComplexData = null;
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = function (e) {
-      dockingViewSequence++;
+      beginDockingView();
       loadedDockingProteinFile = file;
       const pdbData = e.target.result;
       currentProteinData = pdbData;
@@ -647,7 +652,7 @@ function startBatchDocking() {
       if (!data.results || data.results.length === 0) {
         throw new Error("批量任务没有返回有效结果");
       }
-      dockingViewSequence++;
+      beginDockingView();
       for (const item of data.results) if (item && item.success && item.job_id) batchDockingProteins.set(item.job_id, batchProtein);
       showBatchResults(data);
       const firstSuccess = data.results.find((item) => item.success && item.job_id);
@@ -885,7 +890,7 @@ function durableDockingResult(record) {
 }
 
 function renderDurableTaskSuccess(record, result, options = {}) {
-  dockingViewSequence++;
+  beginDockingView();
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
   AppState.currentComplexData = null;
   const restored = options.restored === true;
@@ -1161,7 +1166,7 @@ function resumeDockingTaskIfPresent() {
 // 开始对接分析
 function startDocking() {
   durableHistoryRestoreSequence++;
-  dockingViewSequence++;
+  beginDockingView();
   historicalDockingTaskId = null;
   if (AppState.dockingMode === "batch") {
     startBatchDocking();
@@ -1414,7 +1419,7 @@ function showRealResults(data, options = {}) {
 }
 
 function showBatchResults(data) {
-  dockingViewSequence++;
+  beginDockingView();
   if (typeof viewer !== "undefined" && viewer) { viewer.clear(); viewer.render(); }
   AppState.currentComplexData = null;
   AppState.currentBatchResults = data.results || [];
@@ -1551,7 +1556,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
     Utils.showToast("任务蛋白未恢复或与当前输入不一致，无法显示复合物", "warning");
     return;
   }
-  const viewSequence = ++dockingViewSequence;
+  const viewSequence = beginDockingView();
   if (!viewer) initViewer();
   const selectedPoseNumber =
     Number.isInteger(poseNumber) && poseNumber > 0 ? poseNumber : 1;
@@ -1680,7 +1685,7 @@ function loadComplexStructure(jobId, poseNumber = 1) {
 
 // 查看特定结构
 function viewPose(poseNumber) {
-  const viewSequence = ++dockingViewSequence;
+  const viewSequence = beginDockingView();
   const poseSelect = document.getElementById("pose-select");
   if (poseSelect) poseSelect.value = String(poseNumber);
   if (!viewer) initViewer();
@@ -2090,7 +2095,7 @@ async function restoreDurableDockingTask(taskId) {
     return;
   }
   const sequence = ++durableHistoryRestoreSequence;
-  dockingViewSequence++;
+  beginDockingView();
   try {
     const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}`);
     const payload = await response.json();
@@ -2201,7 +2206,7 @@ function loadHistoryJob(jobId, poseIndex) {
     return;
   }
   const sequence = ++durableHistoryRestoreSequence;
-  const viewSequence = ++dockingViewSequence;
+  const viewSequence = beginDockingView();
   fetch(`/api/docking/result/${jobId}`)
     .then((r) => {
       if (!r.ok) throw new Error("无法获取对接结果");
