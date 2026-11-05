@@ -129,8 +129,10 @@ jobs:
       - name: Verify complete Agent partition collection
         if: matrix.name == 'agent'
         shell: bash
+        # Ubuntu 26.04 installs GNU's process-group watchdog as gnutimeout.
+        # Earlier runner images provide GNU timeout under its original name.
         run: |
-          timeout --signal=KILL 180s python - <<'PY'
+          "$(command -v gnutimeout || command -v timeout)" --signal=KILL 180s python - <<'PY'
           import json, os, shlex, shutil, subprocess, sys, tempfile, time
           from pathlib import Path
           import yaml

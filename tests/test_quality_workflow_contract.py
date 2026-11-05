@@ -12,6 +12,10 @@ import ast
 
 
 ROOT = Path(__file__).resolve().parents[1]
+COLLECTION_WATCHDOG = (
+    '"$(command -v gnutimeout || command -v timeout)"'
+    " --signal=KILL 180s python - <<'PY'"
+)
 AGENT_WEB_TARGET = (
     "tests/agent/test_ordinary_web_lifecycle.py "
     "tests/agent/test_ordinary_web_runtime.py "
@@ -300,7 +304,7 @@ def _agent_collection_verifier():
     assert steps.index(step) < next(i for i, value in enumerate(steps)
                                    if value["name"] == "Run Python tests")
     lines = step["run"].strip().splitlines()
-    assert lines[0] == "timeout --signal=KILL 180s python - <<'PY'" and lines[-1] == "PY"
+    assert lines[0] == COLLECTION_WATCHDOG and lines[-1] == "PY"
     return "\n".join(lines[1:-1])
 
 
@@ -318,7 +322,7 @@ def test_agent_collection_verifier_has_bounded_isolated_children():
 def test_agent_collection_has_process_group_deadline():
     steps = _quality_jobs()['python-tests']['steps']
     step = next(value for value in steps if value['name'] == 'Verify complete Agent partition collection')
-    assert step['run'].splitlines()[0] == "timeout --signal=KILL 180s python - <<'PY'"
+    assert step['run'].splitlines()[0] == COLLECTION_WATCHDOG
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='CI watchdog uses Linux GNU timeout')
