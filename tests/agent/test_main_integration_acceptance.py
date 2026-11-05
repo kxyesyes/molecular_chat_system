@@ -11,12 +11,11 @@ from tempfile import TemporaryDirectory
 import time
 
 import pytest
-from fastapi.testclient import TestClient
 
 from src.agent.contracts import AgentErrorCode, ToolResult
 from src.agent.tools.drug_likeness_assessment import DrugLikenessAssessment
 from tests.agent.test_scientific_reference_browser_lab import (
-    DeadlineSocket, capture, receive_until,
+    DeadlineSocket, LabTestClient, capture, receive_until,
 )
 from tests.scientific_reference_browser_lab import NOTICE, create_lab
 
@@ -94,7 +93,7 @@ def test_subprocess_deadline_kills_and_reaps_child(monkeypatch):
 def exchange(app, query, *, terminal='complete'):
     """Completion then ping is a barrier with Pi's concurrent socket receiver."""
     messages = []
-    with TestClient(app, base_url=BASE) as client:
+    with LabTestClient(app, base_url=BASE) as client:
         page = client.get('/')
         assert page.status_code == 200 and NOTICE in page.text
         assert 'medchat_agent_session' in client.cookies

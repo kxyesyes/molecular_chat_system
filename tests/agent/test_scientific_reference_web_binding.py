@@ -212,12 +212,12 @@ def test_web_candidate_cannot_downgrade_to_legacy_identity(candidate):
 
 def test_actual_pi_generation_reference_ack_and_reopen_without_followup(tmp_path):
     from fastapi.testclient import TestClient
-    from tests.agent.test_scientific_reference_browser_lab import lab, DeadlineSocket, receive_until
+    from tests.agent.test_scientific_reference_browser_lab import lab, DeadlineSocket, LabTestClient, receive_until
 
     app = lab(tmp_path)
     base = 'http://127.0.0.1:6017'
     url = '/api/agent/workflows/references/'
-    with TestClient(app, base_url=base) as client:
+    with LabTestClient(app, base_url=base) as client:
         assert client.get('/').status_code == 200
         with client.websocket_connect('ws://127.0.0.1:6017/ws', headers={'Origin': base}) as transport:
             ws = DeadlineSocket(transport, app.state.inbox)
