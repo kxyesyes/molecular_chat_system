@@ -1,4 +1,5 @@
 """The browser fixture exercises real UI/protocol modules, never a model API."""
+import asyncio
 import importlib
 import importlib.util
 import json
@@ -7,8 +8,27 @@ import threading
 import time
 
 import pytest
+import starlette
 from fastapi import FastAPI, WebSocket
 from fastapi.testclient import TestClient
+
+
+class LabTestClient(TestClient):
+    def websocket_connect(self, *args, **kwargs):
+        session = super().websocket_connect(*args, **kwargs)
+        if starlette.__version__ == '0.27.0':
+            # The CI-pinned transport polls its empty inbound queue with sleep(0).
+            # Yield CPU to the scientific worker while preserving the original
+            # receive (including disconnect) and cancellation before dequeue.
+            receive_frame = session._asgi_receive
+
+            async def receive():
+                while session._receive_queue.empty():
+                    await asyncio.sleep(0.001)
+                return await receive_frame()
+
+            session._asgi_receive = receive
+        return session
 
 
 class CaptureSocketMessages:
@@ -70,7 +90,7 @@ def receive_until(ws, kind, *, timeout=10):
 def test_real_home_socket_ack_and_reopened_lab(tmp_path):
     app = lab(tmp_path)
     base = 'http://127.0.0.1:6017'
-    with TestClient(app, base_url=base) as client:
+    with LabTestClient(app, base_url=base) as client:
         page = client.get('/')
         assert page.status_code == 200
         assert 'OFFLINE REFERENCE LAB' in page.text
@@ -129,7 +149,7 @@ def test_missing_candidate_terminal_fails_without_waiting_for_more_messages(term
             await websocket.receive()
         finally:
             drained.set()
-    with TestClient(app) as client:
+    with LabTestClient(app) as client:
         with client.websocket_connect('/ws') as transport:
             with pytest.raises(AssertionError, match='terminal'):
                 receive_until(DeadlineSocket(transport, app.state.inbox), 'molecule_candidates')
@@ -146,8 +166,30 @@ def test_silent_socket_deadline_is_bounded_and_session_is_drained():
             await websocket.receive()
         finally:
             drained.set()
-    with TestClient(app) as client:
+    with LabTestClient(app) as client:
         with client.websocket_connect('/ws') as transport:
             with pytest.raises(AssertionError, match='deadline'):
                 receive_until(DeadlineSocket(transport, app.state.inbox), 'molecule_candidates', timeout=0.05)
+    assert drained.is_set()
+
+
+def test_cancelled_lab_receive_preserves_next_frame_and_disconnect():
+    app = capture(FastAPI())
+    drained = threading.Event()
+
+    @app.websocket('/ws')
+    async def endpoint(websocket: WebSocket):
+        await websocket.accept()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(websocket.receive(), timeout=0.01)
+        await websocket.send_json({'type': 'ready'})
+        await websocket.send_json(await websocket.receive_json())
+        assert (await websocket.receive())['type'] == 'websocket.disconnect'
+        drained.set()
+
+    with LabTestClient(app) as client, client.websocket_connect('/ws') as transport:
+        ws = DeadlineSocket(transport, app.state.inbox)
+        receive_until(ws, 'ready')
+        ws.send_json({'type': 'echo', 'value': 17})
+        assert receive_until(ws, 'echo')['value'] == 17
     assert drained.is_set()
