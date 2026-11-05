@@ -34,17 +34,20 @@ def test_explicit_docking_action_keeps_its_input_confirmation():
     assert decision.requires_confirmation
 
 
-@pytest.mark.parametrize("query", [
-    "帮我把它和那个靶点做分子对接。",
-    "查找排名第一的靶点结构，并说明能否继续对接。",
-    "找一下 PDE 的资料，不要生成分子，也不要运行对接；如果具体亚型影响答案，请先澄清。",
+@pytest.mark.parametrize("query,required_inputs", [
+    ("帮我把它和那个靶点做分子对接。", ("受体 PDB", "配体", "中心", "大小", "未执行对接")),
+    ("查找排名第一的靶点结构，并说明能否继续对接。", ()),
+    ("找一下 PDE 的资料，不要生成分子，也不要运行对接；如果具体亚型影响答案，请先澄清。", ()),
 ])
-def test_incomplete_or_negated_requests_clarify_without_dispatch(query, tmp_path):
+def test_incomplete_or_negated_requests_clarify_without_dispatch(query, required_inputs, tmp_path):
     store = SQLiteAgentStateStore(tmp_path / 'state.sqlite')
     handler = make_web_handler({}, store)
     complete, _ = run_web_turn(handler, query, [], 'owner')
     assert not handler.model.messages
     assert not any(result.tool_result_sequence for result in handler.web_results)
     content = complete['content']
-    assert any(word in content for word in ("请提供", "请明确", "需要"))
+    if required_inputs:
+        assert all(word in content for word in required_inputs), content
+    else:
+        assert any(word in content for word in ("请提供", "请明确", "需要"))
     assert "Workflow did not" not in content

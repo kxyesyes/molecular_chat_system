@@ -6,6 +6,7 @@ from src.activity.family_contract import resolve_activity_family
 from src.agent.contracts.comparison_presentation import without_comparison_presentation
 from src.agent.contracts.target_request import _TARGET_ROLE, analyze_target_request
 from src.system.molecular_input_parser import LABELED_ACTIVITY_COMPARISON
+from src.target_identifiers import TARGET_PATTERN
 from .molecular_input import (
     _FIELD_END, _MARKER, _looks_like_structure, _unquote, parse_molecular_smiles,
 )
@@ -32,7 +33,10 @@ _BACKGROUND = re.compile(r"\s*(?:研究背景|背景|background\b)", re.I)
 _TARGET_LABEL = r"(针对|靶点\s*[:：]?|对|(?<![A-Za-z])(?:target|for|against)\s*[:=：]?)\s*"
 # Include unrecognized values so explicit intent cannot vanish before validation.
 _TARGET_VALUE = (
-    r"((?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、（(]|(?:的)?(?:抑制活性|活性|p?IC50|p?EC50|p?Ki|p?Kd))"
+    # Only a recognized target introduces a parenthesized alias. Otherwise
+    # keep the complete token so 'for CC(C)O' retains its SMILES branch.
+    rf"({TARGET_PATTERN.pattern}(?=[（(])"
+    r"|(?:丁酰胆碱酯酶|[A-Za-z][A-Za-z0-9_-]*)(?=$|[\s；，,/和及与、]|(?:的)?(?:抑制活性|活性|p?IC50|p?EC50|p?Ki|p?Kd))"
     r"|[^\s；，,/和及与、]+)"
 )
 _LABELLED_TARGET = re.compile(
