@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from src.web.docking_view import capture_docking_view
-from src.web.docking_coordinator import DockingRequestCoordinator, _SECTIONS
+from src.web.docking_coordinator import DockingRequestCoordinator
 from tests.task_runtime.test_chat_docking_execution_context import execution_case, target_case
 from tests.agent.test_docking_publication_candidate import settle
 from tests.agent.test_docking_publication_receipt import publish
@@ -27,18 +27,10 @@ def test_actual_captured_ready_and_verified_result_are_accepted_by_dom(tmp_path,
             root_id=root.root_id, owner_session_id=root.owner, origin_turn_id=root.origin,
             sequence=1, send_generation=1)
         assert captured['source']['reason_code'] == 'scientific_selection_required'
-        captured['pages'] = {}
-        for section in _SECTIONS:
-            pages, offset = [], 0
-            while True:
-                page = await coordinator.source_page(root_id=root.root_id, owner_session_id=root.owner,
-                    source_sha256=view['source_preview']['source_sha256'], section=section, offset=offset, limit=32)
-                assert page['ok']
-                pages.append(page)
-                if page['next_offset'] is None:
-                    break
-                offset = page['next_offset']
-            captured['pages'][section] = pages
+        captured['inventory'] = await coordinator.source_inventory(
+            root_id=root.root_id, owner_session_id=root.owner,
+            source_sha256=view['source_preview']['source_sha256'])
+        assert captured['inventory']['ok']
         return view
     monkeypatch.setattr(DockingRequestCoordinator, 'begin', observed_begin)
     async def run():

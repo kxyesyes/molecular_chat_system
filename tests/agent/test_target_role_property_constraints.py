@@ -25,7 +25,7 @@ def no_network(monkeypatch):
 
 CASES = [
     ("TPSA < 20", "tpsa", "<", 20.0, "Å²", 19.0, 100.0),
-    ("QED >= 0.5", "qed", ">=", 0.5, "dimensionless", 0.5, 0.4),
+    ("QED >= 0.5", "qed", ">=", 0.5, "dimensionless", 0.6, 0.4),
     ("HBA <= 2", "hba", "<=", 2.0, "count", 2, 3),
     ("HBD > 1", "hbd", ">", 1.0, "count", 2, 1),
 ]
@@ -74,9 +74,12 @@ def test_generation_report_checks_canonical_metrics_with_synthetic_evidence(
     label = {"violating": "不满足", "matching": "满足", "missing": "未验证"}[state]
     displayed = value if value is not None else "不可用"
     assert report is not None
-    for identity in ("candidate-1", "candidate-2"):
-        assert f"| {identity} | {metric} {operator} {threshold} {unit} | {displayed} | {label} |" in report
-    assert "fixture-property_calculator" in report
+    unit_label = " Å²" if metric == "tpsa" else ""
+    for index, smiles in enumerate(("CCO", "CCN"), 1):
+        assert (f"| 候选 {index} `{smiles}` | {metric.upper()} {operator} {threshold}{unit_label} "
+                f"| {displayed} | {label} |") in report
+    assert "数值为计算描述符" in report
+    assert "fixture-property_calculator" not in report
 
 
 @pytest.mark.parametrize("clause,metric,operator,threshold,unit,matching,violating", CASES)
