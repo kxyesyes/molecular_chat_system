@@ -805,7 +805,7 @@ def _event_frame(handler, event):
     if (raw.get('event') == 'tool_completed' and raw.get('tool') == 'activity_predictor'
             and type(raw.get('payload')) is dict):
         payload = raw['payload']
-        raw['payload'] = {key: payload.get(key) for key in ('success', 'status')}
+        raw['payload'] = {key: payload[key] for key in ('success', 'status', 'round', 'decision_id') if key in payload}
         raw['message'] = '活性预测已运行，结果正在校验。'
         compacted = True
     if raw['event'] in _TERMINAL_EVENTS and type(raw['payload']) is dict:
