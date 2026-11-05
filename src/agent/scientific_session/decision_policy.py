@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from src.agent.contracts import AgentErrorCode, ObservationStatus, ToolResult
@@ -16,6 +17,15 @@ INITIAL_TOOLS = frozenset({
     'property_calculator', 'drug_likeness_assessment',
     'activity_predictor', 'target_database_search',
 })
+
+# Topic cues select explanatory background only; they never grant authority to tools.
+_CONCEPT_TOPICS = re.compile(
+    r'分子|化合物|药[物理效代]|候选药|靶点|抑制|效力|实验|酶|底物|亲和|结合|对接|'
+    r'吸收|溶解|电离|渗透|代谢|突变|临床|人体试验|构效|'
+    r'\b(?:p?ic50|ki|kd|km|log[dp]|pka|spr|itc|atp|ind|fda|irb|smiles|admet)\b|'
+    r'molecul|compound|drug|target|assay|potency|inhibit|affinity|bind(?:ing)?|dock|'
+    r'absorp|bioavailab|permeab|partition|solubil|pharmacokin|mutation|clinical|human trials?',
+    re.I | re.ASCII)
 
 
 class DecisionBoundaryError(ValueError):
@@ -97,6 +107,9 @@ def decision_system_message(request_kind, required_tools, catalog, requirement_p
            'Earlier task_acceptance snapshots marked superseded are replaced by the latest snapshot; '
            'all tool observations remain available. ' if request_kind == 'scientific' else '')
         if policy is not None else '')
+    web_chat = policy is not None and policy.is_web and request_kind == 'chat'
+    request = requirement_payload.get('request', {})
+    query = request.get('query', '').casefold()
     scientific_concept_guidance = (
         'Potency depends on target and assay; in-vitro potency is not clinical efficacy. '
         'Log transformation does not guarantee normality. Intestinal absorption differs from '
@@ -133,10 +146,10 @@ def decision_system_message(request_kind, required_tools, catalog, requirement_p
         'not all reproductive toxicity studies precede first-in-human trials. '
         'Do not infer drug-specific pharmacokinetic measurements or rankings from memory or descriptors; '
         'without verified sources, say so and identify needed study conditions and evidence. '
-        if policy is not None and policy.is_web and request_kind == 'chat' else '')
+        if web_chat and (_CONCEPT_TOPICS.search(query)
+                         or request.get('metadata', {}).get('tool_free_consultation') is True) else '')
     validation_guidance = ''
-    if scientific_concept_guidance:
-        query = requirement_payload.get('request', {}).get('query', '').casefold()
+    if web_chat:
         from src.agent.contracts.response_length import three_sentence_range
         if three_sentence_range(query) is not None:
             validation_guidance += (
