@@ -8,7 +8,7 @@ import time
 import requests
 
 from src.literature.europe_pmc import EuropePMCClient
-from src.target_search.remote_clients import BoundedJsonClient, RemoteSourceError
+from src.target_search.remote_clients import BoundedJsonClient, RemoteSourceError, discard_redirect_location
 
 
 HERG_URL = 'https://tdcommons.ai/single_pred_tasks/tox/#herg-blockers'
@@ -53,7 +53,7 @@ def _fetch_dataset_page():
         session.trust_env = False
         deadline = time.monotonic() + 20
         with session.get(HERG_URL.split('#')[0], timeout=(3.05, 10), stream=True,
-                         allow_redirects=False) as response:
+                         allow_redirects=False, hooks={'response': discard_redirect_location}) as response:
             if response.status_code != 200:
                 raise ValueError('dataset_http_failure')
             payload = bytearray()

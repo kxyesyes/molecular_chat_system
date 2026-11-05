@@ -76,3 +76,35 @@ def test_bioc_allowlist_is_limited_to_pmc_full_text_json():
     assert not _is_allowlisted_request('PMC_BioC', 'POST', valid)
     assert not _is_allowlisted_request('PMC_BioC', 'GET', valid + '?token=x')
     assert not _is_allowlisted_request('PMC_BioC', 'GET', valid.replace('PMC9649653', '../secret'))
+
+
+@pytest.mark.parametrize('endpoint', ['EuropePMC', 'TDC'])
+def test_literature_clients_reject_redirect_without_reading_body(monkeypatch, endpoint):
+    import io
+    import requests
+    from src.literature.model_sources import _fetch_dataset_page
+
+    class UnreadBody(io.BytesIO):
+        def read(self, *args):
+            pytest.fail('redirect body was read outside the download limit')
+
+    body = UnreadBody(b'ignored')
+
+    def redirect(adapter, request, **kwargs):
+        response = requests.Response()
+        response.status_code = 302
+        response.request = request
+        response.url = request.url
+        response.headers['Location'] = '/moved'
+        response.raw = body
+        return response
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, 'send', redirect)
+    if endpoint == 'EuropePMC':
+        with BoundedJsonClient() as http, pytest.raises(RemoteSourceError) as failure:
+            EuropePMCClient(http).search('EGFR')
+        assert failure.value.status_code == 302
+    else:
+        with pytest.raises(ValueError, match='dataset_http_failure'):
+            _fetch_dataset_page()
+    assert body.closed
