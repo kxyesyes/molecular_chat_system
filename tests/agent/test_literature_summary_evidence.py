@@ -29,6 +29,24 @@ def test_summary_rejects_unmatched_or_unsafe_claims(claim):
     assert validate_summary(json.dumps({'claims': [claim]}, ensure_ascii=False), prepare_abstract(article())) is None
 
 
+def test_summary_rejects_a_new_measurement_attached_to_a_real_quote():
+    source = prepare_abstract({**article(), 'abstract': 'The measured inhibition constant was 9.4 nM.'})
+    claim = {'text': '测得抑制常数为99.4 nM。', 'quote': source['abstract']}
+    assert validate_summary(json.dumps({'claims': [claim]}), source) is None
+    claim['text'] = '测得抑制常数为9.4 nM。'
+    assert validate_summary(json.dumps({'claims': [claim]}), source) == [claim]
+
+
+def test_summary_rejects_measurement_borrowed_from_another_compound_in_the_abstract():
+    first = 'Compound A had an inhibition constant of 9.4 nM.'
+    second = 'Compound B had an inhibition constant of 99.4 nM.'
+    source = prepare_abstract({**article(), 'abstract': first + ' ' + second})
+    claim = {'text': '化合物 A 的抑制常数为99.4 nM。', 'quote': first}
+    assert validate_summary(json.dumps({'claims': [claim]}), source) is None
+    claim['text'] = '化合物 A 的抑制常数为9.4 nM。'
+    assert validate_summary(json.dumps({'claims': [claim]}), source) == [claim]
+
+
 def test_summary_never_truncates_or_mixes_source_identity():
     value = article()
     value['url'] = 'https://pubmed.ncbi.nlm.nih.gov/1/'
