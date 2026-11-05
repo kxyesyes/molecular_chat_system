@@ -82,6 +82,36 @@ def test_three_sentence_followup_repairs_before_publication(actual_app, wire, re
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('proposal', [
+    dict(version='1', action='clarify', question='需要补充什么？', missing_fields=['query']),
+    dict(version='1', action='tool', tool_name='property_calculator',
+         arguments={'step_ref': 'invented-step'}, purpose='review'),
+    dict(version='1', action='finish', response_kind='scientific', text='Done.', evidence_ids=['invented']),
+])
+def test_content_review_requires_a_chat_finish(actual_app, proposal):
+    async def run():
+        async def respond(payload):
+            if len(bundle.calls) == 1:
+                return intent_http_response('general_knowledge')
+            if len(bundle.calls) == 2:
+                return chat_decision('随机划分的高 AUC 证明新骨架能够泛化。')
+            return proposal
+
+        async with actual_app(ordinary_policy=None, respond=respond) as bundle:
+            async with ActualSocket(bundle.app, await cookie_for(bundle.app)) as socket:
+                await socket.ready()
+                frames = await socket.turn({'message': QUESTION})
+                result = result_of(frames)
+                assert result['metadata']['stop_reason'] == 'content_review_requires_chat_finish'
+                assert result['status'] == 'failed' and len(bundle.calls) == 3
+                assert 'continuation_id' not in result['metadata']
+                stored = bundle.app.agent_state_store.get_run(result['trace_id'])
+                assert not stored['metadata'].get('decision_continuation')
+                assert not bundle.app.agent_state_store.get_tool_executions(result['trace_id'])
+                assert '复核' in frames[-1]['content']
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('scenario', ['during_review', 'before_review', 'twice'])
 def test_missing_finish_version_and_evidence_review_in_one_turn(actual_app, scenario):
     query = '测试集有 95 个阴性和 5 个阳性，全部打同分、全部判阴，准确率和 ROC-AUC 各是多少？不运行任何工具。'
@@ -431,7 +461,7 @@ def test_consultation_clarification_resumes_without_more_authority(actual_app, r
             async with ActualSocket(b.app, cookie) as first:
                 await first.ready()
                 wait = result_of(await first.turn({'message': query}))
-                assert wait['status'] == 'waiting_for_input', wait
+                assert wait['status'] == 'waiting_for_input', (wait['metadata'], calls, b.protocol_errors)
                 payload = dict(type='resume', trace_id=wait['trace_id'], continuation_id=wait['metadata']['continuation_id'], message='外部验证。')
                 if reconnect:
                     async with ActualSocket(b.app, cookie) as second:
