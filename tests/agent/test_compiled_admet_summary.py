@@ -38,7 +38,7 @@ def test_compiled_admet_summary_previews_verified_endpoints(admet_web_handler, q
         assert result['details_state'] == 'available'
         answer = result['display_answer']
         assert 'ADMET 预测结果' in answer
-        assert '返回端点：' in answer and '| 端点 | 数值 | 单位 |' in answer
+        assert '返回端点：' in answer and '| 端点 | 模型预测值 | 单位 | 类型 |' in answer
         assert ('分子性质计算结果' in answer) is property_expected
         assert 'admet_predictor' not in answer and '证据 ID' not in answer
         ref = result['details']
@@ -87,7 +87,7 @@ def test_failed_admet_keeps_partial_diagnostics_and_successful_property_preview(
         assert '分子性质计算结果' in result['display_answer']
         assert 'ADMET 预测' in result['display_answer']
         assert '失败' in result['display_answer']
-        assert '| 端点 | 数值 | 单位 |' not in result['display_answer']
+        assert '| 端点 | 模型预测值 | 单位 | 类型 |' not in result['display_answer']
         ref = result['details']
         saved = read_result_details(runtime.store, result['trace_id'],
             session_id='compiled-partial-summary', view_id=ref['view_id'], revision=ref['revision'])
@@ -165,7 +165,7 @@ def test_concise_admet_previews_model_endpoints_not_the_leading_calculated_descr
     before = deepcopy(result.to_legacy_dict())
     answer = web_scientific_display(result, concise=True)
     assert '返回端点：18' in answer
-    assert '| 端点 | 数值 | 单位 |' in answer
+    assert '| 端点 | 模型预测值 | 单位 | 类型 |' in answer
     assert 'calculated_' not in answer
     assert all(f'predicted_{index}' in answer for index in range(8))
     assert 'predicted_8' not in answer

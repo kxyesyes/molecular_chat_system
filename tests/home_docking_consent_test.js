@@ -282,16 +282,16 @@ async function run() {
     }
     const r = rig();
     r.respond(async (url, body) => {
-      assert(url.endsWith("/source-page"));
-      const page = captured.pages[body.section].find(page => page.offset === body.offset);
-      assert(page, "all actual source pages must be consumed");
-      return page;
+      assert(url.endsWith("/source-inventory"));
+      assert.strictEqual(body.source_sha256, captured.inventory.source_sha256);
+      assert.strictEqual(body.revision, captured.source.revision);
+      return captured.inventory;
     });
     r.ui.handle(captured.source, r.socket);
     await button(r.host, "查看结构并选择").click();
     assert(r.host.textContent.includes("结构事实已完整加载"), "actual complete source inventory was not accepted");
     assert(button(r.host, "确认结构选择并生成输入").disabled, "actual source cannot auto-select science");
-    assert.strictEqual(r.requests.length, Object.values(captured.pages).reduce((sum, pages) => sum + pages.length, 0));
+    assert.strictEqual(r.requests.length, 1);
   }
   console.log("home_docking_consent_test: lifecycle, consent, identity, XSS and races passed");
 }
